@@ -1,13 +1,16 @@
 //! First-run onboarding surface (TS `PrimeOnboardingSplashComponent` +
 //! `OnboardingChoiceComponent`): the compact brand mark over its animated
 //! lab field, the welcome line, and the trace-sharing question in the same
-//! selection language as the pickers. The splash owns the pane until the
-//! question is answered; the answer and the completion flag persist through
-//! [`crate::interactive::OnboardingSink`].
+//! selection language as the pickers. [`OnboardingChoice`] is the reusable
+//! question panel (options with optional detail subtitles, a row-width
+//! override, a seeded cursor); the splash mounts one for the trace question
+//! and owns the pane until it is answered; the answer and the completion
+//! flag persist through [`crate::interactive::OnboardingSink`].
 
 use crate::keybindings::KeybindingsManager;
 use crate::keys::KeyId;
 use crate::theme::{Theme, ThemeColor};
+use crate::width::str_width;
 use crate::{Line, Span};
 use ratatui::style::{Color, Modifier, Style};
 
@@ -17,6 +20,28 @@ const TRACE_OPT_IN_DESCRIPTION: &str = "Trace sharing helps us train better open
 const TRACE_OPT_IN_NOTE: &str = "You can change this anytime with /traces.";
 /// Choice rows: `Share` opts in (index 0), `Not now` keeps traces off.
 const CHOICES: [&str; 2] = ["Share", "Not now"];
+
+/// The trace question's options (TS `askOnboardingTraceOptIn` mounts
+/// `[{ label: "Share" }, { label: "Not now" }]`).
+fn trace_question_options() -> Vec<OnboardingChoiceOption> {
+    CHOICES
+        .iter()
+        .map(|label| OnboardingChoiceOption {
+            label: (*label).to_string(),
+            detail: None,
+        })
+        .collect()
+}
+
+/// The trace question's copy (TS `askOnboardingTraceOptIn`'s config).
+fn trace_question_config() -> OnboardingChoiceOptions {
+    OnboardingChoiceOptions {
+        prompt: Some(TRACE_OPT_IN_PROMPT.to_string()),
+        description: Some(TRACE_OPT_IN_DESCRIPTION.to_string()),
+        note: Some(TRACE_OPT_IN_NOTE.to_string()),
+        row_width: None,
+    }
+}
 
 /// TS `PRIME_COMPACT_BUTTERFLY_LOGO` (7 rows, 22 visible columns).
 const LOGO_LINES: [&str; 7] = [
@@ -66,11 +91,26 @@ pub enum OnboardingDecision {
     Exit,
 }
 
-/// The onboarding pane state: the animation frame and the selected row.
-#[derive(Debug, Clone, Default)]
+/// The onboarding pane state: the animation frame and the mounted question.
+#[derive(Debug, Clone)]
 pub struct OnboardingScreen {
     frame: u64,
-    selected: usize,
+    /// The trace-sharing question the splash hosts (TS mounts one
+    /// `OnboardingChoiceComponent` inside the splash).
+    trace_question: OnboardingChoice,
+}
+
+impl Default for OnboardingScreen {
+    fn default() -> Self {
+        Self {
+            frame: 0,
+            trace_question: OnboardingChoice::new(
+                trace_question_options(),
+                None,
+                trace_question_config(),
+            ),
+        }
+    }
 }
 
 impl OnboardingScreen {
@@ -99,15 +139,17 @@ impl OnboardingScreen {
             return Some(OnboardingDecision::Cancelled);
         }
         if kb.matches(key, "tui.select.up") {
-            self.selected = self.selected.saturating_sub(1);
+            self.trace_question.move_selection(-1);
             return None;
         }
         if kb.matches(key, "tui.select.down") {
-            self.selected = (self.selected + 1).min(CHOICES.len() - 1);
+            self.trace_question.move_selection(1);
             return None;
         }
         if kb.matches(key, "tui.select.confirm") {
-            return Some(OnboardingDecision::Selected(self.selected));
+            return Some(OnboardingDecision::Selected(
+                self.trace_question.selected(),
+            ));
         }
         None
     }
@@ -122,7 +164,7 @@ impl OnboardingScreen {
         lines.push(self.heading_line(theme));
         // The question panel indents its own content by one column (TS:
         // panelLeft = contentLeft - 1; contentLeft = PADDING_X = 1).
-        lines.extend(self.choice_rows(theme, width));
+        lines.extend(self.trace_question.render(theme, width));
         while lines.len() < height {
             lines.push(Vec::new());
         }
@@ -253,62 +295,179 @@ impl OnboardingScreen {
         }
     }
 
-    /// The question panel (TS `OnboardingChoiceComponent.render`): prompt,
-    /// wrapped description, choice rows, and the change-anytime note.
-    fn choice_rows(&self, theme: &Theme, width: usize) -> Vec<Line> {
+}
+
+/// One choice row (TS `OnboardingChoiceOption`): a label with an optional
+/// identifier shown as its dim subtitle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnboardingChoiceOption {
+    /// The row label.
+    pub label: String,
+    /// Identifier rendered as `  @detail` after the label — dimmer than the
+    /// label, and counted toward the label-width calc (TS `detail`).
+    pub detail: Option<String>,
+}
+
+/// The choice panel's copy and layout (TS `OnboardingChoiceOptions`): the
+/// question text around the rows and the row-width override.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OnboardingChoiceOptions {
+    /// The question line above the options (TS `prompt`).
+    pub prompt: Option<String>,
+    /// Muted sentence under the prompt, before the options (TS
+    /// `description`), wrapped at 50 columns.
+    pub description: Option<String>,
+    /// Grey footnote under the list, e.g. how to change the answer later
+    /// (TS `note`).
+    pub note: Option<String>,
+    /// Row-width override (TS `rowWidth`); absent sizes the rows from the
+    /// labels, always clamped to the panel width.
+    pub row_width: Option<usize>,
+}
+
+/// A question in the onboarding block (TS `OnboardingChoiceComponent`): the
+/// prompt, a list of options in the same selection language as the
+/// first-run actions, and an optional grey footnote. The host mounts one
+/// per question and drives the cursor with the selection keys.
+#[derive(Debug, Clone)]
+pub struct OnboardingChoice {
+    options: Vec<OnboardingChoiceOption>,
+    selected: usize,
+    config: OnboardingChoiceOptions,
+}
+
+impl OnboardingChoice {
+    /// TS constructor: the cursor seeds at `selected_index` (TS
+    /// `selectedIndex`), clamped into the option list.
+    pub fn new(
+        options: Vec<OnboardingChoiceOption>,
+        selected_seed: Option<usize>,
+        config: OnboardingChoiceOptions,
+    ) -> Self {
+        let last = options.len().saturating_sub(1);
+        Self {
+            selected: selected_seed.unwrap_or(0).min(last),
+            options,
+            config,
+        }
+    }
+
+    /// The row the cursor sits on.
+    pub fn selected(&self) -> usize {
+        self.selected
+    }
+
+    /// Move the cursor `delta` rows (TS `move`): no wrap; `false` when the
+    /// move would leave the list, so the caller skips the re-render.
+    pub fn move_selection(&mut self, delta: isize) -> bool {
+        let next = self.selected as isize + delta;
+        if next < 0 || next as usize >= self.options.len() {
+            return false;
+        }
+        self.selected = next as usize;
+        true
+    }
+
+    /// The panel block (TS `OnboardingChoiceComponent.render`): the prompt,
+    /// the wrapped description, the option rows (the selected one washed),
+    /// and the change-anytime note, each indented one column.
+    pub fn render(&self, theme: &Theme, width: usize) -> Vec<Line> {
+        let safe_width = width.max(1);
         let mut lines: Vec<Line> = vec![Vec::new()];
-        lines.push(vec![Span::styled(
-            format!(" {TRACE_OPT_IN_PROMPT}"),
-            theme.fg_style(ThemeColor::Text),
-        )]);
-        lines.push(Vec::new());
-        let wrap = DESCRIPTION_WIDTH.min(width.saturating_sub(2)).max(1);
-        for row in wrap_words(TRACE_OPT_IN_DESCRIPTION, wrap) {
+        if let Some(prompt) = &self.config.prompt {
             lines.push(vec![Span::styled(
-                format!(" {row}"),
-                theme.fg_style(ThemeColor::Muted),
+                format!(" {prompt}"),
+                theme.fg_style(ThemeColor::Text),
+            )]);
+            lines.push(Vec::new());
+        }
+        if let Some(description) = &self.config.description {
+            let wrap = DESCRIPTION_WIDTH
+                .min(safe_width.saturating_sub(2))
+                .max(1);
+            for row in wrap_words(description, wrap) {
+                lines.push(vec![Span::styled(
+                    format!(" {row}"),
+                    theme.fg_style(ThemeColor::Muted),
+                )]);
+            }
+            lines.push(Vec::new());
+        }
+        lines.extend(self.option_rows(theme, safe_width));
+        if let Some(note) = &self.config.note {
+            lines.push(Vec::new());
+            lines.push(vec![Span::styled(
+                format!(" {note}"),
+                theme.fg_style(ThemeColor::Dim),
             )]);
         }
-        lines.push(Vec::new());
-        let label_width = CHOICES.iter().map(|label| label.len()).max().unwrap_or(0);
+        lines
+    }
+
+    /// The option rows (TS `render`'s row loop): marker + label + the dim
+    /// `  @detail` subtitle, padded to the row width so the wash forms a
+    /// band; the selected row lifts off the canvas with a bold label.
+    fn option_rows(&self, theme: &Theme, safe_width: usize) -> Vec<Line> {
+        let label_width = self
+            .options
+            .iter()
+            .map(|option| match &option.detail {
+                // TS joins label and detail with two spaces for the width
+                // calc; the rendered subtitle adds the `@` on top.
+                Some(detail) => str_width(&option.label) + 2 + str_width(detail),
+                None => str_width(&option.label),
+            })
+            .max()
+            .unwrap_or(0);
         // TS clamps the row to the panel width: a narrow pane shortens the
         // highlight instead of running past the edge.
-        let row_width = width
-            .min((MARKER_WIDTH + label_width + ROW_TRAILING).max(MIN_ROW_WIDTH))
+        let row_width = self
+            .config
+            .row_width
+            .unwrap_or((MARKER_WIDTH + label_width + ROW_TRAILING).max(MIN_ROW_WIDTH))
+            .min(safe_width)
             .max(1);
         let wash = highlight_wash(theme);
-        for (index, label) in CHOICES.iter().enumerate() {
+        let mut rows: Vec<Line> = Vec::with_capacity(self.options.len());
+        for (index, option) in self.options.iter().enumerate() {
             let selected = index == self.selected;
-            let name = format!("{}{}", if selected { "> " } else { "  " }, label);
-            let pad = " ".repeat(row_width.saturating_sub(name.len()));
+            let name = format!("{}{}", if selected { "> " } else { "  " }, option.label);
+            let detail = match &option.detail {
+                Some(detail) => format!("  @{detail}"),
+                None => String::new(),
+            };
+            let pad =
+                " ".repeat(row_width.saturating_sub(str_width(&name) + str_width(&detail)));
             let mut row: Line = vec![Span::styled(" ".to_string(), Style::default())];
             if selected {
                 // The selected row lifts off the canvas (TS
                 // `onboardingHighlightBackground`): a bold name over the
-                // washed background, dim padding inside the wash.
+                // washed background, the dim detail and padding inside
+                // the wash.
                 let mut washed_name = Span::styled(
-                    name.clone(),
+                    name,
                     theme
                         .fg_style(ThemeColor::Text)
                         .add_modifier(Modifier::BOLD),
                 );
                 washed_name.style = washed_name.style.bg(wash);
                 row.push(washed_name);
-                let mut washed_pad = Span::styled(pad, theme.fg_style(ThemeColor::Dim));
-                washed_pad.style = washed_pad.style.bg(wash);
-                row.push(washed_pad);
+                let mut washed_tail = Span::styled(
+                    format!("{detail}{pad}"),
+                    theme.fg_style(ThemeColor::Dim),
+                );
+                washed_tail.style = washed_tail.style.bg(wash);
+                row.push(washed_tail);
             } else {
                 row.push(Span::styled(name, theme.fg_style(ThemeColor::Muted)));
-                row.push(Span::styled(pad, theme.fg_style(ThemeColor::Dim)));
+                row.push(Span::styled(
+                    format!("{detail}{pad}"),
+                    theme.fg_style(ThemeColor::Dim),
+                ));
             }
-            lines.push(row);
+            rows.push(row);
         }
-        lines.push(Vec::new());
-        lines.push(vec![Span::styled(
-            format!(" {TRACE_OPT_IN_NOTE}"),
-            theme.fg_style(ThemeColor::Dim),
-        )]);
-        lines
+        rows
     }
 }
 
@@ -361,11 +520,13 @@ fn render_cells(theme: &Theme, cells: Vec<SplashCell>) -> Line {
 }
 
 /// The selected-row wash (TS `onboardingHighlightBackground`): the canvas
-/// lifted a few percent toward the text colour. "On dark" follows TS
-/// `isLightColor` (luma > 128) with the terminal-default text counting as
-/// light; the dark canvas is the TS default because the theme colour
-/// record carries no parseable `background`.
-fn highlight_wash(theme: &Theme) -> Color {
+/// lifted a few percent toward the text colour. The canvas is the theme
+/// record's parseable `background` (TS `parseHexColor(colors.background)`),
+/// else the hardcoded dark/light canvas by the text luma — "on dark" follows
+/// TS `isLightColor` (luma > 128) with the terminal-default text counting
+/// as light. The built-in themes carry no `background` key, so they keep
+/// the hardcoded canvases.
+pub(crate) fn highlight_wash(theme: &Theme) -> Color {
     let text = theme.fg_style(ThemeColor::Text).fg;
     // TS: `onDark = !text || isLightColor(text)` — undefined (empty theme
     // value) or a light colour both mean light text over a dark canvas.
@@ -376,11 +537,21 @@ fn highlight_wash(theme: &Theme) -> Color {
         }
         Some(_) => true,
     };
-    let (lift, canvas) = if on_dark {
-        ((255u16, 255, 255), (16u16, 16, 16))
+    let lift = if on_dark {
+        (255u16, 255, 255)
     } else {
-        ((0u16, 0, 0), (255u16, 255, 255))
+        (0u16, 0, 0)
     };
+    // TS: `canvas = parseHexColor(colors.background) ?? (onDark ?
+    // DARK_CANVAS : LIGHT_CANVAS)`.
+    let canvas = theme.background_rgb().map_or(
+        if on_dark {
+            (16u16, 16, 16)
+        } else {
+            (255u16, 255, 255)
+        },
+        |(r, g, b)| (u16::from(r), u16::from(g), u16::from(b)),
+    );
     let blend = |lift: u16, canvas: u16| -> u8 {
         let value = lift as f64 * HIGHLIGHT_LIFT + canvas as f64 * (1.0 - HIGHLIGHT_LIFT);
         value.round().clamp(0.0, 255.0) as u8
@@ -395,6 +566,7 @@ fn highlight_wash(theme: &Theme) -> Color {
         crate::theme::ColorMode::TrueColor => Color::Rgb(washed.0, washed.1, washed.2),
     }
 }
+
 
 /// Greedy word wrap at `width` columns.
 fn wrap_words(text: &str, width: usize) -> Vec<String> {
@@ -423,4 +595,207 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
         rows.push(String::new());
     }
     rows
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::{ColorMode, Theme, ThemeJson};
+
+    fn option(label: &str, detail: Option<&str>) -> OnboardingChoiceOption {
+        OnboardingChoiceOption {
+            label: label.to_string(),
+            detail: detail.map(str::to_string),
+        }
+    }
+
+    fn choice_config(row_width: Option<usize>) -> OnboardingChoiceOptions {
+        OnboardingChoiceOptions {
+            prompt: Some("Pick one".to_string()),
+            description: None,
+            note: None,
+            row_width,
+        }
+    }
+
+    fn custom_theme(json: &str, mode: ColorMode) -> Theme {
+        let json: ThemeJson = serde_json::from_str(json).expect("valid theme json");
+        Theme::from_json(&json, mode)
+    }
+
+    #[test]
+    fn wash_blends_against_the_theme_background() {
+        let theme = custom_theme(
+            r#"{ "name": "custom", "colors": { "text": "#f4f4f5", "background": "#050506" } }"#,
+            ColorMode::TrueColor,
+        );
+        // Light text lifts white over the canvas (TS `HIGHLIGHT_LIFT` 0.08):
+        // blend(255, 5) = 25, blend(255, 6) = 26.
+        assert_eq!(highlight_wash(&theme), Color::Rgb(25, 25, 26));
+        let theme = custom_theme(
+            r#"{ "name": "custom", "colors": { "text": "#f4f4f5", "background": "#050506" } }"#,
+            ColorMode::Color256,
+        );
+        // The 256-color mode quantizes the washed colour, not the canvas.
+        assert_eq!(
+            highlight_wash(&theme),
+            Color::Indexed(crate::theme::rgb_to_256((25, 25, 26)))
+        );
+
+        let theme = custom_theme(
+            r#"{ "name": "custom", "colors": { "text": "#000000", "background": "#f0f0f0" } }"#,
+            ColorMode::TrueColor,
+        );
+        // Dark text lifts black over the light canvas: blend(0, 240) = 221.
+        assert_eq!(highlight_wash(&theme), Color::Rgb(221, 221, 221));
+    }
+
+    #[test]
+    fn wash_falls_back_to_the_hardcoded_canvas() {
+        // The built-in themes carry no background key: dark canvas (16,16,16)
+        // lifted toward white — blend(255, 16) = 35.
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        assert_eq!(highlight_wash(&theme), Color::Rgb(35, 35, 35));
+        let theme = Theme::builtin("prime", ColorMode::Color256);
+        assert_eq!(
+            highlight_wash(&theme),
+            Color::Indexed(crate::theme::rgb_to_256((35, 35, 35)))
+        );
+        // A 3-hex background is not the TS `parseHexColor` shape: fallback.
+        let theme = custom_theme(
+            r#"{ "name": "custom", "colors": { "text": "#f4f4f5", "background": "#abc" } }"#,
+            ColorMode::TrueColor,
+        );
+        assert_eq!(highlight_wash(&theme), Color::Rgb(35, 35, 35));
+        // Dark text without a background washes over the light canvas:
+        // blend(0, 255) = 235.
+        let theme = custom_theme(
+            r#"{ "name": "custom", "colors": { "text": "#000000" } }"#,
+            ColorMode::TrueColor,
+        );
+        assert_eq!(highlight_wash(&theme), Color::Rgb(235, 235, 235));
+    }
+
+    #[test]
+    fn detail_renders_as_a_dim_subtitle_and_counts_toward_the_row_width() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let wash = highlight_wash(&theme);
+        let choice = OnboardingChoice::new(
+            vec![
+                option("Personal account", None),
+                option("Prime", Some("prime-intellect")),
+            ],
+            Some(1),
+            choice_config(None),
+        );
+        let lines = choice.render(&theme, 80);
+        // blank, prompt, blank, then the two option rows.
+        assert_eq!(lines.len(), 5);
+        let unselected = &lines[3];
+        // Label width = max("Personal account" = 16, "Prime  prime-intellect"
+        // = 19) → row width max(30, 2 + 19 + 6) = 30.
+        assert_eq!(
+            unselected[1],
+            Span::styled("  Personal account", theme.fg_style(ThemeColor::Muted))
+        );
+        assert_eq!(
+            unselected[2],
+            Span::styled(
+                " ".repeat(30 - "  Personal account".len()),
+                theme.fg_style(ThemeColor::Dim)
+            )
+        );
+        let selected = &lines[4];
+        // The subtitle reads as a dimmer identifier after the name, and the
+        // wash covers the detail and the padding inside the band.
+        assert_eq!(
+            selected[1],
+            Span::styled(
+                "> Prime",
+                theme
+                    .fg_style(ThemeColor::Text)
+                    .add_modifier(Modifier::BOLD)
+                    .bg(wash)
+            )
+        );
+        assert_eq!(
+            selected[2],
+            Span::styled(
+                format!("  @prime-intellect{}", " ".repeat(30 - 7 - 18)),
+                theme.fg_style(ThemeColor::Dim).bg(wash)
+            )
+        );
+    }
+
+    #[test]
+    fn row_width_overrides_and_clamps_to_the_pane() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        // An explicit override under the pane sizes the wash band exactly.
+        let choice = OnboardingChoice::new(
+            vec![option("Share", None)],
+            None,
+            choice_config(Some(20)),
+        );
+        let lines = choice.render(&theme, 80);
+        assert_eq!(lines[3][2].content, " ".repeat(20 - "  Share".len()));
+        // An override past the pane clamps to the pane.
+        let choice = OnboardingChoice::new(
+            vec![option("Share", None)],
+            None,
+            choice_config(Some(100)),
+        );
+        let lines = choice.render(&theme, 50);
+        assert_eq!(lines[3][2].content, " ".repeat(50 - "  Share".len()));
+        // Without an override the labels size the band, still clamped:
+        // "Continue with the current setup" → max(30, 2 + 30 + 6) = 38.
+        let choice = OnboardingChoice::new(
+            vec![option("Continue with the current setup", None)],
+            None,
+            choice_config(None),
+        );
+        let lines = choice.render(&theme, 80);
+        assert_eq!(
+            lines[3][2].content,
+            " ".repeat(38 - "  Continue with the current setup".len())
+        );
+        let lines = choice.render(&theme, 35);
+        assert_eq!(
+            lines[3][2].content,
+            " ".repeat(35 - "  Continue with the current setup".len())
+        );
+    }
+
+    #[test]
+    fn selected_seed_clamps_into_the_options() {
+        let options = || vec![option("a", None), option("b", None), option("c", None)];
+        assert_eq!(
+            OnboardingChoice::new(options(), Some(2), Default::default()).selected(),
+            2
+        );
+        assert_eq!(
+            OnboardingChoice::new(options(), Some(99), Default::default()).selected(),
+            2
+        );
+        assert_eq!(
+            OnboardingChoice::new(options(), None, Default::default()).selected(),
+            0
+        );
+        assert_eq!(
+            OnboardingChoice::new(vec![], Some(3), Default::default()).selected(),
+            0
+        );
+    }
+
+    #[test]
+    fn cursor_moves_without_wrapping() {
+        let mut choice = OnboardingChoice::new(
+            vec![option("a", None), option("b", None)],
+            None,
+            Default::default(),
+        );
+        assert!(choice.move_selection(1));
+        assert!(!choice.move_selection(1));
+        assert!(choice.move_selection(-1));
+        assert!(!choice.move_selection(-1));
+    }
 }

@@ -155,6 +155,16 @@ pub struct ThemeJson {
     colors: BTreeMap<String, serde_json::Value>,
 }
 
+/// Resolve one var reference (TS `resolveVarRefs`): empty and hex values pass
+/// through, any other name looks up `vars` once and stays as-is when unknown
+/// (it then fails hex parsing and the slot drops).
+fn resolve_var_ref<'a>(value: &'a str, vars: &BTreeMap<String, String>) -> &'a str {
+    if value.is_empty() || value.starts_with('#') {
+        return value;
+    }
+    vars.get(value).map(String::as_str).unwrap_or(value)
+}
+
 /// Resolve a color value: hex string, var reference, or "" (terminal default).
 fn resolve_color(value: &serde_json::Value, vars: &BTreeMap<String, String>) -> Option<Color> {
     let Some(s) = value.as_str() else {
@@ -162,16 +172,30 @@ fn resolve_color(value: &serde_json::Value, vars: &BTreeMap<String, String>) -> 
             .as_u64()
             .map(|n| Color::Indexed(u8::try_from(n).unwrap_or(255)));
     };
-    let mut s: &str = s;
-    if !s.is_empty() && !s.starts_with('#') {
-        if let Some(var) = vars.get(s) {
-            s = var.as_str();
-        }
-    }
+    let s = resolve_var_ref(s, vars);
     if s.is_empty() {
         return Some(Color::Reset);
     }
     hex_to_color(s)
+}
+
+/// TS `parseHexColor` on the theme record's `background` (the onboarding
+/// wash canvas): `^#?([0-9a-f]{6})$` case-insensitive on the trimmed value,
+/// after var resolution — only the 6-hex shape parses; anything else (empty,
+/// 3-hex shorthand, an ANSI index, a var miss) stays `None` so callers fall
+/// back to their hardcoded canvases.
+fn parse_theme_background(
+    value: &serde_json::Value,
+    vars: &BTreeMap<String, String>,
+) -> Option<(u8, u8, u8)> {
+    let raw = value.as_str()?;
+    let trimmed = resolve_var_ref(raw, vars).trim();
+    let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok();
+    Some((channel(0..2)?, channel(2..4)?, channel(4..6)?))
 }
 
 fn hex_to_color(s: &str) -> Option<Color> {
@@ -304,6 +328,10 @@ pub struct Theme {
     fg: BTreeMap<&'static str, Style>,
     bg: BTreeMap<&'static str, Style>,
     bg_colors: BTreeMap<&'static str, Color>,
+    /// The theme record's parseable `background` key, raw RGB: blends that
+    /// use it (TS `onboardingHighlightBackground`) mix against the true
+    /// colour and quantize their result per [`Theme::mode`], not this.
+    background: Option<(u8, u8, u8)>,
     pub mode: ColorMode,
 }
 
@@ -333,6 +361,12 @@ impl Theme {
             fg,
             bg,
             bg_colors,
+            // `background` is not a fg/bg slot, so the loop above drops it;
+            // the wash reads it as its canvas (TS `parseHexColor`).
+            background: json
+                .colors
+                .get("background")
+                .and_then(|value| parse_theme_background(value, &json.vars)),
             mode,
         }
     }
@@ -352,6 +386,13 @@ impl Theme {
 
     pub fn bg_color(&self, color: ThemeBg) -> Option<Color> {
         self.bg_colors.get(color.name()).copied()
+    }
+
+    /// The theme record's parseable `background` (strict 6-hex shape after
+    /// var resolution, TS `parseHexColor`), raw RGB; `None` when the theme
+    /// carries no such value, so callers fall back to their own canvases.
+    pub(crate) fn background_rgb(&self) -> Option<(u8, u8, u8)> {
+        self.background
     }
 
     /// `theme.fg("muted", text)` equivalent.
@@ -566,5 +607,35 @@ mod tests {
         let theme = Theme::builtin("prime", ColorMode::Color256);
         let accent = theme.fg_style(ThemeColor::Accent);
         assert!(matches!(accent.fg, Some(Color::Indexed(_))));
+    }
+
+    #[test]
+    fn background_parses_strict_six_hex_after_var_resolution() {
+        let json = serde_json::from_str::<ThemeJson>(
+            r#"{
+                "name": "custom",
+                "vars": { "canvas": "#0A0B0C" },
+                "colors": { "background": "canvas", "text": "#f4f4f5" }
+            }"#,
+        )
+        .expect("valid theme json");
+        let theme = Theme::from_json(&json, ColorMode::TrueColor);
+        // Case-insensitive 6-hex, reached through a var reference.
+        assert_eq!(theme.background_rgb(), Some((0x0a, 0x0b, 0x0c)));
+    }
+
+    #[test]
+    fn background_stays_none_for_non_six_hex_shapes() {
+        // Empty, 3-hex shorthand, an unknown var, an ANSI index, and a
+        // missing value are all unparseable: the wash falls back to its
+        // hardcoded canvas (the built-in themes carry no background at all).
+        for raw in ["\"\"", "\"#abc\"", "\"5\"", "17", "null"] {
+            let json: ThemeJson = serde_json::from_str(&format!(
+                r#"{{ "name": "custom", "colors": {{ "background": {raw} }} }}"#
+            ))
+            .expect("valid theme json");
+            let theme = Theme::from_json(&json, ColorMode::TrueColor);
+            assert_eq!(theme.background_rgb(), None, "background {raw}");
+        }
     }
 }
