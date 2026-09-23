@@ -5646,8 +5646,11 @@ export class AgentSession {
 		}
 		// A pin is accepted only when it resolves in the very list image turns are
 		// read from, so an accepted pin can never be unusable at read time. The
-		// full catalog only classifies a refusal, so it can still name the real
-		// problem (a text-only model, or a provider without credentials).
+		// full catalog only classifies a refusal, and a reference it resolves is
+		// image-capable with working credentials: the only thing missing is the
+		// availability itself, so that refusal must not send the user to /login. A
+		// reference the catalog cannot resolve names a modality or credential
+		// problem instead.
 		const available = resolveImageModelReference({
 			reference: trimmed,
 			availableModels: this._modelRegistry.getAvailable(),
@@ -5661,7 +5664,7 @@ export class AgentSession {
 			});
 			const problem =
 				catalog.ok && available.problem === "unresolved"
-					? "unauthenticated"
+					? "not-available"
 					: catalog.ok
 						? available.problem
 						: catalog.problem;

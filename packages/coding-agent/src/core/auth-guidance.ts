@@ -75,7 +75,7 @@ export function formatImageModelUnusableMessage(reference: string): string {
  * causes need different fixes, so `/image-model` reports the specific one
  * instead of the generic routing message above.
  */
-export type ImageModelReferenceProblem = "unresolved" | "text-only" | "unauthenticated";
+export type ImageModelReferenceProblem = "unresolved" | "text-only" | "unauthenticated" | "not-available";
 
 const IMAGE_MODEL_REFERENCE_PROBLEM_MESSAGES: Record<ImageModelReferenceProblem, (reference: string) => string> = {
 	unresolved: (reference) =>
@@ -83,6 +83,11 @@ const IMAGE_MODEL_REFERENCE_PROBLEM_MESSAGES: Record<ImageModelReferenceProblem,
 	"text-only": (reference) => `"${reference}" does not accept image input, so it cannot serve image turns.`,
 	unauthenticated: (reference) =>
 		`"${reference}" has no configured credentials. Authenticate its provider with /login, then retry.`,
+	// Credentials are not the problem here, so this must not send the user to
+	// /login: the model exists with working auth and only the available list is
+	// missing it.
+	"not-available": (reference) =>
+		`"${reference}" is not available to this session, so it cannot serve image turns. Its provider is authenticated, but the model is missing from the available model list (a private Prime Inference model the team is not entitled to, for example). Pick an available image model with /model.`,
 };
 
 export function formatImageModelReferenceRejectedMessage(
