@@ -784,7 +784,7 @@ async fn family_edges_never_cross_families_end_to_end() {
         );
         let response = client.read_response(id);
         assert_eq!(response["success"], true, "send {id} failed: {response}");
-        client.wait_idle(id, &kid_a_active);
+        client.wait_idle(id, kid_a_active);
     };
     for (id, message) in [
         ("to-kid-1", "drive the sibling probe"),
@@ -850,7 +850,7 @@ async fn family_edges_never_cross_families_end_to_end() {
     let crossed = match std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.error")) {
         Ok(content) => content,
         Err(_) => {
-            let transcript = client.messages("gm-kid-debug", &kid_a_active);
+            let transcript = client.messages("gm-kid-debug", kid_a_active);
             eprintln!("KEEP-DIR {}", dir.path().display());
             if std::env::var_os("PA_E2E_KEEP_DIR").is_some() {
                 std::mem::forget(dir);
@@ -998,7 +998,7 @@ async fn family_edges_never_cross_families_end_to_end() {
     assert_eq!(self_row["relationship"], Value::Null, "{self_row:?}");
     let sibling_row = by_id(parent_b_active);
     assert_eq!(sibling_row["relationship"], "sibling", "{sibling_row:?}");
-    let child_row = by_id(&kid_a_active);
+    let child_row = by_id(kid_a_active);
     assert_eq!(child_row["relationship"], "child", "{child_row:?}");
     assert!(
         !roster
@@ -1044,7 +1044,7 @@ async fn family_edges_never_cross_families_end_to_end() {
     // `child:` prefix on its true parent; another family's subagent
     // (kid-b, delivered here as a probe) renders WITHOUT the label —
     // the mislabeled-ack regression.
-    client.wait_idle("w-child-transcript", &kid_a_active);
+    client.wait_idle("w-child-transcript", kid_a_active);
     let parent_messages = client.messages("gm-parent-transcript", parent_a_active);
     assert!(
         parent_messages
