@@ -531,7 +531,7 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
 
     // At least one scheduled fire delivered before the crash.
     let rows_before_restart = wait_until(Duration::from_secs(20), || {
-        let rows = session_row_count(&session_file);
+        let rows = session_rows_containing(&session_file, "heartbeat_prompt");
         (rows > 0).then_some(rows)
     });
 
@@ -553,7 +553,7 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
     // row count grows past the pre-restart snapshot (a fire delivered by
     // the re-adopted worker).
     let grew = wait_until(Duration::from_secs(30), || {
-        let rows = session_row_count(&session_file);
+        let rows = session_rows_containing(&session_file, "heartbeat_prompt");
         (rows > rows_before_restart).then_some(rows)
     });
     assert!(
@@ -567,13 +567,8 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
     );
 }
 
-fn session_row_count(session_file: &Path) -> usize {
+fn session_rows_containing(session_file: &Path, needle: &str) -> usize {
     std::fs::read_to_string(session_file)
-        .map(|content| {
-            content
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .count()
-        })
+        .map(|content| content.lines().filter(|line| line.contains(needle)).count())
         .unwrap_or(0)
 }
