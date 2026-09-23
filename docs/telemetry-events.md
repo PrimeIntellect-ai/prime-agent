@@ -167,9 +167,9 @@ session's current worker (the stale-id rebind).
 
 | property | type | notes |
 |---|---|---|
-| `kind` | string | `worker_spawned`, `worker_exited`, `worker_restarted`, `attach`, `reattach`, `detach`, `sessions_archived`, `worker_children_closed`, `session_rebound`, `catalog_refresh` |
+| `kind` | string | `worker_spawned`, `worker_exited`, `worker_restarted`, `attach`, `reattach`, `detach`, `sessions_archived`, `worker_children_closed`, `session_rebound`, `catalog_refresh`, `compaction_abort_declared` |
 | `exit_reason` | string | only for `worker_exited`: `normal` / `crash` |
-| `count` | number | only for `sessions_archived`, `worker_children_closed`, and `catalog_refresh`: how many sessions the sweep moved to the archive / how many resident RLM children the supervisor closed with a hard-killed parent worker / how many models the resolved no-cold-start chain serves after the daemon's startup catalog refresh |
+| `count` | number | only for `sessions_archived`, `worker_children_closed`, `catalog_refresh`, and `compaction_abort_declared` (always 1): how many sessions the sweep moved to the archive / how many resident RLM children the supervisor closed with a hard-killed parent worker / how many models the resolved no-cold-start chain serves after the daemon's startup catalog refresh / one wedged-worker compaction the supervisor declared aborted |
 
 ### `mcp connector used`
 

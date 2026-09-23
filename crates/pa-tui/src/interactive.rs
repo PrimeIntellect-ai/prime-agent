@@ -629,6 +629,10 @@ pub async fn run_interactive(
     // Background notes (a failed abort request) fold into the transcript
     // through the same loop that renders daemon events.
     let (notes_tx, mut notes_rx) = mpsc::unbounded_channel::<String>();
+    // The backgrounded compaction abort reports here; the loop folds a
+    // failed abort into the transcript note and clears the stuck loader.
+    let (compaction_abort_tx, mut compaction_abort_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::CompactionAbortNote>();
     // The `/share` upload task reports here; the loop folds the outcome
     // into the transcript and clears the loader.
     let (share_tx, mut share_rx) = mpsc::unbounded_channel::<crate::session_ui::ShareNote>();
@@ -692,6 +696,7 @@ pub async fn run_interactive(
         client,
         &options,
         notes_tx,
+        compaction_abort_tx,
         share_tx,
         reload_tx,
         catalog_tx,
@@ -1262,6 +1267,11 @@ pub async fn run_interactive(
             maybe_note = notes_rx.recv() => {
                 if let Some(note) = maybe_note {
                     session.apply_background_note(&note, &mut view);
+                }
+            }
+            maybe_compaction_abort = compaction_abort_rx.recv() => {
+                if let Some(outcome) = maybe_compaction_abort {
+                    session.apply_compaction_abort_outcome(outcome, &mut view);
                 }
             }
             maybe_share = share_rx.recv() => {

@@ -570,6 +570,17 @@ pub fn track_catalog_refresh(client: &TelemetryClient, count: usize) {
     client.track("daemon event", properties);
 }
 
+/// Track the abort supervision's terminal declaration (`daemon event`,
+/// schema v1, kind `compaction_abort_declared`): the supervisor declared
+/// a wedged worker's compaction aborted after its abort grace expired. A
+/// count only, never session payload.
+pub fn track_compaction_abort_declared(client: &TelemetryClient) {
+    let mut properties = base_properties("daemon");
+    properties.set("kind", Value::from("compaction_abort_declared"));
+    properties.set("count", Value::from(1));
+    client.track("daemon event", properties);
+}
+
 /// Track the parent-death child close's `daemon event` (schema v1, kind
 /// `worker_children_closed`): how many resident RLM children the
 /// supervisor stopped with a hard-killed parent worker. A count only,

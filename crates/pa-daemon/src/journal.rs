@@ -17,7 +17,7 @@ use std::path::Path;
 
 const COMPACT_AFTER_RECORDS: usize = 4096;
 
-fn append_record(path: &Path, record: &Value) -> Result<()> {
+pub(crate) fn append_record(path: &Path, record: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -35,7 +35,7 @@ fn append_record(path: &Path, record: &Value) -> Result<()> {
 
 /// How the temp journal lands on its path.
 #[derive(Debug, Clone, Copy)]
-enum Finalize {
+pub(crate) enum Finalize {
     /// Rename through `rename_onto`: the bounded win32 destination-busy
     /// retry (TS `writeFileAtomicSync` -> `renameOntoSync`).
     RetryBusy,
@@ -44,7 +44,7 @@ enum Finalize {
     Bare,
 }
 
-fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize) -> Result<()> {
+pub(crate) fn rewrite_records(path: &Path, records: &[Value], finalize: Finalize) -> Result<()> {
     let temp = path.with_extension(format!("jsonl.tmp-{}", std::process::id()));
     {
         let file = File::create(&temp).with_context(|| format!("create {}", temp.display()))?;

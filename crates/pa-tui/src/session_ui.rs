@@ -88,6 +88,13 @@ pub(crate) type ShareNote = Result<GistOutcome, String>;
 /// inputs, or the failure message (TS `handleReloadCommand`'s outcome).
 pub(crate) type ReloadNote = Result<(), String>;
 
+/// One backgrounded compaction-abort outcome (the abort supervision's UI
+/// recovery): a failed abort request surfaces as the transcript note and
+/// clears the stuck compaction loader locally — when even the abort could
+/// not reach the daemon, the loader must not hang waiting for a
+/// `compaction_end` that will never come.
+pub(crate) type CompactionAbortNote = Result<(), String>;
+
 /// A landed heartbeat-catalog refresh for the `/heartbeats` view (TS
 /// `refreshHeartbeatCatalog`'s fetch result): the scoped, sorted rows, or
 /// the fetch error that keeps the last catalog (stale-while-revalidate).
@@ -320,6 +327,9 @@ pub(crate) struct SessionUi {
     /// Notes surfacing from background tasks (the async abort result) into
     /// the UI loop.
     notes: mpsc::UnboundedSender<String>,
+    /// Compaction-abort outcomes from the backgrounded request (the abort
+    /// supervision's UI recovery): a failed abort clears the stuck loader.
+    compaction_abort_notes: mpsc::UnboundedSender<CompactionAbortNote>,
     /// A succeeded compaction replaced the durable transcript (TS
     /// `rebuildChatFromMessages`): the next loop pass re-fetches it.
     pub(crate) transcript_stale: bool,
@@ -448,10 +458,12 @@ struct SelectionAutoScroll {
 
 impl SessionUi {
     /// Create/attach per the session selection and return the live state.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn open(
         client: DaemonClient,
         options: &InteractiveOptions,
         notes: mpsc::UnboundedSender<String>,
+        compaction_abort_notes: mpsc::UnboundedSender<CompactionAbortNote>,
         share_notes: mpsc::UnboundedSender<ShareNote>,
         reload_notes: mpsc::UnboundedSender<ReloadNote>,
         catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
@@ -539,6 +551,7 @@ impl SessionUi {
             ctrl_c_hint_until: None,
             goal_view: GoalView::new(),
             notes,
+            compaction_abort_notes,
             transcript_stale: false,
             telemetry: options.telemetry.clone(),
             scroll_adoption_emitted: false,
@@ -5510,12 +5523,15 @@ impl SessionUi {
     /// `interruptOrClearInput` fires `abortCompaction()` when the
     /// compaction loader is up — the agent is not streaming during a
     /// compaction, so the interrupt cancels the run, not a turn): the
-    /// request never blocks key handling, and a failure surfaces later
-    /// as a transcript note.
+    /// request never blocks key handling. A failure surfaces later as a
+    /// transcript note and clears the stuck loader locally (the abort
+    /// supervision's UI recovery): the daemon's own `compaction_end`
+    /// normally clears it, but an abort that could not even reach the
+    /// daemon must not leave the UI waiting on an end that never comes.
     fn abort_compaction(&self) {
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
-        let notes = self.notes.clone();
+        let abort_notes = self.compaction_abort_notes.clone();
         tokio::spawn(async move {
             let result = client
                 .request_ok(DaemonCommand::AbortCompaction {
@@ -5525,9 +5541,23 @@ impl SessionUi {
                 })
                 .await;
             if let Err(error) = result {
-                let _ = notes.send(format!("the compaction abort failed: {error:#}"));
+                let _ = abort_notes.send(Err(format!("{error:#}")));
             }
         });
+    }
+
+    /// Apply one backgrounded compaction-abort outcome: the failed note
+    /// surfaces as a transcript row and the compaction loader clears —
+    /// the local recovery when the abort never reached the daemon.
+    pub(crate) fn apply_compaction_abort_outcome(
+        &mut self,
+        outcome: CompactionAbortNote,
+        view: &mut AgentView,
+    ) {
+        if let Err(error) = outcome {
+            self.note(&format!("the compaction abort failed: {error:#}"), view);
+            view.compaction = None;
+        }
     }
 
     /// Apply one background note (a failed abort request) to the transcript.

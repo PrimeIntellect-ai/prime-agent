@@ -16,6 +16,7 @@ use crate::engine::{CompactionOutcome, CompactionRequest, SessionEngine};
 use crate::protocol::DaemonOutbound;
 use crate::worker::{EventPump, OutboundFrame, SessionCore};
 use pa_agent::abort::AbortController;
+use pa_core::session_engine::messages::{CompactionOutcomeKind, CompactionOutcomeReason};
 
 /// The worker's compaction machinery: the live-run abort slot plus the
 /// compaction flow. One slot per session, replaced by each new run, mirroring
@@ -395,6 +396,35 @@ pub(crate) fn compaction_end_unsuccessful(
         event["customInstructions"] = json!(custom_instructions);
     }
     event
+}
+
+/// The durable `compaction_outcome` row of a compaction the supervisor
+/// declared aborted (the abort supervision's create replay): the same
+/// disclosure the worker's own auto-abort arms persist — `cancelled` with
+/// the run's reason, in the wire custom-message field shape the store
+/// persists. A manual run has no row (TS `compact()`'s abort arm writes
+/// none), and any other reason never invents one.
+pub(crate) fn interrupted_compaction_row(payload: &Value) -> Option<Value> {
+    let record = payload.get("interruptedCompaction")?;
+    let reason = match record.get("reason").and_then(Value::as_str) {
+        Some("threshold") => CompactionOutcomeReason::Threshold,
+        Some("overflow") => CompactionOutcomeReason::Overflow,
+        Some("requested") => CompactionOutcomeReason::Requested,
+        _ => return None,
+    };
+    let message = crate::session_commands::custom_message_value(
+        &pa_core::session_engine::messages::create_compaction_outcome_message(
+            "Compaction cancelled",
+            reason,
+            CompactionOutcomeKind::Cancelled,
+        ),
+    );
+    Some(json!({
+        "customType": message.get("customType").cloned().unwrap_or(Value::Null),
+        "content": message.get("content").cloned().unwrap_or(Value::Null),
+        "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
+        "details": message.get("details").cloned().unwrap_or(Value::Null),
+    }))
 }
 
 /// The `compaction_end` event payload (TS `AgentSessionEvent`), per outcome:

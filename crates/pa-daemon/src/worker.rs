@@ -2081,6 +2081,13 @@ impl Worker {
         };
         self.engine
             .configure_service_tier(restored_tier.unwrap_or(Some(service_tier)));
+        // The abort supervision's terminal record (the supervisor declared
+        // a wedged run aborted and injected it into this create replay):
+        // the rebuilt transcript discloses the abort with the same
+        // `compaction_outcome` row the worker's own auto-abort arms
+        // persist. A manual run persists nothing — TS `compact()`'s abort
+        // arm writes no durable row.
+        let interrupted_compaction = crate::compaction::interrupted_compaction_row(payload);
         // The core lock stays inside this block: everything after it may
         // await (the schedule-catalog bind), and a std MutexGuard must
         // never ride an await point.
@@ -2090,6 +2097,11 @@ impl Worker {
             core.steering = steering;
             core.follow_up = follow_up;
             core.store = Some(store);
+            if let Some(row) = &interrupted_compaction {
+                if let Some(store) = core.store.as_mut() {
+                    let _ = store.persist_entry("custom_message", row.clone());
+                }
+            }
             core.created = true;
             core.abort_requested = false;
             core.auto_compaction_enabled = auto_compaction_enabled;

@@ -606,3 +606,292 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
         "the disclosure never reaches the provider request"
     );
 }
+
+/// Find the resident worker's pid from the persisted descriptors (the
+/// supervisor's own durable state under `daemon-workers/<socket hash>/`).
+fn worker_pid(agent_dir: &Path) -> u32 {
+    let workers_dir = agent_dir.join("daemon-workers");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        for hash_dir in std::fs::read_dir(&workers_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            for file in std::fs::read_dir(hash_dir.path())
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                let path = file.path();
+                if path.extension().is_none_or(|extension| extension != "json") {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Ok(descriptor) = serde_json::from_str::<Value>(&content) else {
+                    continue;
+                };
+                if let Some(pid) = descriptor.get("pid").and_then(Value::as_u64) {
+                    if pid > 0 {
+                        return pid as u32;
+                    }
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!(
+        "no worker descriptor with a pid under {}",
+        workers_dir.display()
+    );
+}
+
+/// The supervisor's terminal-compaction journal for this socket, if written.
+fn supervision_journal(agent_dir: &Path) -> Option<PathBuf> {
+    let workers_dir = agent_dir.join("daemon-workers");
+    for hash_dir in std::fs::read_dir(&workers_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let path = hash_dir.path().join("compaction-supervision.jsonl");
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn signal(pid: u32, signal: &str) {
+    let status = Command::new("kill")
+        .arg(signal)
+        .arg(pid.to_string())
+        .status()
+        .expect("send signal");
+    assert!(status.success(), "kill {signal} {pid} failed");
+}
+
+/// The wedged-worker abort (the abort supervision): a worker frozen
+/// mid-compaction cannot answer its own abort command. The supervisor
+/// acknowledges the abort immediately (never the worker's 30s route
+/// timeout), declares the run terminal after the grace window — the
+/// synthetic aborted `compaction_end` clears every attached loader and the
+/// terminal record lands in the supervisor's own journal — and the
+/// replacement worker's create replay discloses the cancelled outcome in
+/// the rebuilt durable transcript.
+#[test]
+fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let mock = CompactionMock::start();
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "prime-inference": {
+                    "api": "openai-completions",
+                    "baseUrl": mock.url(),
+                    "apiKey": "sk-battery",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "contextWindow": 128000,
+                            "maxTokens": 4096,
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write models.json");
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        json!({ "compaction": {"enabled": true, "reserveTokens": 127500, "keepRecentTokens": 10} })
+            .to_string(),
+    )
+    .expect("write settings.json");
+    let socket = dir.path().join("daemon.sock");
+    let _supervisor = spawn_supervisor(&socket, &agent_dir);
+    let mut client = Client::connect(&socket);
+
+    client.send_command(
+        "c1",
+        json!({
+            "type": "create",
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": session_dir.to_string_lossy(),
+                "provider": "prime-inference",
+                "model": "mock-1",
+            },
+        }),
+    );
+    let created = client.read_response("c1");
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let session_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .or_else(|| created["data"]["activeSessionId"].as_str())
+        .expect("session id")
+        .to_string();
+    client.send_command(
+        "a1",
+        json!({ "type": "attach", "activeSessionId": session_id }),
+    );
+    let attached = client.read_response("a1");
+    assert_eq!(attached["success"], true, "attach failed: {attached}");
+
+    // Seed turn, then the crossing turn whose summarizer the mock holds.
+    client.send_command(
+        "p1",
+        json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "seed turn"}),
+    );
+    let seeded = client.read_response("p1");
+    assert_eq!(seeded["success"], true, "seed prompt failed: {seeded}");
+    mock.hold_summarizer.store(true, Ordering::SeqCst);
+    client.send_command(
+        "p2",
+        json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "crossing turn"}),
+    );
+    let summarizer_index = 2;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && mock.request_count() <= summarizer_index {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        mock.request_count() > summarizer_index,
+        "the compaction summarizer request never arrived"
+    );
+
+    // The second client attaches while the worker still answers (the
+    // loader-holding TUI in the real flow), then the worker freezes: a
+    // SIGSTOP is the wedge — the connection stays open, the command plane
+    // stops answering.
+    let mut second = Client::connect(&socket);
+    second.send_command(
+        "a2",
+        json!({ "type": "attach", "activeSessionId": session_id }),
+    );
+    let attached2 = second.read_response("a2");
+    assert_eq!(attached2["success"], true, "second attach: {attached2}");
+    let pid = worker_pid(&agent_dir);
+    signal(pid, "-STOP");
+
+    // The abort acknowledges immediately from the supervisor plane (TS
+    // daemon-mode's in-process `abortCompaction` always replies instantly;
+    // the wedged worker must not turn it into the 30s route timeout).
+    let sent_at = Instant::now();
+    second.send_command(
+        "ab1",
+        json!({ "type": "abort_compaction", "activeSessionId": session_id }),
+    );
+    let aborted = second.read_response("ab1");
+    let ack_elapsed = sent_at.elapsed();
+    assert_eq!(aborted["success"], true, "abort failed: {aborted}");
+    assert!(
+        ack_elapsed < Duration::from_secs(5),
+        "the acknowledgment waited on the wedged worker: {ack_elapsed:?}"
+    );
+
+    // The supervisor declares the run terminal after the grace window: the
+    // synthetic aborted `compaction_end` reaches the attached client (the
+    // TUI clears its loader on it). An auto run's aborted end carries no
+    // error message or severity, like the worker's own cancelled arm.
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let end_event = loop {
+        second.drain_events(200);
+        if let Some(event) = second.events.iter().find(|event| {
+            event["type"] == "compaction_end"
+                && event["aborted"] == true
+                && event["reason"] == "threshold"
+        }) {
+            break event.clone();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the synthetic compaction_end never landed; events: {:#?}",
+            second.events
+        );
+    };
+    assert!(end_event.get("errorMessage").is_none(), "{end_event}");
+    assert!(end_event.get("errorSeverity").is_none(), "{end_event}");
+    assert_eq!(end_event["willRetry"], false);
+
+    // The terminal record persisted in the supervisor's own journal,
+    // unconsumed (the replacement's create replay owns the consumption).
+    let journal_path = supervision_journal(&agent_dir).expect("the supervision journal exists");
+    let journal = std::fs::read_to_string(&journal_path).expect("read journal");
+    let record: Value = serde_json::from_str(journal.lines().last().expect("a journal record"))
+        .expect("parse journal record");
+    assert_eq!(record["type"], "terminal_compaction");
+    assert_eq!(record["activeSessionId"], session_id.as_str());
+    assert_eq!(record["reason"], "threshold");
+    assert!(record.get("injectedAt").is_none(), "{record}");
+
+    // Kill the frozen worker: the supervisor relaunches it, and the create
+    // replay discloses the aborted run — the same durable
+    // `compaction_outcome` row the worker's own auto-abort arms persist.
+    signal(pid, "-KILL");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let durable = loop {
+        let row = std::fs::read_dir(&session_dir)
+            .expect("list session dir")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "jsonl")
+            })
+            .find_map(|path| {
+                let content = std::fs::read_to_string(&path).ok()?;
+                content
+                    .lines()
+                    .find(|line| line.contains("\"compaction_outcome\""))
+                    .map(str::to_string)
+            });
+        if let Some(row) = row {
+            break serde_json::from_str::<Value>(&row).expect("parse durable row");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the replacement never replayed the cancelled outcome row"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(durable["type"], "custom_message");
+    assert_eq!(durable["customType"], "compaction_outcome");
+    assert_eq!(durable["content"], "Compaction cancelled");
+    assert_eq!(
+        durable["details"],
+        json!({"reason": "threshold", "outcome": "cancelled"})
+    );
+
+    // The replay consumed the record: the journal's latest state for the
+    // session carries `injectedAt`, so a later relaunch never replays it
+    // again.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let journal = std::fs::read_to_string(&journal_path).expect("read journal");
+        let injected = journal
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|record| record["activeSessionId"] == session_id.as_str())
+            .next_back()
+            .is_some_and(|record| record.get("injectedAt").is_some_and(|at| !at.is_null()));
+        if injected {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the journal record was never marked injected"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}

@@ -167,6 +167,12 @@ pub struct Supervisor {
     /// The session input-pause leases (wave b8): pause id -> lease, the
     /// bookkeeping behind `acquire`/`release_session_input_pause`.
     pub(crate) input_pauses: crate::input_pause_lease::SupervisorPauseTable,
+    /// The terminal-compaction journal (the abort supervision): the
+    /// supervisor's own durable record of compactions it declared aborted
+    /// when the worker could not answer — feeds the replacement-worker
+    /// create replay, cleared by a `compaction_end` that did land.
+    pub(crate) compaction_journal:
+        std::sync::Mutex<crate::compaction_supervision::TerminalCompactionJournal>,
 }
 
 impl Supervisor {
@@ -191,6 +197,9 @@ impl Supervisor {
             &options.socket_path,
             &options.agent_dir,
         ));
+        let compaction_journal = crate::compaction_supervision::TerminalCompactionJournal::open(
+            &descriptor_dir.join("compaction-supervision.jsonl"),
+        )?;
         Ok(Supervisor {
             options,
             descriptor_dir,
@@ -209,6 +218,7 @@ impl Supervisor {
             update_budget: UpdateTimeoutBudget::from_env(),
             restore: crate::update_restore::RestoreProgress::new(),
             input_pauses: crate::input_pause_lease::SupervisorPauseTable::default(),
+            compaction_journal: std::sync::Mutex::new(compaction_journal),
         })
     }
 
@@ -384,6 +394,14 @@ impl Supervisor {
             return None;
         }
         Some(resident)
+    }
+
+    /// The abort supervision's declaration event (`daemon event` schema v1,
+    /// kind `compaction_abort_declared`): one count, never session payload.
+    pub(crate) fn note_compaction_abort_declared(&self) {
+        if let Some(client) = &*self.telemetry.lock().unwrap() {
+            pa_core::session_engine::telemetry::track_compaction_abort_declared(client);
+        }
     }
 
     /// Bind the client socket, adopt or relaunch persisted workers, serve.
@@ -820,9 +838,28 @@ impl Supervisor {
             let _ = child.kill().await;
             return Err(error);
         }
-        let payload = {
+        let (payload, injected_compaction_abort) = {
             let descriptor = resident.descriptor.lock().await;
-            create_command_payload(&descriptor.create_command)
+            let mut payload = create_command_payload(&descriptor.create_command);
+            // The abort supervision's pending terminal record rides the
+            // create replay: the replacement worker discloses the aborted
+            // run in the rebuilt transcript (the parity shape of its own
+            // auto-abort rows), and the record is consumed by the reply.
+            let pending = self
+                .compaction_journal
+                .lock()
+                .expect("compaction journal lock")
+                .pending(&descriptor.root_active_session_id)
+                .cloned();
+            if let Some(record) = pending {
+                payload["interruptedCompaction"] = serde_json::json!({
+                    "reason": record.reason,
+                    "sessionFile": record.session_file,
+                });
+                (payload, Some(descriptor.root_active_session_id.clone()))
+            } else {
+                (payload, None)
+            }
         };
         let response = match self
             .route_command(resident, "create", payload, LONG_ROUTE_TIMEOUT_MS)
@@ -859,14 +896,27 @@ impl Supervisor {
                 response.error.unwrap_or_default()
             ));
         }
-        {
-            let mut descriptor = resident.descriptor.lock().await;
-            descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
-            // The persisted failure count stays: the give-up cap and any
-            // adoption decision read the real history, not a
-            // relaunch-blanked one.
-            let _ = persist_worker(&resident.descriptor_path, &descriptor);
+        // The create replay consumed the terminal record: it never
+        // replays again (a later relaunch would duplicate the
+        // disclosure row).
+        if let Some(root_active_session_id) = injected_compaction_abort {
+            if let Err(error) = self
+                .compaction_journal
+                .lock()
+                .expect("compaction journal lock")
+                .mark_injected(&root_active_session_id)
+            {
+                self.log_line(&format!(
+                    "terminal compaction journal inject mark failed for {root_active_session_id}: {error:#}"
+                ));
+            }
         }
+        let mut descriptor = resident.descriptor.lock().await;
+        descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
+        // The persisted failure count stays: the give-up cap and any
+        // adoption decision read the real history, not a relaunch-blanked one.
+        let _ = persist_worker(&resident.descriptor_path, &descriptor);
+        drop(descriptor);
         // The replayed create restored the session: routed client commands
         // may run against this worker again.
         resident.note_session_ready();
@@ -1040,6 +1090,7 @@ impl Supervisor {
         {
             let reader_resident = Arc::clone(resident);
             let events = events.clone();
+            let reader_supervisor = Arc::clone(self);
             tokio::spawn(async move {
                 let mut reader = PrivateFrameReader::new(reader, DEFAULT_PRIVATE_FRAME_LIMITS);
                 while let Ok(Some(frame)) = reader.read_frame().await {
@@ -1084,6 +1135,36 @@ impl Supervisor {
                             .get("activeSessionId")
                             .and_then(Value::as_str)
                             .map(str::to_string);
+                        // The abort supervision rides the forwarded events:
+                        // `compaction_start` arms the supervisor-visible
+                        // token, a settled `compaction_end` clears it (and
+                        // any pending terminal record — the worker landed
+                        // the outcome itself, so a replacement must never
+                        // replay it).
+                        if let Some(event) = payload.get("event") {
+                            match event.get("type").and_then(Value::as_str) {
+                                Some("compaction_start") => {
+                                    reader_resident.compaction.arm(
+                                        active_session_id.as_deref().unwrap_or_default(),
+                                        event
+                                            .get("reason")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or_default(),
+                                    );
+                                }
+                                Some("compaction_end") => {
+                                    reader_resident.compaction.observe_end();
+                                    if let Some(active_session_id) = active_session_id.as_deref() {
+                                        let _ = reader_supervisor
+                                            .compaction_journal
+                                            .lock()
+                                            .expect("compaction journal lock")
+                                            .clear(active_session_id);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                         let routing = active_session_id
                             .map(|active_session_id| ClientRouting::AttachedSession {
                                 active_session_id,
@@ -1129,6 +1210,11 @@ impl Supervisor {
                     }
                 }
                 reader_resident.note_connection_lost(connection_epoch);
+                // The connection ended (EOF or frame error): a run without
+                // an abort request dies with the worker and rides the
+                // normal recovery flow; an abort-requested run stays armed
+                // so its watch task can still declare the terminal state.
+                reader_resident.compaction.observe_worker_gone();
             });
         }
         *resident.cmd_tx.lock().await = Some(cmd_tx);
@@ -2087,6 +2173,16 @@ impl Supervisor {
                 // a supervisor arm - the worker never sees the command.
                 let client_id = effective_client_id.lock().unwrap().clone();
                 self.handle_retry_worker(command, &client_id, &command_id, &type_name)
+                    .await
+            }
+            DaemonCommand::AbortCompaction { .. } => {
+                // The abort supervision: the supervisor answers the abort
+                // itself. The TS daemon-mode `abortCompaction` is an
+                // in-process call that always replies instantly; a wedged
+                // worker must not turn the abort into its own 30s route
+                // timeout and a loader that never clears.
+                let client_id = effective_client_id.lock().unwrap().clone();
+                self.handle_abort_compaction(command, &client_id, &command_id, &type_name)
                     .await
             }
             DaemonCommand::AcquireSessionInputPause { .. } => {
