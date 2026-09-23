@@ -1259,12 +1259,12 @@ def activity_request(action: str, activity_id: str | None = None, lines: int = 5
         # Each retained buffer is bounded, and the response has a further byte cap.
         tail = "\n".join(handle._buffer.text().splitlines()[-lines:])
         payload = tail.encode("utf-8")[-16_384:].decode("utf-8", errors="replace")
-        # The cap is on the serialized frame: json escaping can expand one
-        # character to six bytes (\uXXXX), so a byte-slice of the decoded
-        # text cannot bound the wire size by itself. Trim by the escaped
-        # overflow; each pass removes at least a sixth of it.
-        while len(json.dumps(payload)) > 16_384:
-            excess = len(json.dumps(payload)) - 16_384
+        # json escaping can expand one character to six bytes, so a
+        # byte-slice of the decoded text cannot bound the serialized size
+        # alone. Trim the wrapped payload from the oldest end; the repl
+        # handler enforces the same cap on the complete response frame.
+        while len(json.dumps({"tail": payload})) > 16_384:
+            excess = len(json.dumps({"tail": payload})) - 16_384
             keep = max(1, len(payload) - excess // 6 - 1)
             payload = payload[-keep:]
         return {"activityId": activity_id, "tail": payload}

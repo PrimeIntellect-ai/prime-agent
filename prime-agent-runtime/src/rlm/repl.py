@@ -1055,9 +1055,32 @@ def _handle_bash_activity(req: dict[str, Any]) -> None:
     rid = req["id"]
     try:
         response = activity_request(req["action"], req.get("activityId"), req.get("lines", 50))
-        _send({"event": "done", "id": rid, "status": "ok", **response})
+        frame = {"event": "done", "id": rid, "status": "ok", **response}
+        _cap_bash_activity_frame(frame)
+        _send(frame)
     except (KeyError, ValueError) as exc:
         _send({"event": "done", "id": rid, "status": "error", "reason": str(exc)})
+
+
+def _cap_bash_activity_frame(frame: dict[str, Any]) -> None:
+    """Keep the serialized response under the 16 KiB wire cap.
+
+    json escaping can expand one character to six bytes (uXXXX-style), so
+    the byte slices in `activity_request` cannot bound the frame alone. Trim
+    from the oldest end: a tail keeps its newest lines, a list keeps its
+    newest rows.
+    """
+    tail = frame.get("tail")
+    if isinstance(tail, str):
+        while len(json.dumps(frame)) > 16_384:
+            excess = len(json.dumps(frame)) - 16_384
+            keep = max(1, len(tail) - excess // 6 - 1)
+            tail = tail[-keep:]
+            frame["tail"] = tail
+        return
+    rows = frame.get("activities")
+    while len(json.dumps(frame)) > 16_384 and isinstance(rows, list) and len(rows) > 1:
+        rows.pop(0)
 
 
 
