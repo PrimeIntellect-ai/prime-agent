@@ -959,6 +959,68 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("keeps a live sibling row when a saved root and a tailnet copy share its ids", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-live-sibling-"));
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const saved = SessionManager.create(tempDir, sessionDir);
+			saved.newSession();
+			saved.appendSessionInfo("sibling");
+			const [savedInfo] = await SessionManager.listAll(undefined, sessionDir);
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
+				createRuntime: vi.fn(),
+			});
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				listSupervisorAgentPeers(): Promise<AgentSessionMessageAgentSummary[]>;
+				createAgentMessageController(getCurrentState: () => ActiveSessionState): AgentSessionMessageController;
+			};
+			const current = makeAgentFamilyState("local", "local").state;
+			internals.sessions.set(current.activeSessionId, current);
+			// The saved root on disk and a tailnet peer both reuse the live sibling's ids.
+			internals.listSupervisorAgentPeers = async () => [
+				{
+					activeSessionId: "worker-sibling",
+					sessionId: savedInfo!.id,
+					sessionName: "sibling",
+					runtimeKind: "top-level",
+					cwd: tempDir,
+					isStreaming: false,
+					unfinishedActionCount: 0,
+					sessionPath: savedInfo!.path,
+					status: "running",
+				},
+				{
+					activeSessionId: savedInfo!.id,
+					sessionId: savedInfo!.id,
+					sessionName: "sibling",
+					runtimeKind: "top-level",
+					cwd: tempDir,
+					isStreaming: false,
+					unfinishedActionCount: 0,
+					remoteHost: "peer.tailnet.ts.net",
+					status: "idle",
+				},
+			];
+
+			const family = await internals.createAgentMessageController(() => current).family?.();
+			const siblings = family?.filter(
+				(member) => member.relationship === "sibling" && member.entry.name === "sibling",
+			);
+			// The live row keeps the address the messaging layer sends to and its live endpoint.
+			expect(siblings).toHaveLength(1);
+			expect(siblings?.[0]?.entry).toMatchObject({
+				id: savedInfo!.id,
+				status: "running",
+				activeSessionId: "worker-sibling",
+			});
+			expect(siblings?.[0]?.entry).not.toHaveProperty("remoteHost");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects agent messages when direct delivery preflight fails", async () => {
 		const daemon = new AgentDaemon("/tmp/prime-agent-test.sock", {
 			defaultSessionConfig: { agentDir: "/tmp/prime-agent-test-agent", cwd: "/tmp" },

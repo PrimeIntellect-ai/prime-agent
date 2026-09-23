@@ -6009,9 +6009,9 @@ export class AgentDaemon {
 					messageCount: info.messageCount,
 				}),
 			);
-		// Rows key bare session ids, and a peer publishes its own ids: peers merge first
-		// so a local row always wins its own id. A same-id remote row can then never hide
-		// a saved local name from session-name validation.
+		// Rows key bare session ids, and a tailnet peer publishes its own ids: tailnet rows
+		// merge first so a local row always wins its own id, and a same-id tailnet row can
+		// never hide a saved local name from session-name validation.
 		const byId = new Map<string, AgentFamilyCatalogEntry>();
 		// `remote` peers live in another worker: their active id stays routable, while a
 		// local summary's stand-in id for a passive child does not.
@@ -6040,8 +6040,11 @@ export class AgentDaemon {
 				cwd: agent.cwd,
 			});
 		};
-		for (const peer of remotePeers) addAgent(peer, true);
+		for (const peer of remotePeers) if (peer.remoteHost !== undefined) addAgent(peer, true);
 		for (const entry of savedRoots) byId.set(entry.id, entry);
+		// A hostless peer is a live sibling in another worker of this daemon, so it merges
+		// after saved roots: its own on-disk row never replaces its live row.
+		for (const peer of remotePeers) if (peer.remoteHost === undefined) addAgent(peer, true);
 		for (const agent of localAgents) addAgent(agent);
 		for (const state of this.sessions.values()) {
 			const entry = byId.get(state.runtime.session.sessionId);
