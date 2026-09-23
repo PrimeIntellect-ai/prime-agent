@@ -8292,7 +8292,10 @@ async fn create_session(
         Some(SessionSelection::Resume(path)) => Some(path.to_string_lossy().to_string()),
         _ => None,
     };
-    let data = client
+    // The create consumes the path; a refusal needs it again for the
+    // descriptive error.
+    let refused_path = session_path.clone();
+    let data = match client
         .request_ok(DaemonCommand::Create {
             id: None,
             session_path,
@@ -8310,12 +8313,56 @@ async fn create_session(
             launch_env: None,
             rest: Default::default(),
         })
-        .await?;
+        .await
+    {
+        Ok(data) => data,
+        Err(error) => {
+            return Err(describe_session_open_failure(client, error, refused_path).await);
+        }
+    };
     data.get("activeSessionId")
         .or_else(|| data.get("id"))
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| anyhow!("the daemon did not report a session id for the new session"))
+}
+
+/// A create refusal for a session file another holder already owns
+/// names the holder and the next steps (the operator-directed
+/// descriptive session-open error) instead of stopping at the bare
+/// lease id. Any other failure propagates unchanged.
+async fn describe_session_open_failure(
+    client: &DaemonClient,
+    error: anyhow::Error,
+    session_path: Option<String>,
+) -> anyhow::Error {
+    let Some(path) = session_path else {
+        return error;
+    };
+    let Some(owner) = crate::session_open_error::owner_from_refusal(&error.to_string()) else {
+        return error;
+    };
+    // The refusal names the holder id only: probe the live roster for
+    // the row hosting the same file (best effort — a probe failure keeps
+    // the refusal's own first line and the process-lease guidance).
+    let path = std::path::PathBuf::from(path);
+    let rows: Vec<Value> = client
+        .request_ok(DaemonCommand::List {
+            id: None,
+            all: None,
+            cwd: None,
+            session_dir: None,
+            include_client_owned: None,
+            rest: Default::default(),
+        })
+        .await
+        .map(|data| crate::session_open_error::roster_rows(&data).to_vec())
+        .unwrap_or_default();
+    let text = match crate::session_open_error::holder_from_roster(&rows, &path) {
+        Some(holder) => crate::session_open_error::already_active_error(&holder, &path),
+        None => crate::session_open_error::already_active_unknown_holder(&owner, &path),
+    };
+    anyhow!(text)
 }
 
 /// The retry-episode collapse (SANCTIONED DIVERGENCE from TS, operator

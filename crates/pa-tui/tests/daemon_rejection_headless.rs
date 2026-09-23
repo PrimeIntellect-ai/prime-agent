@@ -328,6 +328,10 @@ fn attach_data(id: &str) -> Value {
 }
 
 fn options(socket: PathBuf) -> InteractiveOptions {
+    options_with_session(socket, SessionSelection::New)
+}
+
+fn options_with_session(socket: PathBuf, session: SessionSelection) -> InteractiveOptions {
     InteractiveOptions {
         socket_path: socket,
         cwd: PathBuf::from("/tmp"),
@@ -339,7 +343,7 @@ fn options(socket: PathBuf) -> InteractiveOptions {
         model_recent_models: Vec::new(),
         default_thinking_level: None,
         no_session: false,
-        session: SessionSelection::New,
+        session,
         initial_message: None,
         show_images: true,
         fullscreen_mouse: false,
@@ -386,6 +390,14 @@ fn run_plan_with(
     steps: Vec<HeadlessStep>,
     configure: impl FnOnce(&mut MockSupervisor),
 ) -> anyhow::Result<RunOutcome> {
+    run_plan_with_selection(steps, SessionSelection::New, configure)
+}
+
+fn run_plan_with_selection(
+    steps: Vec<HeadlessStep>,
+    selection: SessionSelection,
+    configure: impl FnOnce(&mut MockSupervisor),
+) -> anyhow::Result<RunOutcome> {
     // The ambient TMUX variable adds a startup notice to the transcript;
     // scrub it so the run is the same inside tmux and out.
     std::env::remove_var("TMUX");
@@ -405,7 +417,8 @@ fn run_plan_with(
         width: 100,
         height: 40,
     };
-    let outcome = runtime.block_on(run_interactive(options(socket), UiMode::Headless(plan)))?;
+    let options = options_with_session(socket, selection);
+    let outcome = runtime.block_on(run_interactive(options, UiMode::Headless(plan)))?;
     let _ = handle.join();
     Ok(RunOutcome {
         frames: outcome.frames,
@@ -589,5 +602,40 @@ fn refused_saved_session_create_falls_back_to_the_agents_view() {
     assert!(
         run.prompt_requests.is_empty(),
         "no prompt ever dispatched (the session never opened)"
+    );
+}
+
+/// A refused create for a RESUMED session file (the agents-view open
+/// path) surfaces the descriptive refusal: the TS-identical first line
+/// plus the holder guidance and next steps, never the bare lease text.
+#[test]
+fn refused_saved_session_create_names_the_holder_and_next_steps() {
+    let run = run_plan_with_selection(
+        vec![HeadlessStep::WaitMs(100)],
+        SessionSelection::Resume(std::path::PathBuf::from("/tmp/sess-1.jsonl")),
+        |supervisor| {
+            supervisor.reject_create = Some(
+                "session worker create failed: Session is already active in 245ddb974b6d: /tmp/sess-1.jsonl"
+                    .to_string(),
+            );
+        },
+    )
+    .expect("the refused create hands off instead of exiting");
+    assert!(
+        run.return_to_agents_view,
+        "the refused create falls back to the agents view, not exit"
+    );
+    let notice = run.agents_view_notice.as_deref().unwrap_or_default();
+    assert!(
+        notice.contains("Session is already active in 245ddb974b6d: /tmp/sess-1.jsonl"),
+        "the notice keeps the TS refusal first line: {notice}"
+    );
+    assert!(
+        notice.contains("The holder is not a session on this daemon"),
+        "the notice names the holder's situation: {notice}"
+    );
+    assert!(
+        notice.contains("prime-agent agents"),
+        "the notice suggests the next step: {notice}"
     );
 }
