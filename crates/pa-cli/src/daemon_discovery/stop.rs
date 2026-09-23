@@ -514,7 +514,6 @@ fn shutdown_report_json(stopped: &[(String, String)], failed: &[(String, String)
     .unwrap_or_default()
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,7 +548,10 @@ mod tests {
         // Only the confirmed death joins the handled set and unlinks the
         // socket (the contract this helper enforces).
         assert!(handled_pids.contains(&pid));
-        assert!(!socket_path.exists(), "a confirmed death removes the socket file");
+        assert!(
+            !socket_path.exists(),
+            "a confirmed death removes the socket file"
+        );
         let _ = child.wait();
     }
 

@@ -81,7 +81,9 @@ static MODE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static EXIT_RELEASE: AtomicBool = AtomicBool::new(false);
 
 fn lock_modes() -> std::sync::MutexGuard<'static, ()> {
-    MODE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    MODE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Mark the terminal released for process exit (the force-quit restore
