@@ -307,6 +307,54 @@ pub struct NewSessionOptions {
     pub rlm_depth: Option<u64>,
 }
 
+/// The fork's branch copy (TS `forkFrom`'s entry loop): drop the source
+/// header and its `git_state` rows, re-linking any child whose parent was a
+/// dropped row to the nearest kept ancestor. Re-parented entries round-trip
+/// through their own JSON (TS `{ ...entry, parentId }`) so every other field
+/// stays verbatim.
+fn forked_branch_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
+    // git_state rows describe the source repo; the fork reports its own.
+    let mut dropped_parent: HashMap<String, Option<String>> = HashMap::new();
+    for entry in &entries {
+        if matches!(entry, FileEntry::GitState { .. }) {
+            if let Some(id) = entry.id() {
+                dropped_parent.insert(id.to_string(), entry.parent_id().map(str::to_string));
+            }
+        }
+    }
+    let live_parent = |parent: &Option<String>| -> Option<String> {
+        let mut current = parent.clone();
+        while let Some(id) = &current {
+            match dropped_parent.get(id) {
+                Some(next) => current = next.clone(),
+                None => break,
+            }
+        }
+        current
+    };
+    entries
+        .into_iter()
+        .filter(|entry| !matches!(entry, FileEntry::Header { .. } | FileEntry::GitState { .. }))
+        .map(|entry| {
+            let parent = live_parent(&entry.parent_id().map(str::to_string));
+            if entry.parent_id() == parent.as_deref() {
+                return entry;
+            }
+            let mut value = serde_json::to_value(&entry).unwrap_or_default();
+            if let serde_json::Value::Object(map) = &mut value {
+                map.insert(
+                    "parentId".to_string(),
+                    match &parent {
+                        Some(id) => serde_json::Value::from(id.clone()),
+                        None => serde_json::Value::Null,
+                    },
+                );
+            }
+            serde_json::from_value(value).unwrap_or_else(|_| entry)
+        })
+        .collect()
+}
+
 /// The stateful session writer/reader.
 pub struct SessionManager {
     session_id: String,
@@ -380,6 +428,67 @@ impl SessionManager {
             Some(session_file.to_path_buf()),
             true,
         )
+    }
+
+    /// TS `SessionManager.forkFrom`: copy a source session file into a
+    /// fresh session under `target_cwd`, parented at the source. The
+    /// source's `git_state` entries are dropped — they describe the source
+    /// repo, and the fork must report its own target context — with their
+    /// children re-linked to the nearest kept ancestor (TS `liveParent`).
+    /// The new header carries the source path as `parentSession`, the
+    /// resolved RLM depth, and the TARGET cwd's git context.
+    pub fn fork_from(
+        source_path: &Path,
+        target_cwd: &Path,
+        session_dir: &Path,
+    ) -> Result<Self, String> {
+        let mut entries = load_entries_from_file(source_path, true);
+        if entries.is_empty() {
+            return Err(format!(
+                "Cannot fork: source session file is empty or invalid: {}",
+                source_path.display()
+            ));
+        }
+        let source_header = entries
+            .iter()
+            .find_map(|entry| match entry {
+                FileEntry::Header { header } => Some(header.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                format!(
+                    "Cannot fork: source session has no header: {}",
+                    source_path.display()
+                )
+            })?;
+        migrate_to_current_version(&mut entries);
+        let rlm_depth = resolve_session_rlm_depth(&source_header, source_path);
+
+        let mut forked = Self::persisted(target_cwd, session_dir);
+        // A fresh unique id + header (TS `createUniqueSessionFileTarget`):
+        // the fork's git context is captured from the TARGET cwd, and the
+        // source rides along as `parentSession`.
+        forked.new_session(&NewSessionOptions {
+            id: None,
+            parent_session: Some(source_path.display().to_string()),
+            rlm_depth: Some(rlm_depth),
+        });
+        let branch = forked_branch_entries(entries);
+        let has_assistant = branch.iter().any(|entry| {
+            matches!(
+                entry,
+                FileEntry::Message {
+                    message: AgentMessage::Assistant(_),
+                    ..
+                }
+            )
+        });
+        forked.adopt_entries(branch);
+        // The copied rows' assistant entries keep the append path durable
+        // from the first new entry (TS writes the whole fork synchronously).
+        forked.has_assistant_entry = has_assistant;
+        forked.flush_now().map_err(|error| error.to_string())?;
+        Ok(forked)
     }
 
     /// Open only the compacted active window off the async executor. Use
@@ -1649,5 +1758,162 @@ mod tests {
         let stamp = format_iso(1_704_067_200_012);
         assert_eq!(stamp, "2024-01-01T00:00:00.012Z");
         assert_eq!(super::super::timestamp_to_millis(&stamp), 1_704_067_200_012);
+    }
+
+    /// TS `forkFrom`: the fork copies the source branch into a fresh
+    /// session file under the target cwd, parented at the source; the
+    /// source's `git_state` rows drop out and their children re-link to
+    /// the nearest kept ancestor.
+    #[test]
+    fn fork_from_copies_the_branch_under_a_fresh_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source_cwd = tmp.path().join("source-project");
+        let source_dir = tmp.path().join("source-sessions");
+        std::fs::create_dir_all(&source_cwd).unwrap();
+        let mut source = SessionManager::persisted(&source_cwd, &source_dir);
+        source
+            .append_message(AgentMessage::User(pa_types::ai::UserMessage {
+                content: pa_types::ai::UserContent::Text("original question".to_string()),
+                timestamp: 0,
+                rest: Default::default(),
+            }))
+            .unwrap();
+        let user_id = source.get_leaf_id().unwrap().to_string();
+        let assistant = AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+            content: vec![],
+            api: "openai-completions".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-x".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: pa_types::ai::Usage::default(),
+            stop_reason: pa_types::ai::StopReason::Stop,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp: 0,
+            rest: Default::default(),
+        });
+        source.append_message(assistant).unwrap();
+        let assistant_id = source.get_leaf_id().unwrap().to_string();
+        // A git_state row: dropped by the fork, its child re-linked.
+        source
+            .append_entry(FileEntry::GitState {
+                payload: pa_types::session::GitStateEntry {
+                    git: GitContext::default(),
+                },
+                base: EntryBase {
+                    id: Some("gitstate1".to_string()),
+                    parent_id: Some(assistant_id.clone()),
+                    timestamp: Some(format_iso_now()),
+                    rest: Default::default(),
+                },
+            })
+            .unwrap();
+        source
+            .append_custom_entry("after-git-state", Some(serde_json::json!({ "keep": true })))
+            .unwrap();
+        let trailing_id = source.get_leaf_id().unwrap().to_string();
+        let source_file = source.get_session_file().unwrap().to_path_buf();
+
+        // Fork into a different project root.
+        let target_cwd = tmp.path().join("target-project");
+        let target_dir = tmp.path().join("target-sessions");
+        let forked = SessionManager::fork_from(&source_file, &target_cwd, &target_dir)
+            .expect("fork copies the file");
+        let fork_file = forked.get_session_file().unwrap().to_path_buf();
+        assert!(fork_file.exists(), "the fork file landed on disk");
+        assert!(fork_file != source_file, "the fork is a new session file");
+        assert!(
+            fork_file.starts_with(&target_dir),
+            "the fork file lives in the target session dir"
+        );
+
+        // Fresh header: new id, target cwd, source as parentSession, source
+        // depth carried over.
+        let header = forked.get_header().unwrap();
+        assert_ne!(header.id, source.get_session_id());
+        assert_eq!(header.cwd, target_cwd.display().to_string());
+        assert_eq!(
+            header.parent_session.as_deref(),
+            Some(source_file.display().to_string())
+        );
+        assert_eq!(header.rlm_depth, source.get_header().unwrap().rlm_depth);
+
+        // The branch copied: the user + assistant rows survive with the
+        // same ids; the git_state row is gone; its child re-linked to the
+        // git_state's parent (the assistant row).
+        let entries = forked.get_all_entries();
+        assert!(entries
+            .iter()
+            .any(|entry| entry.id() == Some(user_id.as_str())));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.id() == Some(assistant_id.as_str())));
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| matches!(entry, FileEntry::GitState { .. })),
+            "git_state rows drop out of the fork"
+        );
+        let trailing = entries
+            .iter()
+            .find(|entry| entry.id() == Some(trailing_id.as_str()))
+            .expect("the git_state child copied");
+        assert_eq!(trailing.parent_id(), Some(assistant_id.as_str()));
+
+        // The fork continues from the copied branch and the copy is durable.
+        let before = std::fs::read_to_string(&fork_file).unwrap();
+        let trailing_line = before
+            .lines()
+            .find(|line| line.contains(&trailing_id))
+            .expect("the copied rows are on disk");
+        assert!(trailing_line.contains("\"keep\":true"));
+        let mut forked = forked;
+        forked
+            .append_message(AgentMessage::User(pa_types::ai::UserMessage {
+                content: pa_types::ai::UserContent::Text("follow up".to_string()),
+                timestamp: 1,
+                rest: Default::default(),
+            }))
+            .unwrap();
+        let after = std::fs::read_to_string(&fork_file).unwrap();
+        assert!(after.contains("follow up"), "appends extend the fork file");
+        assert!(after.lines().count() > before.lines().count());
+    }
+
+    /// TS `forkFrom`'s failure contract: an empty source file and a file
+    /// with no header error out instead of silently starting fresh.
+    #[test]
+    fn fork_from_rejects_empty_and_headerless_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let empty = tmp.path().join("empty.jsonl");
+        std::fs::write(&empty, "").unwrap();
+        let error =
+            SessionManager::fork_from(&empty, tmp.path(), tmp.path().join("sessions")).unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "Cannot fork: source session file is empty or invalid: {}",
+                empty.display()
+            )
+        );
+        let headerless = tmp.path().join("headerless.jsonl");
+        std::fs::write(
+            &headerless,
+            format!(
+                "{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":[],\"timestamp\":0}},\"id\":\"aaaa1\",\"parentId\":null}}\n"
+            ),
+        )
+        .unwrap();
+        let error = SessionManager::fork_from(&headerless, tmp.path(), tmp.path().join("sessions"))
+            .unwrap_err();
+        assert_eq!(
+            error,
+            format!(
+                "Cannot fork: source session has no header: {}",
+                headerless.display()
+            )
+        );
     }
 }

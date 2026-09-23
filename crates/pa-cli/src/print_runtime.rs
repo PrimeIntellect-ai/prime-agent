@@ -642,18 +642,24 @@ fn build_session_manager(
 ) -> Result<pa_core::session::manager::SessionManager, String> {
     use pa_core::session::manager::SessionManager;
     let cwd = options.config.cwd.clone();
-    if let Some(selector) = &options.session.fork {
-        // TS print mode forks through SessionManager.forkFrom; the Rust port
-        // does not implement fork yet, so fail loudly instead of silently
-        // starting an unrelated fresh session.
-        let _ = selector;
-        return Err("--fork is not supported in print mode yet".to_string());
-    }
     let session_dir = options
         .session
         .session_dir
         .clone()
         .unwrap_or_else(|| options.config.agent_dir.join("sessions"));
+    // TS `createSessionManager`'s fork arm: every resolution shape forks —
+    // a GLOBAL session is exactly what --fork is for (a different
+    // project's session copied into this cwd) — with no daemon-active
+    // guard: the copy writes a fresh file, never the hosted source.
+    if let Some(selector) = &options.session.fork {
+        let resolved =
+            resolve_session_path(selector, &cwd, &session_dir).map_err(render_selector_error)?;
+        let source = match resolved {
+            ResolvedSession::Path(path) | ResolvedSession::Local(path) => path,
+            ResolvedSession::Global { path, .. } => path,
+        };
+        return SessionManager::fork_from(&source, &cwd, &session_dir);
+    }
     // main.ts `explicitCwdOverride`: with --cwd, the flag's directory wins
     // over the stored session cwd on resume.
     let explicit_cwd_override = options.session.cwd_from_flag.then_some(cwd.as_path());
