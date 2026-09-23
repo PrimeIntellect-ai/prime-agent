@@ -568,6 +568,145 @@ fn a_heartbeat_keeps_firing_across_a_supervisor_restart() {
     );
 }
 
+/// The boot-time wake interplay with the storm gates (the ~200-agent
+/// boot crash class): one plain boot after a supervisor kill -9 — the
+/// ADOPTED-ALIVE worker with a due heartbeat fires (the wake survives
+/// re-adoption), while the KILLED sibling (archived, jobs cancelled,
+/// stop tombstoned) never resurrects (the #2592/#2642 gates hold; the
+/// parked scheduler wakes only its own session, never a dead one).
+#[test]
+fn a_boot_fires_the_adopted_worker_due_job_and_never_resurrects_the_killed_sibling() {
+    let root = tempfile::TempDir::new().expect("temp dir");
+    let dir = root.path().to_path_buf();
+    let agent_dir = dir.join("agent");
+    let socket = dir.join("storm.sock");
+    let script = dir.join("faux.json");
+    std::fs::write(
+        &script,
+        json!({
+            "engine": "faux",
+            "responses": [
+                { "text": "the lane works on" },
+                { "text": "the lane works on" },
+                { "text": "the lane works on" },
+                { "text": "the lane works on" },
+                { "text": "the lane works on" },
+                { "text": "the lane works on" },
+                { "text": "the lane works on" },
+                { "text": "the lane works on" },
+            ]
+        })
+        .to_string(),
+    )
+    .expect("write faux script");
+
+    let supervisor = spawn_daemon(&socket, &agent_dir, None);
+    let mut client = Client::connect(&socket);
+    let sessions = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let mut created_ids = Vec::new();
+    for name in ["wake-lane", "dead-lane"] {
+        let created = client.request(
+            name,
+            json!({
+                "type": "create",
+                "name": name,
+                "config": {
+                    "cwd": dir.to_string_lossy(),
+                    "sessionDir": sessions.to_string_lossy(),
+                    "script": script.to_string_lossy(),
+                },
+            }),
+        );
+        assert_eq!(created["success"], true, "create failed: {created}");
+        created_ids.push((
+            created["data"]["id"]
+                .as_str()
+                .or_else(|| created["data"]["activeSessionId"].as_str())
+                .expect("active id")
+                .to_string(),
+            created["data"]["sessionId"]
+                .as_str()
+                .expect("session id")
+                .to_string(),
+        ));
+    }
+    let (wake_active, wake_session) = created_ids[0].clone();
+    let (dead_active, dead_session) = created_ids[1].clone();
+    let wake_file = agent_dir
+        .join("sessions")
+        .join(format!("{wake_session}.jsonl"));
+
+    // The wake lane carries the due heartbeat; the dead lane is wire-
+    // killed (its jobs cancel and its file archives — the stop gates).
+    let heartbeat = client.request(
+        "hb",
+        json!({
+            "type": "heartbeat_set",
+            "activeSessionId": wake_active,
+            "schedule": "every 10s",
+            "prompt": "liveness ping",
+        }),
+    );
+    assert_eq!(
+        heartbeat["success"], true,
+        "heartbeat_set failed: {heartbeat}"
+    );
+    let killed = client.request(
+        "kill",
+        json!({ "type": "kill", "activeSessionId": dead_active }),
+    );
+    assert_eq!(killed["success"], true, "kill failed: {killed}");
+
+    // At least one fire delivered before the crash.
+    let rows_before_restart = wait_until(Duration::from_secs(20), || {
+        let rows = session_rows_containing(&wake_file, "heartbeat_prompt");
+        (rows > 0).then_some(rows)
+    });
+
+    // The supervisor dies hard and relaunches: the wake lane's worker is
+    // adopted alive (its due fire must continue), the killed lane's stop
+    // finishes at the boot scan instead of resurrecting.
+    drop(client);
+    drop(supervisor);
+    std::fs::remove_file(&socket).ok();
+    let _supervisor = spawn_daemon(&socket, &agent_dir, None);
+    let mut client = Client::connect(&socket);
+    wait_until(Duration::from_secs(30), || {
+        client
+            .listed_sessions()
+            .iter()
+            .any(|(active, id)| *active == wake_active || *id == wake_session)
+            .then_some(())
+    });
+
+    // THE STORM GATE: the killed lane never resurrects across the boot
+    // window, while the adopted worker's due fire keeps landing.
+    let window = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < window {
+        let roster = client.listed_sessions();
+        assert!(
+            !roster
+                .iter()
+                .any(|(active, id)| *active == dead_active || *id == dead_session),
+            "the killed session resurrected at boot: {roster:?}"
+        );
+    }
+    let grew = wait_until(Duration::from_secs(30), || {
+        let rows = session_rows_containing(&wake_file, "heartbeat_prompt");
+        (rows > rows_before_restart).then_some(rows)
+    });
+    assert!(
+        grew > rows_before_restart,
+        "no heartbeat fired after the restart ({rows_before_restart} rows)"
+    );
+
+    client.request(
+        "k1",
+        json!({ "type": "kill", "activeSessionId": wake_active }),
+    );
+}
+
 fn session_rows_containing(session_file: &Path, needle: &str) -> usize {
     std::fs::read_to_string(session_file)
         .map(|content| content.lines().filter(|line| line.contains(needle)).count())
