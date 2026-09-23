@@ -315,18 +315,22 @@ pub(crate) fn menu_list_layout(
 /// The scroll-indicator status row: the selection's position in the full
 /// list, `  (n/m)` muted, aligned with the rows' inner column. Menus show
 /// it once the window cannot hold every item (model picker, mcp view,
-/// completion dropdown).
-pub(crate) fn scroll_row(theme: &Theme, position: usize, total: usize) -> Line {
-    vec![theme.fg_span(ThemeColor::Muted, format!("  ({position}/{total})"))]
+/// completion dropdown). Like every status row, it truncates to the
+/// frame width, so a narrow overlay never spills past its dock.
+pub(crate) fn scroll_row(theme: &Theme, width: usize, position: usize, total: usize) -> Line {
+    let line = vec![theme.fg_span(ThemeColor::Muted, format!("  ({position}/{total})"))];
+    truncate_line(&line, width, "")
 }
 
 /// The no-match status row: `  {message}` muted, aligned with the rows'
-/// inner column, shown when a filter empties the list.
-pub(crate) fn no_match_row(theme: &Theme, message: &str) -> Line {
-    vec![
+/// inner column, shown when a filter empties the list. Like every status
+/// row, it truncates to the frame width.
+pub(crate) fn no_match_row(theme: &Theme, width: usize, message: &str) -> Line {
+    let line = vec![
         Span::raw("  "),
         theme.fg_span(ThemeColor::Muted, message.to_string()),
-    ]
+    ];
+    truncate_line(&line, width, "")
 }
 
 /// The key-hint status row: ` {hint}` dim, truncated to the frame width.
@@ -389,13 +393,31 @@ mod tests {
     #[test]
     fn status_rows_share_the_frame_grammar() {
         let theme = theme();
-        assert_eq!(row_text(&scroll_row(&theme, 3, 17)), "  (3/17)");
+        assert_eq!(row_text(&scroll_row(&theme, 40, 3, 17)), "  (3/17)");
         assert_eq!(
-            row_text(&no_match_row(&theme, "No matching models")),
+            row_text(&no_match_row(&theme, 40, "No matching models")),
             "  No matching models"
         );
         let hint = hint_row(&theme, 60, "Enter select · Esc close");
         assert!(row_text(&hint).starts_with(" Enter select"));
+    }
+
+    /// Every status row truncates to the frame width: a narrow menu never
+    /// emits a row wider than its dock (the completion overlay renders
+    /// the rows straight into the editor dock, so an unclamped `(n/m)`
+    /// would overwrite the adjacent terminal cells).
+    #[test]
+    fn status_rows_never_exceed_the_frame_width() {
+        let theme = theme();
+        for row in [
+            scroll_row(&theme, 6, 1, 482),
+            no_match_row(&theme, 6, "No matching commands"),
+        ] {
+            assert!(
+                crate::width::spans_width(&row) <= 6,
+                "the row clamps to the frame width: {row:?}"
+            );
+        }
     }
 
     #[test]

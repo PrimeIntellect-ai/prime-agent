@@ -35,6 +35,18 @@ impl Editor {
         if remainder.iter().any(|c| !c.is_whitespace()) {
             return None;
         }
+        // Applying from the picker clears the editor (the command is
+        // fulfilled), so draft text on a later line would be silently
+        // discarded with it. Only intercept when every line below the
+        // cursor's is whitespace.
+        let later_line_has_text = self
+            .lines
+            .iter()
+            .skip(self.cursor_line + 1)
+            .any(|line| line.chars().any(|c| !c.is_whitespace()));
+        if later_line_has_text {
+            return None;
+        }
         context.command_name.map(|name| (name, context.prefix))
     }
 

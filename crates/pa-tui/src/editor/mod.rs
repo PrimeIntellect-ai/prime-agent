@@ -756,6 +756,32 @@ mod tests {
         );
     }
 
+    /// Applying from the picker clears the editor (the command is
+    /// fulfilled), so draft text on a later line must stop the Tab
+    /// interception: opening the picker there would silently discard the
+    /// draft on apply. Whitespace-only later lines do not block it.
+    #[test]
+    fn picker_argument_context_rejects_later_draft_lines() {
+        let mut e = ed();
+        e.set_text("/model gp\ndraft reply");
+        e.handle_input("up");
+        assert_eq!(e.get_cursor(), (0, 10));
+        assert_eq!(
+            e.picker_argument_context(),
+            None,
+            "a later draft line must not be discarded by a picker apply"
+        );
+        e.set_text("/model gp\n   ");
+        e.handle_input("up");
+        e.handle_input("end");
+        assert_eq!(e.get_cursor(), (0, 10));
+        assert_eq!(
+            e.picker_argument_context(),
+            Some(("model".to_string(), "gp".to_string())),
+            "whitespace-only later lines keep the interception"
+        );
+    }
+
     #[test]
     fn tab_on_an_empty_prompt_is_a_noop() {
         // Tab on an empty prompt must not open a completion menu: the

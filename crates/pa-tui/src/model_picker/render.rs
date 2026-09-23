@@ -62,11 +62,16 @@ pub(super) fn render(
     let filtered_len = picker.filtered_len();
     // The scroll indicator shows the selection's position in the full list.
     if start > 0 || end < filtered_len {
-        lines.push(scroll_row(theme, picker.selected_index() + 1, filtered_len));
+        lines.push(scroll_row(
+            theme,
+            width,
+            picker.selected_index() + 1,
+            filtered_len,
+        ));
     }
 
     if filtered_len == 0 {
-        lines.push(no_match_row(theme, "No matching models"));
+        lines.push(no_match_row(theme, width, "No matching models"));
     } else if let Some(model) = picker.selected_model().cloned() {
         if picker.detail_rows() > 0 {
             lines.extend(detail_lines(theme, width, &model));

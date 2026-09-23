@@ -369,6 +369,7 @@ impl AutocompleteState {
         if self.items.is_empty() {
             return vec![crate::menu_panel::no_match_row(
                 theme,
+                width,
                 "No matching commands",
             )];
         }
@@ -397,6 +398,7 @@ impl AutocompleteState {
         if start > 0 || end < self.items.len() {
             lines.push(crate::menu_panel::scroll_row(
                 theme,
+                width,
                 self.selected_index + 1,
                 self.items.len(),
             ));
@@ -1001,6 +1003,41 @@ mod tests {
         let lines = state.render(&theme(), 40);
         let text: String = lines[0].iter().map(|s| s.content.as_str()).collect();
         assert_eq!(text, "  No matching commands");
+    }
+
+    /// Every overlay row clamps to the render width: the menu rows pad to
+    /// it and the status rows (scroll indicator, no-match) truncate to
+    /// it, so a narrow dropdown never emits a row wider than its dock (the
+    /// overlay renders the rows straight into the editor dock, and an
+    /// unclamped `(n/m)` would overwrite the adjacent terminal cells).
+    #[test]
+    fn narrow_renders_never_exceed_the_frame_width() {
+        let mut described = item("cmd0");
+        described.description = Some("description 0".to_string());
+        let items: Vec<CompletionItem> = std::iter::once(described)
+            .chain((1..7).map(|index| item(&format!("cmd{index}"))))
+            .collect();
+        for width in [4usize, 6, 9, 40] {
+            let state = AutocompleteState::new(
+                items.clone(),
+                5,
+                "/".to_string(),
+                Some(SuggestionKind::SlashCommand),
+            );
+            for line in &state.render(&theme(), width) {
+                assert!(
+                    crate::width::spans_width(line) <= width,
+                    "every row clamps to the frame width {width}: {line:?}"
+                );
+            }
+        }
+        let empty = AutocompleteState::new(Vec::new(), 5, String::new(), None);
+        for line in &empty.render(&theme(), 6) {
+            assert!(
+                crate::width::spans_width(line) <= 6,
+                "the no-match row clamps to the frame width: {line:?}"
+            );
+        }
     }
 
     #[test]

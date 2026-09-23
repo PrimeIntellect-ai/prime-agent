@@ -620,7 +620,12 @@ impl McpView {
         }
 
         if start > 0 || end < self.filtered.len() {
-            lines.push(scroll_row(theme, self.selected + 1, self.filtered.len()));
+            lines.push(scroll_row(
+                theme,
+                width,
+                self.selected + 1,
+                self.filtered.len(),
+            ));
         }
 
         if self.filtered.is_empty() {
@@ -629,7 +634,7 @@ impl McpView {
             } else {
                 "No matching services"
             };
-            lines.push(no_match_row(theme, message));
+            lines.push(no_match_row(theme, width, message));
         } else if let Some(row) = self
             .filtered
             .get(self.selected)
