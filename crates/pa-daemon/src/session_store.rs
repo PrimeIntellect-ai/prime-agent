@@ -400,7 +400,7 @@ impl SessionFile {
             .into_iter()
             .map(|position| &self.entries[position])
             .collect()
-
+    }
 
     pub(crate) fn restored_settings(&self) -> pa_core::session::SessionContext {
         let entries = self.branch_file_entries();
