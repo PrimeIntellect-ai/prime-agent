@@ -200,18 +200,14 @@ mod tests {
             "fetchedAt": "1790082036135",
             "payload": { "version": 2, "counts": {}, "entries": entries }
         });
-        assert!(
-            snapshot_catalog(&stringy_fetched_at.to_string().into_bytes()).is_none()
-        );
+        assert!(snapshot_catalog(&stringy_fetched_at.to_string().into_bytes()).is_none());
         let broken_payload = serde_json::json!({
             "url": MCP_SERVICE_CATALOG_URL,
             "scope": PUBLIC_SCOPE,
             "fetchedAt": 1,
             "payload": { "version": 2, "counts": {}, "entries": [{ "server": "nope" }] }
         });
-        assert!(
-            snapshot_catalog(&broken_payload.to_string().into_bytes()).is_none()
-        );
+        assert!(snapshot_catalog(&broken_payload.to_string().into_bytes()).is_none());
         assert!(snapshot_catalog(b"not json").is_none());
     }
 
@@ -234,8 +230,7 @@ mod tests {
             snapshot_file(serde_json::json!([cache_only_entry()])),
         )
         .expect("write legacy snapshot");
-        let snapshot =
-            cache_plugins_snapshot(&agent).expect("the legacy location serves");
+        let snapshot = cache_plugins_snapshot(&agent).expect("the legacy location serves");
         assert!(snapshot
             .entries
             .iter()
@@ -256,8 +251,7 @@ mod tests {
             }])),
         )
         .expect("write primary snapshot");
-        let snapshot =
-            cache_plugins_snapshot(&agent).expect("the primary path serves");
+        let snapshot = cache_plugins_snapshot(&agent).expect("the primary path serves");
         assert!(snapshot
             .entries
             .iter()

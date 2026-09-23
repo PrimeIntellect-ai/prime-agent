@@ -902,7 +902,10 @@ mod tests {
         let endpoint = "https://vanished.example/mcp";
         let mut manager = manager_with_remote(
             agent_dir.path().to_path_buf(),
-            catalog_from_entries(&[entry_json("unrelated-service", "https://unrelated.example/mcp")]),
+            catalog_from_entries(&[entry_json(
+                "unrelated-service",
+                "https://unrelated.example/mcp",
+            )]),
         );
         {
             let mut store = manager.connection_store.lock().unwrap();
@@ -986,10 +989,7 @@ mod tests {
             let mut store = manager.connection_store.lock().unwrap();
             store
                 .upsert(new_pending_record(
-                    "lives-on",
-                    "lives-on",
-                    "Lives On",
-                    endpoint,
+                    "lives-on", "lives-on", "Lives On", endpoint,
                 ))
                 .map_err(|_| ())
                 .unwrap();
