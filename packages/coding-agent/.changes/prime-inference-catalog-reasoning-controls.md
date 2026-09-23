@@ -1,0 +1,1 @@
+- Changed live Prime Inference catalog refreshes to rebuild each model's thinking levels and reasoning compat from the route's declared parameters, so stale bundled templates no longer override what the gateway actually accepts.

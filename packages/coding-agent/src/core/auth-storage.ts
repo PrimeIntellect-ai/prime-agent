@@ -1243,8 +1243,13 @@ export class AuthStorage {
 
 	getPrimeInferenceTeamSelection(): PrimeTeamCredential | null | undefined {
 		if (process.env.PRIME_TEAM_ID?.trim()) return undefined;
-		const authSource = this.getAuthStatus(PRIME_INFERENCE_PROVIDER_ID).source;
-		if (authSource === "runtime" || authSource === "environment") return undefined;
+		// The stored primeTeam survives runtime and environment API-key
+		// overrides: an ambient PRIME_API_KEY supplies the key, never the team,
+		// so the stored login's team still scopes the credentialed catalog and
+		// private-model fetches (fleet parity with the Rust port's auth
+		// team-source change). Without this, boxes running with an ambient
+		// PRIME_API_KEY never send X-Prime-Team-ID, and the team-private
+		// internal/* routes disappear from /model.
 		const credential = this.data[PRIME_INFERENCE_PROVIDER_ID];
 		return credential?.type === "api_key" ? credential.primeTeam : undefined;
 	}
