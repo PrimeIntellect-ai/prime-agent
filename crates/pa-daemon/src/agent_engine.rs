@@ -920,12 +920,6 @@ impl AgentSessionEngine {
                 });
             }
         }
-
-        // level at every boot (`hasThinkingEntry ?
-        // existingSession.thinkingLevel` — sdk.ts) when the runtime config
-        // carries no explicit flag: the moved-to session's pinned level
-        // wins over the settings/medium default. The level re-clamps
-        // against the model below (the reset dropped the cache).
         // An explicit create flag wins for the MODEL (TS `options.model`)
         // — the saved thinking above still applies, then the restore skips
         // the model's readiness window entirely.
