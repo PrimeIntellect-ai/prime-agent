@@ -319,6 +319,36 @@ fn sync_release_tree(root: &Path) -> Result<()> {
     super::install::sync_directory(root)
 }
 
+/// Validate a staged payload, write the installer metadata, make the
+/// binary executable, fsync the tree, and rename it into its release
+/// name (the atomic staging boundary).
+fn finish_staging(
+    staging: &Path,
+    release_dir: &Path,
+    archive_sha256: &str,
+    install_source: &str,
+) -> Result<()> {
+    if !super::install::install_source_is_valid(install_source) {
+        anyhow::bail!("the install source {install_source:?} is not an http(s) URL");
+    }
+    for asset in RELEASE_ASSETS {
+        if !staging.join(asset).exists() {
+            anyhow::bail!("the staged release is missing {asset}");
+        }
+    }
+    let binary = staging.join("prime-agent");
+    make_executable(&binary)?;
+    std::fs::write(staging.join(".archive-sha256"), archive_sha256)?;
+    std::fs::write(staging.join(".install-source"), install_source)?;
+    sync_release_tree(staging)?;
+    std::fs::rename(staging, release_dir)
+        .with_context(|| format!("stage the release into {}", release_dir.display()))?;
+    if let Some(releases) = release_dir.parent() {
+        super::install::sync_directory(releases)?;
+    }
+    Ok(())
+}
+
 /// The canonical digest of a payload directory: the sha256 over every
 /// file's contents, chained with each file's archive-relative path
 /// (sorted, `/`-separated, symlinks by target). Deterministic across
