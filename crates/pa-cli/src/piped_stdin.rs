@@ -8,6 +8,7 @@
 //! producer resets the window on every chunk; a producer that already
 //! wrote delivers its buffered bytes the moment the listener attaches.
 
+use std::io::IsTerminal as _;
 use std::io::Read as _;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
