@@ -270,7 +270,7 @@ pub(crate) struct SessionUi {
     pending_tools: std::collections::HashSet<String>,
     /// Tool calls settled by a failed final frame, card or not: the run's
     /// late tool frames land on nothing (a new assistant message re-arms a
-    /// reused id, the way TS's fresh component does).
+    /// reused id with a fresh card, the way TS's fresh component does).
     aborted_tools: std::collections::HashSet<String>,
     pub(crate) last_assistant_text: Option<String>,
     /// The OSC 52 channel for clipboard writes (TS `process.stdout`):
@@ -7243,7 +7243,10 @@ impl SessionUi {
             if starts_message {
                 // A new assistant message re-arms a reused id (TS builds a
                 // fresh pending component for the new invocation); a late
-                // `message_update` from a failed run must not.
+                // `message_update` from a failed run must not. The re-armed
+                // invocation's next streamed frame pushes its own fresh card
+                // — the settled card is skipped by its `aborted` flag, the
+                // way TS's cleared pending map forces a new component.
                 self.aborted_tools.remove(id);
             }
             // TS `message_update` registers every streamed call in the
@@ -7363,10 +7366,14 @@ impl SessionUi {
             details: result.get("details").cloned().unwrap_or(Value::Null),
             is_error,
         };
+        // The result lands on the newest card carrying the id: a re-armed
+        // invocation pushed its own card, and the older settled card keeps
+        // its sweep-written result (TS's pending map only ever holds the
+        // current component).
         let card_index = view
             .chat
             .iter()
-            .position(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == tool_call_id));
+            .rposition(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == tool_call_id));
         if let Some(index) = card_index {
             view.prepare_entry_mutation(index);
             if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
