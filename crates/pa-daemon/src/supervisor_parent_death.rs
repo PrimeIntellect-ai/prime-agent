@@ -120,17 +120,28 @@ impl Supervisor {
 
     /// Close one child of a dead parent: the same kill route the #246
     /// `close_children` drives per child (a plain stop - the child
-    /// worker's kill handler aborts its in-flight turn, archives its
-    /// session, and closes its own children first, so the cascade to
-    /// grandchildren rides the recursion) plus the supervisor-side
-    /// completion of a kill (the steps the client kill route runs after
-    /// the worker answers): drop the worker from the registry and the
-    /// live roster, then reseed the ledger so the closed child's passive
-    /// row appears. `false` means the child is still resident (a later
-    /// retry owns it).
+    /// worker's kill handler aborts its in-flight turn and closes its own
+    /// children first, so the cascade to grandchildren rides the
+    /// recursion) plus the supervisor-side completion of a kill (the
+    /// steps the client kill route runs after the worker answers): drop
+    /// the worker from the registry and the live roster, then reseed the
+    /// ledger so the closed child's passive row appears. `false` means the
+    /// child is still resident (a later retry owns it).
+    ///
+    /// The close carries the `shutdown` reason marker: the parent died,
+    /// the child did not (TS's in-process child dies with the parent
+    /// worker without a close; the Rust worker must be told). The child
+    /// keeps its resume entry — no job cancel, no `archived` state — so
+    /// its passive row and its scheduled jobs survive the orphaning,
+    /// exactly like TS (the wake model owns reviving it later).
     async fn close_dead_child(self: &Arc<Self>, child: &Arc<ResidentWorker>) -> bool {
         match self
-            .route_command(child, "kill", json!({}), ROUTE_TIMEOUT_MS)
+            .route_command(
+                child,
+                "kill",
+                json!({ "rlmCloseReason": "shutdown" }),
+                ROUTE_TIMEOUT_MS,
+            )
             .await
         {
             Ok(response) if response.success => {

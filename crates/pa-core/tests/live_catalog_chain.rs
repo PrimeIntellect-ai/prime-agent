@@ -355,3 +355,79 @@ async fn layer_a_fetch_adds_entries_the_compiled_fallback_lacks() {
         .iter()
         .any(|model| model.provider == "prime-inference" && model.id == "z-ai/glm-5.3"));
 }
+
+/// Piece 5 (e): the picker regression — the fetched catalog-repo entry
+/// shows in the picker's available list (`get_available`, the same list
+/// the interactive model picker renders and `get_model_catalog`'s
+/// configuredProviders derives from) once its provider's auth is
+/// configured in models.json; without the provider auth the entry stays in
+/// the full catalog but is gated out of the picker (the production
+/// openai-codex picker gap was missing auth, not missing wiring).
+#[tokio::test]
+async fn the_picker_available_list_shows_a_fetched_entry_once_its_provider_auth_is_configured() {
+    async fn refreshed_registry_with_openai_auth(
+        openai_auth_configured: bool,
+    ) -> (tempfile::TempDir, ModelRegistry) {
+        let agent_dir = tempfile::tempdir().unwrap();
+        let bundled_dir = tempfile::tempdir().unwrap();
+        let server = common::MockServer::start(vec![
+            common::ok_json(
+                json!({ "schemaVersion": 1, "models": [
+                    layer_a_entry(LAYER_A_PROBE_ID, 1.25),
+                ]})
+                .to_string(),
+                None,
+            ),
+            common::ok_json(pi_payload("z-ai/glm-5.3", 7.0), None),
+        ])
+        .await;
+        install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
+        if openai_auth_configured {
+            std::fs::write(
+                agent_dir.path().join("models.json"),
+                json!({
+                    "providers": {
+                        "openai": {
+                            "apiKey": "probe-key",
+                            "headers": { "X-Probe": "catalog-chain" }
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        let mut registry = ModelRegistry::create(
+            prime_auth("test-key", "team-1"),
+            agent_dir.path().join("models.json"),
+        );
+        registry.refresh_available_models().await;
+        (agent_dir, registry)
+    }
+
+    // With the provider auth configured, the fetched entry is pickable.
+    let (_dir, registry) = refreshed_registry_with_openai_auth(true).await;
+    let available = registry.get_available();
+    let probe = available
+        .iter()
+        .find(|model| model.provider == "openai" && model.id == LAYER_A_PROBE_ID)
+        .expect("the fetched entry lists in the picker once auth is configured");
+    assert!((probe.cost.input.as_f64() - 1.25).abs() < 1e-9);
+    // The rlm search surface (find_models) shares the availability gate.
+    assert!(registry
+        .get_rlm_searchable_models()
+        .iter()
+        .any(|model| model.id == LAYER_A_PROBE_ID));
+
+    // Without the provider auth: still in the full catalog, gated out of
+    // the picker's available list.
+    let (_bare_dir, bare_registry) = refreshed_registry_with_openai_auth(false).await;
+    assert!(bare_registry
+        .get_all()
+        .iter()
+        .any(|model| model.id == LAYER_A_PROBE_ID));
+    assert!(!bare_registry
+        .get_available()
+        .iter()
+        .any(|model| model.id == LAYER_A_PROBE_ID));
+}

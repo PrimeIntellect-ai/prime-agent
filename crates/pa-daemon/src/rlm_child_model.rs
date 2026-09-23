@@ -405,6 +405,105 @@ mod tests {
         .unwrap();
     }
 
+    /// The catalog-repo (layer A) child-resolution regression: a fetched
+    /// entry the compiled fallback lacks resolves for a spawned child
+    /// through the on-disk provider catalog the daemon's startup refresh
+    /// writes, once the entry's provider is auth-configured in models.json
+    /// (the same availability gate the picker's configuredProviders filter
+    /// applies — the production openai-codex picker gap was missing auth,
+    /// not missing wiring). Before the live-catalog wiring, the resolution
+    /// list was the compiled table plus a flat Prime Inference merge, so
+    /// catalog-repo entries could never resolve for `rlm.spawn` or list
+    /// in `rlm.find_models`.
+    #[test]
+    fn a_spawned_child_resolves_a_catalog_repo_entry_the_compiled_fallback_lacks() {
+        const PROBE_ID: &str = "gpt-6-probe";
+        assert!(
+            !pa_ai::models_generated::get_models("openai-codex")
+                .iter()
+                .any(|model| model.id == PROBE_ID),
+            "the probe entry is compiled in; pick another id"
+        );
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        // The provider auth the resolution filters on: a models.json
+        // provider entry (headers alone satisfy the config validation and
+        // has_configured_auth).
+        std::fs::write(
+            dir.path().join("models.json"),
+            json!({
+                "providers": {
+                    "openai-codex": {
+                        "apiKey": "codex-key",
+                        "headers": { "X-Probe": "catalog-chain" }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // The layer-A disk cache the startup refresh writes beside
+        // models.json: one catalog-repo entry riding the compiled
+        // openai-codex transport tuple (the pinning invariant).
+        std::fs::write(
+            dir.path()
+                .join("models")
+                .join("provider-model-catalog.v1.json"),
+            json!({
+                "url": pa_models::fetch::MODEL_CATALOG_URL,
+                "scope": pa_models::cache::PUBLIC_SCOPE,
+                "fetchedAt": 1,
+                "payload": { "schemaVersion": 1, "models": [
+                    {
+                        "id": PROBE_ID, "name": "GPT-6 Probe",
+                        "api": "openai-codex-responses", "provider": "openai-codex",
+                        "baseUrl": "https://chatgpt.com/backend-api",
+                        "reasoning": true,
+                        "thinkingLevelMap": { "minimal": null, "xhigh": "xhigh", "max": "max" },
+                        "input": ["text"],
+                        "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 },
+                        "contextWindow": 272000, "maxTokens": 128000,
+                    }
+                ]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let selector = format!("openai-codex/{PROBE_ID}");
+        // The rlm search surface (find_models) lists the fetched entry.
+        let catalog = catalog_models(dir.path());
+        let probe = catalog
+            .iter()
+            .find(|model| model.selector() == selector)
+            .expect("the fetched entry lists for find_models");
+        assert_eq!(probe.name, "GPT-6 Probe");
+        // A spawned child resolves it by full selector and by short form.
+        let resolved = resolve_child_model(
+            dir.path(),
+            Some(&selector),
+            Some("prime-inference/z-ai/glm-5.3"),
+            "subagent",
+        )
+        .unwrap();
+        assert_eq!(resolved, selector);
+        let resolved = resolve_child_model(
+            dir.path(),
+            Some(PROBE_ID),
+            Some("prime-inference/z-ai/glm-5.3"),
+            "subagent",
+        )
+        .unwrap();
+        assert_eq!(resolved, selector);
+        // The spawn-time thinking check follows the fetched entry's map:
+        // xhigh is explicitly mapped, minimal is explicitly nulled out.
+        assert_thinking_supported(dir.path(), Some("xhigh"), &selector).unwrap();
+        let error = assert_thinking_supported(dir.path(), Some("minimal"), &selector).unwrap_err();
+        assert!(
+            error.to_string().contains("not supported by model"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn roster_text_is_collapsed_and_capped() {
         let label = rlm_child_label("  ship   the\nlane  ");

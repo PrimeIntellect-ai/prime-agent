@@ -72,6 +72,9 @@ impl Supervisor {
                 "Session is not owned by this client",
             );
         }
+        // TS `stopWorker`: the owned stop tears the worker down; the
+        // ephemeral schedule cancel (`cancelEphemeralWorkerScheduledJobs`)
+        // rides `stop_worker` itself, keyed on the descriptor's owner.
         self.stop_worker(&resident).await;
         (
             vec![response_line(&response_success(

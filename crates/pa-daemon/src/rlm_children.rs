@@ -38,6 +38,38 @@ use crate::util::now_ms;
 /// Depth bound without an explicit override (TS `resolveRlmMaxDepth` default).
 pub const DEFAULT_RLM_MAX_DEPTH: u32 = 2;
 
+/// The close reason a parent hands its resident children (TS
+/// `closeSessionOnce`'s reason arms, cascaded through
+/// `closeChildSessions(parentState, reason)`):
+///
+/// - `Killed` — the child closes as killed: its scheduled jobs cancel and
+///   its session file archives (TS `cancelScheduledJobsForSession`).
+/// - `Shutdown` — the child keeps its resume entry: the jobs survive the
+///   close (TS `closeKeepsResumeEntry("shutdown")`), so a later scheduled
+///   wake can still fire them.
+/// - `Replaced` — the replacement teardown keeps the child's plain cron
+///   jobs but cancels its RLM heartbeats (TS
+///   `cancelSubagentRlmHeartbeats`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildCloseReason {
+    Killed,
+    Shutdown,
+    Replaced,
+}
+
+impl ChildCloseReason {
+    /// The `rlmCloseReason` rest marker of the kill command the parent
+    /// routes to the child worker (the plain client kill carries none and
+    /// stays `Killed`).
+    fn wire_marker(self) -> Option<&'static str> {
+        match self {
+            Self::Killed => None,
+            Self::Shutdown => Some("shutdown"),
+            Self::Replaced => Some("replaced"),
+        }
+    }
+}
+
 /// How long a detached child prompt waits for its spawning parent turn to
 /// complete before prompting anyway (a stuck turn must not orphan the
 /// child's task; the watcher still settles it).
@@ -257,15 +289,16 @@ impl SupervisorChildSessions {
     /// Close every tracked child session with the parent session (TS
     /// `closeChildSessions`, the daemon host's
     /// `disposeRlmSubagentRuntimes` for the replacement teardown, and the
-    /// `closeSessionOnce` cascade every session close runs). The ruling:
-    /// a parent that replaces or closes its runtime disposes its
-    /// supervisor-backed children - a plain stop, not a delete (no
-    /// `rlmLedgerDelete` marker, so the spawn edge and the passive roster
-    /// row survive like TS), no terminal notice (the parent session is
-    /// going away), and each child's own close cascades to its children
-    /// through the child worker's kill handler.
-    pub async fn close_children(&self) -> Result<()> {
-        self.inner.close_children_inner().await
+    /// `closeSessionOnce(reason)` cascade every session close runs, with
+    /// the parent's own close reason). The ruling: a parent that replaces
+    /// or closes its runtime disposes its supervisor-backed children - a
+    /// plain stop, not a delete (no `rlmLedgerDelete` marker, so the spawn
+    /// edge and the passive roster row survive like TS), no terminal
+    /// notice (the parent session is going away), and each child's own
+    /// close cascades to its children through the child worker's kill
+    /// handler with the same close reason.
+    pub async fn close_children(&self, reason: ChildCloseReason) -> Result<()> {
+        self.inner.close_children_inner(reason).await
     }
 
     /// Replace the parent identity (the worker session sets it once its own
@@ -653,7 +686,9 @@ impl SupervisorChildSessionsInner {
         // A failed prompt tears the just-created session down (TS kills the
         // created session in the create-path catch block).
         if let Err(error) = self.prompt_child(&created.active_session_id, prompt).await {
-            let _ = self.kill_child(&created.active_session_id).await;
+            let _ = self
+                .kill_child(&created.active_session_id, ChildCloseReason::Killed)
+                .await;
             return Err(error);
         }
         Ok(created)
@@ -711,11 +746,15 @@ impl SupervisorChildSessionsInner {
         Ok(())
     }
 
-    async fn kill_child(&self, active_session_id: &str) -> Result<()> {
+    async fn kill_child(&self, active_session_id: &str, reason: ChildCloseReason) -> Result<()> {
+        let mut rest = serde_json::Map::new();
+        if let Some(marker) = reason.wire_marker() {
+            rest.insert("rlmCloseReason".to_string(), json!(marker));
+        }
         let command = DaemonCommand::Kill {
             id: None,
             active_session_id: active_session_id.to_string(),
-            rest: Default::default(),
+            rest,
         };
         self.command(&command, KILL_TIMEOUT_MS)
             .await
@@ -1042,7 +1081,7 @@ impl SupervisorChildSessionsInner {
     /// returned with the remaining children still closed - TS
     /// `closeChildSessions` walks all children and rethrows the first
     /// error.
-    async fn close_children_inner(&self) -> Result<()> {
+    async fn close_children_inner(&self, reason: ChildCloseReason) -> Result<()> {
         let children = self.children.lock().await.clone();
         let mut close_error: Option<anyhow::Error> = None;
         for record in &children {
@@ -1052,7 +1091,7 @@ impl SupervisorChildSessionsInner {
                 record.notice_delivered = true;
             }
             let active_session_id = record.lock().await.active_session_id.clone();
-            if let Err(error) = self.kill_child(&active_session_id).await {
+            if let Err(error) = self.kill_child(&active_session_id, reason).await {
                 if unknown_session(&error).is_some() {
                     // Already gone: TS `closeSessionOnce`'s `sessions.has`
                     // check turns a missing child into a no-op success.
@@ -1274,7 +1313,9 @@ impl RlmSubagentHost for SupervisorChildSessions {
                         eprintln!(
                             "pa-daemon: RLM child task prompt failed for {child_active_session_id}: {error:#}; retry failed: {retry_error:#}"
                         );
-                        let _ = watcher_this.kill_child(&child_active_session_id).await;
+                        let _ = watcher_this
+                            .kill_child(&child_active_session_id, ChildCloseReason::Killed)
+                            .await;
                         watcher_record.lock().await.settled_status = Some("error");
                         return;
                     }
@@ -1761,7 +1802,10 @@ mod watch_tests {
         sessions.notify_turn_done();
         one_running_child(&sessions).await;
 
-        sessions.close_children().await.expect("close children");
+        sessions
+            .close_children(ChildCloseReason::Killed)
+            .await
+            .expect("close children");
 
         // The stop carried no delete marker: the spawn edge survives (TS
         // `closeSessionOnce` archives; only `recordRlmSubagentDeletion`
@@ -1799,7 +1843,7 @@ mod watch_tests {
         one_running_child(&sessions).await;
 
         sessions
-            .close_children()
+            .close_children(ChildCloseReason::Killed)
             .await
             .expect("an already-gone child must not fail the close");
 
@@ -1823,7 +1867,7 @@ mod watch_tests {
         one_running_child(&sessions).await;
 
         let error = sessions
-            .close_children()
+            .close_children(ChildCloseReason::Killed)
             .await
             .expect_err("a real close failure must propagate");
         assert!(

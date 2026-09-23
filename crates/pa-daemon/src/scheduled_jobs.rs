@@ -36,7 +36,8 @@ use tokio::sync::{oneshot, Notify};
 
 use pa_core::cron::scheduler::{AgentCronScheduler, AgentCronSchedulerHooks};
 use pa_core::cron::store::{
-    AgentCronJobStore, CreateAgentCronJobInput, HeartbeatManagementAction, SessionBinding,
+    AgentCronJobStore, CancelJobsFilter, CreateAgentCronJobInput, HeartbeatManagementAction,
+    SessionBinding,
 };
 use pa_core::cron::{
     is_heartbeat_cron_job, normalize_heartbeat_delivery_mode, normalize_heartbeat_schedule,
@@ -66,6 +67,7 @@ pub(crate) struct QueueHooks {
     core: Arc<Mutex<SessionCore>>,
     work_notify: Arc<Notify>,
     user_bash: Arc<crate::user_bash::UserBash>,
+    store: Arc<AgentCronJobStore>,
 }
 
 impl QueueHooks {
@@ -89,8 +91,48 @@ impl QueueHooks {
     }
 }
 
+impl QueueHooks {
+    /// TS `isPersistedCronJobRunnable` (the persisted-job half): a
+    /// persisted job may only fire at a session that still exists — the
+    /// session file present, still the job's session, still carrying the
+    /// `active` state. A killed (`archived`) or deleted session fails the
+    /// check.
+    fn persisted_target_gone(&self, job: &AgentCronJob) -> bool {
+        if job.session_file.is_empty() {
+            return true;
+        }
+        match crate::session_store::read_session_info(Path::new(&job.session_file)) {
+            None => true,
+            Some(info) => info.id != job.session_id || info.state.as_deref() != Some("active"),
+        }
+    }
+
+    /// The failed-runnable cancel (TS
+    /// `cancelScheduledJobsForSessionFile`): the store cancels the dead
+    /// session's whole job set by file, so the artifact never re-fires.
+    fn cancel_jobs_for_dead_target(&self, job: &AgentCronJob) {
+        self.store.cancel_jobs_for_session(
+            &CancelJobsFilter {
+                active_session_id: None,
+                session_id: None,
+                session_file: Some(job.session_file.clone()),
+            },
+            crate::util::now_ms(),
+        );
+    }
+}
+
 impl AgentCronSchedulerHooks for QueueHooks {
     async fn run_job(&self, job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
+        // TS `runCronJob` -> `getOrCreateCronJobSession` ->
+        // `isPersistedCronJobRunnable`: a persisted job whose target is no
+        // longer live (killed — state `archived` — or deleted) cancels the
+        // session's jobs and skips, so a fire can never revive a stopped
+        // session (the zombie fix's delivery-side gate).
+        if self.persisted_target_gone(job) {
+            self.cancel_jobs_for_dead_target(job);
+            return Ok(Some("skipped"));
+        }
         let activity = self.activity();
         if should_defer_heartbeat_cron_job(job, &activity) {
             return Ok(Some("skipped"));
@@ -210,13 +252,15 @@ impl ScheduledJobs {
         store.on_heartbeat_change(Box::new(move || {
             events.send(crate::worker::OutboundFrame::heartbeats_changed());
         }));
+        let store = Arc::new(store);
         ScheduledJobs {
-            store: Arc::new(store),
             hooks: Arc::new(QueueHooks {
                 core,
                 work_notify,
                 user_bash,
+                store: Arc::clone(&store),
             }),
+            store,
             scheduler: tokio::sync::Mutex::new(None),
         }
     }
@@ -337,6 +381,115 @@ impl Worker {
                 .store()
                 .register_session_artifact(store.session_id(), &dir);
         }
+    }
+
+    /// TS `cancelScheduledJobsForSession(state)` (the killed close's
+    /// schedule cancel): the session's whole job set cancels (matched by
+    /// any of the session's three identities, exactly the TS filter), each
+    /// cancelled heartbeat's queued follow-up withdraws
+    /// (`removeQueuedHeartbeatFollowUp`), and the scheduler re-arms. The
+    /// cancel is durable, so the stopped session's own heartbeats can
+    /// never revive it.
+    pub(crate) async fn cancel_session_scheduled_jobs(&self) {
+        let (active_session_id, session_id, session_file) = {
+            let core = self
+                .core
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.bind_store_artifact(&core);
+            let Some(store) = core.store.as_ref() else {
+                return;
+            };
+            (
+                core.active_session_id.clone(),
+                store.session_id().to_string(),
+                store.path.to_string_lossy().to_string(),
+            )
+        };
+        let cancelled = self.scheduled.store().cancel_jobs_for_session(
+            &pa_core::cron::store::CancelJobsFilter {
+                active_session_id: Some(active_session_id),
+                session_id: Some(session_id),
+                session_file: Some(session_file),
+            },
+            crate::util::now_ms(),
+        );
+        for job in &cancelled {
+            self.scheduled.remove_queued_heartbeat_follow_up(job);
+        }
+        if !cancelled.is_empty() {
+            self.scheduled.wake().await;
+        }
+    }
+
+    /// TS `cancelSubagentRlmHeartbeats(state)` (the replaced close of a
+    /// subagent): only the subagent's RLM heartbeat jobs cancel; the plain
+    /// cron jobs survive the replacement. A top-level session cancels
+    /// nothing here (the TS `kind !== "subagent"` gate).
+    pub(crate) async fn cancel_session_rlm_heartbeats(&self) {
+        let (is_subagent, active_session_id) = {
+            let core = self
+                .core
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.bind_store_artifact(&core);
+            (
+                core.runtime_kind == "subagent",
+                core.active_session_id.clone(),
+            )
+        };
+        if !is_subagent {
+            return;
+        }
+        let cancelled = self
+            .scheduled
+            .store()
+            .cancel_rlm_heartbeats_for_session(&active_session_id, crate::util::now_ms());
+        for job in &cancelled {
+            self.scheduled.remove_queued_heartbeat_follow_up(job);
+        }
+        if !cancelled.is_empty() {
+            self.scheduled.wake().await;
+        }
+    }
+
+    /// TS `cancelScheduledJobsForSessionFile` (the saved-session delete's
+    /// `afterFileRemoved` hook): register the deleted file's artifact
+    /// partition (only when its store file exists) and cancel its whole
+    /// job set by file, so the jobs die with the delete even if the
+    /// partition removal fails. The hook runs once the file is gone, so
+    /// the partition derives from the file's stem (the session file IS
+    /// `<session id>.jsonl`), not from a session-info read. Best-effort:
+    /// the deletion never fails on a store error (the TS hook's failures
+    /// are logged, not thrown).
+    pub(crate) fn cancel_deleted_session_jobs(&self, session_file: &std::path::Path) {
+        let Some(session_id) = session_file
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+        else {
+            return;
+        };
+        let Some(dir) = session_artifact_dir(session_file, session_id) else {
+            return;
+        };
+        if !dir
+            .join(pa_core::cron::store::SESSION_SCHEDULED_JOBS_FILENAME)
+            .is_file()
+        {
+            return;
+        }
+        self.scheduled
+            .store()
+            .register_session_artifact(session_id, &dir);
+        self.scheduled.store().cancel_jobs_for_session(
+            &pa_core::cron::store::CancelJobsFilter {
+                active_session_id: None,
+                session_id: None,
+                session_file: Some(session_file.to_string_lossy().to_string()),
+            },
+            crate::util::now_ms(),
+        );
     }
 
     /// `cron_list` (TS daemon-mode case): the store's jobs filtered by the
@@ -763,16 +916,21 @@ mod tests {
     /// bind-time (empty) scheduler, fire the job on schedule, deliver its
     /// prompt onto the session's steer lane, and record the run.
     /// An active rlm heartbeat job due to fire (`every 10s`, never run).
-    fn heartbeat_job(id: &str, prompt: &str, delivery_mode: DeliveryMode) -> AgentCronJob {
+    fn heartbeat_job(
+        id: &str,
+        prompt: &str,
+        delivery_mode: DeliveryMode,
+        session: &(String, std::path::PathBuf),
+    ) -> AgentCronJob {
         AgentCronJob {
             id: id.to_string(),
             status: JobStatus::Active,
             source: Some("rlm_heartbeat".to_string()),
             runtime_kind: None,
             delivery_mode: Some(delivery_mode),
-            active_session_id: "test-session".to_string(),
-            session_id: "test-session".to_string(),
-            session_file: "/w/s.jsonl".to_string(),
+            active_session_id: session.0.clone(),
+            session_id: session.0.clone(),
+            session_file: session.1.to_string_lossy().to_string(),
             cwd: "/w".to_string(),
             label: None,
             prompt: prompt.to_string(),
@@ -791,6 +949,87 @@ mod tests {
         }
     }
 
+    /// A persisted, `active`-state session file the fire's target
+    /// verification (TS `isPersistedCronJobRunnable`) reads.
+    fn write_active_session(dir: &std::path::Path) -> (String, std::path::PathBuf) {
+        let mut session = crate::session_store::SessionFile::create("/w", None, 0);
+        session.append_message(serde_json::json!({
+            "role": "user", "content": "hi", "timestamp": 1u64
+        }));
+        let path = dir.join(crate::session_store::session_file_name(
+            session.session_id(),
+        ));
+        session.set_path(path.clone());
+        let _ = session.append_session_state("active");
+        session.rewrite().unwrap();
+        (session.session_id().to_string(), path)
+    }
+
+    /// The delivery-side verification (TS `isPersistedCronJobRunnable`):
+    /// a fire whose target was killed (state `archived`) cancels the
+    /// session's jobs and skips instead of reviving it, and the queue
+    /// lanes stay empty.
+    #[tokio::test]
+    async fn a_fire_at_a_killed_session_cancels_and_skips() {
+        let dir = std::env::temp_dir().join(format!("pa-sched-dead-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (session_id, session_file) = write_active_session(&dir);
+        let store = AgentCronJobStore::for_session_artifacts();
+        let artifact_dir = session_artifact_dir(&session_file, &session_id).unwrap();
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        store.register_session_artifact(&session_id, &artifact_dir);
+        let job = store
+            .create(&CreateAgentCronJobInput {
+                active_session_id: session_id.clone(),
+                session_id: session_id.clone(),
+                session_file: session_file.to_string_lossy().to_string(),
+                cwd: "/w".to_string(),
+                prompt: "lane-liveness ping".to_string(),
+                schedule_text: "every 10s".to_string(),
+                now: Some(1),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(job.status, JobStatus::Active);
+
+        // The session is killed: the close appended the `archived` state.
+        let mut session = crate::session_store::SessionFile::open(&session_file).unwrap();
+        let _ = session.append_session_state("archived");
+        session.rewrite().unwrap();
+
+        let core = Arc::new(std::sync::Mutex::new(
+            crate::worker::SessionCore::test_core(None, "/w".to_string()),
+        ));
+        let hooks = QueueHooks {
+            core: Arc::clone(&core),
+            work_notify: Arc::new(Notify::new()),
+            user_bash: Arc::new(crate::user_bash::UserBash::new()),
+            store: Arc::new(AgentCronJobStore::for_session_artifacts()),
+        };
+        // The dead-target cancel registers the artifact partition itself
+        // (a fresh store knows nothing of the session yet).
+        hooks
+            .store
+            .register_session_artifact(&session_id, &artifact_dir);
+
+        let verdict = AgentCronSchedulerHooks::run_job(&hooks, &job)
+            .await
+            .unwrap();
+        assert_eq!(verdict, Some("skipped"));
+        let stored = hooks.store.list();
+        let cancelled = stored
+            .iter()
+            .find(|candidate| candidate.id == job.id)
+            .expect("the job stays in the store");
+        assert_eq!(cancelled.status, JobStatus::Cancelled);
+        assert_eq!(cancelled.next_run_at, None);
+        let core = core.lock().unwrap();
+        assert!(
+            core.steering.is_empty() && core.follow_up.is_empty(),
+            "no fire parks at a killed session"
+        );
+    }
+
     /// The fire's parked shape (TS `runCronJob` -> `promptHeartbeat`): a
     /// heartbeat parks on its delivery-mode lane as the injected
     /// `heartbeat_prompt` row with the TS preview — the queue strip reads
@@ -799,6 +1038,9 @@ mod tests {
     /// job parks as a regular follow-up prompt.
     #[tokio::test]
     async fn heartbeat_fire_parks_the_labeled_preview_on_its_lane() {
+        let dir = std::env::temp_dir().join(format!("pa-sched-fire-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = write_active_session(&dir);
         let core = Arc::new(std::sync::Mutex::new(
             crate::worker::SessionCore::test_core(None, "/w".to_string()),
         ));
@@ -806,13 +1048,19 @@ mod tests {
             core: Arc::clone(&core),
             work_notify: Arc::new(Notify::new()),
             user_bash: Arc::new(crate::user_bash::UserBash::new()),
+            store: Arc::new(AgentCronJobStore::for_session_artifacts()),
         });
-        let steer_heartbeat = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer);
-        let follow_up_heartbeat =
-            heartbeat_job("hb-2", "wrap the mission up", DeliveryMode::FollowUp);
+        let steer_heartbeat =
+            heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, &session);
+        let follow_up_heartbeat = heartbeat_job(
+            "hb-2",
+            "wrap the mission up",
+            DeliveryMode::FollowUp,
+            &session,
+        );
         let plain_cron = AgentCronJob {
             source: Some("cron".to_string()),
-            ..heartbeat_job("cron-1", "nightly sweep", DeliveryMode::Steer)
+            ..heartbeat_job("cron-1", "nightly sweep", DeliveryMode::Steer, &session)
         };
         for job in [&steer_heartbeat, &follow_up_heartbeat, &plain_cron] {
             let hooks = Arc::clone(&hooks);

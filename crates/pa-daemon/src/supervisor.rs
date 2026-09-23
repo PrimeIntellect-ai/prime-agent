@@ -610,6 +610,48 @@ impl Supervisor {
         let alive = socket::can_connect(&socket_path, Duration::from_millis(500)).await;
         let pid = descriptor.pid;
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, path);
+        // The stop tombstone outranks liveness (TS's stop ownership: the
+        // kill was durable intent BEFORE the worker was told): a
+        // supervisor that died between `persist_stop_tombstone` and the
+        // worker's shutdown finishes the stop on the next boot — never
+        // adopts the still-reachable worker as healthy (that would drop
+        // the kill and leave the stopped session resident).
+        if resident.descriptor.lock().await.stop_requested_at.is_some() {
+            if alive {
+                // The worker outlived the crash and may never have received
+                // the kill (the crash window is between the tombstone and
+                // the forward): connect to it, tell it to shut down (its
+                // own close cancels its jobs and archives its file), then
+                // finish the durable half of the stop. A failed connect
+                // degrades to the dead-worker finalize below.
+                resident.intentional_stop.store(true, Ordering::SeqCst);
+                if self
+                    .connect_worker(&resident, worker_connect_deadline())
+                    .await
+                    .is_ok()
+                {
+                    let _ = self
+                        .route_command(&resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
+                        .await;
+                }
+            }
+            // TS `scheduleWorkerStopFinalization`: the interrupted stop's
+            // cleanup re-runs instead of a relaunch. The descriptor
+            // survives an unsettled finalize (a later boot retries the
+            // archived-state belt); a settled stop deletes it.
+            let settled = self.finalize_worker_stop(&resident, None).await;
+            if settled {
+                let _ = std::fs::remove_file(&resident.descriptor_path);
+                self.log_line(&format!(
+                    "finished the tombstoned stop of session worker {worker_id}"
+                ));
+            } else {
+                self.log_line(&format!(
+                    "tombstoned stop of session worker {worker_id} not settled; descriptor kept"
+                ));
+            }
+            return;
+        }
         let result = if alive {
             let adopted = self
                 .connect_worker(&resident, worker_connect_deadline())
@@ -3614,6 +3656,50 @@ impl Supervisor {
                 }
             }
         };
+        // A kill is the worker's own root kill (TS `isRootKill`) — a
+        // parent's child-close cascade carries the `rlmCloseReason` marker
+        // and is NOT one (TS forwards a child close without a supervisor
+        // stop): only the plain kill tombstones and finalizes. The stop
+        // tombstone persists BEFORE the worker is told (TS
+        // `persistWorkerStopTombstone(worker, true)`), so a supervisor that
+        // dies mid-stop adopts the tombstone instead of relaunching the
+        // killed worker, and the durable half of the stop (the session
+        // tree's scheduled-job cancel + the `archived` state belt) re-runs.
+        // The plain-kill gate (TS `isRootKill`): the `rlmCloseReason`
+        // marker is the parent's child-close cascade and only ever targets
+        // a subagent session — a top-level target is ALWAYS a plain kill
+        // regardless of the wire marker (a client cannot forge the softer
+        // close semantics for a root session; the finalize belt below
+        // cancels its jobs and archives its file either way).
+        let plain_kill = match command {
+            DaemonCommand::Kill { rest, .. } => {
+                let no_marker = !rest.contains_key("rlmCloseReason");
+                let target_depth = resident
+                    .descriptor
+                    .lock()
+                    .await
+                    .create_command
+                    .rest
+                    .get("rlmDepth")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                no_marker || target_depth == 0
+            }
+            _ => false,
+        };
+        if plain_kill {
+            if let Err(error) = self.persist_stop_tombstone(&resident).await {
+                return (
+                    vec![response_line(&response_failure(
+                        Some(&command_id),
+                        &type_name,
+                        &format!("Failed to persist the session stop: {error:#}"),
+                        None,
+                    ))],
+                    false,
+                );
+            }
+        }
         // A delete flows through the kill route with the `rlmLedgerDelete`
         // marker (the parent-side `delete_subagent`). The deletion boundary
         // is persisted BEFORE the teardown (TS `recordRlmSubagentDeletion`):
@@ -3818,9 +3904,27 @@ impl Supervisor {
                             .retain(|id| id != &resident.worker_id);
                     }
                 }
-                if let DaemonCommand::Kill { .. } = command {
+                if let DaemonCommand::Kill { rest, .. } = command {
                     if response.success {
                         self.stop_worker(&resident).await;
+                        // TS `stopWorkerUntracked`'s archived-stop finalize
+                        // (the plain kill's durable half): the killed
+                        // session tree's scheduled jobs cancel durably and
+                        // the root file carries the `archived` state, so no
+                        // wake pass can revive the stopped session. A
+                        // ledger-tombstoned delete also sweeps the deleted
+                        // child's artifacts (TS `deleteRlmSubagentArtifacts`).
+                        // A marker-carrying child close is a cascade, not a
+                        // stop: no finalize (the child's own close arms
+                        // already carried the parent's reason).
+                        if plain_kill {
+                            let deleted_child = rest
+                                .get("rlmLedgerDelete")
+                                .and_then(Value::as_str)
+                                .map(str::to_string);
+                            self.finalize_worker_stop(&resident, deleted_child.as_deref())
+                                .await;
+                        }
                     }
                 }
                 if let DaemonCommand::Rename { name, .. } = command {
@@ -3875,6 +3979,13 @@ impl Supervisor {
             .route_command(resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
             .await;
         let _ = std::fs::remove_file(&resident.descriptor_path);
+        // TS `stopWorkerUntracked`: a client-owned (ephemeral) worker's
+        // scheduled jobs die with the registration
+        // (`cancelEphemeralWorkerScheduledJobs`) — every remove-descriptor
+        // stop of an owned worker, including the degraded-create cleanups.
+        if resident.descriptor.lock().await.owner_client_id.is_some() {
+            self.finalize_owned_stop(resident).await;
+        }
         self.registry.remove(&resident.worker_id).await;
         self.registry.forget(&resident.worker_id).await;
         self.remove_roster_worker(&resident.worker_id);

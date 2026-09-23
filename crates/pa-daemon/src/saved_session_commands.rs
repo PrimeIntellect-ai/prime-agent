@@ -100,21 +100,34 @@ pub(crate) fn append_saved_session_name(path: &Path, name: &str) -> anyhow::Resu
 }
 
 /// Delete a session file (TS `deleteSessionFile`): try the `trash` CLI
-/// first, fall back to unlink, and remove the session's artifact partition
-/// once the file itself is gone. Answers the TS `DeleteSessionFileResult`
-/// wire object.
+/// first, fall back to unlink, run the after-file-removed hook, and remove
+/// the session's artifact partition once the file itself is gone. Answers
+/// the TS `DeleteSessionFileResult` wire object.
 pub(crate) fn delete_session_file(path: &Path) -> Value {
+    delete_session_file_after_file_removed(path, &|_| {})
+}
+
+/// TS `deleteSessionFile` with its `afterFileRemoved` hook: the hook runs
+/// once the file is gone but BEFORE the artifact partition's removal (the
+/// daemon's `cancelScheduledJobsForSessionFile`, which needs the partition
+/// registered on the store).
+pub(crate) fn delete_session_file_after_file_removed(
+    path: &Path,
+    after_file_removed: &dyn Fn(&Path),
+) -> Value {
     let trash = StdCommand::new("trash").arg("--").arg(path).output();
     let removed_by_trash = match trash {
         Ok(output) => output.status.success() || !path.exists(),
         Err(_) => false,
     };
     if removed_by_trash {
+        after_file_removed(path);
         remove_session_artifacts(path);
         return json!({ "ok": true, "method": "trash" });
     }
     match std::fs::remove_file(path) {
         Ok(()) => {
+            after_file_removed(path);
             remove_session_artifacts(path);
             json!({ "ok": true, "method": "unlink" })
         }
@@ -124,7 +137,7 @@ pub(crate) fn delete_session_file(path: &Path) -> Value {
 
 /// Remove the session's artifact partition (TS `deleteSessionArtifacts`):
 /// `<root>/session-artifacts/<id>`, only once the session file is gone.
-fn remove_session_artifacts(session_path: &Path) {
+pub(crate) fn remove_session_artifacts(session_path: &Path) {
     let Some(stem) = session_path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -807,11 +820,15 @@ impl Worker {
         let sessions_dir = crate::paths::sessions_dir(&self.config.agent_dir)
             .unwrap_or_else(|_| self.config.agent_dir.join("sessions"));
         tombstone_saved_session_delete(&self.config.agent_dir, &sessions_dir, session_path, None);
-        let result = delete_session_file(path);
+        // TS `delete_saved_session`: the hook runs between the file's
+        // removal and the artifact partition's removal — the durable job
+        // cancel (belt: the partition removal is the load-bearing delete,
+        // a failed removal still leaves cancelled jobs that can never
+        // fire). The partition registers only when its store file exists.
+        let result = delete_session_file_after_file_removed(path, &|deleted| {
+            self.cancel_deleted_session_jobs(deleted);
+        });
         if result.get("ok").and_then(Value::as_bool) == Some(true) {
-            // The deleted file's scheduled jobs die with its artifact
-            // partition (delete_session_file removed it) — the same
-            // `cancelScheduledJobsForSessionFile` effect.
             self.scheduled.wake().await;
         }
         response_success(None, "delete_saved_session", Some(result))

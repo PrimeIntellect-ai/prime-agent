@@ -1011,3 +1011,73 @@ TS reference: `packages/coding-agent/src/modes/interactive/interactive-mode.ts` 
   (TS `tryExecUpdateRelaunch` semantics: exec, child fallback, exit-code
   relay), relaunching with this run's args plus `--resume <sessionFile>`
   unless the invocation already selected a session.
+
+## The stop/delete lifecycle — kill cancels goals and heartbeats (lane deletion-lifecycle, 2026-09-23)
+
+Reference: the TS daemon-mode `closeSessionOnce(reason)` arms
+(daemon-mode.ts) and the supervisor's stop machinery
+(daemon-supervisor.ts). The bug class (the 2026-09-23 zombie saga): a
+killed session's scheduled jobs stayed `active`, so every supervisor boot
+`rearm_scheduled_wake` pass resurrected the dead session on its own
+lane-liveness heartbeat, and the resurrected worker's goal continuation
+kept it working (billed model turns for a session nobody wanted alive).
+
+- TS `closeSessionOnce("killed")` cancels the session's whole job set
+  (`cancelScheduledJobsForSession`, the queued heartbeat follow-ups
+  purged, the scheduler re-armed); `shutdown`/`update` keep the resume
+  entry (the jobs survive for the later wake — TS
+  `closeKeepsResumeEntry`); `replaced`/`completed` keep plain cron jobs
+  but cancel a subagent's RLM heartbeats
+  (`cancelSubagentRlmHeartbeats`). The Rust port now threads the close
+  reason through the worker's `kill` (`rlmCloseReason` rest marker) and
+  the parent's child-close cascade (TS `closeChildSessions(parent,
+  reason)`), so a daemon shutdown no longer cancels the children's
+  heartbeats (the previous port collapsed every child close into a
+  kill, which this lane would otherwise have made load-bearing).
+- TS `persistWorkerStopTombstone` + `finalizeArchivedWorkerStop`: a root
+  kill tombstones BEFORE the worker is told and finalizes after it is
+  gone — the session tree's scheduled jobs cancel
+  (`cancelScheduledJobsForSessionTree`, a live worker covering any tree
+  member owns its stores again) and the root file carries the
+  `archived` state (the catalog `archive` belt). The port adds both to
+  the supervisor's plain-kill route, plus the interrupted-stop recovery:
+  the adoption scan finishes a tombstoned dead worker's stop instead of
+  relaunching it (TS `scheduleWorkerStopFinalization`).
+- TS `isPersistedCronJobRunnable` (the delivery-side gate): a fire whose
+  persisted target is gone (file deleted) or killed (`state !==
+  "active"`) cancels the session's jobs and skips. Ported into the
+  worker's `run_job`.
+- TS `collectPassiveScheduledJobs` (the wake-scan gates): the boot
+  re-arm only wakes a due job whose session file still exists, is still
+  the job's session, still carries the `active` state, and whose file no
+  live worker covers. Ported into `rearm_scheduled_wake` (the passive
+  catalog merge in `scheduling_catalog.rs` already had the state gate).
+- The continuation gates: the engine carries the session's closed marker
+  (TS `_disposed || _disposing`) set by the kill/shutdown closes; the
+  goal and autonomous mints and their settle-hook retries bail on it,
+  and the loop-level continuation hook honors the abort signal (TS
+  `signal?.aborted`). A stopped session mints no continuation.
+- TS `deleteRlmSubagentArtifacts`: a ledger-tombstoned child delete
+  sweeps the child's artifact partition; `delete_saved_session`'s
+  `afterFileRemoved` hook cancels the deleted file's jobs between the
+  file removal and the artifact sweep.
+- Verifiers: `crates/pa-daemon/tests/session_stop_lifecycle_e2e.rs`
+  (kill a goal+heartbeat session → the job cancels durably, the file
+  archives, the tombstoned-stop adoption finishes, and NOTHING revives
+  it across a supervisor restart — while the hard-crashed sibling comes
+  back, proving the wake model itself still works) +
+  `scripts/session_stop_lifecycle_parity.py` (the same flow over the
+  wire on both products).
+- Deliberate scope cuts (the TS sites, not ported here): the supervisor's
+  continuous `recomputeScheduledSessionWake` timer (still a boot/restore
+  pass only, as slice 5 recorded); the parent-walk half of the passive
+  scan's `uncoveredRootFor` (the tree cancel at kill covers the zombie
+  class; the job's own file coverage is checked); the "completed"
+  hydration-error child close (the Rust child worker dies with its own
+  process on spawn failure — no in-worker close to hook).
+- Ownership: pa-daemon `stop_cleanup.rs` (the finalize belt, the tree
+  cancel, the wake-scan gate), `worker.rs`/`rlm_children.rs` (the close
+  reason taxonomy), `scheduled_jobs.rs` (the delivery gate + the cancel
+  helpers), `supervisor.rs`/`ownership.rs`/`update_restore.rs` (the
+  routes), `goal_continuation.rs`/`autonomous_continuation.rs` (the
+  continuation gates).

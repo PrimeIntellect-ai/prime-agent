@@ -581,6 +581,13 @@ async fn continuation_treatment(
 async fn rearm_scheduled_wake(supervisor: &std::sync::Arc<Supervisor>) -> usize {
     let jobs = crate::update_roster::scan_scheduled_jobs(&supervisor.options.agent_dir);
     let now = crate::util::now_ms();
+    // The wake-scan target verification (TS `collectPassiveScheduledJobs`'s
+    // scan gates): a due job may only wake a session that still exists —
+    // the file present, still the job's session, still carrying the
+    // `active` state — and that no live worker covers (a covered tree's
+    // scheduler owns the fire itself). A killed (state `archived`) or
+    // deleted session is never revived (TS parity; the zombie fix).
+    let live = supervisor.live_session_files().await;
     let mut woke = 0usize;
     for job in jobs {
         if job.status != pa_core::cron::JobStatus::Active {
@@ -592,13 +599,7 @@ async fn rearm_scheduled_wake(supervisor: &std::sync::Arc<Supervisor>) -> usize 
         if job.session_file.is_empty() {
             continue;
         }
-        if supervisor
-            .registry
-            .find_by_session_file(&job.session_file)
-            .await
-            .is_some()
-        {
-            // The session is live: its own scheduler claims the due job.
+        if !crate::stop_cleanup::due_job_target_alive(&job, &live) {
             continue;
         }
         match wake_saved_session(supervisor, &job.session_file).await {

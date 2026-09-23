@@ -42,6 +42,51 @@ use crate::protocol::{
 };
 use crate::registration::RegistrationHandle;
 use crate::session_store::{session_file_name, SessionFile};
+
+/// The close reason one `kill` carries (TS `DaemonSessionClosedReason` at
+/// `closeSessionOnce`): the plain client kill is `killed`; a parent's
+/// child-close cascade passes `shutdown` or `replaced` through the
+/// `rlmCloseReason` rest marker, and the close arms differ exactly like
+/// TS — `killed` cancels the session's scheduled jobs and archives the
+/// state, `shutdown` keeps the resume entry (the jobs survive for the
+/// later wake), `replaced` keeps the plain cron jobs but cancels the RLM
+/// heartbeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KillCloseReason {
+    Killed,
+    Shutdown,
+    Replaced,
+}
+
+impl KillCloseReason {
+    /// The `rlmCloseReason` marker of a child-close cascade (the plain
+    /// client kill carries none).
+    fn from_payload(payload: &Value) -> Self {
+        match payload.get("rlmCloseReason").and_then(Value::as_str) {
+            Some("shutdown") => Self::Shutdown,
+            Some("replaced") => Self::Replaced,
+            _ => Self::Killed,
+        }
+    }
+
+    /// The wire `session_closed` reason.
+    fn session_closed_reason(self) -> DaemonSessionClosedReason {
+        match self {
+            Self::Killed => DaemonSessionClosedReason::Killed,
+            Self::Shutdown => DaemonSessionClosedReason::Shutdown,
+            Self::Replaced => DaemonSessionClosedReason::Replaced,
+        }
+    }
+
+    /// The recovery journal's close operation.
+    fn recovery_operation(self) -> &'static str {
+        match self {
+            Self::Killed => "killed",
+            Self::Shutdown => "shutdown",
+            Self::Replaced => "replaced",
+        }
+    }
+}
 use crate::setting_switches::{effective_service_tier, supports_fast_mode};
 use crate::types::{AgentConnectionState, SessionActionSnapshot, SessionSummary};
 
@@ -1571,7 +1616,7 @@ impl Worker {
             "get_available_models" => self.handle_get_available_models(),
             "worker_deliver_message" => self.handle_worker_deliver_message(payload),
             "update_snapshot" => self.handle_update_snapshot(),
-            "kill" => self.handle_kill().await,
+            "kill" => self.handle_kill(payload).await,
             "shutdown" => self.handle_shutdown().await,
             "rename" => self.handle_rename("rename", payload),
             "set_session_name" => self.handle_rename("set_session_name", payload),
@@ -2092,6 +2137,12 @@ impl Worker {
             core.store = Some(store);
             core.created = true;
             core.abort_requested = false;
+            // A fresh (or replaced) session starts live: the previous
+            // close's `session_closed` marker clears with the new session
+            // (TS's fresh runtime starts un-disposed).
+            if let Some(agent_engine) = &self.agent_engine {
+                agent_engine.clear_session_closed();
+            }
             core.auto_compaction_enabled = auto_compaction_enabled;
             core.service_tier = restored_tier.unwrap_or(Some(service_tier));
             core.steering_mode = steering_mode;
@@ -2811,6 +2862,15 @@ impl Worker {
     /// The session's telemetry finalizes first (TS dispose callback:
     /// `agent session ended` + one flush), bounded by the sink timeouts.
     async fn handle_shutdown(&self) -> DaemonResponse {
+        // TS `shutdown` -> `closeSession(state, "shutdown")`: the session is
+        // closing, so the continuation mint sites and their settle-hook
+        // retries bail (a stopped session never continues) — but unlike a
+        // kill the close KEEPS the resume entry: no job cancel, no
+        // `archived` state, the scheduled jobs survive for the later wake
+        // (TS `closeKeepsResumeEntry("shutdown")`).
+        if let Some(agent_engine) = &self.agent_engine {
+            agent_engine.mark_session_closed();
+        }
         // TS `shutdown` -> `closeSession` aborts the session's side questions
         // per attached client before anything else closes, and each run's
         // `done` chain writes its cancelled event while the client sockets
@@ -2843,8 +2903,13 @@ impl Worker {
         // `runtime.dispose` -> `disposeHostedSubagentRuntimes`): the
         // children close before the process exits, so the close's kills
         // never race the exit. Best-effort: an unreachable child must not
-        // block the worker's own exit.
-        if let Err(error) = self.close_rlm_children().await {
+        // block the worker's own exit. The children close with the
+        // `shutdown` reason too: their resume entries and scheduled jobs
+        // survive (a daemon shutdown preserves the wake model).
+        if let Err(error) = self
+            .close_rlm_children(crate::rlm_children::ChildCloseReason::Shutdown)
+            .await
+        {
             eprintln!("pa-daemon: RLM child close at shutdown failed: {error:#}");
         }
         if let Some(agent_engine) = &self.agent_engine {
@@ -2920,23 +2985,28 @@ impl Worker {
         // `closeChildSessions(parentState, "replaced")`. A close failure
         // rethrows out of the teardown exactly like TS (the replacement
         // fails with the old runtime already retired).
-        self.close_rlm_children().await
+        self.close_rlm_children(crate::rlm_children::ChildCloseReason::Replaced)
+            .await
     }
 
     /// Close this session's supervisor-backed RLM children (TS
-    /// `closeChildSessions` through `disposeHostedSubagentRuntimes`).
-    /// Runs at every runtime teardown that ends the session - the
-    /// replacement retire, `kill`, and the worker `shutdown` - because
-    /// the TS daemon closes resident children on every session close and
-    /// at the replacement teardown, cascading to grandchildren through
-    /// each child worker's own close.
-    async fn close_rlm_children(&self) -> anyhow::Result<()> {
+    /// `closeChildSessions(parentState, reason)` through
+    /// `disposeHostedSubagentRuntimes`). Runs at every runtime teardown
+    /// that ends the session - the replacement retire, `kill`, and the
+    /// worker `shutdown` - because the TS daemon closes resident children
+    /// on every session close and at the replacement teardown, cascading
+    /// to grandchildren through each child worker's own close with the
+    /// same close reason.
+    async fn close_rlm_children(
+        &self,
+        reason: crate::rlm_children::ChildCloseReason,
+    ) -> anyhow::Result<()> {
         let children = self
             .agent_engine
             .as_ref()
             .and_then(|engine| engine.children.clone());
         match children {
-            Some(children) => children.close_children().await,
+            Some(children) => children.close_children(reason).await,
             None => Ok(()),
         }
     }
@@ -3584,15 +3654,44 @@ impl Worker {
         )
     }
 
-    async fn handle_kill(&self) -> DaemonResponse {
+    async fn handle_kill(&self, payload: &Value) -> DaemonResponse {
+        let reason = KillCloseReason::from_payload(payload);
+        // The session is closing: the continuation mint sites and their
+        // settle-hook retries bail from here on (TS `_disposed ||
+        // _disposing` in the goal/autonomous resume sites). A stopped
+        // session never continues.
+        if let Some(agent_engine) = &self.agent_engine {
+            agent_engine.mark_session_closed();
+        }
+        // TS `closeSession` aborts the side questions per attached client
+        // before `closeSessionOnce`'s arms run.
         self.side_questions
             .abort_all_and_settle(SIDE_QUESTION_SETTLE_TIMEOUT)
             .await;
-        // TS `closeSessionOnce("killed")` cascades the close to the
-        // session's resident children before the session's own archive
-        // and dispose; a close failure is swallowed here exactly like the
-        // daemon-mode kill handler's `.catch(() => undefined)`.
-        if let Err(error) = self.close_rlm_children().await {
+        // TS `closeSessionOnce`'s first act: `killed` cancels the session's
+        // scheduled jobs (`cancelScheduledJobsForSession` — the queued
+        // heartbeat follow-ups' purge included); `replaced` keeps the plain
+        // cron jobs but cancels the subagent's RLM heartbeats
+        // (`cancelSubagentRlmHeartbeats`); `shutdown` keeps them all (the
+        // jobs survive the close for the later scheduled wake). The store
+        // cancel is durable, so the stopped session's own heartbeats can
+        // never revive it (the zombie fix).
+        match reason {
+            KillCloseReason::Killed => self.cancel_session_scheduled_jobs().await,
+            KillCloseReason::Replaced => self.cancel_session_rlm_heartbeats().await,
+            KillCloseReason::Shutdown => {}
+        }
+        // TS `closeSessionOnce(reason)` cascades the close to the
+        // session's resident children with the SAME reason before the
+        // session's own archive and dispose; a close failure is swallowed
+        // here exactly like the daemon-mode kill handler's
+        // `.catch(() => undefined)`.
+        let child_reason = match reason {
+            KillCloseReason::Killed => crate::rlm_children::ChildCloseReason::Killed,
+            KillCloseReason::Shutdown => crate::rlm_children::ChildCloseReason::Shutdown,
+            KillCloseReason::Replaced => crate::rlm_children::ChildCloseReason::Replaced,
+        };
+        if let Err(error) = self.close_rlm_children(child_reason).await {
             eprintln!("pa-daemon: RLM child close at kill failed: {error:#}");
         }
         // The persist (TS `archiveSession` -> `appendSessionState`, before
@@ -3600,20 +3699,28 @@ impl Worker {
         // lands while the turn still holds its provider wait. The turn can
         // only append its aborted row once the abort flag below opens the
         // gate, so the file order (archived, then the aborted row) stays
-        // the TS one. The core lock never blocks on the in-flight turn:
-        // the turn runner holds it only for the instants it persists an
-        // event, never across the provider wait. The guard rides a block,
-        // not an explicit drop: a `drop(core)` does not end the guard's
-        // slot in an async generator, so the later awaits would make the
-        // future non-Send.
+        // the TS one. `shutdown` keeps the resume entry (TS
+        // `closeKeepsResumeEntry`), so its file stays live on disk. The
+        // core lock never blocks on the in-flight turn: the turn runner
+        // holds it only for the instants it persists an event, never
+        // across the provider wait. The guard rides a block, not an
+        // explicit drop: a `drop(core)` does not end the guard's slot in
+        // an async generator, so the later awaits would make the future
+        // non-Send.
         {
             let mut core = self.core.lock().unwrap();
-            if let Some(store) = core.store.as_mut() {
-                if let Err(error) = store.persist_entry(
-                    "session_state",
-                    json!({ "state": { "status": "archived" } }),
-                ) {
-                    return response_failure(None, "kill", &error.to_string(), None);
+            // `shutdown` keeps the resume entry (TS
+            // `closeKeepsResumeEntry`), so its file stays live on disk;
+            // the killed and replaced closes archive (the base's
+            // `persist_entry` write).
+            if reason != KillCloseReason::Shutdown {
+                if let Some(store) = core.store.as_mut() {
+                    if let Err(error) = store.persist_entry(
+                        "session_state",
+                        json!({ "state": { "status": "archived" } }),
+                    ) {
+                        return response_failure(None, "kill", &error.to_string(), None);
+                    }
                 }
             }
             core.created = false;
@@ -3663,8 +3770,8 @@ impl Worker {
             agent_engine.dispose_kernel().await;
         }
         let active_session_id = self.core.lock().unwrap().active_session_id.clone();
-        let _ = self.emit_session_closed(&active_session_id, DaemonSessionClosedReason::Killed);
-        let _ = self.record_recovery(false, "killed");
+        let _ = self.emit_session_closed(&active_session_id, reason.session_closed_reason());
+        let _ = self.record_recovery(false, reason.recovery_operation());
         let lease = self
             .core
             .lock()
@@ -6361,6 +6468,85 @@ mod tests {
             goal_before["continuationsUsed"]
         );
         assert_eq!(goal_after["objective"], goal_before["objective"]);
+    }
+
+    /// The killed close's schedule cancel (TS `cancelScheduledJobsForSession`
+    /// at `closeSessionOnce("killed")`): a session with an active heartbeat
+    /// job dies at kill — the job cancels durably and the session file
+    /// archives, so no scheduled wake can revive the stopped session (the
+    /// zombie fix's stop-side gate).
+    #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+    #[tokio::test]
+    async fn kill_cancels_the_sessions_scheduled_jobs() {
+        let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir =
+            std::env::temp_dir().join(format!("pa-worker-kill-jobs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sessions_dir = dir.join("sessions");
+        let config = WorkerConfig {
+            socket_path: dir.join("worker.sock"),
+            supervisor_socket_path: PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "kill-jobs-session".to_string(),
+            agent_dir: dir.join("agent"),
+            recovery_journal_path: dir.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(json!({ "engine": "faux", "responses": [] })),
+        };
+        let worker = std::sync::Arc::new(Worker::new(config, None));
+        let created = worker
+            .dispatch(
+                "create",
+                &json!({
+                    "cwd": dir.to_string_lossy(),
+                    "sessionDir": sessions_dir.to_string_lossy(),
+                    "name": "kill-jobs",
+                }),
+            )
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        let data = created.data.expect("the create answers a summary");
+        let session_id = data.get("sessionId").and_then(Value::as_str).expect("id");
+        let session_file = data
+            .get("sessionFile")
+            .and_then(Value::as_str)
+            .expect("session file");
+        // A lane-liveness heartbeat on the session's artifact store.
+        let job = worker
+            .scheduled
+            .store()
+            .create(&pa_core::cron::store::CreateAgentCronJobInput {
+                active_session_id: "kill-jobs-session".to_string(),
+                session_id: session_id.to_string(),
+                session_file: session_file.to_string(),
+                cwd: dir.to_string_lossy().to_string(),
+                prompt: "lane-liveness ping".to_string(),
+                schedule_text: "every 10s".to_string(),
+                source: Some("rlm_heartbeat".to_string()),
+                now: Some(1),
+                ..Default::default()
+            })
+            .expect("the store creates the job");
+        assert_eq!(job.status, pa_core::cron::JobStatus::Active);
+
+        let killed = worker.dispatch("kill", &json!({})).await;
+        assert!(killed.success, "kill failed: {killed:?}");
+
+        // The job cancelled durably: no later fire can wake the session.
+        let stored = worker.scheduled.store().list();
+        let cancelled = stored
+            .iter()
+            .find(|candidate| candidate.id == job.id)
+            .expect("the job stays in the store");
+        assert_eq!(cancelled.status, pa_core::cron::JobStatus::Cancelled);
+        assert_eq!(cancelled.next_run_at, None);
+        // The close archived the session file (the wake scan's state gate).
+        let info =
+            crate::session_store::read_session_info(std::path::Path::new(session_file)).unwrap();
+        assert_eq!(info.state.as_deref(), Some("archived"));
     }
 
     /// The `kill` path (the #247 residue, probe-verified): TS

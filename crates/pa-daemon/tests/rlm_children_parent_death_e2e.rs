@@ -481,9 +481,12 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
             .then_some(())
     });
 
-    // The close is a plain stop (the child's own kill handler archives its
-    // session, exactly like the #246 close): the child's session file
-    // records it.
+    // The close is the shutdown-close shape (TS's in-process child dies
+    // with its parent worker without a close; the Rust worker must be
+    // told, and the `shutdown` reason keeps the child's resume entry):
+    // the child's session file keeps its live state and its scheduled
+    // jobs, so the wake model can still own reviving it later — it is
+    // NOT archived like a killed close (the stop lifecycle lane).
     let child_session_file = {
         let child_dir = agent_dir
             .join("session-artifacts")
@@ -500,8 +503,8 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
     let child_session =
         std::fs::read_to_string(&child_session_file).expect("read child session file");
     assert!(
-        child_session.contains("\"archived\""),
-        "the closed child's session must be archived: {child_session}"
+        !child_session.contains("\"archived\""),
+        "the parent-death close keeps the child's resume entry (no archive): {child_session}"
     );
 
     // The respawned parent's registry is fresh: the parent died before it

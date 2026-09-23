@@ -242,6 +242,14 @@ pub struct AgentSessionEngine {
     /// unsettled RLM descendant work (TS `_autonomousContinuationAwaitsRlmWork`):
     /// the children registry's settle hook delivers the owed continuation.
     pub(crate) autonomous_awaits_rlm_work: std::sync::atomic::AtomicBool,
+    /// The session's closed marker (TS `_disposed`/`_disposing`): set by
+    /// the worker's kill/shutdown closes. The goal and autonomous
+    /// continuation mint sites and their settle-hook retries bail instead
+    /// of continuing a stopped session — no continuation, no mint, no
+    /// goal-state churn (the zombie fix: a stopped session stays
+    /// stopped). The create path clears it: a fresh (or replaced) session
+    /// starts live.
+    pub(crate) session_closed: std::sync::atomic::AtomicBool,
     /// The engine's own arc, registered by the worker after construction:
     /// the in-run autonomous continuation hook upgrades the weak so the
     /// agent's loop never pins the engine (the goal seam's pattern, held
@@ -433,6 +441,7 @@ impl AgentSessionEngine {
             held_autonomous_continuation: std::sync::Mutex::new(None),
             autonomous_admission: std::sync::Mutex::new(None),
             autonomous_awaits_rlm_work: std::sync::atomic::AtomicBool::new(false),
+            session_closed: std::sync::atomic::AtomicBool::new(false),
             self_weak: std::sync::Mutex::new(None),
             autonomous_queue_purge: std::sync::Mutex::new(None),
             cwd,
@@ -684,6 +693,30 @@ impl AgentSessionEngine {
         if let Some(engine) = guard.as_deref() {
             engine.dispose_kernel().await;
         }
+    }
+
+    /// Mark the session closed (TS `runtime.dispose`'s `_disposing`/`_disposed`
+    /// gates): the worker's kill and shutdown closes set it first, so every
+    /// continuation mint site and settle-hook retry bails — a stopped
+    /// session never continues (no mint, no goal-state churn, no queued
+    /// follow-up a later wake could run).
+    pub fn mark_session_closed(&self) {
+        self.session_closed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The create path's live reset: a fresh (or replaced) session starts
+    /// live (TS's fresh runtime starts un-disposed).
+    pub fn clear_session_closed(&self) {
+        self.session_closed
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the session is closed (TS `this._disposed || this._disposing`
+    /// in the continuation resume sites).
+    pub fn session_is_closed(&self) -> bool {
+        self.session_closed
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Build the core session once (same once-only rule as `session_agent`),
