@@ -260,12 +260,14 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
     let steering_mode = Some(queue_mode(queue_settings.get_steering_mode()));
     let follow_up_mode = Some(queue_mode(queue_settings.get_follow_up_mode()));
     // TS `createAgentSessionServices` builds every CLI session — print
-    // included — on a live MCP manager (`getUserServers`/
-    // `getCatalogSources` re-read settings per resolve), so the kernel's
-    // `mcp.*` host requests observe settings written after session
-    // construction. The engine's `mcp_manager: None` fallback would
-    // snapshot them instead. Auth construction blocks; run it off the
-    // async runtime like the engine's own gating does.
+    // included — on a manager whose `getUserServers`/`getCatalogSources`
+    // closures re-read settings on every resolution (construction and
+    // each later `refresh()`: the API the remote-catalog change
+    // subscription drives mid-session), and whose declared local catalog
+    // sources resolve. The session's `mcp.config` host handler keeps
+    // serving the registration-time integrations (the pa-core handler
+    // design, shared with the daemon worker). Auth construction blocks;
+    // run it off the async runtime like the engine's own gating does.
     let mcp_manager = {
         let cwd = config.cwd.clone();
         let agent_dir = config.agent_dir.clone();
@@ -1408,14 +1410,17 @@ mod tests {
 
     // --- print-mode MCP wiring (TS `createAgentSessionServices` parity) ---
 
-    /// The print session's MCP manager resolves settings-declared servers
-    /// LIVE (TS `getUserServers` re-reads settings per resolve): a settings
-    /// rewrite reaches the next `mcp.refresh`, and the `mcp.config` host
-    /// request — the kernel's `rlm/mcp.py` resolution path — serves the
-    /// newly declared config. The engine's `mcp_manager: None` fallback
-    /// snapshots at construction and could not.
+    /// The print session's MCP manager serves a settings-declared server
+    /// through the `mcp.config` host request the kernel dispatches
+    /// (`rlm/mcp.py` resolution), and resolves its settings LIVE: a
+    /// settings rewrite reaches the next `refresh()` — the re-resolver
+    /// the remote-catalog change subscription drives mid-session. The
+    /// `mcp.config` handler itself keeps the registration-time
+    /// integrations (the pa-core handler design, shared with the daemon
+    /// worker), so the pre-refresh handler still answers the old roster —
+    /// asserted here so the test states the real production behavior.
     #[tokio::test]
-    async fn print_mode_mcp_manager_resolves_settings_servers_live() {
+    async fn print_mode_mcp_manager_serves_settings_servers_and_resolves_live() {
         let home = tempfile::TempDir::new().unwrap();
         let cwd = home.path().to_path_buf();
         let agent_dir = home.path().join("agent");
@@ -1439,7 +1444,8 @@ mod tests {
             manager.get_enabled_persistent_generic_servers(),
             vec!["fixture-echo".to_string()]
         );
-        // The kernel's config host request serves the declared server.
+        // The kernel's config host request serves the declared server with
+        // the declared stdio config (registration-time integrations).
         let mut handlers = pa_core::kernel::shared::HostRequestHandlers::default();
         manager.register_host_handlers(&mut handlers);
         let config = handlers.get("mcp.config").unwrap().clone();
@@ -1452,7 +1458,8 @@ mod tests {
         assert_eq!(result["type"], "stdio");
         assert_eq!(result["command"], "python3");
         assert_eq!(result["args"], serde_json::json!(["echo.py"]));
-        // A settings rewrite reaches the same live manager on refresh.
+        // A settings rewrite reaches the same manager on the next refresh:
+        // the closures re-read settings per resolution.
         std::fs::write(
             agent_dir.join("settings.json"),
             serde_json::json!({
@@ -1472,25 +1479,27 @@ mod tests {
             manager.get_enabled_persistent_generic_servers(),
             vec!["second-echo".to_string()]
         );
-        let mut handlers = pa_core::kernel::shared::HostRequestHandlers::default();
-        manager.register_host_handlers(&mut handlers);
-        let config = handlers.get("mcp.config").unwrap().clone();
+        // The already-registered handler keeps its registration-time
+        // integrations — the registration shape a live session dispatches.
         let result = config(pa_core::kernel::shared::HostRequestPayload {
-            data: serde_json::json!({ "server": "second-echo" }),
-            cell_source_code: None,
-        })
-        .await
-        .unwrap();
-        assert_eq!(result["command"], "node");
-        let removed = config(pa_core::kernel::shared::HostRequestPayload {
             data: serde_json::json!({ "server": "fixture-echo" }),
             cell_source_code: None,
         })
         .await
         .unwrap();
+        assert_eq!(
+            result["command"], "python3",
+            "the registered handler serves its registration-time integrations"
+        );
+        let missing = config(pa_core::kernel::shared::HostRequestPayload {
+            data: serde_json::json!({ "server": "second-echo" }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap();
         assert!(
-            removed.as_object().unwrap().is_empty(),
-            "the removed server no longer resolves"
+            missing.as_object().unwrap().is_empty(),
+            "the pre-refresh handler does not know the new server"
         );
     }
 
