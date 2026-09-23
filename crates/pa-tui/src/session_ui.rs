@@ -7016,6 +7016,15 @@ impl SessionUi {
                 // this same press (before the idle tick) must not
                 // materialize a dropdown over the menu on the next tick.
                 view.editor.cancel_autocomplete();
+                // The menu also takes the frame from a queue browse: the
+                // parked message keeps its text (the typed partial is the
+                // command being fulfilled now), and the next Enter submits
+                // a prompt instead of routing into apply_queue_selection,
+                // which would delete or replace the still-selected message.
+                if matches!(command.as_str(), "model" | "mcp") {
+                    self.queue_selection.reset();
+                    self.sync_queue_selection(view);
+                }
                 match command.as_str() {
                     "model" => {
                         self.open_model_picker(view, partial.trim()).await?;

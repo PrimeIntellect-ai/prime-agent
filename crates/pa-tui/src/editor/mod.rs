@@ -765,7 +765,7 @@ mod tests {
         let mut e = ed();
         e.set_text("/model gp\ndraft reply");
         e.handle_input("up");
-        assert_eq!(e.get_cursor(), (0, 10));
+        assert_eq!(e.get_cursor(), (0, 9));
         assert_eq!(
             e.picker_argument_context(),
             None,
@@ -774,7 +774,7 @@ mod tests {
         e.set_text("/model gp\n   ");
         e.handle_input("up");
         e.handle_input("end");
-        assert_eq!(e.get_cursor(), (0, 10));
+        assert_eq!(e.get_cursor(), (0, 9));
         assert_eq!(
             e.picker_argument_context(),
             Some(("model".to_string(), "gp".to_string())),
