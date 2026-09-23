@@ -5750,10 +5750,20 @@ impl SessionUi {
     /// Fire a background heartbeat-catalog refresh (TS
     /// `refreshHeartbeatCatalog`): the fetch lands through the run loop's
     /// channel into the open view; failures clear nothing — the next
-    /// `heartbeats_changed` event retries.
-    pub(crate) fn spawn_heartbeat_refresh(&self) {
+    /// `heartbeats_changed` event retries. At most one refresh runs in
+    /// flight with one queued trailing refresh (daemon-wide broadcasts can
+    /// burst; stacked concurrent requests would load the supervisor), and
+    /// every response carries the epoch it was issued under so a stale
+    /// one never overwrites a newer catalog.
+    pub(crate) fn spawn_heartbeat_refresh(&mut self) {
+        if self.heartbeat_refresh_in_flight {
+            self.heartbeat_refresh_queued = true;
+            return;
+        }
+        self.heartbeat_refresh_in_flight = true;
         let updates = self.heartbeat_updates.clone();
         let client = self.client.clone();
+        let epoch = self.heartbeat_refresh_epoch;
         tokio::spawn(async move {
             let request = DaemonCommand::HeartbeatsList {
                 id: None,
@@ -5768,12 +5778,14 @@ impl SessionUi {
             match fetched {
                 Ok(Ok(data)) => {
                     let _ = updates.send(HeartbeatsUpdate {
+                        epoch,
                         heartbeats: parse_heartbeats(&data),
                         fetch_error: None,
                     });
                 }
                 Ok(Err(error)) => {
                     let _ = updates.send(HeartbeatsUpdate {
+                        epoch,
                         heartbeats: Vec::new(),
                         fetch_error: Some(format!("{error:#}")),
                     });
