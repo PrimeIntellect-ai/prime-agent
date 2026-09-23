@@ -458,7 +458,7 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
     }
     // The parked projection reaches attached clients.
     let parked = wait_for_projection(
-        client,
+        &mut client,
         &["steer A", "steer B"],
         &["follow C"],
         "parked queue",
@@ -571,7 +571,7 @@ fn multi_item_queue_delivers_every_item_in_lane_order() {
         assert_eq!(response["success"], true, "{id} failed: {response}");
     }
     let parked = wait_for_projection(
-        client,
+        &mut client,
         &["steer one", "steer two", "steer three"],
         &["follow one", "follow two", "follow three"],
         "six-item parked lane",
