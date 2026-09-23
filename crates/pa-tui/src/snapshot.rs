@@ -184,6 +184,21 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
             tool_results.push(result);
             continue;
         }
+        // The retry-episode collapse (SANCTIONED DIVERGENCE, operator
+        // ruling 2026-09-23): a `provider_retry_outcome` row replaces the
+        // failed attempts its episode superseded, so the rebuilt chat
+        // shows ONE line per episode instead of the per-attempt error
+        // rows TS renders. The superseded rows sit at the tail (attempts
+        // are appended in order), and the collapse never touches tool
+        // cards (their failures ride the cards, not error-only rows).
+        if message.get("role").and_then(Value::as_str) == Some("custom")
+            && message.get("customType").and_then(Value::as_str)
+                == Some(crate::custom_message::PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE)
+        {
+            while chat.last().is_some_and(is_superseded_attempt_row) {
+                chat.pop();
+            }
+        }
         let first_new = chat.len();
         chat.extend(message_value_to_entries(message));
         for (offset, entry) in chat[first_new..].iter().enumerate() {
@@ -972,6 +987,22 @@ pub struct AssistantErrorRow {
     pub aborted: bool,
 }
 
+/// The failed-attempt error row a retry supersedes (SANCTIONED DIVERGENCE
+/// from TS, operator ruling 2026-09-23 — the TS chat keeps one such row per
+/// failed attempt): an error-only assistant entry, no blocks and no tool
+/// calls (their cards carry the failure), not an abort. The episode's
+/// `provider_retry_outcome` row replaces every superseded attempt.
+pub fn is_superseded_attempt_row(entry: &ChatEntry) -> bool {
+    matches!(
+        entry,
+        ChatEntry::Assistant(assistant)
+            if assistant.error.is_some()
+                && !assistant.aborted
+                && assistant.blocks.is_empty()
+                && !assistant.has_tool_calls
+    )
+}
+
 /// Decode a failed assistant message's error row (TS `createErrorComponent`
 /// inputs); `None` for settled messages.
 pub fn assistant_error_row(
@@ -1643,6 +1674,101 @@ mod tests {
                 steering: vec![],
                 follow_ups: vec!["queued follow-up".to_string()],
             }
+        );
+    }
+
+    /// The rebuild side of the single-line retry UX (operator ruling
+    /// 2026-09-23): the `provider_retry_outcome` row replaces the failed
+    /// attempts its episode superseded — the rebuilt chat shows ONE line
+    /// per episode, never the per-attempt error rows TS renders.
+    #[test]
+    fn retry_outcome_row_collapses_the_superseded_attempts() {
+        let user = json!({"role": "user", "content": "run the deploy"});
+        let failed = |text: &str| {
+            json!({
+                "role": "assistant",
+                "content": [],
+                "stopReason": "error",
+                "errorMessage": text,
+            })
+        };
+        let outcome = json!({
+            "role": "custom",
+            "customType": "provider_retry_outcome",
+            "content": "Recovered after 2 retries: 429 Too many concurrent requests (limit: 32)",
+            "display": true,
+            "details": { "success": true, "attempts": 2, "finalError": "429 Too many concurrent requests (limit: 32)" },
+        });
+        let recovered = json!({"role": "assistant", "content": [{"type": "text", "text": "deployed"}], "stopReason": "stop"});
+        let messages = vec![
+            user,
+            failed("Error: 429 Too many concurrent requests (limit: 32). Try again shortly."),
+            failed("Error: 429 Too many concurrent requests (limit: 32). Try again shortly."),
+            outcome,
+            recovered,
+        ];
+        let entries = transcript_to_entries(&messages);
+        // Exactly: the user row, the ONE outcome line, the recovered reply.
+        assert_eq!(entries.len(), 3, "entries: {entries:?}");
+        assert!(matches!(
+            entries[1],
+            ChatEntry::Status { ref text, kind: StatusKind::Info }
+                if text.contains("Recovered after 2 retries")
+                    && text.contains("429 Too many concurrent requests")
+        ));
+        // Zero superseded attempt rows survive.
+        assert!(
+            entries
+                .iter()
+                .all(|entry| !is_superseded_attempt_row(entry)),
+            "per-attempt rows must collapse: {entries:?}"
+        );
+    }
+
+    /// Without an outcome row the failure is not an episode: the lone
+    /// error row keeps today's rendering (retries disabled or a
+    /// non-retryable kind).
+    #[test]
+    fn a_lone_failed_attempt_without_an_outcome_row_stays() {
+        let user = json!({"role": "user", "content": "hi"});
+        let failed = json!({
+            "role": "assistant",
+            "content": [],
+            "stopReason": "error",
+            "errorMessage": "401 Unauthorized",
+        });
+        let entries = transcript_to_entries(&[user, failed]);
+        assert_eq!(entries.len(), 2, "entries: {entries:?}");
+        assert!(
+            entries.iter().any(is_superseded_attempt_row),
+            "the lone failure renders its own row: {entries:?}"
+        );
+    }
+
+    /// Aborted attempts are never collateral of the collapse.
+    #[test]
+    fn aborted_attempts_never_collapse() {
+        let user = json!({"role": "user", "content": "hi"});
+        let aborted = json!({
+            "role": "assistant",
+            "content": [],
+            "stopReason": "aborted",
+            "errorMessage": "Operation aborted",
+        });
+        let outcome = json!({
+            "role": "custom",
+            "customType": "provider_retry_outcome",
+            "content": "\u{26a0} Error: Retry failed after 1 attempts: Retry cancelled",
+            "display": true,
+            "details": { "success": false, "attempts": 1, "finalError": "Retry cancelled" },
+        });
+        let entries = transcript_to_entries(&[user.clone(), aborted, outcome]);
+        assert_eq!(entries.len(), 3, "the abort row stays: {entries:?}");
+        assert!(
+            entries
+                .iter()
+                .any(|entry| matches!(entry, ChatEntry::Assistant(assistant) if assistant.aborted)),
+            "the abort renders: {entries:?}"
         );
     }
 

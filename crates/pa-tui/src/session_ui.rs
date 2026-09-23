@@ -7503,6 +7503,15 @@ impl SessionUi {
                 // reason is a provider-failover switch: the loader names
                 // the backup provider the turn re-routes to (no countdown;
                 // the switch re-issues immediately).
+                //
+                // SANCTIONED DIVERGENCE (operator ruling 2026-09-23): the
+                // just-failed attempt's error row leaves the chat — the
+                // transient loader line (error + attempt + countdown,
+                // updated in place) is the ONE error the chat shows while
+                // the episode runs, and the episode's durable outcome row
+                // replaces it at the settle. (TS keeps one error row per
+                // failed attempt; a 429-storm spammed the chat.)
+                pop_superseded_attempt_row(view);
                 view.retry = Some(RetryState {
                     attempt,
                     max_attempts,
@@ -7513,19 +7522,18 @@ impl SessionUi {
             }
             TurnUpdate::AutoRetryEnd {
                 success: _,
-                attempt,
+                attempt: _,
                 final_error,
                 restored_model,
             } => {
                 view.retry = None;
-                if let Some(final_error) = final_error {
+                if final_error.is_some() {
                     self.turn_error_shown = true;
-                    view.push_entry(ChatEntry::Status {
-                        text: format!(
-                            "\u{26a0} Error: Retry failed after {attempt} attempts: {final_error}"
-                        ),
-                        kind: StatusKind::Error,
-                    });
+                    // The give-up's final failed attempt is superseded by
+                    // the ONE terminal line (the durable outcome row that
+                    // follows this event renders it; the row text matches
+                    // the old live banner).
+                    pop_superseded_attempt_row(view);
                 }
                 // A settled switch restores the primary provider (TS
                 // `restoredModel` status line).
@@ -8423,6 +8431,24 @@ fn mcp_auth_args_need_terminal(args: &str) -> bool {
     matches!(args.split_whitespace().next(), Some("login" | "paste"))
 }
 
+/// The retry-episode collapse (SANCTIONED DIVERGENCE from TS, operator
+/// ruling 2026-09-23): pop the trailing failed-attempt error row the
+/// retry supersedes, so the ONE line the episode shows while it runs is
+/// the transient loader (updated in place) and the ONE line it leaves is
+/// the durable outcome row. No-op when the trailing entry is anything
+/// else (an abort row, tool-call-carrying failures, a settled reply).
+pub(crate) fn pop_superseded_attempt_row(view: &mut AgentView) -> bool {
+    if view
+        .chat
+        .last()
+        .is_some_and(crate::snapshot::is_superseded_attempt_row)
+    {
+        view.pop_chat_entry().is_some()
+    } else {
+        false
+    }
+}
+
 #[cfg(test)]
 mod streaming_tray_hint_tests {
     use super::streaming_tray_hint;
@@ -8668,5 +8694,82 @@ mod mcp_auth_terminal_tests {
         assert!(!mcp_auth_args_need_terminal("logout anthropic"));
         assert!(!mcp_auth_args_need_terminal(""));
         assert!(!mcp_auth_args_need_terminal("refresh anthropic"));
+    }
+}
+
+#[cfg(test)]
+mod retry_collapse_tests {
+    use super::pop_superseded_attempt_row;
+    use crate::chat::{ChatEntry, StatusKind};
+    use crate::theme::{ColorMode, Theme};
+    use crate::view::AgentView;
+
+    fn view_with(entries: Vec<ChatEntry>) -> AgentView {
+        let mut view = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
+        for entry in entries {
+            view.push_entry(entry);
+        }
+        view
+    }
+
+    fn failed_attempt(text: &str) -> ChatEntry {
+        ChatEntry::Assistant(Box::new(crate::chat::AssistantMessage {
+            blocks: Vec::new(),
+            has_tool_calls: false,
+            streaming: false,
+            error: Some(format!("Error: {text}")),
+            aborted: false,
+        }))
+    }
+
+    fn aborted_attempt() -> ChatEntry {
+        ChatEntry::Assistant(Box::new(crate::chat::AssistantMessage {
+            blocks: Vec::new(),
+            has_tool_calls: false,
+            streaming: false,
+            error: Some("Operation aborted".to_string()),
+            aborted: true,
+        }))
+    }
+
+    /// The 429-storm single-line collapse (operator ruling 2026-09-23): the
+    /// trailing failed-attempt error row pops when its retry supersedes it —
+    /// and only that row (an abort, a settled reply, or a tool-carrying
+    /// failure stays).
+    #[test]
+    fn pops_only_the_superseded_failed_attempt() {
+        let mut view = view_with(vec![
+            ChatEntry::User {
+                text: "hi".to_string(),
+            },
+            failed_attempt("429 Too many concurrent requests"),
+        ]);
+        assert!(pop_superseded_attempt_row(&mut view));
+        assert_eq!(view.chat_len(), 1, "only the user row remains");
+        // A second pop finds nothing: exactly one row per attempt.
+        assert!(!pop_superseded_attempt_row(&mut view));
+
+        // An abort row never pops (aborts are not retried).
+        let mut view = view_with(vec![aborted_attempt()]);
+        assert!(!pop_superseded_attempt_row(&mut view));
+
+        // A tool-carrying failure never pops (the cards carry the failure).
+        let mut view = view_with(vec![ChatEntry::Assistant(Box::new(
+            crate::chat::AssistantMessage {
+                blocks: Vec::new(),
+                has_tool_calls: true,
+                streaming: false,
+                error: Some("Error: mid-run failure".to_string()),
+                aborted: false,
+            },
+        ))]);
+        assert!(!pop_superseded_attempt_row(&mut view));
+
+        // A status row (the episode outcome) never pops.
+        let mut view = view_with(vec![ChatEntry::Status {
+            text: "Recovered after 2 retries: provider down".to_string(),
+            kind: StatusKind::Info,
+        }]);
+        assert!(!pop_superseded_attempt_row(&mut view));
     }
 }
