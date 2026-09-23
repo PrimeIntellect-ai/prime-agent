@@ -436,6 +436,10 @@ impl ActivityPanel {
         }
         lines.push(Vec::new());
         if let Some(row) = self.rows.get(self.selected) {
+            // The detail pairs and the fetched tail share one budget: a
+            // collapsed viewport never overspends it (the tail is the
+            // explicitly requested output, so the pairs give way first;
+            // the heading and its lines never draw past the budget).
             let budget = self.detail_budget();
             let tail = self.bash_tail.as_ref().filter(|(id, _)| {
                 self.rows
@@ -445,15 +449,12 @@ impl ActivityPanel {
             let tail_rows = tail
                 .map(|(_, tail)| 1 + tail.len().min(MAX_TAIL_LINES))
                 .unwrap_or(0);
-            let detail_rows = budget
-                .saturating_sub(tail_rows)
-                .max(1)
-                .min(detail_cap(row.group));
+            let detail_rows = budget.saturating_sub(tail_rows).min(detail_cap(row.group));
             lines.extend(detail_lines(theme, width, row, detail_rows));
             if let Some((_, tail)) = tail {
+                let tail_budget = budget.saturating_sub(detail_rows);
                 lines.push(text(ThemeColor::Muted, "Output tail".to_string()));
-                let tail_budget = budget.saturating_sub(detail_rows).max(1);
-                for output in tail.iter().take(tail_budget) {
+                for output in tail.iter().take(tail_budget.saturating_sub(1)) {
                     lines.push(text(ThemeColor::Muted, output.clone()));
                 }
             }

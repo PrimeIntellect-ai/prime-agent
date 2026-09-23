@@ -621,12 +621,11 @@ impl HeartbeatsPicker {
 
     /// The selection's detail-block row budget, shrinking on short
     /// viewports so the pane never clips: the frame rows, the scroll
-    /// indicator, and at least one list row always render first (frame
-    /// 7 + scroll 1 + list 1 = 9 ride outside the budget).
+    /// indicator, and the list rows always render first (frame 7 +
+    /// scroll 1 + list 1 = 9 ride outside the budget) — on very short
+    /// viewports the block yields entirely rather than overspending.
     fn detail_cap(&self) -> usize {
-        MAX_DETAIL_ROWS
-            .min(self.viewport_rows.saturating_sub(9))
-            .max(1)
+        MAX_DETAIL_ROWS.min(self.viewport_rows.saturating_sub(9))
     }
 
     /// The list's visible-row budget (TS `getListLayout`, inline shape).
@@ -764,11 +763,10 @@ impl HeartbeatsPicker {
         // The action pane has no list window to absorb a shortage: the
         // detail block shrinks on short viewports so the pane never
         // clips (its frame rows, the two action rows, and the hint
-        // always render first; the error block adds two rows).
+        // always render first; the error block adds two rows) — on very
+        // short viewports the block yields entirely.
         let error_rows = if self.error.is_some() { 2 } else { 0 };
-        let cap = MAX_DETAIL_ROWS
-            .min(self.viewport_rows.saturating_sub(10 + error_rows))
-            .max(1);
+        let cap = MAX_DETAIL_ROWS.min(self.viewport_rows.saturating_sub(10 + error_rows));
         lines.extend(detail_block_lines(
             theme,
             width,
@@ -1312,7 +1310,7 @@ mod tests {
     /// squeeze (it is never the clipped row).
     #[test]
     fn short_viewports_never_clip_the_list_pane() {
-        for viewport_rows in [10usize, 12, 14] {
+        for viewport_rows in [9usize, 10, 12, 14] {
             let picker = HeartbeatsPicker::new(entries(), None, None, viewport_rows);
             let frame = picker.render(&theme(), 70, &kb());
             assert!(

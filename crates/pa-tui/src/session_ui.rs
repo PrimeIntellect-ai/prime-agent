@@ -110,6 +110,10 @@ pub(crate) struct CompactionAbortNote {
 /// `refreshHeartbeatCatalog`'s fetch result): the scoped, sorted rows, or
 /// the fetch error that keeps the last catalog (stale-while-revalidate).
 pub(crate) struct HeartbeatsUpdate {
+    /// The refresh epoch this snapshot belongs to: a response older than
+    /// the session's current epoch is stale and never overwrites a newer
+    /// catalog.
+    pub epoch: u64,
     pub heartbeats: Vec<HeartbeatEntry>,
     pub fetch_error: Option<String>,
 }
@@ -352,6 +356,16 @@ pub(crate) struct SessionUi {
     /// group and seeds the `/heartbeats` view; refreshed by
     /// `heartbeats_changed`.
     heartbeat_catalog: Vec<HeartbeatEntry>,
+    /// At most one background heartbeat refresh runs at a time (the
+    /// daemon-wide broadcasts can burst); concurrent requests would
+    /// stack load on the supervisor.
+    heartbeat_refresh_in_flight: bool,
+    /// A burst arrived while a refresh was in flight: one trailing
+    /// coalesced refresh follows the landing response.
+    heartbeat_refresh_queued: bool,
+    /// Monotonic epoch of the newest heartbeat refresh; an older
+    /// response never overwrites a newer catalog.
+    heartbeat_refresh_epoch: u64,
     /// The current Python bash() registry snapshot from the owning kernel.
     bash_activities: Value,
     /// Monotonic id of the latest issued kernel-bash list request; a late
@@ -610,6 +624,9 @@ impl SessionUi {
             scoped_agents_view: None,
             roster: Vec::new(),
             heartbeat_catalog: Vec::new(),
+            heartbeat_refresh_in_flight: false,
+            heartbeat_refresh_queued: false,
+            heartbeat_refresh_epoch: 0,
             bash_activities: serde_json::json!({"activities": []}),
             bash_list_epoch: 0,
             bash_updates: activity_updates.bash,
@@ -5621,6 +5638,7 @@ impl SessionUi {
                 }
                 Err(_) => {
                     let _ = updates.send(HeartbeatsUpdate {
+                        epoch,
                         heartbeats: Vec::new(),
                         fetch_error: Some(
                             "timed out waiting for the Prime Agent daemon response".to_string(),
@@ -5640,8 +5658,20 @@ impl SessionUi {
         update: HeartbeatsUpdate,
         view: &mut AgentView,
     ) {
+        // The refresh slot frees whether the response landed, failed, or
+        // timed out; a burst's queued refresh runs next.
+        self.heartbeat_refresh_in_flight = false;
+        let queued = std::mem::take(&mut self.heartbeat_refresh_queued);
+        // A response from an older refresh never overwrites the newer
+        // catalog (an in-flight refresh raced a fresher epoch).
+        if update.epoch < self.heartbeat_refresh_epoch {
+            if queued {
+                self.spawn_heartbeat_refresh();
+            }
+            return;
+        }
         // TS stale-while-revalidate: a failed refresh keeps the last catalog
-        // (the tray keeps counting the heartbeats it knows; the daemon's
+        // (the dock keeps counting the heartbeats it knows; the daemon's
         // scheduler keeps firing while its catalog read times out), and the
         // failure surfaces only inside an open manager view.
         if let Some(error) = update.fetch_error {
@@ -5649,16 +5679,19 @@ impl SessionUi {
                 picker.set_fetch_error(Some(error));
             }
             self.dirty = true;
-            return;
+        } else {
+            let mut heartbeats = self.scope_heartbeats(update.heartbeats);
+            sort_heartbeats(&mut heartbeats);
+            self.heartbeat_catalog = heartbeats.clone();
+            if let Some(picker) = view.heartbeats_picker.as_mut() {
+                picker.apply_catalog(heartbeats, None);
+            }
+            self.sync_activity_dock(view);
+            self.dirty = true;
         }
-        let mut heartbeats = self.scope_heartbeats(update.heartbeats);
-        sort_heartbeats(&mut heartbeats);
-        self.heartbeat_catalog = heartbeats.clone();
-        if let Some(picker) = view.heartbeats_picker.as_mut() {
-            picker.apply_catalog(heartbeats, None);
+        if queued {
+            self.spawn_heartbeat_refresh();
         }
-        self.sync_activity_dock(view);
-        self.dirty = true;
     }
 
     /// Fetch the scoped catalog and open the `/heartbeats` view over it
@@ -5668,6 +5701,9 @@ impl SessionUi {
     /// `preselect` carries the activity panel's chosen heartbeat row into
     /// the view's selection.
     async fn open_heartbeats_view(&mut self, view: &mut AgentView, preselect: Option<String>) {
+        // The direct fetch is the newest snapshot: bump the epoch so an
+        // in-flight background response never overwrites this catalog.
+        self.heartbeat_refresh_epoch += 1;
         let (fetched, fetch_error) = self.fetch_scoped_heartbeats().await;
         let heartbeats = if fetch_error.is_some() {
             self.heartbeat_catalog.clone()
