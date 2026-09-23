@@ -25,6 +25,16 @@ fn resolve_provider(api: &str) -> Result<Arc<dyn crate::registry::Provider>, Pro
 /// (`pa-core` cannot be a dependency here, so the heuristic is restated).
 fn estimated_input_tokens(context: &Context) -> u64 {
     let mut chars = context.system_prompt.as_deref().map_or(0, str::len) as u64;
+    // Tool definitions serialize into every request (the provider sends
+    // each schema on every call), so they claim input room like the
+    // tool-call arguments below.
+    for tool in context.tools.iter().flatten() {
+        chars = chars.saturating_add(
+            serde_json::to_string(tool)
+                .map(|json| json.chars().count() as u64)
+                .unwrap_or(0),
+        );
+    }
     for message in &context.messages {
         chars = chars.saturating_add(match message {
             crate::types::Message::User(user) => match &user.content {
@@ -56,14 +66,17 @@ fn estimated_input_tokens(context: &Context) -> u64 {
 }
 
 /// Text chars plus 4,800 per image (1,200 tokens) — the session engine's
-/// per-image estimate; raw blocks have no modeled size.
+/// per-image estimate; raw blocks count their serialized JSON (`user_block_payload`
+/// passes un-modeled blocks through as text, so their bytes reach the prompt).
 fn user_content_block_chars(blocks: &[crate::types::UserOrToolContent]) -> u64 {
     blocks
         .iter()
         .map(|block| match block {
             crate::types::UserOrToolContent::Text(text) => text.text.chars().count() as u64,
             crate::types::UserOrToolContent::Image(_) => 4_800,
-            crate::types::UserOrToolContent::Raw(_) => 0,
+            crate::types::UserOrToolContent::Raw(value) => serde_json::to_string(value)
+                .map(|json| json.chars().count() as u64)
+                .unwrap_or(0),
         })
         .sum()
 }
@@ -73,8 +86,10 @@ fn user_content_block_chars(blocks: &[crate::types::UserOrToolContent]) -> u64 {
 /// contextWindow` rejects an unsatisfiable request outright (the live
 /// 400: 1,017,457 input + 32,000 requested output on a 1,048,576 window),
 /// so the facade shrinks the output budget to whatever room the estimated
-/// input leaves. The estimate overestimates, so the clamp stays on the
-/// satisfiable side of the provider's own count.
+/// input leaves. The estimate covers the full serialized request — system
+/// prompt, tool schemas, message text, raw blocks, images — so it tracks
+/// the provider's own input count instead of leaving uncounted bytes to
+/// overflow it.
 ///
 /// The TS facade never clamps (`packages/ai/src/providers/simple-options.ts`
 /// caps only at `min(model.maxTokens, 32000)`); this is a deliberate
@@ -180,6 +195,75 @@ mod tests {
             })],
             tools: None,
         }
+    }
+
+    #[test]
+    fn the_estimate_counts_the_serialized_tool_schemas() {
+        let tool: crate::types::Tool = serde_json::from_value(json!({
+            "name": "lookup",
+            "description": "x".repeat(1_600),
+            "parameters": {"type": "object"}
+        }))
+        .expect("tool parses");
+        let serialized = serde_json::to_string(&tool).expect("tool serializes");
+        let mut context = text_context(3_000);
+        context.tools = Some(vec![tool]);
+        // The tool schema's serialized bytes join the text under chars/4.
+        assert_eq!(
+            estimated_input_tokens(&context),
+            (3_000 + serialized.chars().count() as u64).div_ceil(4)
+        );
+    }
+
+    #[test]
+    fn the_estimate_counts_raw_blocks_as_their_serialized_json() {
+        // Raw blocks reach the prompt as text (`user_block_payload`'s
+        // opaque arm), so their serialized bytes claim input room.
+        let value = json!({"unmodeled": "y".repeat(4_000)});
+        let serialized = serde_json::to_string(&value).expect("value serializes");
+        let mut context = text_context(3_000);
+        context
+            .messages
+            .push(crate::types::Message::User(UserMessage {
+                content: UserMessageContent::Blocks(vec![UserOrToolContent::Raw(value)]),
+                timestamp: 0,
+                rest: Default::default(),
+            }));
+        assert_eq!(
+            estimated_input_tokens(&context),
+            (3_000 + serialized.chars().count() as u64).div_ceil(4)
+        );
+    }
+
+    #[test]
+    fn tool_schemas_shrink_the_room_the_clamp_leaves() {
+        // A tool-carrying request the text-only estimate called
+        // satisfiable now clamps: the schemas eat the output room. The
+        // input must still fit the window — zero room leaves the budget
+        // for the overflow recovery arm instead.
+        let model = test_model(1_000, 40_000);
+        let mut context = text_context(3_000); // 750 text tokens
+        let tool: crate::types::Tool = serde_json::from_value(json!({
+            "name": "lookup",
+            "description": "x".repeat(400),
+            "parameters": {"type": "object"}
+        }))
+        .expect("tool parses");
+        let serialized = serde_json::to_string(&tool).expect("tool serializes");
+        context.tools = Some(vec![tool]);
+        let mut options = StreamOptions {
+            max_tokens: Some(250),
+            ..Default::default()
+        };
+        clamp_output_budget(&model, &context, Some(&mut options));
+        // 250 exactly fit the 750-token text input; the schema's
+        // serialized tokens leave less room than the budget requests,
+        // so the budget clamps to exactly what is left.
+        let room = 1_000u64.saturating_sub(
+            (3_000 + serialized.chars().count() as u64).div_ceil(4),
+        );
+        assert_eq!(options.max_tokens, Some(room));
+        assert!(room > 0 && room < 250);
     }
 
     #[test]

@@ -632,6 +632,12 @@ impl AgentSessionEngine {
             .lock()
             .expect("autonomous boundary lock") = None;
         *self.published_goal.lock().expect("published goal lock") = None;
+        // The retired session's provider target goes with it: a demand
+        // seam before the replacement build (an immediate `/compact`)
+        // must resolve the CURRENT model through the pre-build
+        // `resolve_model` fallback, not rebuild on the retired session's
+        // target while a cwd/settings change waits for the prewarm.
+        *self.provider_target.write().expect("provider target lock") = None;
         if let Some(engine) = built {
             // The session's telemetry ends with it (the TS dispose
             // callback the replacement teardown runs); best-effort like
@@ -1633,7 +1639,11 @@ impl SessionEngine for AgentSessionEngine {
             };
         }
         let custom_instructions = request.custom_instructions.clone();
-        let api_key = self.config.api_key.clone();
+        // The live target's key, the same chain every other summarizer
+        // arm reads: the config key is the startup snapshot and goes
+        // stale with the session's provider switches (the R8 seam's
+        // key arm — a summarizer with the old provider's key, or none).
+        let api_key = self.resolve_request_api_key(&model);
         let run = async {
             // The lock covers the clone only (see `run_turn_once`): the
             // compaction below runs a summarizer model call, and holding
@@ -5239,10 +5249,127 @@ pub(crate) mod tests {
             assistant_texts(&crossing_events),
             vec!["crossing reply".to_string()]
         );
+        // The summarizer followed the live target's key too (the R8
+        // seam's key arm): every request against the registration carried
+        // the models.json faux key — the engine's config key is `None`,
+        // so a summarizer reading the stale config key would surface as
+        // a `None` entry here.
+        let keys = registration.received_api_keys();
+        assert_eq!(keys.len() as u64, registration.call_count());
+        assert!(
+            keys.iter().all(|key| key.as_deref() == Some("sk-faux")),
+            "every call followed the live target's key: {keys:?}"
+        );
         assert!(matches!(
             crossing_events.last(),
             Some(EngineEvent::Done(Ok(())))
         ));
+    }
+
+    /// Retirement clears the provider target with the session (the TS
+    /// replacement teardown): a demand seam before the replacement build
+    /// (an immediate `/compact` after the teardown) resolves the CURRENT
+    /// model through the pre-build `resolve_model` fallback, never the
+    /// retired session's target — a cwd/settings model change lands with
+    /// the replacement, not the stale target.
+    #[test]
+    fn retire_clears_the_provider_target_for_the_replacement_build() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let script = json!({ "responses": [{"text": "seed reply"}] });
+        let parsed = pa_ai::faux::script::parse_faux_script(&script).expect("faux script parses");
+        let _registration = pa_ai::faux::script::register_faux_provider_from_script(&parsed);
+        std::fs::write(
+            agent_dir.join("models.json"),
+            json!({
+                "providers": {
+                    "faux": {
+                        "api": "faux", "baseUrl": "http://localhost:0", "apiKey": "sk-faux",
+                        "models": [{
+                            "id": "faux-1", "name": "Faux Model",
+                            "contextWindow": 128000, "maxTokens": 16384,
+                        }],
+                    },
+                    "drift": {
+                        "api": "faux", "baseUrl": "http://localhost:0", "apiKey": "sk-drift",
+                        "models": [{
+                            "id": "drift-1", "name": "Drift Model",
+                            "contextWindow": 128000, "maxTokens": 16384,
+                        }],
+                    },
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let write_settings = |default_provider: &str, default_model: &str| {
+            std::fs::write(
+                agent_dir.join("settings.json"),
+                json!({
+                    "defaultProvider": default_provider,
+                    "defaultModel": default_model,
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        let new_engine = || {
+            AgentSessionEngine::new(AgentEngineConfig {
+                cwd: dir.path().to_path_buf(),
+                agent_dir: agent_dir.clone(),
+                provider: None,
+                model: None,
+                api_key: None,
+                thinking: None,
+                session_dir: None,
+                session_file: None,
+                faux_script: None,
+                supervisor_link: None,
+                telemetry_disabled: None,
+                cron_store: None,
+                queued_steering_probe: None,
+            })
+            .unwrap()
+        };
+        write_settings("faux", "faux-1");
+        let engine = new_engine();
+        // The turn builds the session and pins the provider target.
+        let mut events: Vec<EngineEvent> = Vec::new();
+        admit(&engine, "seed turn".to_string(), &mut events);
+        let model = engine.session_model().expect("the session model resolves");
+        assert_eq!(
+            (model.provider.as_str(), model.id.as_str()),
+            ("faux", "faux-1")
+        );
+
+        // The replacement teardown retires the session while the settings
+        // default moves under it (the cwd/settings change the
+        // replacement carries).
+        write_settings("drift", "drift-1");
+        engine
+            .runtime
+            .block_on(async { engine.retire_session_runtime().await });
+        assert!(
+            engine
+                .runtime
+                .block_on(async { engine.session.lock().await.is_none() })
+        );
+
+        // A demand seam before the replacement build (the prewarm has not
+        // rebuilt yet) resolves the CURRENT model, never the retired
+        // session's target.
+        let model = engine
+            .session_model()
+            .expect("the replacement model resolves");
+        assert_eq!(
+            (model.provider.as_str(), model.id.as_str()),
+            ("drift", "drift-1"),
+            "the retired session's provider target must not outlive it"
+        );
     }
 
     /// End the session telemetry (flushing every queued event through the

@@ -151,6 +151,7 @@ pub struct FauxProviderRegistration {
 #[derive(Default)]
 struct FauxSharedState {
     call_count: Mutex<u64>,
+    received_api_keys: Mutex<Vec<Option<String>>>,
     pending: Mutex<Vec<FauxResponseStep>>,
     prompt_cache: Mutex<HashMap<String, String>>,
 }
@@ -172,6 +173,12 @@ impl FauxProviderRegistration {
     /// Call count across all requests against this registration.
     pub fn call_count(&self) -> u64 {
         *self.state.call_count.lock().unwrap()
+    }
+
+    /// The API key each recorded request carried (per call, in order):
+    /// summarizer arms that must follow the session's live key pin on it.
+    pub fn received_api_keys(&self) -> Vec<Option<String>> {
+        self.state.received_api_keys.lock().unwrap().clone()
     }
 
     /// Replace the queued responses.
@@ -627,6 +634,7 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
         .clamp(1, max);
     let state = Arc::new(FauxSharedState {
         call_count: Mutex::new(0),
+        received_api_keys: Mutex::new(Vec::new()),
         pending: Mutex::new(Vec::new()),
         prompt_cache: Mutex::new(HashMap::new()),
     });
@@ -692,6 +700,11 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
             let (writer, reader) = create_assistant_message_event_stream();
             let step = self.state.pending.lock().unwrap().pop_front_step();
             *self.state.call_count.lock().unwrap() += 1;
+            self.state
+                .received_api_keys
+                .lock()
+                .unwrap()
+                .push(options.and_then(|options| options.api_key.clone()));
 
             let state = self.state.clone();
             let api = self.api.clone();

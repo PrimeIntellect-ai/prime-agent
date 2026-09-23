@@ -228,7 +228,12 @@ impl AgentSessionEngine {
         pa_core::session_engine::compaction::threshold_compaction_due(
             &messages,
             model.context_window,
-            pa_core::session_engine::compaction::request_output_budget(&model),
+            pa_core::session_engine::compaction::request_output_budget(
+                &model,
+                pa_core::session_engine::provider_adapter::model_thinking_level(
+                    state.thinking_level,
+                ),
+            ),
             &mirror.compaction,
         )
     }

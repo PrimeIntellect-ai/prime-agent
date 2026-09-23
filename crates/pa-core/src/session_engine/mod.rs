@@ -312,7 +312,12 @@ impl AgentSession {
         compaction::threshold_compaction_due(
             &messages,
             model.context_window,
-            compaction::request_output_budget(model),
+            // The live thinking level decides whether the request folds a
+            // thinking budget on top of the base output budget.
+            compaction::request_output_budget(
+                model,
+                provider_adapter::model_thinking_level(state.thinking_level),
+            ),
             &self.compaction,
         )
     }

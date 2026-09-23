@@ -188,11 +188,19 @@ pub fn should_compact(
     threshold > 0 && context_tokens > threshold
 }
 
-/// The effective requested output budget of the session's next model call
-/// (the per-request default `min(model.maxTokens, 32000)`, or 0 when the
-/// model declares no max output).
-pub fn request_output_budget(model: &pa_types::ai::Model) -> u64 {
-    pa_ai::default_request_max_tokens(model).unwrap_or(0)
+/// The effective requested output budget of the session's next model call:
+/// the per-request default `min(model.maxTokens, 32000)`, plus the thinking
+/// budget budget-folding providers (Anthropic/Bedrock models without
+/// adaptive thinking) add on top of it for the session's reasoning level,
+/// capped at the model's declared max output; 0 when the model declares no
+/// max output. The combined input+output ceiling reserves what the request
+/// will actually claim, or a budget-folded request can overflow while the
+/// trigger still says "not due".
+pub fn request_output_budget(
+    model: &pa_types::ai::Model,
+    thinking: pa_types::ai::ModelThinkingLevel,
+) -> u64 {
+    pa_ai::effective_request_max_tokens(model, thinking)
 }
 
 /// The message-anchored context estimate over the live loop context (TS

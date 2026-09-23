@@ -43,7 +43,7 @@ pub mod codex_debug {
         reset_debug_stats as reset_websocket_debug_stats, WebSocketDebugStats,
     };
 }
-pub use providers::simple_options::default_request_max_tokens;
+pub use providers::simple_options::{default_request_max_tokens, effective_request_max_tokens};
 pub use registry::{Provider, ProviderRegistry};
 pub use stream::{complete, complete_simple, stream, stream_simple};
 

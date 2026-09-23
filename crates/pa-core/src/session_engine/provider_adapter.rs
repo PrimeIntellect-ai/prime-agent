@@ -34,6 +34,20 @@ pub fn map_thinking_level(level: pa_types::ai::ModelThinkingLevel) -> ThinkingLe
     }
 }
 
+/// The inverse of [`map_thinking_level`]: the pa-types view of the agent
+/// state's thinking level.
+pub fn model_thinking_level(level: ThinkingLevel) -> pa_types::ai::ModelThinkingLevel {
+    match level {
+        ThinkingLevel::Off => pa_types::ai::ModelThinkingLevel::Off,
+        ThinkingLevel::Minimal => pa_types::ai::ModelThinkingLevel::Minimal,
+        ThinkingLevel::Low => pa_types::ai::ModelThinkingLevel::Low,
+        ThinkingLevel::Medium => pa_types::ai::ModelThinkingLevel::Medium,
+        ThinkingLevel::High => pa_types::ai::ModelThinkingLevel::High,
+        ThinkingLevel::Xhigh => pa_types::ai::ModelThinkingLevel::Xhigh,
+        ThinkingLevel::Max => pa_types::ai::ModelThinkingLevel::Max,
+    }
+}
+
 /// The mutable provider target a live session's stream reads per call:
 /// daemon `set_model` swaps it without rebuilding the session, and the
 /// provider-failover switch swaps it for the switched-to provider.
@@ -101,15 +115,7 @@ fn stream_once(
             metadata: None,
             timeout_ms: None,
         },
-        reasoning: Some(match options.reasoning {
-            ThinkingLevel::Off => pa_types::ai::ModelThinkingLevel::Off,
-            ThinkingLevel::Minimal => pa_types::ai::ModelThinkingLevel::Minimal,
-            ThinkingLevel::Low => pa_types::ai::ModelThinkingLevel::Low,
-            ThinkingLevel::Medium => pa_types::ai::ModelThinkingLevel::Medium,
-            ThinkingLevel::High => pa_types::ai::ModelThinkingLevel::High,
-            ThinkingLevel::Xhigh => pa_types::ai::ModelThinkingLevel::Xhigh,
-            ThinkingLevel::Max => pa_types::ai::ModelThinkingLevel::Max,
-        }),
+        reasoning: Some(model_thinking_level(options.reasoning)),
         thinking_budgets: None,
     };
     let stream = pa_ai::stream_simple(&model, &ai_context, Some(stream_options))
