@@ -10,6 +10,12 @@
 //! expandable body — where the TS binary still shows the generic muted
 //! `RLM child status` label over the full content markdown. The TS side is
 //! expected to adopt the same rows.
+//!
+//! Second divergence (operator directive 2026-09-23): the heartbeat prompt
+//! row renders the `◷` clock glyph — the unified activity dock's
+//! Heartbeats group icon (`chrome.rs::render_activity_dock`) — where the
+//! TS binary still renders the `♥` heart. The TS side is expected to
+//! adopt the same glyph.
 
 use super::render::{markdown_rows, spacer, text_rows, truncate_text};
 use super::{
@@ -33,7 +39,9 @@ pub struct InjectedPromptRow {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InjectedPromptKind {
-    /// `♥ Heartbeat prompt · <schedule>` (error pulse, muted label).
+    /// `◷ Heartbeat prompt · <schedule>` (error pulse, muted label; the
+    /// clock glyph is the dock's Heartbeats icon — the operator-directed
+    /// divergence in the module docs).
     Heartbeat { schedule: Option<String> },
     /// `<goal label>[ · <objective preview>]` (muted; TS `goalLabel`/`metaText`).
     Goal {
@@ -193,7 +201,9 @@ fn prompt_header(row: &InjectedPromptRow, detail: Detail, theme: &Theme) -> Line
     // kernel-state row stays header-only).
     let mut header: Line = match &row.kind {
         InjectedPromptKind::Heartbeat { schedule } => vec![
-            Span::styled("\u{2665}".to_string(), theme.fg_style(ThemeColor::Error)),
+            // The ◷ clock (the dock's Heartbeats icon), not the TS ♥ heart:
+            // the operator-directed divergence in the module docs.
+            Span::styled("\u{25f7}".to_string(), theme.fg_style(ThemeColor::Error)),
             Span::raw(" "),
             Span::styled("Heartbeat prompt".to_string(), muted),
             Span::styled(" \u{b7} ".to_string(), dim),
@@ -407,11 +417,11 @@ mod tests {
         assert!(rows[0].is_empty());
         assert_eq!(
             flat(&rows[1]).trim_end(),
-            " \u{2665} Heartbeat prompt \u{b7} every 10m"
+            " \u{25f7} Heartbeat prompt \u{b7} every 10m"
         );
         assert_eq!(
             rows[1][1],
-            Span::styled("\u{2665}".to_string(), theme().fg_style(ThemeColor::Error))
+            Span::styled("\u{25f7}".to_string(), theme().fg_style(ThemeColor::Error))
         );
     }
 

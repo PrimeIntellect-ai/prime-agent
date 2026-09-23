@@ -938,6 +938,15 @@ impl AgentView {
                 lines.extend(frame);
             }
         }
+        // The `/speed` footer (TS `footerSlot`, the main container's last
+        // child): a dim row only while the display is on with a sample.
+        if let Some(speed) = &self.chrome.speed_text {
+            lines.push(crate::chrome::render_speed_footer(
+                speed,
+                &self.theme,
+                width,
+            ));
+        }
         lines
     }
 
@@ -1213,10 +1222,34 @@ impl AgentView {
             .fullscreen
             .then(|| render_top_bar(&self.chrome, &self.theme, width));
         let top_rows = usize::from(top.is_some());
-        let dock = selector_dock.unwrap_or_else(|| self.render_dock(width));
+        let dock = match selector_dock {
+            // The replacement surfaces swap only the editor part of the
+            // dock; the `/speed` footer stays the dock's last row under
+            // them (TS `footerSlot` renders while `showSelector`/the
+            // pickers own the frame).
+            Some(mut dock) => {
+                if let Some(speed) = &self.chrome.speed_text {
+                    dock.push(crate::chrome::render_speed_footer(
+                        speed,
+                        &self.theme,
+                        width,
+                    ));
+                }
+                dock
+            }
+            None => self.render_dock(width),
+        };
         let dock_height = dock
             .len()
             .min(height.saturating_sub(FULLSCREEN_MIN_TRANSCRIPT_ROWS));
+        let cropped = dock.len().saturating_sub(dock_height);
+        // The hardware cursor rides the dock's rows: a front crop removes
+        // the first `cropped` rows, so the editor's cursor sits that many
+        // rows closer to the displayed dock's start — subtract, or the
+        // reported cursor lands below the editor at every cropped height.
+        self.dock_cursor = self
+            .dock_cursor
+            .map(|(row, col)| (row.saturating_sub(cropped), col));
         let dock: Vec<Line> = if dock.len() > dock_height {
             dock[dock.len() - dock_height..].to_vec()
         } else {

@@ -49,6 +49,13 @@ present (collapsed labels, expanded reason bodies, no preview) and the TS
 frames show the old generic label (the baseline the TS team is expected to
 adopt).
 
+Third documented divergence (operator directive 2026-09-23): the heartbeat
+prompt row renders the `\u25f7` clock glyph — the unified activity dock's
+Heartbeats group icon — on the Rust side, where the TS binary still
+renders the `\u2665` heart. The diff canonicalizes the row's glyph on both
+frames (the label and schedule still diff) and the run separately asserts
+each side's glyph (Rust clock, TS heart baseline).
+
 tmux rules: default socket only (`env -u TMUX`), cmparity-* session names,
 no kill-server; sessions are killed individually at the end.
 """
@@ -360,6 +367,15 @@ def normalize(frame, root):
     frame = re.sub(r"[\u2193\u2191] [\d.kM]+ tokens", "<DIR> <TOK> tokens", frame)
     spinners = "".join("\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f")
     frame = re.sub("[" + spinners + "]", "<SPIN>", frame)
+    # Third carried divergence (see the module docstring): the heartbeat
+    # prompt row's glyph — Rust renders the ◷ clock, TS the ♥ heart. The
+    # glyph and its label live in separate styled spans, so the frames
+    # compare ANSI-ful: canonicalize the single chars to one marker (no
+    # other row carries either glyph in this fixture) so the row's label
+    # and schedule still diff; the run separately asserts each side's
+    # glyph.
+    frame = frame.replace("\u2665", "<HBICON>")
+    frame = frame.replace("\u25f7", "<HBICON>")
     pulses = "".join("\u25f4\u25f7\u25f6\u25f5\u25cb\u25f8\u25fb\u25fc")
     frame = re.sub("[" + pulses + "]", "<PULSE>", frame)
     frame = re.sub("\x1b\[39m\n", "\n", frame)
@@ -480,6 +496,24 @@ def strip_rlm_child_rows(frame):
     # shape on both sides even when the trailing blank rows popped here
     # made the last content row the frame's final line.
     return "\n".join(kept) + ("\n" if kept else "")
+
+
+def assert_heartbeat_row(side, collapsed, expanded):
+    """The heartbeat prompt row contract per side: the Rust frames show the
+    ◷ clock glyph (the unified activity dock's Heartbeats icon, the
+    operator-directed 2026-09-23 divergence); the TS frames show the ♥
+    heart (the baseline the improvement diverges from)."""
+    row = " Heartbeat prompt \u00b7 every 10m"
+    if side == "rust":
+        assert "\u25f7" + row in collapsed, "rust: clock heartbeat row missing collapsed"
+        assert "\u25f7" + row in expanded, "rust: clock heartbeat row missing expanded"
+        assert "\u2665" not in collapsed, "rust: heart glyph rendered"
+        assert "\u2665" not in expanded, "rust: heart glyph rendered expanded"
+    else:
+        assert "\u2665" + row in collapsed, "ts: heart row missing (baseline)"
+        assert "\u2665" + row in expanded, "ts: heart row missing expanded (baseline)"
+        assert "\u25f7" + row not in collapsed, "ts: clock glyph rendered"
+        assert "\u25f7" + row not in expanded, "ts: clock glyph rendered expanded"
 
 
 def assert_rlm_child_rows(side, collapsed, expanded):
@@ -687,6 +721,7 @@ def main():
                 expanded = capture_plain_text(frames["b_expanded"])
                 assert_sent_reach(side, collapsed, expanded)
                 assert_rlm_child_rows(side, collapsed, expanded)
+                assert_heartbeat_row(side, collapsed, expanded)
                 assert_skill_reach(side, collapsed, expanded)
             for state in ("a_collapsed", "b_expanded"):
                 ts_norm = normalize(strip_rlm_child_rows(ts_frames[state]), base)

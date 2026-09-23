@@ -54,6 +54,14 @@ fn cooked(attrs: &libc::termios) -> bool {
     attrs.c_lflag & (libc::ICANON | libc::ECHO) == (libc::ICANON | libc::ECHO)
 }
 
+/// `OLCUC` (map lowercase to uppercase on output) is the one recipe
+/// flag only Linux termios carries - macOS never grew the bit, so
+/// there is nothing to clear off it there.
+#[cfg(target_os = "linux")]
+const OLCUC: libc::tcflag_t = libc::OLCUC;
+#[cfg(not(target_os = "linux"))]
+const OLCUC: libc::tcflag_t = 0;
+
 /// Rebuild a sane cooked mode in place (the `stty sane` recipe): the
 /// line discipline on, signal characters live, echo with erase
 /// rendering, and the classic control characters restored.
@@ -62,7 +70,7 @@ fn make_sane(attrs: &mut libc::termios) {
     attrs.c_iflag &=
         !(libc::IGNBRK | libc::BRKINT | libc::PARMRK | libc::ISTRIP | libc::INLCR | libc::IGNCR);
     attrs.c_iflag |= libc::ICRNL | libc::IXON;
-    attrs.c_oflag &= !(libc::OCRNL | libc::OLCUC | libc::OFILL);
+    attrs.c_oflag &= !(libc::OCRNL | OLCUC | libc::OFILL);
     attrs.c_oflag |= libc::OPOST | libc::ONLCR;
     attrs.c_lflag &= !(libc::ECHONL | libc::ECHOCTL);
     attrs.c_lflag |=
@@ -72,6 +80,14 @@ fn make_sane(attrs: &mut libc::termios) {
     }
 }
 
+/// The reopen-stdin fallback for the no-controlling-terminal case:
+/// Linux exposes open descriptors under /proc, macOS through its
+/// fdesc `/dev/fd` (there is no /proc on the Mac).
+#[cfg(target_os = "linux")]
+const STDIN_TTY_PATH: &str = "/proc/self/fd/0";
+#[cfg(not(target_os = "linux"))]
+const STDIN_TTY_PATH: &str = "/dev/fd/0";
+
 /// The process tty (`/dev/tty`, stdin when no controlling terminal
 /// exists - the restore path must still be able to repair the pane it
 /// owns).
@@ -79,7 +95,7 @@ fn make_sane(attrs: &mut libc::termios) {
 fn tty() -> Option<File> {
     match File::open("/dev/tty") {
         Ok(tty) => Some(tty),
-        Err(_) => File::open("/proc/self/fd/0").ok(),
+        Err(_) => File::open(STDIN_TTY_PATH).ok(),
     }
 }
 
@@ -124,6 +140,10 @@ pub fn ensure_cooked_tty() -> TtyCooked {
 mod tests {
     use super::*;
 
+    /// Linux's `termios` alone carries the `c_line` line-discipline
+    /// field (macOS omits it), so the all-zero construction splits by
+    /// shape; every flag field is identical.
+    #[cfg(target_os = "linux")]
     fn attrs_with(lflag: libc::tcflag_t) -> libc::termios {
         libc::termios {
             c_iflag: 0,
@@ -131,6 +151,19 @@ mod tests {
             c_cflag: 0,
             c_lflag: lflag,
             c_line: 0,
+            c_cc: [0; libc::NCCS],
+            c_ispeed: 0,
+            c_ospeed: 0,
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn attrs_with(lflag: libc::tcflag_t) -> libc::termios {
+        libc::termios {
+            c_iflag: 0,
+            c_oflag: 0,
+            c_cflag: 0,
+            c_lflag: lflag,
             c_cc: [0; libc::NCCS],
             c_ispeed: 0,
             c_ospeed: 0,

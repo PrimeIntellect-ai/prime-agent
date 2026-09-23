@@ -435,21 +435,15 @@ mod tests {
         // fingerprint-scoped disk cache carries it.
         let mut auth = pa_core::auth::AuthStorage::create(dir.path());
         let api_key = auth.get_api_key("prime-inference").expect("api key");
+        // The stored team selection (team-7 in the fixture auth.json)
+        // survives ambient env credentials — a dogfood box's ambient
+        // `PRIME_API_KEY` (or a `PRIME_TEAM_ID` pin) changes the resolved
+        // key/team pair, and the cache below is written for whatever pair
+        // resolves, so the verifier runs the same on every box.
         let team_id = auth
             .get_provider_headers("prime-inference")
-            .and_then(|headers| headers.get("X-Prime-Team-ID").cloned());
-        // An ambient `PRIME_API_KEY` without a `PRIME_TEAM_ID` (the dogfood
-        // box posture) makes the environment the active source, and the
-        // stored team is then suppressed — no private adoption can happen
-        // on such a box. Hermetic machines (CI, VM gate sandboxes) run the
-        // full verifier; polluted ones skip with a note.
-        let Some(team_id) = team_id else {
-            eprintln!(
-                "ambient env credentials suppress the stored team; \
-                 skipping the child private-model verifier on this box"
-            );
-            return;
-        };
+            .and_then(|headers| headers.get("X-Prime-Team-ID").cloned())
+            .expect("stored team selection");
         let fingerprint =
             pa_core::models::private_prime_authorization_fingerprint(&api_key, &team_id);
         pa_core::models::write_private_prime_authorization_cache(

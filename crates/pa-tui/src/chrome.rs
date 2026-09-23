@@ -77,6 +77,11 @@ pub struct ChromeState {
     pub tray_override: Option<String>,
     /// Compact, borderless activity dock under the editor.
     pub activity: Option<ActivityDock>,
+    /// The footer's tok/sec readout (TS `FooterComponent` under `/speed`):
+    /// the dim bottom row's text; `None` renders no row. The client keeps
+    /// `None` until the first completed response while the display is on
+    /// (TS renders nothing when enabled without text).
+    pub speed_text: Option<String>,
     /// Hide the splash `cwd` line (TS `getSplashCwd` returns `undefined`
     /// for the scoped agents view, so its metadata rows stay centered
     /// against the logo without the cwd row).
@@ -565,6 +570,15 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
     Some(frame)
 }
 
+/// The footer's tok/sec row (TS `FooterComponent::render` under `/speed`):
+/// one dim line — the dock's last row — truncated with no ellipsis when it
+/// overflows the width.
+pub fn render_speed_footer(text: &str, theme: &Theme, width: usize) -> Line {
+    let dim = theme.fg_style(ThemeColor::Dim);
+    let text = truncate_to_width(text, width, "");
+    vec![Span::styled(text, dim)]
+}
+
 /// The editor surface background: `userMessageBg` (TS `getEditorTheme`).
 pub fn editor_background(theme: &Theme) -> ratatui::style::Style {
     theme.bg_style(ThemeBg::UserMessageBg)
@@ -632,6 +646,27 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("▸ 0 bash"));
         assert!(render_activity_dock(&ActivityDock::default(), &theme, 100).is_none());
+    }
+
+    /// The `/speed` footer row (TS `FooterComponent::render`): one dim row
+    /// with the readout, truncated with no ellipsis when it overflows.
+    #[test]
+    fn speed_footer_is_one_dim_row_truncated_to_width() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let row = render_speed_footer("188 tok/s · avg 200", &theme, 100);
+        let text = row
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert_eq!(text, "188 tok/s · avg 200");
+        assert_eq!(row.len(), 1);
+        let narrow = render_speed_footer("188 tok/s · avg 200", &theme, 10);
+        let text = narrow
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert_eq!(text.chars().count(), 10);
+        assert!(!text.contains("…"));
     }
 
     use super::*;

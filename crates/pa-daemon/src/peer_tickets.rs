@@ -226,8 +226,9 @@ impl Supervisor {
     }
 }
 
-/// TS `effectiveWorkerState`.
-fn effective_worker_state(
+/// TS `effectiveWorkerState` (shared with the create-reuse seam's typed
+/// `worker is {state}` answers).
+pub(crate) fn effective_worker_state(
     connected: bool,
     lifecycle: &DaemonWorkerLifecycle,
     stopping: bool,

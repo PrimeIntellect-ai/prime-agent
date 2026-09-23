@@ -103,6 +103,9 @@ pub struct RuntimeConfig {
 /// Session selection options that stay client-side.
 #[derive(Debug, Clone, Default)]
 pub struct SessionOptions {
+    /// `--continue`/`-c`: the launch surfaces the newest saved session for
+    /// the cwd through the agents view (preselected, never a blind reopen)
+    /// and falls back to a fresh session without a candidate.
     pub continue_recent: bool,
     pub resume_bare: bool,
     pub resume: Option<String>,
@@ -128,6 +131,10 @@ pub struct RunOptions {
     pub list_models: Option<Option<String>>,
     /// The combined first prompt (stdin + @file text + first message).
     pub initial_message: Option<String>,
+    /// The `@file` image attachments for the initial prompt (TS
+    /// `initialImages`; only the non-interactive prompt path sends them -
+    /// the interactive initial-message image arm is not yet wired).
+    pub initial_images: Vec<pa_agent::types::ImageContent>,
     pub verbose: bool,
     pub offline: bool,
     pub agents_view_requested: bool,

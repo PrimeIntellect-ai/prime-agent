@@ -249,6 +249,14 @@ pub(crate) struct SessionUi {
     /// starts on and the command persists the preference (TS
     /// `settingsManager.setFullscreen`) and reports the TS status.
     fullscreen_enabled: bool,
+    /// The `/speed` display flag (TS `speedDisplayEnabled`): per-client
+    /// runtime state, never persisted; turning it off clears the stats and
+    /// the row.
+    speed_display_enabled: bool,
+    /// Per-session output tok/sec accumulation (TS `speedStats`): output
+    /// tokens and wall-clock span summed over completed responses.
+    /// `None` until the first recorded sample; a rebind restarts it.
+    speed_stats: Option<SpeedStats>,
     /// The session's effective service tier (TS `connectionState.serviceTier`),
     /// seeded from the attach state and kept live by `service_tier_changed`
     /// events; the `/fast` toggle reads it.
@@ -555,7 +563,7 @@ impl SessionUi {
         let active_session_id = match &options.session {
             SessionSelection::New => create_session(&client, options, None).await?,
             SessionSelection::Attach(id) => id.clone(),
-            SessionSelection::ContinueRecent | SessionSelection::Resume(_) => {
+            SessionSelection::Resume(_) => {
                 create_session(&client, options, Some(&options.session)).await?
             }
         };
@@ -588,6 +596,8 @@ impl SessionUi {
                 .map(|settings| settings.fullscreen())
                 .unwrap_or(true),
             service_tier: None,
+            speed_display_enabled: false,
+            speed_stats: None,
             client_settings: options.client_settings.clone(),
             active_side_question_id: None,
             side_question_counter: 0,
@@ -1109,9 +1119,13 @@ impl SessionUi {
             .unwrap_or_default();
         // A rebind replaces the whole view: the previous session's open
         // activity panel dies with its transcript instead of owning keys
-        // over the new session's sources.
+        // over the new session's sources. Sessions are independent (TS
+        // `rebindCurrentSession`): a rebind also restarts the tok/sec
+        // stats and clears the readout left over from the previous session.
         if matches!(kind, RebuildKind::Rebind) {
             view.activity_panel = None;
+            self.speed_stats = None;
+            view.chrome.speed_text = None;
         }
         view.clear_chat();
         // The rebuilt transcript invalidates the tracked status row.
@@ -2340,6 +2354,34 @@ impl LoaderTokenTracker {
     }
 }
 
+/// Per-session output tok/sec accumulation for `/speed` (TS `speedStats`):
+/// output tokens and wall-clock spans summed over the session's completed
+/// responses.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct SpeedStats {
+    tokens: u64,
+    duration_ms: i64,
+    samples: u32,
+}
+
+impl SpeedStats {
+    /// The session-average rate in tok/s over the accumulated span (TS
+    /// `speedStats.tokens / (speedStats.durationMs / 1000)`).
+    fn average_rate(&self) -> f64 {
+        self.tokens as f64 / (self.duration_ms as f64 / 1000.0)
+    }
+}
+
+/// TS `formatRate`: whole numbers at 100 tok/s and above, one decimal
+/// below.
+fn format_rate(tokens_per_second: f64) -> String {
+    if tokens_per_second >= 100.0 {
+        format!("{tokens_per_second:.0}")
+    } else {
+        format!("{tokens_per_second:.1}")
+    }
+}
+
 impl SessionUi {
     /// Slash-command dispatch (the TS interactive submission ladder reduced
     /// to this client's surface): local client commands run here, builtin
@@ -2671,6 +2713,22 @@ impl SessionUi {
             // hook); the other management subcommands surface through the
             // `mcp` CLI command instead of the TUI.
             "mcp" => self.handle_mcp_command(resolved, view).await?,
+            // `/plugins [search]` (TS `handlePluginsCommand` ->
+            // `showServiceCatalogPicker`): the external-services catalog
+            // picker. This client folds the catalog into the `/mcp` view
+            // (the same resolved `services` cards the daemon serves both
+            // surfaces), so the command opens that view; an argument
+            // prefills its search field like TS's initial search.
+            "plugins" => {
+                self.track_command_used("plugins");
+                self.open_mcp_view("/plugins", view).await?;
+                let search = resolved.args.trim();
+                if !search.is_empty() {
+                    if let Some(mcp) = view.mcp_view.as_mut() {
+                        mcp.paste(search);
+                    }
+                }
+            }
             // TS `handleExportCommand`: an explicit `.jsonl` path exports
             // the current branch; anything else (including no argument)
             // exports HTML.
@@ -2965,6 +3023,23 @@ impl SessionUi {
                     _ => !self.fullscreen_enabled,
                 };
                 self.set_fullscreen_mode(enable, view);
+            }
+            // `/speed [on|off]` (TS `setSpeedDisplay`): toggle the footer
+            // tok/sec readout for this session — the dim dock row with the
+            // latest response's rate and the session average.
+            "speed" => {
+                self.track_command_used("speed");
+                let arg = resolved.args.trim().to_lowercase();
+                if !arg.is_empty() && arg != "on" && arg != "off" {
+                    self.error_row("Usage: /speed [on|off]", view);
+                    return Ok(());
+                }
+                let enable = match arg.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => !self.speed_display_enabled,
+                };
+                self.set_speed_display(enable, view);
             }
             // `/reload` (TS `handleReloadCommand`): the guards first (a
             // streaming turn or compaction defers the reload), then the
@@ -4057,6 +4132,71 @@ impl SessionUi {
         self.note(&status, view);
     }
 
+    /// `/speed on/off`: toggles the footer tok/sec readout for this
+    /// session (TS `setSpeedDisplay`): the flag lives on the client;
+    /// disabling clears the stats and the row (TS `resetSpeedStats`), and
+    /// the status row reports the TS wording either way.
+    fn set_speed_display(&mut self, enabled: bool, view: &mut AgentView) {
+        self.speed_display_enabled = enabled;
+        if !enabled {
+            self.speed_stats = None;
+            view.chrome.speed_text = None;
+        }
+        let status = if enabled {
+            "Speed display on — footer shows output tok/s per model response and a session average"
+        } else {
+            "Speed display off"
+        };
+        self.note(status, view);
+    }
+
+    /// Updates the footer tok/sec readout from a completed assistant
+    /// message (TS `recordSpeedSample`): output tokens over the
+    /// wall-clock span from the message timestamp (set at provider stream
+    /// start) to this message_end arrival. Timestamps keep the span true
+    /// even when buffered session events replay back-to-back on attach.
+    /// Aborted/failed responses and samples without a finite positive
+    /// span or token count are skipped: some providers only fill usage at
+    /// stream end, so they never produce a bogus rate.
+    fn record_speed_sample(&mut self, message: &Value, view: &mut AgentView) {
+        if !self.speed_display_enabled {
+            return;
+        }
+        let stop_reason = message
+            .get("stopReason")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if stop_reason == "aborted" || stop_reason == "error" {
+            return;
+        }
+        // TS reads `Number(message.timestamp)`: a frame without one is NaN
+        // in TS and fails its `> 0` guard, so it is skipped here too — a
+        // zero-default would span the epoch and poison the average.
+        let Some(timestamp) = message.get("timestamp").and_then(Value::as_i64) else {
+            return;
+        };
+        let duration_ms = crate::agents_view_state::now_ms() as i64 - timestamp;
+        let output_tokens = message
+            .get("usage")
+            .and_then(|usage| usage.get("output"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if duration_ms <= 0 || output_tokens == 0 {
+            return;
+        }
+        let stats = self.speed_stats.get_or_insert_with(SpeedStats::default);
+        stats.tokens += output_tokens;
+        stats.duration_ms += duration_ms;
+        stats.samples += 1;
+        let last = format_rate(output_tokens as f64 / (duration_ms as f64 / 1000.0));
+        let average = format_rate(stats.average_rate());
+        view.chrome.speed_text = Some(if stats.samples > 1 {
+            format!("{last} tok/s · avg {average}")
+        } else {
+            format!("{last} tok/s")
+        });
+    }
+
     /// `/reload` (TS `handleReloadCommand`): the reload box replaces the
     /// editor (TS swaps the editor container) while the daemon reload
     /// runs; the run loop folds the outcome in when it lands.
@@ -4645,7 +4785,7 @@ impl SessionUi {
     ) -> Result<()> {
         self.track_command_used("mcp");
         if resolved.args.trim().is_empty() {
-            return self.open_mcp_view(view).await;
+            return self.open_mcp_view("/mcp", view).await;
         }
         let Some(auth) = self.client_auth.clone() else {
             self.note("/mcp is not available in this client yet", view);
@@ -4660,7 +4800,9 @@ impl SessionUi {
     /// `get_mcp_connections` roster. The request carries the kernel's tool
     /// listing (it opens each connected generic server, bounded), so it
     /// gets the wider deadline.
-    async fn open_mcp_view(&mut self, view: &mut AgentView) -> Result<()> {
+    /// `command` names the entry the user ran (`/mcp` or `/plugins`), so a
+    /// failed roster load reports the command that failed.
+    async fn open_mcp_view(&mut self, command: &str, view: &mut AgentView) -> Result<()> {
         let data = match self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS * 4),
@@ -4674,7 +4816,7 @@ impl SessionUi {
         {
             Ok(data) => data,
             Err(error) => {
-                self.note(&format!("/mcp failed: {error:#}"), view);
+                self.note(&format!("{command} failed: {error:#}"), view);
                 return Ok(());
             }
         };
@@ -7687,6 +7829,7 @@ impl SessionUi {
             }
         } else {
             self.working_tokens.settle(usage_output);
+            self.record_speed_sample(message, view);
         }
         if let Some(text) = blocks.iter().rev().find_map(|block| match block {
             MessageBlock::Text(text) => Some(text.clone()),
@@ -8020,7 +8163,6 @@ async fn create_session(
     options: &InteractiveOptions,
     selection: Option<&SessionSelection>,
 ) -> Result<String> {
-    let continue_recent = matches!(selection, Some(SessionSelection::ContinueRecent));
     let session_path = match selection {
         Some(SessionSelection::Resume(path)) => Some(path.to_string_lossy().to_string()),
         _ => None,
@@ -8029,7 +8171,10 @@ async fn create_session(
         .request_ok(DaemonCommand::Create {
             id: None,
             session_path,
-            continue_recent: continue_recent.then_some(true),
+            // A create names its session (`sessionPath`) or opens one
+            // through the agents view; `continueRecent` stays absent
+            // (TS wire shape — the supervisor refuses it).
+            continue_recent: None,
             no_session: options.no_session.then_some(true),
             name: None,
             config: Some(options.create_config()),
@@ -8199,7 +8344,7 @@ mod activity_dock_counts_tests {
 
 #[cfg(test)]
 mod loader_token_tests {
-    use super::LoaderTokenTracker;
+    use super::{format_rate, LoaderTokenTracker, SpeedStats};
 
     /// The live count derives from the streamed message, so coalesced
     /// frames (one latest-snapshot wire frame per flush tick) count the
@@ -8245,5 +8390,30 @@ mod loader_token_tests {
         assert_eq!(tracker.current(), 250);
         tracker.reset();
         assert_eq!(tracker.current(), 0);
+    }
+
+    /// TS `formatRate`: whole numbers at 100 tok/s and above, one decimal
+    /// below.
+    #[test]
+    fn format_rate_matches_the_ts_boundaries() {
+        assert_eq!(format_rate(150.0), "150");
+        assert_eq!(format_rate(100.0), "100");
+        assert_eq!(format_rate(99.96), "100.0");
+        assert_eq!(format_rate(12.34), "12.3");
+        assert_eq!(format_rate(0.5), "0.5");
+    }
+
+    /// The session average sums tokens over the summed wall-clock span (TS
+    /// `speedStats`); it only reads once a positive-span sample exists.
+    #[test]
+    fn speed_stats_average_rate_sums_tokens_over_spans() {
+        let mut stats = SpeedStats::default();
+        stats.tokens = 300;
+        stats.duration_ms = 1500;
+        stats.samples = 1;
+        assert_eq!(stats.average_rate(), 200.0);
+        stats.tokens += 100;
+        stats.duration_ms += 500;
+        assert_eq!(stats.average_rate(), 200.0);
     }
 }

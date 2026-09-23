@@ -178,6 +178,138 @@ pub(crate) fn merge_discovered(
     by_identity.into_values().collect()
 }
 
+/// Parse `/proc/net/unix` rows into (inode, path) pairs for *listening*
+/// unix sockets: the accept-connections flag `SS_ACCEPTCONN` (kernel
+/// include/uapi/linux/net.h, hex `00010000`) plus a filesystem path.
+/// Format: `Num RefCount Protocol Flags Type St Inode Path`.
+///
+/// Byte-level on purpose: a unix socket pathname may contain any byte
+/// sequence (unix(7) — one non-UTF-8 name anywhere in the file must not
+/// reject the whole census), and it may contain spaces, so the first seven
+/// columns parse separately and the *remainder* of each line is the path.
+/// A row whose pathname is not valid UTF-8 drops out on its own (product
+/// socket paths are UTF-8; the rest of the census stands). The header row
+/// fails the hex flag parse and drops out; unnamed and non-listening rows
+/// (no path, or no `SS_ACCEPTCONN`) drop out too.
+#[cfg(target_os = "linux")]
+fn parse_proc_net_unix(bytes: &[u8]) -> Vec<(String, String)> {
+    const SS_ACCEPTCONN: u32 = 0x0001_0000;
+    let mut listeners = Vec::new();
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let mut columns = line.splitn(8, |byte: &u8| byte.is_ascii_whitespace());
+        let columns: Vec<&[u8]> = (0..8).filter_map(|_| columns.next()).collect();
+        if columns.len() < 8 {
+            continue;
+        }
+        let Some(flags) = std::str::from_utf8(columns[3])
+            .ok()
+            .and_then(|flags| u32::from_str_radix(flags, 16).ok())
+        else {
+            continue;
+        };
+        if flags & SS_ACCEPTCONN == 0 {
+            continue;
+        }
+        let Some(path) = std::str::from_utf8(columns[7]).ok() else {
+            continue;
+        };
+        if !path.starts_with('/') {
+            continue;
+        }
+        let Some(inode) = std::str::from_utf8(columns[6]).ok() else {
+            continue;
+        };
+        listeners.push((inode.to_string(), path.to_string()));
+    }
+    listeners
+}
+
+/// Every live process and the unix-socket inodes it holds, from
+/// `/proc/<pid>/fd/*` symlinks shaped `socket:[<inode>]`, with the pid's
+/// `/proc/<pid>/comm` name. Ascending pid order keeps the census
+/// deterministic; processes whose fd directory or comm cannot be read
+/// (permission, or the process exited mid-scan) are skipped silently.
+#[cfg(target_os = "linux")]
+fn proc_socket_inodes() -> Vec<(u32, String, std::collections::HashSet<String>)> {
+    let mut processes = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return processes;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let Ok(comm) = std::fs::read_to_string(format!("/proc/{pid}/comm")) else {
+            continue;
+        };
+        let mut inodes = std::collections::HashSet::new();
+        if let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) {
+            for fd in fds.flatten() {
+                let Ok(target) = fd.path().read_link() else {
+                    continue;
+                };
+                let Some(target) = target.to_str() else {
+                    continue;
+                };
+                if let Some(rest) = target.strip_prefix("socket:[") {
+                    if let Some(inode) = rest.strip_suffix(']') {
+                        inodes.insert(inode.to_string());
+                    }
+                }
+            }
+        }
+        processes.push((pid, comm.trim_end().to_string(), inodes));
+    }
+    processes.sort_by_key(|process| process.0);
+    processes
+}
+
+/// The dependency-free Linux listening census (operator-mandated fallback
+/// for tool-less root-user systems; see PORTING-NOTES.md): map
+/// `/proc/net/unix` listeners to their owning pids and keep those whose
+/// comm name is this product. Visibility matches `ss -lxp`: uid 0 sees
+/// every daemon on the machine, an unprivileged user only its own — other
+/// users' `/proc/<pid>/fd` is unreadable, exactly the pid info `ss` hides
+/// from non-root callers. TS has no equivalent fallback (`daemon-ps.ts`
+/// yields nothing without `ss`/`lsof`), so the three discovery e2e tests
+/// fail on stock root-user Linux images that ship neither tool.
+#[cfg(target_os = "linux")]
+fn scan_proc_listeners(app_name: &str) -> Vec<DiscoveredDaemonProcess> {
+    let Ok(unix) = std::fs::read("/proc/net/unix") else {
+        return Vec::new();
+    };
+    let listeners = parse_proc_net_unix(&unix);
+    if listeners.is_empty() {
+        return Vec::new();
+    }
+    let mut daemons = Vec::new();
+    for (pid, comm, inodes) in proc_socket_inodes() {
+        if !process_name_matches(&comm, app_name) {
+            continue;
+        }
+        for (inode, path) in &listeners {
+            if inodes.contains(inode) {
+                daemons.push(DiscoveredDaemonProcess {
+                    pid,
+                    socket_path: normalize_socket_path(path),
+                    uptime_seconds: None,
+                });
+            }
+        }
+    }
+    daemons
+}
+
+/// Non-Linux platforms have no `/proc`; the fallback census finds nothing.
+#[cfg(not(target_os = "linux"))]
+fn scan_proc_listeners(_app_name: &str) -> Vec<DiscoveredDaemonProcess> {
+    Vec::new()
+}
+
 /// Attach `ps` uptimes to the discovered daemons (TS `enrichUptimes`).
 fn enrich_uptimes(mut daemons: Vec<DiscoveredDaemonProcess>) -> Vec<DiscoveredDaemonProcess> {
     if daemons.is_empty() {
@@ -217,7 +349,10 @@ pub(crate) fn scan_all_listening_daemons(
 }
 
 /// The raw OS census, machine-wide (TS `scanAllListeningDaemons`): callers
-/// must filter to a state root before acting on any result.
+/// must filter to a state root before acting on any result. The `/proc`
+/// fallback joins the `lsof` groups so a system with neither `ss` nor
+/// `lsof` (the stock root-user Linux images the gate runs on) still gets a
+/// real census instead of a silently empty one.
 fn scan_listening_daemons_machine_wide(app_name: &str) -> Vec<DiscoveredDaemonProcess> {
     if let Some(stdout) = capture_stdout("ss", &["-lxp"]) {
         return parse_ss_listeners(&stdout, app_name);
@@ -242,5 +377,76 @@ fn scan_listening_daemons_machine_wide(app_name: &str) -> Vec<DiscoveredDaemonPr
             }
         }
     }
-    merge_discovered(&[by_name, by_pid])
+    let from_proc = scan_proc_listeners(app_name);
+    merge_discovered(&[by_name, by_pid, from_proc])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact `/proc/net/unix` row shapes observed on Linux 6.1
+    /// (bookworm): a listening row with a path, an unnamed connected row,
+    /// and a bound-but-not-listening row.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_proc_net_unix_keeps_listening_rows_with_paths_only() {
+        let sample = b"Num       RefCount Protocol Flags    Type St Inode Path\n\
+0000000047ecc27d: 00000002 00000000 00010000 0001 01  9703 /tmp/agent/daemon.sock\n\
+0000000000ac5346: 00000003 00000000 00000000 0001 03  9700\n\
+0000000047ecc280: 00000002 00000000 00000000 0001 01  9710 /tmp/agent/bound.sock\n";
+        let listeners = parse_proc_net_unix(sample);
+        assert_eq!(
+            listeners,
+            vec![("9703".to_string(), "/tmp/agent/daemon.sock".to_string())],
+            "only the SS_ACCEPTCONN row with a filesystem path counts"
+        );
+    }
+
+    /// A pathname with spaces must survive whole (the remainder of the line
+    /// is the path), and one non-UTF-8 pathname elsewhere in the file must
+    /// not reject the census (unix(7) allows arbitrary path bytes).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_proc_net_unix_keeps_spaced_and_survives_non_utf8_paths() {
+        let mut sample = (*b"Num RefCount Protocol Flags Type St Inode Path\n\
+0000000047ecc27d: 00000002 00000000 00010000 0001 01  9703 /tmp/agent sandbox/daemon.sock\n")
+            .to_vec();
+        sample.extend_from_slice(
+            b"0000000047ecc280: 00000002 00000000 00010000 0001 01  9710 /tmp/agent/",
+        );
+        sample.push(0xff);
+        sample.extend_from_slice(b"\xff/daemon.sock\n");
+        let listeners = parse_proc_net_unix(&sample);
+        assert_eq!(
+            listeners,
+            vec![("9703".to_string(), "/tmp/agent sandbox/daemon.sock".to_string())],
+            "the spaced path is kept whole; the non-UTF-8 row drops out alone, never rejecting the census"
+        );
+    }
+
+    /// The ss text parse and the /proc parse must agree on the same
+    /// listener: same pid, same socket path.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_and_ss_parsers_agree_on_one_listener() {
+        let ss_line = "u_str LISTEN 0      4096   /tmp/agent/daemon.sock 21049121            * 0    users:((\"prime-agent\",pid=123,fd=14))\n";
+        let ss = parse_ss_listeners(ss_line, "prime-agent");
+        let proc_rows = parse_proc_net_unix(
+            b"Num RefCount Protocol Flags Type St Inode Path\n0000000047ecc27d: 00000002 00000000 00010000 0001 01  9703 /tmp/agent/daemon.sock\n",
+        );
+        // The /proc half maps inode 9703 to pid 123 through fd symlinks;
+        // the parser-level parity check uses the matching shape directly.
+        assert_eq!(ss.len(), 1);
+        assert_eq!(proc_rows.len(), 1);
+        assert_eq!(ss[0].socket_path.to_string_lossy(), proc_rows[0].1);
+        assert_eq!(ss[0].pid, 123);
+        assert!(proc_rows[0].0.contains("9703"));
+    }
+
+    #[test]
+    fn ss_parse_skips_foreign_process_names() {
+        let sample = "u_str LISTEN 0      4096   /tmp/bus.sock 1 * 0    users:((\"dbus-daemon\",pid=7,fd=3))\n";
+        assert!(parse_ss_listeners(sample, "prime-agent").is_empty());
+    }
 }

@@ -70,6 +70,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand { name: "login", description: "Configure provider authentication", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "logout", description: "Remove provider authentication", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "mcp", description: "Open MCP Connections or manage MCP integrations", execution: SlashCommandExecution::Client, argument_hint: Some("[add|list|get|remove|login|logout]"), aliases: &[], takes_argument: true },
+    BuiltinSlashCommand { name: "plugins", description: "Browse and connect external services", execution: SlashCommandExecution::Client, argument_hint: Some("[search]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "new", description: "Start a new session, optionally named and/or with an initial prompt", execution: SlashCommandExecution::Client, argument_hint: Some("[--name \"session name\" --] [prompt]"), aliases: &["clear"], takes_argument: true },
     BuiltinSlashCommand { name: "compact", description: "Compact the session context; optional instructions focus the summary", execution: SlashCommandExecution::Session, argument_hint: Some("[instructions]"), aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "refine", description: "Refine continual harness prompt notes, skills, subagents, and memory", execution: SlashCommandExecution::Session, argument_hint: None, aliases: &[], takes_argument: false },
@@ -81,6 +82,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand { name: "resume", description: "Open the agents view, or resume a session by id or path", execution: SlashCommandExecution::Client, argument_hint: Some("[id|path]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "reload", description: "Reload keybindings, extensions, skills, prompts, and themes", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "fullscreen", description: "Toggle fullscreen (alternate screen) rendering with scrollable transcript", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
+    BuiltinSlashCommand { name: "speed", description: "Toggle footer readout of model output tok/sec (latest response and session average)", execution: SlashCommandExecution::Client, argument_hint: Some("[on|off]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "quit", description: "Quit Prime Agent", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
 ];
 
