@@ -440,10 +440,13 @@ mod tests {
             runs: Arc::new(AtomicUsize::new(0)),
             panic_first: AtomicBool::new(true),
         });
+        // No start(): the passes below drive `run_due` directly (a
+        // started timer would race the manual passes for the same due
+        // job — the timer task would claim the first dispatch, and the
+        // manual pass would find nothing due).
         let scheduler = Arc::new(AgentCronScheduler::new(store.clone(), hooks.clone()));
-        scheduler.start().await;
-        // The first pass panics inside its spawned task (the timer task
-        // survives; the flag must not stay wedged).
+        // The first pass panics inside its spawned task (the flag must
+        // not stay wedged).
         let first = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             tokio::spawn({
