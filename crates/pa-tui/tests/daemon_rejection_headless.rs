@@ -451,9 +451,12 @@ fn rejected_mid_turn_submission_renders_the_error_row_and_keeps_running() {
     .expect("interactive run stays mounted through the refusal");
     let all = run.frames.join("\n");
     assert_eq!(run.prompt_requests.len(), 2, "both prompts dispatched");
-    // The TS `showError` row with the daemon's refusal message.
+    // The TS `showError` row with the daemon's refusal message. The row
+    // wraps at the render width, so compare the whitespace-flattened
+    // frames.
+    let flat = all.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        all.contains(&format!(
+        flat.contains(&format!(
             "\u{26a0} Error: the daemon rejected the prompt request: {SUSPENDED_ADMISSION}"
         )),
         "the refusal renders as the error row:\n{all}"
