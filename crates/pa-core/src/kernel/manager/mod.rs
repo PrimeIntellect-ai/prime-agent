@@ -67,6 +67,8 @@ struct ExitInfo {
 struct ExecBuffers {
     stdout: String,
     stderr: String,
+    stdout_chars: usize,
+    stderr_chars: usize,
     stdout_truncated: bool,
     stderr_truncated: bool,
     result: Option<String>,
@@ -75,6 +77,7 @@ struct ExecBuffers {
     attachment_oversized: bool,
     sent_agent_messages: Vec<KernelSentAgentMessage>,
     background_output: String,
+    background_output_chars: usize,
     background_output_truncated: bool,
     error: Option<KernelError>,
     status: ExecuteStatus,
@@ -205,6 +208,7 @@ struct Guarded {
     pending_restore: bool,
     /// Unattributed stream text that arrived between cells; surfaced on the next execution.
     pending_background_output: String,
+    pending_background_output_chars: usize,
     pending_background_output_truncated: bool,
     flushing_snapshot_for_dispose: bool,
     protocol_repair: Option<Arc<RepairHandle>>,
@@ -313,6 +317,7 @@ impl ReplKernelManager {
                 pending_rebootstrap: false,
                 pending_restore: false,
                 pending_background_output: String::new(),
+                pending_background_output_chars: 0,
                 pending_background_output_truncated: false,
                 flushing_snapshot_for_dispose: false,
                 protocol_repair: None,

@@ -9,21 +9,30 @@ use super::*;
 
 pub(crate) use crate::platform::process::Signal;
 
-/// Append stream text, capping the buffer at `max_chars` and flagging truncation.
+/// Append stream text up to `max_chars` Unicode scalars, keeping the buffered count in sync.
 pub(crate) fn append_truncated(
     buffer: &mut String,
     truncated: &mut bool,
+    chars: &mut usize,
     text: &str,
     max_chars: usize,
 ) {
-    if buffer.chars().count() < max_chars {
+    if *chars >= max_chars {
+        return;
+    }
+    let remaining = max_chars - *chars;
+    let text_chars = text.chars().count();
+    if text_chars <= remaining {
         buffer.push_str(text);
-        if buffer.chars().count() > max_chars {
-            let chars: Vec<char> = buffer.chars().take(max_chars).collect();
-            buffer.clear();
-            buffer.extend(chars);
-            *truncated = true;
-        }
+        *chars += text_chars;
+    } else {
+        let end = text
+            .char_indices()
+            .nth(remaining)
+            .map_or(text.len(), |(i, _)| i);
+        buffer.push_str(&text[..end]);
+        *chars = max_chars;
+        *truncated = true;
     }
 }
 
@@ -157,6 +166,8 @@ impl ReplKernelManager {
         {
             let mut g = lock(&self.inner.guarded);
             buffers.background_output = std::mem::take(&mut g.pending_background_output);
+            buffers.background_output_chars =
+                std::mem::take(&mut g.pending_background_output_chars);
             buffers.background_output_truncated =
                 std::mem::replace(&mut g.pending_background_output_truncated, false);
             g.active_execution = None; // reset below with the execution in hand
@@ -276,6 +287,41 @@ impl ReplKernelManager {
                     Err(_) => Err(anyhow!("Kernel has been shut down")),
                 },
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::append_truncated;
+
+    #[test]
+    fn capped_stream_matches_original_unicode_and_frame_semantics() {
+        let frames = ["", "a", "é", "🍁", "xy", "é🍁abc", "", "tail"];
+        for cap in [0, 1, 2, 3, 4, 7, 65_536] {
+            let mut actual = String::new();
+            let mut count = 0;
+            let mut truncated = false;
+            let mut expected = String::new();
+            let mut expected_truncated = false;
+            for text in frames {
+                append_truncated(&mut actual, &mut truncated, &mut count, text, cap);
+                if expected.chars().count() < cap {
+                    expected.push_str(text);
+                    if expected.chars().count() > cap {
+                        expected = expected.chars().take(cap).collect();
+                        expected_truncated = true;
+                    }
+                }
+                assert_eq!(
+                    (actual.as_str(), truncated, count),
+                    (
+                        expected.as_str(),
+                        expected_truncated,
+                        expected.chars().count()
+                    )
+                );
+            }
         }
     }
 }

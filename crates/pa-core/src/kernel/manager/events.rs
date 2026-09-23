@@ -130,18 +130,28 @@ impl Inner {
         let mut buffers = lock(&execution.buffers);
         let ExecBuffers {
             stdout,
+            stdout_chars,
             stdout_truncated,
             stderr,
+            stderr_chars,
             stderr_truncated,
             ..
         } = &mut *buffers;
         match stream {
-            StreamName::Stdout => {
-                append_truncated(stdout, stdout_truncated, text, execution.max_chars)
-            }
-            StreamName::Stderr => {
-                append_truncated(stderr, stderr_truncated, text, execution.max_chars)
-            }
+            StreamName::Stdout => append_truncated(
+                stdout,
+                stdout_truncated,
+                stdout_chars,
+                text,
+                execution.max_chars,
+            ),
+            StreamName::Stderr => append_truncated(
+                stderr,
+                stderr_truncated,
+                stderr_chars,
+                text,
+                execution.max_chars,
+            ),
         }
         drop(buffers);
         if let Some(on_stream) = &execution.opts.on_stream {
@@ -206,38 +216,42 @@ impl Inner {
         let execution = lock(&self.guarded).active_execution.clone();
         if let Some(execution) = execution {
             let mut buffers = lock(&execution.buffers);
-            if buffers.background_output.chars().count() >= MAX_BACKGROUND_OUTPUT_CHARS {
+            if buffers.background_output_chars >= MAX_BACKGROUND_OUTPUT_CHARS {
                 buffers.background_output_truncated = true;
                 return;
             }
-            buffers.background_output.push_str(text);
-            if buffers.background_output.chars().count() > MAX_BACKGROUND_OUTPUT_CHARS {
-                let chars: Vec<char> = buffers
-                    .background_output
-                    .chars()
-                    .take(MAX_BACKGROUND_OUTPUT_CHARS)
-                    .collect();
-                buffers.background_output.clear();
-                buffers.background_output.extend(chars);
-                buffers.background_output_truncated = true;
-            }
+            let ExecBuffers {
+                background_output,
+                background_output_truncated,
+                background_output_chars,
+                ..
+            } = &mut *buffers;
+            append_truncated(
+                background_output,
+                background_output_truncated,
+                background_output_chars,
+                text,
+                MAX_BACKGROUND_OUTPUT_CHARS,
+            );
             return;
         }
         let mut g = lock(&self.guarded);
-        if g.pending_background_output.chars().count() >= MAX_BACKGROUND_OUTPUT_CHARS {
+        if g.pending_background_output_chars >= MAX_BACKGROUND_OUTPUT_CHARS {
             g.pending_background_output_truncated = true;
             return;
         }
-        g.pending_background_output.push_str(text);
-        if g.pending_background_output.chars().count() > MAX_BACKGROUND_OUTPUT_CHARS {
-            let chars: Vec<char> = g
-                .pending_background_output
-                .chars()
-                .take(MAX_BACKGROUND_OUTPUT_CHARS)
-                .collect();
-            g.pending_background_output.clear();
-            g.pending_background_output.extend(chars);
-            g.pending_background_output_truncated = true;
-        }
+        let Guarded {
+            pending_background_output,
+            pending_background_output_truncated,
+            pending_background_output_chars,
+            ..
+        } = &mut *g;
+        append_truncated(
+            pending_background_output,
+            pending_background_output_truncated,
+            pending_background_output_chars,
+            text,
+            MAX_BACKGROUND_OUTPUT_CHARS,
+        );
     }
 }
