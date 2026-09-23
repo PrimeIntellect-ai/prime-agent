@@ -1262,7 +1262,7 @@ mod tests {
 
         // The fired prompt ran as the session's turn and persisted as the
         // injected `heartbeat_prompt` custom row (TS `promptHeartbeat`):
-        // the ♥ Heartbeat transcript component's wire shape, never a
+        // the ◷ Heartbeat transcript component's wire shape, never a
         // plain user message.
         let fired_row = {
             let core = worker
