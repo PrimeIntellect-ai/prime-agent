@@ -187,7 +187,17 @@ class Side:
         self.mock.set_responses([{"text": "idle filler"}])
         self.mock.start()
         self.binary = binary
+        # Findings accumulate ACROSS the run's Side instances (each flow
+        # builds its own Side; a per-instance list loses the earlier
+        # flows' FAILs from the summary).
         self.findings: list[dict] = []
+        self.all_findings: list[dict] = []
+        prior = out / "all-findings.json"
+        if prior.exists():
+            try:
+                self.all_findings = json.loads(prior.read_text())
+            except Exception:
+                self.all_findings = []
         self.env = B.scrubbed_env(self.agent, self.root / "tmp")
         # The kernel python: reuse the machine's installed kernel venv when
         # present. A fresh HOME would otherwise bootstrap a fresh venv per
@@ -256,7 +266,10 @@ class Side:
     # -- helpers ------------------------------------------------------------
 
     def record(self, summary: str, ok: bool, evidence: str = "") -> None:
-        self.findings.append({"side": self.name, "ok": ok, "summary": summary, "evidence": evidence})
+        finding = {"side": self.name, "ok": ok, "summary": summary, "evidence": evidence}
+        self.findings.append(finding)
+        self.all_findings.append(finding)
+        (self.out / "all-findings.json").write_text(json.dumps(self.all_findings, indent=1))
         print(f"[{'ok  ' if ok else 'FAIL'}] {self.name}: {summary}")
 
     def evidence(self, name: str, text: str) -> None:
@@ -607,9 +620,10 @@ def run_side(name: str, binary: str, out: Path) -> int:
             side.stop_daemon()
         except Exception:
             pass
-    side.evidence("summary.json", json.dumps(side.findings, indent=1))
-    failed = [f for f in side.findings if not f["ok"]]
-    print(f"{name}: {len(side.findings) - len(failed)}/{len(side.findings)} steps ok")
+    side.evidence("summary.json", json.dumps(side.all_findings, indent=1))
+    total = side.all_findings
+    failed = [f for f in total if not f["ok"]]
+    print(f"{name}: {len(total) - len(failed)}/{len(total)} steps ok (all flows)")
     return 1 if failed else 0
 
 

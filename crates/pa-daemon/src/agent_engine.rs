@@ -1376,6 +1376,28 @@ impl AgentSessionEngine {
             }),
         })
         .await
+        .inspect(|engine| {
+            // A queue-mode switch that landed while this build was in
+            // flight wrote only the live slot (the build snapshot above
+            // predates it, and the agent handle did not exist yet): re-
+            // apply the current modes to the freshly built agent so the
+            // first build can never serve a stale mode (TS's agent is
+            // built once per session, so the race does not exist there;
+            // this port's lazy build needs the catch-up).
+            let (steering_mode, follow_up_mode) = {
+                let modes = self.queue_modes.lock().expect("queue modes");
+                (
+                    modes.0.as_deref().and_then(Self::queue_mode),
+                    modes.1.as_deref().and_then(Self::queue_mode),
+                )
+            };
+            if let Some(mode) = steering_mode {
+                engine.session.agent().set_steering_mode(mode);
+            }
+            if let Some(mode) = follow_up_mode {
+                engine.session.agent().set_follow_up_mode(mode);
+            }
+        })
     }
 }
 
@@ -2935,9 +2957,17 @@ impl SessionEngine for AgentSessionEngine {
         // user row per batched message, in delivery order, persisted and
         // rendered like the primary. The batch only ever rides a plain user
         // turn (the injected-custom turns deliver solo — the queue never
-        // batches a row that replaces the user row).
+        // batches a row that replaces the user row). Each row expands a
+        // leading `/skill:` the same way the primary does, so the accepted
+        // row persists and renders the expanded submission (TS normalizes
+        // every submission at queue time).
         for row in &request.batch {
-            let mut content = vec![json!({ "type": "text", "text": row.text })];
+            let text = if row.text.starts_with("/skill:") {
+                self.expand_skill_submission(&row.text)
+            } else {
+                row.text.clone()
+            };
+            let mut content = vec![json!({ "type": "text", "text": text })];
             for image in &row.images {
                 let mut block = match serde_json::to_value(image) {
                     Ok(Value::Object(block)) => Value::Object(block),

@@ -4441,13 +4441,14 @@ fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<QueuedItem> 
     let Some(first) = items.front() else {
         return Vec::new();
     };
-    let first_policy = first.policy;
     // TS `_forcedAllSteeringBatch(first)`: the armed set forces "all" only
     // when the front item is armed; an un-armed front disarms the batch
     // once no armed item remains queued (a delivered item leaves the lane
-    // with its flag, so the armed prefix exhausts itself).
+    // with its flag, so the armed prefix exhausts itself). The read runs
+    // before the front's delivery class — every pickup disarms an
+    // exhausted arm, whatever it delivers.
     let forced = lane == Lane::Steering && core.forced_all_steering && first.forced_batch;
-    let mut batch = vec![items.pop_front().expect("front checked")];
+    let mut batch = Vec::new();
     if lane == Lane::Steering
         && core.forced_all_steering
         && !forced
@@ -4455,6 +4456,20 @@ fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<QueuedItem> 
     {
         core.forced_all_steering = false;
     }
+    // The front's own delivery class decides the turn's shape before any
+    // gathering (TS: the direct prompt hand-off never queues, an injected
+    // custom row replaces its turn's user row, and a queued session
+    // command runs as the command — none of those turns carry co-delivered
+    // rows, so the front delivers solo).
+    if first.custom_message.is_some()
+        || first.policy == TurnPolicy::Direct
+        || crate::session_commands::parse_prompt_session_command(&first.message).is_some()
+    {
+        batch.push(items.pop_front().expect("front checked"));
+        return batch;
+    }
+    let first_policy = first.policy;
+    batch.push(items.pop_front().expect("front checked"));
     if forced || mode == "all" {
         while let Some(next) = items.front() {
             if next.policy != first_policy

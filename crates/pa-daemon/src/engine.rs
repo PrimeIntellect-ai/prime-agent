@@ -1184,14 +1184,28 @@ impl SessionEngine for ScriptedEngine {
             return;
         }
         // The batched co-delivery rows (the real engine's one-run batch):
-        // one accepted user row per batched message, in delivery order,
-        // ahead of the single scripted reply.
+        // one accepted user row per batched message, in delivery order —
+        // images ride as multimodal content blocks after the text, like
+        // the primary — ahead of the single scripted reply.
+        let mut batch_rows = Vec::new();
         for row in &request.batch {
+            let mut content = vec![json!(row.text)];
+            for image in &row.images {
+                let mut block = match serde_json::to_value(image) {
+                    Ok(Value::Object(block)) => Value::Object(block),
+                    _ => continue,
+                };
+                if let Some(object) = block.as_object_mut() {
+                    object.insert("type".to_string(), json!("image"));
+                }
+                content.push(block);
+            }
             let accepted_row = json!({
                 "role": "user",
-                "content": row.text,
+                "content": content,
                 "timestamp": crate::util::now_ms(),
             });
+            batch_rows.push(accepted_row.clone());
             if !emit(EngineEvent::UserMessage(accepted_row)) {
                 emit(cancelled());
                 return;
@@ -1231,10 +1245,14 @@ impl SessionEngine for ScriptedEngine {
             return;
         }
         // The loop's run-end frame (TS `agent_end`): the run's
-        // accumulated message set — the accepted row plus the final
-        // assistant message in the scripted shape.
+        // accumulated message set — the accepted rows (the primary plus
+        // every batched row) and the final assistant message in the
+        // scripted shape.
+        let mut run_messages = vec![accepted_row];
+        run_messages.extend(batch_rows);
+        run_messages.push(final_message);
         if !emit(EngineEvent::AgentEnd {
-            messages: vec![accepted_row, final_message],
+            messages: run_messages,
         }) {
             emit(cancelled());
             return;
