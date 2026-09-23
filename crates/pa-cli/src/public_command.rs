@@ -124,11 +124,6 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
     if !public.contains(command) {
         return continue_with(args.clone());
     }
-    // TS routes a marker-carrying `update` child into package-manager-cli's
-    // update case — which in TS IS the self-update implementation. The
-    // Rust port split self-updates (`prime-agent update`) from package
-    // updates, so the marker child must fall through to `run_update` (the
-    // self-update flow) instead of the extensions-only package command.
     if command == "update"
         && args
             .iter()

@@ -2737,7 +2737,11 @@ impl SessionUi {
                     self.error_row("Usage: /nightly [on|off|status]", view);
                     return Ok(());
                 }
-                if self.turn_active {
+                // TS guards on compacting/streaming/bash: `turn_active`
+                // carries the streaming and compaction arms, and the
+                // user-bash slot (`!` runs) is its own state — a relaunch
+                // mid-run would interrupt either.
+                if self.turn_active || self.user_bash_running {
                     self.note_as(
                         "Wait for the current work to finish before updating.",
                         StatusKind::Warning,
