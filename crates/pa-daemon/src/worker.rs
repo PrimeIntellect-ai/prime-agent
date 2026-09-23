@@ -1147,6 +1147,40 @@ impl Worker {
                     );
                 });
                 concrete.set_goal_admission(probe, sink, queue_purge);
+                // The bash-completion wake seam (TS
+                // `_promptInjectedMessage` for `bash.completed` and
+                // `_withdrawAsyncBashCompletionNotice` for
+                // `bash.consumed`): the handler validates and the sink
+                // admits/withdraws through the queue lanes. The engine
+                // reference carries the closed-session gate (the same
+                // refusal `deliver_goal_work` applies).
+                // A weak engine reference: the engine holds the sinks,
+                // so a strong reference here would pin it forever (the
+                // same reason the goal settle hook downgrades).
+                let notice_engine = std::sync::Arc::downgrade(concrete);
+                let notice_core = Arc::clone(&core);
+                let notice_notify = Arc::clone(&work_notify);
+                let notice_recovery = Arc::clone(&recovery);
+                let completion: crate::engine::BashCompletionSink = Arc::new(move |notice| {
+                    let Some(engine) = notice_engine.upgrade() else {
+                        return;
+                    };
+                    if engine.session_is_closed() {
+                        return;
+                    }
+                    admit_bash_completion_notice(
+                        &notice_recovery,
+                        &notice_core,
+                        &notice_notify,
+                        notice,
+                    );
+                });
+                let withdraw_core = Arc::clone(&core);
+                let withdraw_recovery = Arc::clone(&recovery);
+                let consumed: crate::engine::BashConsumedSink = Arc::new(move |notice| {
+                    withdraw_bash_completion_notice(&withdraw_recovery, &withdraw_core, notice);
+                });
+                concrete.set_bash_notice_sinks(completion, consumed);
             }
             let runner = TurnRunner {
                 recovery: Arc::clone(&recovery),
@@ -4916,6 +4950,136 @@ pub(crate) fn admit_goal_follow_up(
     // `resumeIfIdle`: the runner re-checks the queue at its loop head, so
     // the minted turn runs as the next admitted turn.
     work_notify.notify_one();
+}
+
+/// Admit one detached kernel bash completion notice (TS
+/// `bash.completed` -> `_promptInjectedMessage(message, {
+/// streamingBehavior: "steer", queueIfBusy: true, resumeIfIdle: true })`):
+/// the `[bash-done pid:N exit:M]` row queues on the steering lane — a
+/// busy session keeps a visible steer row, an idle session wakes into
+/// the turn that runs on the row. The admission carries the recovery
+/// busy-evidence checkpoint, so a crash between the notice and its
+/// delivery revives the worker with the row replaying (the wake
+/// survives worker re-adoption and revival).
+pub(crate) fn admit_bash_completion_notice(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
+    core: &Arc<Mutex<SessionCore>>,
+    work_notify: &Arc<Notify>,
+    notice: crate::engine::BashCompletionNotice,
+) {
+    let row = pa_core::session_engine::messages::create_async_bash_completion_message(
+        notice.pid,
+        &notice.command,
+        notice.exit_code,
+        crate::util::now_ms(),
+    );
+    let content = match &row.content {
+        pa_types::ai::UserContent::Text(text) => text.clone(),
+        _ => String::new(),
+    };
+    // TS `queueVisible: visibleQueued` + the schedule's execution policy:
+    // busy sessions queue a visible row, idle sessions wake on an
+    // invisible injected turn.
+    let (policy, queue_visible) = {
+        let core_guard = core.lock().unwrap();
+        if core_guard.busy {
+            (TurnPolicy::Queued, true)
+        } else {
+            (TurnPolicy::Injected, false)
+        }
+    };
+    {
+        let mut core_guard = core.lock().unwrap();
+        core_guard.steering.push_back(QueuedItem {
+            // TS `previewLabel` (`injectedMessagePreviewLabel` ->
+            // `ASYNC_BASH_COMPLETION_PREVIEW_LABEL`): the queue strip
+            // reads `Background command finished: <content>` (the TUI's
+            // labeled-preview prefix).
+            preview: Some(format!(
+                "{}: {content}",
+                pa_core::session_engine::messages::ASYNC_BASH_COMPLETION_PREVIEW_LABEL
+            )),
+            message: content,
+            custom_message: Some(crate::session_commands::custom_message_value(&row)),
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible,
+            policy,
+            forced_batch: false,
+        });
+    }
+    // The fire checkpoint (busy=true, TS's steering queue string): the
+    // notice is undelivered live work until its turn settles — the same
+    // evidence the goal/autonomous continuations record.
+    checkpoint_queue_recovery(
+        recovery,
+        core,
+        QueueCheckpoint::Admitted {
+            operation: "steer_queued",
+        },
+    );
+    // `resumeIfIdle`: the runner re-checks the queue at its loop head.
+    work_notify.notify_one();
+}
+
+/// Withdraw one queued bash completion notice (TS `bash.consumed` ->
+/// `_withdrawAsyncBashCompletionNotice`): the kernel read the finished
+/// command's result before the notice delivered, so the undelivered row
+/// cancels — one read withdraws one notice, and pids are reused across
+/// handles, so the command disambiguates (`_isAsyncBashCompletionActionFor`).
+pub(crate) fn withdraw_bash_completion_notice(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
+    core: &Arc<Mutex<SessionCore>>,
+    notice: crate::engine::BashConsumedNotice,
+) {
+    let mut removed = false;
+    {
+        let mut core_guard = core.lock().unwrap();
+        let before = core_guard.steering.len() + core_guard.follow_up.len();
+        core_guard
+            .steering
+            .retain(|item| !is_bash_completion_notice_for(item, &notice));
+        core_guard
+            .follow_up
+            .retain(|item| !is_bash_completion_notice_for(item, &notice));
+        removed = before != core_guard.steering.len() + core_guard.follow_up.len();
+    }
+    if removed {
+        // The withdrawal refreshes the verdict (and the snapshot) so a
+        // consumed notice cannot keep busy=true promising a revive the
+        // withdrawn row would replay (a mid-turn withdrawal stays busy
+        // through the in-flight turn).
+        checkpoint_queue_recovery(
+            recovery,
+            core,
+            QueueCheckpoint::Settle {
+                operation: "queue_purged",
+            },
+        );
+    }
+}
+
+/// Whether one queued item is the async-bash-completion notice for this
+/// pid+command (TS `_isAsyncBashCompletionActionFor`: the custom row's
+/// details carry both — pids alone are reused).
+fn is_bash_completion_notice_for(
+    item: &QueuedItem,
+    notice: &crate::engine::BashConsumedNotice,
+) -> bool {
+    let Some(row) = item.custom_message.as_ref() else {
+        return false;
+    };
+    if row.get("customType").and_then(Value::as_str)
+        != Some(pa_core::session_engine::messages::ASYNC_BASH_COMPLETION_CUSTOM_TYPE)
+    {
+        return false;
+    }
+    let details = row.get("details").unwrap_or(&Value::Null);
+    details.get("pid").and_then(Value::as_u64) == Some(notice.pid as u64)
+        && details.get("command").and_then(Value::as_str) == Some(notice.command.as_str())
 }
 
 /// Whether one queued item is a minted goal-context turn (TS's
@@ -10029,6 +10193,164 @@ mod recovery_verdict_tests {
         .expect("the admission flushed its snapshot");
         assert!(steering.is_empty(), "steering: {steering:?}");
         assert_eq!(follow_up[0].message, "continue the mission");
+        let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+    }
+
+    /// The detached bash completion notice admits through the steering
+    /// lane: an idle session wakes on an invisible injected row, and the
+    /// admission is journal busy evidence (the crash between the notice
+    /// and its delivery revives the worker with the row replaying — the
+    /// wake survives re-adoption and revival alike).
+    #[tokio::test]
+    async fn a_bash_completion_notice_admits_the_steering_lane_with_busy_evidence() {
+        let worker = created_worker_with_journal().await;
+        worker.dispatch("clear_queue", &json!({})).await;
+        let notify = Arc::new(Notify::new());
+        admit_bash_completion_notice(
+            &worker.recovery,
+            &worker.core,
+            &notify,
+            crate::engine::BashCompletionNotice {
+                pid: 4321,
+                command: "sleep 12; echo RW_WAKE_DONE".to_string(),
+                exit_code: 0,
+            },
+        );
+        let core = worker.core.lock().unwrap();
+        let item = core
+            .steering
+            .front()
+            .expect("the notice queues on the steering lane");
+        let row = item.custom_message.as_ref().expect("the injected row");
+        assert_eq!(
+            row.get("customType").and_then(Value::as_str),
+            Some("async_bash_completion"),
+            "the row is the async-bash-completion notice: {row}"
+        );
+        assert_eq!(
+            row["details"]["pid"],
+            json!(4321),
+            "the notice carries its pid: {row}"
+        );
+        assert!(
+            item.message.starts_with("[bash-done pid:4321 exit:0]"),
+            "the turn runs on the notice content: {item:?}"
+        );
+        assert!(
+            item.preview
+                .as_deref()
+                .is_some_and(|preview| preview.starts_with("Background command finished: ")),
+            "the queue row carries the TS preview label: {item:?}"
+        );
+        // TS `queueVisible: visibleQueued`: an idle session's wake is an
+        // invisible injected turn.
+        assert!(!item.queue_visible, "the idle wake stays invisible");
+        drop(core);
+        assert!(
+            WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+            "the notice admission is live work"
+        );
+        let latest = latest_record(&worker);
+        assert_eq!(latest.operation, "steer_queued");
+        let (steering, _) = WorkerRecoveryJournal::read_queue_snapshot(
+            &worker.config.recovery_journal_path,
+            "target-session",
+        )
+        .unwrap()
+        .expect("the admission flushed its snapshot");
+        assert_eq!(
+            steering[0].message,
+            "[bash-done pid:4321 exit:0]\n\nCommand: \"sleep 12; echo RW_WAKE_DONE\""
+        );
+        let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+    }
+
+    /// A busy session queues the notice as a visible steer row (TS
+    /// `queueIfBusy`), the same row with the queued delivery class.
+    #[tokio::test]
+    async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row() {
+        let worker = created_worker_with_journal().await;
+        worker.core.lock().unwrap().busy = true;
+        let notify = Arc::new(Notify::new());
+        admit_bash_completion_notice(
+            &worker.recovery,
+            &worker.core,
+            &notify,
+            crate::engine::BashCompletionNotice {
+                pid: 99,
+                command: "make gates".to_string(),
+                exit_code: 2,
+            },
+        );
+        let core = worker.core.lock().unwrap();
+        let item = core.steering.front().expect("the queued notice");
+        assert!(item.queue_visible, "the busy session keeps a visible row");
+        assert_eq!(item.policy, TurnPolicy::Queued);
+        drop(core);
+        let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+    }
+
+    /// The kernel read the result first: the undelivered notice withdraws
+    /// (pid+command — pids are reused), and the withdrawal settles the
+    /// busy evidence so the journal never promises a replay the row left.
+    #[tokio::test]
+    async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
+        let worker = created_worker_with_journal().await;
+        worker.dispatch("clear_queue", &json!({})).await;
+        let notify = Arc::new(Notify::new());
+        admit_bash_completion_notice(
+            &worker.recovery,
+            &worker.core,
+            &notify,
+            crate::engine::BashCompletionNotice {
+                pid: 4321,
+                command: "sleep 12; echo RW_WAKE_DONE".to_string(),
+                exit_code: 0,
+            },
+        );
+        assert!(
+            WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+            "the notice admission is live work"
+        );
+        // A different command under a reused pid must not withdraw (TS
+        // `_isAsyncBashCompletionActionFor` matches both).
+        withdraw_bash_completion_notice(
+            &worker.recovery,
+            &worker.core,
+            crate::engine::BashConsumedNotice {
+                pid: 4321,
+                command: "another command".to_string(),
+            },
+        );
+        assert!(
+            worker.core.lock().unwrap().steering.len() == 1,
+            "the mismatched withdrawal kept the row"
+        );
+        assert!(
+            WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+            "the kept row stays live work"
+        );
+        withdraw_bash_completion_notice(
+            &worker.recovery,
+            &worker.core,
+            crate::engine::BashConsumedNotice {
+                pid: 4321,
+                command: "sleep 12; echo RW_WAKE_DONE".to_string(),
+            },
+        );
+        {
+            let core = worker.core.lock().unwrap();
+            assert!(
+                core.steering.is_empty() && core.follow_up.is_empty(),
+                "the consumed notice withdrew"
+            );
+        }
+        assert!(
+            !WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+            "the withdrawal settled the busy evidence"
+        );
+        let latest = latest_record(&worker);
+        assert_eq!(latest.operation, "queue_purged");
         let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
     }
 

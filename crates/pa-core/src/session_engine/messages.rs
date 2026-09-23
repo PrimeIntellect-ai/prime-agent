@@ -22,6 +22,13 @@ pub const COMPACTION_OUTCOME_CUSTOM_TYPE: &str = "compaction_outcome";
 pub const REFINEMENT_OUTCOME_CUSTOM_TYPE: &str = "refinement_outcome";
 pub const REFINEMENT_NOTICE_CUSTOM_TYPE: &str = "refinement_notice";
 pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
+/// TS `ASYNC_BASH_COMPLETION_CUSTOM_TYPE`: the durable row a detached
+/// kernel bash completion admits as the woken turn's injected prompt.
+pub const ASYNC_BASH_COMPLETION_CUSTOM_TYPE: &str = "async_bash_completion";
+/// TS `ASYNC_BASH_COMPLETION_PREVIEW_LABEL`: the queue-strip label the
+/// notice's queued row carries (the TUI renders it with its own label,
+/// no lane prefix).
+pub const ASYNC_BASH_COMPLETION_PREVIEW_LABEL: &str = "Background command finished";
 /// The queue-strip preview label for a parked heartbeat fire (TS
 /// `HEARTBEAT_PROMPT_PREVIEW_LABEL`): the queued row reads
 /// `Heartbeat prompt: <content>` instead of the lane-labeled preview.
@@ -146,6 +153,38 @@ pub fn create_heartbeat_prompt_message(
         content: UserContent::Text(content),
         display: true,
         details: Some(serde_json::Value::Object(details)),
+        timestamp,
+        rest: Default::default(),
+    }
+}
+
+/// The detached kernel bash completion notice (TS
+/// `createAsyncBashCompletionMessage`): an `async_bash_completion`
+/// custom message carrying `[bash-done pid:N exit:M]` plus the
+/// JSON-encoded command, with the completion's `{pid, command,
+/// exitCode}` in details. The daemon's `bash.completed` host handler
+/// admits the row as the woken turn's injected prompt (the turn runs on
+/// the row, so the transcript renders the bash-done component); a
+/// later kernel read that reaches the model first withdraws it through
+/// its details (`bash.consumed`).
+pub fn create_async_bash_completion_message(
+    pid: u32,
+    command: &str,
+    exit_code: i64,
+    timestamp: u64,
+) -> pa_types::session::CustomMessage {
+    // TS `JSON.stringify(details.command)`: the quoted, escaped command.
+    let encoded_command = serde_json::to_string(command).unwrap_or_default();
+    let content = format!("[bash-done pid:{pid} exit:{exit_code}]\n\nCommand: {encoded_command}");
+    pa_types::session::CustomMessage {
+        custom_type: ASYNC_BASH_COMPLETION_CUSTOM_TYPE.to_string(),
+        content: UserContent::Text(content),
+        display: true,
+        details: Some(serde_json::json!({
+            "pid": pid,
+            "command": command,
+            "exitCode": exit_code,
+        })),
         timestamp,
         rest: Default::default(),
     }

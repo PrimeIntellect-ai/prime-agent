@@ -1303,6 +1303,7 @@ allowlist.
   lazy refusal-telemetry client), with the three seams above.
 
 
+
 ## The continue-recent launch safety — `--continue` never blind-resumes (lane continue-recent-safety, 2026-09-23)
 
 The P6 trap: a continue-recent launch resolves "the newest session for the
@@ -1355,3 +1356,80 @@ FRESH session (a parity bug both directions: no resume, no error).
   not the first-listed row.
 - `supervisor_e2e::create_with_continue_recent_is_refused`: the wire
   refusal + the plain-create pass-through.
+
+## The re-adoption wake paths — the async bash completion notice + scheduled fires (lane readoption-wake-path, 2026-09-23)
+
+### The bug (the macos-tty-sane takeover finding)
+
+A daemon supervisor restart that re-adopts a still-live worker leaves its
+re-adopted sessions asleep forever: the takeover's frozen worker ran a
+detached background `bash()` (a gates watcher), went idle, the supervisor
+restarted and re-adopted it — and when the watcher process exited (having
+written its `BASE_GATES_DONE` marker), the completion notification never
+woke the session. No heartbeat, no steer path: invisible but alive.
+
+Root cause: the port had **no kernel host handlers for
+`bash.completed`/`bash.consumed` at all**. The kernel runtime
+(`prime-agent-runtime`'s `bash.py`) starts a notice task for every
+detached background `bash()` whose creating cell ends before the command
+settles; when the process finishes (result unconsumed) it sends the
+`bash.completed` host request. The TS session answers it (agent-session.ts
+`_createKernelHostHandlers`'s `bash.completed` arm) by injecting the
+`[bash-done pid:N exit:M]` custom row with `queueIfBusy` + `resumeIfIdle`
+— a busy session queues the notice as a steering row, an idle session
+wakes into a new turn that runs on the row. The Rust daemon answered every
+`bash.completed` with "host request type is not available in this
+session", so a background command finishing after its turn NEVER woke a
+session — re-adopted or not; the restart incident is where it was caught
+(the worker and its kernel survive supervisor death, so the frozen-waiter
+shape is exactly the re-adoption window).
+
+### The port
+
+| TS site | behavior | Rust port |
+|---|---|---|
+| `createAsyncBashCompletionHostHandler` (rlm-runtime.ts) | validated details: positive integer pid, non-empty string command, integer exit code | `bash_notices::validate_completion`/`validate_consumed` |
+| `createAsyncBashCompletionMessage` (messages.ts) | the `[bash-done pid:N exit:M]` `async_bash_completion` custom row, `display`, details `{pid, command, exitCode}` | `pa_core::session_engine::messages::create_async_bash_completion_message` (+ `ASYNC_BASH_COMPLETION_CUSTOM_TYPE`/`ASYNC_BASH_COMPLETION_PREVIEW_LABEL`) |
+| the `bash.completed` arm's `_promptInjectedMessage(..., { streamingBehavior: "steer", queueIfBusy: true, resumeIfIdle: true, ... })` | busy sessions queue a visible steer row; idle sessions wake on an invisible injected turn | the worker's `admit_bash_completion_notice`: steering lane, `queue_visible` from `core.busy`, `TurnPolicy::Queued`/`Injected`, `work_notify` wake |
+| `injectedMessagePreviewLabel` -> `ASYNC_BASH_COMPLETION_PREVIEW_LABEL` | the queue row reads `Background command finished: <content>` (the TUI already renders the labeled prefix) | the queued item's `preview` |
+| `bash.consumed` -> `_withdrawAsyncBashCompletionNotice` | the kernel read the result first: the undelivered notice cancels (pid+command, pids are reused) | `withdraw_bash_completion_notice` over both lanes + the settle checkpoint |
+| `_disposed || _disposing` / `session_closed` gates | a closing session admits no injected work | the sink's `session_is_closed` refusal (weak engine ref — the engine holds the sinks, so the sink must not pin it) |
+| the action store's crash replay (`restoreSessionActions`) | a queued notice survives a worker crash and replays | the recovery-journal queue-snapshot checkpoint at admission (`steer_queued` busy evidence; the revived worker's create replay restores the lanes) |
+
+### Why the wake now survives re-adoption and revival
+
+- **Adopted-live workers** (the incident): the handler, the sink, the
+  kernel, and the runner all live in the worker process — the supervisor
+  restart never touches them; the notice fires, admits, and wakes.
+- **Revived workers** (the worker died after the notice queued): the
+  admission's queue-snapshot checkpoint is busy evidence, so the adoption
+  relaunches the worker and the create replay restores the lane — the
+  queued notice delivers. (A command still running when its worker dies
+  loses its kernel notice task entirely — TS parity: the runtime's notice
+  task is kernel-process state, unrecoverable.)
+- **Scheduled fires** (heartbeats): the worker's in-process scheduler keeps
+  firing across the restart (verified by the e2e); the supervisor's boot
+  re-arm (`rearm_scheduled_wake`, #2592's gates) covers workerless saved
+  sessions. The continuous `recomputeScheduledSessionWake` timer stays a
+  recorded scope cut of slice 5 (owned by the scheduled-wake family lane).
+
+### Scope cuts / differences
+
+- The `bash.consumed` withdrawal covers queued rows; an item already
+  picked by the runner runs its turn (TS's cancelable "preparing" window
+  has no Rust equivalent at the runner seam — the kernel-side arming
+  order makes this a benign race, same as TS's withdrawal-after-preparing).
+- Handlers register at the daemon worker seam (every product session is a
+  daemon worker; outside a worker there is no queue to admit into, and
+  the TS CLI local session is not a Rust runtime shape).
+
+### Where the code lives
+
+- `pa-core`: `session_engine::messages` (the row builder + constants).
+- `pa-daemon`: `bash_notices` (the handlers + validation), `engine`
+  (the sink types), `agent_engine` (the fields + registration),
+  `worker` (the sink wiring + `admit_bash_completion_notice`/
+  `withdraw_bash_completion_notice` + the journal evidence), the e2e
+  `tests/readoption_wake_e2e.rs` (the deterministic repro: supervisor
+  kill -9 + relaunch mid-bash-completion-wait, assert the wake; plus the
+  heartbeat-across-restart variant).

@@ -159,6 +159,14 @@ pub struct AgentSessionEngine {
     /// `_clearQueuedGoalContexts`): invoked by the pause/clear/start
     /// session commands and the kernel `goal.complete` host request.
     pub(crate) goal_queue_purge: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    /// The worker's bash-completion queue seams (TS
+    /// `_promptInjectedMessage`/`_withdrawAsyncBashCompletionNotice`):
+    /// the `bash.completed` notice admits through the steering lane
+    /// (queue-if-busy, resume-if-idle) and the `bash.consumed` notice
+    /// withdraws its undelivered row. Set by the worker at construction;
+    /// `None` outside a daemon worker (no queue to admit into).
+    pub(crate) bash_completion_sink: std::sync::Mutex<Option<crate::engine::BashCompletionSink>>,
+    pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
     /// The session's live agent handle (TS `AgentSession.agent`): the eager
     /// turn-abort funnel's target. Mirrored from the core session at build
     /// time for the same reason as the goal runtime handles — a running
@@ -479,6 +487,8 @@ impl AgentSessionEngine {
             goal_budget_crossed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             goal_input_probe: std::sync::Mutex::new(None),
             goal_admission_sink: std::sync::Mutex::new(None),
+            bash_completion_sink: std::sync::Mutex::new(None),
+            bash_consumed_sink: std::sync::Mutex::new(None),
             goal_queue_purge: std::sync::Mutex::new(None),
             turn_agent: std::sync::Mutex::new(None),
             queue_modes,
@@ -1249,6 +1259,7 @@ impl AgentSessionEngine {
         let mut handlers = HostRequestHandlers::default();
         register_agent_message_host_handlers(sender, &mut handlers);
         register_agent_observe_host_handlers(observer, &mut handlers);
+        self.register_bash_notice_host_handlers(&mut handlers);
         Some(handlers)
     }
 
