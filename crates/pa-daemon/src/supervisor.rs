@@ -3895,8 +3895,17 @@ impl Supervisor {
         // bounded background hydration fills each newly seeded row's
         // durable display fields (cwd, model, thinking level) and
         // publishes them as one update. A fresh session has no family;
-        // the guards skip every row another surface already seeded.
-        if let Some(root) = summary.get("sessionFile").and_then(Value::as_str) {
+        // the guards skip every row another surface already seeded. The
+        // root is the CREATE response's session file (the authoritative
+        // durable path, exactly what admission reads): a get_state that
+        // answers mid-replay without its session file must not skip a
+        // resume's family, and a live get_state file that differs is
+        // still the same session.
+        if let Some(root) = summary
+            .get("sessionFile")
+            .and_then(Value::as_str)
+            .or_else(|| create_summary.get("sessionFile").and_then(Value::as_str))
+        {
             let seeded = self.seed_roster_family_edges(Path::new(&root)).await;
             if !seeded.is_empty() {
                 self.spawn_seeded_hydration(seeded);
