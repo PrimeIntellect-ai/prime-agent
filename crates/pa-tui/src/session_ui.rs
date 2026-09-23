@@ -1362,6 +1362,20 @@ impl SessionUi {
         self.note_as(text, StatusKind::Info, view);
     }
 
+    /// Show an ephemeral action toast (the top-right auto-dismiss overlay;
+    /// a sanctioned divergence from TS — see `toast`): the confirmation
+    /// never lands in the transcript, and the frame repaints so the
+    /// overlay appears at once (its expiry repaints it away).
+    pub(crate) fn toast(
+        &mut self,
+        text: &str,
+        kind: crate::toast::ToastKind,
+        view: &mut AgentView,
+    ) {
+        view.toasts.push(text, kind);
+        self.dirty = true;
+    }
+
     /// A plain appended dim row (TS `chatContainer.addChild(new
     /// Markdown/Text(...))` — `/name` and `/rlm-max-depth` report rows):
     /// unlike `note` it never rewrites the previous status in place, so
@@ -3680,7 +3694,11 @@ impl SessionUi {
             return Ok(());
         };
         match crate::clipboard::copy_to_clipboard(&text, &mut self.osc_sink) {
-            Ok(()) => self.note("Copied last agent message to clipboard", view),
+            Ok(()) => self.toast(
+                "Copied last agent message to clipboard",
+                crate::toast::ToastKind::Success,
+                view,
+            ),
             Err(message) => self.error_row(&message, view),
         }
         Ok(())
@@ -5333,14 +5351,19 @@ impl SessionUi {
     /// through tmux (`set-clipboard`), so the write goes straight to the
     /// terminal; a headless run has no terminal and records the text for
     /// its verifier instead. A successful copy surfaces the
-    /// "Copied selection to clipboard" status row (TS `showStatus`), a
-    /// failed write the failure row (TS `showError`).
+    /// "Copied selection to clipboard" action toast (the ephemeral
+    /// overlay, not the TS `showStatus` chat row — sanctioned divergence),
+    /// a failed write the failure row (TS `showError`).
     fn copy_selection(&mut self, text: &str, view: &mut AgentView) {
         let lines = text.lines().count().max(1);
         self.copies.push(text.to_string());
         self.track_selection(lines);
         if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-            self.note("Copied selection to clipboard", view);
+            self.toast(
+                "Copied selection to clipboard",
+                crate::toast::ToastKind::Success,
+                view,
+            );
             return;
         }
         use base64::Engine;
@@ -5350,7 +5373,11 @@ impl SessionUi {
         match out.write_all(format!("\x1b]52;c;{encoded}\x07").as_bytes()) {
             Ok(()) => {
                 let _ = out.flush();
-                self.note("Copied selection to clipboard", view);
+                self.toast(
+                    "Copied selection to clipboard",
+                    crate::toast::ToastKind::Success,
+                    view,
+                );
             }
             Err(error) => {
                 self.error_row(&format!("Failed to copy selection: {error}"), view);

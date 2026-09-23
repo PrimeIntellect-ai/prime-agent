@@ -226,6 +226,9 @@ pub struct AgentView {
     /// frame; the window re-styles only the rows the selection change
     /// touched): walked base rows, their styled copies, and the spans.
     pub(crate) selection_restyle: restyle::SelectionRestyle,
+    /// The ephemeral action toasts (the top-right auto-dismiss overlay;
+    /// a sanctioned divergence from TS — see `toast`).
+    pub toasts: crate::toast::Toasts,
 }
 
 impl AgentView {
@@ -270,6 +273,7 @@ impl AgentView {
             dock_cursor: None,
             window_rows: 0,
             osc_last_rows: std::collections::HashMap::new(),
+            toasts: crate::toast::Toasts::default(),
             entry_layout: Vec::new(),
             entry_heights: Vec::new(),
             sparse_window: None,
@@ -1309,6 +1313,26 @@ impl AgentView {
         }
         self.frame_rows = frame.len();
         self.apply_frame_selection(&mut frame, width);
+        // The action toasts overlay the transcript window's top rows
+        // (newest at the bottom of the stack), above the selection restyle
+        // so the transient text stays legible.
+        let now = std::time::Instant::now();
+        let toasts: Vec<(String, ratatui::style::Style)> = self
+            .toasts
+            .active(now)
+            .map(|(text, kind)| {
+                let color = match kind {
+                    crate::toast::ToastKind::Success => crate::theme::ThemeColor::Success,
+                    crate::toast::ToastKind::Info => crate::theme::ThemeColor::Accent,
+                    crate::toast::ToastKind::Warning => crate::theme::ThemeColor::Warning,
+                    crate::toast::ToastKind::Error => crate::theme::ThemeColor::Error,
+                };
+                (text.to_string(), self.theme.fg_style(color))
+            })
+            .collect();
+        if !toasts.is_empty() {
+            crate::toast::overlay_toasts(&mut frame, top_rows, &toasts, width);
+        }
         frame
     }
 
@@ -2342,6 +2366,48 @@ mod tests {
         view.mark_entry_stale(0);
         let frame1 = transcript_text(&mut view, 80);
         assert!(frame1.contains("and more"));
+    }
+
+    /// The action toast overlays the top transcript rows right-aligned
+    /// (the newest at the bottom of the stack) and auto-dismisses once its
+    /// TTL passes.
+    #[test]
+    fn action_toasts_overlay_the_top_rows_and_auto_dismiss() {
+        let mut view = view();
+        view.toasts
+            .push("Copied to clipboard", crate::toast::ToastKind::Success);
+        let frame = view.render_frame(60, 24);
+        let rows: Vec<String> = frame
+            .iter()
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .collect();
+        let toast_row = rows
+            .iter()
+            .position(|row| row.contains("Copied to clipboard"))
+            .expect("the toast renders");
+        // Right-aligned: the row leads with blanks and the top bar stays
+        // above the overlay (fullscreen: row 0).
+        assert!(toast_row >= 1, "the toast sits below the top bar");
+        // Right-aligned: the overlaid row is the label alone (its column
+        // padding trimmed), not the transcript row beneath it.
+        assert_eq!(rows[toast_row].trim(), "Copied to clipboard");
+        // The overlay expires with its TTL.
+        view.toasts
+            .age_by(crate::toast::TOAST_TTL + std::time::Duration::from_millis(1));
+        let frame = view.render_frame(60, 24);
+        let joined: String = frame
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !joined.contains("Copied to clipboard"),
+            "the expired toast is gone: {joined}"
+        );
     }
 
     /// The browse header inserts BELOW the editor's top row with an empty
