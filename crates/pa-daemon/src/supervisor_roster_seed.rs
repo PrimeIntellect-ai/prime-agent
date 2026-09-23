@@ -91,7 +91,7 @@ impl Supervisor {
             // tombstoned during the read, must not receive rows (the
             // delete's roster removal already settled and never
             // revisits them).
-            if !ledger.edge_is_live(&edge.child_id)
+            if !ledger.edge_is_live(&edge.child_id, &edge.child)
                 || !family_descends_from(&parent_by_child, &parent, &self.roster_seed_roots().await)
             {
                 continue;
@@ -220,22 +220,28 @@ impl Supervisor {
         let Ok(ledger) = self.rlm_spawn_ledger_for(None).await else {
             return Vec::new();
         };
+        // The family walk outside the roster lock: the descent check is
+        // an in-memory parent walk and the liveness check is a
+        // stat-backed ledger read, and neither may block every roster
+        // operation behind a large family's registration (the lock is
+        // taken only for the duplicate checks and writes).
+        let candidates: Vec<&RlmLedgerEdge> = edges
+            .iter()
+            .filter(|edge| {
+                let parent = canonical_session_path(Path::new(&edge.parent));
+                family_descends_from(&parent_by_child, &parent, &roots)
+                    // The edge snapshot predates this pass by the
+                    // ledger-read await: a child deleted in that
+                    // window never seeds (its completed delete must
+                    // not be followed by a fresh row).
+                    && ledger.edge_is_live(&edge.child_id, &edge.child)
+            })
+            .collect();
         let mut changed = Vec::new();
         let mut retry = Vec::new();
         {
             let mut roster = self.roster.lock().unwrap();
-            for edge in &edges {
-                let parent = canonical_session_path(Path::new(&edge.parent));
-                if !family_descends_from(&parent_by_child, &parent, &roots) {
-                    continue;
-                }
-                // The edge snapshot predates this loop by the
-                // ledger-read await: a child deleted in that window
-                // never seeds (its completed delete must not be
-                // followed by a fresh row).
-                if !ledger.edge_is_live(&edge.child_id) {
-                    continue;
-                }
+            for edge in candidates {
                 let candidate = SeededRosterEntry::edge_only(edge);
                 // Present rows never republish (TS has/hasSessionFile);
                 // an unhydrated seeded row stays a hydration candidate
