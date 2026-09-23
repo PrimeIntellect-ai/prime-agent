@@ -37,6 +37,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -224,6 +225,13 @@ def run_side(binary, corpus, script_path, out_dir, width, height):
         ext_dir = sandbox["agent"] / "extensions"
         ext_dir.mkdir(exist_ok=True)
         (ext_dir / "paste-stream-faux.js").write_text(TS_FAUX_EXTENSION)
+    # Each side resumes its own copy of the corpus: a resumed session
+    # appends its turn records to the file, so a shared corpus would hand
+    # the second side the first side's transcript (the needle is then no
+    # longer at the tail and the resume wait can never succeed).
+    corpus_copy = sandbox_root / "corpus.jsonl"
+    shutil.copyfile(corpus, corpus_copy)
+    corpus = corpus_copy
 
     session = f"pastep-{binary}"
     tmux("kill-session", "-t", session, check=False)
