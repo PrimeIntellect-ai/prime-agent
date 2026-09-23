@@ -86,6 +86,19 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(tail), 0)
         self.assertLessEqual(len(json.dumps({"tail": tail})), 16_384)
 
+    async def test_activity_list_frame_stays_under_the_wire_cap(self):
+        handles = [bash("sleep 3 # " + str(index) * 80) for index in range(30)]
+        try:
+            from rlm.bash import activity_request
+
+            rows = activity_request("list")["activities"]
+            self.assertGreater(len(rows), 1)
+            self.assertLessEqual(len(json.dumps({"activities": rows})), 16_384)
+            self.assertTrue(all(len(row["command"]) <= 512 for row in rows))
+        finally:
+            for handle in handles:
+                handle.kill()
+
     async def test_activity_tail_keeps_the_newest_output_under_the_cap(self):
         # Escaped output shrinks from the oldest end: the newest line is
         # always the surviving one.

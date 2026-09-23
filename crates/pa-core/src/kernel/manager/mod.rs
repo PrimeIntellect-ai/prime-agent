@@ -486,6 +486,21 @@ impl ReplKernelManager {
         if !self.is_running() {
             return Err(anyhow!("Kernel is not running"));
         }
+        // The runtime's pre-validation answers with a protocol error that
+        // carries no request id (so the waiter could only time out);
+        // mirror the contract locally and fail fast instead.
+        if !matches!(action, "list" | "tail" | "kill") {
+            return Err(anyhow!("unknown bash activity action"));
+        }
+        let requires_id = action != "list" && activity_id.map(str::trim).unwrap_or("").is_empty();
+        if requires_id {
+            return Err(anyhow!(
+                "bash activity tail/kill requires string activityId"
+            ));
+        }
+        if action == "tail" && !(1..=200).contains(&lines) {
+            return Err(anyhow!("lines must be an integer between 1 and 200"));
+        }
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         lock(&self.inner.guarded)

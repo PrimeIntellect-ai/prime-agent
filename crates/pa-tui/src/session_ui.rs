@@ -5205,8 +5205,18 @@ impl SessionUi {
                 view.activity_panel = None;
                 match group {
                     ActivityPanelGroup::Subagents => {
-                        self.emit_activity_opened("subagents");
-                        self.open_scoped_agents_view(view);
+                        // The same gate as the dock's group: a run that
+                        // cannot open the scoped agents view shows the
+                        // note instead of leaving the session view.
+                        if self.return_to_agents_view {
+                            self.emit_activity_opened("subagents");
+                            self.open_scoped_agents_view(view);
+                        } else {
+                            self.note(
+                                "The agents view needs a daemon-hosted session; start normally (without --no-session) to browse sessions",
+                                view,
+                            );
+                        }
                     }
                     ActivityPanelGroup::Heartbeats => {
                         self.emit_activity_opened("heartbeats");
@@ -6144,7 +6154,10 @@ impl SessionUi {
                 }
                 return Ok(());
             }
-            if kb.matches(&id, "tui.select.up") || kb.matches(&id, "tui.select.cancel") {
+            if kb.matches(&id, "tui.select.up")
+                || kb.matches(&id, "tui.select.cancel")
+                || kb.matches(&id, "app.agents.back")
+            {
                 self.subagents_focused = false;
                 self.update_subagent_summary(view);
                 self.dirty = true;

@@ -1235,10 +1235,10 @@ def activity_request(action: str, activity_id: str | None = None, lines: int = 5
             if handle is None:
                 raise KeyError("Unknown kernel bash activity")
     if action == "list":
-        return {"activities": [
+        rows = [
             {
                 "id": key,
-                "command": handle.command,
+                "command": handle.command[:512],
                 "pid": handle._pid,
                 "startedAt": handle._started_at,
                 "durationMs": int((handle._result.duration if handle._result else time.monotonic() - handle._started) * 1000),
@@ -1246,7 +1246,13 @@ def activity_request(action: str, activity_id: str | None = None, lines: int = 5
                 "exitCode": handle._result.exit_code if handle._result else None,
             }
             for key, handle in handles
-        ]}
+        ]
+        # The serialized list frame stays under the same 16 KiB cap as the
+        # tail: long commands are truncated per row first, and the oldest
+        # rows drop until the response fits.
+        while len(json.dumps({"activities": rows})) > 16_384 and len(rows) > 1:
+            rows.pop(0)
+        return {"activities": rows}
     if action == "tail":
         if isinstance(lines, bool) or not isinstance(lines, int) or not 1 <= lines <= 200:
             raise ValueError("lines must be an integer between 1 and 200")
