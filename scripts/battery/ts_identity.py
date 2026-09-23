@@ -64,7 +64,9 @@ def probe_version(command):
         )
     except subprocess.TimeoutExpired:
         return ""
-    line = result.stdout.strip().splitlines()
+    # The deployed release prints its version on stdout; the TS-main CLI
+    # bundle (node dist/bundle/cli.js --version) prints on stderr.
+    line = result.stdout.strip().splitlines() or result.stderr.strip().splitlines()
     return line[0] if line else ""
 
 
