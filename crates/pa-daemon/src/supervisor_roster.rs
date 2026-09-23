@@ -160,11 +160,6 @@ impl Supervisor {
                 None,
             );
         };
-        // The delta write skips `write_roster_summary`'s per-write push
-        // (that helper serves the create/adoption flows, where one write
-        // is one push): the entry write and the removals batch into one
-        // `roster_update`, the TS `applyWorkerRosterDelta` cadence (its
-        // scheduleRosterPush coalesces the whole frame's mutations).
         let changed = vec![self.roster.lock().unwrap().write_summary(
             summary,
             Some(&resident.worker_id),
