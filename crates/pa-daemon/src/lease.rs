@@ -380,7 +380,6 @@ impl SessionLease {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveLeaseOwner {
     pub pid: u32,
-    pub active_session_id: Option<String>,
 }
 
 /// Whether a live process holds the session file's runtime lease: read the
@@ -398,10 +397,7 @@ pub fn live_lease_owner(agent_dir: &Path, session_path: &Path) -> Option<LiveLea
     if !owner_alive(&owner) {
         return None;
     }
-    Some(LiveLeaseOwner {
-        pid: owner.pid,
-        active_session_id: owner.active_session_id,
-    })
+    Some(LiveLeaseOwner { pid: owner.pid })
 }
 
 /// Acquire the lease for one session file. Returns `None` when leases are
