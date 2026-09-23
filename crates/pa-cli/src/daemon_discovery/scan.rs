@@ -185,22 +185,18 @@ pub(crate) fn merge_discovered(
 ///
 /// Byte-level on purpose: a unix socket pathname may contain any byte
 /// sequence (unix(7) — one non-UTF-8 name anywhere in the file must not
-/// reject the whole census), and it may contain spaces, so the first seven
-/// columns parse separately and the *remainder* of each line is the path.
-/// A row whose pathname is not valid UTF-8 drops out on its own (product
-/// socket paths are UTF-8; the rest of the census stands). The header row
-/// fails the hex flag parse and drops out; unnamed and non-listening rows
-/// (no path, or no `SS_ACCEPTCONN`) drop out too.
+/// reject the whole census), and it may contain spaces. The kernel pads
+/// the fixed columns with runs of spaces, so the seven columns scan with
+/// padding collapsed and the path keeps the whole row remainder. A row
+/// whose pathname is not valid UTF-8 drops out on its own (product socket
+/// paths are UTF-8; the rest of the census stands). The header row fails
+/// the hex flag parse and drops out; unnamed and non-listening rows (no
+/// path, or no `SS_ACCEPTCONN`) drop out too.
 #[cfg(target_os = "linux")]
 fn parse_proc_net_unix(bytes: &[u8]) -> Vec<(String, String)> {
     const SS_ACCEPTCONN: u32 = 0x0001_0000;
     let mut listeners = Vec::new();
     for line in bytes.split(|byte| *byte == b'\n') {
-        // The kernel pads the fixed columns with runs of spaces (`splitn`
-        // counts every space, so a naive 8-way split reads the padding as
-        // an empty column and the inode lands in the path slot): scan seven
-        // whitespace-collapsed tokens, then keep the whole remainder as the
-        // pathname, spaces included.
         let mut rest = line;
         let mut columns: Vec<&[u8]> = Vec::with_capacity(7);
         for _ in 0..7 {
