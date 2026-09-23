@@ -38,19 +38,42 @@ pub fn holder_from_roster(rows: &[Value], session_path: &Path) -> Option<Session
             .get("activeSessionId")
             .or_else(|| row.get("id"))
             .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())?
-            .to_string();
+            .filter(|id| !id.is_empty())?;
         Some(SessionHolder {
-            id,
+            id: single_line(id),
             name: row
                 .get("sessionName")
                 .and_then(Value::as_str)
                 .filter(|name| !name.is_empty())
-                .map(str::to_string),
-            cwd: row.get("cwd").and_then(Value::as_str).map(str::to_string),
-            model: row.get("model").and_then(Value::as_str).map(str::to_string),
+                .map(single_line),
+            cwd: row.get("cwd").and_then(Value::as_str).map(single_line),
+            // Live roster rows carry `model` as `{id, provider}` (the
+            // worker's `get_state` summary); a display string is accepted
+            // for the mock/older shapes.
+            model: row.get("model").and_then(model_label).map(single_line),
         })
     })
+}
+
+/// One roster-controlled field flattened to a single line: line breaks
+/// collapse to spaces so a renamed session (or any roster-controlled
+/// value) cannot inject lines into the refusal text.
+fn single_line(value: &str) -> String {
+    value.replace(['\r', '\n'], " ")
+}
+
+/// The model label of a `model` roster field: a display string, or the
+/// `{id, provider}` object's id (the provider only when no id rides).
+fn model_label(model: &Value) -> Option<String> {
+    match model {
+        Value::String(label) => Some(label.to_string()),
+        Value::Object(map) => map
+            .get("id")
+            .and_then(Value::as_str)
+            .or_else(|| map.get("provider").and_then(Value::as_str))
+            .map(str::to_string),
+        _ => None,
+    }
 }
 
 /// The roster rows of a daemon `list` response payload.
@@ -63,7 +86,7 @@ pub fn roster_rows(data: &Value) -> &[Value] {
 
 /// The first line of the refusal: the TS `SessionAlreadyActiveError`
 /// message, byte-identical.
-pub fn already_active_line(holder: &str, session_path: &Path) -> String {
+pub(crate) fn already_active_line(holder: &str, session_path: &Path) -> String {
     format!(
         "Session is already active in {holder}: {}",
         session_path.display()
@@ -210,6 +233,42 @@ mod tests {
         let data = json!({"sessions": [row("/s/a.jsonl", "a", None, None)], "other": 1});
         assert_eq!(roster_rows(&data).len(), 1);
         assert_eq!(roster_rows(&json!({})).len(), 0);
+    }
+
+    /// The roster's `model` rides as an object (`{id, provider}`): the
+    /// holder line still shows the model id.
+    #[test]
+    fn the_holder_reads_the_object_model_field() {
+        let file = std::env::temp_dir().join("holder-model.jsonl");
+        std::fs::write(&file, "{}").unwrap();
+        let mut row = row(&file.display().to_string(), "h1", None, None);
+        row["model"] = json!({"id": "z-ai/glm-5.3", "provider": "prime-inference"});
+        let holder =
+            holder_from_roster(std::slice::from_ref(&row), &file).expect("the row answers");
+        assert_eq!(holder.model.as_deref(), Some("z-ai/glm-5.3"));
+        let text = already_active_error(&holder, &file);
+        assert!(text.contains("\u{b7} model z-ai/glm-5.3"), "{text}");
+    }
+
+    /// Roster-controlled fields cannot inject lines: every interpolated
+    /// value collapses its line breaks.
+    #[test]
+    fn roster_controlled_fields_cannot_inject_lines() {
+        let file = std::env::temp_dir().join("holder-inject.jsonl");
+        std::fs::write(&file, "{}").unwrap();
+        let mut row = row(&file.display().to_string(), "h1", None, None);
+        row["sessionName"] = json!("injected\nname");
+        row["cwd"] = json!("/w\n/w2");
+        let holder =
+            holder_from_roster(std::slice::from_ref(&row), &file).expect("the row answers");
+        let text = already_active_error(&holder, &file);
+        // The identity stays ONE line: every break flattened to a space.
+        let identity = text
+            .lines()
+            .find(|line| line.starts_with("Holder:"))
+            .expect("the identity line renders");
+        assert!(identity.contains("injected name"), "{identity}");
+        assert!(identity.contains("cwd /w /w2"), "{identity}");
     }
 }
 
