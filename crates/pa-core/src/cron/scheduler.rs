@@ -130,6 +130,16 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
     }
 }
 
+/// Panic-safe reset for the scheduler's run-pass flag: cleared on drop
+/// however the pass unwinds.
+struct RunningGuard<'a>(&'a AtomicBool);
+
+impl Drop for RunningGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
     pub async fn run_due_at(&self, now: u64) -> anyhow::Result<usize> {
         if self.running.load(Ordering::SeqCst)
@@ -138,6 +148,11 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
             return Ok(0);
         }
         self.running.store(true, Ordering::SeqCst);
+        // Panic safety: a claim/dispatch that unwinds must not wedge the
+        // re-entrancy flag at `true` — that would silence every later
+        // pass while the timer keeps spinning. The guard resets it on
+        // the way out however the pass ends.
+        let _running = RunningGuard(&self.running);
         let claimed = self.store.claim_due(now, self.hooks.now());
         let dispatches: Vec<PendingDispatch> = claimed
             .into_iter()
@@ -147,7 +162,6 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
             })
             .collect();
         let ran = self.dispatch_all(dispatches).await;
-        self.running.store(false, Ordering::SeqCst);
         Ok(ran)
     }
 
@@ -275,22 +289,32 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
 
 impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
     /// (Re)start the wake timer to the next active run.
+    ///
+    /// The timer task NEVER exits on an empty store: with no active runs
+    /// it parks on the wake notify until a catalog mutation re-arms it
+    /// (the TS `recomputeScheduledSessionWake` shape — every recompute
+    /// arms a fresh timer, so a mutation can always revive the schedule).
+    /// The task that returned on an empty store was a dead scheduler:
+    /// the parked `Notify` had no waiter, so the wake after a later job
+    /// creation notified nobody and the session never received its due
+    /// fires (the frozen-heartbeat re-adoption incident: a job rows as
+    /// active with a stale `nextRunAt` and `runCount` 0 forever).
     async fn schedule_next(&self) {
         let mut timer = self.timer.lock().await;
         if let Some(previous) = timer.take() {
             previous.abort();
         }
-        let Some(next) = self.core.store.next_active_run_at() else {
-            return;
-        };
         let core = self.core.clone();
-        let delay_ms = next
-            .saturating_sub(self.core.hooks.now())
-            .min(MAX_TIMEOUT_MS);
         let handle = tokio::spawn(async move {
             loop {
                 let Some(next) = core.store.next_active_run_at() else {
-                    return;
+                    // Nothing to fire: park until a mutation re-arms
+                    // (an explicit stop is the only exit).
+                    if core.stopped.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    core.wake.notified().await;
+                    continue;
                 };
                 let now = core.hooks.now();
                 let delay = tokio::time::Duration::from_millis(
@@ -308,9 +332,6 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
             }
         });
         timer.replace(handle);
-        // Keep `delay_ms` semantics: the first sleep honors the requested
-        // delay computed above.
-        let _ = delay_ms;
     }
 }
 
@@ -383,6 +404,114 @@ mod tests {
         assert!(
             runs.load(Ordering::SeqCst) >= 1,
             "the woken timer never fired"
+        );
+        scheduler.stop().await;
+    }
+
+    /// The frozen-heartbeat re-adoption incident's structural guard: a
+    /// dispatch that panics must not wedge the run-pass re-entrancy flag
+    /// at `true` — that silently no-ops every later pass while the timer
+    /// keeps firing (a job rows as active with a stale `nextRunAt` and
+    /// `runCount` 0 forever, exactly the governance session's frozen
+    /// `*/2` heartbeat after its supervisor restart re-adoption).
+    #[tokio::test]
+    async fn a_panicking_dispatch_does_not_wedge_the_run_pass() {
+        struct PanickingHooks {
+            runs: Arc<AtomicUsize>,
+            panic_first: AtomicBool,
+        }
+        impl AgentCronSchedulerHooks for PanickingHooks {
+            async fn run_job(&self, _job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
+                self.runs.fetch_add(1, Ordering::SeqCst);
+                if self.panic_first.swap(false, Ordering::SeqCst) {
+                    panic!("the first dispatch unwinds");
+                }
+                Ok(Some("ran"))
+            }
+            fn now(&self) -> u64 {
+                1_700_000_000_000
+            }
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(AgentCronJobStore::new(dir.path().join("jobs.json")));
+        let now = 1_700_000_000_000;
+        store.create(&input("tick", "every 10m", now)).unwrap();
+        let hooks = Arc::new(PanickingHooks {
+            runs: Arc::new(AtomicUsize::new(0)),
+            panic_first: AtomicBool::new(true),
+        });
+        let scheduler = Arc::new(AgentCronScheduler::new(store.clone(), hooks.clone()));
+        scheduler.start().await;
+        // The first pass panics inside its spawned task (the timer task
+        // survives; the flag must not stay wedged).
+        let first = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::spawn({
+                let scheduler = Arc::clone(&scheduler);
+                async move { scheduler.run_due().await }
+            }),
+        )
+        .await
+        .expect("first pass settles");
+        assert!(first.is_err(), "the panicking pass surfaced: {first:?}");
+        // A second job becomes due; the pass must still claim and run it
+        // (a wedged flag would silently skip forever).
+        store
+            .create(&input("tock", "every 10m", now - 600_000))
+            .expect("second job");
+        let ran = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::spawn({
+                let scheduler = Arc::clone(&scheduler);
+                async move { scheduler.run_due().await }
+            }),
+        )
+        .await
+        .expect("second pass settles")
+        .expect("second pass ran");
+        assert!(ran > 0, "the wedged flag skipped the second pass: {ran}");
+        scheduler.stop().await;
+    }
+
+    /// The timer task parks on an empty store instead of dying: the store
+    /// emptying mid-life (every job cancelled or completed) must leave a
+    /// parked timer a later mutation wake re-arms — the mid-life death
+    /// behind a re-adopted worker whose session never receives a due
+    /// fire again.
+    #[tokio::test]
+    async fn the_timer_parks_on_an_empty_store_and_re_arms_on_wake() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(AgentCronJobStore::new(dir.path().join("jobs.json")));
+        let now = 1_700_000_000_000;
+        let runs = Arc::new(AtomicUsize::new(0));
+        let hooks = Arc::new(CountingHooks {
+            runs: runs.clone(),
+            outcomes: Mutex::new(vec!["ran"]),
+        });
+        let scheduler = AgentCronScheduler::new(store.clone(), hooks);
+        scheduler.start().await;
+        // The store empties mid-life: the only job is cancelled.
+        let job = store
+            .create(&input("tick", "every 10m", now))
+            .expect("first job");
+        store.cancel(&job.id, now).expect("cancel the only job");
+        // The parked timer survives the empty era; a later mutation's
+        // job + wake must fire.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        store
+            .create(&input("tock", "in 1m", now - 61_000))
+            .expect("later job");
+        scheduler.wake().await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while runs.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            runs.load(Ordering::SeqCst) >= 1,
+            "the parked timer never fired the later job"
         );
         scheduler.stop().await;
     }
