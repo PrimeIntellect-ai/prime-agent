@@ -10,6 +10,7 @@ pa-types = { path = "../pa-types" }
 ratatui = { version = "0.29", default-features = false, features = ["crossterm"] }
 crossterm = "0.28"
 unicode-width = "0.2"
+unicode-properties = "0.1"
 unicode-segmentation = "1"
 fancy-regex = "0.14"
 regex = "1"

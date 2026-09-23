@@ -50,12 +50,18 @@ pub fn supports_adaptive_thinking(model_id: &str, model_name: Option<&str>) -> b
         })
 }
 
-/// Port of `supportsAlwaysOnAdaptiveThinking`: Fable/Mythos models think every
-/// turn and reject sampling params with a 400.
+/// Port of `supportsAlwaysOnAdaptiveThinking`: Fable/Mythos models — and
+/// Claude Opus 5.5 — think every turn and reject sampling params with a 400.
 pub fn supports_always_on_adaptive_thinking(model_id: &str, model_name: Option<&str>) -> bool {
     get_model_match_candidates(model_id, model_name)
         .iter()
-        .any(|s| s.contains("fable-5") || s.contains("mythos-5") || s.contains("mythos-preview"))
+        .any(|s| {
+            s.contains("fable-5")
+                || s.contains("mythos-5")
+                || s.contains("mythos-preview")
+                || s.contains("opus-5-5")
+                || s.contains("opus-5.5")
+        })
 }
 
 /// Port of `isAnthropicClaudeModel`.
@@ -406,5 +412,30 @@ pub fn map_stop_reason(reason: Option<&str>) -> crate::types::StopReason {
         Some("max_tokens") | Some("model_context_window_exceeded") => StopReason::Length,
         Some("tool_use") => StopReason::ToolUse,
         _ => StopReason::Error,
+    }
+}
+
+#[cfg(test)]
+mod supports_always_on_adaptive_thinking_tests {
+    use super::supports_always_on_adaptive_thinking;
+
+    #[test]
+    fn bedrock_always_on_models_reject_sampling_params() {
+        assert!(supports_always_on_adaptive_thinking(
+            "us.anthropic.claude-opus-5-5-v1",
+            Some("Claude Opus 5.5")
+        ));
+        assert!(supports_always_on_adaptive_thinking(
+            "anthropic.claude-fable-5",
+            None
+        ));
+    }
+
+    #[test]
+    fn bedrock_optional_thinking_models_keep_sampling_params() {
+        assert!(!supports_always_on_adaptive_thinking(
+            "us.anthropic.claude-opus-5-v1",
+            Some("Claude Opus 5")
+        ));
     }
 }

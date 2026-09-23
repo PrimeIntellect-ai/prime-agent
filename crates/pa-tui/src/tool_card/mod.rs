@@ -38,6 +38,11 @@ pub struct ToolCallCard {
     pub result: Option<ToolResultView>,
     /// `result` is a partial streaming frame.
     pub result_partial: bool,
+    /// The run aborted with the card still pending: the card settled with
+    /// the run's error text, and the tool's late result frames are dropped
+    /// (TS `resetPendingToolState` removed the component from the pending
+    /// map the same way).
+    pub aborted: bool,
 }
 
 /// One (partial or final) tool result (TS `AgentToolResult` view).

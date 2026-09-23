@@ -4,6 +4,9 @@
 //! as 2 columns, tabs expand to 3 spaces when measuring rendered output.
 
 use crate::{Line, Span};
+use unicode_properties::{
+    EmojiStatus, GeneralCategory, GeneralCategoryGroup, UnicodeEmoji, UnicodeGeneralCategory,
+};
 use unicode_width::UnicodeWidthChar;
 
 mod wrapping;
@@ -15,6 +18,24 @@ mod wrapping_tests;
 pub fn char_width(c: char) -> usize {
     match c {
         '\t' => 3,
+        // Conjoining jamo + a few letters that EastAsianWidth rates 1 but
+        // unicode-width rates 0 (its Grapheme_Extend view of the jamo
+        // vowels/trails). TS measures the EAW value (an exhaustive
+        // unicode-width vs get-east-asian-width scan found exactly this
+        // set plus the FF9E/FF9F halves below; verified against the TS
+        // dist).
+        '\u{1161}'..='\u{11ff}'
+        | '\u{d7b0}'..='\u{d7c6}'
+        | '\u{d7cb}'..='\u{d7fb}'
+        | '\u{111c2}'..='\u{111c3}'
+        | '\u{11a84}'..='\u{11a89}'
+        | '\u{0d4e}'
+        | '\u{a8fa}'
+        | '\u{1193f}'
+        | '\u{11941}'
+        | '\u{11a3a}'
+        | '\u{11d46}'
+        | '\u{11f02}' => 1,
         // TS `graphemeWidth` counts the halfwidth katakana sound marks
         // (EastAsianWidth H) as one column each, both standalone and as
         // the trailing half of a cluster; `unicode-width` counts them zero
@@ -91,8 +112,17 @@ pub fn str_width(s: &str) -> usize {
         return *width;
     }
     use unicode_segmentation::UnicodeSegmentation;
+    // TS `visibleWidth` expands tabs to three spaces BEFORE measuring (a
+    // tab is 3 columns everywhere the editor renders one).
+    let expanded;
+    let measured = if s.contains('\t') {
+        expanded = s.replace('\t', "   ");
+        expanded.as_str()
+    } else {
+        s
+    };
     let mut width = 0;
-    let mut rest = s;
+    let mut rest = measured;
     while !rest.is_empty() {
         match escape_len(rest) {
             Some(len) => rest = &rest[len..],
@@ -127,33 +157,83 @@ fn width_cache() -> &'static std::sync::Mutex<std::collections::HashMap<Box<str>
 /// A char that renders nothing on its own: controls and zero-width chars
 /// (unicode-width reports marks, joiners, and variation selectors as `None`).
 fn is_invisible(c: char) -> bool {
-    c.is_control() || c.width().unwrap_or(0) == 0
+    c.is_control() || (c.width().unwrap_or(0) == 0 && !is_eaw_one_wide_zero(c))
 }
 
-/// Width of one grapheme cluster (port of TS `graphemeWidth` in utils.ts).
-///
-/// TS measures whole clusters, not chars: RGI emoji sequences (ZWJ families,
-/// skin tones, keycaps, VS16 presentations) render 2 columns no matter how
-/// many code points they carry, regional indicators (flags, and isolated
-/// ones during streaming) render 2, halfwidth/fullwidth trailing forms add
-/// up, and all-invisible clusters render 0.
-/// True for the code-point blocks of the TS `couldBeEmoji` pre-filter (kept
-/// deliberately broad, like TS) plus the emoji-modifier skin tones.
-fn in_emoji_blocks(c: char) -> bool {
-    let cp = c as u32;
-    (0x1f000..=0x1fbff).contains(&cp)
-        || (0x2300..=0x23ff).contains(&cp)
-        || (0x2600..=0x27bf).contains(&cp)
-        || (0x2b50..=0x2b55).contains(&cp)
+/// TS `\p{Mark}` (Mn|Mc|Me). unicode-width only zeroes Mn/Me, so spacing
+/// marks (Devanagari U+0903, Bengali U+0983, …) need the category lookup to
+/// measure zero like TS's zeroWidthRegex.
+fn is_mark(c: char) -> bool {
+    c.general_category_group() == GeneralCategoryGroup::Mark
+}
+
+/// True for a char that unicode-width reports zero but TS measures 1 (its
+/// EastAsianWidth): the conjoining jamo, the halfwidth voicing marks, and
+/// a few letters (the exhaustive unicode-width vs get-east-asian-width
+/// scan; the `char_width` match carries the same set).
+fn is_eaw_one_wide_zero(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ff9e}' | '\u{ff9f}'
+            | '\u{1161}'..='\u{11ff}'
+            | '\u{d7b0}'..='\u{d7c6}'
+            | '\u{d7cb}'..='\u{d7fb}'
+            | '\u{111c2}'..='\u{111c3}'
+            | '\u{11a84}'..='\u{11a89}'
+            | '\u{0d4e}'
+            | '\u{a8fa}'
+            | '\u{1193f}'
+            | '\u{11941}'
+            | '\u{11a3a}'
+            | '\u{11d46}'
+            | '\u{11f02}'
+    )
+}
+
+/// Char classes of the TS `zeroWidthRegex` alternation:
+/// `\p{Control}|\p{Mark}|\p{Default_Ignorable_Code_Point}|\p{Surrogate}`
+/// (surrogates cannot appear in a Rust `str`). `is_invisible` covers the
+/// controls, Mn/Me marks and every default-ignorable; spacing marks are the
+/// only width-1 additions.
+fn is_zero_class_char(c: char) -> bool {
+    // U+115F (Hangul choseong filler) is the one Default_Ignorable char
+    // unicode-width rates nonzero (2): TS's zeroWidthRegex zeroes it and
+    // the leading strip removes it inside clusters.
+    is_invisible(c) || is_mark(c) || c == '\u{115f}'
+}
+
+/// Char classes of the TS `leadingNonPrintingRegex` strip set:
+/// `\p{DIC}|\p{Control}|\p{Format}|\p{Mark}|\p{Surrogate}`. The Format
+/// term contributes the prepended concatenation marks (U+0600, …), the only
+/// width-1 format chars unicode-width reports.
+fn is_leading_nonprinting(c: char) -> bool {
+    is_zero_class_char(c) || c.general_category() == GeneralCategory::Format
+}
+
+/// Single-codepoint RGI emoji: TS `\p{RGI_Emoji}` matches a bare codepoint
+/// exactly when Emoji_Presentation=Yes (`⭐`, `⌚`, `🀄`, the flag RIs, …).
+fn is_emoji_presentation(c: char) -> bool {
+    matches!(
+        c.emoji_status(),
+        EmojiStatus::EmojiPresentation
+            | EmojiStatus::EmojiPresentationAndModifierBase
+            | EmojiStatus::EmojiPresentationAndEmojiComponent
+            | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+    )
 }
 
 fn grapheme_width(g: &str) -> usize {
+    // TS `visibleWidth` replaces tabs with three spaces before segmenting,
+    // so a tab cluster measures 3 columns (GB5 keeps it its own cluster).
+    if g == "\t" {
+        return 3;
+    }
     let mut chars = g.chars();
     let Some(first) = chars.next() else {
         return 0;
     };
-    if chars.all(is_invisible) && is_invisible(first) {
-        // TS zeroWidthRegex: control / default-ignorable / mark-only cluster.
+    if chars.all(is_zero_class_char) && is_zero_class_char(first) {
+        // TS zeroWidthRegex: control / mark / default-ignorable cluster.
         return 0;
     }
     // Regional indicators render as flag emoji even when isolated (the
@@ -161,18 +241,33 @@ fn grapheme_width(g: &str) -> usize {
     if ('\u{1f1e6}'..='\u{1f1ff}').contains(&first) {
         return 2;
     }
-    if g.chars().count() <= 1 {
-        return char_width(first);
-    }
-    if is_rgi_emoji_cluster(first, g) {
+    if g.chars().count() > 1 && is_rgi_emoji_cluster(first, g) {
         // Approximation of the TS RGI_Emoji test: an emoji-led multi-char
         // cluster (ZWJ family, skin tone, VS16 presentation, keycap) is
         // one 2-column cell.
         return 2;
     }
+    if is_emoji_presentation(first) {
+        // Single-codepoint RGI emoji carry Emoji_Presentation=Yes (the
+        // star U+2B50, watch U+231A, mahjong U+1F004, ...) and render two
+        // columns even though EastAsianWidth is Neutral; unicode-width
+        // would say 1.
+        return 2;
+    }
+    // TS strips a leading non-printing run, then measures the base code
+    // point: a prepended-concatenation-mark cluster (U+0600 + "1") measures
+    // the digit, a cluster whose leading run ate everything is zero, and a
+    // single visible char passes through with base = the char itself.
+    let base = g.trim_start_matches(is_leading_nonprinting);
+    let Some(base_c) = base.chars().next() else {
+        return 0;
+    };
     // Base visible char plus the trailing forms TS counts: halfwidth/
-    // fullwidth forms and the Thai/Lao AM vowels; marks add nothing.
-    let mut w = char_width(first);
+    // fullwidth forms and the Thai/Lao AM vowels; marks add nothing. The
+    // loop walks the raw cluster after the first char, exactly like TS's
+    // `segment.slice(1)` (an astral base leaves a low surrogate there,
+    // which never matches).
+    let mut w = char_width(base_c);
     for c in g.chars().skip(1) {
         if ('\u{ff00}'..='\u{ffef}').contains(&c) {
             w += char_width(c);
@@ -197,15 +292,17 @@ fn is_rgi_emoji_cluster(first: char, g: &str) -> bool {
         return g.split('\u{200d}').all(|part| {
             part.chars()
                 .find(|c| !is_invisible(*c))
-                .is_some_and(|base| in_emoji_blocks(base) || skin_tone(base))
+                .is_some_and(|base| base.is_emoji_char() || skin_tone(base))
         });
     }
     if g.contains('\u{fe0f}') {
-        // VS16 presentation / keycap sequence.
-        return in_emoji_blocks(first) || keycap_base(first);
+        // VS16 presentation / keycap sequence (`™️`, `©️`, `#️⃣`, `😀️`):
+        // RGI contains base+VS16 exactly for Emoji=YES bases. Non-emoji
+        // bases with a stray VS16 (`☐️`) fall through to the base width.
+        return first.is_emoji_char() || keycap_base(first);
     }
     // Emoji + skin tone modifier (no VS16, no ZWJ).
-    in_emoji_blocks(first) && g.chars().skip(1).all(|c| skin_tone(c) || is_invisible(c))
+    first.is_emoji_char() && g.chars().skip(1).all(|c| skin_tone(c) || is_invisible(c))
 }
 pub fn spans_width(spans: &[Span]) -> usize {
     spans.iter().map(|s| str_width(&s.content)).sum()
@@ -227,6 +324,28 @@ const PUNCTUATION: &str = "(){}[]<>.,;:'\"!?+-=*/\\|&%^$#@~`";
 
 pub fn is_punctuation_char(c: char) -> bool {
     PUNCTUATION.contains(c)
+}
+
+/// Normalize text for terminal output without changing logical content (TS
+/// `normalizeTerminalOutput`): some terminals render precomposed Thai/Lao
+/// AM vowels inconsistently during differential repaint, and their
+/// compatibility decompositions have the same cell width but avoid
+/// stale-cell artifacts; tabs expand to three spaces at paint.
+pub fn normalize_terminal_output(s: &str) -> String {
+    let has_thai_lao_am = s.contains('\u{0e33}') || s.contains('\u{0eb3}');
+    if !has_thai_lao_am && !s.contains('\t') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '\u{0e33}' => out.push_str("\u{0e4d}\u{0e32}"),
+            '\u{0eb3}' => out.push_str("\u{0ecd}\u{0eb2}"),
+            '\t' => out.push_str("   "),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Strip a leading run of zero-width/format chars (approximation of the TS
@@ -344,20 +463,43 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<Line> {
     out
 }
 
-/// Slice a line by visible columns `[start, start+length)`.
+/// Slice a line by visible columns `[start, start+length)` (the TS
+/// `sliceByColumn` default): whole grapheme clusters in or out — a cluster
+/// whose start column is in range is included even when it straddles the
+/// end boundary.
 pub fn slice_line_by_column(line: &Line, start: usize, length: usize) -> Line {
+    slice_line_by_column_strict(line, start, length, false)
+}
+
+/// The `strict` form of TS `sliceByColumn` (sliceWithWidth): clip a wide
+/// cluster whose end crosses the slice boundary (the overlay-compositing
+/// form) instead of including it whole.
+pub fn slice_line_by_column_strict(line: &Line, start: usize, length: usize, strict: bool) -> Line {
+    use unicode_segmentation::UnicodeSegmentation;
     let mut out: Line = Vec::new();
     let mut col = 0usize;
     let end = start.saturating_add(length);
-    for span in line {
-        for c in span.content.chars() {
-            let w = char_width(c);
-            if col >= start && col + w <= end {
-                push_char(&mut out, span.style, c);
+    'outer: for span in line {
+        let mut rest = span.content.as_str();
+        while !rest.is_empty() {
+            if let Some(len) = escape_len(rest) {
+                // Zero-width escape codes ride outside any slice.
+                rest = &rest[len..];
+                continue;
+            }
+            let g = rest.graphemes(true).next().expect("non-empty rest");
+            let w = grapheme_width(g);
+            let in_range = col >= start && col < end;
+            let fits = !strict || col + w <= end;
+            if in_range && fits {
+                for c in g.chars() {
+                    push_char(&mut out, span.style, c);
+                }
             }
             col += w;
+            rest = &rest[g.len()..];
             if col >= end {
-                return out;
+                break 'outer;
             }
         }
     }
@@ -406,5 +548,131 @@ mod tests {
         assert_eq!(str_width("\u{feff}"), 0); // zero-width BOM
         assert_eq!(str_width("\u{200d}"), 0); // lone ZWJ
         assert_eq!(str_width("a\u{200d}b"), 2); // ZWJ does not cluster letters
+    }
+}
+
+/// Golden widths from the TS `visibleWidth` (utils.ts:196, the installed
+/// parity ground truth) over the lane's Unicode corpus: CJK, emoji +
+/// ZWJ families, flags, keycaps, skin tones, combining marks, Thai/Lao
+/// AM, zero-width, wide box-drawing, halfwidth/fullwidth forms, east-
+/// asian ambiguous, jamo, and tabs (3 columns, TS-measured).
+#[test]
+fn str_width_matches_ts_golden_corpus() {
+    let cases: Vec<(&str, usize)> = vec![
+        ("你好世界，这是一段很长的中文文本", 32),
+        ("日本語 テキスト は 長い 長い 長い", 33),
+        ("hello 안녕하세요 world 안녕", 27),
+        ("👨‍👩‍👧‍👦 family 🇯🇵 flag #️⃣ keycap 👍🏽 skin", 35),
+        ("café café café combining tail", 29),
+        ("Thai: ทดสอบการทำงานำ and Lao: ທົດສອບຳ", 36),
+        ("zero\u{200b}-width \u{feff} zwj\u{200d}seq tail", 23),
+        ("─━┏━┓ wide box chars ┗━┛", 24),
+        ("🇺 isolated regional", 20),
+        ("ｶｷｸ halfwidth カﾞキﾟ marks", 26),
+        ("ａｂｃ fullwidth ＡＢＣ latin", 29),
+        ("ambiguous: ± √ α β ∂ Ω ○ ◇", 26),
+        ("trailing marks: á̂ b́", 19),
+        ("mixed 你áb😊你áb😊", 18),
+        ("ＴＡＢ\u{9}text", 13),
+        ("你好 abc", 8),
+        ("🄰 enclosed", 10),
+        ("㍿ ligature", 11),
+        ("각 jamo sequence", 16),
+        ("🇯🇵🇺🇸 flags adjacency", 20),
+        ("é::́ split cluster", 17),
+        (" leading space", 14),
+    ];
+    for (text, expected) in cases {
+        assert_eq!(str_width(text), expected, "width mismatch for {text:?}");
+    }
+}
+
+/// `normalize_terminal_output` goldens (TS utils.ts:313): the Thai/Lao
+/// AM decomposition and tab expansion, unchanged when neither appears.
+#[test]
+fn normalize_terminal_output_matches_ts_goldens() {
+    let cases: Vec<(&str, &str)> = vec![
+        (
+            "Thai: ทดสอบการทำงานำ and Lao: ທົດສອບຳ",
+            "Thai: ทดสอบการทํางานํา and Lao: ທົດສອບໍາ",
+        ),
+        ("ＴＡＢ\u{9}text", "ＴＡＢ   text"),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(
+            normalize_terminal_output(input),
+            expected,
+            "normalize mismatch for {input:?}"
+        );
+    }
+    // No AM, no tab: the fast path returns the input unchanged.
+    assert_eq!(normalize_terminal_output("plain ascii"), "plain ascii");
+}
+
+/// `slice_line_by_column` goldens (TS `sliceByColumn` semantics):
+/// whole clusters in or out; the strict form clips a wide cluster at
+/// the boundary, the default includes it whole.
+#[test]
+fn slice_line_by_column_is_grapheme_level() {
+    let line: Line = vec![Span::raw("a你b👨‍👩‍👧‍👦c".to_string())];
+    // Columns: a(1) 你(2) b(1) family(2) c(1).
+    // Non-strict: a slice ending inside the family keeps it whole.
+    let slice = slice_line_by_column(&line, 0, 5);
+    let text: String = slice.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(
+        text,
+        "a你b\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}"
+    );
+    // Strict: the family crossing the boundary is clipped out.
+    let slice = slice_line_by_column_strict(&line, 0, 5, true);
+    let text: String = slice.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(text, "a你b");
+    // A slice starting inside the family excludes it (start col in
+    // range is the cluster's own column).
+    let slice = slice_line_by_column(&line, 5, 5);
+    let text: String = slice.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(text, "c");
+    // Combining-mark clusters never split mid-cluster.
+    let marked: Line = vec![Span::raw("e\u{301}f".to_string())];
+    let slice = slice_line_by_column(&marked, 0, 1);
+    let text: String = slice.iter().map(|s| s.content.as_str()).collect();
+    assert_eq!(text, "e\u{301}");
+}
+#[cfg(test)]
+mod uni4_probe_tests {
+    use super::*;
+
+    #[test]
+    fn ts_reference_widths() {
+        // Values captured from the TS binary's visibleWidth (dist/utils.js).
+        assert_eq!(str_width("\u{93E}"), 0); // Mc mark: TS \p{Mark} zero cluster
+        assert_eq!(str_width("\u{93E}\u{200D}"), 0);
+        assert_eq!(str_width("\u{0600}1"), 1); // prepend mark merges forward
+        assert_eq!(str_width("\u{0600}"), 0); // trailing prepend mark: base eaten
+        assert_eq!(str_width("#\u{FE0F}\u{20E3}"), 2);
+        assert_eq!(str_width(":\u{FE0F}"), 1); // VS16 on a non-emoji base
+        assert_eq!(str_width("\u{2B50}"), 2); // single-codepoint RGI (EAW N)
+        assert_eq!(str_width("\u{2122}\u{FE0F}"), 2); // TM + VS16 is RGI
+        assert_eq!(str_width("\u{2122}"), 1);
+        assert_eq!(str_width("\u{2610}\u{FE0F}"), 1); // ballot box: not emoji
+        assert_eq!(str_width("\u{1F004}"), 2);
+        assert_eq!(str_width("\u{231A}"), 2);
+        assert_eq!(str_width("\u{00A1}"), 1); // ambiguous
+        assert_eq!(str_width("\u{20000}"), 2);
+        assert_eq!(str_width("ก\u{0E48}"), 1); // Thai mai ek cluster
+        assert_eq!(str_width("กำ"), 2); // SARA AM is a trailing spacing mark
+        assert_eq!(str_width("ກ\u{0EB3}"), 2);
+        assert_eq!(str_width("a\tb"), 5); // tab measures like TS's 3-space swap
+        assert_eq!(str_width("\u{FEFF}"), 0);
+        assert_eq!(str_width("a\u{200d}b"), 2);
+        // The Hangul choseong filler is Default_Ignorable (TS zeroes the
+        // lone char and strips it inside clusters) and conjoining jamo
+        // measure 1 (EAW), not unicode-width's 0 (unicode-wrap-981's
+        // oracle pair, TS-verified).
+        assert_eq!(str_width("\u{115f}"), 0);
+        assert_eq!(str_width("\u{115f}\u{1161}"), 1);
+        assert_eq!(str_width("\u{1161}"), 1);
+        assert_eq!(str_width("\u{d7b0}"), 1);
+        assert_eq!(str_width("\u{1100}\u{1161}\u{11a8}"), 2); // one LVT cluster, base W
     }
 }

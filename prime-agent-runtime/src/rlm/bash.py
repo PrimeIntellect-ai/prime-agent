@@ -1118,8 +1118,16 @@ def _process_start_id(pid: int) -> str | None:
         # macOS has no /proc; /bin/ps is always present there, so use the
         # absolute path (bare `ps` stays only as the exotic-POSIX last resort).
         ps = "/bin/ps" if sys.platform == "darwin" else "ps"
+        # `lstart` renders in the subprocess timezone and locale, so pin both
+        # for a durable identity (TS getPsProcessStartId; the Rust host reads
+        # the same pinned values - an unpinned match would drift on non-UTC
+        # hosts and the identity comparison would never agree).
         out = subprocess.run(
-            [ps, "-p", str(pid), "-o", "lstart="], capture_output=True, text=True, timeout=5
+            [ps, "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={**os.environ, "LC_ALL": "C", "LC_TIME": "C", "LANG": "C", "TZ": "UTC"},
         ).stdout.strip()
         return f"ps:{out}" if out else None
     except (OSError, subprocess.SubprocessError):
@@ -1127,9 +1135,10 @@ def _process_start_id(pid: int) -> str | None:
 
 
 def _record_journal(pid: int, active: bool) -> bool:
-    # Returns False only when the journal is configured but enrollment failed;
-    # active-record callers must then fail closed. Active records always carry
-    # a processStartId so host reaping stays identity-verified.
+    # Best-effort per the TS (core/orphan-process-journal.ts): journaling
+    # failures never fail the spawn - a misconfigured owner pid is the only
+    # hard False. Identity-free records (no processStartId) are valid and
+    # still safely reaped on POSIX (the group-scoped kill).
     path = os.environ.get("PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL")
     owner = os.environ.get("PRIME_AGENT_KERNEL_OWNER_PID")
     if not path or not owner:
@@ -1139,8 +1148,6 @@ def _record_journal(pid: int, active: bool) -> bool:
     except ValueError:
         return False
     start_id = _process_start_id(pid) if active else None
-    if active and start_id is None:
-        return False
     record: dict[str, Any] = {
         "version": 1,
         "pid": pid,
@@ -1152,22 +1159,25 @@ def _record_journal(pid: int, active: bool) -> bool:
         "recordedAt": datetime.now(timezone.utc).isoformat(),
     }
     data = (json.dumps(record) + "\n").encode()
+    # TS parity (core/orphan-process-journal.ts): process tracking must not
+    # make a successfully spawned command fail - a journal that cannot be
+    # written (a vanished dir, a full disk) means the command runs untracked,
+    # never that the spawn dies. The short-write guard still drops truncated
+    # lines (the host discards them) but returns True: the command is alive.
     try:
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
-            # Complete-write loop: a short write would leave a truncated JSON
-            # line that the host discards, which must count as failure.
             view = memoryview(data)
             while view:
                 written = os.write(fd, view)
                 if written <= 0:
-                    return False
+                    break
                 view = view[written:]
             os.fsync(fd)
         finally:
             os.close(fd)
     except OSError:
-        return False
+        pass
     return True
 
 
