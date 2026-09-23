@@ -3830,19 +3830,17 @@ impl Supervisor {
         {
             return Ok(summary);
         }
-        // TS daemon-supervisor.ts:3051 - only a `client_owned`-lifecycle
-        // create is client-owned (`ownerClientId = command.lifecycle ===
-        // "client_owned" ? clientId : undefined`); the TS client declares
-        // `resident` for every other session (main.ts `options.clientOwned
-        // ? "client_owned" : "resident"`), so an unspecified lifecycle is
-        // that same normal create and stays unowned. Ownership is the
-        // `client_owned` declaration alone: a normal create's live session
-        // stays visible to every client through the access gate
-        // (`assertWorkerAccessibleToClient`), and an RLM child spawn
-        // (always `Resident`) never inherits the spawning client's
-        // ownership - a stopped child under a surviving root passivates
-        // instead of dying with an owned registration (the walk e2e
-        // asserts the seeded passive row survives the kill).
+        // TS daemon-supervisor.ts: only a `client_owned`-lifecycle create
+        // is client-owned (`ownerClientId = command.lifecycle ===
+        // "client_owned" ? clientId : undefined`); unspecified and
+        // `Resident` lifecycles are unowned. Every RLM child spawn
+        // declares `Resident`, so a spawned child never inherits the
+        // spawning client's ownership: passivation deletes an owned
+        // worker's rows, and a stopped child under a surviving root must
+        // passivate instead (the walk e2e asserts the passive row
+        // survives the kill). A `None`-lifecycle create being owner-
+        // marked would hide its live session from every other client
+        // (`assertWorkerAccessibleToClient`), so it stays unowned too.
         let create_lifecycle = match command {
             DaemonCommand::Create { lifecycle, .. } => *lifecycle,
             _ => None,
