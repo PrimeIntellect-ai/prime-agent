@@ -436,7 +436,7 @@ fn shutdown_daemon(socket_path: &Path, force: bool) -> bool {
 }
 
 /// `promptYesNo`: empty or anything-but-yes resolves false (default No).
-fn prompt_yes_no(message: &str) -> bool {
+pub(crate) fn prompt_yes_no(message: &str) -> bool {
     use std::io::Write as _;
     print!("{message} [y/N] ");
     let _ = std::io::stdout().flush();

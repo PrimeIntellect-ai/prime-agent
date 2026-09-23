@@ -448,7 +448,7 @@ fn finish_staging(
 /// release name.
 fn release_tree_digest(dir: &Path) -> Result<String> {
     let mut entries: Vec<(Vec<u8>, PathBuf)> = Vec::new();
-    collect_payload_entries(dir, &mut Vec::new(), &mut entries)?;
+    collect_payload_entries(dir, &[], &mut entries)?;
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     let mut digest = Sha256::new();
     for (relative, path) in &entries {
@@ -769,7 +769,14 @@ mod tests {
     #[tokio::test]
     async fn stages_a_local_archive_and_probes_the_binary() {
         let dir = tempfile::tempdir().unwrap();
-        let (archive, sha) = fixture_versioned_archive(dir.path(), "candidate.tar.gz", "1.2.3");
+        let (archive, _archive_file_sha) =
+            fixture_versioned_archive(dir.path(), "candidate.tar.gz", "1.2.3");
+        // The release name's digest is the canonical digest of the STAGED
+        // tree (the extracted archive content), not the archive file's own
+        // sha256 — the archive fixture above carries the same content as
+        // this payload tree, so their tree digests are equal.
+        let extracted = fixture_payload(dir.path(), "extracted", "1.2.3");
+        let expected_digest = release_tree_digest(&extracted).unwrap();
         let root = dir.path().join("install-root");
         std::fs::create_dir_all(&root).unwrap();
         let (release_dir, version) = stage_local_payload(&archive, &root, "https://example.com")
@@ -777,12 +784,12 @@ mod tests {
             .unwrap();
         assert_eq!(version, "1.2.3");
         assert!(release_dir.ends_with(format!(
-            "releases/1.2.3-{platform}-{sha}",
+            "releases/1.2.3-{platform}-{expected_digest}",
             platform = current_platform_alias()
         )));
         assert_eq!(
             std::fs::read_to_string(release_dir.join(".archive-sha256")).unwrap(),
-            sha
+            expected_digest
         );
     }
 

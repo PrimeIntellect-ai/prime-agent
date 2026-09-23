@@ -40,12 +40,15 @@ so the normalization can be dropped.
 Second documented divergence (Kevin directive 2026-09-23, product
 improvement BEYOND TS): the RLM child rows render the
 `\u25c6 Subagent <name> finished|failed|cancelled` diamond rows on the Rust
-side (accent diamond, semantic label colors, the failure error and the
+side (the diamond marker carries the row's semantic color — the same style
+the label renders in, success green / error red / cancelled yellow, per the
+same directive's icon-follows-text rule — plus the failure error and the
 cancellation reason as the expandable body, no reply-preview anywhere),
 where the TS binary still shows the generic muted `RLM child status` label
 over the full content markdown. The diff drops the RLM child rows from
 BOTH frames and the run separately asserts the Rust diamond rows ARE
-present (collapsed labels, expanded reason bodies, no preview) and the TS
+present (collapsed labels, expanded reason bodies, no preview, and the
+diamond sharing the label's exact SGR color run per outcome) and the TS
 frames show the old generic label (the baseline the TS team is expected to
 adopt).
 
@@ -539,6 +542,63 @@ def assert_rlm_child_rows(side, collapsed, expanded):
             assert f"Subagent {name}" not in collapsed, "ts: diamond row rendered"
 
 
+
+def _sgr_fg_color(run):
+    """The foreground color parameter inside one SGR run (truecolor
+    `38;2;r;g;b` or 256-color `38;5;N`), None when the run sets no fg."""
+    found = re.search(r"38;2;\d+;\d+;\d+|38;5;\d+", run or "")
+    return found.group(0) if found else None
+
+
+def _row_header_runs(frame, label):
+    """The SGR runs directly before the diamond marker and the label text
+    of one rendered `◆ <label>` header row (the escape-bearing frame):
+    (icon_run, label_run) or None when the row never renders."""
+    for line in frame.split("\n"):
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        if f"\u25c6 {label}" in plain:
+            icon = re.search(r"((?:\x1b\[[0-9;]*m)+)\u25c6", line)
+            text = re.search(r"((?:\x1b\[[0-9;]*m)+)" + re.escape(label), line)
+            if icon and text:
+                return icon.group(1), text.group(1)
+    return None
+
+
+def assert_rlm_child_icon_colors(frames):
+    """The icon-follows-text color contract for the Rust RLM child rows
+    (Kevin directive 2026-09-23, same directive as the row divergence):
+    the diamond marker renders in the row's semantic color — the exact fg
+    run the label uses — so the icon no longer stays on the fixed accent.
+    The kernel-restored row in the same fixture keeps its accent diamond
+    (TS parity), which doubles as the accent baseline the three semantic
+    colors must differ from."""
+    for state in ("a_collapsed", "b_expanded"):
+        frame = frames[state]
+        kernel = _row_header_runs(frame, "Restored Python kernel state")
+        assert kernel, f"rust: kernel-restored header missing in {state}"
+        accent_fg = _sgr_fg_color(kernel[0])
+        assert accent_fg, f"rust: kernel diamond carries no fg color in {state}"
+        icon_fgs = {}
+        for name, outcome in RLM_CHILD_LABELS:
+            label = f"Subagent {name} {outcome}"
+            runs = _row_header_runs(frame, label)
+            assert runs, f"rust: diamond header for {label!r} missing in {state}"
+            icon_fg = _sgr_fg_color(runs[0])
+            label_fg = _sgr_fg_color(runs[1])
+            assert icon_fg, f"rust: {label} diamond carries no fg color in {state}"
+            assert label_fg, f"rust: {label} label carries no fg color in {state}"
+            assert icon_fg == label_fg, (
+                f"rust: {label} diamond fg {icon_fg} != label fg {label_fg} in {state}"
+            )
+            assert icon_fg != accent_fg, (
+                f"rust: {label} diamond still on the accent color in {state}"
+            )
+            icon_fgs[label] = icon_fg
+        assert len(set(icon_fgs.values())) == len(RLM_CHILD_LABELS), (
+            f"rust: the three RLM child outcomes share one icon color in {state}: {icon_fgs}"
+        )
+
+
 def assert_sent_reach(side, collapsed, expanded):
     """The Ctrl+O contract for this fixture: collapsed frames show the
     agent-message and sent-receipt summaries only; the expanded frames show
@@ -723,6 +783,10 @@ def main():
                 assert_rlm_child_rows(side, collapsed, expanded)
                 assert_heartbeat_row(side, collapsed, expanded)
                 assert_skill_reach(side, collapsed, expanded)
+            # The icon-follows-text color contract (the same directive as
+            # the row divergence): the escape-bearing Rust frames carry
+            # it; the TS frames have no icon to check (the generic label).
+            assert_rlm_child_icon_colors(rust_frames)
             for state in ("a_collapsed", "b_expanded"):
                 ts_norm = normalize(strip_rlm_child_rows(ts_frames[state]), base)
                 rust_norm = normalize(

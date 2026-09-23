@@ -422,10 +422,14 @@ impl ActivityPanel {
             let detail_rows = budget.saturating_sub(tail_rows).min(MAX_DETAIL_LINES);
             lines.extend(detail_lines(theme, width, row, detail_rows));
             if let Some((_, tail)) = tail {
+                // A zero budget renders no tail at all: the heading itself
+                // would spend a line the frame needs on a short viewport.
                 let tail_budget = budget.saturating_sub(detail_rows);
-                lines.push(text(ThemeColor::Muted, "Output tail".to_string()));
-                for output in tail.iter().take(tail_budget.saturating_sub(1)) {
-                    lines.push(text(ThemeColor::Muted, output.clone()));
+                if tail_budget > 0 {
+                    lines.push(text(ThemeColor::Muted, "Output tail".to_string()));
+                    for output in tail.iter().take(tail_budget.saturating_sub(1)) {
+                        lines.push(text(ThemeColor::Muted, output.clone()));
+                    }
                 }
             }
         }
@@ -437,12 +441,11 @@ impl ActivityPanel {
             .first()
             .map(|key| format_key_text(key))
             .unwrap_or_else(|| "Esc".to_string());
-        let kill_hint = self
-            .rows
-            .iter()
-            .any(|row| row.killable)
-            .then(|| " \u{00b7} k kill".to_string())
-            .unwrap_or_default();
+        let kill_hint = if self.rows.iter().any(|row| row.killable) {
+            " \u{00b7} k kill".to_string()
+        } else {
+            String::new()
+        };
         lines.push(text(
             ThemeColor::Dim,
             format!(
@@ -464,8 +467,11 @@ impl ActivityPanel {
                 // The rendered heading plus the bounded tail lines.
                 .map(|(_, tail)| 1 + tail.len().min(MAX_TAIL_LINES))
                 .unwrap_or(0);
+        // No forced minimum: a viewport with no room for the detail block
+        // renders zero detail rows rather than clipping the hint and the
+        // border (the block yields to the frame and at least one list
+        // row, which the layout reserves first).
         full.min(self.viewport_rows.saturating_sub(RESERVED_ROWS + 2))
-            .max(1)
     }
 }
 
