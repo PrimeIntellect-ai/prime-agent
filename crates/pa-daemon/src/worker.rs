@@ -8547,6 +8547,7 @@ mod turn_stream_tests {
             )
             .await;
         assert!(created.success, "create failed: {created:?}");
+        let mut subscription = worker.events.subscribe();
         // The held turn parks the queue behind it (the 600s fetch hold).
         let prompt = worker
             .dispatch(
@@ -8642,6 +8643,37 @@ mod turn_stream_tests {
             &replies[1..],
             &["batch reply".to_string(), "follow-up reply".to_string()],
             "one reply for the batch, one for the follow-up: {replies:?}"
+        );
+        // The wire frames: each batched user row broadcasts exactly once
+        // (the accepted-row emission — never the engine's loop re-emission).
+        let events = runner_events(&mut subscription);
+        let wire_user_starts: Vec<String> = events
+            .iter()
+            .filter(|event| event.get("type").and_then(Value::as_str) == Some("message_start"))
+            .filter(|event| {
+                let message = event.get("message").unwrap_or(&Value::Null);
+                message.get("role").and_then(Value::as_str) == Some("user")
+            })
+            .filter_map(|event| {
+                let message = event.get("message")?;
+                let content = message.get("content")?;
+                content
+                    .as_array()
+                    .and_then(|parts| parts.first())
+                    .and_then(|part| part.get("text"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        assert_eq!(
+            wire_user_starts,
+            vec![
+                "held turn for the batch abort".to_string(),
+                "steering one".to_string(),
+                "steering two".to_string(),
+                "follow up after the batch".to_string(),
+            ],
+            "every user row broadcast exactly once: {wire_user_starts:?}"
         );
         {
             let core = worker.core.lock().unwrap();

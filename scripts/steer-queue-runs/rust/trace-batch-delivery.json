@@ -1,0 +1,1680 @@
+[
+ {
+  "type": "agent_start"
+ },
+ {
+  "type": "turn_start"
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "three tools prompt the queue drives"
+    }
+   ],
+   "timestamp": 1790150555336
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "three tools prompt the queue drives"
+    }
+   ],
+   "timestamp": 1790150555336
+  }
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "assistant",
+   "content": [],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150555420
+  },
+  "assistantMessageEvent": {
+   "type": "start"
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {
+      "code": "import time\nprint('batch tool one done')\ntime.sleep(5)"
+     }
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150555420
+  },
+  "assistantMessageEvent": {
+   "type": "toolcall_delta",
+   "delta": "{\"code\": \"import time\\nprint('batch tool one done')\\ntime.sleep(5)\"}"
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {
+      "code": "import time\nprint('batch tool one done')\ntime.sleep(5)"
+     }
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150555420
+  },
+  "assistantMessageEvent": {
+   "type": "toolcall_end"
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {
+      "code": "import time\nprint('batch tool one done')\ntime.sleep(5)"
+     }
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150555420
+  }
+ },
+ {
+  "type": "tool_execution_start",
+  "toolCallId": "call_battery_1",
+  "toolName": "ipython",
+  "args": {
+   "code": "import time\nprint('batch tool one done')\ntime.sleep(5)"
+  }
+ },
+ {
+  "type": "tool_execution_update",
+  "toolCallId": "call_battery_1",
+  "partialResult": {
+   "content": [
+    {
+     "type": "text",
+     "text": "Starting Python kernel..."
+    }
+   ],
+   "details": {
+    "status": "starting"
+   }
+  }
+ },
+ {
+  "type": "tool_execution_update",
+  "toolCallId": "call_battery_1",
+  "partialResult": {
+   "content": [
+    {
+     "type": "text",
+     "text": "Starting Python kernel..."
+    }
+   ],
+   "details": {
+    "status": "starting"
+   }
+  }
+ },
+ {
+  "type": "tool_execution_update",
+  "toolCallId": "call_battery_1",
+  "partialResult": {
+   "content": [
+    {
+     "type": "text",
+     "text": "Starting Python kernel..."
+    }
+   ],
+   "details": {
+    "status": "starting"
+   }
+  }
+ },
+ {
+  "type": "tool_execution_update",
+  "toolCallId": "call_battery_1",
+  "partialResult": {
+   "content": [
+    {
+     "type": "text",
+     "text": "Restoring Python state..."
+    }
+   ],
+   "details": {
+    "status": "starting"
+   }
+  }
+ },
+ {
+  "type": "tool_execution_update",
+  "toolCallId": "call_battery_1",
+  "partialResult": {
+   "content": [
+    {
+     "type": "text",
+     "text": "Preparing Python runtime..."
+    }
+   ],
+   "details": {
+    "status": "starting"
+   }
+  }
+ },
+ {
+  "type": "tool_execution_update",
+  "toolCallId": "call_battery_1",
+  "partialResult": {
+   "content": [
+    {
+     "type": "text",
+     "text": "Restoring Python state..."
+    }
+   ],
+   "details": {
+    "status": "starting"
+   }
+  }
+ },
+ {
+  "type": "tool_execution_update",
+  "toolCallId": "call_battery_1",
+  "partialResult": {
+   "content": [
+    {
+     "type": "text",
+     "text": "Preparing Python runtime..."
+    }
+   ],
+   "details": {
+    "status": "starting"
+   }
+  }
+ },
+ {
+  "type": "tool_execution_end",
+  "toolCallId": "call_battery_1",
+  "result": {
+   "content": [
+    {
+     "type": "text",
+     "text": "batch tool one done\n"
+    }
+   ],
+   "details": {
+    "status": "ok",
+    "kernelRestarted": false,
+    "durationMs": 5001,
+    "stdout": "batch tool one done\n"
+   }
+  },
+  "isError": false
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "toolResult",
+   "toolCallId": "call_battery_1",
+   "toolName": "ipython",
+   "content": [
+    {
+     "text": "batch tool one done\n",
+     "type": "text"
+    }
+   ],
+   "details": {
+    "status": "ok",
+    "kernelRestarted": false,
+    "durationMs": 5001,
+    "stdout": "batch tool one done\n"
+   },
+   "isError": false,
+   "timestamp": 1790150566057
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "toolResult",
+   "toolCallId": "call_battery_1",
+   "toolName": "ipython",
+   "content": [
+    {
+     "text": "batch tool one done\n",
+     "type": "text"
+    }
+   ],
+   "details": {
+    "status": "ok",
+    "kernelRestarted": false,
+    "durationMs": 5001,
+    "stdout": "batch tool one done\n"
+   },
+   "isError": false,
+   "timestamp": 1790150566057
+  }
+ },
+ {
+  "type": "turn_end",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {
+      "code": "import time\nprint('batch tool one done')\ntime.sleep(5)"
+     }
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150555420
+  },
+  "toolResults": [
+   {
+    "role": "toolResult",
+    "toolCallId": "call_battery_1",
+    "toolName": "ipython",
+    "content": [
+     {
+      "text": "batch tool one done\n",
+      "type": "text"
+     }
+    ],
+    "details": {
+     "status": "ok",
+     "kernelRestarted": false,
+     "durationMs": 5001,
+     "stdout": "batch tool one done\n"
+    },
+    "isError": false,
+    "timestamp": 1790150566057
+   }
+  ]
+ },
+ {
+  "type": "turn_start"
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "assistant",
+   "content": [],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150566062
+  },
+  "assistantMessageEvent": {
+   "type": "start"
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {
+      "code": "import time\nprint('batch tool two done')\ntime.sleep(3)"
+     }
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150566062
+  },
+  "assistantMessageEvent": {
+   "type": "toolcall_delta",
+   "delta": "{\"code\": \"import time\\nprint('batch tool two done')\\ntime.sleep(3)\"}"
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {
+      "code": "import time\nprint('batch tool two done')\ntime.sleep(3)"
+     }
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150566062
+  },
+  "assistantMessageEvent": {
+   "type": "toolcall_end"
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {
+      "code": "import time\nprint('batch tool two done')\ntime.sleep(3)"
+     }
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150566062
+  }
+ },
+ {
+  "type": "tool_execution_start",
+  "toolCallId": "call_battery_1",
+  "toolName": "ipython",
+  "args": {
+   "code": "import time\nprint('batch tool two done')\ntime.sleep(3)"
+  }
+ },
+ {
+  "type": "tool_execution_end",
+  "toolCallId": "call_battery_1",
+  "result": {
+   "content": [
+    {
+     "type": "text",
+     "text": "batch tool two done\n"
+    }
+   ],
+   "details": {
+    "status": "ok",
+    "kernelRestarted": false,
+    "durationMs": 3002,
+    "stdout": "batch tool two done\n"
+   }
+  },
+  "isError": false
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "toolResult",
+   "toolCallId": "call_battery_1",
+   "toolName": "ipython",
+   "content": [
+    {
+     "text": "batch tool two done\n",
+     "type": "text"
+    }
+   ],
+   "details": {
+    "status": "ok",
+    "kernelRestarted": false,
+    "durationMs": 3002,
+    "stdout": "batch tool two done\n"
+   },
+   "isError": false,
+   "timestamp": 1790150569077
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "toolResult",
+   "toolCallId": "call_battery_1",
+   "toolName": "ipython",
+   "content": [
+    {
+     "text": "batch tool two done\n",
+     "type": "text"
+    }
+   ],
+   "details": {
+    "status": "ok",
+    "kernelRestarted": false,
+    "durationMs": 3002,
+    "stdout": "batch tool two done\n"
+   },
+   "isError": false,
+   "timestamp": 1790150569077
+  }
+ },
+ {
+  "type": "turn_end",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "toolCall",
+     "id": "call_battery_1",
+     "name": "ipython",
+     "arguments": {
+      "code": "import time\nprint('batch tool two done')\ntime.sleep(3)"
+     }
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150566062
+  },
+  "toolResults": [
+   {
+    "role": "toolResult",
+    "toolCallId": "call_battery_1",
+    "toolName": "ipython",
+    "content": [
+     {
+      "text": "batch tool two done\n",
+      "type": "text"
+     }
+    ],
+    "details": {
+     "status": "ok",
+     "kernelRestarted": false,
+     "durationMs": 3002,
+     "stdout": "batch tool two done\n"
+    },
+    "isError": false,
+    "timestamp": 1790150569077
+   }
+  ]
+ },
+ {
+  "type": "turn_start"
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "assistant",
+   "content": [],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150569081
+  },
+  "assistantMessageEvent": {
+   "type": "start"
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "all batch tools done"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150569081
+  },
+  "assistantMessageEvent": {
+   "type": "text_delta",
+   "delta": "all batch tools done"
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "all batch tools done"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150569081
+  },
+  "assistantMessageEvent": {
+   "type": "text_end"
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "all batch tools done"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150569081
+  }
+ },
+ {
+  "type": "turn_end",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "all batch tools done"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150569081
+  },
+  "toolResults": []
+ },
+ {
+  "type": "agent_end",
+  "messages": [
+   {
+    "customType": "harness_digest",
+    "content": "[harness-digest]\n\nThe persistent memories produced across this session so far:\n\n<harness_state>\n# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0\n</harness_state>",
+    "display": false,
+    "details": {
+     "digest": "# Continual Harness State\n\nLocal continual harness entries belong to this Prime Agent session. Global continual harness entries persist across Prime Agent sessions.\nThe continual harness entries below are compact summaries, not full descriptions. Use them as routing/context hints; inspect or refine the underlying continual harness entry only when detail matters.\nDefault to local continual harness refinement for current task progress, temporary blockers, and session coordination. Use global continual harness refinement only for stable cross-session lessons, durable user preferences, reusable skills/subagents, or explicitly project-qualified facts.\nUse these continual harness prompt notes, memories, skills, and subagent specs when they are relevant. The base system prompt is immutable; prompt entries below are supplemental notes only.\n\nWhen to call `await refine.run()`: after a repeated failure, a reusable tactic emerges, a repeated delegation role should become a subagent spec, a repeated procedure should become a skill, a durable fact/preference should become a memory, a narrow behavioral policy should become a prompt addendum, a user corrects behavior that should persist locally or globally, validation shows a continual harness entry is wrong, or a skill/subagent/memory/prompt note should be created, updated, deleted, or rolled back. Keep `await refine.run()` continual harness edits small and evidence-backed.\n\nCall contract: read each installed Python skill's SKILL.md and call its documented module function in the Python REPL; do not assume a `.run` entrypoint. Use `<skill_import> ...` in shell when a CLI exists. Continual harness skill entries are Python REPL skills with an explicit Python `reference` and `arguments` contract. Spawn a continual harness subagent spec by composing a concise task prompt and calling `handle = await rlm.spawn('sub-task', name='worker')`; admission returns immediately with `rlm_child_id`, `name`, `session_dir`, and `model`, never the child's answer. Results arrive only through explicit `agent_message` replies or files; children reply with `await agent_message.send(message, receiver_role='parent')`. Use `await rlm.list_subagents()` to recover direct child handles and `await agent_message.send(..., receiver_role='child', receiver_name=handle.name)` for follow-ups. Do not invent wrappers such as `call_skill(...)`, `run_subagent(...)`, or named subagent registries.\n\nprompt: 0\n\nmemory: 0\n\nskill: 0\n\nsubagent: 0\n\nNo saved harness entries yet.\n\nrecent refinements: 0"
+    },
+    "timestamp": 1790150555416,
+    "role": "custom"
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "text": "three tools prompt the queue drives",
+      "type": "text"
+     }
+    ],
+    "timestamp": 1790150555416
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "toolCall",
+      "id": "call_battery_1",
+      "name": "ipython",
+      "arguments": {
+       "code": "import time\nprint('batch tool one done')\ntime.sleep(5)"
+      }
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "responseId": "chatcmpl-battery",
+    "usage": {
+     "input": 20,
+     "output": 10,
+     "cacheRead": 80,
+     "cacheWrite": 0,
+     "totalTokens": 110,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790150555420
+   },
+   {
+    "role": "toolResult",
+    "toolCallId": "call_battery_1",
+    "toolName": "ipython",
+    "content": [
+     {
+      "text": "batch tool one done\n",
+      "type": "text"
+     }
+    ],
+    "details": {
+     "status": "ok",
+     "kernelRestarted": false,
+     "durationMs": 5001,
+     "stdout": "batch tool one done\n"
+    },
+    "isError": false,
+    "timestamp": 1790150566057
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "toolCall",
+      "id": "call_battery_1",
+      "name": "ipython",
+      "arguments": {
+       "code": "import time\nprint('batch tool two done')\ntime.sleep(3)"
+      }
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "responseId": "chatcmpl-battery",
+    "usage": {
+     "input": 20,
+     "output": 10,
+     "cacheRead": 80,
+     "cacheWrite": 0,
+     "totalTokens": 110,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790150566062
+   },
+   {
+    "role": "toolResult",
+    "toolCallId": "call_battery_1",
+    "toolName": "ipython",
+    "content": [
+     {
+      "text": "batch tool two done\n",
+      "type": "text"
+     }
+    ],
+    "details": {
+     "status": "ok",
+     "kernelRestarted": false,
+     "durationMs": 3002,
+     "stdout": "batch tool two done\n"
+    },
+    "isError": false,
+    "timestamp": 1790150569077
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "all batch tools done"
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "responseId": "chatcmpl-battery",
+    "usage": {
+     "input": 20,
+     "output": 10,
+     "cacheRead": 80,
+     "cacheWrite": 0,
+     "totalTokens": 110,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790150569081
+   }
+  ]
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 1,
+   "steering": [
+    "steer batch one"
+   ],
+   "followUps": []
+  }
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 0,
+   "steering": [],
+   "followUps": [],
+   "active": {
+    "kind": "turn",
+    "phase": "preparing",
+    "label": "steer batch one"
+   }
+  }
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 0,
+   "steering": [],
+   "followUps": [],
+   "active": {
+    "kind": "turn",
+    "phase": "committing",
+    "label": "steer batch one"
+   }
+  }
+ },
+ {
+  "type": "agent_start"
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 1,
+   "steering": [
+    "steer batch two"
+   ],
+   "followUps": [],
+   "active": {
+    "kind": "turn",
+    "phase": "running",
+    "label": "steer batch one"
+   }
+  }
+ },
+ {
+  "type": "turn_start"
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 1,
+   "steering": [
+    "steer batch two"
+   ],
+   "followUps": [],
+   "active": {
+    "kind": "turn",
+    "phase": "committing",
+    "label": "steer batch one"
+   }
+  }
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 2,
+   "steering": [
+    "steer batch two",
+    "steer batch three"
+   ],
+   "followUps": [],
+   "active": {
+    "kind": "turn",
+    "phase": "running",
+    "label": "steer batch one"
+   }
+  }
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "steer batch one"
+    }
+   ],
+   "timestamp": 1790150746425
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "steer batch one"
+    }
+   ],
+   "timestamp": 1790150746425
+  }
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "assistant",
+   "content": [],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150746469
+  },
+  "assistantMessageEvent": {
+   "type": "start"
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "batch reply"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150746469
+  },
+  "assistantMessageEvent": {
+   "type": "text_delta",
+   "delta": "batch reply"
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "batch reply"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150746469
+  },
+  "assistantMessageEvent": {
+   "type": "text_end"
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "batch reply"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150746469
+  }
+ },
+ {
+  "type": "turn_end",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "batch reply"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150746469
+  },
+  "toolResults": []
+ },
+ {
+  "type": "agent_end",
+  "messages": [
+   {
+    "customType": "ipython_state_restored",
+    "content": "[python-state-restored]\n\nYour Python kernel state was revived from your previous session. These names are available again: agent_message, agent_observe, goal, rlm_heartbeat.",
+    "display": true,
+    "details": {
+     "restored": true
+    },
+    "timestamp": 1790150561054,
+    "role": "custom"
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "text": "steer batch one",
+      "type": "text"
+     }
+    ],
+    "timestamp": 1790150746467
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "batch reply"
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "responseId": "chatcmpl-battery",
+    "usage": {
+     "input": 20,
+     "output": 10,
+     "cacheRead": 80,
+     "cacheWrite": 0,
+     "totalTokens": 110,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790150746469
+   }
+  ]
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 2,
+   "steering": [
+    "steer batch two",
+    "steer batch three"
+   ],
+   "followUps": []
+  }
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 0,
+   "steering": [],
+   "followUps": [],
+   "active": {
+    "kind": "turn",
+    "phase": "preparing",
+    "label": "steer batch two"
+   }
+  }
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 0,
+   "steering": [],
+   "followUps": [],
+   "active": {
+    "kind": "turn",
+    "phase": "committing",
+    "label": "steer batch two"
+   }
+  }
+ },
+ {
+  "type": "agent_start"
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 0,
+   "steering": [],
+   "followUps": [],
+   "active": {
+    "kind": "turn",
+    "phase": "running",
+    "label": "steer batch two"
+   }
+  }
+ },
+ {
+  "type": "turn_start"
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "steer batch two"
+    }
+   ],
+   "timestamp": 1790150746535
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "steer batch two"
+    }
+   ],
+   "timestamp": 1790150746535
+  }
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "steer batch three"
+    }
+   ],
+   "timestamp": 1790150746537
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "user",
+   "content": [
+    {
+     "type": "text",
+     "text": "steer batch three"
+    }
+   ],
+   "timestamp": 1790150746537
+  }
+ },
+ {
+  "type": "message_start",
+  "message": {
+   "role": "assistant",
+   "content": [],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150746587
+  },
+  "assistantMessageEvent": {
+   "type": "start"
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "batch reply"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 0,
+    "output": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "totalTokens": 0,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150746587
+  },
+  "assistantMessageEvent": {
+   "type": "text_delta",
+   "delta": "batch reply"
+  }
+ },
+ {
+  "type": "message_update",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "batch reply"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150746587
+  },
+  "assistantMessageEvent": {
+   "type": "text_end"
+  }
+ },
+ {
+  "type": "message_end",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "batch reply"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150746587
+  }
+ },
+ {
+  "type": "turn_end",
+  "message": {
+   "role": "assistant",
+   "content": [
+    {
+     "type": "text",
+     "text": "batch reply"
+    }
+   ],
+   "api": "openai-completions",
+   "provider": "prime-inference",
+   "model": "mock-1",
+   "responseId": "chatcmpl-battery",
+   "usage": {
+    "input": 20,
+    "output": 10,
+    "cacheRead": 80,
+    "cacheWrite": 0,
+    "totalTokens": 110,
+    "cost": {
+     "input": 0,
+     "output": 0,
+     "cacheRead": 0,
+     "cacheWrite": 0,
+     "total": 0
+    }
+   },
+   "stopReason": "stop",
+   "timestamp": 1790150746587
+  },
+  "toolResults": []
+ },
+ {
+  "type": "agent_end",
+  "messages": [
+   {
+    "role": "user",
+    "content": [
+     {
+      "text": "steer batch two",
+      "type": "text"
+     }
+    ],
+    "timestamp": 1790150746584
+   },
+   {
+    "role": "user",
+    "content": [
+     {
+      "text": "steer batch three",
+      "type": "text"
+     }
+    ],
+    "timestamp": 1790150746584
+   },
+   {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "batch reply"
+     }
+    ],
+    "api": "openai-completions",
+    "provider": "prime-inference",
+    "model": "mock-1",
+    "responseId": "chatcmpl-battery",
+    "usage": {
+     "input": 20,
+     "output": 10,
+     "cacheRead": 80,
+     "cacheWrite": 0,
+     "totalTokens": 110,
+     "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0,
+      "total": 0
+     }
+    },
+    "stopReason": "stop",
+    "timestamp": 1790150746587
+   }
+  ]
+ },
+ {
+  "type": "session_action_update",
+  "actions": {
+   "queuedCount": 0,
+   "steering": [],
+   "followUps": []
+  }
+ }
+]

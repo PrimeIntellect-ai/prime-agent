@@ -1,0 +1,3 @@
+supervisor started pid 2299429
+[2026-09-23T08:05:51.850Z] session worker 24b85ee174fd registered (epoch 1, pid 2299435)
+[2026-09-23T08:05:52.000Z] session worker 24b85ee174fd re-registered (epoch 2, pid 2299435)

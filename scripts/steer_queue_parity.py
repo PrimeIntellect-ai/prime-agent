@@ -367,12 +367,17 @@ class Side:
         co-delivers as ONE batched turn at the boundary."""
         work = self.root / "work-b"
         work.mkdir()
+        # The parked-lane parking must be deterministic: tool one's cell
+        # holds the turn long enough for every steer to park mid-run (the
+        # established three-tools pattern), so the steering stop ends the
+        # run at tool one's boundary with the whole prefix queued.
         self.queue_script(
             [
-                {"toolCall": {"name": "ipython", "arguments": {"code": "import time\nprint('batch wedge done')\ntime.sleep(4)"}}},
-                {"text": "the wedge turn completed"},
+                {"toolCall": {"name": "ipython", "arguments": {"code": "import time\nprint('batch tool one done')\ntime.sleep(5)"}}},
+                {"toolCall": {"name": "ipython", "arguments": {"code": "import time\nprint('batch tool two done')\ntime.sleep(12)"}}},
+                {"text": "all batch tools done"},
             ]
-            + [{"text": f"batch reply {msg}"} for msg in BATCH_STEERS]
+            + [{"text": "batch reply"}]
         )
         wire = B.Wire(self.sock)
         try:
@@ -384,6 +389,25 @@ class Side:
             assert prompt.get("success") is True, prompt
             first_end = self.wait_event(wire, lambda ev: ev.get("type") == "tool_execution_end")
             self.record("the batch wedge run started", first_end is not None)
+            park_t0 = time.time()
+            for msg in BATCH_STEERS:
+                parked = wire.request(f"b-steer-{msg}", {"type": "steer", "activeSessionId": sid, "message": msg})
+                assert parked.get("success") is True, parked
+                print(f"[timing] {self.name}: parked {msg!r} at +{time.time() - park_t0:.2f}s")
+            # The parked rows project before the boundary: every steer is
+            # visible in the queue projection before the run stops (the
+            # parking is part of the assertion surface, and it makes the
+            # pickup race-free: all three rows are queued when the
+            # boundary hits).
+            for msg in BATCH_STEERS:
+                proj = self.wait_event(
+                    wire,
+                    lambda ev, m=msg: ev.get("type") == "session_action_update"
+                    and m in json.dumps(ev.get("actions") or {}),
+                    timeout=60,
+                )
+                print(f"[timing] {self.name}: projected {msg!r} at +{time.time() - park_t0:.2f}s")
+            assert proj is not None, "the parking projection never arrived"
             parked = [
                 wire.request(f"b-steer-{i}", {"type": "steer", "activeSessionId": sid, "message": msg})
                 for i, msg in enumerate(BATCH_STEERS)
