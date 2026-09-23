@@ -181,29 +181,45 @@ pub(crate) fn merge_discovered(
 /// Parse `/proc/net/unix` rows into (inode, path) pairs for *listening*
 /// unix sockets: the accept-connections flag `SS_ACCEPTCONN` (kernel
 /// include/uapi/linux/net.h, hex `00010000`) plus a filesystem path.
-/// Format: `Num RefCount Protocol Flags Type St Inode Path`. The header row
+/// Format: `Num RefCount Protocol Flags Type St Inode Path`.
+///
+/// Byte-level on purpose: a unix socket pathname may contain any byte
+/// sequence (unix(7) — one non-UTF-8 name anywhere in the file must not
+/// reject the whole census), and it may contain spaces, so the first seven
+/// columns parse separately and the *remainder* of each line is the path.
+/// A row whose pathname is not valid UTF-8 drops out on its own (product
+/// socket paths are UTF-8; the rest of the census stands). The header row
 /// fails the hex flag parse and drops out; unnamed and non-listening rows
 /// (no path, or no `SS_ACCEPTCONN`) drop out too.
 #[cfg(target_os = "linux")]
-fn parse_proc_net_unix(stdout: &str) -> Vec<(String, String)> {
+fn parse_proc_net_unix(bytes: &[u8]) -> Vec<(String, String)> {
     const SS_ACCEPTCONN: u32 = 0x0001_0000;
     let mut listeners = Vec::new();
-    for line in stdout.lines() {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() < 8 {
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let mut columns = line.splitn(8, |byte: &u8| byte.is_ascii_whitespace());
+        let columns: Vec<&[u8]> = (0..8).filter_map(|_| columns.next()).collect();
+        if columns.len() < 8 {
             continue;
         }
-        let Ok(flags) = u32::from_str_radix(fields[3], 16) else {
+        let Some(flags) = std::str::from_utf8(columns[3])
+            .ok()
+            .and_then(|flags| u32::from_str_radix(flags, 16).ok())
+        else {
             continue;
         };
         if flags & SS_ACCEPTCONN == 0 {
             continue;
         }
-        let path = fields[7];
+        let Some(path) = std::str::from_utf8(columns[7]).ok() else {
+            continue;
+        };
         if !path.starts_with('/') {
             continue;
         }
-        listeners.push((fields[6].to_string(), path.to_string()));
+        let Some(inode) = std::str::from_utf8(columns[6]).ok() else {
+            continue;
+        };
+        listeners.push((inode.to_string(), path.to_string()));
     }
     listeners
 }
@@ -263,7 +279,7 @@ fn proc_socket_inodes() -> Vec<(u32, String, std::collections::HashSet<String>)>
 /// fail on stock root-user Linux images that ship neither tool.
 #[cfg(target_os = "linux")]
 fn scan_proc_listeners(app_name: &str) -> Vec<DiscoveredDaemonProcess> {
-    let Ok(unix) = std::fs::read_to_string("/proc/net/unix") else {
+    let Ok(unix) = std::fs::read("/proc/net/unix") else {
         return Vec::new();
     };
     let listeners = parse_proc_net_unix(&unix);
@@ -375,7 +391,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn parse_proc_net_unix_keeps_listening_rows_with_paths_only() {
-        let sample = "Num       RefCount Protocol Flags    Type St Inode Path\n\
+        let sample = b"Num       RefCount Protocol Flags    Type St Inode Path\n\
 0000000047ecc27d: 00000002 00000000 00010000 0001 01  9703 /tmp/agent/daemon.sock\n\
 0000000000ac5346: 00000003 00000000 00000000 0001 03  9700\n\
 0000000047ecc280: 00000002 00000000 00000000 0001 01  9710 /tmp/agent/bound.sock\n";
@@ -387,6 +403,26 @@ mod tests {
         );
     }
 
+    /// A pathname with spaces must survive whole (the remainder of the line
+    /// is the path), and one non-UTF-8 pathname elsewhere in the file must
+    /// not reject the census (unix(7) allows arbitrary path bytes).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_proc_net_unix_keeps_spaced_and_survives_non_utf8_paths() {
+        let mut sample = (*b"Num RefCount Protocol Flags Type St Inode Path\n\
+0000000047ecc27d: 00000002 00000000 00010000 0001 01  9703 /tmp/agent sandbox/daemon.sock\n")
+            .to_vec();
+        sample.extend_from_slice(b"0000000047ecc280: 00000002 00000000 00010000 0001 01  9710 /tmp/agent/");
+        sample.push(0xff);
+        sample.extend_from_slice(b"\xff/daemon.sock\n");
+        let listeners = parse_proc_net_unix(&sample);
+        assert_eq!(
+            listeners,
+            vec![("9703".to_string(), "/tmp/agent sandbox/daemon.sock".to_string())],
+            "the spaced path is kept whole; the non-UTF-8 row drops out alone, never rejecting the census"
+        );
+    }
+
     /// The ss text parse and the /proc parse must agree on the same
     /// listener: same pid, same socket path.
     #[cfg(target_os = "linux")]
@@ -395,7 +431,7 @@ mod tests {
         let ss_line = "u_str LISTEN 0      4096   /tmp/agent/daemon.sock 21049121            * 0    users:((\"prime-agent\",pid=123,fd=14))\n";
         let ss = parse_ss_listeners(ss_line, "prime-agent");
         let proc_rows = parse_proc_net_unix(
-            "Num RefCount Protocol Flags Type St Inode Path\n0000000047ecc27d: 00000002 00000000 00010000 0001 01  9703 /tmp/agent/daemon.sock\n",
+            b"Num RefCount Protocol Flags Type St Inode Path\n0000000047ecc27d: 00000002 00000000 00010000 0001 01  9703 /tmp/agent/daemon.sock\n",
         );
         // The /proc half maps inode 9703 to pid 123 through fd symlinks;
         // the parser-level parity check uses the matching shape directly.
