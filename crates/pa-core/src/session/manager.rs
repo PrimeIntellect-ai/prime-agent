@@ -1886,7 +1886,7 @@ mod tests {
         assert_eq!(header.cwd, target_cwd.display().to_string());
         assert_eq!(
             header.parent_session.as_deref(),
-            Some(source_file.display().to_string())
+            Some(source_file.display().to_string().as_str())
         );
         assert_eq!(header.rlm_depth, source.get_header().unwrap().rlm_depth);
 
@@ -2003,8 +2003,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let empty = tmp.path().join("empty.jsonl");
         std::fs::write(&empty, "").unwrap();
-        let error =
-            SessionManager::fork_from(&empty, tmp.path(), tmp.path().join("sessions")).unwrap_err();
+        let error = SessionManager::fork_from(&empty, tmp.path(), &tmp.path().join("sessions"))
+            .err()
+            .expect("fork rejects an empty source");
         assert_eq!(
             error,
             format!(
@@ -2020,8 +2021,10 @@ mod tests {
             ),
         )
         .unwrap();
-        let error = SessionManager::fork_from(&headerless, tmp.path(), tmp.path().join("sessions"))
-            .unwrap_err();
+        let error =
+            SessionManager::fork_from(&headerless, tmp.path(), &tmp.path().join("sessions"))
+                .err()
+                .expect("fork rejects a headerless source");
         assert_eq!(
             error,
             format!(
@@ -2031,8 +2034,9 @@ mod tests {
             "the loader finalizes a headerless file to zero entries"
         );
         let missing = tmp.path().join("absent.jsonl");
-        let error = SessionManager::fork_from(&missing, tmp.path(), tmp.path().join("sessions"))
-            .unwrap_err();
+        let error = SessionManager::fork_from(&missing, tmp.path(), &tmp.path().join("sessions"))
+            .err()
+            .expect("fork rejects a missing source");
         assert!(error.starts_with("Cannot fork: source session file is empty or invalid:"));
     }
 }
