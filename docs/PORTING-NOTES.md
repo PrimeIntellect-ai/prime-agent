@@ -487,6 +487,23 @@ divergences from the TS `cli/daemon-ps.ts` shape:
   product-parity trade-off is accepted for this mission sandbox per the operator directive;
   revisit before any release cut of the binary.
 
+Two follow-ups (root-user Linux, 2026-09-23; the uid-0 side of the same directive):
+
+- The uid-0 twins are guarded too. The product-default socket dir is `<tmpdir>/prime-agent-<uid>`,
+  so on a root-user Linux box (uid 0 — the fleet's root-uid gate sandboxes and any root-user
+  mission topology) the ambient mission daemon's sockets live under `/tmp/prime-agent-0` and
+  `/tmp/mission-tmp/prime-agent-0`. Without those entries the whole never-touch protection
+  would silently disappear at uid 0, since the original list only named the uid-1000 paths.
+- The OS census has a dependency-free Linux fallback (`scan_proc_listeners`): when neither
+  `ss` nor `lsof` exists — stock `rust:1-bookworm` and most slim container images ship neither —
+  TS `daemon-ps.ts` returns nothing and every discovery report reads as an empty machine,
+  which fails the three `daemon_discovery_e2e` tests deterministically on uid 0 ("No
+  background services found."). The Rust port instead maps `/proc/net/unix` listening rows
+  to owning pids via `/proc/<pid>/fd` and matches the comm name, so the census works with no
+  external tools. Visibility equals `ss -lxp` in both privilege classes: uid 0 sees every
+  daemon on the machine, an unprivileged user only its own. This is a deliberate divergence
+  from TS (which stays tool-dependent); same operator authority as the containment guard.
+
 
 ## Child-session stream hang (observed in production, 2026-09-16)
 
