@@ -213,6 +213,19 @@ def read_tail(path, tail_bytes=2 * 1024 * 1024):
         return handle.read().decode("utf-8", errors="replace")
 
 
+def read_tail_settled(path, needles, tail_bytes=2 * 1024 * 1024, timeout=15.0):
+    """The corpus tail once every needle is present (the daemon flushes its
+    session records slightly after the pane renders them, so the integrity
+    read retries until the records land instead of racing the flush)."""
+    deadline = time.time() + timeout
+    tail = ""
+    while True:
+        tail = read_tail(path, tail_bytes)
+        if all(needle in tail for needle in needles) or time.time() >= deadline:
+            return tail
+        time.sleep(0.5)
+
+
 def run_side(binary, corpus, script_path, out_dir, width, height):
     """One binary through the full scenario; returns the evidence dict."""
     sandbox_root = out_dir / binary
@@ -312,7 +325,9 @@ def run_side(binary, corpus, script_path, out_dir, width, height):
 
         # Submission integrity from the session file (ground truth, both
         # products append JSONL): every pasted line verbatim.
-        tail = read_tail(corpus)
+        tail = read_tail_settled(
+            corpus, [PASTE_ACK] + FOLLOW_PASTE + BURST_PASTE + PAUSED_PASTE
+        )
         for line in FOLLOW_PASTE + BURST_PASTE + PAUSED_PASTE:
             if line not in tail:
                 failures.append(f"the submitted message lost {line!r}")
