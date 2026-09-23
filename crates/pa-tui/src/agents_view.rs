@@ -1347,10 +1347,15 @@ impl Renderer {
         ui: AgentsViewUiMode,
         ui_tx: mpsc::UnboundedSender<UiInput>,
         exit_guard: crate::exit_guard::ExitGuard,
+        surface_mounted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Renderer> {
         match ui {
             AgentsViewUiMode::Terminal => {
                 crossterm::terminal::enable_raw_mode()?;
+                // The terminal state changed: every later setup step is
+                // fallible and an error from any of them still owns the
+                // release. The flag arms here, not at the end of setup.
+                surface_mounted.store(true, std::sync::atomic::Ordering::SeqCst);
                 // Adopt the alternate screen the previous surface left in
                 // place (TS `pendingAltScreenHandoff`); only the first
                 // surface of the process enters it, so a view switch never
@@ -1589,7 +1594,15 @@ pub async fn run_agents_view(
     match run_agents_view_surface(options, ui, link, mounted).await {
         Ok(run) => Ok(run),
         Err(error) => {
-            if owns_terminal && surface_mounted.load(std::sync::atomic::Ordering::SeqCst) {
+            // Same rule as the session surface: restore when this run
+            // changed the terminal state (the flag arms at the raw-mode
+            // entry) OR when it entered on a pane already in TUI state
+            // (the preserve handoff it must release even on a pre-mount
+            // failure).
+            if owns_terminal
+                && (surface_mounted.load(std::sync::atomic::Ordering::SeqCst)
+                    || crate::altscreen::active())
+            {
                 crate::exit_restore::restore_terminal();
             }
             Err(error)
@@ -1635,8 +1648,7 @@ async fn run_agents_view_surface(
     // teardown must still hand the terminal back whole (the same
     // unwind-guard contract the session surface arms).
     let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
-    let mut renderer = Renderer::setup(ui, ui_tx.clone(), exit_guard.clone())?;
-    surface_mounted.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut renderer = Renderer::setup(ui, ui_tx.clone(), exit_guard.clone(), &surface_mounted)?;
     // The first frame renders from the live roster the moment the surface
     // mounts (TS `applySessionList(this.rosterStore.summaries(), true)`
     // before its first `requestRender`): the saved-catalog fetch below

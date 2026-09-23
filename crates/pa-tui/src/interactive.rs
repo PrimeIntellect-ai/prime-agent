@@ -649,7 +649,18 @@ pub async fn run_interactive(
     match run_interactive_surface(options, ui, mounted).await {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
-            if owns_terminal && surface_mounted.load(std::sync::atomic::Ordering::SeqCst) {
+            // Restore when THIS run changed the terminal state (the flag
+            // arms at the raw-mode entry inside `Renderer::setup`) OR
+            // when it entered on a pane already in TUI state (the
+            // agents-view preserve handoff: the adopting surface owns the
+            // release even when it fails before mounting — the process is
+            // exiting and no other writer remains). A fresh-pane
+            // pre-mount failure (the daemon refused the connect) has
+            // nothing to release and must not tear down the caller.
+            if owns_terminal
+                && (surface_mounted.load(std::sync::atomic::Ordering::SeqCst)
+                    || crate::altscreen::active())
+            {
                 crate::exit_restore::restore_terminal();
             }
             Err(error)
@@ -731,8 +742,13 @@ async fn run_interactive_surface(
     // cannot carry this — tokio catches task panics and the process
     // would live on with a half-restored surface).
     let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
-    let mut renderer = Renderer::setup(ui, ui_tx, exit_guard.clone(), options.fullscreen_mouse)?;
-    surface_mounted.store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut renderer = Renderer::setup(
+        ui,
+        ui_tx,
+        exit_guard.clone(),
+        options.fullscreen_mouse,
+        &surface_mounted,
+    )?;
     if !headless {
         // TS `ui.start()` renders once before the session loads: the first
         // frame is the startup chrome (banner, editor, tray). The model
@@ -1828,10 +1844,17 @@ impl Renderer {
         ui_tx: mpsc::UnboundedSender<UiInput>,
         exit_guard: ExitGuard,
         mouse: bool,
+        surface_mounted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Renderer> {
         match ui {
             UiMode::Terminal => {
                 terminal::enable_raw_mode()?;
+                // The terminal state changed: every later setup step is
+                // fallible (the alt-screen enter, the mode enables, the
+                // terminal construction) and an error from any of them
+                // still owns the release. The flag arms here, not at the
+                // end of setup.
+                surface_mounted.store(true, std::sync::atomic::Ordering::SeqCst);
                 // Adopt the alternate screen the previous surface left in
                 // place (TS `pendingAltScreenHandoff`); only the first
                 // surface of the process enters it, so a view switch never
