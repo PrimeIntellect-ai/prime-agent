@@ -473,6 +473,80 @@ mod tests {
         scheduler.stop().await;
     }
 
+    /// THE LIVE INCIDENT'S EXACT SHAPE: a catalog mutation whose wake
+    /// lands while a fire pass is in-flight aborts the timer task
+    /// mid-pass (`schedule_next` aborts the previous task; the abort
+    /// cancels the future at its await without running the pass's tail)
+    /// — the re-entrancy flag must reset through the guard's drop, or
+    /// every later pass silently no-ops forever (the governance
+    /// session's beats froze exactly here: the job was re-created from
+    /// inside a running beat, the mutation's wake aborted the in-flight
+    /// pass, and no later job ever fired).
+    #[tokio::test]
+    async fn a_mutation_wake_during_an_in_flight_pass_does_not_wedge_the_flag() {
+        struct BlockingHooks {
+            runs: Arc<AtomicUsize>,
+            block_first: AtomicBool,
+        }
+        impl AgentCronSchedulerHooks for BlockingHooks {
+            async fn run_job(&self, _job: &AgentCronJob) -> anyhow::Result<Option<&'static str>> {
+                self.runs.fetch_add(1, Ordering::SeqCst);
+                if self.block_first.swap(false, Ordering::SeqCst) {
+                    // The delivery parks (the fire's settle wait): the
+                    // pass is in-flight when the mutation's wake aborts
+                    // the timer task.
+                    std::future::pending::<()>().await;
+                }
+                Ok(Some("ran"))
+            }
+            fn now(&self) -> u64 {
+                1_700_000_000_000
+            }
+        }
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = Arc::new(AgentCronJobStore::new(dir.path().join("jobs.json")));
+        let now = 1_700_000_000_000;
+        let hooks = Arc::new(BlockingHooks {
+            runs: Arc::new(AtomicUsize::new(0)),
+            block_first: AtomicBool::new(true),
+        });
+        let scheduler = AgentCronScheduler::new(store.clone(), hooks.clone());
+        // The job is created already-due: the timer fires immediately on
+        // start. The pass parks inside its first delivery.
+        store
+            .create(&input("tick", "in 1m", now - 61_000))
+            .expect("first job");
+        scheduler.start().await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while hooks.runs.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            hooks.runs.load(Ordering::SeqCst),
+            1,
+            "the first fire started"
+        );
+        // A catalog mutation from inside the running beat: its wake
+        // aborts the timer task MID-PASS.
+        store
+            .create(&input("tock", "in 1m", now - 61_000))
+            .expect("second job");
+        scheduler.wake().await;
+        // The aborted pass's flag must not wedge: a fresh wake re-arms
+        // the timer and the second job's due pass must claim and run.
+        scheduler.wake().await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while hooks.runs.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            hooks.runs.load(Ordering::SeqCst) >= 2,
+            "a wedged flag silently skipped every later pass (runs: {})",
+            hooks.runs.load(Ordering::SeqCst)
+        );
+        scheduler.stop().await;
+    }
+
     /// The timer task parks on an empty store instead of dying: the store
     /// emptying mid-life (every job cancelled or completed) must leave a
     /// parked timer a later mutation wake re-arms — the mid-life death

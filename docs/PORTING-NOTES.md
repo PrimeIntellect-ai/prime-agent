@@ -1451,10 +1451,16 @@ store's write path is healthy; the claim/fire path is dead. Two structural death
   waiter. The fix parks the task on the wake notify instead of exiting —
   the TS `recomputeScheduledSessionWake` shape (every recompute arms a
   fresh timer), so a parked timer always re-arms.
-- **The run-pass re-entrancy flag** (`running`) was set true with no
-  panic guard: a claim or dispatch that unwound wedged it at `true`,
-  silently no-oping every later pass while the timer kept spinning.
-  A drop guard resets it however the pass ends.
+- **The run-pass re-entrancy flag** (`running`) had no reset on ANY
+  abnormal exit — a panic, or the exact live shape: a catalog
+  mutation whose `wake()` lands while a fire pass is in-flight
+  (`schedule_next` aborts the previous task mid-`run_due_at`; the
+  abort cancels the future at its await without running the pass's
+  tail, so the flag never resets — the operator's capture pinned this:
+  the governance job was re-created from INSIDE a running beat, the
+  mutation's wake aborted the in-flight pass, and no job ever fired
+  again). A drop guard resets the flag however the pass ends (panic or
+  abort alike: destructors run on abort).
 
 Regression: `a_panicking_dispatch_does_not_wedge_the_run_pass` +
 `the_timer_parks_on_an_empty_store_and_re_arms_on_wake` (pa-core
