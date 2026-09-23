@@ -467,12 +467,14 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     }
 
     // The child rendered every delivered prompt once and answered each
-    // with a real parent-directed kernel send.
+    // with a real parent-directed kernel send. Each delivery's card
+    // carries the body twice (the row content plus details.message), so
+    // three deliveries render the body six times.
     client.wait_idle("w-child", &child_active_session_id);
     let child_messages = client.messages("gm-child", &child_active_session_id);
     assert_eq!(
         child_messages.matches("hello there").count(),
-        3,
+        6,
         "the child rendered every delivered message once: {child_messages}"
     );
     if let Ok(error) = std::fs::read_to_string(receipts_dir.join("child-reply.error")) {
@@ -502,9 +504,11 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         3,
         "the parent rendered every child reply: {parent_messages}"
     );
+    // Each reply's card carries the body twice (row content plus
+    // details.message), so three replies render the body six times.
     assert_eq!(
         parent_messages.matches("kid reply").count(),
-        3,
+        6,
         "the reply bodies rendered in the parent: {parent_messages}"
     );
 }

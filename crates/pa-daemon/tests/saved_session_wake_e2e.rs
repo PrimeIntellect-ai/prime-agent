@@ -374,9 +374,11 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
         let text = messages(&mut client, "gm2", &woken_id);
         (text.contains("[agent-message from") && text.contains("wake reply")).then_some(text)
     });
+    // The delivery renders as the agent_message custom row: the body
+    // rides the row content (the rendered prompt) and details.message.
     assert_eq!(
         woken_messages.matches("wake up").count(),
-        1,
+        2,
         "{woken_messages}"
     );
 
@@ -394,7 +396,9 @@ fn send_to_a_saved_session_wakes_it_and_runs_the_turn() {
     );
     wait_until(Duration::from_secs(30), || {
         let text = messages(&mut client, "gm3", &woken_id);
-        (text.matches("again").count() == 1).then_some(())
+        // The second send's card carries the body in the row content and
+        // in details.message: two occurrences for the one delivery.
+        (text.matches("again").count() == 2).then_some(())
     });
 
     // An unknown selector that matches no saved session keeps the TS error.

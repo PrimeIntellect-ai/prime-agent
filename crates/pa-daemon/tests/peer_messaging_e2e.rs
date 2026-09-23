@@ -431,11 +431,36 @@ fn worker_to_worker_kernel_send_delivers_over_the_peer_transport() {
         beta_messages.contains("beta reply"),
         "B answered the delivered prompt: {beta_messages}"
     );
-    // The delivered prompt is the only extra prompt B ever saw.
+    // The delivery renders as the agent_message custom row (TS
+    // `createAgentSessionMessage`): the rendered prompt is the row content
+    // and the raw body rides `details.message`, so the body shows up in
+    // both. The delivered prompt is still the only extra prompt B ever
+    // saw.
     assert_eq!(
         beta_messages.matches("hello from alpha").count(),
-        1,
-        "the message body renders once: {beta_messages}"
+        2,
+        "the body rides the card content and details.message: {beta_messages}"
+    );
+    let beta_rows: Value =
+        serde_json::from_str(&beta_messages).expect("the messages payload parses");
+    let delivered = beta_rows["messages"]
+        .as_array()
+        .expect("messages array")
+        .iter()
+        .find(|row| row.get("customType").and_then(Value::as_str) == Some("agent_message"))
+        .expect("the delivered prompt renders as the agent_message custom row");
+    assert_eq!(delivered["role"], "custom");
+    assert_eq!(
+        delivered["content"],
+        "[agent-message from alpha]\n\nhello from alpha"
+    );
+    assert_eq!(delivered["display"], true);
+    assert_eq!(delivered["details"]["message"], "hello from alpha");
+    assert!(
+        delivered["details"]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("agentmsg_")),
+        "the card details carry the delivery id: {delivered}"
     );
 
     // A's closing turn completed too.
@@ -621,9 +646,12 @@ fn supervisor_death_mid_conversation_still_delivers_after_re_registration() {
         2,
         "both delivered prompts rendered in B: {beta_messages}"
     );
+    // Each delivery's card carries the body twice (content plus
+    // details.message), so two sends render the body four times while the
+    // bracketed prompt stays once per send.
     assert_eq!(
         beta_messages.matches("hello from alpha").count(),
-        2,
-        "the delivered message body rendered once per send: {beta_messages}"
+        4,
+        "the delivered message body rendered twice per send: {beta_messages}"
     );
 }
