@@ -151,11 +151,9 @@ describe("Anthropic thinking disable payload", () => {
 		expect(payload.output_config).toEqual({ effort: "max" });
 	});
 
-	// Claude Opus 5.5 ships through the remote catalog (the compiled snapshot
-	// does not carry the id), so this uses the release id over an Anthropic
-	// surface (the snapshot's Opus 5 entry is a prime-inference
-	// openai-completions variant, unusable here): it rejects thinking disabled
-	// and sampling params with a 400.
+	// Opus 5.5 ships via the remote catalog and the snapshot's Opus 5 entry is a
+	// prime-inference openai-completions variant, so use the release id (the
+	// always-on logic keys on it) over a registered Anthropic surface.
 	it("omits thinking disabled and temperature for Claude Opus 5.5", async () => {
 		const opus55: Model<"anthropic-messages"> = { ...getModel("anthropic", "claude-fable-5")!, id: "claude-opus-5-5" };
 		const payload = await capturePayload(opus55, { temperature: 0.5 });
