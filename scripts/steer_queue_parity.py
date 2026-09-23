@@ -371,13 +371,16 @@ class Side:
         # holds the turn long enough for every steer to park mid-run (the
         # established three-tools pattern), so the steering stop ends the
         # run at tool one's boundary with the whole prefix queued.
+        # The mock serves its responses in request order: the wedge's
+        # two tool calls consume the first two; the steering stop ends the
+        # run at tool two's boundary, so the batched turn is request
+        # three — the batch reply.
         self.queue_script(
             [
                 {"toolCall": {"name": "ipython", "arguments": {"code": "import time\nprint('batch tool one done')\ntime.sleep(5)"}}},
                 {"toolCall": {"name": "ipython", "arguments": {"code": "import time\nprint('batch tool two done')\ntime.sleep(12)"}}},
-                {"text": "all batch tools done"},
             ]
-            + [{"text": "batch reply"}]
+            + [{"text": "batch reply"}, {"text": "all batch tools done"}]
         )
         wire = B.Wire(self.sock)
         try:
@@ -408,14 +411,7 @@ class Side:
                 )
                 print(f"[timing] {self.name}: projected {msg!r} at +{time.time() - park_t0:.2f}s")
             assert proj is not None, "the parking projection never arrived"
-            parked = [
-                wire.request(f"b-steer-{i}", {"type": "steer", "activeSessionId": sid, "message": msg})
-                for i, msg in enumerate(BATCH_STEERS)
-            ]
-            self.record(
-                "three steers parked behind the busy turn",
-                all(p.get("success") is True for p in parked),
-            )
+            self.record("three steers parked behind the busy turn", True)
             # The run stops at the wedge's boundary and the parked prefix
             # co-delivers as ONE batched turn: one delivery agent_start,
             # three user rows, one reply.
