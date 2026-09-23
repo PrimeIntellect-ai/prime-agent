@@ -716,26 +716,26 @@ pub async fn run_interactive(
     {
         Ok(session) => session,
         Err(error) => {
-            // A remembered active id whose session is truly gone (not
-            // rebindable to a live worker): the pane hands off to the
-            // agents view with the failure as its status line instead of
-            // dying to the shell. Every other startup failure (daemon
-            // down, create failure) stays fatal.
+            // A daemon refusal for the startup create/attach/resume (the
+            // daemon is alive and refused THIS request — a remembered id
+            // whose worker is gone, or a saved-session create the daemon
+            // refuses, e.g. "Session is already active in <id>" while
+            // another instance holds the session file): the pane hands off
+            // to the agents view with the failure as its status line —
+            // the session-picker fallback — instead of dying to the
+            // shell. Only transport/protocol failures (daemon down,
+            // unanswerable socket) stay fatal.
             //
-            // The check matches the daemon's RAW refusal exactly - it must
-            // name this attach's own selector - instead of a substring of
-            // the rendered chain: the chain's context lines echo the
-            // user-typed selector, so a selector that happens to contain
-            // the phrase could not forge the refusal into a transport
-            // failure's report (and vice versa).
+            // The unknown-session check matches the daemon's RAW refusal
+            // message exactly - it must name this attach's own selector -
+            // so a selector that happens to contain the phrase could not
+            // forge the refusal (and vice versa).
             let unknown_session_refusal = |selector: &str| {
                 let expected = format!("Unknown active session: {selector}");
                 error.chain().any(|cause| {
                     cause
-                        .to_string()
-                        .strip_prefix("the daemon rejected the ")
-                        .and_then(|rejection| rejection.rsplit_once(" request: "))
-                        .is_some_and(|(_, daemon_error)| daemon_error == expected)
+                        .downcast_ref::<crate::daemon_client::RequestRejected>()
+                        .is_some_and(|rejection| rejection.message == expected)
                 })
             };
             if let SessionSelection::Attach(selector) = &options.session {
@@ -754,6 +754,20 @@ pub async fn run_interactive(
                         ..Default::default()
                     });
                 }
+            }
+            // Any other daemon refusal (a create the daemon refused for a
+            // saved-session open, an admission refusal, ...) gets the same
+            // session-picker fallback: the agents view opens with the
+            // refusal as its status line and the client never exits.
+            if crate::daemon_client::is_daemon_rejection(&error) {
+                exit_guard.cancel();
+                let frames = renderer.finish(&mut view, true);
+                return Ok(InteractiveOutcome {
+                    return_to_agents_view: true,
+                    agents_view_notice: Some(format!("{error:#}")),
+                    frames,
+                    ..Default::default()
+                });
             }
             // The surface is already up: hand the terminal back before the
             // CLI reports the failure on the plain screen (the same
@@ -823,7 +837,9 @@ pub async fn run_interactive(
         }
     }
     if let Some(initial) = &options.initial_message {
-        session.submit_prompt(initial, &mut view).await?;
+        session
+            .submit_prompt(initial, crate::session_ui::SubmitBehavior::Steer, &mut view)
+            .await?;
     }
 
     let mut pending: VecDeque<UiInput> = VecDeque::new();
@@ -938,7 +954,20 @@ pub async fn run_interactive(
                         // TS stops the selection auto-scroll on every
                         // non-mouse input (`handleFullscreenInput`).
                         session.stop_selection_auto_scroll();
-                        session.handle_key(key, &mut view, &mut running).await?;
+                        match session.handle_key(key, &mut view, &mut running).await {
+                            Ok(()) => {}
+                            // A daemon refusal answered this key's request
+                            // (the connection stays healthy): the TS
+                            // `showError` row surfaces it and the loop keeps
+                            // running with the editor state preserved — a
+                            // refused request never exits the client.
+                            Err(error) if crate::daemon_client::is_daemon_rejection(&error) => {
+                                session.error_row(&format!("{error:#}"), &mut view);
+                            }
+                            // Everything else (dead socket, timeout,
+                            // protocol corruption) stays fatal.
+                            Err(error) => return Err(error),
+                        }
                         // TS `handleCtrlZ` (`app.suspend`, default ctrl+z):
                         // hand the terminal to the shell and stop the process
                         // group; execution continues here once the user
@@ -994,7 +1023,13 @@ pub async fn run_interactive(
                             if suspended {
                                 renderer.suspend(&mut view)?;
                             }
-                            let dispatched = session.submit_prompt(&command, &mut view).await;
+                            let dispatched = session
+                                .submit_prompt(
+                                    &command,
+                                    crate::session_ui::SubmitBehavior::Steer,
+                                    &mut view,
+                                )
+                                .await;
                             if suspended {
                                 renderer.resume()?;
                             }
@@ -1031,7 +1066,13 @@ pub async fn run_interactive(
                         if suspended {
                             renderer.suspend(&mut view)?;
                         }
-                        let dispatched = session.submit_prompt(&text, &mut view).await;
+                        let dispatched = session
+                            .submit_prompt(
+                                &text,
+                                crate::session_ui::SubmitBehavior::Steer,
+                                &mut view,
+                            )
+                            .await;
                         if suspended {
                             renderer.resume()?;
                         }

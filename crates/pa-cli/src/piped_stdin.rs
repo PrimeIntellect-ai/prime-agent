@@ -11,7 +11,7 @@
 use std::io::IsTerminal as _;
 use std::io::Read as _;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Env override for the no-input window of a non-interactive stdin read,
 /// in milliseconds. `0` skips the read entirely; values above the cap are
@@ -72,12 +72,14 @@ pub fn read_piped_stdin(idle_timeout_ms: u64) -> Option<String> {
 }
 
 /// Drain chunks until EOF or the idle window lapses: the collected bytes
-/// and whether the window (not EOF) ended the read.
+/// and whether the window (not EOF) ended the read. A live producer
+/// resets the window on every chunk (TS `scheduleIdleTimeout` re-arms on
+/// each `data` event); only silence expires it.
 fn collect_from(receiver: &Receiver<Vec<u8>>, idle_timeout_ms: u64) -> (Vec<u8>, bool) {
-    let deadline = Instant::now() + Duration::from_millis(idle_timeout_ms);
+    let idle_window = Duration::from_millis(idle_timeout_ms);
     let mut data = Vec::new();
     loop {
-        match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        match receiver.recv_timeout(idle_window) {
             Ok(chunk) => data.extend_from_slice(&chunk),
             Err(RecvTimeoutError::Timeout) => return (data, true),
             Err(RecvTimeoutError::Disconnected) => return (data, false),

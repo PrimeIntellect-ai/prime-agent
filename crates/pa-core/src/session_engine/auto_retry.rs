@@ -20,9 +20,9 @@ use pa_agent::types::{AssistantMessage, StopReason};
 
 use super::provider_retry::{
     is_agent_lifecycle_failure, is_context_overflow_failure, is_faux_provider_queue_exhausted,
-    is_permanent_provider_failure_kind, is_unsupported_tool_failure, provider_retry_delay,
-    provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
-    provider_stream_failure_status, ProviderRetryDelay, ProviderRetryPolicy,
+    is_permanent_provider_failure_kind, is_unsupported_tool_failure, jittered_delay_ms,
+    provider_retry_delay, provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
+    provider_stream_failure_status, retry_jitter_rand01, ProviderRetryDelay, ProviderRetryPolicy,
 };
 
 /// Why one `auto_retry_start` fired (the TS wire `reason` field).
@@ -148,7 +148,13 @@ where
             policy,
         );
         let delay_ms = match delay {
-            ProviderRetryDelay::Wait { delay_ms } => delay_ms,
+            // Jittered (SANCTIONED DIVERGENCE, operator ruling 2026-09-23):
+            // the jittered value is both waited and reported, so the
+            // interactive countdown stays honest while a fleet of retried
+            // sessions spreads off the same exponential-ladder ticks.
+            ProviderRetryDelay::Wait { delay_ms } => {
+                jittered_delay_ms(delay_ms, retry_jitter_rand01())
+            }
             ProviderRetryDelay::ExceedsCap { retry_after_ms } => {
                 emit(AutoRetryEvent::End {
                     success: false,
@@ -306,24 +312,27 @@ mod tests {
         .unwrap();
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
         assert_eq!(message.stop_reason, StopReason::Stop);
-        // Two retry starts (one per retry) and one success end.
+        // Two retry starts (one per retry) and one success end. The delays
+        // sit in the jitter band around the 5ms/10ms ladder steps
+        // (jittered: [4, 7] and [8, 14] with the ±20% rounding headroom).
         let events = events.lock().unwrap().clone();
-        assert_eq!(
-            events,
-            vec![
+        assert_eq!(events.len(), 3, "two starts + one end: {events:?}");
+        let shape_matches = matches!(
+            events.as_slice(),
+            [
                 AutoRetryEvent::Start {
                     attempt: 1,
                     max_attempts: 3,
-                    delay_ms: 5,
-                    error_message: "provider down".to_string(),
+                    error_message: error_one,
                     reason: RetryStartReason::Quick,
+                    ..
                 },
                 AutoRetryEvent::Start {
                     attempt: 2,
                     max_attempts: 3,
-                    delay_ms: 10,
-                    error_message: "provider down".to_string(),
+                    error_message: error_two,
                     reason: RetryStartReason::Quick,
+                    ..
                 },
                 AutoRetryEvent::End {
                     success: true,
@@ -331,7 +340,20 @@ mod tests {
                     final_error: None,
                     restored_model: None,
                 },
-            ]
+            ] if error_one == "provider down" && error_two == "provider down"
+        );
+        assert!(shape_matches, "unexpected events: {events:?}");
+        let delays: Vec<u64> = events
+            .iter()
+            .filter_map(|event| match event {
+                AutoRetryEvent::Start { delay_ms, .. } => Some(*delay_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(delays.len(), 2, "two retry starts: {events:?}");
+        assert!(
+            (4..=7).contains(&delays[0]) && (8..=14).contains(&delays[1]),
+            "jittered delays {delays:?} outside the [4,7]/[8,14] bands"
         );
     }
 
