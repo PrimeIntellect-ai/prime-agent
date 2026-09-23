@@ -259,6 +259,23 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
     };
     let steering_mode = Some(queue_mode(queue_settings.get_steering_mode()));
     let follow_up_mode = Some(queue_mode(queue_settings.get_follow_up_mode()));
+    // TS `createAgentSessionServices` builds every CLI session — print
+    // included — on a live MCP manager (`getUserServers`/
+    // `getCatalogSources` re-read settings per resolve), so the kernel's
+    // `mcp.*` host requests observe settings written after session
+    // construction. The engine's `mcp_manager: None` fallback would
+    // snapshot them instead. Auth construction blocks; run it off the
+    // async runtime like the engine's own gating does.
+    let mcp_manager = {
+        let cwd = config.cwd.clone();
+        let agent_dir = config.agent_dir.clone();
+        let manager = tokio::task::spawn_blocking(move || {
+            crate::mcp_login::cli_mcp_manager(&cwd, &agent_dir)
+        })
+        .await
+        .map_err(|error| format!("MCP manager construction failed: {error}"))?;
+        std::sync::Arc::new(std::sync::Mutex::new(manager))
+    };
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
             cron_store: None,
@@ -267,7 +284,7 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
             follow_up_mode,
             cwd: config.cwd.clone(),
             agent_dir: config.agent_dir.clone(),
-            mcp_manager: None,
+            mcp_manager: Some(mcp_manager),
             model: Some(agent_model),
             thinking_level: Some(resolve_thinking_level(config, &model)),
             stream_fn: Some(stream_fn),
@@ -1386,6 +1403,156 @@ mod tests {
         assert_eq!(
             value["assistantMessageEvent"],
             serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "first reply"})
+        );
+    }
+
+    // --- print-mode MCP wiring (TS `createAgentSessionServices` parity) ---
+
+    /// The print session's MCP manager resolves settings-declared servers
+    /// LIVE (TS `getUserServers` re-reads settings per resolve): a settings
+    /// rewrite reaches the next `mcp.refresh`, and the `mcp.config` host
+    /// request — the kernel's `rlm/mcp.py` resolution path — serves the
+    /// newly declared config. The engine's `mcp_manager: None` fallback
+    /// snapshots at construction and could not.
+    #[tokio::test]
+    async fn print_mode_mcp_manager_resolves_settings_servers_live() {
+        let home = tempfile::TempDir::new().unwrap();
+        let cwd = home.path().to_path_buf();
+        let agent_dir = home.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({
+                "mcpServers": {
+                    "fixture-echo": {
+                        "type": "stdio",
+                        "command": "python3",
+                        "args": ["echo.py"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut manager = crate::mcp_login::cli_mcp_manager(&cwd, &agent_dir);
+        assert_eq!(
+            manager.get_enabled_persistent_generic_servers(),
+            vec!["fixture-echo".to_string()]
+        );
+        // The kernel's config host request serves the declared server.
+        let mut handlers = pa_core::kernel::shared::HostRequestHandlers::default();
+        manager.register_host_handlers(&mut handlers);
+        let config = handlers.get("mcp.config").unwrap().clone();
+        let result = config(pa_core::kernel::shared::HostRequestPayload {
+            data: serde_json::json!({ "server": "fixture-echo" }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(result["type"], "stdio");
+        assert_eq!(result["command"], "python3");
+        assert_eq!(result["args"], serde_json::json!(["echo.py"]));
+        // A settings rewrite reaches the same live manager on refresh.
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({
+                "mcpServers": {
+                    "second-echo": {
+                        "type": "stdio",
+                        "command": "node",
+                        "args": ["echo.mjs"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        manager.refresh();
+        assert_eq!(
+            manager.get_enabled_persistent_generic_servers(),
+            vec!["second-echo".to_string()]
+        );
+        let mut handlers = pa_core::kernel::shared::HostRequestHandlers::default();
+        manager.register_host_handlers(&mut handlers);
+        let config = handlers.get("mcp.config").unwrap().clone();
+        let result = config(pa_core::kernel::shared::HostRequestPayload {
+            data: serde_json::json!({ "server": "second-echo" }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(result["command"], "node");
+        let removed = config(pa_core::kernel::shared::HostRequestPayload {
+            data: serde_json::json!({ "server": "fixture-echo" }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap();
+        assert!(
+            removed.as_object().unwrap().is_empty(),
+            "the removed server no longer resolves"
+        );
+    }
+
+    /// Local service-catalog sources (`mcpCatalogSources`) reach the print
+    /// manager's catalog resolution (TS `getCatalogSources`): the declared
+    /// file's entry surfaces as a local descriptor, and dropping the
+    /// declaration withdraws it on the next resolve — the same live
+    /// settings read as the user-server closure.
+    #[test]
+    fn print_mode_mcp_manager_resolves_declared_catalog_sources() {
+        let home = tempfile::TempDir::new().unwrap();
+        let agent_dir = home.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let catalog = home.path().join("local-catalog.json");
+        std::fs::write(
+            &catalog,
+            serde_json::json!({
+                "version": 1,
+                "entries": [{
+                    "server": "my-local", "service": "my-local", "label": "My Local",
+                    "url": "https://my-local.example/mcp", "aliases": [],
+                    "transport": { "type": "http", "url": "https://my-local.example/mcp" },
+                    "auth": { "strategy": "oauth", "clientRegistration": "dynamic" },
+                    "setup": { "status": "ready" },
+                    "verification": { "status": "unverified" },
+                    "legacyBuiltin": false,
+                    "provenance": [{ "source": "user" }]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let settings = |sources: &[&str]| {
+            serde_json::json!({
+                "mcpCatalogSources": sources
+                    .iter()
+                    .map(|path| path.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .to_string()
+        };
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            settings(&[&catalog.display().to_string()]),
+        )
+        .unwrap();
+        let mut manager = crate::mcp_login::cli_mcp_manager(home.path(), &agent_dir);
+        let my_local = manager
+            .service_descriptors()
+            .iter()
+            .find(|service| service.service_id == "my-local")
+            .expect("declared source entry resolved");
+        assert!(my_local.local_source);
+        // Live: dropping the declaration withdraws the entry on refresh.
+        std::fs::write(agent_dir.join("settings.json"), settings(&[])).unwrap();
+        manager.refresh();
+        assert!(
+            !manager
+                .service_descriptors()
+                .iter()
+                .any(|service| service.service_id == "my-local"),
+            "the dropped source no longer resolves"
         );
     }
 }
