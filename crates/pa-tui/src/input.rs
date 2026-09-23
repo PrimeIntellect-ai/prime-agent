@@ -18,6 +18,14 @@
 //! crossterm serves the rest of the same OS read without blocking, so a
 //! burst is exactly the events one terminal write carried.
 //!
+//! Both readers also run the [`SequenceGuard`] (TS `StdinBuffer`'s
+//! partial-sequence hold, ported in [`crate::sequence_guard`]):
+//! crossterm's parser commits a lone trailing `ESC` at every partial-read
+//! boundary, and the sequence it opened then arrives as plain `Char`
+//! presses — a mouse drag types SGR report bodies into the editor. The
+//! guard holds that `ESC`, reassembles the sequence, and hands the reader
+//! decoded mouse reports and consumed escape forms instead.
+//!
 //! Every chunk then flows through the TS enhanced-key dispatch filters
 //! (see [`filter_enhanced_key_events`]): key releases are dropped (TS
 //! tui.ts dispatch filter) and a duplicate-reporting kitty terminal's
@@ -26,7 +34,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use crate::sequence_guard::{GuardOutput, SequenceGuard};
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
@@ -62,11 +72,14 @@ pub(crate) fn request_reader_stop() {
     }
 }
 
-/// One input unit for the paste-aware reader: a parsed terminal event, or
-/// a coalesced marker-less keystroke burst (the TS raw multiline-paste
+/// One input unit for the paste-aware reader: a parsed terminal event, a
+/// mouse report decoded from a reassembled escape sequence, or a
+/// coalesced marker-less keystroke burst (the TS raw multiline-paste
 /// heuristic; the payload keeps the burst's Enter keys as `\n`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReaderInput {
     Event(Event),
+    Mouse(crate::mouse::MouseEvent),
     BurstPaste(String),
 }
 
@@ -80,6 +93,9 @@ where
 {
     spawn_reader(false, move |input| match input {
         ReaderInput::Event(event) => on_event(event),
+        // Surfaces without a mouse dispatch consume reports; a
+        // reassembled report is terminal noise they must not type.
+        ReaderInput::Mouse(_) => true,
         ReaderInput::BurstPaste(_) => true,
     });
 }
@@ -98,11 +114,14 @@ where
 /// The shared reader body: one reader per process, joined across surfaces.
 /// `paste_aware` selects the burst coalescing; a plain reader forwards
 /// every event unchanged (surfaces without the editor's paste path would
-/// lose a coalesced burst they cannot consume). Every chunk — one
-/// terminal write — flows through [`filter_enhanced_key_events`] (the TS
-/// release-event dispatch filter and the kitty-printable dedup) before it
-/// reaches the surface, in TS order: the raw-paste heuristic sees the
-/// untouched chunk first.
+/// lose a coalesced burst they cannot consume). Each chunk — one
+/// terminal write — is repaired and classified before any of it reaches
+/// the surface: the macOS-Terminal meta repair
+/// ([`merge_legacy_meta_escapes`]) rewrites the wrapped double-ESC
+/// shapes first (the [`SequenceGuard`] would otherwise hold their `Esc`
+/// head), the guard reassembles partial sequences into mouse reports
+/// and key events, and [`forward`] passes the TS dispatch filters
+/// ([`filter_enhanced_key_events`]) when it delivers.
 fn spawn_reader<F>(paste_aware: bool, mut on_input: F)
 where
     F: FnMut(ReaderInput) -> bool + Send + 'static,
@@ -116,55 +135,131 @@ where
     }
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
-    let handle = std::thread::spawn(move || loop {
-        if thread_stop.load(Ordering::Relaxed) {
-            break;
-        }
-        match crossterm::event::poll(Duration::from_millis(POLL_TIMEOUT_MS)) {
-            Ok(false) => continue,
-            Ok(true) => {
-                // Drain every event of this terminal write: a zero-timeout
-                // poll serves the rest of the same OS read without
-                // blocking, so the drain stops exactly at the chunk
-                // boundary.
-                let mut events = Vec::new();
-                let mut text = String::new();
-                let mut burst_is_plain_text = true;
-                loop {
-                    match crossterm::event::read() {
-                        Ok(event) => {
-                            if paste_aware {
-                                match printable_text(&event) {
-                                    Some(chunk) => text.push_str(&chunk),
-                                    None => burst_is_plain_text = false,
+    let handle = std::thread::spawn(move || {
+        let mut guard = SequenceGuard::default();
+        loop {
+            if thread_stop.load(Ordering::Relaxed) {
+                break;
+            }
+            // The wait never runs past a held escape sequence's deadline:
+            // the guard flushes on the next wake.
+            let timeout =
+                guard.poll_timeout(Duration::from_millis(POLL_TIMEOUT_MS), Instant::now());
+            match crossterm::event::poll(timeout) {
+                Ok(false) => {
+                    if !forward(
+                        guard.flush_expired(Instant::now()),
+                        paste_aware,
+                        &mut on_input,
+                    ) {
+                        return;
+                    }
+                }
+                Ok(true) => {
+                    // Drain every event of this terminal write: a
+                    // zero-timeout poll serves the rest of the same OS read
+                    // without blocking, so the drain stops exactly at the
+                    // chunk boundary.
+                    let mut events = Vec::new();
+                    loop {
+                        match crossterm::event::read() {
+                            Ok(event) => {
+                                events.push(event);
+                                match crossterm::event::poll(Duration::ZERO) {
+                                    Ok(true) => continue,
+                                    _ => break,
                                 }
                             }
-                            events.push(event);
-                            match crossterm::event::poll(Duration::ZERO) {
-                                Ok(true) => continue,
-                                _ => break,
-                            }
+                            Err(_) => return,
                         }
-                        Err(_) => return,
                     }
-                }
-                if paste_aware && burst_is_plain_text && is_raw_multiline_paste(&text) {
-                    if !on_input(ReaderInput::BurstPaste(text)) {
+                    // The meta repair runs on the raw chunk, BEFORE the
+                    // guard: a wrapped `ESC ESC [ A` folds to `Esc` +
+                    // `[` + SHIFT-ed letter, and the guard would hold the
+                    // wrapper's `Esc` head and reassemble the inner
+                    // `ESC [ A` as plain Up — the option identity TS's
+                    // double-ESC branch (keys.ts:788) rebuilds would be
+                    // lost. The repaired Alt+key is never a bare Esc
+                    // press, so the guard never holds it, and the partial
+                    // sequences the guard exists for end their write on
+                    // the lone `Esc` with no decodable body beside it,
+                    // so the repair never steals one either.
+                    let events = merge_legacy_meta_escapes(events);
+                    let mut outputs = Vec::new();
+                    for event in events {
+                        outputs.extend(guard.feed(event, Instant::now()));
+                    }
+                    if !forward(outputs, paste_aware, &mut on_input) {
                         return;
                     }
-                    continue;
                 }
-                let events = merge_legacy_meta_escapes(events);
-                for event in filter_enhanced_key_events(events) {
-                    if !on_input(ReaderInput::Event(event)) {
-                        return;
-                    }
-                }
+                Err(_) => break,
             }
-            Err(_) => break,
         }
     });
     *previous = Some(Reader { handle, stop });
+}
+
+/// Deliver one drained round to the surface: a whole-write burst that
+/// reconstructs to marker-less multi-line text coalesces into one
+/// [`ReaderInput::BurstPaste`] (the TS raw-paste heuristic); everything
+/// else — plain events and reassembled mouse reports alike — passes the
+/// TS dispatch filters ([`filter_enhanced_key_events`]) and forwards
+/// input by input. Returns `false` when the surface stopped the reader.
+fn forward(
+    outputs: Vec<GuardOutput>,
+    paste_aware: bool,
+    on_input: &mut dyn FnMut(ReaderInput) -> bool,
+) -> bool {
+    if paste_aware && !outputs.is_empty() {
+        let mut text = String::new();
+        let mut burst_is_plain_text = true;
+        for output in &outputs {
+            match output {
+                GuardOutput::Event(event) => match printable_text(event) {
+                    Some(chunk) => text.push_str(&chunk),
+                    None => burst_is_plain_text = false,
+                },
+                // A reassembled report breaks the burst like the mouse
+                // events crossterm parses itself do.
+                GuardOutput::Mouse(_) => burst_is_plain_text = false,
+            }
+        }
+        if burst_is_plain_text && is_raw_multiline_paste(&text) {
+            return on_input(ReaderInput::BurstPaste(text));
+        }
+    }
+    // The dispatch filters run after the guard — a reassembled sequence
+    // can complete mid-round, and its synthesized form must pass them
+    // like an event crossterm parsed itself would (a split kitty release
+    // form is dropped here too). Mouse reports keep their stream slots
+    // between the filtered key runs.
+    let mut inputs = Vec::with_capacity(outputs.len());
+    let mut key_run: Vec<Event> = Vec::new();
+    for output in outputs {
+        match output {
+            GuardOutput::Event(event) => key_run.push(event),
+            GuardOutput::Mouse(report) => {
+                inputs.extend(
+                    filter_enhanced_key_events(std::mem::take(&mut key_run))
+                        .into_iter()
+                        .map(ReaderInput::Event),
+                );
+                inputs.push(ReaderInput::Mouse(report));
+            }
+        }
+    }
+    inputs.extend(
+        filter_enhanced_key_events(key_run)
+            .into_iter()
+            .map(ReaderInput::Event),
+    );
+    for input in inputs {
+        if !on_input(input) {
+            return false;
+        }
+    }
+    true
 }
 
 /// The TS enhanced-key dispatch filters, applied to one terminal write:
@@ -684,6 +779,53 @@ mod tests {
     }
 
     #[test]
+    fn a_reassembled_report_breaks_the_burst_like_a_parsed_mouse_event() {
+        // The guard's decoded reports are terminal noise, never paste
+        // evidence: the chars around them forward one by one.
+        let report = crate::mouse::parse_sgr_mouse_event("\x1b[<32;14;2M").expect("valid report");
+        let outputs = vec![
+            GuardOutput::Event(key(KeyCode::Char('a'), KeyModifiers::NONE)),
+            GuardOutput::Mouse(report),
+            GuardOutput::Event(key(KeyCode::Enter, KeyModifiers::NONE)),
+            GuardOutput::Event(key(KeyCode::Char('b'), KeyModifiers::NONE)),
+        ];
+        let inputs = collect_forwarded(outputs);
+        assert_eq!(
+            inputs,
+            vec![
+                ReaderInput::Event(key(KeyCode::Char('a'), KeyModifiers::NONE)),
+                ReaderInput::Mouse(report),
+                ReaderInput::Event(key(KeyCode::Enter, KeyModifiers::NONE)),
+                ReaderInput::Event(key(KeyCode::Char('b'), KeyModifiers::NONE)),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_plain_multiline_char_burst_still_coalesces_into_a_paste() {
+        let outputs = vec![
+            GuardOutput::Event(key(KeyCode::Char('x'), KeyModifiers::NONE)),
+            GuardOutput::Event(key(KeyCode::Enter, KeyModifiers::NONE)),
+            GuardOutput::Event(key(KeyCode::Char('y'), KeyModifiers::NONE)),
+        ];
+        assert_eq!(
+            collect_forwarded(outputs),
+            vec![ReaderInput::BurstPaste("x\ry".into())]
+        );
+    }
+
+    /// `forward` against a capturing sink (the paste-aware surface).
+    fn collect_forwarded(outputs: Vec<GuardOutput>) -> Vec<ReaderInput> {
+        let mut inputs = Vec::new();
+        let ok = forward(outputs, true, &mut |input| {
+            inputs.push(input);
+            true
+        });
+        assert!(ok);
+        inputs
+    }
+
+    #[test]
     fn multiline_shape_needs_text_on_both_sides() {
         assert!(is_raw_multiline_paste("alpha\nbeta\ngamma"));
         assert!(is_raw_multiline_paste("alpha\n\n\nbeta"));
@@ -849,5 +991,80 @@ mod tests {
         ];
         assert_eq!(merge_legacy_meta_escapes(chunk).len(), 3);
         crate::enhanced_keys::set_kitty_active_for_tests(false);
+    }
+
+    // --- the merged seam: the meta repair runs before the sequence guard ---
+
+    /// The wrapped Option+Up chunk is repaired BEFORE the guard sees it:
+    /// the guard would otherwise hold the wrapper's `Esc` head, reassemble
+    /// the inner `ESC [ A`, and synthesize plain Up — the option identity
+    /// TS's double-ESC branch (keys.ts:788) rebuilds would be lost, and
+    /// the queue browse would move the cursor instead.
+    #[test]
+    fn the_wrapped_meta_form_passes_the_guard_with_alt_kept() {
+        let _state = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let write = vec![
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            press('['),
+            shift_press('A'),
+        ];
+        let mut guard = SequenceGuard::default();
+        let now = Instant::now();
+        let outputs: Vec<GuardOutput> = merge_legacy_meta_escapes(write)
+            .into_iter()
+            .flat_map(|event| guard.feed(event, now))
+            .collect();
+        assert_eq!(outputs.len(), 1, "one key, not a held head: {outputs:?}");
+        let GuardOutput::Event(Event::Key(key)) = &outputs[0] else {
+            panic!("the repaired form must deliver as a key event");
+        };
+        assert_eq!(key.code, KeyCode::Up);
+        assert_eq!(key.modifiers, KeyModifiers::ALT);
+        // The repaired Alt+Up is not a bare Esc press, so nothing is held.
+        assert!(guard
+            .flush_expired(now + crate::sequence_guard::HOLD)
+            .is_empty());
+    }
+
+    /// The repair never steals the guard's held sequence: a real partial
+    /// read ends its write on the lone `Esc` (no decodable body beside
+    /// it), so the repair passes it through and the next write's
+    /// continuation reassembles through the guard exactly as before —
+    /// a split `ESC [ A` is the Up key, never `[A` typed.
+    #[test]
+    fn a_split_sequence_survives_the_repair_for_the_guard() {
+        let _state = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let mut guard = SequenceGuard::default();
+        let now = Instant::now();
+        let feed_write = |guard: &mut SequenceGuard, events: Vec<Event>| -> Vec<GuardOutput> {
+            merge_legacy_meta_escapes(events)
+                .into_iter()
+                .flat_map(|event| guard.feed(event, now))
+                .collect()
+        };
+        // Write one ends right after the ESC byte: crossterm commits the
+        // lone `Esc`, the repair leaves it, the guard holds it.
+        let held = feed_write(
+            &mut guard,
+            vec![Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))],
+        );
+        assert!(held.is_empty());
+        // The next write carries the rest of the sequence as folded chars.
+        let outputs = feed_write(&mut guard, vec![press('['), shift_press('A')]);
+        assert_eq!(outputs.len(), 1, "{outputs:?}");
+        let GuardOutput::Event(Event::Key(key)) = &outputs[0] else {
+            panic!("the split sequence must decode to a key event");
+        };
+        assert_eq!(key.code, KeyCode::Up);
+        assert_eq!(key.modifiers, KeyModifiers::NONE);
+        assert!(guard
+            .flush_expired(now + crate::sequence_guard::HOLD)
+            .is_empty());
     }
 }

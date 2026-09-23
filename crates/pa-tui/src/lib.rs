@@ -61,6 +61,7 @@ pub mod provider_auth;
 pub mod queued;
 pub(crate) mod search_input;
 pub mod selection;
+mod sequence_guard;
 pub mod session;
 pub mod session_ui;
 pub mod settings_menu;

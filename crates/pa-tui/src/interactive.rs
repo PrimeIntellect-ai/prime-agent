@@ -1622,6 +1622,17 @@ impl Renderer {
                     crate::input::ReaderInput::BurstPaste(text) => {
                         ui_tx.send(UiInput::Paste(text)).is_ok()
                     }
+                    // A report the guard reassembled from a sequence
+                    // crossterm's reader split at a committed-`ESC` read
+                    // boundary: same contract as the terminal's own mouse
+                    // events below — consumed unless tracking is active.
+                    crate::input::ReaderInput::Mouse(report) => {
+                        if !crate::mouse_tracking::active() {
+                            true
+                        } else {
+                            ui_tx.send(UiInput::Mouse(report)).is_ok()
+                        }
+                    }
                     crate::input::ReaderInput::Event(event) => match event {
                         crossterm::event::Event::Key(key) => {
                             exit_guard.observe_key(&key);
