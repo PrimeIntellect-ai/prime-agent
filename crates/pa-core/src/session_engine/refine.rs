@@ -219,19 +219,29 @@ fn strip_display_prefixes(plan: RefinementPlan) -> RefinementPlan {
     plan
 }
 
+/// The transcript feeding the refinement planner: the conversation messages
+/// plus the (possibly pre-window) history rows the audit scan reads.
+pub struct RefinementTranscript<'a> {
+    pub messages: &'a [AgentMessage],
+    pub historical_entries: &'a [FileEntry],
+}
+
 /// Run the full refinement flow: plan (LLM or rollback), re-read the target
 /// store, apply, persist state + history, and append the audit, outcome, and
 /// notice entries to the session. `refine_call` performs the model request.
 pub async fn execute_refinement(
     session: &mut SessionManager,
-    messages: &[AgentMessage],
-    historical_entries: &[FileEntry],
+    transcript: RefinementTranscript<'_>,
     global_harness_dir: &Path,
     model: &pa_types::ai::Model,
     options: &RefineOptions,
     source: RefinementSource,
     refine_call: crate::refinement::executor::RefinerFn,
 ) -> anyhow::Result<RefinementResult> {
+    let RefinementTranscript {
+        messages,
+        historical_entries,
+    } = transcript;
     let local_harness_dir = local_harness_state_dir(session);
     let core_options = CoreRefineOptions {
         global: options.global,
@@ -609,8 +619,10 @@ Reviewer instructions: record it"
         let reply = r#"{"summary":"note it","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
         let result = execute_refinement(
             &mut session,
-            &[user_message("do a thing twice")],
-            &[],
+            RefinementTranscript {
+                messages: &[user_message("do a thing twice")],
+                historical_entries: &[],
+            },
             &global_dir,
             &test_model(),
             &RefineOptions::default(),
@@ -653,8 +665,10 @@ Reviewer instructions: record it"
         let reply = r#"{"summary":"global lesson","edits":[{"action":"create","kind":"memory","id":"g1","title":"Lesson","content":"durable"}]}"#;
         let result = execute_refinement(
             &mut session,
-            &[user_message("x")],
-            &[],
+            RefinementTranscript {
+                messages: &[user_message("x")],
+                historical_entries: &[],
+            },
             &global_dir,
             &test_model(),
             &RefineOptions {
@@ -678,8 +692,10 @@ Reviewer instructions: record it"
         // Rollback by id works through the merged history.
         let rolled = execute_refinement(
             &mut session,
-            &[],
-            &[],
+            RefinementTranscript {
+                messages: &[],
+                historical_entries: &[],
+            },
             &global_dir,
             &test_model(),
             &RefineOptions {

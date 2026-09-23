@@ -527,8 +527,10 @@ impl AgentSession {
             let mut session = self.session.lock().await;
             refine::execute_refinement(
                 &mut session,
-                &messages,
-                &entries,
+                refine::RefinementTranscript {
+                    messages: &messages,
+                    historical_entries: &entries,
+                },
                 &global_harness_dir,
                 model,
                 options,
