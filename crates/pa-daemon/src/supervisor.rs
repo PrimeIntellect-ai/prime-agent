@@ -1182,13 +1182,29 @@ impl Supervisor {
                         {
                             match event.get("type").and_then(Value::as_str) {
                                 Some("compaction_start") => {
-                                    reader_resident.compaction.arm(
+                                    let carried_abort = reader_resident.compaction.arm(
                                         active_session_id.as_deref().unwrap_or_default(),
                                         event
                                             .get("reason")
                                             .and_then(Value::as_str)
                                             .unwrap_or_default(),
                                     );
+                                    // A pending fallback abort rode this
+                                    // start frame onto the run it
+                                    // reveals (the fallback armed before
+                                    // the delayed frame landed): the
+                                    // carried epoch needs its own watcher,
+                                    // the fallback's old epoch never
+                                    // matches again.
+                                    if let Some(epoch) = carried_abort {
+                                        let supervisor = Arc::clone(&reader_supervisor);
+                                        let resident = Arc::clone(&reader_resident);
+                                        tokio::spawn(async move {
+                                            supervisor
+                                                .watch_unresolved_compaction_abort(resident, epoch)
+                                                .await;
+                                        });
+                                    }
                                 }
                                 Some("compaction_end") => {
                                     let mut journal = reader_supervisor

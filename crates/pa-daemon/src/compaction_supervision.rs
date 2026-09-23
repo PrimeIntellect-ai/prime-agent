@@ -68,6 +68,11 @@ struct InFlightCompaction {
     /// The supervisor already declared this run terminal (the synthetic
     /// end went out); a late real end must not redeclare.
     terminal: bool,
+    /// The run is the empty-slot fallback's synthetic stand-in, armed
+    /// before its real `compaction_start` was ever observed: a start
+    /// frame that arrives while this run holds a pending abort reveals
+    /// the very run that abort targeted, so the abort carries onto it.
+    synthetic: bool,
 }
 
 /// The terminal declaration returned to the watch task: everything the
@@ -81,19 +86,32 @@ pub(crate) struct TerminalCompaction {
 impl CompactionSupervision {
     /// A `compaction_start` frame flowed through: arm the slot. A stale
     /// slot from a run that never settled is replaced — the new run owns
-    /// the newest abort, like the worker's own slot replacement.
-    pub(crate) fn arm(&self, active_session_id: &str, reason: &str) {
+    /// the newest abort, like the worker's own slot replacement. One
+    /// pending abort survives the replacement: the fallback's synthetic
+    /// run stands in for a run whose start frame was delayed past the
+    /// abort (a wedged worker's stalled output), so when that frame
+    /// finally arrives it reveals the very run the abort targeted —
+    /// the abort carries onto the newly armed run and the returned
+    /// epoch is the one a watcher must declare against. Every other
+    /// replacement arms un-aborted (a fresh run is a fresh subject).
+    pub(crate) fn arm(&self, active_session_id: &str, reason: &str) -> Option<u64> {
         let epoch = self
             .next_epoch
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut state = self.state.lock().expect("compaction supervision lock");
+        let carried_abort = match state.as_ref() {
+            Some(run) if run.synthetic && !run.terminal => Some(epoch),
+            _ => None,
+        };
         *state = Some(InFlightCompaction {
             active_session_id: active_session_id.to_string(),
             reason: reason.to_string(),
             abort_epoch: epoch,
-            abort_requested_at_epoch: None,
+            abort_requested_at_epoch: carried_abort,
             terminal: false,
+            synthetic: false,
         });
+        carried_abort
     }
 
     /// Arm the fallback run of an abort that found no observed run and no
@@ -103,7 +121,10 @@ impl CompactionSupervision {
     /// it instead; a terminal leftover yields no fallback (that run was
     /// already declared). The fallback's reason is `manual` — the abort is
     /// user-initiated and a manual record replays no durable row — and the
-    /// abort is already requested. Returns the epoch to watch, or `None`.
+    /// abort is already requested. The run is synthetic: a delayed
+    /// `compaction_start` for the wedged run replaces it and carries the
+    /// abort onto the real run (`arm`). Returns the epoch to watch, or
+    /// `None`.
     pub(crate) fn arm_aborted_fallback(&self, active_session_id: &str) -> Option<u64> {
         let mut state = self.state.lock().expect("compaction supervision lock");
         match state.as_mut() {
@@ -123,6 +144,7 @@ impl CompactionSupervision {
                     abort_epoch: epoch,
                     abort_requested_at_epoch: Some(epoch),
                     terminal: false,
+                    synthetic: true,
                 });
                 Some(epoch)
             }
@@ -481,7 +503,7 @@ impl crate::supervisor::Supervisor {
     /// The grace-window watch over an abort the token still holds armed:
     /// when the worker never lands its own `compaction_end`, declare the
     /// run terminal. One declaration per abort epoch.
-    async fn watch_unresolved_compaction_abort(
+    pub(crate) async fn watch_unresolved_compaction_abort(
         self: &Arc<Self>,
         resident: Arc<crate::registry::ResidentWorker>,
         epoch: u64,
@@ -697,6 +719,59 @@ mod tests {
             supervision.arm_aborted_fallback("session-a"),
             None,
             "a terminal leftover arms nothing"
+        );
+    }
+
+    /// A delayed `compaction_start` replaces the fallback's synthetic run
+    /// and carries the abort onto the real run it reveals (the fallback
+    /// armed before the stalled frame landed): the carried epoch is what
+    /// the reader's watcher declares against, the fallback's old watcher
+    /// never matches again, and the declaration carries the real run's
+    /// reason.
+    #[test]
+    fn a_delayed_start_frame_carries_the_fallback_abort() {
+        let supervision = CompactionSupervision::default();
+        let fallback_epoch = supervision
+            .arm_aborted_fallback("session-a")
+            .expect("empty slot arms");
+        let carried = supervision
+            .arm("session-a", "threshold")
+            .expect("the pending fallback abort carries");
+        assert_ne!(fallback_epoch, carried);
+        assert_eq!(
+            supervision.declare_terminal_if_unresolved(fallback_epoch),
+            None,
+            "the old watcher never matches again"
+        );
+        assert_eq!(
+            supervision.declare_terminal_if_unresolved(carried),
+            Some(TerminalCompaction {
+                active_session_id: "session-a".to_string(),
+                reason: "threshold".to_string(),
+            })
+        );
+    }
+
+    /// A normal replacement never carries an abort: a fresh run is a
+    /// fresh subject — the replaced run's watcher exits and a new abort
+    /// takes the new epoch.
+    #[test]
+    fn a_normal_replacement_arms_unaborted() {
+        let supervision = supervision_with_run("manual");
+        let aborted = supervision.request_abort().expect("armed run");
+        assert_eq!(supervision.arm("session-a", "threshold"), None);
+        assert_eq!(
+            supervision.declare_terminal_if_unresolved(aborted),
+            None,
+            "the old watcher never matches the fresh run"
+        );
+        let fresh = supervision.request_abort().expect("re-armed run");
+        assert_ne!(aborted, fresh);
+        assert_eq!(
+            supervision
+                .declare_terminal_if_unresolved(fresh)
+                .map(|declared| declared.reason),
+            Some("threshold".to_string())
         );
     }
 
