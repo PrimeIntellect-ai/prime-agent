@@ -73,13 +73,27 @@ impl SseDecoder {
 
     /// Feed a chunk of decoded text; returns complete events in order.
     pub fn push_text(&mut self, text: &str) -> Vec<ServerSentEvent> {
+        let mut index = self.buffer.len();
         self.buffer.push_str(text);
         let mut events = Vec::new();
-        while let Some(line) = take_line(&mut self.buffer) {
-            if let Some(event) = self.state.decode_line(&line) {
+        let mut line_start = 0;
+        let bytes = self.buffer.as_bytes();
+        while index < bytes.len() {
+            let break_len = match bytes[index] {
+                b'\r' if bytes.get(index + 1) == Some(&b'\n') => 2,
+                b'\r' | b'\n' => 1,
+                _ => {
+                    index += 1;
+                    continue;
+                }
+            };
+            if let Some(event) = self.state.decode_line(&self.buffer[line_start..index]) {
                 events.push(event);
             }
+            index += break_len;
+            line_start = index;
         }
+        self.buffer.drain(..line_start);
         events
     }
 
@@ -97,42 +111,6 @@ impl SseDecoder {
             events.push(event);
         }
         events
-    }
-}
-
-fn take_line(buffer: &mut String) -> Option<String> {
-    let break_index = next_line_break_index(buffer)?;
-    let line: String = buffer[..break_index.start].to_string();
-    buffer.drain(..break_index.start + break_index.len);
-    Some(line)
-}
-
-struct LineBreak {
-    /// Index of the break character.
-    start: usize,
-    /// Length of the break (1 for \r or \n, 2 for \r\n).
-    len: usize,
-}
-
-fn next_line_break_index(text: &str) -> Option<LineBreak> {
-    let carriage_return = text.find('\r');
-    let newline = text.find('\n');
-    match (carriage_return, newline) {
-        (None, None) => None,
-        (Some(cr), None) => Some(LineBreak { start: cr, len: 1 }),
-        (None, Some(lf)) => Some(LineBreak { start: lf, len: 1 }),
-        (Some(cr), Some(lf)) => {
-            if cr < lf {
-                if cr + 1 == lf {
-                    // \r\n is a single line break.
-                    Some(LineBreak { start: cr, len: 2 })
-                } else {
-                    Some(LineBreak { start: cr, len: 1 })
-                }
-            } else {
-                Some(LineBreak { start: lf, len: 1 })
-            }
-        }
     }
 }
 
@@ -195,6 +173,37 @@ mod tests {
             .collect();
         assert!(empty.is_empty(), "found empty data events");
         assert!(events[0].data.contains("chat.completion.chunk"));
+    }
+
+    #[test]
+    fn preserves_fragmented_line_breaks_and_raw_lines() {
+        let mut decoder = SseDecoder::new();
+        assert!(decoder.push_text("data: first\r").is_empty());
+        assert_eq!(
+            decoder.push_text("\n"),
+            vec![ServerSentEvent {
+                event: None,
+                data: "first".into(),
+                raw: vec!["data: first".into()],
+            }]
+        );
+        assert_eq!(
+            decoder.push_text("event: update\rdata: next\n\n"),
+            vec![ServerSentEvent {
+                event: Some("update".into()),
+                data: "next".into(),
+                raw: vec!["event: update".into(), "data: next".into()],
+            }]
+        );
+        assert!(decoder.push_text("data: final").is_empty());
+        assert_eq!(
+            decoder.finish(),
+            vec![ServerSentEvent {
+                event: None,
+                data: "final".into(),
+                raw: vec!["data: final".into()],
+            }]
+        );
     }
 
     #[test]

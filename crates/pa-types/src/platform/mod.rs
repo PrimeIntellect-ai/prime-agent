@@ -11,6 +11,7 @@
 pub mod dirs;
 pub mod identity;
 pub mod process;
+pub mod terminal;
 pub mod transport;
 #[cfg(windows)]
 pub(crate) mod windows_pipe;
