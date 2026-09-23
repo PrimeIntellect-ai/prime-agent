@@ -204,6 +204,7 @@ impl Supervisor {
                 }
             };
         // Resolve the session (the generic route's wake-aware resolution).
+        let mut rebound_to: Option<String> = None;
         let resident = match self.registry.resolve(active_session_id).await {
             Ok(resident) => resident,
             Err(_) => {
@@ -211,12 +212,38 @@ impl Supervisor {
                 match self.registry.resolve(active_session_id).await {
                     Ok(resident) => resident,
                     Err(_) => {
-                        let message =
-                            self.restore_failure_for(active_session_id)
-                                .unwrap_or_else(|| {
-                                    format!("Unknown active session: {active_session_id}")
-                                });
-                        return self.admission_failure(&command_id, &type_name, &message);
+                        // The stale-active-id rebind (the generic route's
+                        // seam): the admission id stays the client's
+                        // idempotency key across the rebind - the prompt
+                        // failed before it reached any worker, so routing it
+                        // once to the session's current resident delivers
+                        // it exactly once.
+                        match self.binding_target(active_session_id).await {
+                            Some(resident) => {
+                                let current = resident.worker_id.clone();
+                                self.log_line(&format!(
+                                    "rebinding stale session id {active_session_id} -> {current}"
+                                ));
+                                self.note_daemon_event("session_rebound", None);
+                                let mut attached = attached.lock().unwrap();
+                                if attached.iter().any(|id| id == active_session_id) {
+                                    attached.retain(|id| id != active_session_id);
+                                    if !attached.iter().any(|id| id == &current) {
+                                        attached.push(current.clone());
+                                    }
+                                }
+                                drop(attached);
+                                rebound_to = Some(current);
+                                resident
+                            }
+                            None => {
+                                let message =
+                                    self.restore_failure_for(active_session_id).unwrap_or_else(
+                                        || format!("Unknown active session: {active_session_id}"),
+                                    );
+                                return self.admission_failure(&command_id, &type_name, &message);
+                            }
+                        }
                     }
                 }
             }
@@ -247,6 +274,10 @@ impl Supervisor {
             }
         };
         payload["admissionId"] = json!(worker_admission_id);
+        // A rebind retargets the routed frame to the session's current id.
+        if let Some(current) = &rebound_to {
+            payload["activeSessionId"] = json!(current);
+        }
         let response = self
             .route_command(&resident, command_type, payload, timeout)
             .await;

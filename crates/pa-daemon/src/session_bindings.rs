@@ -65,17 +65,14 @@ impl SessionBindingTable {
         let mut by_active_id = self.locked(&self.by_active_id);
         let mut by_session_file = self.locked(&self.by_session_file);
         by_active_id.insert(active_session_id.to_string(), Arc::clone(&binding));
+        // The supersede result pairs the OLD id with the NEW binding: the
+        // caller's supersede event tells old-id holders where to rebind.
         let superseded = binding
             .session_file
             .as_deref()
             .and_then(|file| by_session_file.get(file))
             .filter(|previous| previous.active_session_id != binding.active_session_id)
-            .map(|previous| {
-                (
-                    previous.active_session_id.clone(),
-                    Arc::clone(previous) as Arc<SessionBinding>,
-                )
-            });
+            .map(|previous| (previous.active_session_id.clone(), Arc::clone(&binding)));
         if let Some(file) = binding.session_file.as_deref() {
             by_session_file.insert(file.to_string(), Arc::clone(&binding));
         }
@@ -125,11 +122,9 @@ mod tests {
     #[test]
     fn record_indexes_by_active_id_and_file() {
         let table = SessionBindingTable::new();
-        assert!(
-            table
-                .record("worker-1", Some("sess-uuid"), Some("/tmp/sess.jsonl"))
-                .is_none()
-        );
+        assert!(table
+            .record("worker-1", Some("sess-uuid"), Some("/tmp/sess.jsonl"))
+            .is_none());
         let binding = table.binding_for("worker-1").expect("binding");
         assert_eq!(binding.active_session_id, "worker-1");
         assert_eq!(binding.session_id.as_deref(), Some("sess-uuid"));
@@ -144,13 +139,19 @@ mod tests {
             .record("worker-2", Some("sess-uuid"), Some("/tmp/sess.jsonl"))
             .expect("supersede reported");
         assert_eq!(superseded.0, "worker-1");
+        // The pair carries the NEW binding - what the supersede event
+        // advertises as the rebind target.
+        assert_eq!(superseded.1.active_session_id, "worker-2");
         // The old id addresses the session's CURRENT binding.
         let through_old = table.binding_for("worker-1").expect("old id still bound");
         assert_eq!(through_old.active_session_id, "worker-2");
         assert_eq!(through_old.session_file.as_deref(), Some("/tmp/sess.jsonl"));
         // The new id works directly.
         assert_eq!(
-            table.binding_for("worker-2").expect("new id").active_session_id,
+            table
+                .binding_for("worker-2")
+                .expect("new id")
+                .active_session_id,
             "worker-2"
         );
     }
@@ -160,11 +161,9 @@ mod tests {
         let table = SessionBindingTable::new();
         table.record("worker-1", Some("sess-uuid"), Some("/tmp/sess.jsonl"));
         // A relaunch re-records the same identity: no supersede, no event.
-        assert!(
-            table
-                .record("worker-1", Some("sess-uuid"), Some("/tmp/sess.jsonl"))
-                .is_none()
-        );
+        assert!(table
+            .record("worker-1", Some("sess-uuid"), Some("/tmp/sess.jsonl"))
+            .is_none());
     }
 
     #[test]
@@ -184,7 +183,10 @@ mod tests {
         assert!(table.record("worker-1", None, None).is_none());
         assert!(table.record("worker-2", None, None).is_none());
         assert_eq!(
-            table.binding_for("worker-1").expect("kept").active_session_id,
+            table
+                .binding_for("worker-1")
+                .expect("kept")
+                .active_session_id,
             "worker-1"
         );
     }
@@ -195,11 +197,19 @@ mod tests {
         table.record("worker-1", Some("a"), Some("/tmp/a.jsonl"));
         table.record("worker-2", Some("b"), Some("/tmp/b.jsonl"));
         assert_eq!(
-            table.binding_for("worker-1").expect("a").session_id.as_deref(),
+            table
+                .binding_for("worker-1")
+                .expect("a")
+                .session_id
+                .as_deref(),
             Some("a")
         );
         assert_eq!(
-            table.binding_for("worker-2").expect("b").session_id.as_deref(),
+            table
+                .binding_for("worker-2")
+                .expect("b")
+                .session_id
+                .as_deref(),
             Some("b")
         );
     }

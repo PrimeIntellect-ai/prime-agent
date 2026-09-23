@@ -97,6 +97,14 @@ pub enum DaemonClientEvent {
     /// when the heartbeat catalog changes (TS `broadcastGlobal`). The
     /// session view refreshes its open `/heartbeats` picker on it.
     HeartbeatsChanged,
+    /// `session_binding`: the supervisor rebound a session to a new active
+    /// id (a worker replacement) and the id this client holds is
+    /// superseded. The session view re-attaches to the current id so its
+    /// event routing follows the session.
+    SessionBinding {
+        previous_active_session_id: String,
+        active_session_id: String,
+    },
 }
 
 /// One non-response frame, parsed from a supervisor JSONL line or a direct
@@ -188,6 +196,18 @@ pub(crate) fn client_event_from_value(value: &Value) -> Option<DaemonClientEvent
             resync: value.get("resync") == Some(&Value::Bool(true)),
         }),
         "heartbeats_changed" => Some(DaemonClientEvent::HeartbeatsChanged),
+        "session_binding" => Some(DaemonClientEvent::SessionBinding {
+            previous_active_session_id: value
+                .get("previousActiveSessionId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            active_session_id: value
+                .get("activeSessionId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        }),
         _ => None,
     }
 }

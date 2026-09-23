@@ -366,6 +366,21 @@ pub enum DaemonOutbound {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// The stale-id rebind notice (Rust-only extension over the TS wire): a
+    /// worker replacement rebound a session, and the id the client holds is
+    /// superseded. Old clients ignore the unknown type; attached clients
+    /// re-attach to the session's current id so their event routing follows
+    /// it.
+    SessionBinding {
+        previous_active_session_id: String,
+        active_session_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_file: Option<String>,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     SessionClosed {
         active_session_id: String,
         reason: DaemonSessionClosedReason,

@@ -421,7 +421,7 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
         let agents_view = options.session.resume_bare
             || (options.agents_view_requested && tui_options.onboarding.is_none());
         if agents_view {
-            run_agents_view_flow(tui_options, None).await
+            run_agents_view_flow(tui_options, None, None).await
         } else {
             let outcome =
                 pa_tui::interactive::run_interactive(tui_options.clone(), UiMode::Terminal).await?;
@@ -430,7 +430,11 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
             // (`launchAgentsView` anchored on the session just left); every
             // other exit (ctrl+c/ctrl+d, `/quit`) ends the process.
             if outcome.return_to_agents_view {
-                run_agents_view_flow(tui_options, Some(outcome.session_id.clone())).await
+                // A startup attach that fell back to the view has no session
+                // identity to anchor on; its notice seeds the view's status
+                // line instead.
+                let anchor = (!outcome.session_id.is_empty()).then(|| outcome.session_id.clone());
+                run_agents_view_flow(tui_options, anchor, outcome.agents_view_notice).await
             } else {
                 print_resume_hint(&outcome.resume_hint);
                 Ok(())
@@ -464,7 +468,11 @@ fn print_resume_hint(hint: &Option<String>) {
 /// session exit — ctrl+c/ctrl+d, `/quit`, `/exit` — ends the whole app (TS
 /// `shutdown()` exits the process instead of reopening the view). A
 /// `/resume <selector>` chain runs its target before the loop decides again.
-async fn run_agents_view_flow(base: InteractiveOptions, anchor: Option<String>) -> Result<()> {
+async fn run_agents_view_flow(
+    base: InteractiveOptions,
+    anchor: Option<String>,
+    notice: Option<String>,
+) -> Result<()> {
     let mut anchor = anchor;
     // The flow's roster connection (TS `AgentsViewPersistentState.rosterClient`):
     // every view run in this loop reuses it, and a chat run hands it back,
@@ -482,7 +490,7 @@ async fn run_agents_view_flow(base: InteractiveOptions, anchor: Option<String>) 
     let mut expanded_ancestors: Vec<String> = Vec::new();
     let mut selected_row_identity: Option<String> = None;
     let mut selected_key: Option<pa_tui::agents_view::AgentsViewSelectionKey> = None;
-    let mut status_message: Option<String> = None;
+    let mut status_message: Option<String> = notice;
     loop {
         let view_options = pa_tui::agents_view::AgentsViewOptions {
             socket_path: base.socket_path.clone(),
@@ -536,7 +544,12 @@ async fn run_agents_view_flow(base: InteractiveOptions, anchor: Option<String>) 
         session_options.session_has_children = view.opened_has_children;
         let outcome =
             pa_tui::interactive::run_interactive(session_options, UiMode::Terminal).await?;
-        anchor = Some(outcome.session_id.clone());
+        if !outcome.session_id.is_empty() {
+            anchor = Some(outcome.session_id.clone());
+        }
+        if let Some(notice) = &outcome.agents_view_notice {
+            status_message = Some(notice.clone());
+        }
         if !outcome.return_to_agents_view {
             print_resume_hint(&outcome.resume_hint);
             if let Some(link) = roster_link.take() {
@@ -564,7 +577,12 @@ async fn run_agents_view_flow(base: InteractiveOptions, anchor: Option<String>) 
             let mut next = base.clone();
             next.session = selection;
             let outcome = pa_tui::interactive::run_interactive(next, UiMode::Terminal).await?;
-            anchor = Some(outcome.session_id.clone());
+            if !outcome.session_id.is_empty() {
+                anchor = Some(outcome.session_id.clone());
+            }
+            if let Some(notice) = &outcome.agents_view_notice {
+                status_message = Some(notice.clone());
+            }
             if !outcome.return_to_agents_view {
                 print_resume_hint(&outcome.resume_hint);
                 if let Some(link) = roster_link.take() {

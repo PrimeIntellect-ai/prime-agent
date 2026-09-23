@@ -488,6 +488,11 @@ pub struct InteractiveOutcome {
     /// Texts copied out by finished mouse selections (headless runs have
     /// no terminal for OSC 52; the verifiers read these).
     pub copies: Vec<String>,
+    /// A startup attach failed on a session that is truly gone: the run
+    /// hands off to the agents view (`return_to_agents_view`) and this
+    /// notice seeds the view's status line instead of the pane dying to
+    /// the shell.
+    pub agents_view_notice: Option<String>,
 }
 
 /// Inputs consumed by the UI loop. Terminal keys arrive one event at a time;
@@ -687,6 +692,25 @@ pub async fn run_interactive(
     {
         Ok(session) => session,
         Err(error) => {
+            // A remembered active id whose session is truly gone (not
+            // rebindable to a live worker): the pane hands off to the
+            // agents view with the failure as its status line instead of
+            // dying to the shell. Every other startup failure (daemon
+            // down, create failure) stays fatal.
+            let rendered = format!("{error:#}");
+            if rendered.contains("Unknown active session") {
+                if let SessionSelection::Attach(selector) = &options.session {
+                    let frames = renderer.finish(&mut view, true);
+                    return Ok(InteractiveOutcome {
+                        return_to_agents_view: true,
+                        agents_view_notice: Some(format!(
+                            "Session {selector} is no longer running — pick a session to continue."
+                        )),
+                        frames,
+                        ..Default::default()
+                    });
+                }
+            }
             // The surface is already up: hand the terminal back before the
             // CLI reports the failure on the plain screen (the same
             // teardown contract as the onboarding exit below).
@@ -749,6 +773,7 @@ pub async fn run_interactive(
                 return_to_agents_view: false,
                 selection_request: None,
                 copies: Vec::new(),
+                agents_view_notice: None,
             });
         }
     }
@@ -1094,6 +1119,21 @@ pub async fn run_interactive(
                         if was_active && !session.turn_active {
                             session.refresh_stats().await;
                             session.rebuild_tray(&mut view);
+                        }
+                        // A `session_binding` supersede notice: the session
+                        // lives under a new active id, so re-attach to it -
+                        // event routing follows the attach, and the
+                        // transcript rebuilds from the snapshot (silent, no
+                        // banner). A failed re-attach keeps the old binding;
+                        // the submit-path rebind retries on the next send.
+                        if let Some(current) = session.pending_rebind.take() {
+                            match session.attach_session(&current).await {
+                                Ok(()) => session.rebuild_view(&mut view),
+                                Err(error) => session.note(
+                                    &format!("session rebind failed: {error:#}"),
+                                    &mut view,
+                                ),
+                            }
                         }
                         // An update close frame arms the reconnect driver
                         // immediately: the doomed connection's reader task is
@@ -1505,6 +1545,7 @@ pub async fn run_interactive(
         agents_view_scope: session.scoped_agents_view.take(),
         selection_request: session.pending_selection,
         copies: std::mem::take(&mut session.copies),
+        agents_view_notice: None,
     };
     // The agents-view handoff's background detach owns this connection now
     // (it closes once the daemon answers); every other exit closes it here.
