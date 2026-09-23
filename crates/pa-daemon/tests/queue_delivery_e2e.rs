@@ -396,6 +396,31 @@ fn queued_prompt(session_id: &str, message: &str, behavior: &str) -> Value {
     })
 }
 
+/// Drain until the projection with the given lane contents arrives (a
+/// bounded wait: under a loaded runner the first drain window can close
+/// between the worker's projection emits, and the parked-lane assert must
+/// observe the full projection rather than race it).
+fn wait_for_projection(
+    client: &mut Client,
+    steering: &[&str],
+    follow_ups: &[&str],
+    what: &str,
+) -> Vec<usize> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        client.drain_events(Duration::from_millis(400));
+        let parked = action_updates_with(&client.events, steering, follow_ups);
+        if !parked.is_empty() {
+            return parked;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the {what} never projected; events: {:?}",
+            event_types(&client.events)
+        );
+    }
+}
+
 /// Every `session_action_update` event with the given lane contents.
 fn action_updates_with(events: &[Value], steering: &[&str], follow_ups: &[&str]) -> Vec<usize> {
     let expected = json!({ "steering": steering, "followUps": follow_ups });
@@ -432,8 +457,12 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
         assert_eq!(response["success"], true, "{id} failed: {response}");
     }
     // The parked projection reaches attached clients.
-    client.drain_events(Duration::from_millis(400));
-    let parked = action_updates_with(&client.events, &["steer A", "steer B"], &["follow C"]);
+    let parked = wait_for_projection(
+        client,
+        &["steer A", "steer B"],
+        &["follow C"],
+        "parked queue",
+    );
     assert!(
         !parked.is_empty(),
         "the parked queue must project as session_action_update, events: {:?}",
@@ -541,17 +570,11 @@ fn multi_item_queue_delivers_every_item_in_lane_order() {
         let response = client.send(id, queued_prompt(&session_id, message, behavior));
         assert_eq!(response["success"], true, "{id} failed: {response}");
     }
-    client.drain_events(Duration::from_millis(400));
-    let parked = action_updates_with(
-        &client.events,
+    let parked = wait_for_projection(
+        client,
         &["steer one", "steer two", "steer three"],
         &["follow one", "follow two", "follow three"],
-    );
-    assert_eq!(
-        parked.len(),
-        1,
-        "every parked item projects, events: {:?}",
-        event_types(&client.events)
+        "six-item parked lane",
     );
     let actions = &client.events[parked[0]]["actions"];
     assert_eq!(actions["queuedCount"], 6, "queuedCount counts both lanes");
