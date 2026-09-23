@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, it, test, vi } from "vitest";
 import {
 	buildPrimeInferenceModels,
 	PRIME_INFERENCE_BASE_URL,
@@ -39,6 +39,20 @@ const entry = (id: string) => ({
 	maxTokens: 20_000,
 	vision: true,
 	reasoning: false,
+});
+
+const effortEntry = (id: string) => ({
+	...entry(id),
+	reasoning: true,
+	supportedParameters: ["max_tokens", "reasoning", "reasoning_effort"],
+	reasoningEfforts: ["low", "high", "max"],
+	reasoningMandatory: true,
+});
+
+const toggleEntry = (id: string) => ({
+	...entry(id),
+	reasoning: true,
+	supportedParameters: ["max_tokens", "reasoning", "include_reasoning"],
 });
 
 const payloadEntry = (
@@ -87,6 +101,64 @@ describe("Prime Inference model catalog", () => {
 		expect(
 			buildPrimeInferenceModels(bundled, [entry("new/one"), entry("new/two"), entry("new/three")]),
 		).toBeUndefined();
+	});
+
+	it.each([
+		{
+			name: "effort route",
+			entry: () => effortEntry("z-ai/glm-5.3"),
+			thinkingFormat: undefined,
+			supportsReasoningEffort: true,
+			map: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" },
+		},
+		{
+			name: "toggle route",
+			entry: () => toggleEntry("z-ai/glm-4.7"),
+			thinkingFormat: "openrouter",
+			supportsReasoningEffort: false,
+			map: { minimal: null, low: null, medium: null, high: "high", xhigh: null, max: null },
+		},
+		{
+			name: "effort route without declared efforts keeps the template map",
+			entry: () => ({
+				...entry("z-ai/glm-5.3"),
+				reasoning: true,
+				supportedParameters: ["max_tokens", "reasoning", "reasoning_effort"],
+				reasoningMandatory: false,
+			}),
+			thinkingFormat: undefined,
+			supportsReasoningEffort: true,
+			map: { high: "high" },
+		},
+		{
+			name: "no-parameter route keeps the stale template",
+			entry: () => entry("z-ai/glm-5.3"),
+			thinkingFormat: "zai",
+			supportsReasoningEffort: undefined,
+			map: { high: "high" },
+		},
+		{
+			name: "reasoning-free route drops the stale template",
+			entry: () => ({ ...entry("qwen/qwen3-coder"), supportedParameters: ["max_tokens"] }),
+			thinkingFormat: undefined,
+			supportsReasoningEffort: false,
+			map: undefined,
+		},
+	])("$name", ({ entry: makeEntry, ...expected }) => {
+		const liveEntry = makeEntry();
+		const template = model(liveEntry.id);
+		const stale = { ...template, compat: { ...template.compat, thinkingFormat: "zai" as const } };
+		const [live] = buildPrimeInferenceModels([stale], [liveEntry], { minimumModels: 0 }) ?? [];
+		expect(live?.compat?.thinkingFormat).toBe(expected.thinkingFormat);
+		expect(live?.compat?.supportsReasoningEffort).toBe(expected.supportsReasoningEffort);
+		if (expected.map) expect(live?.thinkingLevelMap).toEqual(expected.map);
+		else expect(live?.thinkingLevelMap).toBeUndefined();
+	});
+
+	test("gives new live models the conservative default compat plus declared controls", () => {
+		const models =
+			buildPrimeInferenceModels([], [effortEntry("vendor/new"), entry("vendor/plain")], { minimumModels: 0 }) ?? [];
+		expect(models.map((m) => m.compat?.supportsReasoningEffort)).toEqual([true, false]);
 	});
 
 	test("caches valid responses and falls back to the cache when the fetch fails", async () => {

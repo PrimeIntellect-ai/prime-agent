@@ -268,6 +268,12 @@ describe("Anthropic request wire contract", () => {
 			},
 		);
 		expect(toolsOf(oauth.body).map((entry) => entry.name)).toEqual(["TodoWrite", "find", "my_custom_tool"]);
+		// Subscription requests claim the Claude Code client identity, and the
+		// claimed version must stay at or above what the API's model gates require
+		// (opus-5.5 family rejects anything below 2.280).
+		expect(oauth.headers["user-agent"]).toMatch(/^claude-cli\//);
+		expect(oauth.headers["x-app"]).toBe("cli");
+		expect((oauth.headers["anthropic-beta"] as string) ?? "").toContain("claude-code-20250219");
 
 		const apiKey = await captureAnthropicRequest(
 			getFixtureModel<"anthropic-messages">("anthropic", "claude-sonnet-4-6")!,

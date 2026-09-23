@@ -254,8 +254,14 @@ describe("AuthStorage", () => {
 
 				await expect(authStorage.getApiKey("prime-inference")).resolves.toBe("runtime-key");
 				expect(authStorage.getAuthStatus("prime-inference").source).toBe("runtime");
-				expect(authStorage.getPrimeInferenceTeamSelection()).toBeUndefined();
-				expect(authStorage.getProviderHeaders("prime-inference")).toBeUndefined();
+				// The stored primeTeam survives runtime and environment API-key
+				// overrides: the key comes from the override, the team from the
+				// stored login, so the credentialed catalog and private-model
+				// fetches stay team-scoped and internal/* routes remain visible.
+				expect(authStorage.getPrimeInferenceTeamSelection()).toEqual(team);
+				expect(authStorage.getProviderHeaders("prime-inference")).toEqual({
+					"X-Prime-Team-ID": team.teamId,
+				});
 				authStorage.removeRuntimeApiKey("prime-inference");
 				await expect(authStorage.getApiKey("prime-inference")).resolves.toBe("env-key");
 				expect(authStorage.getAuthStatus("prime-inference")).toEqual({
@@ -263,8 +269,10 @@ describe("AuthStorage", () => {
 					source: "environment",
 					label: "PRIME_API_KEY",
 				});
-				expect(authStorage.getPrimeInferenceTeamSelection()).toBeUndefined();
-				expect(authStorage.getProviderHeaders("prime-inference")).toBeUndefined();
+				expect(authStorage.getPrimeInferenceTeamSelection()).toEqual(team);
+				expect(authStorage.getProviderHeaders("prime-inference")).toEqual({
+					"X-Prime-Team-ID": team.teamId,
+				});
 				vi.stubEnv("PRIME_API_KEY", undefined);
 				await expect(authStorage.getApiKey("prime-inference")).resolves.toBe("agent-key");
 				expect(authStorage.getAuthStatus("prime-inference").source).toBe("stored");

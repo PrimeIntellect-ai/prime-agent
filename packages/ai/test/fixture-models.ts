@@ -1081,6 +1081,64 @@ const fixtureModels = {
 		contextWindow: 1000000,
 		maxTokens: 131072,
 	},
+	// Prime Inference fixtures carry the reasoning controls the client derives
+	// from the live catalog's supported_parameters/reasoning metadata
+	// (getPrimeInferenceReasoningControls applied over the bundled templates by
+	// buildPrimeInferenceModels; the derivation is covered by the catalog
+	// tests). Gateway-verified 2026-09-21: z-ai/glm-5.3 declares reasoning_effort
+	// with efforts low/high/max and mandatory reasoning; z-ai/glm-4.7 declares
+	// only the optional reasoning toggle (no effort selector).
+	"prime-inference/z-ai/glm-5.3": {
+		id: "z-ai/glm-5.3",
+		name: "GLM 5.3",
+		api: "openai-completions",
+		provider: "prime-inference",
+		baseUrl: "https://api.pinference.ai/api/v1",
+		compat: {
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: true,
+			maxTokensField: "max_tokens",
+			supportsStrictMode: false,
+		},
+		reasoning: true,
+		thinkingLevelMap: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" },
+		input: ["text"],
+		cost: {
+			input: 1.4,
+			output: 4.4,
+			cacheRead: 0.26,
+			cacheWrite: 1.4,
+		},
+		contextWindow: 1048576,
+		maxTokens: 131072,
+	},
+	"prime-inference/z-ai/glm-4.7": {
+		id: "z-ai/glm-4.7",
+		name: "GLM 4.7",
+		api: "openai-completions",
+		provider: "prime-inference",
+		baseUrl: "https://api.pinference.ai/api/v1",
+		compat: {
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsReasoningEffort: false,
+			maxTokensField: "max_tokens",
+			supportsStrictMode: false,
+			thinkingFormat: "openrouter",
+		},
+		reasoning: true,
+		thinkingLevelMap: { minimal: null, low: null, medium: null, high: "high", xhigh: null, max: null },
+		input: ["text"],
+		cost: {
+			input: 0.6,
+			output: 2.2,
+			cacheRead: 0,
+			cacheWrite: 0,
+		},
+		contextWindow: 204800,
+		maxTokens: 131072,
+	},
 	"cloudflare-ai-gateway/claude-sonnet-4.6": {
 		id: "claude-sonnet-4.6",
 		name: "Claude Sonnet 4.6",

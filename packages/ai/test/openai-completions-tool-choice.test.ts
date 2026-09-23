@@ -1150,26 +1150,50 @@ describe("openai-completions tool_choice", () => {
 		expect((payload as { reasoning_effort?: unknown }).reasoning_effort).toBe("none");
 	});
 
-	it("sends no thinking parameter to Prime Inference GLM routes but keeps the z.ai toggle", async () => {
+	// Gateway-verified (2026-09-21): glm-5.3 declares reasoning_effort, glm-4.7 only the reasoning object.
+	it("sends only the declared reasoning parameters to Prime Inference GLM routes", async () => {
 		const context = { messages: [{ role: "user" as const, content: "Hi", timestamp: Date.now() }] };
 		const payloads = new Map<string, Record<string, unknown>>();
-		for (const model of [
-			getModel("prime-inference", "z-ai/glm-5.3")!,
-			getFixtureModel<"openai-completions">("zai", "glm-5.3")!,
-		]) {
-			await streamSimple(model, context, {
+		for (const [id, level] of [
+			["z-ai/glm-5.3", "high"],
+			["z-ai/glm-5.3", "medium"],
+			["z-ai/glm-4.7", "high"],
+			["z-ai/glm-4.7", "off"],
+		] as const) {
+			await streamSimple(getFixtureModel<"openai-completions">("prime-inference", id)!, context, {
 				apiKey: "test",
-				reasoning: "high",
+				reasoning: level,
 				onPayload: (params: unknown) => {
-					payloads.set(model.id, params as Record<string, unknown>);
+					payloads.set(`${id}:${level}`, params as Record<string, unknown>);
 				},
 			}).result();
 		}
-		const prime = payloads.get("z-ai/glm-5.3");
-		expect(prime?.enable_thinking).toBeUndefined();
-		expect(prime?.reasoning_effort).toBeUndefined();
-		expect(prime?.reasoning).toBeUndefined();
-		expect(payloads.get("glm-5.3")?.enable_thinking).toBe(true);
+		const effort = payloads.get("z-ai/glm-5.3:high")!;
+		expect(effort).toMatchObject({ reasoning_effort: "high" });
+		expect(effort).not.toHaveProperty("enable_thinking");
+		expect(effort).not.toHaveProperty("reasoning");
+		expect(payloads.get("z-ai/glm-5.3:medium")).toMatchObject({ reasoning_effort: "high" });
+		const toggle = payloads.get("z-ai/glm-4.7:high")!;
+		expect(toggle).toMatchObject({ reasoning: { enabled: true } });
+		expect(toggle).not.toHaveProperty("enable_thinking");
+		expect(toggle).not.toHaveProperty("reasoning_effort");
+		expect(payloads.get("z-ai/glm-4.7:off")).toMatchObject({ reasoning: { enabled: false } });
+	});
+
+	it("keeps the z.ai coding-plan toggle on enable_thinking", async () => {
+		let payload: Record<string, unknown> | undefined;
+		await streamSimple(
+			getFixtureModel<"openai-completions">("zai", "glm-5.3")!,
+			{ messages: [{ role: "user" as const, content: "Hi", timestamp: Date.now() }] },
+			{
+				apiKey: "test",
+				reasoning: "high",
+				onPayload: (params: unknown) => {
+					payload = params as Record<string, unknown>;
+				},
+			},
+		).result();
+		expect(payload?.enable_thinking).toBe(true);
 	});
 
 	it("serializes explicit off only for models that allow disabling reasoning", async () => {
