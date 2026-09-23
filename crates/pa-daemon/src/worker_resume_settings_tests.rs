@@ -127,52 +127,53 @@ mod resume_settings_tests {
                 crate::lease::acquire_runtime_session_lease(&path, &dir.path().join("agent"))
                     .is_err()
             );
-            let selected = capture.selected.lock().unwrap();
-            assert_eq!(
-                (
-                    selected.provider.as_deref(),
-                    selected.model.as_deref(),
-                    selected.thinking
-                ),
-                if mode == 4 {
-                    (Some("saved"), Some("inferred"), None)
-                } else if mode == 3 {
+            {
+                let selected = capture.selected.lock().unwrap();
+                assert_eq!(
                     (
-                        Some("saved"),
-                        Some("inferred"),
-                        Some(pa_types::ai::ModelThinkingLevel::Off),
-                    )
-                } else if mode == 2 {
-                    (
-                        None,
-                        Some("model-only"),
-                        Some(pa_types::ai::ModelThinkingLevel::High),
-                    )
-                } else if mode == 1 {
-                    (
-                        Some("explicit"),
-                        Some("chosen"),
-                        Some(pa_types::ai::ModelThinkingLevel::Low),
-                    )
-                } else {
-                    (
-                        Some("saved"),
-                        Some("inferred"),
-                        Some(pa_types::ai::ModelThinkingLevel::High),
-                    )
-                }
-            );
-            assert_eq!(*capture.tier.lock().unwrap(), None);
-            assert!(worker
-                .core
-                .lock()
-                .unwrap()
-                .store
-                .as_ref()
-                .unwrap()
-                .window
-                .is_some());
-            drop(selected);
+                        selected.provider.as_deref(),
+                        selected.model.as_deref(),
+                        selected.thinking
+                    ),
+                    if mode == 4 {
+                        (Some("saved"), Some("inferred"), None)
+                    } else if mode == 3 {
+                        (
+                            Some("saved"),
+                            Some("inferred"),
+                            Some(pa_types::ai::ModelThinkingLevel::Off),
+                        )
+                    } else if mode == 2 {
+                        (
+                            None,
+                            Some("model-only"),
+                            Some(pa_types::ai::ModelThinkingLevel::High),
+                        )
+                    } else if mode == 1 {
+                        (
+                            Some("explicit"),
+                            Some("chosen"),
+                            Some(pa_types::ai::ModelThinkingLevel::Low),
+                        )
+                    } else {
+                        (
+                            Some("saved"),
+                            Some("inferred"),
+                            Some(pa_types::ai::ModelThinkingLevel::High),
+                        )
+                    }
+                );
+                assert_eq!(*capture.tier.lock().unwrap(), None);
+                assert!(worker
+                    .core
+                    .lock()
+                    .unwrap()
+                    .store
+                    .as_ref()
+                    .unwrap()
+                    .window
+                    .is_some());
+            }
             if mode == 0 {
                 let killed = worker.dispatch("kill", &json!({})).await;
                 assert!(killed.success, "{killed:?}");
