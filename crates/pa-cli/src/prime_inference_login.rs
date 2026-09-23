@@ -429,6 +429,33 @@ mod tests {
                 }
             })
         }
+
+        fn post_json<'a>(
+            &'a self,
+            url: &'a str,
+            _body: &'a str,
+            _bearer: Option<&'a str>,
+            _timeout_ms: u64,
+        ) -> Pin<
+            Box<
+                dyn std::future::Future<Output = Result<pa_core::auth::PrimeHttpResponse, String>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            let url = url.to_string();
+            let entry = self.queue.lock().unwrap().pop_front();
+            self.served.lock().unwrap().push(url.clone());
+            Box::pin(async move {
+                match entry {
+                    Some((expected_url, response)) if expected_url == url => Ok(response),
+                    Some((expected_url, _)) => {
+                        panic!("unexpected request {url}, scripted {expected_url}")
+                    }
+                    None => panic!("no scripted response for {url}"),
+                }
+            })
+        }
     }
 
     /// A scripted UI: the queued paste lines and team choices answer in
