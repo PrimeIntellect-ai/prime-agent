@@ -170,6 +170,12 @@ def launch(session, binary, sandbox, script_path, shared_cwd):
     # relative one would be looked up under shared_cwd, the new
     # session's cwd, not the checkout the harness ran from).
     package_dir = os.environ.get("PI_PACKAGE_DIR") or find_runtime_package_dir()
+    # The pane shell inherits the harness process environment, so any
+    # inherited `RLM_*` variable (e.g. RLM_DEPTH=debug) leaks into the
+    # launched agent and can panic its env parsing: scrub them first.
+    rlm_unset = " ".join(
+        f"-u {shlex.quote(name)}" for name in os.environ if name.startswith("RLM_")
+    )
     env = " ".join(
         f"{name}={shlex.quote(value)}"
         for name, value in (
@@ -182,7 +188,7 @@ def launch(session, binary, sandbox, script_path, shared_cwd):
         )
     )
     command = (
-        f"{env} {shlex.quote(os.path.abspath(binary))} "
+        f"env {rlm_unset} {env} {shlex.quote(os.path.abspath(binary))} "
         f"--daemon-socket {shlex.quote(os.path.join(agent, 'daemon.sock'))} "
         f"--model {TS_SCRIPT_MODEL}"
     )
@@ -439,8 +445,14 @@ def main():
         if os.path.exists(socket):
             stale_sockets.append(socket)
     if stale_sockets:
+        # cwd_roots scopes the detached-worker sweep, which kills ANY
+        # process working under the roots: only the harness-owned sandbox
+        # dir belongs there (`--out .` or `--out /tmp` must not sweep
+        # unrelated processes).
         batterylib.reap_daemons(
-            socket_paths=stale_sockets, needles=(args.out,), cwd_roots=(args.out,)
+            socket_paths=stale_sockets,
+            needles=(args.out,),
+            cwd_roots=(stale_sandbox,),
         )
     # Each side tears down in a finally: a wait_for timeout or a tmux
     # error mid-run must not leak the session or its daemon, and the
@@ -474,7 +486,7 @@ def main():
             tmux("kill-session", "-t", SESSION_BRANCH, check=False)
     finally:
         batterylib.reap_daemons(
-            socket_paths=sockets, needles=(args.out,), cwd_roots=(args.out,)
+            socket_paths=sockets, needles=(args.out,), cwd_roots=(base,)
         )
 
     failed = 0
