@@ -4458,8 +4458,7 @@ fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<QueuedItem> 
         core.forced_all_steering = false;
     }
     if forced || mode == "all" {
-        loop {
-            let Some(next) = items.front() else { break };
+        while let Some(next) = items.front() {
             if next.policy != first_policy
                 || next.custom_message.is_some()
                 || (forced && !next.forced_batch)
