@@ -319,4 +319,70 @@ mod tests {
         assert!(late_sent_agent_message(Some("cell1"), &data).is_some());
         assert!(late_sent_agent_message(None, &data).is_none());
     }
+
+    /// Timed fixture for the bulk `data` payloads of `display`/`host_request`
+    /// frames at 1 KiB / 1 MiB / 10 MiB. Run with
+    /// `cargo test -p pa-core --release -- kernel::protocol --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing fixture; run with --release --ignored --nocapture"]
+    fn parse_event_data_frame_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        fn display_frame(data_bytes: usize) -> String {
+            json!({
+                "event": "display",
+                "id": "cell-1",
+                "data": {
+                    crate::kernel::shared::ATTACHMENT_DISPLAY_MIME: {
+                        "name": "bench.png",
+                        "data": "A".repeat(data_bytes),
+                    }
+                }
+            })
+            .to_string()
+        }
+
+        fn host_request_frame(entries: usize) -> String {
+            json!({
+                "event": "host_request",
+                "id": "hr-1",
+                "data": {
+                    "reason": "bench",
+                    "items": (0..entries)
+                        .map(|i| json!({ "name": format!("entry-{i}"), "text": "x".repeat(48), "n": i }))
+                        .collect::<Vec<_>>(),
+                }
+            })
+            .to_string()
+        }
+
+        for (target, label, iters) in [
+            (1024_usize, "1 KiB", 200_000_u32),
+            (1024 * 1024, "1 MiB", 2_000),
+            (10 * 1024 * 1024, "10 MiB", 200),
+        ] {
+            let display = display_frame(target.saturating_sub(120));
+            let host = host_request_frame(((target - 60) / 85).max(1));
+            for (kind, frame) in [("display", display.as_str()), ("host_request", host.as_str())] {
+                assert_eq!(parse_event(frame).expect("valid fixture frame").kind(), kind);
+                for _ in 0..(iters / 20).max(1) {
+                    black_box(parse_event(black_box(frame)));
+                }
+                let start = Instant::now();
+                for _ in 0..iters {
+                    black_box(parse_event(black_box(frame)));
+                }
+                let elapsed = start.elapsed();
+                let per_frame = elapsed / iters;
+                let throughput =
+                    frame.len() as f64 / elapsed.as_secs_f64() / (1024.0 * 1024.0);
+                println!(
+                    "{label} {kind:>12} frame={frame_len:>9} bytes iters={iters:>6} per-frame={per_frame_us:>12.1} µs throughput={throughput:8.1} MiB/s",
+                    frame_len = frame.len(),
+                    per_frame_us = per_frame.as_secs_f64() * 1e6,
+                );
+            }
+        }
+    }
 }
