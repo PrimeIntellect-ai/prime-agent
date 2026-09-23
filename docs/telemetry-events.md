@@ -335,6 +335,7 @@ parked submission, not per rendered row).
 | property | type | notes |
 |---|---|---|
 | `lane` | string | `steering` (Enter while a turn runs) / `follow_up` (the follow-up key) |
+| `steering_mode` | string | the session's queue delivery mode at the submission (TS `steeringMode`): `all` = the parked steering prefix delivers as one batched turn at the boundary, `one-at-a-time` = one steer per turn — exposure under batched delivery is the multi-steer batch feature's adoption signal |
 
 ### `tui queue edited`
 
@@ -367,6 +368,19 @@ subagent inspection surface; emitted once per open action).
 | property | type | notes |
 |---|---|---|
 | `children_total` | number | live RLM descendant count at open time |
+
+### `tui activity opened`
+
+The user opened an activity surface from the session view: the unified
+panel itself (dock Enter, a second Alt+A, or a dock group's Enter) or a
+group's management view from the panel (the scoped agents view, the
+heartbeats view, a bash output tail). The goal indicator is read-only and
+does not emit this event. No command, output, prompt, or goal content is
+collected.
+
+| property | type | notes |
+|---|---|---|
+| `kind` | string | `panel` / `subagents` / `heartbeats` / `bash` |
 
 ### `tui prompt stash`
 

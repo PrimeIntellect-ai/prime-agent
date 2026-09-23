@@ -289,6 +289,8 @@ async fn scripted_session_executes_the_extension_tool() -> Result<()> {
 
     let engine = create_session(SessionEngineConfig {
         cron_store: None,
+        steering_mode: None,
+        follow_up_mode: None,
         cwd: cwd.clone(),
         agent_dir: dir.path().join("agent"),
         model: Some(model),

@@ -256,8 +256,9 @@ async fn down_arrow_focuses_the_panel_and_enter_drills_into_the_child() {
         .expect("append spawn edge");
 
     // Run 1 — the attached parent's main chat: Down at the end of the empty
-    // prompt hands the focus to the subagent panel, Enter opens the scoped
-    // agents view.
+    // prompt focuses the activity dock, Enter opens the unified activity
+    // panel (the grouped list), and a second Enter on the selected
+    // subagent row opens the scoped agents view.
     let parent_options = session_options(
         &supervisor.socket,
         &session_dir,
@@ -277,6 +278,11 @@ async fn down_arrow_focuses_the_panel_and_enter_drills_into_the_child() {
                 crossterm::event::KeyCode::Enter,
                 crossterm::event::KeyModifiers::NONE,
             )),
+            pa_tui::interactive::HeadlessStep::WaitMs(300),
+            pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            )),
         ],
         width: 120,
         height: 36,
@@ -286,32 +292,34 @@ async fn down_arrow_focuses_the_panel_and_enter_drills_into_the_child() {
             .await
             .expect("parent session run");
 
-    // The panel renders at attach with the select hint (unfocused).
-    let attached = first_frame_of(&parent_run.frames, "subagents");
+    // The dock renders at attach as the one-line activity row (unfocused,
+    // hint-free by design; the first Enter opens the grouped list).
+    let attached = first_frame_of(&parent_run.frames, "1 subagent");
     assert!(
-        attached.contains("\u{2193} select"),
-        "the unfocused panel shows the cursor-down select hint:\n{attached}"
+        attached.contains("\u{25c6} 1 subagent"),
+        "the unfocused dock shows the live subagent count:\n{attached}"
     );
-    // Down focused it: the hint flips to the focused open pair, and the
-    // select hint is gone.
-    let focused = frame_of(&parent_run.frames, "Enter/\u{2192} open");
+    // The first Enter opened the grouped list: the grouped row and the
+    // selected-detail pane.
+    let panel = frame_of(&parent_run.frames, "Subagents");
     assert!(
-        focused.contains("subagents"),
-        "the focused frame still renders the panel:\n{focused}"
+        panel.contains("Activity"),
+        "the dock's Enter opens the unified activity panel:\n{panel}"
     );
     assert!(
-        !focused.contains("select"),
-        "the focused panel replaces the select hint with the open hint:\n{focused}"
+        panel.contains("Selected"),
+        "the panel shows the selected-detail pane:\n{panel}"
     );
-    // Enter opened the scoped agents view (the summary line's open action).
+    // The second Enter opened the scoped agents view (the selected
+    // subagent row's open action).
     assert!(
         parent_run.return_to_agents_view,
-        "Enter on the focused panel hands the pane to the agents view"
+        "Enter on the panel's subagent row hands the pane to the agents view"
     );
     let scope = parent_run
         .agents_view_scope
         .clone()
-        .expect("the open came from the subagent summary line (scoped)");
+        .expect("the open came from the activity panel (scoped)");
 
     // Run 2 — the scoped agents view: the child lists as the root's direct
     // child, and Enter drills into its transcript.

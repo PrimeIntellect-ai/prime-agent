@@ -13,6 +13,10 @@ sees:
 - a second parked lane with slash-command and token-bearing prompts, so the
   accent styling itself is compared byte-exact (captured before delivery,
   aborted away after);
+- the streaming follow-up hint (TS `getTrayOverrideLabel`'s streaming
+  arm): while the slow turn streams and a draft sits in the editor, the
+  tray row reads `<followUp> to queue message` — compared ANSI
+  byte-exact, and its departure with the cleared draft is asserted;
 - the live editor with a slash command and argument tokens typed but not
   submitted — cursor at the end (command segment accented, tokens colored)
   and cursor moved inside the command token (accent suppressed), the
@@ -61,7 +65,7 @@ QUEUE_FAUX_SCRIPT = {
     "modelName": "Faux Model",
     "reasoning": False,
     "contextWindow": 128000,
-    "tokensPerSecond": 6,
+    "tokensPerSecond": 3,
     "responses": [
         # The token-user-row turn answers quickly so the transcript state
         # settles; the queue turns follow (the first of them streams
@@ -71,7 +75,15 @@ QUEUE_FAUX_SCRIPT = {
             "content": [
                 {
                     "type": "text",
-                    "text": "The first turn streams slowly and keeps going for a good while so the parked preview strip has plenty of time to render before this turn settles and the queue drains.",
+                    # Long enough that the streaming-hint state AND the
+                    # parked strip both fit inside the turn at the faux's
+                    # 3 tokens/second (the hint capture + clear, then the
+                    # two parked prompts, all before the settle).
+                    "text": "The first turn streams slowly and keeps going for a good long while, "
+                    "certainly long enough that the streaming follow-up hint can be captured over "
+                    "a draft while the turn is still live, and then the parked preview strip has "
+                    "plenty of time to render with both of its rows before this turn finally "
+                    "settles and the queue drains the parked prompts as their own turns.",
                 }
             ]
         },
@@ -121,6 +133,13 @@ HOTKEYS_SIZE = (120, 130)
 STEERING_ROW = f"Steering: {STEERING_PROMPT}"
 FOLLOW_UP_ROW = f"Follow-up: {FOLLOW_UP_PROMPT}"
 HINT_ROW = "to browse and edit queued messages"
+
+# The streaming follow-up hint (TS `getTrayOverrideLabel`): while a turn
+# streams and a draft sits in the editor, the tray's location label is
+# replaced by `<followUp> to queue message` (the default binding on this
+# platform is alt+enter on both binaries).
+HINT_DRAFT = "draft not sent yet"
+STREAMING_HINT_ROW = "Alt+Enter to queue message"
 
 ANSI_PATTERN = re.compile("\x1b\\[[0-9;]*[A-Za-z]")
 
@@ -185,6 +204,53 @@ def exact_rows_styled(frame, text):
     ]
 
 
+def styled_segment(line, text):
+    """The ANSI bytes of `line` that render exactly `text` (the styled
+    segment), so a row that carries side-varying content past the segment
+    (the tray row's context label: token counts differ per side) still
+    compares byte-exact over the segment under test."""
+    import re as _re
+
+    plain = strip_ansi(line)
+    start = plain.find(text)
+    if start < 0:
+        return None
+    end = start + len(text)
+    out = []
+    plain_pos = 0
+    i = 0
+    while i < len(line):
+        if line[i] == "\x1b":
+            match = _re.match(r"\x1b\[[0-9;]*[A-Za-z]", line[i:])
+            sequence = match.group(0) if match else line[i]
+            # An escape strictly inside the segment (a color change mid-
+            # segment) belongs to it — the WHOLE sequence, so the byte-
+            # exact compare sees real styling; the one AT the segment's
+            # end starts the next span (the context label) and stays out.
+            if start <= plain_pos < end:
+                out.append(sequence)
+            i += len(sequence)
+            continue
+        if start <= plain_pos < end:
+            out.append(line[i])
+        plain_pos += 1
+        i += 1
+    return "".join(out)
+
+
+def tray_segment_rows(frame, text):
+    """The styled tray segments (rows containing `text`) for byte-exact
+    compare: the hint row's own bytes, never the context label beside it."""
+    frame = normalize_sgr_boundaries(frame)
+    segments = []
+    for line in frame.split("\n"):
+        if text in strip_ansi(line):
+            segment = styled_segment(line, text)
+            if segment is not None:
+                segments.append(segment)
+    return segments
+
+
 def prepare_queue_sandbox(base):
     """The visual_parity fixture with the queue-specific faux script."""
     shared_cwd, script_path, sandboxes = vp.prepare_sandbox(base)
@@ -221,8 +287,13 @@ def run_queue_session(binary, sandbox, shared_cwd, script_path, size, out_dir, p
         "PRIME_AGENT_DISABLE_ANALYTICS=1"
     )
     if binary == "ts":
+        # The tmux server's inherited PATH may sit a Rust build at
+        # `prime-agent` (the box's release install): resolve the binary
+        # in THIS process's PATH (the operator points it at the TS
+        # release for the run) and launch the absolute path.
+        ts_bin = shutil.which("prime-agent") or "prime-agent"
         command = (
-            f"prime-agent --daemon-socket {sandbox['agent']}/daemon.sock "
+            f"{ts_bin} --daemon-socket {sandbox['agent']}/daemon.sock "
             f"--model {vp.TS_SCRIPT_MODEL}"
         )
     else:
@@ -285,12 +356,45 @@ def run_queue_session(binary, sandbox, shared_cwd, script_path, size, out_dir, p
     vp.tmux("send-keys", "-t", session, FIRST_PROMPT)
     vp.tmux("send-keys", "-t", session, "Enter")
     vp.wait_for(session, "streams slowly", timeout=60)
+
+    # (h) the streaming follow-up hint (TS `getTrayOverrideLabel`): early
+    # in the slow turn, type a draft without submitting — the tray row
+    # becomes `<followUp> to queue message`. Captured before the parking
+    # below (the parked prompts ride the same turn; the cleared draft
+    # leaves the editor exactly as the parking expects).
+    vp.tmux("send-keys", "-t", session, HINT_DRAFT)
+    try:
+        vp.wait_for(session, STREAMING_HINT_ROW, timeout=15)
+    except TimeoutError:
+        # Failure evidence: the pane at the miss, so the diff between the
+        # rendered tray and the expected row is visible post-run.
+        dump = vp.capture(session, escape=False)
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, f"{binary}-h-miss-plain.txt"), "w") as f:
+            f.write(dump)
+        raise
+    time.sleep(0.3)
+    frames["h_streaming_hint"] = vp.capture(session)
+    # Clear the draft with backspaces: the escape-repeat pair is the TS
+    # streaming-turn surface (the double press aborts the turn and opens
+    # the session tree mid-run), never a plain input clear.
+    for _ in range(len(HINT_DRAFT) + 2):
+        vp.tmux("send-keys", "-t", session, "BSpace")
+    wait_plain(session, HINT_DRAFT, gone=True, timeout=15)
+    wait_plain(session, STREAMING_HINT_ROW, gone=True, timeout=15)
+
     vp.tmux("send-keys", "-t", session, STEERING_PROMPT)
     vp.tmux("send-keys", "-t", session, "Enter")
     vp.tmux("send-keys", "-t", session, FOLLOW_UP_PROMPT)
     vp.tmux("send-keys", "-t", session, "M-Enter")
-    vp.wait_for(session, HINT_ROW, timeout=30)
-    vp.wait_for(session, STEERING_ROW, timeout=15)
+    try:
+        vp.wait_for(session, HINT_ROW, timeout=30)
+        vp.wait_for(session, STEERING_ROW, timeout=15)
+    except TimeoutError:
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, f"{binary}-strip-miss-plain.txt"), "w") as f:
+            f.write(vp.capture(session, escape=False))
+        raise
     vp.wait_for(session, FOLLOW_UP_ROW, timeout=15)
     time.sleep(0.3)
     frames["q_queue_strip"] = vp.capture(session)
@@ -361,8 +465,12 @@ def run_hotkeys_session(binary, sandbox, shared_cwd, script_path, out_dir, prefi
         "PRIME_AGENT_DISABLE_ANALYTICS=1"
     )
     if binary == "ts":
+        # (See the queue session above: resolve the TS binary in this
+        # process's PATH — the tmux server's inherited PATH may sit a
+        # Rust build at `prime-agent`.)
+        ts_bin = shutil.which("prime-agent") or "prime-agent"
         command = (
-            f"prime-agent --daemon-socket {sandbox['agent']}/daemon.sock "
+            f"{ts_bin} --daemon-socket {sandbox['agent']}/daemon.sock "
             f"--model {vp.TS_SCRIPT_MODEL}"
         )
     else:
@@ -480,6 +588,16 @@ def main():
             [f"Steering: {prompt}" for prompt in SLASH_STEERING_PROMPTS] + [HINT_ROW],
             "q_slash_strip (ts)",
         )
+        require_markers(
+            ts_frames["h_streaming_hint"],
+            [STREAMING_HINT_ROW, HINT_DRAFT],
+            "h_streaming_hint (ts)",
+        )
+        require_markers(
+            rust_frames["h_streaming_hint"],
+            [STREAMING_HINT_ROW, HINT_DRAFT],
+            "h_streaming_hint (rust)",
+        )
         # The transcript states must show their rows (an early capture or a
         # scrolled-off block would compare empty rows).
         for state, text in (
@@ -533,6 +651,18 @@ def main():
                     editor_rows_styled(rust_frames[state]),
                 )
             )
+        # The streaming follow-up hint row compares ANSI byte-exact over
+        # the hint segment (the tray override label — muted key +
+        # description, TS `getTrayOverrideLabel` -> `renderInfoLine`);
+        # the row's right side (the context label) carries per-side token
+        # counts and is not the surface under test.
+        failures.append(
+            compare(
+                f"h_streaming_hint-{args.size}",
+                tray_segment_rows(ts_frames["h_streaming_hint"], STREAMING_HINT_ROW),
+                tray_segment_rows(rust_frames["h_streaming_hint"], STREAMING_HINT_ROW),
+            )
+        )
         # The browse header and drained strip keep the plain-row compare.
         for state in ("q_browse_header", "q_drained"):
             name = f"{state}-{args.size}"

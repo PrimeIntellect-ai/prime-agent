@@ -480,6 +480,32 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// Rust-native extension, advertised by the `kernel_bash_activity` capability.
+    ListKernelBash {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    TailKernelBash {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        activity_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lines: Option<u32>,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
+    KillKernelBash {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        activity_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     CancelRlmChild {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,

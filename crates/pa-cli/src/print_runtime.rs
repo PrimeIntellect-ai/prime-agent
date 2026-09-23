@@ -248,10 +248,23 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
             now: None,
         }
     });
+    // TS `sdk.ts` seeds the Agent's queue modes from the settings manager
+    // (`steeringMode`/`followUpMode`): the print runtime reads the same
+    // settings its telemetry does, so the agent-level queues drain per
+    // the configured modes (default "one-at-a-time").
+    let queue_settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
+    let queue_mode = |mode: pa_core::settings::QueueModeSetting| match mode {
+        pa_core::settings::QueueModeSetting::All => pa_agent::agent::QueueMode::All,
+        pa_core::settings::QueueModeSetting::OneAtATime => pa_agent::agent::QueueMode::OneAtATime,
+    };
+    let steering_mode = Some(queue_mode(queue_settings.get_steering_mode()));
+    let follow_up_mode = Some(queue_mode(queue_settings.get_follow_up_mode()));
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
             cron_store: None,
             telemetry,
+            steering_mode,
+            follow_up_mode,
             cwd: config.cwd.clone(),
             agent_dir: config.agent_dir.clone(),
             mcp_manager: None,
@@ -1132,6 +1145,8 @@ async fn build_faux_engine_parts(
         pa_core::session_engine::engine::SessionEngineConfig {
             cron_store: None,
             // Faux verification harness: no product telemetry.
+            steering_mode: None,
+            follow_up_mode: None,
             telemetry: None,
             cwd: config.cwd.clone(),
             agent_dir: config.agent_dir.clone(),

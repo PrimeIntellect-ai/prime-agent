@@ -136,6 +136,9 @@ pub struct AgentView {
     /// `HeartbeatManagerComponent`, inline-picker style): while set, it
     /// owns the editor dock like the `/model` and `/effort` pickers.
     pub heartbeats_picker: Option<crate::heartbeats_picker::HeartbeatsPicker>,
+    /// The unified activity panel (the dock's grouped list): while set, it
+    /// owns the editor dock like the inline pickers.
+    pub activity_panel: Option<crate::activity_panel::ActivityPanel>,
     /// A `/share` gist upload in flight (TS `BorderedLoader`): while set,
     /// it replaces the editor with the cancellable loader rows.
     pub share_loader: Option<ShareLoader>,
@@ -252,6 +255,7 @@ impl AgentView {
             effort_picker: None,
             mcp_view: None,
             heartbeats_picker: None,
+            activity_panel: None,
             share_loader: None,
             reload_box: None,
             side_pane: None,
@@ -929,35 +933,12 @@ impl AgentView {
         self.dock_cursor = cursor.map(|(row, col)| (context_rows + overlay_count + row, col));
         lines.extend(editor_rows);
         lines.push(render_tray(&self.chrome, &self.theme, width));
-        if let Some(summary) = self.chrome.subagents {
-            let hints = self.summary_key_hints();
-            lines.extend(crate::chrome::render_subagent_summary(
-                &summary,
-                &hints.0,
-                &hints.1,
-                &hints.2,
-                &self.theme,
-                width,
-            ));
+        if let Some(dock) = &self.chrome.activity {
+            if let Some(row) = crate::chrome::render_activity_dock(dock, &self.theme, width) {
+                lines.push(row);
+            }
         }
         lines
-    }
-
-    /// The summary-line hint key texts (TS `keyText`): the confirm/open
-    /// pair for the focused open hint, the primary cursor-down key for the
-    /// select hint.
-    fn summary_key_hints(&self) -> (String, String, String) {
-        let kb = self.editor.keybindings();
-        let key = |binding: &str| {
-            kb.first_key(binding)
-                .map(|key| crate::keybindings::format_key_text(&key))
-                .unwrap_or_default()
-        };
-        (
-            key("tui.select.confirm"),
-            key("app.agents.open"),
-            key("tui.editor.cursorDown"),
-        )
     }
 
     /// The autocomplete dropdown, mounted just above the editor surface (TS
@@ -1187,6 +1168,10 @@ impl AgentView {
             let mut dock = prompt_context;
             dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
             Some(dock)
+        } else if let Some(panel) = &self.activity_panel {
+            let mut dock = prompt_context;
+            dock.extend(panel.render(&self.theme, width, self.editor.keybindings()));
+            Some(dock)
         } else {
             None
         };
@@ -1335,6 +1320,7 @@ impl AgentView {
             || self.model_picker.is_some()
             || self.effort_picker.is_some()
             || self.heartbeats_picker.is_some()
+            || self.activity_panel.is_some()
             || self.tree_selector.is_some()
             || self.fork_selector.is_some()
             || self.share_loader.is_some()

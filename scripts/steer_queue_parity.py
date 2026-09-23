@@ -12,6 +12,12 @@ three flows that define the queue/abort UX:
   and the delivery projects the TS active-action phases (`preparing` at
   pickup, `committing` before the dispatch, `running` after the delivered
   run's `agent_start`, cleared at the settle, the compactRlmText label).
+- multi-steer batch delivery (queue mode "all", seeded via
+  `<agentDir>/settings.json` `steeringMode`): three steers parked behind
+  a running wedge turn co-deliver as ONE batched turn at the boundary
+  (TS `_pumpSessionInputs`'s mode-gated gathering +
+  `turnExecutionPoliciesEqual`) - one delivery `agent_start`, three user
+  rows, one reply - on both binaries byte-compareably.
 - abort settle: an abort during a running kernel cell settles the turn
   at once - tool_execution_end(isError) + the aborted toolResult row pair
   + turn_end + agent_end broadcast (and the toolResult row persists),
@@ -47,6 +53,11 @@ import batterylib as B  # noqa: E402  (the shared daemon-reap sweep)
 PROMPT = "three tools prompt the queue drives"
 STEER_MSG = "steer now use plan b"
 FOLLOWUP_MSG = "follow up now do more"
+BATCH_STEERS = [
+    "steer batch one",
+    "steer batch two",
+    "steer batch three",
+]
 # Each tool cell sleeps so the parked inputs land deterministically
 # mid-run: the steer arrives during tool 2's cell, so the run stops at
 # the next boundary (TS `_steeringStopPending`) and never runs tool 3.
@@ -154,7 +165,7 @@ def normalize_event(event: dict) -> dict:
 
 
 class Side:
-    def __init__(self, name: str, binary: str, out: Path):
+    def __init__(self, name: str, binary: str, out: Path, steering_mode: str | None = None):
         self.name = name
         self.out = out / name
         self.out.mkdir(parents=True, exist_ok=True)
@@ -165,11 +176,28 @@ class Side:
         self.agent.mkdir(parents=True)
         self.work = self.root / "work"
         self.work.mkdir()
+        # The queue delivery modes (TS `steeringMode`/`followUpMode`, the
+        # global `<agentDir>/settings.json`): `all` batches the parked
+        # steering prefix into ONE co-delivered turn at the boundary.
+        if steering_mode is not None:
+            (self.agent / "settings.json").write_text(
+                json.dumps({"steeringMode": steering_mode, "followUpMode": "one-at-a-time"})
+            )
         self.mock = B.MockProvider(self.root, [0])
         self.mock.set_responses([{"text": "idle filler"}])
         self.mock.start()
         self.binary = binary
+        # Findings accumulate ACROSS the run's Side instances (each flow
+        # builds its own Side; a per-instance list loses the earlier
+        # flows' FAILs from the summary).
         self.findings: list[dict] = []
+        self.all_findings: list[dict] = []
+        prior = out / "all-findings.json"
+        if prior.exists():
+            try:
+                self.all_findings = json.loads(prior.read_text())
+            except Exception:
+                self.all_findings = []
         self.env = B.scrubbed_env(self.agent, self.root / "tmp")
         # The kernel python: reuse the machine's installed kernel venv when
         # present. A fresh HOME would otherwise bootstrap a fresh venv per
@@ -238,7 +266,10 @@ class Side:
     # -- helpers ------------------------------------------------------------
 
     def record(self, summary: str, ok: bool, evidence: str = "") -> None:
-        self.findings.append({"side": self.name, "ok": ok, "summary": summary, "evidence": evidence})
+        finding = {"side": self.name, "ok": ok, "summary": summary, "evidence": evidence}
+        self.findings.append(finding)
+        self.all_findings.append(finding)
+        (self.out / "all-findings.json").write_text(json.dumps(self.all_findings, indent=1))
         print(f"[{'ok  ' if ok else 'FAIL'}] {self.name}: {summary}")
 
     def evidence(self, name: str, text: str) -> None:
@@ -339,6 +370,100 @@ class Side:
             self.record("the delivery projected preparing/committing/running with labels", phases[:3] == ["preparing", "committing", "running"], json.dumps(phases))
             labels = [t["actions"].get("active", {}).get("label") for t in trace if t["type"] == "session_action_update" and t["actions"].get("active")]
             self.record("the active labels are the compacted messages", labels and all(l in (STEER_MSG, FOLLOWUP_MSG) for l in labels if l), json.dumps(labels))
+            return self.raw_trace(wire)
+        finally:
+            wire.close()
+
+    def flow_batch_delivery(self) -> list:
+        """The multi-steer batch under queue mode "all" (TS
+        `_pumpSessionInputs`'s mode gate): the same-lane parked prefix
+        co-delivers as ONE batched turn at the boundary."""
+        work = self.root / "work-b"
+        work.mkdir()
+        # The parked-lane parking must be deterministic: tool one's cell
+        # holds the turn long enough for every steer to park mid-run (the
+        # established three-tools pattern), so the steering stop ends the
+        # run at tool one's boundary with the whole prefix queued.
+        # The mock serves its responses in request order: the wedge's
+        # two tool calls consume the first two; the steering stop ends the
+        # run at tool two's boundary, so the batched turn is request
+        # three — the batch reply.
+        self.queue_script(
+            [
+                {"toolCall": {"name": "ipython", "arguments": {"code": "import time\nprint('batch tool one done')\ntime.sleep(5)"}}},
+                {"toolCall": {"name": "ipython", "arguments": {"code": "import time\nprint('batch tool two done')\ntime.sleep(12)"}}},
+            ]
+            + [{"text": "batch reply"}, {"text": "all batch tools done"}]
+        )
+        wire = B.Wire(self.sock)
+        try:
+            created = wire.request("b-create", {"type": "create", "config": {"cwd": str(work), "model": "mock-1", "sessionDir": str(self.agent / "sessions")}})
+            assert created.get("success") is True, created
+            sid = created["data"]["id"]
+            wire.request("b-attach", {"type": "attach", "activeSessionId": sid})
+            prompt = wire.request("b-prompt", {"type": "prompt", "activeSessionId": sid, "message": PROMPT})
+            assert prompt.get("success") is True, prompt
+            first_end = self.wait_event(wire, lambda ev: ev.get("type") == "tool_execution_end")
+            self.record("the batch wedge run started", first_end is not None)
+            park_t0 = time.time()
+            for msg in BATCH_STEERS:
+                parked = wire.request(f"b-steer-{msg}", {"type": "steer", "activeSessionId": sid, "message": msg})
+                assert parked.get("success") is True, parked
+                print(f"[timing] {self.name}: parked {msg!r} at +{time.time() - park_t0:.2f}s")
+            # The parked rows project before the boundary: every steer is
+            # visible in the queue projection before the run stops (the
+            # parking is part of the assertion surface, and it makes the
+            # pickup race-free: all three rows are queued when the
+            # boundary hits).
+            for msg in BATCH_STEERS:
+                proj = self.wait_event(
+                    wire,
+                    lambda ev, m=msg: ev.get("type") == "session_action_update"
+                    and m in json.dumps(ev.get("actions") or {}),
+                    timeout=60,
+                )
+                print(f"[timing] {self.name}: projected {msg!r} at +{time.time() - park_t0:.2f}s")
+            assert proj is not None, "the parking projection never arrived"
+            self.record("three steers parked behind the busy turn", True)
+            # The run stops at the wedge's boundary and the parked prefix
+            # co-delivers as ONE batched turn: one delivery agent_start,
+            # three user rows, one reply.
+            delivered = self.wait_event(
+                wire,
+                lambda ev: ev.get("type") == "message_start"
+                and BATCH_STEERS[0] in json.dumps(ev.get("message") or {}),
+                timeout=180,
+            )
+            self.record("the batched turn's first steer row delivered", delivered is not None)
+            replied = self.wait_event(
+                wire,
+                lambda ev: ev.get("type") == "message_end"
+                and "batch reply" in json.dumps(ev.get("message") or {}),
+                timeout=180,
+            )
+            self.record("the batched turn settled with one reply", replied is not None)
+            if replied is not None:
+                self.wait_event(wire, lambda ev: ev.get("type") == "agent_end", timeout=180)
+                wire.drain(2.0)
+            types = self.session_event_types(wire)
+            if delivered is not None and replied is not None:
+                # The delivery window: everything after the wedge run's
+                # agent_end (the batched turn is the next — and, under
+                # mode "all", the only — run).
+                wedge_end = types.index("agent_end")
+                delivery = types[wedge_end + 1 :]
+                self.record(
+                    "the delivery ran as ONE agent_start",
+                    delivery.count("agent_start") == 1,
+                    json.dumps(delivery[:40]),
+                )
+                # The three steers + the batched reply ride the one run:
+                # three user message_starts plus the reply's.
+                self.record(
+                    "the three steers co-delivered in the one batched turn",
+                    delivery.count("message_start") >= 4,
+                    json.dumps(delivery[:40]),
+                )
             return self.raw_trace(wire)
         finally:
             wire.close()
@@ -476,6 +601,11 @@ def run_side(name: str, binary: str, out: Path) -> int:
         traces["queue-delivery"] = side.flow_queue_delivery()
         side.evidence("trace-queue-delivery.json", json.dumps(traces["queue-delivery"], indent=1))
         side.stop_daemon()
+        side = Side(name, binary, out, steering_mode="all")
+        side.start_daemon()
+        traces["batch-delivery"] = side.flow_batch_delivery()
+        side.evidence("trace-batch-delivery.json", json.dumps(traces["batch-delivery"], indent=1))
+        side.stop_daemon()
         side = Side(name, binary, out)
         side.start_daemon()
         traces["abort-settle"] = side.flow_abort_settle()
@@ -490,15 +620,16 @@ def run_side(name: str, binary: str, out: Path) -> int:
             side.stop_daemon()
         except Exception:
             pass
-    side.evidence("summary.json", json.dumps(side.findings, indent=1))
-    failed = [f for f in side.findings if not f["ok"]]
-    print(f"{name}: {len(side.findings) - len(failed)}/{len(side.findings)} steps ok")
+    side.evidence("summary.json", json.dumps(side.all_findings, indent=1))
+    total = side.all_findings
+    failed = [f for f in total if not f["ok"]]
+    print(f"{name}: {len(total) - len(failed)}/{len(total)} steps ok (all flows)")
     return 1 if failed else 0
 
 
 def run_diff(out: Path) -> int:
     failed = 0
-    for flow in ("queue-delivery", "abort-settle", "abort-ownership"):
+    for flow in ("queue-delivery", "batch-delivery", "abort-settle", "abort-ownership"):
         ts_path = out / "ts" / f"trace-{flow}.json"
         rust_path = out / "rust" / f"trace-{flow}.json"
         if not ts_path.exists() or not rust_path.exists():

@@ -79,34 +79,39 @@ pub struct ChromeState {
     /// Tray override label (TS `getTrayOverrideLabel`): while the Ctrl+C
     /// exit hint is armed, it replaces the tray's location label.
     pub tray_override: Option<String>,
-    /// The subagent summary box under the tray (TS `SubagentSummaryLine`):
-    /// `None` hides the box; a zero-total summary renders nothing either.
-    pub subagents: Option<SubagentSummary>,
+    /// Compact, borderless activity dock under the editor.
+    pub activity: Option<ActivityDock>,
     /// Hide the splash `cwd` line (TS `getSplashCwd` returns `undefined`
     /// for the scoped agents view, so its metadata rows stay centered
     /// against the logo without the cwd row).
     pub splash_hide_cwd: bool,
 }
 
-/// Live descendant counts of a session's RLM children (TS
-/// `SubagentSummaryCounts` + the focus/openable state of the summary line).
+/// Which actionable group owns the activity-dock selection.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SubagentSummary {
-    pub running: usize,
-    pub idle: usize,
-    pub inactive: usize,
-    /// The summary line holds keyboard focus (selected background, the
-    /// open hint instead of the select hint).
-    pub focused: bool,
-    /// The current run may open the scoped agents view (TS `setOpenable`:
-    /// true for every daemon-hosted session).
-    pub openable: bool,
+pub enum ActivityGroup {
+    #[default]
+    Subagents,
+    Heartbeats,
+    Bash,
 }
 
-impl SubagentSummary {
-    /// Every retained descendant.
-    pub fn total(&self) -> usize {
-        self.running + self.idle + self.inactive
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ActivityDock {
+    pub subagents: usize,
+    pub heartbeats: usize,
+    pub bash_total: usize,
+    pub goal_tokens: Option<(String, u64, Option<u64>)>,
+    pub selected: ActivityGroup,
+    pub focused: bool,
+}
+
+impl ActivityDock {
+    pub fn visible(&self) -> bool {
+        self.subagents > 0
+            || self.heartbeats > 0
+            || self.bash_total > 0
+            || self.goal_tokens.is_some()
     }
 }
 
@@ -482,92 +487,58 @@ fn truncate_spans_to_width(spans: &[crate::Span], width: usize) -> Vec<crate::Sp
     out
 }
 
-/// The subagent summary box (TS `SubagentSummaryLine.render`, the counts
-/// box under the tray): a `\u{256d}\u{2500} subagents \u{2500}\u{256e}` frame with the
-/// status counts left and the open/select hint right; the focused row
-/// carries the selection background. A zero-total summary renders nothing.
-pub fn render_subagent_summary(
-    summary: &SubagentSummary,
-    confirm_hint: &str,
-    open_hint: &str,
-    select_hint: &str,
-    theme: &Theme,
-    width: usize,
-) -> Vec<Line> {
-    if summary.total() == 0 || width < 2 {
-        return Vec::new();
+/// One borderless row with three actionable groups and read-only goal progress.
+pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) -> Option<Line> {
+    if !dock.visible() || width == 0 {
+        return None;
     }
-    let inner = width - 2;
-    let border = theme.fg_style(ThemeColor::Border);
-    let label = "subagents";
-    let label_width = str_width(label);
-    let top_rule = "\u{2500}".repeat(inner.saturating_sub(3 + label_width));
-    let top: Line = vec![
-        Span::styled("\u{256d}\u{2500} ".to_string(), border),
-        Span::styled(label.to_string(), theme.fg_style(ThemeColor::Accent)),
-        Span::styled(format!(" {top_rule}\u{256e}"), border),
+    let groups = [
+        (
+            ActivityGroup::Subagents,
+            format!(
+                "◆ {} subagent{}",
+                dock.subagents,
+                if dock.subagents == 1 { "" } else { "s" }
+            ),
+        ),
+        (
+            ActivityGroup::Heartbeats,
+            format!(
+                "◷ {} heartbeat{}",
+                dock.heartbeats,
+                if dock.heartbeats == 1 { "" } else { "s" }
+            ),
+        ),
+        (ActivityGroup::Bash, format!("▸ {} bash", dock.bash_total)),
     ];
-    let counts = [
-        (
-            ThemeColor::Success,
-            format!("\u{25cf} {} running", summary.running),
-        ),
-        (
-            ThemeColor::Warning,
-            format!("\u{25d0} {} idle", summary.idle),
-        ),
-        (
-            ThemeColor::Dim,
-            format!("\u{25cb} {} inactive", summary.inactive),
-        ),
-    ];
-    let counts_width: usize = counts
-        .iter()
-        .map(|(_, text)| str_width(text))
-        .sum::<usize>()
-        + (counts.len() - 1) * 3;
-    let hint = match (summary.openable, summary.focused) {
-        (true, true) => format!("{confirm_hint}/{open_hint} open"),
-        (true, false) => format!("{select_hint} select"),
-        _ => String::new(),
-    };
-    let hint_width = str_width(&hint);
-    let gap = inner.saturating_sub(2 + counts_width + hint_width).max(1);
-    // The composed row: one leading space, counts (3-space separated), the
-    // gap, the hint, one trailing space (TS `\u{20}${counts}${gap}${hint}\u{20}`).
-    let mut spans: Vec<crate::Span> = vec![Span::raw(" ".to_string())];
-    for (index, (color, text)) in counts.iter().enumerate() {
+    let mut line = vec![Span::raw(" ")];
+    for (index, (group, text)) in groups.iter().enumerate() {
         if index > 0 {
-            spans.push(Span::raw("   ".to_string()));
+            line.push(theme.fg_span(ThemeColor::Dim, "  ·  "));
         }
-        spans.push(Span::styled(text.clone(), theme.fg_style(*color)));
+        let style = if dock.focused && dock.selected == *group {
+            theme
+                .fg_style(ThemeColor::Accent)
+                .patch(theme.bg_style(ThemeBg::SelectedBg))
+        } else {
+            theme.fg_style(ThemeColor::Muted)
+        };
+        line.push(Span::styled(text.clone(), style));
     }
-    spans.push(Span::raw(" ".repeat(gap)));
-    if !hint.is_empty() {
-        spans.push(Span::styled(hint.clone(), theme.fg_style(ThemeColor::Dim)));
+    if let Some((status, used, budget)) = &dock.goal_tokens {
+        line.push(theme.fg_span(ThemeColor::Dim, "  ·  "));
+        let goal = match budget {
+            Some(budget) => format!(
+                "goal {} {}/{}",
+                status,
+                format_token_count(*used),
+                format_token_count(*budget)
+            ),
+            None => format!("goal {status}"),
+        };
+        line.push(theme.fg_span(ThemeColor::Dim, goal));
     }
-    spans.push(Span::raw(" ".to_string()));
-    let body = truncate_spans_to_width(&spans, inner);
-    let body_width: usize = body.iter().map(|s| str_width(&s.content)).sum();
-    let pad = inner.saturating_sub(body_width);
-    let mut row: Line = vec![Span::styled("\u{2502}".to_string(), border)];
-    if summary.focused {
-        let selected = theme.bg_style(ThemeBg::SelectedBg);
-        for mut span in body {
-            span.style = span.style.patch(selected);
-            row.push(span);
-        }
-        row.push(Span::styled(" ".repeat(pad), selected));
-    } else {
-        row.extend(body);
-        row.push(Span::raw(" ".repeat(pad)));
-    }
-    row.push(Span::styled("\u{2502}".to_string(), border));
-    let bottom: Line = vec![Span::styled(
-        format!("\u{2570}{}\u{256f}", "\u{2500}".repeat(inner)),
-        border,
-    )];
-    vec![top, row, bottom]
+    Some(truncate_spans_to_width(&line, width))
 }
 
 /// The editor surface background: `userMessageBg` (TS `getEditorTheme`).
@@ -578,59 +549,26 @@ pub fn editor_background(theme: &Theme) -> ratatui::style::Style {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn subagent_summary_box_matches_ts_geometry() {
+    fn activity_dock_is_one_borderless_row_with_goal_last() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
-        let summary = SubagentSummary {
-            running: 0,
-            idle: 1,
-            inactive: 0,
-            focused: false,
-            openable: true,
+        let dock = ActivityDock {
+            subagents: 2,
+            heartbeats: 1,
+            bash_total: 1,
+            goal_tokens: Some(("active".to_string(), 18_000, Some(40_000))),
+            ..ActivityDock::default()
         };
-        let rows = render_subagent_summary(&summary, "Enter", "\u{2192}", "\u{2193}", &theme, 120);
-        assert_eq!(rows.len(), 3, "the box frame is three rows");
-        let flat = |row: &Line| row.iter().map(|s| s.content.as_str()).collect::<String>();
+        let row = render_activity_dock(&dock, &theme, 100).unwrap();
+        let text = row
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
         assert_eq!(
-            flat(&rows[0]),
-            "\u{256d}\u{2500} subagents ".to_string() + &"\u{2500}".repeat(106) + "\u{256e}"
+            text,
+            " ◆ 2 subagents  ·  ◷ 1 heartbeat  ·  ▸ 1 bash  ·  goal active 18k/40k"
         );
-        assert_eq!(
-            flat(&rows[1]),
-            "\u{2502} \u{25cf} 0 running   \u{25d0} 1 idle   \u{25cb} 0 inactive".to_string()
-                + &" ".repeat(71)
-                + "\u{2193} select \u{2502}"
-        );
-        assert_eq!(
-            flat(&rows[2]),
-            "\u{2570}".to_string() + &"\u{2500}".repeat(118) + "\u{256f}"
-        );
-        assert_eq!(str_width(&flat(&rows[1])), 120);
-    }
-
-    #[test]
-    fn subagent_summary_box_hidden_without_children() {
-        let theme = Theme::builtin("prime", ColorMode::TrueColor);
-        let summary = SubagentSummary::default();
-        assert!(
-            render_subagent_summary(&summary, "Enter", "\u{2192}", "\u{2193}", &theme, 120)
-                .is_empty()
-        );
-        let focused = SubagentSummary {
-            running: 2,
-            idle: 0,
-            inactive: 1,
-            focused: true,
-            openable: true,
-        };
-        let rows = render_subagent_summary(&focused, "Enter", "\u{2192}", "\u{2193}", &theme, 120);
-        let flat = |row: &Line| row.iter().map(|s| s.content.as_str()).collect::<String>();
-        assert!(
-            flat(&rows[1])
-                .trim()
-                .ends_with("Enter/\u{2192} open \u{2502}"),
-            "{}",
-            flat(&rows[1])
-        );
+        assert!(!text.contains('╭'));
+        assert!(render_activity_dock(&ActivityDock::default(), &theme, 100).is_none());
     }
 
     use super::*;

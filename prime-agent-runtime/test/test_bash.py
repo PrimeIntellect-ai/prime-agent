@@ -46,6 +46,71 @@ def _win_spawn(procs=None, resume=True):
 
 
 class BashTest(unittest.IsolatedAsyncioTestCase):
+    async def test_activity_handles_are_scoped_and_tail_is_bounded(self):
+        handle = bash("printf 'first\nsecond\n'; sleep 20")
+        from rlm.bash import activity_request
+
+        activity_id = handle._activity_id
+        rows = activity_request("list")["activities"]
+        listed = next(row for row in rows if row["id"] == activity_id)
+        self.assertEqual(listed["pid"], handle.pid)
+        self.assertIsNone(listed["exitCode"])
+        self.assertIn("T", listed["startedAt"])
+        for _ in range(100):
+            if "second" in activity_request("tail", activity_id, 1)["tail"]:
+                break
+            await asyncio.sleep(0.01)
+        self.assertEqual(activity_request("tail", activity_id, 1)["tail"], "second")
+        self.assertEqual(activity_request("kill", activity_id)["killed"], True)
+        await handle
+        finished = next(
+            row for row in activity_request("list")["activities"] if row["id"] == activity_id
+        )
+        self.assertEqual(finished["status"], "finished")
+        self.assertIsInstance(finished["exitCode"], int)
+        with self.assertRaises(KeyError):
+            activity_request("kill", "not-a-handle")
+        with self.assertRaises(ValueError):
+            activity_request("tail", activity_id, 201)
+        self.assertFalse(activity_request("kill", activity_id)["killed"])
+
+    async def test_activity_tail_frame_stays_under_the_wire_cap(self):
+        # json escaping can expand one byte to six (\uXXXX), so the cap
+        # must hold on the serialized frame, not the decoded slice.
+        handle = bash('python3 -c "print(chr(0) * 20000)"')
+        await handle
+        from rlm.bash import activity_request
+
+        activity_id = handle._activity_id
+        tail = activity_request("tail", activity_id, 200)["tail"]
+        self.assertGreater(len(tail), 0)
+        self.assertLessEqual(len(json.dumps({"tail": tail})), 16_384)
+
+    async def test_activity_list_frame_stays_under_the_wire_cap(self):
+        handles = [bash("sleep 3 # " + str(index) * 80) for index in range(30)]
+        try:
+            from rlm.bash import activity_request
+
+            rows = activity_request("list")["activities"]
+            self.assertGreater(len(rows), 1)
+            self.assertLessEqual(len(json.dumps({"activities": rows})), 16_384)
+            self.assertTrue(all(len(row["command"]) <= 512 for row in rows))
+        finally:
+            for handle in handles:
+                handle.kill()
+
+    async def test_activity_tail_keeps_the_newest_output_under_the_cap(self):
+        # Escaped output shrinks from the oldest end: the newest line is
+        # always the surviving one.
+        handle = bash('python3 -c "print(chr(0) * 20000); print(chr(65) * 8)"')
+        await handle
+        from rlm.bash import activity_request
+
+        activity_id = handle._activity_id
+        tail = activity_request("tail", activity_id, 200)["tail"]
+        self.assertTrue(tail.endswith("AAAAAAAA"), tail[-60:])
+        self.assertLessEqual(len(json.dumps({"tail": tail})), 16_384)
+
     async def test_await_returns_result(self):
         result = await bash("echo hi")
         self.assertEqual(result.exit_code, 0)

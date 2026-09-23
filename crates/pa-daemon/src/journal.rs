@@ -297,10 +297,32 @@ pub struct WorkerQueueItemRecord {
     pub queue_key: Option<String>,
     #[serde(default = "queue_visible_default")]
     pub queue_visible: bool,
+    /// The item's turn-execution class ("queued"/"injected"/"direct", see
+    /// worker::TurnPolicy): the batch gathering's compatibility gate. A
+    /// record written before the field existed restores as "queued" — the
+    /// dominant lane class, and the only one a fresh snapshot can batch.
+    #[serde(default = "queue_policy_default")]
+    pub policy: String,
 }
 
 fn queue_visible_default() -> bool {
     true
+}
+
+fn queue_policy_default() -> String {
+    "queued".to_string()
+}
+
+impl WorkerQueueItemRecord {
+    /// The record's turn-execution class; an unknown value restores as
+    /// the dominant "queued" class.
+    pub(crate) fn policy(&self) -> crate::worker::TurnPolicy {
+        match self.policy.as_str() {
+            "injected" => crate::worker::TurnPolicy::Injected,
+            "direct" => crate::worker::TurnPolicy::Direct,
+            _ => crate::worker::TurnPolicy::Queued,
+        }
+    }
 }
 
 /// A worker queue snapshot record: the pending steering/follow-up lanes so a
@@ -503,6 +525,7 @@ fn parse_snapshot_lane(value: Option<&Value>) -> Vec<WorkerQueueItemRecord> {
                         custom_message: None,
                         queue_key: None,
                         queue_visible: true,
+                        policy: queue_policy_default(),
                     }),
                     Value::Object(_) => serde_json::from_value(entry.clone()).ok(),
                     _ => None,

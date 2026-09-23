@@ -10,6 +10,9 @@ use pa_types::daemon::DaemonCommand;
 use pa_types::slash_commands::{SlashCommandExecution, SlashCommandRegistry};
 use serde_json::Value;
 
+use crate::activity_panel::{
+    ActivityPanel, ActivityPanelAction, ActivityPanelGroup, ActivityPanelSources,
+};
 use crate::chat::{
     ChatEntry, CompactionReason, CompactionState, MessageBlock, RetryState, StatusKind,
     ToolResultView, WorkingState,
@@ -109,6 +112,40 @@ pub(crate) struct CompactionAbortNote {
 pub(crate) struct HeartbeatsUpdate {
     pub heartbeats: Vec<HeartbeatEntry>,
     pub fetch_error: Option<String>,
+}
+
+pub(crate) struct ActivityUpdates {
+    pub heartbeats: mpsc::UnboundedSender<HeartbeatsUpdate>,
+    pub bash: mpsc::UnboundedSender<BashActivityUpdate>,
+}
+
+/// Kernel-bash channel frames: list snapshots refresh the dock and panel,
+/// a landed tail feeds the open panel's selected row, and a failed
+/// background action surfaces as an error row.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum BashActivityUpdate {
+    /// `epoch` identifies the list request the response answers; only the
+    /// latest issued request's response may land.
+    List {
+        session: String,
+        epoch: u64,
+        data: Value,
+    },
+    Tail {
+        session: String,
+        activity_id: String,
+        tail: String,
+    },
+    /// A background action settled; re-issue the list from the main loop so
+    /// the request carries a fresh epoch (one issued mid-action must not
+    /// supersede the post-action snapshot).
+    Refresh {
+        session: String,
+    },
+    Error {
+        session: String,
+        message: String,
+    },
 }
 
 /// A landed `get_model_catalog` refresh: the full catalog and the providers
@@ -253,6 +290,12 @@ pub(crate) struct SessionUi {
     /// Rows of the most recent `/list` (for `/switch <n>`).
     list_rows: Vec<Value>,
     pub(crate) turn_active: bool,
+    /// The session's queue delivery mode (TS `steeringMode`, the state's
+    /// `steeringMode`): `all` delivers the queued steering prefix as one
+    /// batched turn at the boundary; `one-at-a-time` (the TS default) one
+    /// per turn. Cached at every connection-state read so the queued-input
+    /// adoption event reports the mode without a synchronous fetch.
+    pub(crate) steering_mode: String,
     /// The chat index of the assistant message still streaming.
     streaming_index: Option<usize>,
     /// The loader's token accounting (TS `AgentActivityTracker`), reported
@@ -308,8 +351,15 @@ pub(crate) struct SessionUi {
     /// `getScopedHeartbeats`): drives the tray heartbeat label and seeds
     /// the `/heartbeats` view; refreshed by `heartbeats_changed`.
     heartbeat_catalog: Vec<HeartbeatEntry>,
+    /// The current Python bash() registry snapshot from the owning kernel.
+    bash_activities: Value,
+    /// Monotonic id of the latest issued kernel-bash list request; a late
+    /// response from an older request must not repaint a newer snapshot.
+    bash_list_epoch: u64,
+    bash_updates: mpsc::UnboundedSender<BashActivityUpdate>,
     /// The subagent summary line holds keyboard focus.
     subagents_focused: bool,
+    activity_group: crate::chrome::ActivityGroup,
     /// The last computed descendant counts (selectability reads them between
     /// roster updates).
     subagent_counts: crate::subagents::SubagentCounts,
@@ -485,7 +535,7 @@ impl SessionUi {
         share_notes: mpsc::UnboundedSender<ShareNote>,
         reload_notes: mpsc::UnboundedSender<ReloadNote>,
         catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
-        heartbeat_updates: mpsc::UnboundedSender<HeartbeatsUpdate>,
+        activity_updates: ActivityUpdates,
     ) -> Result<SessionUi> {
         let active_session_id = match &options.session {
             SessionSelection::New => create_session(&client, options, None).await?,
@@ -509,7 +559,7 @@ impl SessionUi {
             default_thinking_level: options.default_thinking_level.clone(),
             models_fetched_at: None,
             catalog_updates,
-            heartbeat_updates,
+            heartbeat_updates: activity_updates.heartbeats,
             telemetry_disabled: options.telemetry_disabled,
             code_block_indent: options.code_block_indent.clone(),
             tree_filter_mode: crate::tree_list::filter_mode_from_str(&options.tree_filter_mode),
@@ -540,6 +590,7 @@ impl SessionUi {
             cost_usd: None,
             list_rows: Vec::new(),
             turn_active: false,
+            steering_mode: "one-at-a-time".to_string(),
             streaming_index: None,
             working_tokens: LoaderTokenTracker::default(),
             turn_error_shown: false,
@@ -558,7 +609,11 @@ impl SessionUi {
             scoped_agents_view: None,
             roster: Vec::new(),
             heartbeat_catalog: Vec::new(),
+            bash_activities: serde_json::json!({"activities": []}),
+            bash_list_epoch: 0,
+            bash_updates: activity_updates.bash,
             subagents_focused: false,
+            activity_group: crate::chrome::ActivityGroup::Subagents,
             subagent_counts: crate::subagents::SubagentCounts::default(),
             session_file: None,
             pending_selection: None,
@@ -776,6 +831,11 @@ impl SessionUi {
         // refreshes the catalog on every chat open).
         self.heartbeat_catalog.clear();
         self.spawn_heartbeat_refresh();
+        // The bash registry is kernel-owned and session-scoped: the previous
+        // session's rows are not this one's (the next poll refills).
+        self.bash_activities = serde_json::json!({"activities": []});
+        self.activity_group = crate::chrome::ActivityGroup::Subagents;
+        self.spawn_bash_activity_refresh();
         self.pending_model = reconstructed.model_id;
         self.last_assistant_text = reconstructed
             .chat
@@ -870,9 +930,7 @@ impl SessionUi {
         }
     }
 
-    /// Recompute the subagent summary box from the roster (TS
-    /// `updateSubagentSummaryLine`): live counts over this session's
-    /// descendants, focused when the summary line holds the focus.
+    /// Refresh the one-line activity dock from the existing session feeds.
     fn update_subagent_summary(&mut self, view: &mut AgentView) {
         let identity = crate::subagents::SessionIdentity::new(
             (!self.active_session_id.is_empty()).then(|| self.active_session_id.clone()),
@@ -881,40 +939,97 @@ impl SessionUi {
         );
         let counts = crate::subagents::count_descendants(&self.roster, &identity);
         self.subagent_counts = counts;
-        if counts.total == 0 {
-            self.subagents_focused = false;
-            view.chrome.subagents = None;
-            return;
-        }
-        view.chrome.subagents = Some(crate::chrome::SubagentSummary {
-            running: counts.running,
-            idle: counts.idle,
-            inactive: counts.inactive,
-            focused: self.subagents_focused,
-            openable: self.return_to_agents_view,
+
+        let goal = &self.goal_view.goal;
+        let goal_tokens = (goal.status != pa_types::goal::GoalStatus::Idle).then(|| {
+            (
+                goal.status.slug().to_string(),
+                goal.tokens_used,
+                goal.token_budget,
+            )
         });
+        let dock = crate::chrome::ActivityDock {
+            subagents: counts.total,
+            heartbeats: self.heartbeat_catalog.len(),
+            bash_total: crate::activity_panel::parse_bash_activities(&self.bash_activities).len(),
+            goal_tokens,
+            selected: self.activity_group,
+            focused: self.subagents_focused,
+        };
+        // A focused selection must stay actionable: when its feed empties
+        // (or never had rows), move to the first selectable group; with
+        // nothing selectable the dock stays a read-only indicator and
+        // releases the focus.
+        if self.subagents_focused && !self.activity_selectable(self.activity_group) {
+            self.activity_group = [
+                crate::chrome::ActivityGroup::Subagents,
+                crate::chrome::ActivityGroup::Heartbeats,
+                crate::chrome::ActivityGroup::Bash,
+            ]
+            .into_iter()
+            .find(|group| self.activity_selectable(*group))
+            .unwrap_or(crate::chrome::ActivityGroup::Subagents);
+            if !self.activity_selectable(self.activity_group) {
+                self.subagents_focused = false;
+            }
+        }
+        view.chrome.activity = dock.visible().then_some(crate::chrome::ActivityDock {
+            selected: self.activity_group,
+            focused: self.subagents_focused,
+            ..dock
+        });
+        if let Some(panel) = view.activity_panel.as_mut() {
+            panel.apply_sources(&self.activity_sources(&identity));
+        }
     }
 
-    /// Whether the subagent summary line may take focus (TS `isSelectable`):
-    /// children exist and the run can open the scoped agents view.
-    fn subagents_selectable(&self) -> bool {
-        self.return_to_agents_view && self.subagent_counts.total > 0
+    fn activity_selectable(&self, group: crate::chrome::ActivityGroup) -> bool {
+        match group {
+            crate::chrome::ActivityGroup::Subagents => {
+                self.return_to_agents_view && self.subagent_counts.total > 0
+            }
+            crate::chrome::ActivityGroup::Heartbeats => !self.heartbeat_catalog.is_empty(),
+            crate::chrome::ActivityGroup::Bash => {
+                !crate::activity_panel::parse_bash_activities(&self.bash_activities).is_empty()
+            }
+        }
     }
 
-    /// Hand the focus to the subagent summary line (TS
-    /// `focusSubagentSummary`, shared by `app.subagents.focus` and the
-    /// editor's move-below-prompt hook): the tray override label blocks
-    /// the hand-off — the armed Ctrl+C exit hint, and the streaming
-    /// follow-up-queue hint while a draft sits in the editor (TS
-    /// `getTrayOverrideLabel`) — and a non-selectable line never takes
-    /// it. The inline pickers never reach this point: they own the whole
-    /// key dispatch before the editor path (TS `isInlinePickerOpen`).
+    /// The panel's row sources over the same feeds as the dock.
+    fn activity_sources<'a>(
+        &'a self,
+        identity: &'a crate::subagents::SessionIdentity,
+    ) -> ActivityPanelSources<'a> {
+        ActivityPanelSources {
+            roster: &self.roster,
+            identity,
+            goal: &self.goal_view.goal,
+            heartbeats: &self.heartbeat_catalog,
+            bash: &self.bash_activities,
+        }
+    }
+
+    /// The editor's Down and Alt+A hand focus to the compact dock.
     fn focus_subagents_summary(&mut self, view: &mut AgentView) -> bool {
-        if self.tray_override().is_some()
-            || (self.turn_active && !view.editor.get_text().trim().is_empty())
-            || !self.subagents_selectable()
-        {
+        // The tray override label blocks the hand-off (TS
+        // `focusSubagentSummary`'s `getTrayOverrideLabel()` gate): the
+        // armed Ctrl+C exit hint, or the streaming follow-up hint over a
+        // non-empty draft — the override covers the streaming arm, so no
+        // separate draft check is needed.
+        if self.tray_override(view).is_some() {
             return false;
+        }
+        if !self.activity_selectable(self.activity_group) {
+            let Some(group) = [
+                crate::chrome::ActivityGroup::Subagents,
+                crate::chrome::ActivityGroup::Heartbeats,
+                crate::chrome::ActivityGroup::Bash,
+            ]
+            .into_iter()
+            .find(|group| self.activity_selectable(*group)) else {
+                return false;
+            };
+            self.activity_group = group;
         }
         self.subagents_focused = true;
         self.update_subagent_summary(view);
@@ -957,6 +1072,12 @@ impl SessionUi {
         let held_bash = matches!(kind, RebuildKind::Resync)
             .then(|| std::mem::take(&mut view.pending_bash))
             .unwrap_or_default();
+        // A rebind replaces the whole view: the previous session's open
+        // activity panel dies with its transcript instead of owning keys
+        // over the new session's sources.
+        if matches!(kind, RebuildKind::Rebind) {
+            view.activity_panel = None;
+        }
         view.clear_chat();
         // The rebuilt transcript invalidates the tracked status row.
         self.last_status_index = None;
@@ -1131,6 +1252,11 @@ impl SessionUi {
         let label = tray_goal_label(&self.goal_view.goal);
         if view.chrome.goal_label != label {
             view.chrome.goal_label = label;
+            self.dirty = true;
+        }
+        let previous = view.chrome.activity.clone();
+        self.update_subagent_summary(view);
+        if previous != view.chrome.activity {
             self.dirty = true;
         }
     }
@@ -2065,8 +2191,13 @@ impl SessionUi {
                     SubmitBehavior::Steer => "steering",
                     SubmitBehavior::FollowUp => "follow_up",
                 };
+                // The queued-input adoption event carries the session's
+                // queue delivery mode (`tui input queued`'s
+                // `steering_mode`): exposure under batched delivery is
+                // the multi-steer batch feature's adoption signal.
+                let steering_mode = self.steering_mode.clone();
                 tokio::spawn(async move {
-                    telemetry.queued_input(lane).await;
+                    telemetry.queued_input(lane, steering_mode).await;
                 });
             }
         }
@@ -2843,7 +2974,7 @@ impl SessionUi {
                     return Ok(());
                 }
                 self.track_command_used("heartbeats");
-                self.open_heartbeats_view(view).await;
+                self.open_heartbeats_view(view, None).await;
             }
             other => {
                 self.note(
@@ -3353,12 +3484,12 @@ impl SessionUi {
             steering_mode: state
                 .get("steeringMode")
                 .and_then(Value::as_str)
-                .unwrap_or("all")
+                .unwrap_or("one-at-a-time")
                 .to_string(),
             follow_up_mode: state
                 .get("followUpMode")
                 .and_then(Value::as_str)
-                .unwrap_or("all")
+                .unwrap_or("one-at-a-time")
                 .to_string(),
             thinking_level: state
                 .get("thinkingLevel")
@@ -3578,6 +3709,11 @@ impl SessionUi {
                     view,
                 )
                 .await;
+                // The queue delivery mode changed (TS `setSteeringMode`
+                // applies live): refresh the cache the queued-input event
+                // reads, so a submission right after the switch reports
+                // the new mode.
+                let _ = self.connection_state(view).await;
             }
             "follow-up-mode" => {
                 self.daemon_switch(
@@ -4751,18 +4887,27 @@ impl SessionUi {
             .filter(|until| std::time::Instant::now() < *until)
     }
 
-    /// The tray override label while the exit hint is armed (TS
-    /// `getTrayOverrideLabel`: `Press Ctrl+C again to exit`).
-    pub(crate) fn tray_override(&self) -> Option<String> {
-        if !self.ctrl_c_hint_visible() {
-            return None;
+    /// The tray override label (TS `getTrayOverrideLabel`): the Ctrl+C
+    /// exit hint while armed, else — while the agent streams and a draft
+    /// sits in the editor — the streaming follow-up hint
+    /// (`<followUp> to queue message`). The inline pickers never reach
+    /// this from the key path (they own the whole dispatch before the
+    /// editor, TS `isInlinePickerOpen`), and the dock render skips the
+    /// tray while one is mounted.
+    pub(crate) fn tray_override(&self, view: &AgentView) -> Option<String> {
+        if self.ctrl_c_hint_visible() {
+            let key = self
+                .keybindings
+                .first_key("app.clear")
+                .map(|key| crate::keybindings::format_key_text(&key))
+                .unwrap_or_else(|| "Ctrl+C".to_string());
+            return Some(format!("Press {key} again to exit"));
         }
-        let key = self
-            .keybindings
-            .first_key("app.clear")
-            .map(|key| crate::keybindings::format_key_text(&key))
-            .unwrap_or_else(|| "Ctrl+C".to_string());
-        Some(format!("Press {key} again to exit"))
+        streaming_tray_hint(
+            &self.keybindings,
+            self.turn_active,
+            &view.editor.get_expanded_text(),
+        )
     }
 
     /// One key press while the `/model` picker is open: Esc/Ctrl+C close
@@ -4829,6 +4974,7 @@ impl SessionUi {
         let overlay_focused = view.model_picker.is_some()
             || view.effort_picker.is_some()
             || view.heartbeats_picker.is_some()
+            || view.activity_panel.is_some()
             || view.tree_selector.is_some()
             || view.fork_selector.is_some()
             || view.share_loader.is_some()
@@ -4986,6 +5132,13 @@ impl SessionUi {
             self.dirty = true;
             return;
         }
+        // The activity panel owns the whole frame while open (like its key
+        // dispatch): a paste never lands in the hidden editor prompt,
+        // where a later Enter would submit it unedited.
+        if view.activity_panel.is_some() {
+            self.dirty = true;
+            return;
+        }
         let _ = view.editor.handle_paste(text);
     }
 
@@ -5021,6 +5174,249 @@ impl SessionUi {
             }
             None => {}
         }
+        Ok(())
+    }
+
+    pub(crate) fn spawn_bash_activity_refresh(&mut self) {
+        if !self
+            .client
+            .hello()
+            .get("serverCapabilities")
+            .and_then(Value::as_array)
+            .is_some_and(|caps| {
+                caps.iter()
+                    .any(|cap| cap.as_str() == Some("kernel_bash_activity"))
+            })
+        {
+            return;
+        }
+        // The 2s poll, the panel open, and the post-kill refresh can
+        // overlap: every request stamps the epoch it was issued under, and
+        // only the latest issued request's response lands.
+        self.bash_list_epoch += 1;
+        let epoch = self.bash_list_epoch;
+        let client = self.client.clone();
+        let active_session_id = self.active_session_id.clone();
+        let session_for_update = active_session_id.clone();
+        let tx = self.bash_updates.clone();
+        tokio::spawn(async move {
+            if let Ok(data) = client
+                .request_ok(DaemonCommand::ListKernelBash {
+                    id: None,
+                    active_session_id,
+                    rest: Default::default(),
+                })
+                .await
+            {
+                let _ = tx.send(BashActivityUpdate::List {
+                    session: session_for_update,
+                    epoch,
+                    data,
+                });
+            }
+        });
+    }
+
+    /// A late poll from the previous session must not repaint the dock of
+    /// the newly attached one: every update carries the session it asked
+    /// about, and only that session's frames land.
+    pub(crate) fn apply_bash_activity(&mut self, update: BashActivityUpdate, view: &mut AgentView) {
+        let session = match &update {
+            BashActivityUpdate::List { session, .. } => session,
+            BashActivityUpdate::Tail { session, .. } => session,
+            BashActivityUpdate::Refresh { session } => session,
+            BashActivityUpdate::Error { session, .. } => session,
+        };
+        if session != &self.active_session_id {
+            return;
+        }
+        match update {
+            BashActivityUpdate::List { epoch, data, .. } => {
+                // A late response from an older request must not repaint a
+                // newer snapshot (a killed process must not come back as
+                // running).
+                if epoch != self.bash_list_epoch {
+                    return;
+                }
+                if self.bash_activities == data {
+                    return;
+                }
+                self.bash_activities = data;
+                self.update_subagent_summary(view);
+            }
+            BashActivityUpdate::Tail {
+                activity_id, tail, ..
+            } => {
+                if let Some(panel) = view.activity_panel.as_mut() {
+                    panel.set_bash_tail(&activity_id, &tail);
+                }
+            }
+            BashActivityUpdate::Error { message, .. } => {
+                self.error_row(&message, view);
+            }
+            BashActivityUpdate::Refresh { .. } => {
+                // Issue a fresh list from the main loop; its own response
+                // lands through this channel with a current epoch.
+                self.spawn_bash_activity_refresh();
+                return;
+            }
+        }
+        self.dirty = true;
+    }
+
+    fn emit_activity_opened(&self, kind: &'static str) {
+        if let Some(telemetry) = self.telemetry.clone() {
+            tokio::spawn(async move {
+                telemetry.activity_opened(kind).await;
+            });
+        }
+    }
+
+    /// Open the dock's grouped list over the current feeds, pre-selecting
+    /// the dock's group when it has rows.
+    fn open_activity_panel(&mut self, view: &mut AgentView) {
+        self.spawn_bash_activity_refresh();
+        let identity = crate::subagents::SessionIdentity::new(
+            (!self.active_session_id.is_empty()).then(|| self.active_session_id.clone()),
+            (!self.session_id.is_empty()).then(|| self.session_id.clone()),
+            self.session_file.clone(),
+        );
+        let sources = self.activity_sources(&identity);
+        let initial = match self.activity_group {
+            crate::chrome::ActivityGroup::Subagents => Some(ActivityPanelGroup::Subagents),
+            crate::chrome::ActivityGroup::Heartbeats => Some(ActivityPanelGroup::Heartbeats),
+            crate::chrome::ActivityGroup::Bash => Some(ActivityPanelGroup::Bash),
+        };
+        view.activity_panel = Some(ActivityPanel::new(
+            &sources,
+            initial,
+            picker_viewport_rows(view.terminal_rows()),
+        ));
+        self.subagents_focused = false;
+        self.update_subagent_summary(view);
+        self.dirty = true;
+    }
+
+    async fn handle_activity_panel_key(
+        &mut self,
+        key: KeyEvent,
+        view: &mut AgentView,
+    ) -> Result<()> {
+        let Some(id) = key_event_to_id(&key) else {
+            return Ok(());
+        };
+        if id == "ctrl+c" {
+            self.exit_guard.note_ctrl_c_handled();
+        }
+        let action = view
+            .activity_panel
+            .as_mut()
+            .map(|panel| panel.handle_key(&id, view.editor.keybindings()));
+        match action {
+            Some(ActivityPanelAction::Close) => {
+                view.activity_panel = None;
+            }
+            Some(ActivityPanelAction::OpenGroup { group, selected_id }) => {
+                view.activity_panel = None;
+                match group {
+                    ActivityPanelGroup::Subagents => {
+                        // The same gate as the dock's group: a run that
+                        // cannot open the scoped agents view shows the
+                        // note instead of leaving the session view.
+                        if self.return_to_agents_view {
+                            self.emit_activity_opened("subagents");
+                            self.open_scoped_agents_view(view);
+                        } else {
+                            self.note(
+                                "The agents view needs a daemon-hosted session; start normally (without --no-session) to browse sessions",
+                                view,
+                            );
+                        }
+                    }
+                    ActivityPanelGroup::Heartbeats => {
+                        self.emit_activity_opened("heartbeats");
+                        // The panel's chosen row opens selected, not the
+                        // catalog's first entry.
+                        self.open_heartbeats_view(view, selected_id).await;
+                    }
+                    // Enter never opens these groups from the panel: the
+                    // goal row is read-only and the bash rows fetch their
+                    // tail in place.
+                    ActivityPanelGroup::Goals | ActivityPanelGroup::Bash => {}
+                }
+            }
+            Some(ActivityPanelAction::ViewBashOutput { id }) => {
+                self.emit_activity_opened("bash");
+                // The request runs off the key loop: a stalled daemon
+                // must not freeze the TUI behind the request bound. The
+                // tail lands on the open panel through the update channel.
+                let client = self.client.clone();
+                let session = self.active_session_id.clone();
+                let tx = self.bash_updates.clone();
+                tokio::spawn(async move {
+                    let response_id = id.clone();
+                    let result = client
+                        .request_ok(DaemonCommand::TailKernelBash {
+                            id: None,
+                            active_session_id: session.clone(),
+                            activity_id: id,
+                            lines: Some(50),
+                            rest: Default::default(),
+                        })
+                        .await;
+                    match result {
+                        Ok(data) => {
+                            if let Some(tail) = data.get("tail").and_then(Value::as_str) {
+                                let _ = tx.send(BashActivityUpdate::Tail {
+                                    session,
+                                    activity_id: response_id,
+                                    tail: tail.to_string(),
+                                });
+                            }
+                        }
+                        Err(error) => {
+                            let _ = tx.send(BashActivityUpdate::Error {
+                                session,
+                                message: format!("Bash output: {error:#}"),
+                            });
+                        }
+                    }
+                });
+            }
+            Some(ActivityPanelAction::KillBash { id }) => {
+                let client = self.client.clone();
+                let session = self.active_session_id.clone();
+                let tx = self.bash_updates.clone();
+                tokio::spawn(async move {
+                    let result = client
+                        .request_ok(DaemonCommand::KillKernelBash {
+                            id: None,
+                            active_session_id: session.clone(),
+                            activity_id: id,
+                            rest: Default::default(),
+                        })
+                        .await;
+                    match result {
+                        Ok(_) => {
+                            // The killed row settles immediately: the
+                            // main loop re-issues the list under a fresh
+                            // epoch (the one stamped here predates any
+                            // poll that fired while the kill was in
+                            // flight).
+                            let _ = tx.send(BashActivityUpdate::Refresh { session });
+                        }
+                        Err(error) => {
+                            let _ = tx.send(BashActivityUpdate::Error {
+                                session,
+                                message: format!("Could not kill bash command: {error:#}"),
+                            });
+                        }
+                    }
+                });
+            }
+            Some(ActivityPanelAction::None) | None => {}
+        }
+        self.dirty = true;
         Ok(())
     }
 
@@ -5263,7 +5659,9 @@ impl SessionUi {
     /// (TS `showHeartbeatManager`): the fetch error opens over the cached
     /// catalog with the failure surfaced inside the view (stale-while-
     /// revalidate), and the tray label follows the landed catalog.
-    async fn open_heartbeats_view(&mut self, view: &mut AgentView) {
+    /// `preselect` carries the activity panel's chosen heartbeat row into
+    /// the view's selection.
+    async fn open_heartbeats_view(&mut self, view: &mut AgentView, preselect: Option<String>) {
         let (fetched, fetch_error) = self.fetch_scoped_heartbeats().await;
         let heartbeats = if fetch_error.is_some() {
             self.heartbeat_catalog.clone()
@@ -5274,6 +5672,7 @@ impl SessionUi {
         view.heartbeats_picker = Some(HeartbeatsPicker::new(
             heartbeats,
             fetch_error,
+            preselect,
             picker_viewport_rows(view.terminal_rows()),
         ));
         self.sync_heartbeat_tray(view);
@@ -5286,6 +5685,11 @@ impl SessionUi {
         let label = tray_heartbeat_label(&self.heartbeat_catalog, &self.keybindings);
         if view.chrome.heartbeat_label != label {
             view.chrome.heartbeat_label = label;
+            self.dirty = true;
+        }
+        let previous = view.chrome.activity.clone();
+        self.update_subagent_summary(view);
+        if previous != view.chrome.activity {
             self.dirty = true;
         }
     }
@@ -5497,7 +5901,16 @@ impl SessionUi {
             )
             .await
         {
-            Ok(data) => Some(data),
+            Ok(data) => {
+                // The queue delivery mode rides the state (TS
+                // `steeringMode`): cached here — every state read is the
+                // single refresh seam — so the queued-input adoption
+                // event reports the live mode without a fetch.
+                if let Some(mode) = data.get("steeringMode").and_then(Value::as_str) {
+                    self.steering_mode = mode.to_string();
+                }
+                Some(data)
+            }
             Err(error) => {
                 self.note(&format!("{error:#}"), view);
                 None
@@ -5777,6 +6190,10 @@ impl SessionUi {
         if view.heartbeats_picker.is_some() {
             return self.handle_heartbeats_picker_key(key, view).await;
         }
+        // The unified activity panel owns the frame the same way.
+        if view.activity_panel.is_some() {
+            return self.handle_activity_panel_key(key, view).await;
+        }
         // The `/tree` and `/fork` selectors own the frame the same way.
         if view.tree_selector.is_some() {
             return self.handle_tree_selector_key(key, view).await;
@@ -5854,16 +6271,43 @@ impl SessionUi {
             self.dirty = true;
             return Ok(());
         }
-        // The subagent summary line owns focus while focused (TS
-        // `SubagentSummaryLine.handleInput`): confirm/open opens the
-        // scoped agents view, up/cancel/back returns to the editor,
-        // expand cycles the conversation detail and KEEPS the focus, and
-        // every other key falls through after releasing the focus (TS
-        // `onChatAction` -> `focusEditor` -> the editor handles it).
+        // The activity dock owns focus while focused: Enter and a second
+        // Alt+A open the grouped list (the panel pre-selects the dock's
+        // group), left/right move the dock's group, up/cancel/back
+        // returns to the editor, expand cycles the conversation detail
+        // and KEEPS the focus, and every other key falls through after
+        // releasing the focus (TS `onChatAction` -> `focusEditor` -> the
+        // editor handles it).
         if self.subagents_focused {
             let kb = view.editor.keybindings();
-            if kb.matches(&id, "tui.select.confirm") || kb.matches(&id, "app.agents.open") {
-                self.open_scoped_agents_view(view);
+            if kb.matches(&id, "tui.select.confirm") || kb.matches(&id, "app.subagents.focus") {
+                self.emit_activity_opened("panel");
+                self.open_activity_panel(view);
+                return Ok(());
+            }
+            if id == "left" || id == "right" {
+                let groups = [
+                    crate::chrome::ActivityGroup::Subagents,
+                    crate::chrome::ActivityGroup::Heartbeats,
+                    crate::chrome::ActivityGroup::Bash,
+                ];
+                let current = groups
+                    .iter()
+                    .position(|group| *group == self.activity_group)
+                    .unwrap_or(0);
+                let candidates: Box<dyn Iterator<Item = _>> = if id == "left" {
+                    Box::new(groups[..current].iter().rev())
+                } else {
+                    Box::new(groups[current + 1..].iter())
+                };
+                if let Some(next) = candidates
+                    .copied()
+                    .find(|group| self.activity_selectable(*group))
+                {
+                    self.activity_group = next;
+                    self.update_subagent_summary(view);
+                    self.dirty = true;
+                }
                 return Ok(());
             }
             if kb.matches(&id, "tui.select.up")
@@ -5903,7 +6347,7 @@ impl SessionUi {
             .keybindings()
             .matches(&id, "app.heartbeats.open")
         {
-            self.open_heartbeats_view(view).await;
+            self.open_heartbeats_view(view, None).await;
             return Ok(());
         }
         if view.editor.keybindings().matches(&id, "app.input.clear") {
@@ -7446,6 +7890,26 @@ fn sorted_session_rows(mut sessions: Vec<Value>) -> Vec<Value> {
     sessions
 }
 
+/// The streaming follow-up hint (TS `getTrayOverrideLabel`'s streaming
+/// arm): `<followUp> to queue message` — the tray override while the agent
+/// streams and a draft sits in the editor (an empty draft or an idle
+/// session shows nothing; the Ctrl+C exit hint outranks it at the call
+/// site, TS `isCtrlCExitHintVisible()`'s early return).
+fn streaming_tray_hint(
+    keybindings: &crate::keybindings::KeybindingsManager,
+    turn_active: bool,
+    draft: &str,
+) -> Option<String> {
+    if !turn_active || draft.trim().is_empty() {
+        return None;
+    }
+    let follow_up = keybindings
+        .first_key("app.message.followUp")
+        .map(|key| crate::keybindings::format_key_text(&key))
+        .unwrap_or_default();
+    Some(format!("{follow_up} to queue message"))
+}
+
 /// TS `isBashRunning` guard's warning: the clear key (app.clear) cancels
 /// the running user command, spelled through the effective keybindings.
 fn already_running_warning(keybindings: &crate::keybindings::KeybindingsManager) -> String {
@@ -7548,6 +8012,51 @@ async fn create_session(
         .ok_or_else(|| anyhow!("the daemon did not report a session id for the new session"))
 }
 
+#[cfg(test)]
+mod streaming_tray_hint_tests {
+    use super::streaming_tray_hint;
+    use crate::keybindings::{KeybindingsConfig, KeybindingsManager};
+
+    /// TS `getTrayOverrideLabel`'s streaming arm: the follow-up hint names
+    /// the effective `app.message.followUp` key (the default is
+    /// alt+enter).
+    #[test]
+    fn the_hint_names_the_follow_up_key_over_a_draft() {
+        let kb = KeybindingsManager::new();
+        assert_eq!(
+            streaming_tray_hint(&kb, true, "a draft in the editor"),
+            Some("Alt+Enter to queue message".to_string()),
+            "the default binding renders the TS sentence"
+        );
+    }
+
+    /// TS `!this.isAgentStreaming() || !text.trim()` — an idle session or
+    /// an empty (whitespace-only) draft shows no hint.
+    #[test]
+    fn idle_or_empty_draft_shows_no_hint() {
+        let kb = KeybindingsManager::new();
+        assert_eq!(streaming_tray_hint(&kb, false, "draft"), None);
+        assert_eq!(streaming_tray_hint(&kb, true, ""), None);
+        assert_eq!(streaming_tray_hint(&kb, true, "   "), None);
+    }
+
+    /// A user-rebound follow-up key spells through the effective binding
+    /// (TS `keyText("app.message.followUp")`).
+    #[test]
+    fn the_hint_spells_a_rebound_follow_up_key() {
+        let mut config = KeybindingsConfig::new();
+        config.insert(
+            "app.message.followUp".to_string(),
+            vec!["ctrl+q".to_string()],
+        );
+        let kb = KeybindingsManager::with_user_bindings(config);
+        assert_eq!(
+            streaming_tray_hint(&kb, true, "draft"),
+            Some("Ctrl+Q to queue message".to_string()),
+            "the hint follows the effective binding"
+        );
+    }
+}
 #[cfg(test)]
 mod bash_bang_tests {
     use super::already_running_warning;

@@ -259,6 +259,18 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
         })
     }
 
+    fn activity_opened(&self, kind: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            let mut properties = pa_telemetry::base_properties("interactive");
+            properties.set("kind", serde_json::Value::from(kind));
+            client.track("tui activity opened", properties);
+            let _ = client.shutdown().await;
+        })
+    }
+
     fn subagents_view_opened(
         &self,
         children_total: u64,
@@ -304,13 +316,18 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
         })
     }
 
-    fn queued_input(&self, lane: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+    fn queued_input(
+        &self,
+        lane: &'static str,
+        steering_mode: String,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
         Box::pin(async move {
             let Some(client) = self.client() else {
                 return;
             };
             let mut properties = pa_telemetry::base_properties("interactive");
             properties.set("lane", serde_json::Value::from(lane));
+            properties.set("steering_mode", serde_json::Value::from(steering_mode));
             client.track("tui input queued", properties);
             let _ = client.shutdown().await;
         })

@@ -195,6 +195,15 @@ impl Worker {
                         .get("queueVisible")
                         .and_then(Value::as_bool)
                         .unwrap_or(true),
+                    // TS restores the action's execution policy
+                    // (`executionPolicy`): the batch-gathering class maps
+                    // from its shape — `nextTurnContextTiming` "commit"
+                    // is the client-queued policy, "preparation" with a
+                    // preserved empty prompt is injected, "preparation"
+                    // without it is the direct-prompt hand-off. An absent
+                    // policy restores as the dominant queued class.
+                    policy: crate::worker::restored_turn_policy(payload),
+                    forced_batch: false,
                 };
                 if lane_follow_up {
                     core.follow_up.push_back(item);

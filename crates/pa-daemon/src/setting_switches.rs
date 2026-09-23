@@ -502,6 +502,16 @@ impl Worker {
         if let Err(error) = persisted {
             return response_failure(None, command, &error.to_string(), None);
         }
+        // TS `session.setSteeringMode`/`setFollowUpMode` write the live
+        // agent's queue mode (`this.agent.steeringMode = mode`): the
+        // engine's agent-level queues drain per the new mode from the
+        // next boundary (the worker lane's delivery mode already carries
+        // the `core.steering_mode`/`core.follow_up_mode` update above).
+        if command == "set_steering_mode" {
+            self.engine.set_queue_modes(Some(mode), None);
+        } else {
+            self.engine.set_queue_modes(None, Some(mode));
+        }
         response_success(None, command, None)
     }
 

@@ -210,6 +210,8 @@ impl AgentCronSchedulerHooks for QueueHooks {
                 queue_key,
                 done: Some(done_tx),
                 queue_visible: true,
+                policy: crate::worker::TurnPolicy::Injected,
+                forced_batch: false,
             });
         }
         self.work_notify.notify_one();

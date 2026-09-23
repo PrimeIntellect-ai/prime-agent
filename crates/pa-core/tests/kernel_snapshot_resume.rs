@@ -246,6 +246,8 @@ impl Fixture {
         faux: &FauxSession,
     ) -> SessionEngineConfig {
         SessionEngineConfig {
+            steering_mode: None,
+            follow_up_mode: None,
             cwd: self.cwd.clone(),
             agent_dir: self.agent_dir.clone(),
             model: Some(agent_model(&faux.model)),
