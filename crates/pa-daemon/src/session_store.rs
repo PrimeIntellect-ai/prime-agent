@@ -223,16 +223,21 @@ impl SessionFile {
         path
     }
 
-    /// The leaf-to-root walk with ghost-parent gaps bridged: files written
-    /// before `persist_entry` became write-first can carry a parent id that
-    /// was minted but never persisted; the walk continues from the previous
-    /// entry in file order (the writer's persisted leaf at the time). The
-    /// strict [`Self::branch`] stays the model-facing truth (a gap really
-    /// truncates the rebuilt context); this walk serves the cumulative
-    /// usage accounting (`get_session_stats`, the /context totals), which
-    /// must not zero out the session's real spend because of one lost
-    /// write. Forks are unaffected: they resolve by parent id, and only a
-    /// missing parent bridges.
+    /// The leaf-to-root walk with parent gaps bridged: a session file can
+    /// carry a parent id that was minted but never persisted (one lost
+    /// append). At a gap the walk continues from the gap entry's file
+    /// predecessor — the last entry that reached the file, and the gap
+    /// entry's true parent whenever the writer persisted anything after a
+    /// branch move (a `branch_summary` marker chains from the moved-to
+    /// entry, so the abandoned fork stays out). A gap directly after an
+    /// unmarked `branch_to` is indistinguishable from a plain chain gap —
+    /// the minted parent id is simply absent from the file — so the walk
+    /// keeps the persisted chain rather than dropping spend the session
+    /// really logged. The strict [`Self::branch`] stays the model-facing
+    /// truth (a gap really truncates the rebuilt context); this walk
+    /// serves the cumulative usage accounting (`get_session_stats`, the
+    /// /context totals). Forks resolve by parent id; only a missing
+    /// parent bridges.
     pub fn branch_bridged(&self) -> Vec<&SessionEntry> {
         let mut positions: Vec<usize> = Vec::new();
         let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -502,11 +507,12 @@ impl SessionFile {
     }
 
     /// Append one entry line to the file, rewriting first when the file is
-    /// missing. The entry joins the in-memory index only after the write
-    /// succeeds: a failed write leaves the store exactly as it was, so the
-    /// next append parents to the last persisted entry, never an id that
-    /// is absent from the file (which would truncate every later
-    /// `branch()` walk at the gap).
+    /// missing. The entry joins the in-memory index only after its line
+    /// reaches the file: a failed write (or rewrite) leaves the store
+    /// exactly as it was, so the next append parents to the last entry
+    /// the file holds. `sync_data` past the flush only enforces
+    /// durability — when it fails the entry stays indexed (a reload of
+    /// the file would load it as the leaf) and the error still surfaces.
     pub fn persist_entry(&mut self, entry_type: &str, fields: Value) -> Result<String> {
         let entry = SessionEntry::new(entry_type, self.leaf_id.clone(), &self.index_map(), fields);
         let id = entry.id.clone();
@@ -519,8 +525,10 @@ impl SessionFile {
             let mut writer = std::io::BufWriter::new(file);
             write_line(&mut writer, &entry)?;
             writer.flush()?;
-            writer.get_ref().sync_data()?;
+            // The line is in the file now: index it before the durability
+            // barrier so the in-memory leaf matches what a reload sees.
             self.push_index(entry);
+            writer.get_ref().sync_data()?;
         } else {
             // The rewrite path serializes the whole index, so the entry must
             // be indexed first; a failed rewrite rolls the index back.
@@ -926,8 +934,9 @@ mod tests {
                 json!({ "message": { "role": "user", "content": "again" } }),
             )
             .unwrap();
-        // The reloaded file chains first -> third: the failed write left no
-        // gap id the successful one could point at.
+        // The reloaded file chains first -> third: the failed append added
+        // nothing to the file, so the next one chains from the last
+        // persisted entry.
         let loaded = SessionFile::open(&file).unwrap();
         let chain: Vec<&str> = loaded
             .branch()
@@ -975,6 +984,37 @@ mod tests {
             .map(|entry| entry.id.as_str())
             .collect();
         assert_eq!(bridged, ["e1", "e2", "e3", "e4"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A gap after a persisted branch move follows the active lineage:
+    /// the `branch_summary` marker is the gap entry's file predecessor
+    /// and chains from the moved-to entry, so the bridged walk keeps the
+    /// active branch and skips the abandoned fork.
+    #[test]
+    fn branch_bridged_skips_abandoned_chains_after_a_persisted_branch_move() {
+        let dir = temp_dir();
+        let path = dir.join("moved.jsonl");
+        let content = [
+            json!({"type": "session", "version": 3, "id": "s1", "timestamp": "2026-09-22T00:00:00.000Z", "cwd": "/tmp"}),
+            json!({"type": "message", "id": "e1", "parentId": null, "timestamp": "2026-09-22T00:00:01.000Z", "message": {"role": "user", "content": "root"}}),
+            json!({"type": "message", "id": "e2", "parentId": "e1", "timestamp": "2026-09-22T00:00:02.000Z", "message": {"role": "user", "content": "abandoned a"}}),
+            json!({"type": "message", "id": "e3", "parentId": "e2", "timestamp": "2026-09-22T00:00:03.000Z", "message": {"role": "user", "content": "abandoned b"}}),
+            json!({"type": "branch_summary", "id": "m1", "parentId": "e1", "timestamp": "2026-09-22T00:00:04.000Z", "fromId": "e1", "summary": "moved back"}),
+            json!({"type": "message", "id": "e4", "parentId": "8b5f0d21", "timestamp": "2026-09-22T00:00:05.000Z", "message": {"role": "user", "content": "after the move"}}),
+        ]
+        .iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        fs::write(&path, content).unwrap();
+        let store = SessionFile::open(&path).unwrap();
+        let bridged: Vec<&str> = store
+            .branch_bridged()
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect();
+        assert_eq!(bridged, ["e1", "m1", "e4"]);
         let _ = fs::remove_dir_all(&dir);
     }
 

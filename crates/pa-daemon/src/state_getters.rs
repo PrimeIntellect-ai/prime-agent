@@ -77,9 +77,9 @@ impl Worker {
     /// recursive grandchildren. A live child's node is read from its
     /// session file (the TS disk-fallback shape; the id, label, and status
     /// come from the live registry, the fresher sources for a running
-    /// child), and ids tombstoned in the RLM ledger stay hidden. The disk
-    /// walk and registry reads are blocking I/O: they run on the blocking
-    /// pool, never the runtime worker.
+    /// child), and ids tombstoned in the RLM ledger stay hidden at every
+    /// depth of the walk. The disk walk and registry reads are blocking
+    /// I/O: they run on the blocking pool, never the runtime worker.
     pub(crate) async fn handle_get_context_tree(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_context_tree") {
             return response;
@@ -133,31 +133,39 @@ impl Worker {
         let walk = tokio::task::spawn_blocking(move || {
             let registry = worker_model_registry(&agent_dir);
             let artifacts_root = crate::context_tree_children::session_artifacts_dir(&agent_dir);
-            // User-deleted subagents stay hidden: ids tombstoned in this
-            // session's RLM ledger edges never load from disk (the TS
-            // in-memory guard is its restart-behavior; the ledger is the
-            // durable authority here). Unreadable ledgers degrade to no
-            // filtering, never a failed tree.
+            // User-deleted subagents stay hidden at every depth: the
+            // ledger's tombstones key by the deleted child's parent
+            // session file, so this session's deletions resolve into the
+            // root skip set and the record hands down for each recursion
+            // level to resolve its own (the TS in-memory guard is its
+            // restart-behavior; the ledger is the durable authority
+            // here). Unreadable ledgers degrade to no filtering, never
+            // a failed tree.
             let mut skip_ids: std::collections::HashSet<String> = snapshots
                 .iter()
                 .filter_map(|child| child.get("id").and_then(Value::as_str))
                 .map(str::to_string)
                 .collect();
-            if let Some(session_file) = &session_file {
-                let sessions_dir = agent_dir.join("sessions");
-                let ledger =
-                    crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
-                if let Ok(edges) = ledger.edges(true) {
-                    let parent_key = crate::lease::canonical_session_path(session_file);
-                    for edge in edges {
-                        if edge.deleted.is_some()
-                            && crate::lease::canonical_session_path(std::path::Path::new(
+            let mut tombstones = crate::context_tree_children::TombstonedChildren::new();
+            let sessions_dir = agent_dir.join("sessions");
+            let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
+            if let Ok(edges) = ledger.edges(true) {
+                for edge in edges {
+                    if edge.deleted.is_some() {
+                        tombstones
+                            .entry(crate::lease::canonical_session_path(std::path::Path::new(
                                 &edge.parent,
-                            )) == parent_key
-                        {
-                            skip_ids.insert(edge.child_id.clone());
-                        }
+                            )))
+                            .or_default()
+                            .insert(edge.child_id.clone());
                     }
+                }
+            }
+            if let Some(session_file) = &session_file {
+                if let Some(deleted) =
+                    tombstones.get(&crate::lease::canonical_session_path(session_file))
+                {
+                    skip_ids.extend(deleted.iter().cloned());
                 }
             }
             let mut children: Vec<Value> = Vec::with_capacity(snapshots.len());
@@ -174,6 +182,7 @@ impl Worker {
                             &artifacts_root,
                             std::path::Path::new(dir),
                             &registry,
+                            &tombstones,
                         )
                     })
                     .unwrap_or_else(|| {
@@ -194,6 +203,7 @@ impl Worker {
                     session_id,
                     &registry,
                     &skip_ids,
+                    &tombstones,
                 ));
             }
             children

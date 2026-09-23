@@ -22,11 +22,13 @@
 //! `loadContextTreeChildFromDisk` fallback); and user-deleted subagents
 //! stay hidden — the TS re-surfaces them after a restart because its
 //! deletion guard is in-memory only, while this port consults the
-//! durable RLM ledger tombstones (the caller passes them as skip ids).
+//! durable RLM ledger tombstones at every level of the walk (the caller
+//! resolves this session's deletions into skip ids and hands the whole
+//! record down, so each recursion level skips its own).
 //! The TS child-node cache is not ported yet (the walk runs per
 //! /context call, not per top-bar refresh).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
@@ -40,6 +42,11 @@ use crate::session_store::SessionFile;
 const LABEL_MAX_CHARS: usize = 80;
 const ELLIPSIS: &str = "...";
 
+/// User-deleted child ids keyed by the deleted child's parent session
+/// file path (the RLM ledger's durable tombstones, canonicalized): every
+/// level of the walk consults its own session's deletions.
+pub type TombstonedChildren = HashMap<PathBuf, HashSet<String>>;
+
 /// The artifact tree root every session's children live under
 /// (`child_session_dir` writes `<agent-dir>/session-artifacts/<id>/...`).
 pub fn session_artifacts_dir(agent_dir: &Path) -> PathBuf {
@@ -52,12 +59,15 @@ pub fn session_artifacts_dir(agent_dir: &Path) -> PathBuf {
 /// message, the terminal status from the last assistant turn, the model
 /// from its `model_change` entries, the context utilization against the
 /// registry's window, and the recursive grandchild nodes from the
-/// child's own session id's tree. `None` when the dir holds no readable
-/// session (TS `findSessionFile` miss).
+/// child's own session id's tree. The child's own deleted subagents stay
+/// hidden at the next level: `tombstones` carries the ledger's deletion
+/// record keyed by the deleted child's parent session file. `None` when
+/// the dir holds no readable session (TS `findSessionFile` miss).
 pub fn load_context_tree_child(
     artifacts_root: &Path,
     child_dir: &Path,
     registry: &ModelRegistry,
+    tombstones: &TombstonedChildren,
 ) -> Option<Value> {
     // The newest VALID session file: artifact dirs carry sibling `.jsonl`
     // files (`semantic-edges.jsonl`, harness state) that are not sessions,
@@ -101,11 +111,19 @@ pub fn load_context_tree_child(
             node["contextUsage"] = usage;
         }
     }
+    // The child's own deleted subagents stay hidden one level down: the
+    // tombstones key by the deleted child's parent session file, and the
+    // grandchild edges' parent is this child's session file.
+    let deleted_ids = tombstones
+        .get(&crate::lease::canonical_session_path(&store.path))
+        .cloned()
+        .unwrap_or_default();
     node["children"] = Value::Array(load_context_tree_children(
         artifacts_root,
         store.session_id(),
         registry,
-        &HashSet::new(),
+        &deleted_ids,
+        tombstones,
     ));
     Some(node)
 }
@@ -113,12 +131,15 @@ pub fn load_context_tree_child(
 /// Build the nodes for every persisted child dir of one session (TS
 /// `loadContextTreeChildrenFromDisk`): the `sub-*` dirs under
 /// `<artifacts_root>/<session_id>/`, skipping the ids already represented
-/// live or tombstoned in the RLM ledger (the caller resolves both).
+/// live or tombstoned in the RLM ledger (the caller resolves this
+/// session's deletions into `skip_ids`; `tombstones` carries every
+/// session's record so each recursion level resolves its own).
 pub fn load_context_tree_children(
     artifacts_root: &Path,
     session_id: &str,
     registry: &ModelRegistry,
     skip_ids: &HashSet<String>,
+    tombstones: &TombstonedChildren,
 ) -> Vec<Value> {
     child_session_dirs(&artifacts_root.join(session_id))
         .into_iter()
@@ -128,7 +149,9 @@ pub fn load_context_tree_children(
                 !skip_ids.contains(name.as_ref())
             })
         })
-        .filter_map(|child_dir| load_context_tree_child(artifacts_root, &child_dir, registry))
+        .filter_map(|child_dir| {
+            load_context_tree_child(artifacts_root, &child_dir, registry, tombstones)
+        })
         .collect()
 }
 
@@ -334,8 +357,13 @@ mod tests {
         let artifacts = root.join("session-artifacts");
         let parent = artifacts.join("01a0parent-0000");
         let child_dir = write_child(&parent, "sub-003f741a", "01a0child-0000", "stop");
-        let node =
-            load_context_tree_child(&artifacts, &child_dir, &registry()).expect("node builds");
+        let node = load_context_tree_child(
+            &artifacts,
+            &child_dir,
+            &registry(),
+            &TombstonedChildren::new(),
+        )
+        .expect("node builds");
         assert_eq!(node["id"], json!("sub-003f741a"));
         assert_eq!(node["label"], json!("fix the login bug please"));
         assert_eq!(node["status"], json!("done"));
@@ -348,10 +376,22 @@ mod tests {
 
         // An errored child renders as errored; an aborted one as cancelled.
         let errored = write_child(&parent, "sub-errored", "01a0child-0001", "error");
-        let node = load_context_tree_child(&artifacts, &errored, &registry()).expect("node builds");
+        let node = load_context_tree_child(
+            &artifacts,
+            &errored,
+            &registry(),
+            &TombstonedChildren::new(),
+        )
+        .expect("node builds");
         assert_eq!(node["status"], json!("error"));
         let aborted = write_child(&parent, "sub-aborted", "01a0child-0002", "aborted");
-        let node = load_context_tree_child(&artifacts, &aborted, &registry()).expect("node builds");
+        let node = load_context_tree_child(
+            &artifacts,
+            &aborted,
+            &registry(),
+            &TombstonedChildren::new(),
+        )
+        .expect("node builds");
         assert_eq!(node["status"], json!("cancelled"));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -372,11 +412,18 @@ mod tests {
             "01a0parent-0000",
             &registry,
             &Default::default(),
+            &TombstonedChildren::new(),
         );
         assert_eq!(nodes.len(), 2, "non-sub dirs and empty dirs drop out");
 
         let skip: HashSet<String> = ["sub-a".to_string()].into_iter().collect();
-        let nodes = load_context_tree_children(&artifacts, "01a0parent-0000", &registry, &skip);
+        let nodes = load_context_tree_children(
+            &artifacts,
+            "01a0parent-0000",
+            &registry,
+            &skip,
+            &TombstonedChildren::new(),
+        );
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0]["id"], json!("sub-b"));
         let _ = std::fs::remove_dir_all(&root);
@@ -404,12 +451,62 @@ mod tests {
             "stop",
         );
         std::fs::create_dir_all(child_dir.join("sub-nested-decoy")).unwrap();
-        let node =
-            load_context_tree_child(&artifacts, &child_dir, &registry()).expect("node builds");
+        let node = load_context_tree_child(
+            &artifacts,
+            &child_dir,
+            &registry(),
+            &TombstonedChildren::new(),
+        )
+        .expect("node builds");
         let grandchildren = node["children"].as_array().expect("children");
         assert_eq!(grandchildren.len(), 1, "the decoy dir drops out");
         assert_eq!(grandchildren[0]["id"], json!("sub-grand"));
         assert_eq!(grandchildren[0]["ownUsage"]["totalTokens"], json!(15));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A deleted grandchild stays hidden: the tombstone record keys by
+    /// the grandchild's parent session file (the child's own file), so
+    /// the recursion into the child's tree skips its deleted ids while
+    /// live grandchildren still load.
+    #[test]
+    fn deleted_grandchildren_stay_hidden() {
+        let root = dir();
+        let artifacts = root.join("session-artifacts");
+        let child_dir = write_child(
+            &artifacts.join("01a0parent-0000"),
+            "sub-parent",
+            "01a0child-0000",
+            "stop",
+        );
+        write_child(
+            &artifacts.join("01a0child-0000"),
+            "sub-alive",
+            "01a0grand-0000",
+            "stop",
+        );
+        write_child(
+            &artifacts.join("01a0child-0000"),
+            "sub-dead",
+            "01a0grand-0001",
+            "stop",
+        );
+        let mut tombstones = TombstonedChildren::new();
+        tombstones
+            .entry(crate::lease::canonical_session_path(
+                &child_dir.join("01a0child-0000.jsonl"),
+            ))
+            .or_default()
+            .insert("sub-dead".to_string());
+        let node = load_context_tree_child(&artifacts, &child_dir, &registry(), &tombstones)
+            .expect("node builds");
+        let grandchildren = node["children"].as_array().expect("children");
+        assert_eq!(
+            grandchildren.len(),
+            1,
+            "the tombstoned grandchild drops out"
+        );
+        assert_eq!(grandchildren[0]["id"], json!("sub-alive"));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -434,8 +531,13 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(child_dir.join("01a0child-0000.jsonl"), content).unwrap();
-        let node =
-            load_context_tree_child(&artifacts, &child_dir, &registry()).expect("node builds");
+        let node = load_context_tree_child(
+            &artifacts,
+            &child_dir,
+            &registry(),
+            &TombstonedChildren::new(),
+        )
+        .expect("node builds");
         assert_eq!(node["ownUsage"]["input"], json!(7));
         assert_eq!(node["ownUsage"]["totalTokens"], json!(9));
         // The identity survives the gap too: model, label, and status come
