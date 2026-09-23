@@ -556,9 +556,10 @@ impl AgentsViewMode {
     /// continue-recent launch that can be an unrelated live session). The
     /// open waits instead: the anchor lands the selection once its row
     /// appears, and any direction key cancels the wait for an explicit
-    /// manual pick.
+    /// manual pick. A scoped view never lists its anchor (the scope root
+    /// is excluded), so its wait never resolves — it keeps the open.
     fn open_selected(&mut self) {
-        if self.anchor_selection_pending {
+        if self.anchor_selection_pending && self.options.scope.is_none() {
             self.status =
                 Some("Still loading sessions — press ↓ or ↑ to pick a session now.".to_string());
             return;
@@ -2106,6 +2107,13 @@ mod tests {
         assert_eq!(mode.selected, 0);
         assert_eq!(mode.rows[0].summary["sessionId"], "c");
         assert!(mode.anchor_selection_pending, "the wait never resolves");
+        // The unresolved wait never blocks the scoped view's own opens:
+        // Enter opens the first listed row.
+        mode.handle_key("enter");
+        let opened = mode
+            .opened
+            .expect("the scoped view opens despite the never-resolving wait");
+        assert_eq!(opened.selection, SessionSelection::Attach("c-live".to_string()));
     }
 
     /// TS `countRowsBySection` (the splash header counts) counts agent-kind
