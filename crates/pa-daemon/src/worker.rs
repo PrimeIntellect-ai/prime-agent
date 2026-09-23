@@ -8611,53 +8611,56 @@ mod turn_stream_tests {
     }
 
     /// The product default (Kevin's batch spec): the steering lane's
-/// default mode co-delivers the queued same-class prefix as ONE batched
-/// turn at the boundary without any explicit mode set — the default
-/// change from the TS "one-at-a-time" is the deliberate divergence.
-#[tokio::test]
-async fn the_default_mode_co_delivers_the_queued_steering_prefix() {
-    let engine: Arc<dyn SessionEngine> = Arc::new(
-        ScriptedEngine::from_value(json!({ "responses": ["batched reply"] }))
-            .unwrap_or_default(),
-    );
-    let runner = burst_runner(Arc::clone(&engine));
-    {
-        let mut core = runner.core.lock().unwrap();
-        assert_eq!(core.steering_mode, "all", "the default is the batched mode");
-        core.steering
-            .push_back(queued_prompt("steer one", TurnPolicy::Queued));
-        core.steering
-            .push_back(queued_prompt("steer two", TurnPolicy::Queued));
-        core.steering
-            .push_back(queued_prompt("steer three", TurnPolicy::Queued));
+    /// default mode co-delivers the queued same-class prefix as ONE batched
+    /// turn at the boundary without any explicit mode set — the default
+    /// change from the TS "one-at-a-time" is the deliberate divergence.
+    #[tokio::test]
+    async fn the_default_mode_co_delivers_the_queued_steering_prefix() {
+        let engine: Arc<dyn SessionEngine> = Arc::new(
+            ScriptedEngine::from_value(json!({ "responses": ["batched reply"] }))
+                .unwrap_or_default(),
+        );
+        let runner = burst_runner(Arc::clone(&engine));
+        {
+            let mut core = runner.core.lock().unwrap();
+            assert_eq!(core.steering_mode, "all", "the default is the batched mode");
+            core.steering
+                .push_back(queued_prompt("steer one", TurnPolicy::Queued));
+            core.steering
+                .push_back(queued_prompt("steer two", TurnPolicy::Queued));
+            core.steering
+                .push_back(queued_prompt("steer three", TurnPolicy::Queued));
+        }
+        let mut subscription = runner.events.subscribe();
+        let core = std::sync::Arc::clone(&runner.core);
+        let work_notify = std::sync::Arc::clone(&runner.work_notify);
+        let running = tokio::spawn(async move { runner.run().await });
+        drain_pump(&core, &work_notify).await;
+        running.abort();
+
+        let events = runner_events(&mut subscription);
+        let starts = events
+            .iter()
+            .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+            .count();
+        assert_eq!(
+            starts, 1,
+            "the default batches the whole prefix: {events:?}"
+        );
+        let rows = delivered_rows(&events);
+        assert_eq!(
+            rows,
+            vec![
+                ("user".to_string(), "steer one".to_string()),
+                ("user".to_string(), "steer two".to_string()),
+                ("user".to_string(), "steer three".to_string()),
+                ("assistant".to_string(), "batched reply".to_string()),
+            ],
+            "the default mode co-delivers every parked steer: {rows:?}"
+        );
     }
-    let mut subscription = runner.events.subscribe();
-    let core = std::sync::Arc::clone(&runner.core);
-    let work_notify = std::sync::Arc::clone(&runner.work_notify);
-    let running = tokio::spawn(async move { runner.run().await });
-    drain_pump(&core, &work_notify).await;
-    running.abort();
 
-    let events = runner_events(&mut subscription);
-    let starts = events
-        .iter()
-        .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
-        .count();
-    assert_eq!(starts, 1, "the default batches the whole prefix: {events:?}");
-    let rows = delivered_rows(&events);
-    assert_eq!(
-        rows,
-        vec![
-            ("user".to_string(), "steer one".to_string()),
-            ("user".to_string(), "steer two".to_string()),
-            ("user".to_string(), "steer three".to_string()),
-            ("assistant".to_string(), "batched reply".to_string()),
-        ],
-        "the default mode co-delivers every parked steer: {rows:?}"
-    );
-}
-
-/// Queue mode "one-at-a-time" (selectable via the `steeringMode`
+    /// Queue mode "one-at-a-time" (selectable via the `steeringMode`
     /// setting; the TS default — this port's product default is "all",
     /// Kevin's batch spec): each queued steer is its own turn — one reply
     /// each, delivered in order.

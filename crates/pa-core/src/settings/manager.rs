@@ -557,9 +557,7 @@ impl SettingsManager {
     /// the next tool call") — a deliberate divergence from the TS default
     /// ("one-at-a-time"); the setting surface keeps both modes.
     pub fn get_steering_mode(&self) -> QueueModeSetting {
-        self.merged
-            .steering_mode
-            .unwrap_or(QueueModeSetting::All)
+        self.merged.steering_mode.unwrap_or(QueueModeSetting::All)
     }
 
     pub fn get_follow_up_mode(&self) -> QueueModeSetting {
@@ -873,7 +871,7 @@ mod tests {
         assert_eq!(manager.get_code_block_indent(), "    ");
     }
 
-        /// The steering default is "all" (Kevin's batch spec: every queued
+    /// The steering default is "all" (Kevin's batch spec: every queued
     /// steer co-delivers as ONE turn at the next tool-call boundary) — a
     /// deliberate divergence from the TS default "one-at-a-time", which
     /// stays selectable; the follow-up default keeps the TS value.
@@ -881,10 +879,7 @@ mod tests {
     fn steering_mode_defaults_to_all_follow_ups_stay_one_at_a_time() {
         let mut manager = SettingsManager::in_memory(Settings::default());
         assert_eq!(manager.get_steering_mode(), QueueModeSetting::All);
-        assert_eq!(
-            manager.get_follow_up_mode(),
-            QueueModeSetting::OneAtATime
-        );
+        assert_eq!(manager.get_follow_up_mode(), QueueModeSetting::OneAtATime);
         manager
             .set_steering_mode(QueueModeSetting::OneAtATime)
             .unwrap();
@@ -895,7 +890,7 @@ mod tests {
         );
     }
 
-#[test]
+    #[test]
     fn migrations_apply_on_load() {
         let storage: Arc<dyn SettingsStorage> =
             Arc::new(super::super::storage::InMemorySettingsStorage::default());
