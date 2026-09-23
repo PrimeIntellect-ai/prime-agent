@@ -1107,6 +1107,11 @@ Semantics:
 
 - **Global scope only** (`~/.prime/agent/settings.json`), like
   `idleEvictionMinutes`: a daemon policy a project scope cannot weaken.
+- **Fails closed**: a settings document that cannot be loaded (lock
+  contention, read, or parse failure) is an UNKNOWN policy, never an
+  unrestricted one — every seam refuses loudly while unreadable
+  (`DaemonAllowlist::Unreadable`), and the failover chain yields no
+  candidates.
 - **Pattern grammar** = the `--models` CLI scope vocabulary, matched
   case-insensitively against the full selector `provider/model-id` and the
   bare id: a pattern with wildcards (`*`, `?`, `[`) globs; a plain pattern
@@ -1126,9 +1131,11 @@ Semantics:
      land a session on an off-list model — the chain resolves, then the
      gate refuses, so a broken pin surfaces as an error instead of a
      session on the wrong model.
-- **Adoption telemetry**: every refusal emits `model refused` (schema v1;
-  `docs/telemetry-events.md`) — surface + provider/model categories only,
-  never the refused selector or the configured patterns.
+- **Adoption telemetry**: a refusal emits `model refused` (schema v1;
+  `docs/telemetry-events.md`) once per distinct `(surface, selector)` per
+  worker — surface + provider/model categories only, never the refused
+  selector or the configured patterns. Surfaces: `set_model`,
+  `cycle_model`, `spawn`, `create_session`, `session_start`.
 
 ### Parity stance
 
