@@ -186,7 +186,7 @@ pub fn has_prerelease_tag(version: &str) -> bool {
 /// their builds, `beta.1986.1` < `beta.1987.2`) for the ordering to be
 /// update evidence. Same-base tag shuffles are never auto-selected
 /// candidates (`--force` reinstalls explicitly).
-pub fn same_base_opaque_build_tag(candidate_version: &str, current_version: &str) -> bool {
+fn same_base_opaque_build_tag(candidate_version: &str, current_version: &str) -> bool {
     let Some(candidate) = parse_package_version(candidate_version) else {
         return false;
     };
@@ -234,11 +234,14 @@ pub fn is_release_update_candidate(
     current_version: &str,
     channel: Option<UpdateChannel>,
 ) -> bool {
-    if same_base_opaque_build_tag(candidate_version, current_version) {
-        // The tags order by string, not by build recency: never
-        // auto-select such a candidate (the `0.10.0-rust-<sha>` dogfood
-        // trains installed an obsolete build this way).
-        return false;
+    // The opaque-tag refusal applies to the current channel (the default
+    // path, where the `0.10.0-rust-<sha>` dogfood trains installed an
+    // obsolete build) — an explicit switch to another channel is operator
+    // intent and the channel-switch branch below evaluates it.
+    if channel.is_none() || channel == Some(resolve_update_channel(current_version, None)) {
+        if same_base_opaque_build_tag(candidate_version, current_version) {
+            return false;
+        }
     }
     if is_newer_package_version(candidate_version, current_version) {
         return true;
@@ -322,7 +325,14 @@ mod tests {
             "0.10.0-rust-4a8bcb15",
             None
         ));
-        assert!(!is_release_update_candidate(
+        // An explicit switch to another channel is operator intent and is
+        // evaluated by the channel-switch branch, not by the opaque guard.
+        assert!(is_release_update_candidate(
+            "1.2.3-beta.5",
+            "1.2.3-rust-aaaa",
+            Some(UpdateChannel::Nightly)
+        ));
+        assert!(is_release_update_candidate(
             "0.10.0-rust-64f66e3d",
             "0.10.0-rust-4a8bcb15",
             Some(UpdateChannel::Nightly)

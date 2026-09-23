@@ -237,9 +237,10 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
 /// from the payload binary's `--version` probe, and the staging is
 /// copy-to-scratch + fsync + atomic rename (the in-place `cp` over a
 /// running binary that corrupted two installs is structurally impossible
-/// here). The current launcher must already name a valid release: the
-/// coordinator's rollback boot depends on it, so a broken launcher is
-/// repaired before any binary is replaced.
+/// here). The current launcher must already name a valid release — the
+/// coordinator's rollback boot depends on it — so a broken launcher is
+/// refused with a repair hint before any binary is replaced (the flag
+/// parser validated `--source`; the staging boundary re-validates it).
 async fn plan_direct(
     install_root: &std::path::Path,
     options: &UpdateCommandOptions,
@@ -251,9 +252,6 @@ async fn plan_direct(
     let source = options.source.as_deref().context(
         "the direct install needs --source <https-url> (recorded as the release's install origin)",
     )?;
-    if !pa_core::update::install::install_source_is_valid(source) {
-        anyhow::bail!("--source must be an http(s) URL, not {source:?}.");
-    }
     if !archive.exists() {
         anyhow::bail!("the release payload {} does not exist", archive.display());
     }

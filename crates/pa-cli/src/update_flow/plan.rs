@@ -60,11 +60,12 @@ fn download_base_url(override_url: Option<&str>, install_source: &str) -> String
 
 /// The update baseline: the release the RUNNING binary occupies. The
 /// comparison the plan makes is against this release's version — never a
-/// launcher that can point elsewhere — and a binary whose own release
-/// directory does not parse (a hand-named `0.10.0-rust-<sha>` dogfood
-/// directory) is refused as a baseline: the updater must never plan an
-/// update "from" a version its binary does not report.
-pub fn running_release_anchor() -> Result<RunningRelease> {
+/// launcher that can point elsewhere — and the directory's version must
+/// equal the version this binary itself reports (`--version`), so a
+/// hand-named directory (a `0.10.0-rust-<sha>` dogfood train, or a
+/// `999.0.0` directory around an older binary) is refused as a baseline:
+/// the updater never plans "from" a version its binary does not report.
+fn running_release_anchor() -> Result<RunningRelease> {
     let executable = std::env::current_exe().context("resolve the running executable")?;
     running_release(&executable)
 }
@@ -121,6 +122,16 @@ pub async fn plan(
     let running = running_release_anchor().map_err(|error| {
         anyhow!("This binary does not run from a managed release directory: {error:#}. Update from a binary installed by the Prime Agent installer.")
     })?;
+    // The directory's version and the binary's own report must agree
+    // (`--version` prints `config::version()`): a release directory named
+    // around a binary it does not contain is an inconsistent installation.
+    let reported = crate::config::version();
+    if running.version != reported {
+        anyhow::bail!(
+            "The installation is inconsistent: the release directory reports {} while this binary reports {reported}. Reinstall with the published installer.",
+            running.version
+        );
+    }
     if let Ok(active_installation) = &active {
         if active_installation.target.release_dir != running.release_dir {
             anyhow::bail!(

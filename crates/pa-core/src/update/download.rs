@@ -100,7 +100,7 @@ const STAGING_PREFIX: &str = ".stage-";
 
 /// Remove leftover staging scratch from interrupted installs (staging
 /// directories are never a release; the rename into place is atomic).
-pub fn sweep_staging(releases: &Path) {
+fn sweep_staging(releases: &Path) {
     let Ok(entries) = std::fs::read_dir(releases) else {
         return;
     };
@@ -116,22 +116,64 @@ pub fn sweep_staging(releases: &Path) {
 /// the same probe with a 10 s timeout). The binary's own report is the
 /// version the release layout must carry: a directory whose name claims a
 /// different version is an inconsistent installation, never a candidate.
+/// The probe is resource-bounded in both directions: a timed-out or
+/// over-long-writing child is killed (`kill_on_drop`, plus the explicit
+/// kill once the read bound is hit), and stdout is read to a bounded
+/// length, so a payload binary that hangs or streams cannot exhaust the
+/// updater.
 pub async fn binary_reported_version(exe: &Path) -> Result<String> {
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        tokio::process::Command::new(exe)
-            .arg("--version")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output(),
-    )
+    const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+    const MAX_VERSION_OUTPUT: usize = 512;
+    let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
+    let mut child = tokio::process::Command::new(exe)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        // A dropped timeout future must never leave the probe running.
+        .kill_on_drop(true)
+        .spawn()
+        .with_context(|| format!("run {} --version", exe.display()))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("{} --version produced no stdout", exe.display()))?;
+    let mut output = Vec::new();
+    let read = tokio::time::timeout_at(deadline, async {
+        use tokio::io::AsyncReadExt;
+        let mut buffer = [0u8; 128];
+        loop {
+            if output.len() >= MAX_VERSION_OUTPUT {
+                break;
+            }
+            let read = stdout.read(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            output.extend_from_slice(&buffer[..read]);
+            if output.contains(&b'\n') {
+                break;
+            }
+        }
+        std::io::Result::Ok(())
+    })
     .await
-    .map_err(|_| anyhow!("{} --version timed out", exe.display()))?
-    .with_context(|| format!("run {} --version", exe.display()))?;
-    if !output.status.success() {
-        anyhow::bail!("{} --version exited with {output:?}", exe.display());
+    .map_err(|_| anyhow!("{} --version timed out", exe.display()))?;
+    read.with_context(|| format!("read the {} --version output", exe.display()))?;
+    // A well-behaved binary has exited by now; a hung or over-writing one
+    // is killed only when the overall probe budget expires.
+    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
+        Ok(status) => status,
+        Err(_) => {
+            let _ = child.kill().await;
+            anyhow::bail!("{} --version timed out", exe.display())
+        }
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    .with_context(|| format!("wait for {} --version", exe.display()))?;
+    if !status.success() {
+        anyhow::bail!("{} --version exited with {status}", exe.display());
+    }
+    Ok(String::from_utf8_lossy(&output).trim().to_string())
 }
 
 /// Extract the verified archive into
@@ -160,10 +202,14 @@ pub fn stage_archive(
     }
     let staging = fresh_staging(root)?;
     let staged = unpack_archive_into(archive, &staging).and_then(|()| {
-        for asset in RELEASE_ASSETS {
-            if !staging.join(asset).exists() {
-                anyhow::bail!("the staged release is missing {asset}");
-            }
+        // The archive could change on disk between the download's
+        // verification and the extract; re-verify the digest of the file
+        // that was actually unpacked.
+        let observed = file_digest(archive)?;
+        if observed != archive_sha256 {
+            anyhow::bail!(
+                "the release archive changed during staging: expected {archive_sha256}, observed {observed}"
+            );
         }
         Ok(())
     });
@@ -173,16 +219,33 @@ pub fn stage_archive(
     result.map(|()| release_dir)
 }
 
+/// The streaming sha256 of one file (bounded memory for large payloads).
+fn file_digest(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 128 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(hex(&digest.finalize()))
+}
+
 /// The manual/direct install (`prime-agent update --archive`): stage a
 /// locally-built release payload — a payload directory or a release
 /// archive — into `releases/<version>-<platform>-<sha256>/` and return the
 /// release directory with the version the payload binary reports. The
 /// version always comes from the payload binary's `--version` output
-/// (never a hand-typed string), the release name's digest is the canonical
-/// payload digest, and the payload is copied into staging scratch, fsynced,
-/// and renamed into place: a manual install can never write over a running
-/// binary (the in-place `cp` class of corrupted installs) and a crash can
-/// never leave a partial release under its final name.
+/// (never a hand-typed string), and the release name's digest is the
+/// canonical digest of the STAGED tree (computed after the copy or
+/// extract, so the digest names exactly the bytes that were staged). The
+/// payload is copied into staging scratch, fsynced, and renamed into
+/// place: a manual install can never write over a running binary (the
+/// in-place `cp` class of corrupted installs) and a crash can never leave
+/// a partial release under its final name.
 pub async fn stage_local_payload(
     payload: &Path,
     root: &Path,
@@ -191,13 +254,17 @@ pub async fn stage_local_payload(
     let payload = payload
         .canonicalize()
         .with_context(|| format!("read the release payload at {}", payload.display()))?;
-    let digest = if payload.is_dir() {
-        release_tree_digest(&payload)?
-    } else {
-        let bytes =
-            std::fs::read(&payload).with_context(|| format!("read {}", payload.display()))?;
-        super::release::sha256_hex(&bytes)
-    };
+    // Only a directory or a regular file is a payload: a device or FIFO
+    // would block or exhaust the updater during staging.
+    let payload_kind = std::fs::symlink_metadata(&payload)
+        .map(|metadata| metadata.file_type())
+        .with_context(|| format!("read the release payload at {}", payload.display()))?;
+    if !(payload_kind.is_dir() || payload_kind.is_file()) {
+        anyhow::bail!(
+            "the release payload {} is not a directory or a regular file",
+            payload.display()
+        );
+    }
     let staging = fresh_staging(root)?;
     let version = match stage_payload_version(&payload, &staging).await {
         Ok(version) => version,
@@ -206,20 +273,45 @@ pub async fn stage_local_payload(
             return Err(error);
         }
     };
+    // The digest names the staged bytes (not the source path, which can
+    // change underneath a concurrent writer).
+    let digest = release_tree_digest(&staging)?;
     let candidate = root.join("releases").join(format!(
         "{version}-{platform}-{digest}",
         platform = current_platform_alias()
     ));
-    // Byte-identical re-staging reuses the validated release.
-    if let Some(existing) = existing_release(&candidate, &digest)? {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Ok((existing, version));
+    // Byte-identical re-staging reuses the validated release; the
+    // operator's --source is authoritative for future updates.
+    match existing_release(&candidate, &digest) {
+        Ok(Some(existing)) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            update_install_source(&existing, install_source)?;
+            return Ok((existing, version));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error);
+        }
     }
     if let Err(error) = finish_staging(&staging, &candidate, &digest, install_source) {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(error);
     }
     Ok((candidate, version))
+}
+
+/// The recorded install origin of a reused release follows the operator's
+/// current `--source` (future channel updates resolve from it).
+fn update_install_source(release_dir: &Path, install_source: &str) -> Result<()> {
+    let path = release_dir.join(".install-source");
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    if current.trim() == install_source.trim() {
+        return Ok(());
+    }
+    std::fs::write(&path, install_source).with_context(|| format!("write {}", path.display()))?;
+    std::fs::File::open(&path)?.sync_all()?;
+    super::install::sync_directory(release_dir)
 }
 
 /// Copy or extract the payload into staging scratch, check the release
@@ -231,12 +323,10 @@ async fn stage_payload_version(payload: &Path, staging: &Path) -> Result<String>
     } else {
         unpack_archive_into(payload, staging)?;
     }
-    for asset in RELEASE_ASSETS {
-        if !staging.join(asset).exists() {
-            anyhow::bail!("the release payload is missing {asset}");
-        }
-    }
     let binary = staging.join("prime-agent");
+    if !binary.is_file() {
+        anyhow::bail!("the release payload is missing prime-agent");
+    }
     make_executable(&binary)?;
     let version = binary_reported_version(&binary).await?;
     // The release name embeds the version; a binary that does not report a
@@ -349,52 +439,80 @@ fn finish_staging(
     Ok(())
 }
 
-/// The canonical digest of a payload directory: the sha256 over every
-/// file's contents, chained with each file's archive-relative path
-/// (sorted, `/`-separated, symlinks by target). Deterministic across
-/// machines, so a re-staged identical payload always lands on the same
+/// The canonical digest of a staged payload tree: the sha256 over every
+/// entry's contents (streamed, so memory stays bounded), chained with each
+/// entry's archive-relative path in its OS-native byte form and its
+/// permission mode — so identical byte content under different names or
+/// permission bits never reuses an earlier release. Deterministic across
+/// machines: a re-staged identical payload always lands on the same
 /// release name.
-pub fn release_tree_digest(dir: &Path) -> Result<String> {
-    let mut files: Vec<(String, PathBuf)> = Vec::new();
-    collect_payload_entries(dir, "", &mut files)?;
-    files.sort_by(|left, right| left.0.cmp(&right.0));
+fn release_tree_digest(dir: &Path) -> Result<String> {
+    let mut entries: Vec<(Vec<u8>, PathBuf)> = Vec::new();
+    collect_payload_entries(dir, &mut Vec::new(), &mut entries)?;
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
     let mut digest = Sha256::new();
-    for (relative, path) in &files {
-        digest.update(relative.as_bytes());
+    for (relative, path) in &entries {
+        digest.update(relative);
         digest.update(b"\0");
-        let contents = match std::fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => std::fs::read_link(path)
-                .with_context(|| format!("read the link at {}", path.display()))?
-                .to_string_lossy()
-                .as_bytes()
-                .to_vec(),
-            _ => std::fs::read(path).with_context(|| format!("read {}", path.display()))?,
-        };
-        digest.update(super::release::sha256_hex(&contents).as_bytes());
+        let metadata = std::fs::symlink_metadata(path)
+            .with_context(|| format!("read the metadata of {}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            let target = std::fs::read_link(path)
+                .with_context(|| format!("read the link at {}", path.display()))?;
+            digest
+                .update(super::release::sha256_hex(target.to_string_lossy().as_bytes()).as_bytes());
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                digest.update(format!("{:o}", metadata.permissions().mode()).as_bytes());
+            }
+            #[cfg(not(unix))]
+            let _ = &metadata;
+            digest.update(b"\0");
+            digest.update(file_digest(path)?.as_bytes());
+        }
         digest.update(b"\n");
     }
     Ok(hex(&digest.finalize()))
 }
 
 fn collect_payload_entries(
-    root: &Path,
-    prefix: &str,
-    files: &mut Vec<(String, PathBuf)>,
+    directory: &Path,
+    prefix: &[u8],
+    files: &mut Vec<(Vec<u8>, PathBuf)>,
 ) -> Result<()> {
-    for entry in std::fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+    for entry in
+        std::fs::read_dir(directory).with_context(|| format!("read {}", directory.display()))?
+    {
         let entry = entry?;
-        let name = entry.file_name().to_string_lossy().to_string();
-        let relative = if prefix.is_empty() {
-            name.clone()
-        } else {
-            format!("{prefix}/{name}")
-        };
+        let name = entry.file_name();
+        let mut relative = prefix.to_vec();
+        if !relative.is_empty() {
+            relative.push(b'/');
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            relative.extend_from_slice(name.as_bytes());
+        }
+        #[cfg(not(unix))]
+        {
+            relative.extend_from_slice(name.to_string_lossy().as_bytes());
+        }
         let path = entry.path();
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
             collect_payload_entries(&path, &relative, files)?;
-        } else {
+        } else if file_type.is_file() || file_type.is_symlink() {
             files.push((relative, path));
+        } else {
+            // FIFOs, devices, and sockets are not payload content: reading
+            // one would block or never end.
+            anyhow::bail!(
+                "{} is a special file, not release payload content",
+                path.display()
+            );
         }
     }
     Ok(())
@@ -583,12 +701,46 @@ mod tests {
                 .unwrap();
         assert_eq!(again, release_dir);
         assert_eq!(again_version, "9.9.9");
+        // A reused release follows the operator's current install source.
+        let (reused, _) =
+            stage_local_payload(&payload, &root, "https://mirror.example.com/tree/def")
+                .await
+                .unwrap();
+        assert_eq!(reused, release_dir);
+        assert_eq!(
+            std::fs::read_to_string(reused.join(".install-source")).unwrap(),
+            "https://mirror.example.com/tree/def"
+        );
         // A changed payload stages under a different name (a new digest).
         std::fs::write(payload.join("README.md"), "changed").unwrap();
-        let (changed, _) = stage_local_payload(&payload, &root, "https://example.com/tree/abc")
+        let (changed, _) =
+            stage_local_payload(&payload, &root, "https://mirror.example.com/tree/def")
+                .await
+                .unwrap();
+        assert_ne!(changed, release_dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_permission_change_stages_a_new_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let payload = fixture_payload(dir.path(), "payload", "9.9.9");
+        let root = dir.path().join("install-root");
+        std::fs::create_dir_all(&root).unwrap();
+        let (first, _) = stage_local_payload(&payload, &root, "https://example.com")
             .await
             .unwrap();
-        assert_ne!(changed, release_dir);
+        // The same bytes with a different executable bit are a different
+        // payload: the digest must not reuse the earlier release.
+        let helper = payload.join("README.md");
+        let mut permissions = std::fs::metadata(&helper).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(permissions.mode() | 0o111);
+        std::fs::set_permissions(&helper, permissions).unwrap();
+        let (second, _) = stage_local_payload(&payload, &root, "https://example.com")
+            .await
+            .unwrap();
+        assert_ne!(second, first);
     }
 
     /// A release archive whose `prime-agent` is an executable script
