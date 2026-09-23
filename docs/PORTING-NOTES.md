@@ -1015,6 +1015,7 @@ TS reference: `packages/coding-agent/src/modes/interactive/interactive-mode.ts` 
   relay), relaunching with this run's args plus `--resume <sessionFile>`
   unless the invocation already selected a session.
 
+EAD
 ## The stop/delete lifecycle — kill cancels goals and heartbeats (lane deletion-lifecycle, 2026-09-23)
 
 Reference: the TS daemon-mode `closeSessionOnce(reason)` arms
@@ -1084,3 +1085,83 @@ kept it working (billed model turns for a session nobody wanted alive).
   helpers), `supervisor.rs`/`ownership.rs`/`update_restore.rs` (the
   routes), `goal_continuation.rs`/`autonomous_continuation.rs` (the
   continuation gates).
+# Multi-steer batch delivery + the streaming follow-up hint (PR: `pa-daemon/pa-tui: multi-steer batch delivery (steeringMode "all" + the forced batch) + the streaming opt+enter hint`)
+
+TS reference: `packages/coding-agent/src/core/agent-session.ts` —
+`_pumpSessionInputs`'s mode-gated batch gathering (the
+`turnExecutionPoliciesEqual` + `steeringMode`/`followUpMode`/"all" gates),
+`abortAndSendQueued` + `_forcedAllSteeringBatch` (the one-shot armed
+batch), `sdk.ts`'s settings-seeded `Agent` queue modes,
+`setSteeringMode`/`setFollowUpMode`'s live agent write,
+`restoreSessionActions`'s persisted execution policy; and
+`interactive-mode.ts`'s `getTrayOverrideLabel` (the streaming
+`<followUp> to queue message` tray hint).
+
+- **The pump's batch gathering** (`crates/pa-daemon/src/worker.rs`,
+  `gather_delivery_batch`): the lane's front item anchors the delivery;
+  under queue mode "all" — or the forced steering batch — the same-class
+  prefix behind it co-delivers as ONE turn. Joining gates, exactly TS's:
+  the same turn-execution class (`QueuedItem::policy`, the port of
+  `TurnExecutionPolicy` — client rows ("queued"), injected rows
+  (heartbeats, agent-message deliveries, goal/autonomous continuations),
+  the idle prompt's direct hand-off), a plain user row (an injected
+  custom row delivers solo — it replaces its turn's user row), not a
+  queued session command, and armed-set membership while the forced batch
+  governs. The front item anchors regardless, exactly like TS's `first`.
+- **The forced batch** (`SessionCore::forced_all_steering` +
+  `QueuedItem::forced_batch`, armed by
+  `Worker::arm_forced_all_steering`): the visible plain-user steering
+  items — queue-visible rows whose delivery record is a user message,
+  not an accepted agent message or an injected custom row — co-deliver
+  as one batched turn even under "one-at-a-time". Transient worker
+  state, never journaled (the TS armed set is equally in-memory). The
+  caller is the `abort_and_send_queued` handler (schema 29): the
+  command + its Ctrl+C trigger are the abort-parity lane's surface per
+  the fleet split; this branch precedes its head, so the seam is
+  lint-silenced until the rebase wires the call.
+- **One turn for the whole batch** (`run_turn` over `Vec<QueuedItem>`):
+  the first item anchors the prompt; the rest ride as co-delivered rows
+  (`PromptRequest::batch` → the engine's `AgentPromptInput::Messages`
+  list, TS `_startPreparedTurnActions`'s `turns.flatMap(records)` → one
+  `agent.prompt`). Each batched row emits its accepted `message` frames
+  in order; the batch's queue-visible anchor projects the TS
+  active-action phases (`visibleSessionActionProjection()[0]`); one
+  waiter per queued `prompt_and_wait` item resolves at the settle.
+- **The queue modes, wired** (TS `sdk.ts` seeds the Agent from settings):
+  the engine's `SessionEngineConfig` carries `steering_mode`/
+  `follow_up_mode` into the `AgentOptions`; the worker create seeds them
+  through the new `SessionEngine::set_queue_modes` (the settings read
+  the create already had), and `set_steering_mode`/`set_follow_up_mode`
+  apply live (TS `setSteeringMode` writes the live agent — the trait
+  method updates both the built agent and any later build). The print
+  runtime reads the settings the same way its telemetry does.
+- **Recovery**: the worker journal's queue snapshot records carry the
+  policy class ("queued"/"injected"/"direct", the dominant "queued"
+  default for pre-field records); `restore_actions` maps the wire
+  `executionPolicy` back to the class (`nextTurnContextTiming`
+  "commit" → queued, "preparation" + preserved → injected, else direct).
+- **The streaming hint** (`crates/pa-tui/src/session_ui.rs`,
+  `streaming_tray_hint`): while a turn runs and a non-empty draft sits
+  in the editor, the tray's location label is replaced by
+  `<followUp> to queue message` (the effective `app.message.followUp`
+  key; the Ctrl+C exit hint outranks it while armed, TS
+  `isCtrlCExitHintVisible()`'s early return). `focus_subagents_summary`
+  consults the same override (TS `focusSubagentSummary`), so the
+  subagent-summary hand-off is blocked while the hint is up.
+- **Adoption telemetry**: `tui input queued` carries `steering_mode`
+  (the connection-state cached value, refreshed at every state read and
+  after the settings switch) — exposure under batched delivery is the
+  feature's adoption signal.
+- Verifiers: `scripts/steer_queue_parity.py`'s new `batch-delivery` flow
+  (both binaries over the daemon wire, `steeringMode: "all"` seeded via
+  `<agentDir>/settings.json`, three steers parked behind a wedge turn —
+  the normalized traces byte-compare; the side assertions pin ONE
+  delivery `agent_start` + three user rows + one reply) and
+  `scripts/queue_parity.py`'s new `h_streaming_hint` state (tmux
+  ANSI-byte-exact tray-row compare + the hint's departure with the
+  cleared draft); worker unit tests cover mode "all"/"one-at-a-time",
+  the forced batch (armed prefix batched, a post-arm steer excluded),
+  the policy-class split under "all", the follow-up lane's own mode,
+  and the arming classification; pa-tui unit tests cover the hint text
+  (default + rebound key) and its idle/empty-draft gates.
+

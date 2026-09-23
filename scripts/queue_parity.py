@@ -13,6 +13,10 @@ sees:
 - a second parked lane with slash-command and token-bearing prompts, so the
   accent styling itself is compared byte-exact (captured before delivery,
   aborted away after);
+- the streaming follow-up hint (TS `getTrayOverrideLabel`'s streaming
+  arm): while the slow turn streams and a draft sits in the editor, the
+  tray row reads `<followUp> to queue message` — compared ANSI
+  byte-exact, and its departure with the cleared draft is asserted;
 - the live editor with a slash command and argument tokens typed but not
   submitted — cursor at the end (command segment accented, tokens colored)
   and cursor moved inside the command token (accent suppressed), the
@@ -121,6 +125,13 @@ HOTKEYS_SIZE = (120, 130)
 STEERING_ROW = f"Steering: {STEERING_PROMPT}"
 FOLLOW_UP_ROW = f"Follow-up: {FOLLOW_UP_PROMPT}"
 HINT_ROW = "to browse and edit queued messages"
+
+# The streaming follow-up hint (TS `getTrayOverrideLabel`): while a turn
+# streams and a draft sits in the editor, the tray's location label is
+# replaced by `<followUp> to queue message` (the default binding on this
+# platform is alt+enter on both binaries).
+HINT_DRAFT = "draft not sent yet"
+STREAMING_HINT_ROW = "Alt+Enter to queue message"
 
 ANSI_PATTERN = re.compile("\x1b\\[[0-9;]*[A-Za-z]")
 
@@ -294,6 +305,20 @@ def run_queue_session(binary, sandbox, shared_cwd, script_path, size, out_dir, p
     vp.wait_for(session, FOLLOW_UP_ROW, timeout=15)
     time.sleep(0.3)
     frames["q_queue_strip"] = vp.capture(session)
+
+    # (h) the streaming follow-up hint (TS `getTrayOverrideLabel`): while
+    # the turn still streams and a draft sits in the editor, the tray row
+    # becomes `<followUp> to queue message`. Type a draft without
+    # submitting, capture, then clear it — the hint leaves with the empty
+    # editor, and the browse state below starts from the clean editor.
+    vp.tmux("send-keys", "-t", session, HINT_DRAFT)
+    vp.wait_for(session, STREAMING_HINT_ROW, timeout=15)
+    time.sleep(0.3)
+    frames["h_streaming_hint"] = vp.capture(session)
+    vp.tmux("send-keys", "-t", session, "Escape")
+    time.sleep(0.4)
+    vp.tmux("send-keys", "-t", session, "Escape")
+    wait_plain(session, STREAMING_HINT_ROW, gone=True, timeout=15)
 
     # (b) the browse state: alt+up selects the newest parked message (the
     # follow-up) and shows the dim browse header.
@@ -480,6 +505,16 @@ def main():
             [f"Steering: {prompt}" for prompt in SLASH_STEERING_PROMPTS] + [HINT_ROW],
             "q_slash_strip (ts)",
         )
+        require_markers(
+            ts_frames["h_streaming_hint"],
+            [STREAMING_HINT_ROW, HINT_DRAFT],
+            "h_streaming_hint (ts)",
+        )
+        require_markers(
+            rust_frames["h_streaming_hint"],
+            [STREAMING_HINT_ROW, HINT_DRAFT],
+            "h_streaming_hint (rust)",
+        )
         # The transcript states must show their rows (an early capture or a
         # scrolled-off block would compare empty rows).
         for state, text in (
@@ -533,6 +568,17 @@ def main():
                     editor_rows_styled(rust_frames[state]),
                 )
             )
+        # The streaming follow-up hint row compares ANSI byte-exact: the
+        # tray override label (muted key + description, TS
+        # `getTrayOverrideLabel` -> `renderInfoLine`) is the surface under
+        # test.
+        failures.append(
+            compare(
+                f"h_streaming_hint-{args.size}",
+                exact_rows_styled(ts_frames["h_streaming_hint"], STREAMING_HINT_ROW),
+                exact_rows_styled(rust_frames["h_streaming_hint"], STREAMING_HINT_ROW),
+            )
+        )
         # The browse header and drained strip keep the plain-row compare.
         for state in ("q_browse_header", "q_drained"):
             name = f"{state}-{args.size}"
