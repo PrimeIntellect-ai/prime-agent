@@ -4782,14 +4782,16 @@ pub(crate) mod tests {
         assert_eq!(engine.goal_state_value()["continuationsUsed"], 1);
     }
 
-    /// The engine session's entries as their persisted wire shapes.
+    /// The engine session's entries as their persisted wire shapes (the
+    /// hydrating snapshot: a windowed manager holds only the suffix).
     fn engine_session_entries(engine: &AgentSessionEngine) -> Vec<pa_types::session::FileEntry> {
         let guard = engine.session.blocking_lock();
         let core = guard.as_deref().expect("session built");
         let persistence = core.session.shared_persistence();
-        engine
-            .runtime
-            .block_on(async { persistence.lock().await.get_all_entries().to_vec() })
+        engine.runtime.block_on(async {
+            let snapshot = persistence.lock().await.history_snapshot();
+            snapshot.await.expect("history snapshot")
+        })
     }
 
     /// An injected custom turn (wire `customMessage`, the RLM child
@@ -5857,9 +5859,10 @@ pub(crate) mod tests {
             return false;
         };
         let persistence = core.session.shared_persistence();
-        let entries = engine
-            .runtime
-            .block_on(async { persistence.lock().await.get_entries() });
+        let entries = engine.runtime.block_on(async {
+            let snapshot = persistence.lock().await.history_snapshot();
+            snapshot.await.expect("history snapshot")
+        });
         entries
             .iter()
             .any(|entry| matches!(entry, pa_types::session::FileEntry::Compaction { .. }))
