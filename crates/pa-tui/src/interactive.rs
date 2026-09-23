@@ -810,12 +810,16 @@ pub async fn run_interactive(
 
         // The OSC 8 hyperlink capability settles once per run with the
         // terminal identity the paint backend binds to: one adoption event
-        // reports the gate (`tui hyperlinks`).
+        // reports the gate (`tui hyperlinks`). The one-shot client's
+        // flush shutdown can wait out a slow telemetry endpoint, so the
+        // event is spawned instead of awaited - the run's first frame and
+        // input handling never block on it.
         if hyperlinks_pending {
-            if let Some(telemetry) = &session.telemetry {
-                telemetry
-                    .hyperlinks_active(crate::hyperlinks::hyperlinks_enabled())
-                    .await;
+            if let Some(telemetry) = session.telemetry.clone() {
+                let enabled = crate::hyperlinks::hyperlinks_enabled();
+                tokio::spawn(async move {
+                    telemetry.hyperlinks_active(enabled).await;
+                });
             }
             hyperlinks_pending = false;
         }

@@ -70,6 +70,8 @@ URL_TURN = (
     "Explicit: [docs](https://example.com/docs) and [https://bare.dev](https://bare.dev)\n"
     "\n"
     "Parens: (see https://x.dev/page_(p), thanks)\n"
+    "\n"
+    "Nested: [pre <https://inner.dev> post](https://outer.dev)\n"
 )
 
 PROMPT = "Show me the links."
@@ -202,7 +204,7 @@ def run_pty(command, env_extra, cwd, turn_seconds):
     return bytes(out), resize_offset
 
 
-def binary_command(binary, sandbox, script_path):
+def binary_command(binary, sandbox, script_path, ts_bin):
     agent = sandbox["agent"]
     common_env = {
         "HOME": sandbox["home"],
@@ -212,7 +214,9 @@ def binary_command(binary, sandbox, script_path):
         "PRIME_AGENT_DISABLE_ANALYTICS": "1",
     }
     if binary == "ts":
-        ts_bin = os.environ.get("TS_BIN") or "prime-agent"
+        # The resolved executable path, not a PATH lookup: leg B sends the
+        # command through the tmux server, whose environment may hold a
+        # stale PATH (and resolve a different binary than `main` asserted).
         command = [ts_bin, "--daemon-socket", os.path.join(agent, "daemon.sock"), "--model", vp.TS_SCRIPT_MODEL]
     else:
         rust = os.environ.get(
@@ -296,7 +300,7 @@ def leg_a(ts_bin, rust_bin, base):
     raw = {}
     resize_at = {}
     for binary in ("ts", "rust"):
-        command, env_extra = binary_command(binary, sandboxes[binary], script_path)
+        command, env_extra = binary_command(binary, sandboxes[binary], script_path, ts_bin)
         env_extra["TERM_PROGRAM"] = "vscode"
         raw[binary], resize_at[binary] = run_pty(command, env_extra, shared_cwd, 150)
     events = {b: leg_a_events(raw[b][resize_at[b] :]) for b in raw}
@@ -329,6 +333,11 @@ def leg_a(ts_bin, rust_bin, base):
         "https://example.com/docs",
         "https://bare.dev/",
         "https://x.dev/page_(p)",
+        # Macroscope finding 4, byte-proofed: the angle autolink inside a
+        # link label runs in marked too (only the url rule is inLink-guarded)
+        # and the nested hyperlink renders identically on both sides.
+        "https://outer.dev",
+        "https://inner.dev",
     ):
         if expected not in urls:
             print(f"FAIL leg A: expected OSC 8 href missing: {expected}")
@@ -337,7 +346,7 @@ def leg_a(ts_bin, rust_bin, base):
     return 0
 
 
-def leg_b(base):
+def leg_b(base, ts_bin):
     """tmux panes with no capability env: legacy fallback parity, no OSC 8."""
     shared_cwd, script_path, sandboxes = base
     panes = {}
@@ -345,7 +354,7 @@ def leg_b(base):
         session = f"vplane-osc8-{binary}"
         vp.tmux("kill-session", "-t", session, check=False)
         vp.tmux("new-session", "-d", "-s", session, "-x", str(WIDTH), "-y", str(HEIGHT), "-c", shared_cwd)
-        command, env_extra = binary_command(binary, sandboxes[binary], script_path)
+        command, env_extra = binary_command(binary, sandboxes[binary], script_path, ts_bin)
         env = " ".join(f"{k}={v}" for k, v in env_extra.items())
         vp.tmux("send-keys", "-t", session, f"{env} {' '.join(command)}", "Enter")
         vp.wait_for(session, "Collapsed mode", timeout=40)
@@ -421,7 +430,7 @@ def main():
         rc = leg_a(ts_bin, rust_bin, base)
         if rc:
             return rc
-        return leg_b(base)
+        return leg_b(base, ts_bin)
     finally:
         batterylib.reap_daemons(needles=[base_dir], cwd_roots=[base_dir])
         if not args.keep:

@@ -79,20 +79,32 @@ pub(crate) fn bare_token(src: &str) -> Option<AutolinkToken> {
         });
     }
     let scheme = caps.get(1)?.as_str().to_string();
-    let mut text = caps.get(0)?.as_str().to_string();
-    while let Ok(Some(m)) = BACKPEDAL.find(&text) {
-        if m.as_str() == text {
+    let matched = caps.get(0)?.as_str();
+    // marked's fixpoint (`do .. while r !== t[0]`) re-executed on the
+    // shrunk match; the loop here walks the same steps as (start, end)
+    // ranges over the one matched slice instead of re-copying the string
+    // each pass, so a long trailing-punctuation run peels without an
+    // allocation per peeled character.
+    let mut start = 0;
+    let mut end = matched.len();
+    while let Ok(Some(m)) = BACKPEDAL.find(&matched[start..end]) {
+        if m.start() == 0 && m.end() == end - start {
             break;
         }
-        text = m.as_str().to_string();
+        start += m.start();
+        end = start + m.end() - m.start();
     }
+    let text = &matched[start..end];
     let href = if scheme == "www." {
         format!("http://{text}")
     } else {
-        text.clone()
+        text.to_string()
     };
-    let raw = text.clone();
-    Some(AutolinkToken { raw, text, href })
+    Some(AutolinkToken {
+        raw: text.to_string(),
+        text: text.to_string(),
+        href,
+    })
 }
 
 /// Cheap per-position gate for the gfm `url` rule: the rule can only match
@@ -114,7 +126,12 @@ pub(crate) fn bare_candidate(bytes: &[char], i: usize, line_has_at: bool) -> boo
             return true;
         }
     }
-    if line_has_at {
+    if line_has_at && (i == 0 || !is_local_part(bytes[i - 1])) {
+        // Only the first character of a local-part run can start an email
+        // match (the local-part grammar ends at the `@`, so a mid-run
+        // start faces the identical `@` and domain and cannot succeed
+        // where the run start failed), and one scan per run keeps a long
+        // local-part run linear instead of quadratic.
         let mut j = i;
         while j < bytes.len() && is_local_part(bytes[j]) {
             j += 1;

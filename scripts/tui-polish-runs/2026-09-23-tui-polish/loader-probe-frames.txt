@@ -1,0 +1,4416 @@
+===== ts-00
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-01
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-02
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-03
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-04
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-05
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-06
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-07
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-08
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-09
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-10
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-11
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-12
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-13
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-14
+HOME=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/home TMPDIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/tmp PRIME_AGENT_CODING_
+AGENT_DIR=/tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent PRIME_AGENT_DISABLE_ANALYTICS=1  /home/ubuntu/.local/share/prime
+-agent/releases/0.9.5-linux-x64-bc4b0ed791d1e8b3b5d6a95249a60306d9579fc0d6038e5d7d82f068d81f008d/prime-agent --provider
+prime-inference --model mock-1 --offline --daemon-socket /tmp/mission-tmp/tui-polish-63lo7ujb/ts/agent/daemon.sock
+
+    ____       _                ____      __       ____          __
+   / __ \_____(_)___ ___  ___  /  _/___  / /____  / / /__  _____/ /_
+  / /_/ / ___/ / __ `__ \/ _ \ / // __ \/ __/ _ \/ / / _ \/ ___/ __/
+ / ____/ /  / / / / / / /  __// // / / / /_/  __/ / /  __/ /__/ /_
+/_/   /_/  /_/_/ /_/ /_/\___/___/_/ /_/\__/\___/_/_/\___/\___/\__/
+
+$ say the loader parity probe
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-15
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+===== ts-16
+                                                          cwd
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.9.5[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader parity probe
+    [7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                          [38;2;113;113;122mmock-1:medium · 0 (0%)
+
+===== ts-17
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.9.5[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader parity probe
+    [7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                          [38;2;113;113;122mmock-1:medium · 0 (0%)
+
+===== ts-18
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.9.5[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader parity probe
+    [7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                          [38;2;113;113;122mmock-1:medium · 0 (0%)
+
+===== ts-19
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.9.5[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader parity probe
+    [7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                          [38;2;113;113;122mmock-1:medium · 0 (0%)
+
+===== ts-20
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.9.5[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader parity probe
+    [7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                          [38;2;113;113;122mmock-1:medium · 0 (0%)
+
+===== ts-21
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.9.5[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader parity probe
+    [7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                          [38;2;113;113;122mmock-1:medium · 0 (0%)
+
+===== ts-22
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.9.5[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader parity probe
+    [7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                          [38;2;113;113;122mmock-1:medium · 0 (0%)
+
+===== ts-23
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.9.5[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader parity probe
+    [7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                          [38;2;113;113;122mmock-1:medium · 0 (0%)
+
+===== rust-00
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  s[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-01
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  sa[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-02
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say [7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-03
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say t[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-04
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say th[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-05
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-06
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the [7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-07
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the l[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-08
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loa[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-09
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the load[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-10
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loade[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-11
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-12
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader p[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-13
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader pa[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-14
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader pari[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-15
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader parit[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-16
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader parity[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-17
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader parity [7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-18
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader parity pr[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-19
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader parity pro[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-20
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  say the loader parity probe[7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-21
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+
+ [38;2;124;111;175m⠋[39m [38;2;161;161;170mWaiting · 0s[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  [7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-22
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+[48;2;26;26;31m
+  say the loader parity probe
+
+
+[49m [38;2;124;111;175m⠹[39m [38;2;161;161;170mWaiting · 0s[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  [7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+
+===== rust-23
+                                                          cwd  [38;2;113;113;122m$0.00[39m
+
+                  ▗▄▄█▀
+    ███▄       ▗▄███▀
+   ▗█▛▐█▙   ▗▄█▀▗█▀       prime agent [38;2;161;161;170mv0.1.0[39m
+  ▗█▛ ▟██▙▄██▛ ▟▛         [38;2;113;113;122mmodel [38;2;161;161;170mmock-1[39m
+  ▗▟▌ ▐███▛▘▗▄█▖          [38;2;113;113;122mcwd [38;2;161;161;170m/tmp/mission-tmp/tui-polish-63lo7ujb/cwd[39m
+ ▟███▄  ▄▄▟███▀
+ ▜█▛▀▘  ▜█▛▀▘
+
+[48;2;26;26;31m
+  say the loader parity probe
+
+
+[49m [38;2;124;111;175m⠼[39m [38;2;161;161;170mWaiting · 0s[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                      [38;2;113;113;122mCollapsed mode (Ctrl+O to expand)[39m
+[48;2;26;26;31m
+ >  [7m [0m[39m[48;2;26;26;31m
+
+[38;2;113;113;122m[49m←[38;2;161;161;170m manage[39m                                                                                                 [38;2;113;113;122mmock-1 · 0 (0%)
+

@@ -72,12 +72,43 @@ pub fn rewrite_drive_path(url: &str) -> String {
 pub fn resolve_link_href(token_href: &str) -> String {
     let target = rewrite_drive_path(token_href);
     if target.starts_with('#') {
-        return target;
+        return sanitize_control_bytes(target);
     }
     match url::Url::parse(&target) {
         Ok(parsed) => parsed.to_string(),
-        Err(_) => target,
+        Err(_) => sanitize_control_bytes(target),
     }
+}
+
+/// The parse-bypass paths above return the target raw, exactly like the
+/// TS renderer (its `!target.startsWith('#')` short-circuit and the
+/// `canParse` fallthrough both hand the raw string to `hyperlink()`).
+/// A raw C0/DEL byte in that string would ride the OSC 8 `href` field as
+/// a second terminal escape (e.g. an OSC 52 clipboard write), so those
+/// paths percent-encode the bytes first - the same bytes WHATWG URL
+/// parsing percent-encodes on every parseable target in both products.
+/// The TS renderer shares the hole (its fragment and unparseable targets
+/// reach `hyperlink()` unsanitized); this is deliberate hardening past
+/// parity on an input class no battery covers.
+fn sanitize_control_bytes(target: String) -> String {
+    if !target
+        .as_bytes()
+        .iter()
+        .any(|&b| matches!(b, 0x00..=0x1f | 0x7f))
+    {
+        return target;
+    }
+    let mut out = Vec::with_capacity(target.len());
+    for byte in target.bytes() {
+        if matches!(byte, 0x00..=0x1f | 0x7f) {
+            out.extend_from_slice(format!("%{byte:02X}").as_bytes());
+        } else {
+            out.push(byte);
+        }
+    }
+    // Only ASCII control bytes were replaced; the remaining bytes are the
+    // original valid UTF-8 sequence.
+    String::from_utf8(out).expect("utf-8 survives ASCII percent-encoding")
 }
 
 /// The env-based hyperlink-capability gate (TS `detectCapabilities`):
@@ -481,6 +512,20 @@ mod tests {
         assert_eq!(resolve_link_href("mailto:a@b.dev"), "mailto:a@b.dev");
         assert_eq!(resolve_link_href("c:\\src"), "file:///c:/src");
         assert_eq!(resolve_link_href("see docs"), "see docs");
+        assert_eq!(resolve_link_href("#section"), "#section");
+    }
+
+    #[test]
+    fn parse_bypass_targets_percent_encode_control_bytes() {
+        // Fragment and unparseable targets reach the OSC 8 href raw (the
+        // TS renderer's own bypass paths); a raw control byte there would
+        // ride the terminal stream as a second escape (an OSC 52 clipboard
+        // write), so those paths percent-encode C0 and DEL first - the
+        // same bytes URL parsing encodes on every parseable target.
+        assert_eq!(resolve_link_href("#a]52;cb"), "#a%1B]52;c%07b");
+        assert_eq!(resolve_link_href("not a url]8;;x"), "not a url%1B]8;;x");
+        assert_eq!(resolve_link_href("#s"), "#s%7F");
+        // Printable fragments stay untouched, byte-identical to TS.
         assert_eq!(resolve_link_href("#section"), "#section");
     }
 

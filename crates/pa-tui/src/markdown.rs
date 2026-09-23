@@ -605,6 +605,10 @@ pub fn render_inline(text: &str, style: &MarkdownStyle) -> Line {
 fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
     let mut spans: Vec<Span> = Vec::new();
     let bytes: Vec<char> = text.chars().collect();
+    // Byte offset per char index: the autolink rules run on a slice of the
+    // original text (zero-copy) instead of a copy of the remaining tail,
+    // so a candidate-heavy line stays linear in its attempts.
+    let byte_offsets: Vec<usize> = text.char_indices().map(|(b, _)| b).collect();
     let mut buf = String::new();
     let mut i = 0usize;
     let base = style.body;
@@ -784,9 +788,9 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
         // construct failed at this position. The two rules are disjoint on
         // their first character, so the order collapses to this split.
         let autolink_hit = if c == '<' {
-            autolink_token_at(&bytes, i, true)
+            autolink_token_at(&text[byte_offsets[i]..], true)
         } else if !in_link && crate::autolink::bare_candidate(&bytes, i, line_has_at) {
-            autolink_token_at(&bytes, i, false)
+            autolink_token_at(&text[byte_offsets[i]..], false)
         } else {
             None
         };
@@ -834,19 +838,15 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
     spans
 }
 
-/// Run the marked autolink rules on the text starting at char index `i`
-/// (`angle` selects the `<...>` rule, otherwise the gfm bare-url rule).
+/// Run the marked autolink rules on the text starting at `rest` (the
+/// caller's slice of the original line, so no per-candidate tail copy;
+/// `angle` selects the `<...>` rule, otherwise the gfm bare-url rule).
 /// Returns the token; the caller advances by its `raw` char count.
-fn autolink_token_at(
-    bytes: &[char],
-    i: usize,
-    angle: bool,
-) -> Option<crate::autolink::AutolinkToken> {
-    let rest: String = bytes[i..].iter().collect();
+fn autolink_token_at(rest: &str, angle: bool) -> Option<crate::autolink::AutolinkToken> {
     if angle {
-        crate::autolink::angle_token(&rest)
+        crate::autolink::angle_token(rest)
     } else {
-        crate::autolink::bare_token(&rest)
+        crate::autolink::bare_token(rest)
     }
 }
 
@@ -1455,6 +1455,39 @@ mod tests {
         let spans = render_inline("[see https://in.dev/x](https://out.dev/y)", &style);
         let texts: Vec<&str> = spans.iter().map(|s| s.content.as_str()).collect();
         assert_eq!(texts, vec!["see https://in.dev/x", " (https://out.dev/y)"]);
+        crate::hyperlinks::set_hyperlinks_override(None);
+    }
+
+    #[test]
+    fn angle_autolink_inside_link_label_yields_the_terminal_ranges() {
+        // marked tokenizes angle autolinks even inside an explicit link
+        // label (only the gfm bare rule is inLink-guarded), so the TS byte
+        // stream carries the outer wrap around a label that itself embeds
+        // an inner OSC 8 pair. Terminals keep no region stack: the inner
+        // close ends the active region, so the outer label's tail after
+        // it is NOT linked - exactly the ranges the frame scan produces
+        // (the outer range closes at the inner open, and never resumes).
+        crate::hyperlinks::set_hyperlinks_override(Some(true));
+        let style = MarkdownStyle::default();
+        let spans = render_inline("[pre <https://inner.dev> post](https://outer.dev)", &style);
+        let ranges = crate::hyperlinks::frame_link_ranges(&[spans]);
+        assert_eq!(
+            ranges,
+            vec![
+                crate::hyperlinks::LinkRange {
+                    row: 0,
+                    start_col: 0,
+                    end_col: 4,
+                    url: "https://outer.dev/".to_string(),
+                },
+                crate::hyperlinks::LinkRange {
+                    row: 0,
+                    start_col: 4,
+                    end_col: 21,
+                    url: "https://inner.dev/".to_string(),
+                },
+            ]
+        );
         crate::hyperlinks::set_hyperlinks_override(None);
     }
 
