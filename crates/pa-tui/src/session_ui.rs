@@ -262,6 +262,16 @@ pub(crate) struct SessionUi {
     /// retry-exhausted banner); the turn_end error stays silent then (TS
     /// renders the failure once, through the message or the retry banner).
     turn_error_shown: bool,
+    /// Tool cards awaiting their final result (TS `pendingTools`): a
+    /// streamed call registers at its `message_update` frame or at
+    /// `tool_execution_start`, the final result unregisters, and the run's
+    /// failed final frame settles every pending card with the failure text
+    /// (late frames land on nothing — TS `resetPendingToolState`).
+    pending_tools: std::collections::HashSet<String>,
+    /// Tool calls settled by a failed final frame, card or not: the run's
+    /// late tool frames land on nothing (a new assistant message re-arms a
+    /// reused id, the way TS's fresh component does).
+    aborted_tools: std::collections::HashSet<String>,
     pub(crate) last_assistant_text: Option<String>,
     /// The OSC 52 channel for clipboard writes (TS `process.stdout`):
     /// stdout in the terminal, a captured buffer in headless runs.
@@ -533,6 +543,8 @@ impl SessionUi {
             streaming_index: None,
             working_tokens: LoaderTokenTracker::default(),
             turn_error_shown: false,
+            pending_tools: Default::default(),
+            aborted_tools: Default::default(),
             last_assistant_text: None,
             osc_sink: crate::clipboard::OscSink::Stdout,
             pending_confirm: None,
@@ -948,9 +960,25 @@ impl SessionUi {
         view.clear_chat();
         // The rebuilt transcript invalidates the tracked status row.
         self.last_status_index = None;
+        // The rebuild drops the previous run's pending-tool map (TS
+        // `resetPendingToolState` at the rebuild boundary).
+        self.pending_tools.clear();
+        self.aborted_tools.clear();
         if let Some(items) = self.pending_snapshot.take() {
             for entry in items {
                 view.push_entry(entry);
+            }
+        }
+        // The rebuild re-registers the live tool cards the way TS
+        // `restoreStreamingMessageFromSnapshot` does (the resumed turn's
+        // streamed calls re-enter the pending map): a post-reconnect
+        // failure frame can still settle them. Settled cards (a final
+        // result attached) stay out.
+        for entry in &view.chat {
+            if let ChatEntry::Tool(card) = entry {
+                if card.result.is_none() || card.result_partial {
+                    self.pending_tools.insert(card.id.clone());
+                }
             }
         }
         if let Some(model) = self.pending_model.take() {
@@ -5507,20 +5535,49 @@ impl SessionUi {
     }
 
     /// Abort the active turn off the UI loop (TS `interruptOrClearInput`
-    /// fires `void abort()`): the request never blocks key handling, and a
-    /// failure surfaces later as a transcript note.
+    /// fires `void abortAndSendQueued()` when streaming, schema 29): the
+    /// daemon aborts the run and, with visible steering parked at the
+    /// boundary, delivers it right after the aborted run settles — a
+    /// plain abort when the steering queue is empty. A daemon without the
+    /// schema-29 capability gets the plain abort (TS
+    /// `supportsServerCapability` + the `isUnknownDaemonCommandError`
+    /// catch, both arms of TS `abortAndSendQueued`). The request never
+    /// blocks key handling, and a failure surfaces later as a transcript
+    /// note.
     fn abort_turn(&self) {
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
         let notes = self.notes.clone();
         tokio::spawn(async move {
-            let result = client
-                .request_ok(DaemonCommand::Abort {
-                    id: None,
-                    active_session_id,
-                    rest: Default::default(),
-                })
-                .await;
+            let mut result = if client.supports_server_capability("abort_and_send_queued") {
+                client
+                    .request_ok(DaemonCommand::AbortAndSendQueued {
+                        id: None,
+                        active_session_id: active_session_id.clone(),
+                        rest: Default::default(),
+                    })
+                    .await
+            } else {
+                client
+                    .request_ok(DaemonCommand::Abort {
+                        id: None,
+                        active_session_id: active_session_id.clone(),
+                        rest: Default::default(),
+                    })
+                    .await
+            };
+            // A daemon that rejects the command itself gets the plain
+            // abort too (TS `isUnknownDaemonCommandError`'s arm).
+            if matches!(&result, Err(error) if error.to_string().contains("abort_and_send_queued"))
+            {
+                result = client
+                    .request_ok(DaemonCommand::Abort {
+                        id: None,
+                        active_session_id,
+                        rest: Default::default(),
+                    })
+                    .await;
+            }
             if let Err(error) = result {
                 let _ = notes.send(format!("the abort failed: {error:#}"));
             }
@@ -5890,6 +5947,11 @@ impl SessionUi {
                 "clear"
             };
             self.arm_escape_repeat(action);
+            // TS `handleEscape` arms the repeat, then fires
+            // `interruptOrClearInput()` — the same abort ladder as the
+            // Ctrl+C interrupt, minus the Ctrl+C exit hint (TS shows that
+            // only through `handleInterruptKey`).
+            self.interrupt_running_work(view);
             return Ok(());
         }
         if view.editor.keybindings().matches(&id, "app.exit") && view.editor.get_text().is_empty() {
@@ -5942,22 +6004,7 @@ impl SessionUi {
                     }
                 });
             }
-            if view.compaction.is_some() {
-                // The compaction loader is up (TS `isAgentCompacting()`):
-                // the interrupt cancels the compaction run only — the agent
-                // is not streaming, so no turn abort goes out, exactly like
-                // the TS interrupt key.
-                self.abort_compaction(view.compaction_generation);
-            } else if self.turn_active {
-                self.abort_turn();
-                self.note("aborting the current turn", view);
-            }
-            // A running user-bash command aborts the same way (TS
-            // `interruptOrClearInput` fires `void abortBash()`): the
-            // settled run reports cancelled through its bash_end.
-            if self.user_bash_running {
-                self.abort_user_bash();
-            }
+            self.interrupt_running_work(view);
             self.show_ctrl_c_hint();
             self.dirty = true;
             return Ok(());
@@ -6456,6 +6503,10 @@ impl SessionUi {
             TurnUpdate::TurnStarted => {
                 self.turn_active = true;
                 self.turn_error_shown = false;
+                // TS `agent_start` clears the pending tool map: no card
+                // from a previous run settles on this one's failure.
+                self.pending_tools.clear();
+                self.aborted_tools.clear();
                 self.start_loader(view);
             }
             TurnUpdate::UserMessage(text) => {
@@ -6499,34 +6550,57 @@ impl SessionUi {
                 tool_name,
                 args,
             } => {
-                crate::snapshot::apply_tool_execution_start(view, &tool_call_id, &tool_name, args);
-                self.set_working_activity("Executing", false, view);
+                // The failed frame's sweep owns the call: the run's late
+                // tool frames land on nothing - not the card, not the
+                // pending map, not the loader (TS: no component in the
+                // cleared pending map).
+                if !self.aborted_tools.contains(&tool_call_id) {
+                    crate::snapshot::apply_tool_execution_start(
+                        view,
+                        &tool_call_id,
+                        &tool_name,
+                        args,
+                    );
+                    // TS `tool_execution_start` re-registers the call in the
+                    // pending map (a card may predate a pending-state reset or
+                    // arrive without its own streamed frame).
+                    self.pending_tools.insert(tool_call_id.clone());
+                    self.set_working_activity("Executing", false, view);
+                }
             }
             TurnUpdate::ToolExecutionUpdate {
                 tool_call_id,
                 partial,
             } => {
                 // A `starting` partial (python-kernel bootstrap) owns the
-                // loader note (TS `setWorkingMessage`); other updates leave
-                // any current note alone.
-                if let Some(message) = crate::snapshot::working_message_from_update(&partial) {
-                    if let Some(working) = &mut view.working {
+                // loader note (TS `setWorkingMessage`); other updates
+                // leave any current note alone. The note rides the
+                // landed-result gate: the aborted card's late frames must
+                // not clobber the delivered turn's loader.
+                let loader_message = crate::snapshot::working_message_from_update(&partial);
+                if self.apply_tool_result(&tool_call_id, partial, false, true, view) {
+                    if let (Some(message), Some(working)) = (loader_message, view.working.as_mut())
+                    {
                         working.message = Some(message);
                     }
                 }
-                self.apply_tool_result(&tool_call_id, partial, false, true, view);
             }
             TurnUpdate::ToolExecutionEnd {
                 tool_call_id,
                 result,
                 is_error,
             } => {
-                self.apply_tool_result(&tool_call_id, result, is_error, false, view);
-                self.set_working_activity("Waiting", false, view);
-                // The tool that owned the loader note finished executing
-                // (TS clears `workingMessage` in the tool's `finally`).
-                if let Some(working) = &mut view.working {
-                    working.message = None;
+                // The landed-result gate keeps the loader safe: after the
+                // interrupt delivers the parked queue, a late end frame from
+                // the aborted run must not rewrite the new turn's activity
+                // label or clear its loader note.
+                if self.apply_tool_result(&tool_call_id, result, is_error, false, view) {
+                    self.set_working_activity("Waiting", false, view);
+                    // The tool that owned the loader note finished executing
+                    // (TS clears `workingMessage` in the tool's `finally`).
+                    if let Some(working) = &mut view.working {
+                        working.message = None;
+                    }
                 }
             }
             TurnUpdate::TurnEnded { error } => {
@@ -6542,6 +6616,11 @@ impl SessionUi {
                 // indicator stream into the transcript (TS `turn_end`
                 // flushes `pendingBashComponents`).
                 self.flush_pending_bash(view);
+                // TS `turn_end` clears the pending tool map after the
+                // failed frame's settle: stragglers never leak into the
+                // next run.
+                self.pending_tools.clear();
+                self.aborted_tools.clear();
                 // A provider failure already surfaced through the failed
                 // assistant message and/or the retry-exhausted banner; the
                 // turn result error is only a silent-failure backstop.
@@ -7040,6 +7119,34 @@ impl SessionUi {
         });
     }
 
+    /// TS `interruptOrClearInput`'s abort ladder, shared by the Ctrl+C and
+    /// Escape interrupts: a compacting session aborts the compaction run,
+    /// a streaming turn aborts through `abort_and_send_queued` (schema 29),
+    /// and a running user bash aborts alongside. The side-question abort
+    /// stays at the call sites — the two keys dispose of its pane
+    /// differently.
+    fn interrupt_running_work(&self, view: &AgentView) {
+        if view.compaction.is_some() {
+            // The compaction loader is up (TS `isAgentCompacting()`):
+            // the interrupt cancels the compaction run only — the agent
+            // is not streaming, so no turn abort goes out, exactly like
+            // the TS interrupt key.
+            self.abort_compaction(view.compaction_generation);
+        } else if self.turn_active {
+            // TS shows no transient abort hint: the aborted turn's own
+            // assistant row carries the interrupt (the red "Operation
+            // aborted" error row inside the message component), so
+            // nothing is noted here.
+            self.abort_turn();
+        }
+        // A running user-bash command aborts the same way (TS
+        // `interruptOrClearInput` fires `void abortBash()`): the settled
+        // run reports cancelled through its bash_end.
+        if self.user_bash_running {
+            self.abort_user_bash();
+        }
+    }
+
     /// Apply an assistant message frame: an open streaming message is
     /// updated in place; otherwise the message expands into a chat component
     /// plus a card per tool call.
@@ -7127,8 +7234,25 @@ impl SessionUi {
             // A streamed tool call first appears queued; the execution start
             // event flips it to running, and later frames refresh its name
             // and args while they stream (TS `updateArgs` + the latest
-            // streaming call winning at component creation).
-            crate::snapshot::apply_streamed_tool_card(view, id, name, args);
+            // streaming call winning at component creation). The failed
+            // run's late frames touch no card either (the settled card
+            // keeps its sweep-written result).
+            if !self.aborted_tools.contains(id) {
+                crate::snapshot::apply_streamed_tool_card(view, id, name, args);
+            }
+            if starts_message {
+                // A new assistant message re-arms a reused id (TS builds a
+                // fresh pending component for the new invocation); a late
+                // `message_update` from a failed run must not.
+                self.aborted_tools.remove(id);
+            }
+            // TS `message_update` registers every streamed call in the
+            // pending map (`message_start` and the final frame never do:
+            // their cards either already settled or get the failed frame's
+            // sweep); the failed run's late frames stay out too.
+            if streaming && !starts_message && !self.aborted_tools.contains(id) {
+                self.pending_tools.insert(id.clone());
+            }
         }
         if !streaming {
             let open = self.streaming_index.take();
@@ -7152,8 +7276,45 @@ impl SessionUi {
         open: Option<usize>,
         view: &mut AgentView,
     ) {
+        // TS `message_end`'s failed-frame block: an aborted run's row text
+        // is the client's own — the retry count and the working-elapsed
+        // suffix never ride the wire (the rebuild keeps the stored
+        // "Operation aborted") — and every still-pending tool card settles
+        // with the failure text; late result frames land on nothing.
+        let stop_reason = message.get("stopReason").and_then(Value::as_str);
+        let abort_text = if stop_reason == Some("aborted") {
+            Some(crate::chat::live_abort_text(
+                view.retry.as_ref().map_or(0, |retry| retry.attempt),
+                view.working_since.map(|since| since.elapsed().as_secs()),
+            ))
+        } else {
+            None
+        };
+        if abort_text.is_some() || stop_reason == Some("error") {
+            let settle_text = abort_text.clone().unwrap_or_else(|| {
+                message
+                    .get("errorMessage")
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or("Error")
+                    .to_string()
+            });
+            crate::snapshot::settle_pending_tool_cards(
+                view,
+                &mut self.pending_tools,
+                &mut self.aborted_tools,
+                &settle_text,
+            );
+        }
         let Some(error) = crate::snapshot::assistant_error_row(message, tool_calls) else {
             return;
+        };
+        let error = match abort_text {
+            Some(text) => crate::snapshot::AssistantErrorRow {
+                text,
+                aborted: true,
+            },
+            None => error,
         };
         self.turn_error_shown = true;
         if let Some(index) = open {
@@ -7180,6 +7341,11 @@ impl SessionUi {
     }
 
     /// Attach a (partial or final) tool result to the matching card.
+    /// Returns whether the result landed (a card exists and is not
+    /// aborted): the caller's loader work rides the same gate — the
+    /// aborted card's late frames must leave the loader untouched too
+    /// (TS `tool_execution_end` does nothing without a pending
+    /// component).
     fn apply_tool_result(
         &mut self,
         tool_call_id: &str,
@@ -7187,7 +7353,7 @@ impl SessionUi {
         is_error: bool,
         partial: bool,
         view: &mut AgentView,
-    ) {
+    ) -> bool {
         let result = ToolResultView {
             content: result
                 .get("content")
@@ -7204,14 +7370,23 @@ impl SessionUi {
         if let Some(index) = card_index {
             view.prepare_entry_mutation(index);
             if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
+                // The failed frame's sweep owns the call: the tool's late
+                // result frames land on nothing (TS `tool_execution_end`
+                // finds no component in the cleared pending map).
+                if self.aborted_tools.contains(tool_call_id) || card.aborted {
+                    return false;
+                }
                 card.result = Some(result);
                 card.result_partial = partial;
                 if !partial {
                     card.ended_at = Some(std::time::Instant::now());
+                    self.pending_tools.remove(tool_call_id);
                 }
                 view.mark_entry_stale(index);
+                return true;
             }
         }
+        false
     }
 
     /// Update the loader activity label (agent-activity tracker subset).

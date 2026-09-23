@@ -190,6 +190,23 @@ pub struct WorkingState {
     pub elapsed_secs: u64,
 }
 
+/// TS `message_end`'s aborted arm: the live abort row's text — the retry
+/// count and the working-elapsed suffix ride the client, never the wire
+/// (the rebuild path keeps the stored "Operation aborted").
+pub fn live_abort_text(retry_attempt: u32, elapsed_secs: Option<u64>) -> String {
+    let elapsed_suffix = elapsed_secs
+        .map(|secs| format!(" \u{00b7} {}", format_working_elapsed(secs)))
+        .unwrap_or_default();
+    if retry_attempt > 0 {
+        format!(
+            "Aborted after {retry_attempt} retry attempt{}{elapsed_suffix}",
+            if retry_attempt > 1 { "s" } else { "" }
+        )
+    } else {
+        format!("Operation aborted{elapsed_suffix}")
+    }
+}
+
 /// TS `formatWorkingElapsed`: "3s", "1m 05s", "1h 02m 03s", "1d 02h 03m 04s".
 pub fn format_working_elapsed(total_secs: u64) -> String {
     let secs = total_secs % 60;
@@ -550,7 +567,7 @@ pub fn render_retry(retry: &RetryState, frame: usize, theme: &Theme, width: usiz
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::theme::{ColorMode, Theme};
+    use crate::theme::{ColorMode, Theme, ThemeColor};
 
     fn theme() -> Theme {
         Theme::builtin("prime", ColorMode::TrueColor)
@@ -1012,6 +1029,89 @@ mod tests {
         assert!(rows.is_empty(), "got: {rows:?}");
     }
 
+    /// TS `AssistantMessageComponent.rebuild`'s aborted arm: the aborted
+    /// message renders its "Operation aborted" row inside the component,
+    /// in the theme's error color with no "Error: " prefix, behind a
+    /// spacer; a non-generic errorMessage renders itself; the abort also
+    /// keeps the tool-call trailing spacer (TS `hasTrailingSpace`).
+    #[test]
+    fn aborted_assistant_message_renders_the_red_abort_row() {
+        let theme = theme();
+        let message = AssistantMessage {
+            blocks: vec![MessageBlock::Text("Partial answer.".into())],
+            has_tool_calls: true,
+            streaming: false,
+            error: Some("Operation aborted".into()),
+            aborted: true,
+        };
+        let rows = render_assistant(
+            &message,
+            Detail::Overview,
+            &theme,
+            "  ",
+            60,
+            true,
+            &mut crate::markdown::MarkdownBlockCache::default(),
+        );
+        let abort_row_index = rows
+            .iter()
+            .position(|line| {
+                line.iter()
+                    .any(|span| span.content.contains("Operation aborted"))
+            })
+            .expect("the aborted row never rendered");
+        // The row before is the spacer TS `rebuild` adds, the row is
+        // error-colored with the plain text (no "Error: " prefix), and
+        // the trailing tool spacer follows (hasTrailingSpace's aborted
+        // arm, even after tool activity).
+        assert_eq!(
+            rows[abort_row_index - 1].len(),
+            0,
+            "no spacer before the abort row"
+        );
+        let error_style = theme.fg_style(ThemeColor::Error);
+        let abort_text = rows[abort_row_index]
+            .iter()
+            .find(|span| span.content.contains("Operation aborted"))
+            .expect("the abort span");
+        assert_eq!(
+            abort_text.style, error_style,
+            "the abort row is not error-colored"
+        );
+        assert!(
+            !rows[abort_row_index]
+                .iter()
+                .any(|span| span.content.contains("Error: ")),
+            "unexpected error prefix"
+        );
+        assert_eq!(rows.last().unwrap().len(), 0, "trailing spacer");
+        // A provider-supplied abort reason renders instead of the generic
+        // text (TS: every errorMessage but "Request was aborted" wins).
+        let message = AssistantMessage {
+            blocks: Vec::new(),
+            has_tool_calls: false,
+            streaming: false,
+            error: Some("aborted by the user".into()),
+            aborted: true,
+        };
+        let rows = render_assistant(
+            &message,
+            Detail::Overview,
+            &theme,
+            "  ",
+            60,
+            false,
+            &mut crate::markdown::MarkdownBlockCache::default(),
+        );
+        assert!(
+            rows.iter().any(|line| {
+                line.iter()
+                    .any(|span| span.content.contains("aborted by the user"))
+            }),
+            "the custom abort reason never rendered: {rows:?}"
+        );
+    }
+
     #[test]
     fn loader_line_shape() {
         let working = WorkingState {
@@ -1091,5 +1191,22 @@ mod tests {
         assert_eq!(format_working_elapsed(65), "1m 05s");
         assert_eq!(format_working_elapsed(3723), "1h 02m 03s");
         assert_eq!(format_working_elapsed(93784), "1d 02h 03m 04s");
+    }
+
+    /// TS `message_end`'s aborted arm: the live abort row carries the
+    /// client's own retry count and working-elapsed suffix (the wire row
+    /// never does; the rebuild keeps the plain stored text).
+    #[test]
+    fn live_abort_text_matches_ts() {
+        assert_eq!(live_abort_text(0, None), "Operation aborted");
+        assert_eq!(live_abort_text(0, Some(3)), "Operation aborted \u{00b7} 3s");
+        assert_eq!(
+            live_abort_text(1, Some(2)),
+            "Aborted after 1 retry attempt \u{00b7} 2s"
+        );
+        assert_eq!(
+            live_abort_text(2, Some(65)),
+            "Aborted after 2 retry attempts \u{00b7} 1m 05s"
+        );
     }
 }

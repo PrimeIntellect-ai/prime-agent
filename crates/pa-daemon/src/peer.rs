@@ -577,6 +577,13 @@ mod tests {
         let wrong = serde_json::json!({ "activeSessionId": "other" });
         assert!(peer_command_allowed("attach", &attach, &grant));
         assert!(peer_command_allowed("prompt", &attach, &grant));
+        // The abort-and-send interrupt rides the session plane too (TS
+        // `abort_and_send_queued: "session"`).
+        assert!(peer_command_allowed(
+            "abort_and_send_queued",
+            &attach,
+            &grant
+        ));
         assert!(!peer_command_allowed("prompt", &wrong, &grant));
         assert!(!peer_command_allowed(
             "attach",

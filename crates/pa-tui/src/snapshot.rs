@@ -7,7 +7,7 @@
 //! arrays, with or without explicit block `type` tags, covering the shapes
 //! the scripted harness and the real engine both emit.
 
-use crate::chat::{AssistantMessage, ChatEntry, MessageBlock, ToolCallCard};
+use crate::chat::{AssistantMessage, ChatEntry, MessageBlock, ToolCallCard, ToolResultView};
 use pa_types::daemon::{DaemonEventCursor, DaemonReplayInfo};
 use serde::Deserialize;
 use serde_json::Value;
@@ -875,6 +875,43 @@ pub fn apply_streamed_tool_card(
     }
 }
 
+/// TS `message_end`'s failed-frame sweep: every still-pending tool card
+/// settles with the failure text as an error result, and the card drops the
+/// tool's late result frames (`resetPendingToolState` cleared the pending
+/// map the same way — a late `tool_execution_end` finds no component there).
+pub fn settle_pending_tool_cards(
+    view: &mut crate::view::AgentView,
+    pending: &mut std::collections::HashSet<String>,
+    aborted: &mut std::collections::HashSet<String>,
+    text: &str,
+) {
+    for tool_call_id in pending.drain() {
+        // Every drained id records as aborted — late frames for a call that
+        // never created a card land on nothing the same way (TS removed the
+        // pending-map entry, and a late `tool_execution_start` finds no
+        // component to re-create).
+        aborted.insert(tool_call_id.clone());
+        if let Some(index) = view
+            .chat
+            .iter()
+            .position(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == tool_call_id))
+        {
+            view.prepare_entry_mutation(index);
+            if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
+                card.result = Some(ToolResultView {
+                    content: vec![serde_json::json!({ "type": "text", "text": text })],
+                    details: serde_json::Value::Null,
+                    is_error: true,
+                });
+                card.result_partial = false;
+                card.ended_at = Some(std::time::Instant::now());
+                card.aborted = true;
+                view.mark_entry_stale(index);
+            }
+        }
+    }
+}
+
 /// `tool_execution_start` folded into the live transcript: mark the matching
 /// card running, or create it when the assistant-message frames have not
 /// arrived yet. The daemon-reported tool name is authoritative — it
@@ -1227,6 +1264,45 @@ mod tests {
                 .all(|row| !row.contains("\"code\"") && !row.contains('{')),
             "the raw arguments JSON must not render: {rows:?}"
         );
+    }
+
+    /// TS `message_end`'s failed-frame sweep: every still-pending card
+    /// settles with the failure text as an error result, the pending set
+    /// drains, and the card flags the abort so the tool's late result
+    /// frames land on nothing.
+    #[test]
+    fn failed_frame_sweep_settles_pending_tool_cards() {
+        let mut view = test_view();
+        apply_streamed_tool_card(
+            &mut view,
+            "call-1",
+            "bash",
+            &json!({ "command": "sleep 10" }),
+        );
+        apply_tool_execution_start(&mut view, "call-1", "bash", Value::Null);
+        let mut pending = std::collections::HashSet::from(["call-1".to_string()]);
+        let mut aborted = std::collections::HashSet::new();
+        settle_pending_tool_cards(
+            &mut view,
+            &mut pending,
+            &mut aborted,
+            "Operation aborted \u{00b7} 3s",
+        );
+        assert!(pending.is_empty(), "the sweep drains the pending set");
+        // Every drained id records as aborted - late frames for a call
+        // that never created a card land on nothing the same way.
+        assert_eq!(
+            aborted,
+            std::collections::HashSet::from(["call-1".to_string()]),
+            "the sweep records the settled ids"
+        );
+        let card = card_of(&view).expect("the streamed card");
+        assert!(card.aborted, "the settled card flags the abort");
+        let result = card.result.as_ref().expect("the settle result");
+        assert!(result.is_error, "the settle result is an error");
+        assert_eq!(result.text_output(false), "Operation aborted \u{00b7} 3s");
+        assert!(!card.result_partial, "the settle result is final");
+        assert!(card.ended_at.is_some(), "the settle stamps the card ended");
     }
 
     /// The latest streamed frame wins on an existing card (TS builds the

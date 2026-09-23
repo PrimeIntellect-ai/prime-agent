@@ -1,16 +1,54 @@
 """Ground-truth probe for the terminal turn_end frame + the aborted-turn
 row (lanes turn-end-frame / aborted-row): what each side's daemon
 broadcasts + persists when a turn settles normally, when it is aborted
-mid-provider-wait (plain `abort`), and what the compact abort shows. The
-`turn_end` frames are captured raw per side and compared cross-side
-(timestamps normalized) — settled and aborted turns alike."""
+mid-provider-wait (plain `abort`), when one parked steering message is
+delivered by the interrupt (`abort_and_send_queued`, schema 29), and what
+the compact abort shows. The `turn_end` frames are captured raw per side
+and compared cross-side (timestamps normalized) — settled and aborted
+turns alike."""
+import glob
 import json, os, sys, time, shutil
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import batterylib as B
+import ts_identity  # noqa: E402  (the shared binary-identity guard)
 
 RUN = Path("/tmp/aborted-row-probe")
+
+
+def default_ts_binary() -> str:
+    """The ts side's launch command (the rules queue_edit_parity.py
+    established): the box PATH `prime-agent` may itself be the Rust
+    dogfood install, and the deployed 0.9.5 release predates schema 29
+    (abortAndSendQueued, TS PR #2426, never reached it), so the probe
+    compares against the TS-main bundle from the parity checkout.
+    PA_TS_BINARY overrides (an absolute path or a full command string)."""
+    override = os.environ.get("PA_TS_BINARY")
+    if override:
+        return override
+    ts_main_cli = os.path.join(
+        "/home/ubuntu/prime-agent", "packages", "coding-agent", "dist", "bundle", "cli.js"
+    )
+    if os.path.exists(ts_main_cli):
+        return f"node {ts_main_cli}"
+    releases = os.path.expanduser("~/.local/share/prime-agent/releases")
+    candidates = sorted(glob.glob(os.path.join(releases, "0.9.5-linux-x64-*", "prime-agent")))
+    if not candidates:
+        raise SystemExit("neither the TS-main checkout nor a deployed TS release found; set PA_TS_BINARY")
+    return candidates[-1]
+
+
+def ts_executable(command: str) -> str:
+    """batterylib spawns `[binary, ...]` directly, so a node-bundle
+    command needs a wrapper executable."""
+    if " " not in command:
+        return command
+    RUN.mkdir(parents=True, exist_ok=True)
+    wrapper = RUN / "ts-cli"
+    wrapper.write_text(f"#!/bin/sh\nexec {command} \"$@\"\n")
+    wrapper.chmod(0o755)
+    return str(wrapper)
 
 def make_side(name: str, binary: str) -> B.Side:
     root = RUN / name
@@ -56,18 +94,24 @@ def normalize_turn_end(event: dict) -> dict:
 def probe(side: B.Side, abort_command: dict | None, key: str) -> None:
     # The settled case consumes the immediate reply; the abort cases hold
     # the turn mid-provider-wait (the 15s delay) — each side is fresh, so
-    # the queue holds exactly the one reply the case needs first.
+    # the queue holds exactly the one reply the case needs first. The
+    # abort-and-send case parks one steering message before the interrupt
+    # (the held reply cancels with the turn, the second reply answers the
+    # delivered steering turn).
     reply = (
         {"text": "settled reply", "delayMs": 0}
         if abort_command is None
         else {"text": "held reply", "delayMs": 15000}
     )
+    replies = [reply]
+    if key == "abort_and_send_queued":
+        replies.append({"text": "queued steering reply", "delayMs": 0})
     side.mock.set_responses(
         [{"text": "statusline filler"}],
         queues=[{
             "name": "aborted-row-probe",
             "matchModels": ["mock-1"],
-            "responses": [reply],
+            "responses": replies,
         }],
     )
     side.start_daemon()
@@ -93,6 +137,17 @@ def probe(side: B.Side, abort_command: dict | None, key: str) -> None:
     }, timeout=60)
     if abort_command:
         time.sleep(0.8)  # mid-provider-wait (the 15s hold)
+        if key == "abort_and_send_queued":
+            # One steering message parked at the turn boundary, so the
+            # interrupt aborts the held run AND delivers it (schema 29):
+            # TS batches the armed steering into one new turn, the Rust
+            # port runs it as its own boundary turn — the `turn_end`
+            # payloads compared below must match either way.
+            steer = wire.request("sq1", {
+                "type": "steer", "activeSessionId": session_id,
+                "message": "queued steering text",
+            }, timeout=60)
+            print(f"[{side.name}/{key}] steer queued: {steer.get('success')}")
         # The close command itself must answer on the CANCELLED turn: TS
         # `closeSessionOnce` fires `session.abort()` (the run cancel) before
         # any close work that can wait on the turn, so the reply lands far
@@ -176,14 +231,18 @@ def compare(key: str, sides: list[str]) -> bool:
     return False
 
 def main():
-    ts_bin = "prime-agent"
-    rust_bin = os.environ.get(
-        "ABORTED_ROW_RUST_BIN",
-        "/home/ubuntu/lane-worktrees/aborted-row/target/release/prime-agent",
-    )
+    ts_command = default_ts_binary()
+    # Fail fast before any launch: the probe's parity tables are only a
+    # parity claim when the ts side is the TS product. The TS-main bundle
+    # prints its version line to stderr: redirect it into the guard's
+    # stdout probe (the queue_edit_parity rule).
+    ts_identity.assert_ts_side_is_the_ts_product(f"{ts_command} 2>&1")
+    ts_bin = ts_executable(ts_command)
+    rust_bin = os.environ.get("ABORTED_ROW_RUST_BIN") or ts_identity.default_rust_binary()
     cases = [
         ("settled", None),
         ("abort", {"type": "abort"}),
+        ("abort_and_send_queued", {"type": "abort_and_send_queued"}),
         ("compact", {"type": "compact"}),
         ("kill", {"type": "kill"}),
         ("abort_and_clear_queue", {"type": "abort_and_clear_queue"}),

@@ -320,26 +320,50 @@ def daemon_pids_matching(needles, exclude_pids=()) -> list[int]:
     """Live `--mode daemon` processes whose argv references any of
     `needles` (daemon socket paths, isolated TMPDIR roots, or a harness
     sandbox root containing either). Empty-string needles are dropped: a
-    bare "" would match every process."""
+    bare "" would match every process. The scan walks /proc on Linux and
+    `ps` on macOS (a harness must reap on both)."""
     seen: list[int] = []
     live_needles = [needle for needle in needles if needle]
-    for proc_dir in Path("/proc").iterdir():
-        if not proc_dir.name.isdigit():
+    if Path("/proc").is_dir():
+        for proc_dir in Path("/proc").iterdir():
+            if not proc_dir.name.isdigit():
+                continue
+            pid = int(proc_dir.name)
+            if pid in (1, os.getpid()) or pid in exclude_pids:
+                continue
+            try:
+                argv = [
+                    part.decode(errors="replace")
+                    for part in (proc_dir / "cmdline").read_bytes().split(b"\0")
+                    if part
+                ]
+            except OSError:
+                continue
+            if "--mode" not in argv or "daemon" not in argv:
+                continue
+            if any(needle in part for part in argv for needle in live_needles):
+                seen.append(pid)
+        return seen
+    scan = subprocess.run(
+        ["ps", "-axo", "pid=,command="],
+        capture_output=True,
+        text=True,
+        env=dict(os.environ, COLUMNS="4096"),
+    )
+    for line in scan.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2 or not parts[0].isdigit():
             continue
-        pid = int(proc_dir.name)
+        pid = int(parts[0])
         if pid in (1, os.getpid()) or pid in exclude_pids:
             continue
-        try:
-            argv = [
-                part.decode(errors="replace")
-                for part in (proc_dir / "cmdline").read_bytes().split(b"\0")
-                if part
-            ]
-        except OSError:
-            continue
+        argv = parts[1].split()
         if "--mode" not in argv or "daemon" not in argv:
             continue
-        if any(needle in part for part in argv for needle in live_needles):
+        # Needles can span argv splits (a socket, sandbox, or TMPDIR path
+        # with spaces), so they match against the full rendered command
+        # line, never against the fragments.
+        if any(needle in parts[1] for needle in live_needles):
             seen.append(pid)
     return seen
 
@@ -349,7 +373,11 @@ def worker_pids_under(cwd_roots=(), exclude_pids=()) -> list[int]:
     (normalized, trailing-separator-safe). The products' detached session
     workers run as `<binary> worker` with no sandbox path in their argv,
     but with the session's cwd (the side's work dir), so cwd is the only
-    scope that reaches them."""
+    scope that reaches them. /proc-only: the macOS fallback reaps the
+    daemon pair (the argv scan above) and leaves the detached workers to
+    their own exit paths."""
+    if not Path("/proc").is_dir():
+        return []
     roots = []
     for root in cwd_roots:
         if root:

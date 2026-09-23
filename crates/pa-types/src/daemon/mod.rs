@@ -16,8 +16,8 @@ use crate::JsonMap;
 
 pub const DAEMON_PROTOCOL_NAME: &str = "prime-agent.daemon";
 pub const DAEMON_PROTOCOL_VERSION: u64 = 7;
-pub const DAEMON_SCHEMA_REVISION: u64 = 28;
-pub const DAEMON_SCHEMA_ID: &str = "protocol-7-schema-28-92bc5368a082";
+pub const DAEMON_SCHEMA_REVISION: u64 = 29;
+pub const DAEMON_SCHEMA_ID: &str = "protocol-7-schema-29-a5c9d20f8b13";
 
 pub type DaemonClientId = String;
 pub type DaemonCommandId = String;
@@ -181,8 +181,8 @@ mod tests {
     fn protocol_constants_match_ts() {
         assert_eq!(DAEMON_PROTOCOL_NAME, "prime-agent.daemon");
         assert_eq!(DAEMON_PROTOCOL_VERSION, 7);
-        assert_eq!(DAEMON_SCHEMA_REVISION, 28);
-        assert_eq!(DAEMON_SCHEMA_ID, "protocol-7-schema-28-92bc5368a082");
+        assert_eq!(DAEMON_SCHEMA_REVISION, 29);
+        assert_eq!(DAEMON_SCHEMA_ID, "protocol-7-schema-29-a5c9d20f8b13");
         assert_eq!(DAEMON_UPDATE_RESTART_FORMAT_VERSION, 1);
     }
 }

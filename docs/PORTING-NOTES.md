@@ -533,7 +533,8 @@ Two TS wire behaviors are deliberately out of that row's scope and still open:
   `TurnEnd`/inner `TurnStart` boundary events and the worker frames them in
   the TS shapes — the terminal assistant message plus the turn's
   `toolResults` on every settled turn (aborts and provider errors included,
-  probe-verified cross-side on settled/abort/compact/kill/abort_and_clear_queue
+  probe-verified cross-side on
+  settled/abort/abort_and_send_queued/compact/kill/abort_and_clear_queue
   in `scripts/battery/aborted_row_probe.py`). The `agent_end` `messages`
   payload is still open. The worker's Done-synthesized frames are now a
   fallback for runs that ended without a model turn (session commands,
@@ -762,7 +763,9 @@ the autonomous accounting counts everything non-error).
   accounting counts it like TS's non-error guard.
 - Surface matrix (probe-verified against the TS binary,
   `scripts/battery/aborted_row_probe.py` — a daemon wire/store probe over
-  a held mid-provider-wait turn): `abort` and `abort_and_clear_queue`
+  a held mid-provider-wait turn): `abort`, `abort_and_send_queued` (the
+  interrupt that also delivers the parked steering at the boundary, schema
+  29), and `abort_and_clear_queue`
   broadcast + persist the row (TS `requestAbort` keeps the session
   subscribed), and so does the close family (`kill`; shutdown rides the
   same TS close path) — the gate forwards the row on all of them. The

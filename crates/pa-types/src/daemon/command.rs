@@ -423,6 +423,17 @@ pub enum DaemonCommand {
         #[serde(flatten)]
         rest: JsonMap,
     },
+    /// `abort_and_send_queued` (schema 29, capability-gated in TS): abort
+    /// the active run and deliver the visible queued steering batch at the
+    /// turn boundary; a plain abort when no steering is queued (TS
+    /// `AgentSession.abortAndSendQueued`).
+    AbortAndSendQueued {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        active_session_id: String,
+        #[serde(flatten)]
+        rest: JsonMap,
+    },
     StartSideQuestion {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,

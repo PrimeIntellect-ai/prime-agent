@@ -71,6 +71,7 @@ pub fn command_plane(command_type: &str) -> DaemonCommandPlane {
         | "append_custom_message"
         | "resume_queue"
         | "abort"
+        | "abort_and_send_queued"
         | "start_side_question"
         | "abort_side_question"
         | "execute_bash"

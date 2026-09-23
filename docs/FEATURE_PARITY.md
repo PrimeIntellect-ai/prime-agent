@@ -83,8 +83,12 @@ Notable systemic findings:
   bracket plus the kitty mode (the modifyOtherKeys fallback is never armed —
   see its row below), and `pa-tui/src/input.rs` coalesces marker-less
   multi-line bursts; see `scripts/bracketed_paste_parity.py`.)
-- Interrupt paths only send `Abort`/`AbortCompaction`; `AbortBash`/`AbortRetry`/
-  `AbortBranchSummary` wire commands exist but are never sent from the UI.
+- The turn interrupt sends `abort_and_send_queued` (TS `abortAndSendQueued`,
+  schema 29: abort the run and deliver the parked steering at the boundary,
+  abort-only when no steering is queued); the compaction interrupt sends
+  `abort_compaction`, and a running user-bash command's interrupt sends
+  `abort_bash`. `AbortRetry`/`AbortBranchSummary` wire commands exist but
+  are never sent from the UI.
 - The `/btw` side-question engine and wire protocol exist (`pa-daemon/src/side_question.rs`,
   `start_side_question`/`abort_side_question`); the client pane family landed in
   `pa-tui/src/side_question.rs` — only the in-pane `!` bash arm remains
@@ -833,10 +837,10 @@ Method: every TS method in scope read in full; the Rust implementing code locate
 | interactive-mode.ts:6639 | echoLocalCommand (local command echoed as user message) | crates/pa-tui/src/session_ui.rs:1424-1440 (/hotkeys only) | PARTIAL | info-commands |
 | interactive-mode.ts:6650 | addMessageToEditorHistory | MISSING | MISSING | transcript-extras |
 | interactive-mode.ts:7078 | getUserInput (input promise / agentsViewRequest guard) | crates/pa-tui/src/interactive.rs:581-616 (UiInput queue) | MATCHES | — |
-| interactive-mode.ts:7095 | handleEscape (arm + interrupt-or-clear) | crates/pa-tui/src/session_ui.rs:2680-2712 | PARTIAL | interrupt-paths |
+| interactive-mode.ts:7095 | handleEscape (arm + interrupt-or-clear) | crates/pa-tui/src/session_ui.rs (arm/tree/clear/draft-restore + the first-Escape interrupt ladder) | PARTIAL | interrupt-paths |
 | interactive-mode.ts:7116 | armEscapeRepeat/takeEscapeRepeatAction/clearEscapeRepeat (500ms window) | crates/pa-tui/src/session_ui.rs:1927-1947 | MATCHES | — |
 | interactive-mode.ts:7145 | handleCtrlC/handleInterruptKey (first press abort + hint) | crates/pa-tui/src/session_ui.rs:2718-2753 | MATCHES | — |
-| interactive-mode.ts:7160 | interruptOrClearInput (abort retry/bash/compaction/branch-summary/side-question/stream) | crates/pa-tui/src/session_ui.rs (Abort/AbortCompaction/AbortSideQuestion; AbortBash/AbortRetry/AbortBranchSummary still unsent) | PARTIAL | interrupt-paths |
+| interactive-mode.ts:7160 | interruptOrClearInput (abort retry/bash/compaction/branch-summary/side-question/stream) | crates/pa-tui/src/session_ui.rs (AbortAndSendQueued/AbortCompaction/AbortSideQuestion/AbortBash; AbortRetry/AbortBranchSummary still unsent) | PARTIAL | interrupt-paths |
 | interactive-mode.ts:7184 | showCtrlCExitHint/clearCtrlCExitHint/isCtrlCExitHintVisible (2s window) | crates/pa-tui/src/session_ui.rs:2112-2142 | MATCHES | — |
 | interactive-mode.ts:7221 | handleCtrlD (exit on empty editor) | crates/pa-tui/src/session_ui.rs:2713-2717 | MATCHES | — |
 | interactive-mode.ts:7232 | shutdown (stats, drain, dispose, resume hint, exit 0) | crates/pa-tui/src/interactive.rs:1055-1103 + session_ui.rs:808-854 | MATCHES | — |
@@ -972,8 +976,8 @@ Method: every TS method in scope read in full; the Rust implementing code locate
 #### Partial notes
 
 - `interactive-mode.ts:6639` echoLocalCommand (local command echoed as user message): Rust echoes only /hotkeys; TS echoes /session,/system-prompt,/context,/logs,/changelog,/hotkeys — moot until those commands land, but the echo seam exists for exactly one of six.
-- `interactive-mode.ts:7095` handleEscape (arm + interrupt-or-clear): Arm/tree/clear/draft-restore match (session_ui.rs:2680-2712), but the first Escape never calls interruptOrClearInput, so a running turn/retry/bash is not aborted by Escape.
-- `interactive-mode.ts:7160` interruptOrClearInput (abort retry/bash/compaction/branch-summary/side-question/stream): Rust sends Abort (turn), AbortCompaction, and AbortSideQuestion; AbortBash/AbortRetry/AbortBranchSummary exist on the wire (crates/pa-types/src/daemon/command.rs:419-840) but are never sent by the interrupt key.
+- `interactive-mode.ts:7095` handleEscape (arm + interrupt-or-clear): arm/tree/clear/draft-restore match, and the first Escape now fires the interrupt ladder (a compacting session aborts the compaction, a streaming turn aborts through `abort_and_send_queued`, a running user bash aborts alongside); the remaining gap is the ladder's `abort_retry`/`abort_branch_summary` arms, never sent from either interrupt key.
+- `interactive-mode.ts:7160` interruptOrClearInput (abort retry/bash/compaction/branch-summary/side-question/stream): the turn interrupt sends `abort_and_send_queued` (schema 29), a compaction interrupt sends `abort_compaction`, a running user-bash interrupt sends `abort_bash`, and a side question aborts through `abort_side_question`; `AbortRetry`/`AbortBranchSummary` exist on the wire (crates/pa-types/src/daemon/command.rs:419-840) but are never sent by the interrupt key.
 - `interactive-mode.ts:7631` collectQueueReplaceImages (marker-resolved image replace/clear): Rust always omits `images` on a queue replace (preserves server attachments); TS resolves markers to replace, sends [] to clear when none, and undefined only when unresolvable.
 - `interactive-mode.ts:7680` applyFullscreen (alt screen + mouse + scroll): The Rust client is structurally always-fullscreen (alt screen + SGR mouse + scroll on every run); there is no inline mode and no on/off toggle.
 - `interactive-mode.ts:7906` showFullPaneOverlay (full-width overlay surface): Only the onboarding pane covers the frame; no general full-width overlay surface (the heartbeat manager and any future full-pane views need it).
@@ -1038,7 +1042,7 @@ Priority reflects user-visible impact.
 | `msg-card-gaps` | ~4 (sections 1, 5) | Missing expandable transcript cards: `[branch]` box, `[skill]` invocation box, legacy heartbeat prompt rows. |
 | `transcript-extras` | ~8 (section 5) | Transcript-replay gaps: `populateHistory`, limit-transcript banner, compaction-count status, tool-def preload warning, per-message render-failure placeholder, `isTextOnlyUserMessage`. |
 | `term-enhanced-keys` | ~8 (section 3) | Kitty keyboard protocol enable, modifyOtherKeys, bracketed-paste enable (`?2004`) + raw multiline paste heuristic + `drainInput`. Paste is currently broken for real terminals. |
-| `interrupt-paths` | ~6 (sections 5, 1) | Escape/Ctrl-C abort targets (`AbortBash`/`AbortRetry`/`AbortBranchSummary`), pending tool cards getting error results on abort, abort-suffix ("· elapsed"/retry) parity. |
+| `interrupt-paths` | ~3 (sections 5, 1) | The interrupt ladder's `AbortRetry`/`AbortBranchSummary` triggers (both interrupt keys now abort the compaction, the streaming turn through `abort_and_send_queued`, and a running user bash; the abort row's pending-card settle + "· elapsed"/retry suffix landed with the abort-parity lane). |
 | `extension-ui` | ~30 (sections 4, 1, 2) | Extension binding, widgets above/below editor, custom footer/header, extension selector/input/editor/confirm/notify/error/custom, `extension_ui_request` wire method, extension key shortcuts. Largest single gap in section 4. |
 | `md-latex` | ~4 (section 3) | LaTeX/math tokenizers (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) — formulas currently render as raw prose. |
 | `md-blocks` | ~6 (section 3) | Markdown block gaps: nested lists, blockquote border/nesting, hr clamp, html tokens. |

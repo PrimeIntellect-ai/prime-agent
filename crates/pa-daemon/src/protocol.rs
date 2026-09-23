@@ -60,6 +60,7 @@ pub const KNOWN_COMMAND_TYPES: &[&str] = &[
     "agent_messages_resume",
     "agent_messages_clear",
     "abort",
+    "abort_and_send_queued",
     "start_side_question",
     "abort_side_question",
     "execute_bash",
@@ -315,6 +316,7 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
                 "rlm_quiescence_barrier",
                 "session_input_pause",
                 "acp_mcp_servers",
+                "abort_and_send_queued",
                 "agent_roster",
                 "direct_peer_transport",
             ]
@@ -549,6 +551,9 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
             active_session_id, ..
         }
         | DaemonCommand::Abort {
+            active_session_id, ..
+        }
+        | DaemonCommand::AbortAndSendQueued {
             active_session_id, ..
         }
         | DaemonCommand::StartSideQuestion {
@@ -848,6 +853,7 @@ pub fn command_type_name(command: &DaemonCommand) -> &'static str {
         DaemonCommand::AgentMessagesResume { .. } => "agent_messages_resume",
         DaemonCommand::AgentMessagesClear { .. } => "agent_messages_clear",
         DaemonCommand::Abort { .. } => "abort",
+        DaemonCommand::AbortAndSendQueued { .. } => "abort_and_send_queued",
         DaemonCommand::StartSideQuestion { .. } => "start_side_question",
         DaemonCommand::AbortSideQuestion { .. } => "abort_side_question",
         DaemonCommand::ExecuteBash { .. } => "execute_bash",

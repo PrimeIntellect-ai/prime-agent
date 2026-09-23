@@ -207,7 +207,8 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
     // Differential goldens captured from the TS supervisor
-    // (`prime-agent --mode daemon`, protocol 7, schema 28).
+    // (`prime-agent --mode daemon`, protocol 7, schema 29 — the deployed
+    // TS-main bundle reports the same schema id at the hello).
     assert_eq!(
         hello["protocol"],
         serde_json::json!({
@@ -216,7 +217,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     );
     assert_eq!(
         hello["schemaId"].as_str().map(|v| v.to_string()),
-        Some("protocol-7-schema-28-92bc5368a082".to_string())
+        Some("protocol-7-schema-29-a5c9d20f8b13".to_string())
     );
     assert!(hello["supervisorOwnerToken"].is_string());
     assert!(hello["supervisorProcessStartId"]
@@ -247,6 +248,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
             "rlm_quiescence_barrier",
             "session_input_pause",
             "acp_mcp_servers",
+            "abort_and_send_queued",
             "agent_roster",
             "direct_peer_transport",
         ])

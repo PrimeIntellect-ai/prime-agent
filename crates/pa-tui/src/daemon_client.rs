@@ -431,6 +431,20 @@ impl DaemonClient {
     }
 
     /// The full `daemon_hello` frame the supervisor sent on connect.
+    /// Whether the daemon's `daemon_hello` advertised `capability` (TS
+    /// `supportsServerCapability`): capability-gated commands fall back to
+    /// their older shape without it.
+    pub fn supports_server_capability(&self, capability: &str) -> bool {
+        self.hello
+            .get("serverCapabilities")
+            .and_then(Value::as_array)
+            .is_some_and(|capabilities| {
+                capabilities
+                    .iter()
+                    .any(|entry| entry.as_str() == Some(capability))
+            })
+    }
+
     pub fn hello(&self) -> &Value {
         &self.hello
     }
