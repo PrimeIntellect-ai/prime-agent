@@ -1213,7 +1213,11 @@ mod tests {
                 String::new(),
                 format!(" Auth failed{}", " ".repeat(48)),
                 format!(" for provider.{}", " ".repeat(46)),
-                String::new(),
+                // The error's empty line pads to a full-width spaces row
+                // (TS `collapsible-error.ts` renderText: `rawLine || " "`
+                // then pad to width); `render_collapsible_error` matches
+                // that — never a truly blank row inside the error body.
+                " ".repeat(60),
                 format!(" Run /login to update credentials.{}", " ".repeat(26)),
             ]
         );
