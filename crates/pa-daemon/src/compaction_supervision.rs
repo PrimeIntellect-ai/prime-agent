@@ -211,6 +211,11 @@ pub(crate) struct TerminalCompactionRecord {
 pub(crate) struct TerminalCompactionJournal {
     path: PathBuf,
     latest: HashMap<String, TerminalCompactionRecord>,
+    /// Declarations whose durable write failed, kept retryable in
+    /// memory: the replacement replay retries them at the point the
+    /// record is needed instead of the disclosure silently degrading.
+    /// A settled end drops them like a pending record.
+    retryable: HashMap<String, TerminalCompactionRecord>,
 }
 
 const TERMINAL_COMPACTION_RECORD_TYPE: &str = "terminal_compaction";
@@ -222,6 +227,7 @@ impl TerminalCompactionJournal {
         }
         Ok(TerminalCompactionJournal {
             latest: Self::load(path),
+            retryable: HashMap::new(),
             path: path.to_path_buf(),
         })
     }
@@ -245,9 +251,17 @@ impl TerminalCompactionJournal {
 
     /// Record the terminal declaration (durable before the synthetic end
     /// goes out, so a supervisor crash between the two still leaves the
-    /// state on disk).
+    /// state on disk). A failed durable write does not lose the
+    /// declaration: the record stays retryable in memory for the next
+    /// replacement replay, which retries it at the point the record is
+    /// needed.
     pub(crate) fn declare(&mut self, record: TerminalCompactionRecord) -> Result<()> {
-        crate::journal::append_record(&self.path, &serde_json::to_value(&record)?)?;
+        let durable = crate::journal::append_record(&self.path, &serde_json::to_value(&record)?);
+        if let Err(error) = durable {
+            self.retryable
+                .insert(record.active_session_id.clone(), record);
+            return Err(error);
+        }
         self.latest.insert(record.active_session_id.clone(), record);
         Ok(())
     }
@@ -256,6 +270,7 @@ impl TerminalCompactionJournal {
     /// goes only after the rewrite landed, so a failed rewrite stays
     /// retryable and memory never diverges from disk.
     fn remove(&mut self, active_session_id: &str) -> Result<()> {
+        self.retryable.remove(active_session_id);
         if !self.latest.contains_key(active_session_id) {
             return Ok(());
         }
@@ -278,9 +293,24 @@ impl TerminalCompactionJournal {
 
     /// The unconsumed declaration for a session, if one is pending: the
     /// replacement worker's create replay carries it so the rebuilt
-    /// transcript discloses the abort.
-    pub(crate) fn pending(&self, active_session_id: &str) -> Option<&TerminalCompactionRecord> {
-        self.latest.get(active_session_id)
+    /// transcript discloses the abort. A declaration whose durable
+    /// write failed is retried here first — the replay is the point the
+    /// record is needed — and stays retryable for a later replacement
+    /// when the storage is still failing.
+    pub(crate) fn pending(
+        &mut self,
+        active_session_id: &str,
+    ) -> Result<Option<&TerminalCompactionRecord>> {
+        if let Some(record) = self.retryable.remove(active_session_id) {
+            if let Err(error) =
+                crate::journal::append_record(&self.path, &serde_json::to_value(&record)?)
+            {
+                self.retryable.insert(active_session_id.to_string(), record);
+                return Err(error);
+            }
+            self.latest.insert(active_session_id.to_string(), record);
+        }
+        Ok(self.latest.get(active_session_id))
     }
 
     /// The create replay carried the record: it is consumed and never
@@ -467,7 +497,11 @@ impl crate::supervisor::Supervisor {
     /// supervisor's journal (before the broadcast, so a supervisor crash
     /// between the two still leaves the state on disk for the
     /// replacement), the adoption count, and the synthetic aborted
-    /// `compaction_end` broadcast that clears every attached loader.
+    /// `compaction_end` broadcast that clears every attached loader. A
+    /// failed durable write does not gate the broadcast — resolving the
+    /// attached loaders is the abort's contract regardless of storage —
+    /// the record stays retryable and the next replacement replay
+    /// retries it at the point it is needed.
     ///
     /// `take` claims the token's declaration and runs UNDER the journal
     /// lock, so a real `compaction_end` landing concurrently either
@@ -499,7 +533,7 @@ impl crate::supervisor::Supervisor {
             };
             if let Err(error) = journal.declare(record) {
                 self.log_line(&format!(
-                    "terminal compaction journal declare failed for {}: {error:#}",
+                    "terminal compaction journal declare failed for {} (kept retryable for the replacement replay): {error:#}",
                     terminal.active_session_id
                 ));
             }
@@ -699,19 +733,22 @@ mod tests {
                     declared_at: "2026-09-23T00:00:00Z".to_string(),
                 })
                 .unwrap();
-            let pending = journal.pending("session-a").expect("declared record");
+            let pending = journal
+                .pending("session-a")
+                .unwrap()
+                .expect("declared record");
             assert_eq!(pending.reason, "threshold");
         }
         // A supervisor restart: the record is still pending.
         {
             let mut journal = TerminalCompactionJournal::open(&path).unwrap();
-            assert!(journal.pending("session-a").is_some());
+            assert!(journal.pending("session-a").unwrap().is_some());
             journal.consume("session-a").unwrap();
-            assert_eq!(journal.pending("session-a"), None, "consumed");
+            assert_eq!(journal.pending("session-a").unwrap(), None, "consumed");
         }
         {
-            let journal = TerminalCompactionJournal::open(&path).unwrap();
-            assert_eq!(journal.pending("session-a"), None);
+            let mut journal = TerminalCompactionJournal::open(&path).unwrap();
+            assert_eq!(journal.pending("session-a").unwrap(), None);
         }
         // A settled end clears even a pending record.
         {
@@ -727,8 +764,58 @@ mod tests {
                 })
                 .unwrap();
             journal.clear("session-b").unwrap();
-            let reopened = TerminalCompactionJournal::open(&path).unwrap();
-            assert_eq!(reopened.pending("session-b"), None);
+            let mut reopened = TerminalCompactionJournal::open(&path).unwrap();
+            assert_eq!(reopened.pending("session-b").unwrap(), None);
         }
+    }
+
+    /// A declaration whose durable write failed is not lost: it stays
+    /// retryable and the replacement replay's `pending` retries it; once
+    /// the storage accepts the write the record is durable exactly like
+    /// a first-try declaration, and a settled end drops the retryable
+    /// declaration like a pending record.
+    #[test]
+    fn a_failed_durable_write_stays_retryable_until_the_replay() {
+        let dir = std::env::temp_dir().join(format!("pa-comp-sup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("compaction-supervision.jsonl");
+        let record = || TerminalCompactionRecord {
+            version: 1,
+            r#type: TERMINAL_COMPACTION_RECORD_TYPE.to_string(),
+            active_session_id: "session-a".to_string(),
+            session_file: Some("/sessions/a.jsonl".to_string()),
+            reason: "threshold".to_string(),
+            declared_at: "2026-09-23T00:00:00Z".to_string(),
+        };
+        // A journal whose writes fail (a directory stands where the file
+        // must be): declare errors, but the declaration is kept retryable
+        // and the replay's retry fails the same way.
+        let mut failing = TerminalCompactionJournal::open(&path).unwrap();
+        std::fs::create_dir_all(&path).unwrap();
+        assert!(failing.declare(record()).is_err());
+        assert!(
+            failing.pending("session-a").is_err(),
+            "the retry failed too"
+        );
+        // The storage heals: the replay's retry lands the record and the
+        // durable journal holds it for the create payload.
+        std::fs::remove_dir(&path).unwrap();
+        let pending = failing.pending("session-a").unwrap().expect("retried");
+        assert_eq!(pending.reason, "threshold");
+        let reloaded = TerminalCompactionJournal::open(&path).unwrap();
+        assert!(reloaded.latest.contains_key("session-a"));
+
+        // A settled end drops a retryable declaration like a pending one.
+        let path2 = dir.join("compaction-supervision-2.jsonl");
+        let mut journal = TerminalCompactionJournal::open(&path2).unwrap();
+        std::fs::create_dir_all(&path2).unwrap();
+        assert!(journal.declare(record()).is_err());
+        journal.clear("session-a").unwrap();
+        std::fs::remove_dir(&path2).unwrap();
+        assert!(
+            journal.pending("session-a").unwrap().is_none(),
+            "the cleared record never reappears"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -852,12 +852,27 @@ impl Supervisor {
             // create replay: the replacement worker discloses the aborted
             // run in the rebuilt transcript (the parity shape of its own
             // auto-abort rows), and the record is consumed by the reply.
-            let pending = self
-                .compaction_journal
-                .lock()
-                .expect("compaction journal lock")
-                .pending(&descriptor.root_active_session_id)
-                .cloned();
+            // A declaration whose durable write failed is retried here —
+            // the replay is the point the record is needed — and a
+            // still-failing write only logs: the replay proceeds without
+            // the disclosure and the record stays retryable for a later
+            // replacement.
+            let pending = {
+                let mut journal = self
+                    .compaction_journal
+                    .lock()
+                    .expect("compaction journal lock");
+                match journal.pending(&descriptor.root_active_session_id) {
+                    Ok(pending) => pending.cloned(),
+                    Err(error) => {
+                        self.log_line(&format!(
+                            "terminal compaction journal retry failed for {}: {error:#}",
+                            descriptor.root_active_session_id
+                        ));
+                        None
+                    }
+                }
+            };
             if let Some(record) = pending {
                 // `declaredAt` is the disclosure row's identity: the
                 // replacement stamps its persisted entry with it, so a
