@@ -138,9 +138,15 @@ def scenario(binary, base, name):
         results["confirm"] = {"code": code, "out": normalize(out.strip())}
         # The confirmation refusal is a pinned invariant (TS text, same
         # quote style): JSON without --force over a non-tty stdin must
-        # carry it, in both output modes' byte stream.
-        if CONFIRMATION_ERROR not in out:
-            results.setdefault("errors", []).append("confirmation error string missing")
+        # carry it as the failed entry's reason.
+        reasons = [
+            entry.get("reason", "")
+            for entry in json.loads(out).get("failed", [])
+        ]
+        if CONFIRMATION_ERROR not in reasons:
+            results.setdefault("errors", []).append(
+                "confirmation error string missing from the failed reasons"
+            )
     return results
 
 
