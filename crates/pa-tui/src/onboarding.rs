@@ -745,7 +745,8 @@ mod tests {
         let lines = choice.render(&theme, 50);
         assert_eq!(lines[3][2].content, " ".repeat(50 - "  Share".len()));
         // Without an override the labels size the band, still clamped:
-        // "Continue with the current setup" → max(30, 2 + 30 + 6) = 38.
+        // "Continue with the current setup" (31 columns) →
+        // max(30, 2 + 31 + 6) = 39.
         let choice = OnboardingChoice::new(
             vec![option("Continue with the current setup", None)],
             None,
@@ -754,7 +755,7 @@ mod tests {
         let lines = choice.render(&theme, 80);
         assert_eq!(
             lines[3][2].content,
-            " ".repeat(38 - "  Continue with the current setup".len())
+            " ".repeat(39 - "  Continue with the current setup".len())
         );
         let lines = choice.render(&theme, 35);
         assert_eq!(
