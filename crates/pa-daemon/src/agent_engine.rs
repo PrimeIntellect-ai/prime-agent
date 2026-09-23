@@ -894,19 +894,45 @@ impl AgentSessionEngine {
             return;
         }
         self.reset_selection_to_spawn_fallback();
-        if self.current_selection().model.is_some() {
-            return;
-        }
-        // TS `buildSessionContext().model`: the session file pins the
-        // model it last ran on. The scan is plain file work on a
-        // potentially large session file — park it on a blocking thread.
+        // TS `buildSessionContext()`: the session file pins the model it
+        // last ran on and the thinking level it last set. The scan is
+        // plain file work on a potentially large session file — park it
+        // on a blocking thread.
         let path = session_path.to_path_buf();
-        let Ok(saved) =
-            tokio::task::spawn_blocking(move || saved_model_from_session_file(&path)).await
+        let Ok(saved) = tokio::task::spawn_blocking(move || saved_session_context(&path)).await
         else {
             return;
         };
-        let Some((provider, model_id)) = saved else {
+        let Some(saved) = saved else {
+            return;
+        };
+        // TS `createAgentSession` re-reads the session's saved thinking
+        // level at every boot (`hasThinkingEntry ?
+        // existingSession.thinkingLevel` — sdk.ts) when the runtime config
+        // carries no explicit flag: the moved-to session's pinned level
+        // wins over the settings/medium default. The level re-clamps
+        // against the model below (the reset dropped the cache).
+        if self.current_selection().thinking.is_none() {
+            if let Some(level) = saved.thinking {
+                self.configure_model(EngineModelSelection {
+                    thinking: Some(level),
+                    ..Default::default()
+                });
+            }
+        }
+
+        // level at every boot (`hasThinkingEntry ?
+        // existingSession.thinkingLevel` — sdk.ts) when the runtime config
+        // carries no explicit flag: the moved-to session's pinned level
+        // wins over the settings/medium default. The level re-clamps
+        // against the model below (the reset dropped the cache).
+        // An explicit create flag wins for the MODEL (TS `options.model`)
+        // — the saved thinking above still applies, then the restore skips
+        // the model's readiness window entirely.
+        if self.current_selection().model.is_some() {
+            return;
+        }
+        let Some((provider, model_id)) = saved.model else {
             return;
         };
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
@@ -1338,11 +1364,28 @@ pub(crate) fn persisted_rlm_max_depth(path: Option<&str>) -> Option<u64> {
 /// the last `model_change` row, else the last assistant message's
 /// provider/model. `None` when the file carries no model context (a
 /// fresh session) or cannot be read (the create flow owns that failure).
-pub(crate) fn saved_model_from_session_file(path: &std::path::Path) -> Option<(String, String)> {
+/// The session file's saved model context (TS `buildSessionContext`): the
+/// pinned `(provider, model)` and the saved thinking level — present only
+/// when the file carries a `thinking_level_change` row (TS
+/// `hasThinkingEntry`).
+pub(crate) struct SavedSessionContext {
+    pub(crate) model: Option<(String, String)>,
+    pub(crate) thinking: Option<pa_types::ai::ModelThinkingLevel>,
+}
+
+pub(crate) fn saved_session_context(path: &std::path::Path) -> Option<SavedSessionContext> {
     let store = crate::session_store::SessionFile::open(path).ok()?;
     let entries = store.branch_file_entries();
     let leaf = store.leaf_id().map(str::to_string);
-    pa_core::session::build_session_context(&entries, leaf.as_deref()).model
+    let context = pa_core::session::build_session_context(&entries, leaf.as_deref());
+    let thinking = store
+        .has_thinking_level()
+        .then(|| pa_ai::models::thinking_level_from_str(&context.thinking_level))
+        .flatten();
+    Some(SavedSessionContext {
+        model: context.model,
+        thinking,
+    })
 }
 
 /// One artifact reference (TS `createArtifactReference` in
@@ -7128,6 +7171,62 @@ pub(crate) mod tests {
             (resolved.provider.as_str(), resolved.id.as_str()),
             ("battery", "mock-reason"),
             "the live selection survives an unpersisted replacement"
+        );
+    }
+
+    /// A replacement re-reads the moved-to session's saved thinking level
+    /// (TS `createAgentSession`: `hasThinkingEntry ?
+    /// existingSession.thinkingLevel` when the runtime config carries no
+    /// explicit flag): the pinned level replaces the settings/medium
+    /// default and clamps against the restored model.
+    #[tokio::test]
+    async fn a_replacement_restores_the_moved_to_sessions_saved_thinking_level() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        write_thinking_pair_models_json(&agent_dir, "http://127.0.0.1:9");
+        let engine = restore_test_engine(dir.path(), None, None);
+
+        // Session A pins the reasoning model at thinking `low`.
+        let mut file_a = crate::session_store::SessionFile::create(
+            dir.path().to_str().unwrap_or("/tmp"),
+            None,
+            0,
+        );
+        let path_a = dir
+            .path()
+            .join(crate::session_store::session_file_name(file_a.session_id()));
+        file_a.set_path(path_a.clone());
+        file_a.append_model_change("battery", "mock-reason");
+        file_a.append_thinking_level_change("low");
+        file_a.rewrite().unwrap();
+        engine.set_session_file(path_a.clone());
+        engine.restore_session_model(&path_a).await;
+        assert_eq!(
+            engine.effective_thinking_level().as_deref(),
+            Some("low"),
+            "the moved-to session's saved thinking level restores, not the medium default"
+        );
+
+        // Session B pins the non-reasoning model at thinking `high`: the
+        // saved level restores and clamps against the restored model.
+        let mut file_b = crate::session_store::SessionFile::create(
+            dir.path().to_str().unwrap_or("/tmp"),
+            None,
+            0,
+        );
+        let path_b = dir
+            .path()
+            .join(crate::session_store::session_file_name(file_b.session_id()));
+        file_b.set_path(path_b.clone());
+        file_b.append_model_change("battery", "mock-plain");
+        file_b.append_thinking_level_change("high");
+        file_b.rewrite().unwrap();
+        engine.set_session_file(path_b.clone());
+        engine.restore_session_model(&path_b).await;
+        assert_eq!(
+            engine.effective_thinking_level().as_deref(),
+            Some("off"),
+            "the saved level re-clamps against the restored non-reasoning model"
         );
     }
 
