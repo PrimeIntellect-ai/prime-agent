@@ -165,9 +165,9 @@ never session payload.
 
 | property | type | notes |
 |---|---|---|
-| `kind` | string | `worker_spawned`, `worker_exited`, `worker_restarted`, `attach`, `reattach`, `detach`, `sessions_archived`, `worker_children_closed` |
+| `kind` | string | `worker_spawned`, `worker_exited`, `worker_restarted`, `attach`, `reattach`, `detach`, `sessions_archived`, `worker_children_closed`, `catalog_refresh` |
 | `exit_reason` | string | only for `worker_exited`: `normal` / `crash` |
-| `count` | number | only for `sessions_archived` and `worker_children_closed`: how many sessions the sweep moved to the archive / how many resident RLM children the supervisor closed with a hard-killed parent worker |
+| `count` | number | only for `sessions_archived`, `worker_children_closed`, and `catalog_refresh`: how many sessions the sweep moved to the archive / how many resident RLM children the supervisor closed with a hard-killed parent worker / how many models the resolved no-cold-start chain serves after the daemon's startup catalog refresh |
 
 ### `mcp connector used`
 

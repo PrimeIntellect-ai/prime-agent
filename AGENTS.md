@@ -126,7 +126,7 @@ pa-telemetry <-- telemetry library; depends on no workspace crate
 pa-ai (providers/registry)
 pa-models (catalog) --> depends on pa-ai
 pa-agent (agent loop) --> depends on pa-ai, pa-types
-pa-core (session engine) --> depends on pa-agent, pa-ai, pa-types, pa-telemetry
+pa-core (session engine) --> depends on pa-agent, pa-ai, pa-models, pa-types, pa-telemetry
 pa-daemon (supervisor/workers) --> depends on pa-core
 pa-tui (terminal UI) --> depends on pa-types, pa-core (session wire)
 pa-cli (binary) --> depends on everything, the composition root

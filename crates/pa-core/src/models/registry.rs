@@ -9,12 +9,9 @@ use pa_types::ai::Model;
 use crate::auth::manager::AuthStorage;
 use crate::auth::types::PRIME_INFERENCE_PROVIDER_ID;
 
+use super::catalog_chain;
 use super::custom::{apply_model_override, load_custom_models, merge_compat, CustomModelsResult};
 use super::prime_inference::is_private_prime_inference_model;
-use super::prime_inference_catalog::{
-    merge_prime_inference_models, read_cached_prime_inference_models,
-    refresh_prime_inference_models,
-};
 use super::private_auth::{
     fetch_authorized_private_prime_inference_models, is_offline_mode_enabled,
     private_prime_authorization_fingerprint, read_private_prime_authorization_cache,
@@ -56,7 +53,9 @@ pub struct ModelRegistry {
     authorized_private_ids: HashSet<String>,
     authorized_private_models: Vec<Model>,
     authorized_team_id: Option<String>,
-    live_prime_inference_models: Option<Vec<Model>>,
+    /// The process-shared live catalog chain (`catalog_chain::catalog_for`):
+    /// resolve() sources built-ins from it.
+    catalog: std::sync::Arc<pa_models::ModelCatalog>,
 }
 
 impl ModelRegistry {
@@ -69,6 +68,7 @@ impl ModelRegistry {
     }
 
     fn new(auth: AuthStorage, models_json_path: Option<PathBuf>) -> Self {
+        let catalog = catalog_chain::catalog_for(models_json_path.as_deref());
         let mut registry = Self {
             auth,
             models_json_path,
@@ -80,10 +80,21 @@ impl ModelRegistry {
             authorized_private_ids: HashSet::new(),
             authorized_private_models: Vec::new(),
             authorized_team_id: None,
-            live_prime_inference_models: None,
+            catalog,
         };
         registry.load_models();
         registry
+    }
+
+    /// The Prime Inference credentials for the credentialed catalog layer
+    /// (the TS `refreshPrimeInferenceModels` headers: Bearer + team).
+    pub fn prime_credentials(&mut self) -> Option<pa_models::PrimeCredentials> {
+        let api_key = self.auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID)?;
+        let team_id = self
+            .auth
+            .get_provider_headers(PRIME_INFERENCE_PROVIDER_ID)
+            .and_then(|headers| headers.get("X-Prime-Team-ID").cloned());
+        Some(pa_models::PrimeCredentials { api_key, team_id })
     }
 
     /// Error from loading models.json, if any.
@@ -205,21 +216,6 @@ impl ModelRegistry {
         self.load_models();
     }
 
-    fn prime_inference_cache_path(&self) -> Option<PathBuf> {
-        self.models_json_path.as_ref().map(|path| {
-            path.parent()
-                .unwrap_or_else(|| path)
-                .join("prime-inference-models-cache.json")
-        })
-    }
-
-    fn bundled_prime_inference_models() -> Vec<Model> {
-        pa_ai::models_generated::get_models(PRIME_INFERENCE_PROVIDER_ID)
-            .into_iter()
-            .cloned()
-            .collect()
-    }
-
     fn load_models(&mut self) {
         let path = self.models_json_path.clone();
         let result = match &path {
@@ -236,16 +232,6 @@ impl ModelRegistry {
             .map(|model| model.id.clone())
             .collect();
 
-        // Live Prime Inference catalog: disk cache first; stays None when unset.
-        if self.live_prime_inference_models.is_none() {
-            if let Some(cache_path) = self.prime_inference_cache_path() {
-                self.live_prime_inference_models = read_cached_prime_inference_models(
-                    &cache_path,
-                    &Self::bundled_prime_inference_models(),
-                );
-            }
-        }
-
         // Private models: bundled table + authorized set, deduped by id.
         let mut private_models: HashMap<String, Model> = HashMap::new();
         for model in super::private_auth::get_private_prime_inference_models() {
@@ -255,7 +241,8 @@ impl ModelRegistry {
             private_models.insert(model.id.clone(), model.clone());
         }
 
-        let mut built_in = self.load_built_in_models(&result);
+        let credentials = self.prime_credentials();
+        let mut built_in = self.load_built_in_models(&result, credentials.as_ref());
         built_in.extend(private_models.into_values());
         self.models = self.merge_custom_models(built_in, result.models);
     }
@@ -348,16 +335,17 @@ impl ModelRegistry {
         }
     }
 
-    fn load_built_in_models(&self, custom: &CustomModelsResult) -> Vec<Model> {
-        let bundled: Vec<Model> = pa_ai::models_generated::get_providers()
-            .into_iter()
-            .flat_map(|provider| {
-                pa_ai::models_generated::get_models(provider)
-                    .into_iter()
-                    .cloned()
-            })
-            .collect();
-        merge_prime_inference_models(&bundled, self.live_prime_inference_models.as_deref())
+    /// Built-ins through the no-cold-start chain (validated disk snapshot |
+    /// bundled asset | compiled fallback), merged with the credentialed
+    /// live Prime Inference snapshot for `credentials` — TS
+    /// `loadBuiltInModels` over the provider catalog + `livePrimeInferenceModels`.
+    fn load_built_in_models(
+        &self,
+        custom: &CustomModelsResult,
+        credentials: Option<&pa_models::PrimeCredentials>,
+    ) -> Vec<Model> {
+        self.catalog
+            .resolve(credentials)
             .into_iter()
             .map(|mut model| {
                 if let Some(provider_override) = custom.provider_overrides.get(&model.provider) {
@@ -397,22 +385,21 @@ impl ModelRegistry {
         built_in
     }
 
-    /// Reload local state and refresh entitlements (live catalog + private auth).
+    /// Reload local state and refresh entitlements (live catalog + private
+    /// auth). The chain refresh (the gated provider-catalog fetch + the
+    /// credentialed Prime Inference fetch, TS `refreshProviderCatalog(false)`
+    /// + `refreshPrimeInferenceModels`) is awaited so the resolved catalog
+    /// reflects it as soon as the call returns.
     pub async fn refresh_available_models(&mut self) -> Vec<Model> {
         let previous_ids = self.authorized_private_ids.clone();
         let previous_team = self.authorized_team_id.clone();
         let previous_models = self.authorized_private_models.clone();
         self.refresh();
-        if let Some(cache_path) = self.prime_inference_cache_path() {
-            let bundled = Self::bundled_prime_inference_models();
-            if let Some(models) =
-                refresh_prime_inference_models(&cache_path, &bundled, is_offline_mode_enabled())
-                    .await
-            {
-                self.live_prime_inference_models = Some(models);
-                self.load_models();
-            }
-        }
+        let credentials = self.prime_credentials();
+        self.catalog
+            .refresh_with_credentials(false, credentials.as_ref())
+            .await;
+        self.load_models();
         self.refresh_private_prime_inference_authorization(
             previous_ids,
             previous_team,
@@ -477,12 +464,9 @@ impl ModelRegistry {
             return self.clear_private_authorization();
         }
 
-        let public_ids: HashSet<String> = self
-            .live_prime_inference_models
-            .as_deref()
-            .map(|models| models.iter().map(|model| model.id.clone()).collect())
-            .unwrap_or_else(Self::bundled_public_ids);
+        let public_ids = self.public_prime_inference_ids();
         let fetched = fetch_authorized_private_prime_inference_models(
+            self.catalog.prime_inference_base_url(),
             &api_key,
             &team_headers,
             &public_ids,
@@ -524,12 +508,9 @@ impl ModelRegistry {
         fingerprint: String,
         cache_path: PathBuf,
     ) {
-        let public_ids: HashSet<String> = self
-            .live_prime_inference_models
-            .as_deref()
-            .map(|models| models.iter().map(|model| model.id.clone()).collect())
-            .unwrap_or_else(Self::bundled_public_ids);
+        let public_ids = self.public_prime_inference_ids();
         let Ok(models) = fetch_authorized_private_prime_inference_models(
+            self.catalog.prime_inference_base_url(),
             &api_key,
             &team_headers,
             &public_ids,
@@ -557,10 +538,18 @@ impl ModelRegistry {
         );
     }
 
-    fn bundled_public_ids() -> HashSet<String> {
-        Self::bundled_prime_inference_models()
-            .into_iter()
-            .map(|model| model.id)
+    /// The public Prime Inference ids the resolved catalog serves (the
+    /// live-or-offline snapshot, TS `livePrimeInferenceModels ??
+    /// bundledPrimeInferenceModels`): the private-authorization fetch
+    /// skips these and reports only the account's private entitlements.
+    fn public_prime_inference_ids(&self) -> HashSet<String> {
+        self.models
+            .iter()
+            .filter(|model| {
+                model.provider == PRIME_INFERENCE_PROVIDER_ID
+                    && !is_private_prime_inference_model(model)
+            })
+            .map(|model| model.id.clone())
             .collect()
     }
 
@@ -681,6 +670,14 @@ mod tests {
         AuthStorage::in_memory(data, Arc::new(NoOAuth))
     }
 
+    /// Like [`auth_with`] but with ambient `PRIME_API_KEY`/`PRIME_TEAM_ID`
+    /// ignored: the stored credential is the only source, so credential
+    /// tests are hermetic on boxes that carry Prime Inference env vars.
+    fn auth_without_env(data: serde_json::Value) -> AuthStorage {
+        let data = AuthStorageData(data.as_object().cloned().unwrap_or_default());
+        AuthStorage::in_memory_without_env(data, Arc::new(NoOAuth))
+    }
+
     fn model(id: &str, provider: &str) -> Model {
         serde_json::from_value(serde_json::json!({
             "id": id, "name": id, "api": "openai-completions", "provider": provider,
@@ -795,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn live_catalog_cache_merges_over_the_bundled_prime_inference_models() {
+    fn live_scope_keyed_cache_merges_over_the_compiled_prime_inference_models() {
         let dir = tempfile::tempdir().unwrap();
         let models_path = dir.path().join("models.json");
         std::fs::write(
@@ -807,27 +804,23 @@ mod tests {
             } } }"#,
         )
         .unwrap();
-        // A live-catalog cache: one bundled model repriced, one new entry,
-        // well past the coverage floor so the build accepts it.
-        let bundled = super::ModelRegistry::bundled_prime_inference_models();
-        // The live catalog carries public models only: reprice the first
-        // public bundled entry (private models stay on the bundled table).
-        let repriced_index = bundled
-            .iter()
-            .position(|model| {
-                !super::super::prime_inference::is_private_prime_inference_model_id(&model.id)
-            })
-            .expect("a public bundled model");
+        // A live-catalog snapshot scoped to these credentials: one compiled
+        // model repriced, one new entry, well past the coverage floor so
+        // the build accepts it. The scope-keyed cache serves this scope's
+        // snapshot only; another credential never sees it.
+        let auth = auth_without_env(serde_json::json!({
+            "prime-inference": { "type": "api_key", "key": "live-key",
+                "primeTeam": { "teamId": "team-1", "name": "Team 1" } }
+        }));
+        let compiled = pa_models::transports::prime_inference_offline_entries();
+        let repriced = &compiled[0];
         let mut entries = Vec::new();
-        for (index, model) in bundled.iter().enumerate() {
-            if super::super::prime_inference::is_private_prime_inference_model_id(&model.id) {
-                continue;
-            }
+        for model in &compiled {
             entries.push(serde_json::json!({
                 "id": model.id,
                 "display_name": model.name,
                 "pricing": {
-                    "input_usd_per_mtok": if index == repriced_index { 7.0 } else { model.cost.input.as_f64() },
+                    "input_usd_per_mtok": if model.id == repriced.id { 7.0 } else { model.cost.input.as_f64() },
                     "output_usd_per_mtok": model.cost.output.as_f64(),
                 },
                 "specs": {
@@ -848,24 +841,30 @@ mod tests {
                 "modalities": { "input": ["text"], "output": ["text"] },
             },
         }));
+        let scope = pa_models::prime_inference::scope_key("live-key", "team-1");
+        let snapshot = serde_json::json!({
+            "url": format!("{}/models", super::super::prime_inference::PRIME_INFERENCE_BASE_URL),
+            "scope": scope,
+            "fetchedAt": 1,
+            "payload": { "data": entries },
+        });
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
         std::fs::write(
-            dir.path().join("prime-inference-models-cache.json"),
-            serde_json::to_vec(&serde_json::json!({ "data": entries })).unwrap(),
+            dir.path().join("models/prime-inference-models-cache.json"),
+            serde_json::to_vec(&snapshot).unwrap(),
         )
         .unwrap();
-        let registry = ModelRegistry::create(auth_with(serde_json::json!({})), &models_path);
-        let all = registry.get_all();
-        // The live repriced model replaced its bundled template (other
+        let mut registry = ModelRegistry::create(auth, &models_path);
+        let all = registry.get_all().to_vec();
+        // The live repriced model replaced its compiled template (other
         // providers may serve the same id; match the provider too).
-        let repriced = all
+        let repriced_model = all
             .iter()
-            .find(|model| {
-                model.id == bundled[repriced_index].id && model.provider == "prime-inference"
-            })
+            .find(|model| model.id == repriced.id && model.provider == "prime-inference")
             .expect("repriced model");
-        assert_eq!(repriced.cost.input.as_f64(), 7.0);
+        assert_eq!(repriced_model.cost.input.as_f64(), 7.0);
         assert_eq!(
-            repriced.base_url,
+            repriced_model.base_url,
             super::super::prime_inference::PRIME_INFERENCE_BASE_URL
         );
         // The live-only model is present.
@@ -874,10 +873,33 @@ mod tests {
             .any(|model| model.id == "anthropic/live-only-model"));
         // The custom models.json model survives the merge.
         assert!(all.iter().any(|model| model.id == "my-model"));
-        // Bundled models of other providers stay.
+        // Compiled models of other providers stay.
         assert!(all
             .iter()
-            .any(|model| model.provider == "anthropic" && model.id != bundled[0].id));
+            .any(|model| model.provider == "anthropic" && model.id != repriced.id));
+        // A different credential's scope never sees this snapshot.
+        let other_auth = auth_without_env(serde_json::json!({
+            "prime-inference": { "type": "api_key", "key": "other-key",
+                "primeTeam": { "teamId": "team-2", "name": "Team 2" } }
+        }));
+        registry.auth = other_auth;
+        registry.refresh();
+        let all = registry.get_all().to_vec();
+        let compiled_price = compiled
+            .iter()
+            .find(|model| model.id == repriced.id)
+            .unwrap();
+        let still_compiled = all
+            .iter()
+            .find(|model| model.id == repriced.id && model.provider == "prime-inference")
+            .expect("compiled fallback for the other scope");
+        assert_eq!(
+            still_compiled.cost.input.as_f64(),
+            compiled_price.cost.input.as_f64()
+        );
+        assert!(!all
+            .iter()
+            .any(|model| model.id == "anthropic/live-only-model"));
     }
 
     #[test]

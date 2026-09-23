@@ -559,6 +559,17 @@ pub fn track_sessions_archived(client: &TelemetryClient, count: usize) {
     client.track("daemon event", properties);
 }
 
+/// Track the live-catalog warm-up settle's `daemon event` (schema v1,
+/// kind `catalog_refresh`): how many models the resolved
+/// no-cold-start chain serves after the daemon's startup refresh. A
+/// count only, never model ids, credentials, or catalog payloads.
+pub fn track_catalog_refresh(client: &TelemetryClient, count: usize) {
+    let mut properties = base_properties("daemon");
+    properties.set("kind", Value::from("catalog_refresh"));
+    properties.set("count", Value::from(count));
+    client.track("daemon event", properties);
+}
+
 /// Track the parent-death child close's `daemon event` (schema v1, kind
 /// `worker_children_closed`): how many resident RLM children the
 /// supervisor stopped with a hard-killed parent worker. A count only,

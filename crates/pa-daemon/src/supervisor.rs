@@ -206,6 +206,14 @@ impl Supervisor {
         }
     }
 
+    /// Emit the live-catalog warm-up settle's `daemon event` (schema v1,
+    /// kind `catalog_refresh`): the served model count, primitives only.
+    fn note_catalog_refresh(&self, count: usize) {
+        if let Some(client) = &*self.telemetry.lock().unwrap() {
+            pa_core::session_engine::telemetry::track_catalog_refresh(client, count);
+        }
+    }
+
     /// Emit a `daemon event` (best-effort, non-blocking; no-op when the
     /// daemon is opted out).
     fn note_daemon_event(&self, kind: &str, exit_reason: Option<&str>) {
@@ -229,6 +237,33 @@ impl Supervisor {
             };
             *self.telemetry.lock().unwrap() = (!disabled).then(|| {
                 pa_core::session_engine::telemetry::build_client(&settings, &self.options.agent_dir)
+            });
+        }
+        // Live model catalog (both fetch layers): the supervisor process
+        // keeps the disk caches warm for every worker it spawns — a forced
+        // startup refresh (layer A provider catalog + the credentialed
+        // Prime Inference snapshot for the logged-in account) and then the
+        // hourly loop. Fire-and-forget: workers always have the
+        // last-good chain (disk snapshot | bundled | compiled) and the
+        // refresh only adds live pricing and catalog-repo/new entries.
+        pa_core::models::startup_refresh(&self.options.agent_dir);
+        pa_core::models::spawn_hourly_refresh(&self.options.agent_dir);
+        // Adoption telemetry for the wiring: one `daemon event` (kind
+        // `catalog_refresh`) when the startup refresh settles — the
+        // served model count, primitives only. The awaited refresh is
+        // gated, so it coalesces with the startup refresh's in-flight
+        // fetches instead of refetching.
+        {
+            let supervisor = Arc::clone(&self);
+            tokio::spawn(async move {
+                let agent_dir = &supervisor.options.agent_dir;
+                let catalog = pa_core::models::catalog_for(Some(&agent_dir.join("models.json")));
+                let credentials = pa_core::models::prime_credentials_for_dir(agent_dir);
+                catalog
+                    .refresh_with_credentials(false, credentials.as_ref())
+                    .await;
+                let count = catalog.resolve(credentials.as_ref()).len();
+                supervisor.note_catalog_refresh(count);
             });
         }
         socket::prepare_socket_path(&self.options.socket_path).await?;

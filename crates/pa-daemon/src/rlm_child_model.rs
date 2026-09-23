@@ -7,9 +7,7 @@ use std::path::Path;
 
 use anyhow::{anyhow, bail, Result};
 use pa_ai::models::{get_supported_thinking_levels, thinking_level_from_str};
-use pa_core::auth::AuthStorage;
 use pa_core::kernel::rlm_runtime::{find_rlm_model_matches, RlmModelInfo};
-use pa_core::models::ModelRegistry;
 
 /// Close matches listed in model-resolution errors (TS suggestion limit).
 const MODEL_ERROR_SUGGESTION_LIMIT: usize = 3;
@@ -20,10 +18,11 @@ pub const LABEL_MAX_CHARS: usize = 200;
 const ELLIPSIS: &str = "...";
 
 /// The model catalog the RLM surface resolves against: the same
-/// credential-backed list `rlm.find_models` searches.
+/// credential-backed list `rlm.find_models` searches (the worker-style
+/// registry construction: the private-authorization disk cache is adopted,
+/// so entitled `internal/*` models resolve for spawned children).
 pub fn catalog_models(agent_dir: &Path) -> Vec<RlmModelInfo> {
-    let auth = AuthStorage::create(agent_dir);
-    let registry = ModelRegistry::create(auth, agent_dir.join("models.json"));
+    let registry = crate::state_getters::worker_model_registry(agent_dir);
     registry
         .get_rlm_searchable_models()
         .into_iter()
@@ -106,8 +105,7 @@ pub fn assert_thinking_supported(
     let Some((provider, id)) = selector.split_once('/') else {
         return Ok(());
     };
-    let auth = AuthStorage::create(agent_dir);
-    let registry = ModelRegistry::create(auth, agent_dir.join("models.json"));
+    let registry = crate::state_getters::worker_model_registry(agent_dir);
     let Some(model) = registry
         .get_rlm_searchable_models()
         .into_iter()
@@ -308,6 +306,103 @@ mod tests {
         );
         // A model outside the catalog (scripted verification models) passes.
         assert_thinking_supported(dir.path(), Some("high"), "scripted/faux-1").unwrap();
+    }
+
+    /// Piece 5 (c) — the child-propagation regression: a spawned child
+    /// resolves an entitled private `internal/*` model through the same
+    /// disk caches the worker serves (auth.json + the private-authorization
+    /// cache). Before the fix, `catalog_models` built a bare registry that
+    /// never adopted the private cache, so `internal/*` was invisible to
+    /// `rlm.spawn` model resolution and `rlm.find_models`.
+    #[test]
+    fn a_spawned_child_resolves_an_entitled_private_model() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        // The worker-path auth (auth.json): one Prime Inference key+team.
+        std::fs::write(
+            dir.path().join("auth.json"),
+            json!({
+                "prime-inference": {
+                    "type": "api_key",
+                    "key": "child-key",
+                    "primeTeam": { "teamId": "team-7", "name": "Team 7" }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // The authorized private model: the compiled fallback lacks it, the
+        // fingerprint-scoped disk cache carries it.
+        let mut auth = pa_core::auth::AuthStorage::create(dir.path());
+        let api_key = auth.get_api_key("prime-inference").expect("api key");
+        let team_id = auth
+            .get_provider_headers("prime-inference")
+            .and_then(|headers| headers.get("X-Prime-Team-ID").cloned());
+        // An ambient `PRIME_API_KEY` without a `PRIME_TEAM_ID` (the dogfood
+        // box posture) makes the environment the active source, and the
+        // stored team is then suppressed — no private adoption can happen
+        // on such a box. Hermetic machines (CI, VM gate sandboxes) run the
+        // full verifier; polluted ones skip with a note.
+        let Some(team_id) = team_id else {
+            eprintln!(
+                "ambient env credentials suppress the stored team; \
+                 skipping the child private-model verifier on this box"
+            );
+            return;
+        };
+        let fingerprint =
+            pa_core::models::private_prime_authorization_fingerprint(&api_key, &team_id);
+        pa_core::models::write_private_prime_authorization_cache(
+            &dir.path().join("models.json"),
+            &pa_core::models::PrivatePrimeAuthorizationCache {
+                fingerprint,
+                models: vec![serde_json::from_value(json!({
+                    "id": "internal/glm-5.3-fast", "name": "GLM 5.3 Fast",
+                    "api": "openai-completions", "provider": "prime-inference",
+                    "baseUrl": "https://api.pinference.ai/api/v1",
+                    "reasoning": true, "input": ["text"],
+                    "cost": { "input": 0.42, "output": 2.1, "cacheRead": 0, "cacheWrite": 0 },
+                    "contextWindow": 400_000, "maxTokens": 131_072
+                }))
+                .unwrap()],
+                refreshed_at: 1,
+            },
+        );
+
+        // The catalog the RLM surface searches carries the private model.
+        assert!(catalog_models(dir.path())
+            .iter()
+            .any(|model| model.id == "internal/glm-5.3-fast"));
+        // A spawned child resolves it by full selector and by short form.
+        let resolved = resolve_child_model(
+            dir.path(),
+            Some("prime-inference/internal/glm-5.3-fast"),
+            Some("prime-inference/z-ai/glm-5.3"),
+            "subagent",
+        )
+        .unwrap();
+        assert_eq!(resolved, "prime-inference/internal/glm-5.3-fast");
+        let resolved = resolve_child_model(
+            dir.path(),
+            Some("internal/glm-5.3-fast"),
+            Some("prime-inference/z-ai/glm-5.3"),
+            "subagent",
+        )
+        .unwrap();
+        assert_eq!(resolved, "prime-inference/internal/glm-5.3-fast");
+        // The spawn-time thinking check follows the resolved entitlement.
+        assert_thinking_supported(
+            dir.path(),
+            Some("high"),
+            "prime-inference/internal/glm-5.3-fast",
+        )
+        .unwrap();
+        assert_thinking_supported(
+            dir.path(),
+            Some("off"),
+            "prime-inference/internal/glm-5.3-fast",
+        )
+        .unwrap();
     }
 
     #[test]

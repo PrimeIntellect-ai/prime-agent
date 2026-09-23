@@ -162,10 +162,15 @@ pub fn wire_session_runtime(
     runtime.register_host_handlers(session.clone(), &mut handlers);
     let model_registry = rlm.model_registry.unwrap_or_else(|| {
         let auth = crate::auth::AuthStorage::create(agent_dir);
-        Arc::new(crate::models::registry::ModelRegistry::create(
-            auth,
-            agent_dir.join("models.json"),
-        ))
+        let mut registry =
+            crate::models::registry::ModelRegistry::create(auth, agent_dir.join("models.json"));
+        // Adopt the on-disk private authorization before freezing the Arc:
+        // `rlm.find_models` and child-spawn resolution search this registry,
+        // and a fresh registry otherwise gates every private
+        // `internal/*` model out (only the async refresh populates the
+        // authorized set).
+        registry.load_private_authorization_from_cache();
+        Arc::new(registry)
     });
     let rlm_bridge = Arc::new(RlmHostBridge::new(model_registry, rlm.subagent_host));
     register_rlm_host_handlers(&mut handlers, &rlm_bridge);
