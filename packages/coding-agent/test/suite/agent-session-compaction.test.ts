@@ -367,7 +367,7 @@ describe("AgentSession compaction", () => {
 			kind: "memory",
 			title: "Compaction test memory",
 			content: "Written before compaction.",
-			topic: "general",
+			path: "general",
 			scope: "local",
 			reference: {},
 			arguments: {},
