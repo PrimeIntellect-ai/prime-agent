@@ -1366,13 +1366,8 @@ impl SessionUi {
     /// a sanctioned divergence from TS — see `toast`): the confirmation
     /// never lands in the transcript, and the frame repaints so the
     /// overlay appears at once (its expiry repaints it away).
-    pub(crate) fn toast(
-        &mut self,
-        text: &str,
-        kind: crate::toast::ToastKind,
-        view: &mut AgentView,
-    ) {
-        view.toasts.push(text, kind);
+    pub(crate) fn toast(&mut self, text: &str, view: &mut AgentView) {
+        view.toasts.push(text);
         self.dirty = true;
     }
 
@@ -3694,11 +3689,7 @@ impl SessionUi {
             return Ok(());
         };
         match crate::clipboard::copy_to_clipboard(&text, &mut self.osc_sink) {
-            Ok(()) => self.toast(
-                "Copied last agent message to clipboard",
-                crate::toast::ToastKind::Success,
-                view,
-            ),
+            Ok(()) => self.toast("Copied last agent message to clipboard", view),
             Err(message) => self.error_row(&message, view),
         }
         Ok(())
@@ -5359,11 +5350,7 @@ impl SessionUi {
         self.copies.push(text.to_string());
         self.track_selection(lines);
         if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-            self.toast(
-                "Copied selection to clipboard",
-                crate::toast::ToastKind::Success,
-                view,
-            );
+            self.toast("Copied selection to clipboard", view);
             return;
         }
         use base64::Engine;
@@ -5373,11 +5360,7 @@ impl SessionUi {
         match out.write_all(format!("\x1b]52;c;{encoded}\x07").as_bytes()) {
             Ok(()) => {
                 let _ = out.flush();
-                self.toast(
-                    "Copied selection to clipboard",
-                    crate::toast::ToastKind::Success,
-                    view,
-                );
+                self.toast("Copied selection to clipboard", view);
             }
             Err(error) => {
                 self.error_row(&format!("Failed to copy selection: {error}"), view);

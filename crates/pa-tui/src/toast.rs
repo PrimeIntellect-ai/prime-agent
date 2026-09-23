@@ -21,32 +21,17 @@ pub const TOAST_TTL: Duration = Duration::from_millis(3000);
 /// How many toasts stack at once (the oldest drop first).
 pub const TOAST_STACK_LIMIT: usize = 3;
 
-/// The toast's semantic color (the theme's color per kind).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToastKind {
-    /// A completed action (Success).
-    Success,
-    /// Neutral information (Accent).
-    Info,
-    /// A warning (Warning).
-    Warning,
-    /// An error (Error).
-    Error,
-}
-
-/// One ephemeral confirmation: its text, kind, and expiry.
+/// One ephemeral confirmation: its text and expiry.
 #[derive(Debug, Clone)]
 struct Toast {
     text: String,
-    kind: ToastKind,
     expires_at: Instant,
 }
 
 impl Toast {
-    fn new(text: String, kind: ToastKind) -> Self {
+    fn new(text: String) -> Self {
         Toast {
             text,
-            kind,
             expires_at: Instant::now()
                 .checked_add(TOAST_TTL)
                 .unwrap_or_else(Instant::now),
@@ -63,16 +48,11 @@ pub struct Toasts {
 impl Toasts {
     /// Show a toast: the newest lands at the bottom of the stack; a stack
     /// past the limit drops the oldest.
-    pub fn push(&mut self, text: impl Into<String>, kind: ToastKind) {
-        self.entries.push(Toast::new(text.into(), kind));
+    pub fn push(&mut self, text: impl Into<String>) {
+        self.entries.push(Toast::new(text.into()));
         while self.entries.len() > TOAST_STACK_LIMIT {
             self.entries.remove(0);
         }
-    }
-
-    /// Whether any toast is still on screen at `now`.
-    pub fn has_active(&self, now: Instant) -> bool {
-        self.entries.iter().any(|toast| toast.expires_at > now)
     }
 
     /// Drop the toasts whose TTL passed at `now`; `true` when any went.
@@ -82,12 +62,12 @@ impl Toasts {
         before != self.entries.len()
     }
 
-    /// The still-active toasts, oldest first.
-    pub fn active<'a>(&'a self, now: Instant) -> impl Iterator<Item = (&'a str, ToastKind)> + 'a {
+    /// The still-active toasts' texts, oldest first.
+    pub fn active<'a>(&'a self, now: Instant) -> impl Iterator<Item = &'a str> + 'a {
         self.entries
             .iter()
             .filter(move |toast| toast.expires_at > now)
-            .map(|toast| (toast.text.as_str(), toast.kind))
+            .map(|toast| toast.text.as_str())
     }
 
     /// Fast-forward every toast's expiry by `age` (test hook: expiry
@@ -103,19 +83,20 @@ impl Toasts {
 }
 
 /// Compose the toast block over the frame's top transcript rows: each
-/// toast replaces one row with its right-aligned message, so the overlay
-/// stays legible over whatever the transcript shows beneath it. Each
-/// entry carries its own style (the kind's theme color). Rows at or past
+/// toast replaces one row with its right-aligned message (rendered in
+/// the block's single `style`), so the overlay stays legible over
+/// whatever the transcript shows beneath it. Rows at or past
 /// `end` (the transcript window's last row + 1) stay untouched — a short
 /// window never lets the overlay run into the dock.
 pub fn overlay_toasts(
     frame: &mut [Line],
     start: usize,
     end: usize,
-    toasts: &[(String, Style)],
+    toasts: &[String],
     width: usize,
+    style: Style,
 ) {
-    for (offset, (text, style)) in toasts.iter().enumerate() {
+    for (offset, text) in toasts.iter().enumerate() {
         if start + offset >= end {
             break;
         }
@@ -124,7 +105,7 @@ pub fn overlay_toasts(
         };
         let label = format!(" {text} ");
         let col = width.saturating_sub(crate::width::str_width(&label));
-        let mut out: Line = vec![Span::raw(" ".repeat(col)), Span::styled(label, *style)];
+        let mut out: Line = vec![Span::raw(" ".repeat(col)), Span::styled(label, style)];
         out = crate::width::truncate_line(&out, width, "");
         let tail = width.saturating_sub(crate::width::line_width(&out));
         if tail > 0 {
@@ -146,11 +127,9 @@ mod tests {
     #[test]
     fn toasts_expire_on_their_ttl() {
         let mut toasts = Toasts::default();
-        toasts.push("Copied", ToastKind::Success);
-        assert!(toasts.has_active(now()));
+        toasts.push("Copied");
         assert_eq!(toasts.active(now()).count(), 1);
         toasts.age_by(TOAST_TTL + Duration::from_millis(1));
-        assert!(!toasts.has_active(now()));
         assert_eq!(toasts.active(now()).count(), 0);
         assert!(toasts.prune_expired(now()));
         assert!(toasts.entries.is_empty());
@@ -160,7 +139,7 @@ mod tests {
     #[test]
     fn pruning_a_fresh_stack_reports_no_change() {
         let mut toasts = Toasts::default();
-        toasts.push("Again", ToastKind::Info);
+        toasts.push("Again");
         assert!(!toasts.prune_expired(now()));
         assert_eq!(toasts.entries.len(), 1);
     }
@@ -170,9 +149,9 @@ mod tests {
     fn the_stack_caps_at_the_limit() {
         let mut toasts = Toasts::default();
         for index in 0..=TOAST_STACK_LIMIT {
-            toasts.push(format!("toast {index}"), ToastKind::Info);
+            toasts.push(format!("toast {index}"));
         }
-        let texts: Vec<&str> = toasts.active(now()).map(|(text, _)| text).collect();
+        let texts: Vec<&str> = toasts.active(now()).collect();
         assert_eq!(texts, vec!["toast 1", "toast 2", "toast 3"]);
     }
 
@@ -181,8 +160,8 @@ mod tests {
     #[test]
     fn the_overlay_writes_the_top_rows_right_aligned() {
         let mut frame = vec![vec![Span::raw("row")]; 6];
-        let toasts = vec![("Copied the answer".to_string(), Style::default())];
-        overlay_toasts(&mut frame, 2, 6, &toasts, 20);
+        let toasts = vec!["Copied the answer".to_string()];
+        overlay_toasts(&mut frame, 2, 6, &toasts, 20, Style::default());
         let rendered: Vec<String> = frame
             .iter()
             .map(|line| {
@@ -201,11 +180,8 @@ mod tests {
     #[test]
     fn an_overlong_label_truncates_to_the_frame_width() {
         let mut frame = vec![vec![Span::raw("row")]];
-        let toasts = vec![(
-            "a very long toast label that cannot fit".to_string(),
-            Style::default(),
-        )];
-        overlay_toasts(&mut frame, 0, 1, &toasts, 10);
+        let toasts = vec!["a very long toast label that cannot fit".to_string()];
+        overlay_toasts(&mut frame, 0, 1, &toasts, 10, Style::default());
         let rendered: String = frame[0]
             .iter()
             .map(|span| span.content.to_string())
@@ -220,11 +196,8 @@ mod tests {
     #[test]
     fn a_tall_stack_overlays_only_what_fits() {
         let mut frame = vec![vec![Span::raw("row")]; 2];
-        let toasts = vec![
-            ("one".to_string(), Style::default()),
-            ("two".to_string(), Style::default()),
-        ];
-        overlay_toasts(&mut frame, 1, 2, &toasts, 10);
+        let toasts = vec!["one".to_string(), "two".to_string()];
+        overlay_toasts(&mut frame, 1, 2, &toasts, 10, Style::default());
         assert!(frame[1].iter().any(|span| span.content.contains("two")));
     }
 
@@ -234,14 +207,10 @@ mod tests {
     #[test]
     fn the_end_bound_never_spills_into_the_dock() {
         let mut frame = vec![vec![Span::raw("row")]; 4];
-        let toasts = vec![
-            ("one".to_string(), Style::default()),
-            ("two".to_string(), Style::default()),
-            ("three".to_string(), Style::default()),
-        ];
+        let toasts = vec!["one".to_string(), "two".to_string(), "three".to_string()];
         // Transcript window: rows 1..3 (end 3); the third toast would be
         // row 3 — the dock's first row — so only two overlay.
-        overlay_toasts(&mut frame, 1, 3, &toasts, 10);
+        overlay_toasts(&mut frame, 1, 3, &toasts, 10, Style::default());
         assert!(frame[1].iter().any(|span| span.content.contains("one")));
         assert!(frame[2].iter().any(|span| span.content.contains("two")));
         assert!(

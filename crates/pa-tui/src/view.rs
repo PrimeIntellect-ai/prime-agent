@@ -1324,31 +1324,23 @@ impl AgentView {
         // transient overlay must never hide rows a drag is selecting —
         // releasing over covered text could copy content that was not
         // visible.
-        let selection_dragging = self.selection_drag_active();
         let now = std::time::Instant::now();
-        let toasts: Vec<(String, ratatui::style::Style)> = if selection_dragging {
+        let toasts: Vec<String> = if self.selection_drag_active() {
             Vec::new()
         } else {
-            self.toasts
-                .active(now)
-                .map(|(text, kind)| {
-                    let color = match kind {
-                        crate::toast::ToastKind::Success => crate::theme::ThemeColor::Success,
-                        crate::toast::ToastKind::Info => crate::theme::ThemeColor::Accent,
-                        crate::toast::ToastKind::Warning => crate::theme::ThemeColor::Warning,
-                        crate::toast::ToastKind::Error => crate::theme::ThemeColor::Error,
-                    };
-                    (text.to_string(), self.theme.fg_style(color))
-                })
-                .collect()
+            self.toasts.active(now).map(str::to_string).collect()
         };
         if !toasts.is_empty() {
+            // The action ack renders in the Success color (a completed
+            // action); anything needing another tone grows the kind then.
+            let style = self.theme.fg_style(crate::theme::ThemeColor::Success);
             crate::toast::overlay_toasts(
                 &mut frame,
                 top_rows,
                 top_rows + window_height,
                 &toasts,
                 width,
+                style,
             );
         }
         frame
@@ -2399,8 +2391,7 @@ mod tests {
     #[test]
     fn action_toasts_overlay_the_top_rows_and_auto_dismiss() {
         let mut view = view();
-        view.toasts
-            .push("Copied to clipboard", crate::toast::ToastKind::Success);
+        view.toasts.push("Copied to clipboard");
         let frame = view.render_frame(60, 24);
         let rows: Vec<String> = frame
             .iter()
