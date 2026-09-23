@@ -437,12 +437,11 @@ impl ActivityPanel {
             .first()
             .map(|key| format_key_text(key))
             .unwrap_or_else(|| "Esc".to_string());
-        let kill_hint = self
-            .rows
-            .iter()
-            .any(|row| row.killable)
-            .then(|| " \u{00b7} k kill".to_string())
-            .unwrap_or_default();
+        let kill_hint = if self.rows.iter().any(|row| row.killable) {
+            " \u{00b7} k kill".to_string()
+        } else {
+            String::new()
+        };
         lines.push(text(
             ThemeColor::Dim,
             format!(
