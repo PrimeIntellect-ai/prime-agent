@@ -369,7 +369,6 @@ impl AgentSessionEngine {
         ));
         let model_refusal_telemetry =
             std::sync::Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
-                config.cwd.clone(),
                 config.agent_dir.clone(),
                 config.telemetry_disabled == Some(true),
             ));

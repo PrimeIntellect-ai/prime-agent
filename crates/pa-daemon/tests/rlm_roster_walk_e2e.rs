@@ -332,7 +332,6 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
         parent_active_id.clone(),
         std::sync::Arc::new(pa_daemon::model_allowlist::ModelRefusalTelemetry::new(
             agent_dir.clone(),
-            agent_dir.clone(),
             /*telemetry_disabled*/ true,
         )),
     );

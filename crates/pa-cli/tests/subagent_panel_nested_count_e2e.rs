@@ -195,7 +195,6 @@ fn children_host(
         parent.active_session_id.clone(),
         std::sync::Arc::new(pa_daemon::model_allowlist::ModelRefusalTelemetry::new(
             agent_dir.to_path_buf(),
-            agent_dir.to_path_buf(),
             /*telemetry_disabled*/ true,
         )),
     );

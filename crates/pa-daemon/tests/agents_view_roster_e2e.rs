@@ -380,7 +380,6 @@ async fn rlm_children_key_the_roster_by_parent_path_and_child_id() {
         "parent-active-id".to_string(),
         std::sync::Arc::new(pa_daemon::model_allowlist::ModelRefusalTelemetry::new(
             agent_dir.clone(),
-            agent_dir.clone(),
             /*telemetry_disabled*/ true,
         )),
     );

@@ -351,7 +351,6 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         parent_active_session_id.clone(),
         std::sync::Arc::new(pa_daemon::model_allowlist::ModelRefusalTelemetry::new(
             agent_dir.clone(),
-            agent_dir.clone(),
             /*telemetry_disabled*/ true,
         )),
     );

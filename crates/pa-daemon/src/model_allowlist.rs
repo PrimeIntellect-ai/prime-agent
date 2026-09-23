@@ -42,19 +42,19 @@ pub struct ModelRefusalTelemetry {
     agent_dir: std::path::PathBuf,
     enabled: bool,
     client: std::sync::Mutex<Option<(std::path::PathBuf, TelemetryClient)>>,
+    /// Already-noted `(surface, selector)` pairs: one event per distinct
+    /// refusal per worker, so a polling getter that re-resolves a refused
+    /// model (the connection-state surface) never spams the event.
+    noted: std::sync::Mutex<std::collections::HashSet<(String, String)>>,
 }
 
 impl ModelRefusalTelemetry {
-    pub fn new(
-        cwd: std::path::PathBuf,
-        agent_dir: std::path::PathBuf,
-        telemetry_disabled: bool,
-    ) -> Self {
-        let _ = cwd;
+    pub fn new(agent_dir: std::path::PathBuf, telemetry_disabled: bool) -> Self {
         Self {
             agent_dir,
             enabled: !telemetry_disabled,
             client: std::sync::Mutex::new(None),
+            noted: std::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -76,6 +76,15 @@ impl ModelRefusalTelemetry {
         };
         if !enabled {
             return;
+        }
+        // Once per distinct (surface, selector): repeated resolutions of the
+        // same refused model stay silent (the user-facing errors still fire
+        // every time; the adoption signal needs one data point).
+        {
+            let mut noted = self.noted.lock().expect("refusal noted lock");
+            if !noted.insert((surface.to_string(), selector.to_string())) {
+                return;
+            }
         }
         let mut slot = self.client.lock().expect("refusal telemetry lock");
         if !slot.as_ref().is_some_and(|(bound_cwd, _)| bound_cwd == cwd) {
@@ -164,8 +173,7 @@ mod tests {
     async fn refusal_telemetry_honors_both_opt_outs() {
         let dir = tempfile::tempdir().expect("tempdir");
         // The create-command opt-out: no client ever.
-        let disabled =
-            ModelRefusalTelemetry::new(dir.path().to_path_buf(), dir.path().to_path_buf(), true);
+        let disabled = ModelRefusalTelemetry::new(dir.path().to_path_buf(), true);
         disabled.note_refused("set_model", "zai/glm-5.3", dir.path());
         assert!(
             disabled.client.lock().unwrap().is_none(),
@@ -173,8 +181,7 @@ mod tests {
         );
         // The settings opt-out (`telemetry.enabled: false`): no client.
         let agent_dir = dir.path().join("agent");
-        let settings_gated =
-            ModelRefusalTelemetry::new(dir.path().to_path_buf(), agent_dir.clone(), false);
+        let settings_gated = ModelRefusalTelemetry::new(agent_dir.clone(), false);
         write_settings(&agent_dir, r#"{"telemetry": {"enabled": false}}"#);
         settings_gated.note_refused("set_model", "zai/glm-5.3", dir.path());
         assert!(
@@ -182,8 +189,7 @@ mod tests {
             "no client when settings disable telemetry"
         );
         // No settings: the client builds on the first note.
-        let enabled =
-            ModelRefusalTelemetry::new(dir.path().to_path_buf(), dir.path().to_path_buf(), false);
+        let enabled = ModelRefusalTelemetry::new(dir.path().to_path_buf(), false);
         enabled.note_refused("set_model", "zai/glm-5.3", dir.path());
         assert!(
             enabled.client.lock().unwrap().as_ref().is_some(),
@@ -191,11 +197,32 @@ mod tests {
         );
     }
 
+    /// One `model refused` per distinct (surface, selector): a polling
+    /// getter re-resolving the same refused model stays silent after the
+    /// first event.
+    #[tokio::test]
+    async fn refusal_telemetry_dedupes_repeated_resolves() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let telemetry = ModelRefusalTelemetry::new(dir.path().to_path_buf(), false);
+        telemetry.note_refused("session_start", "zai/glm-5.3", dir.path());
+        assert_eq!(
+            telemetry.noted.lock().unwrap().len(),
+            1,
+            "first refusal noted"
+        );
+        // The same pair again: no new note, and no client churn.
+        telemetry.note_refused("session_start", "zai/glm-5.3", dir.path());
+        assert_eq!(telemetry.noted.lock().unwrap().len(), 1);
+        // A different selector (or surface) is a new data point.
+        telemetry.note_refused("session_start", "zai/glm-5.3-flash", dir.path());
+        telemetry.note_refused("spawn", "zai/glm-5.3", dir.path());
+        assert_eq!(telemetry.noted.lock().unwrap().len(), 3);
+    }
+
     #[tokio::test]
     async fn refusal_telemetry_rebinds_when_the_cwd_moves() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let telemetry =
-            ModelRefusalTelemetry::new(dir.path().to_path_buf(), dir.path().join("agent"), false);
+        let telemetry = ModelRefusalTelemetry::new(dir.path().join("agent"), false);
         let first = dir.path().join("project-a");
         std::fs::create_dir_all(&first).unwrap();
         telemetry.note_refused("set_model", "zai/glm-5.3", &first);

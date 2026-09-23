@@ -1739,7 +1739,6 @@ mod watch_tests {
             "parent-live".to_string(),
             std::sync::Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
                 std::env::temp_dir(),
-                std::env::temp_dir(),
                 /*telemetry_disabled*/ true,
             )),
         );

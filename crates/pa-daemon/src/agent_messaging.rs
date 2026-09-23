@@ -734,7 +734,6 @@ mod controller_tests {
             "aaa111".to_string(),
             std::sync::Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
                 std::path::PathBuf::from("/agent"),
-                std::path::PathBuf::from("/agent"),
                 /*telemetry_disabled*/ true,
             )),
         );
