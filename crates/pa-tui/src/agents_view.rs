@@ -2113,7 +2113,10 @@ mod tests {
         let opened = mode
             .opened
             .expect("the scoped view opens despite the never-resolving wait");
-        assert_eq!(opened.selection, SessionSelection::Attach("c-live".to_string()));
+        assert_eq!(
+            opened.selection,
+            SessionSelection::Attach("c-live".to_string())
+        );
     }
 
     /// TS `countRowsBySection` (the splash header counts) counts agent-kind
