@@ -322,14 +322,12 @@ fn forked_branch_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
             }
         }
     }
-    // Resolve each dropped id to its nearest kept ancestor once — TS's
-    // `liveParent`, memoized: a parent chain shared by many children costs
-    // one walk total, and a parent cycle inside malformed git_state rows
-    // terminates at the first repeated id.
+    // Resolve each dropped id to its nearest kept ancestor lazily — TS's
+    // `liveParent`, memoized over the ACYCLIC walks: a parent chain shared
+    // by many children costs one walk total. Cycles (malformed git_state
+    // rows) stay per-child: their terminal depends on the walk's start, so
+    // memoizing them would make the outcome depend on map iteration order.
     let mut resolved: HashMap<String, Option<String>> = HashMap::new();
-    for id in dropped_parent.keys().cloned().collect::<Vec<_>>() {
-        resolve_dropped_ancestor(&dropped_parent, &mut resolved, &id);
-    }
     entries
         .into_iter()
         .filter(|entry| !matches!(entry, FileEntry::Header { .. } | FileEntry::GitState { .. }))
@@ -339,11 +337,10 @@ fn forked_branch_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
                 // A dropped parent re-links to its resolved kept ancestor
                 // (which may be None, re-rooting the entry); a kept parent
                 // stays.
-                Some(id) => match resolved.get(id) {
-                    Some(answer) => answer.clone(),
-                    None => parent.clone(),
-                },
-                None => None,
+                Some(id) if dropped_parent.contains_key(id) => {
+                    resolve_dropped_ancestor(&dropped_parent, &mut resolved, id)
+                }
+                other => other.clone(),
             };
             if entry.parent_id() == live.as_deref() {
                 return entry;
@@ -365,8 +362,11 @@ fn forked_branch_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
 
 /// The nearest kept ancestor for one dropped git_state row: walk the
 /// dropped parents until an id that survives the fork (or a null parent),
-/// memoizing every node the walk passed so shared chains resolve once and
-/// cycles stop at the first repeated id.
+/// memoizing every ACYCLIC node the walk passed so shared chains resolve
+/// once. A cycle (malformed git_state rows parenting at each other) stops
+/// at the first repeated id WITHOUT memoizing: the terminal depends on the
+/// walk's start, so caching it would make the outcome depend on which
+/// child resolves first.
 fn resolve_dropped_ancestor(
     dropped_parent: &HashMap<String, Option<String>>,
     resolved: &mut HashMap<String, Option<String>>,
@@ -384,11 +384,9 @@ fn resolve_dropped_ancestor(
             return answer;
         }
         if !seen.insert(id.clone()) {
-            let answer = Some(id.clone());
-            for node in path {
-                resolved.insert(node, answer.clone());
-            }
-            return answer;
+            // The first repeated id of THIS walk — the outcome for this
+            // child, memoized for no one else.
+            return Some(id);
         }
         match dropped_parent.get(&id) {
             Some(next) => {
