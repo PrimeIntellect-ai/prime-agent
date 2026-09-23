@@ -45,9 +45,13 @@ import glob
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import uuid
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "battery"))
 import batterylib  # noqa: E402  (the shared daemon-reap sweep)
@@ -166,15 +170,21 @@ def launch(session: str, agent_dir: str, command: str, tmp_dir: str) -> None:
     # `<TMPDIR>/prime-agent-<uid>/worker-<id>.sock`, and a unix domain socket
     # path caps at 108 bytes (observed: `listen EINVAL` with the deep
     # worktree path; the battery sandboxes live under short /tmp paths for
-    # the same reason). Keep it private to this worktree, just shallow.
+    # the same reason). The OS temp root plus the run id keep it shallow
+    # and private to this invocation (see short_tmp).
     socket_probe = os.path.join(tmp_dir, "prime-agent-1000", "worker-xxxxxxxxxxxx-yyyyyyyyyyyy.sock")
     if len(socket_probe) >= 108:
         raise RuntimeError(
             f"TMPDIR {tmp_dir} is too deep for the worker unix sockets ({len(socket_probe)} >= 108)"
         )
+    # The pane runs a shell, so every interpolated value is quoted: an
+    # out-dir with spaces (or shell metacharacters) must not redirect
+    # HOME/TMPDIR/the coding-agent dir somewhere wrong or run unintended
+    # commands instead of starting the agent.
     env = (
-        f"HOME={agent_dir}/home TMPDIR={tmp_dir} "
-        f"PRIME_AGENT_CODING_AGENT_DIR={agent_dir} "
+        f"HOME={shlex.quote(os.path.join(agent_dir, 'home'))} "
+        f"TMPDIR={shlex.quote(tmp_dir)} "
+        f"PRIME_AGENT_CODING_AGENT_DIR={shlex.quote(agent_dir)} "
         f"PRIME_AGENT_DISABLE_ANALYTICS=1 {command}"
     )
     tmux("send-keys", "-t", session, env, "Enter")
@@ -242,12 +252,12 @@ def default_ts_binary() -> str:
         "/home/ubuntu", "prime-agent", "packages", "coding-agent", "dist", "bundle", "cli.js"
     )
     if os.path.exists(ts_main_cli):
-        return f"node {ts_main_cli}"
+        return f"node {shlex.quote(ts_main_cli)}"
     releases = os.path.expanduser("~/.local/share/prime-agent/releases")
     candidates = sorted(glob.glob(os.path.join(releases, "0.9.5-linux-x64-*", "prime-agent")))
     if not candidates:
         raise SystemExit("no TS-main checkout and no deployed 0.9.5 release; set PA_TS_BINARY")
-    return candidates[-1]
+    return shlex.quote(candidates[-1])
 
 
 def runtime_package_dir() -> str:
@@ -266,13 +276,12 @@ def runtime_package_dir() -> str:
     return candidates[-1]
 
 
-def short_tmp(side: str) -> str:
-    """A worktree-private but SHALLOW TMPDIR (see launch): deep paths break
-    the worker unix sockets with EINVAL."""
-    base = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".pt"
-    )
-    return os.path.join(base, side)
+def short_tmp(run_id: str, side: str) -> str:
+    """A per-invocation but SHALLOW TMPDIR (see launch): deep paths break
+    the worker unix sockets with EINVAL. The run id keeps concurrent runs
+    from sharing a pane, a TMPDIR, or a daemon-reap needle; the OS temp
+    root keeps the socket path under the 108-byte cap on any checkout."""
+    return os.path.join(tempfile.gettempdir(), f"pa-mcp-hint-{run_id}", side)
 
 
 def faux_script_path(agent_dir: str) -> str:
@@ -325,53 +334,59 @@ def seed_agent_dir(agent_dir: str, cache: bool, ts_extension: bool) -> None:
             handle.write(extension)
 
 
-def run_ts(ts_binary: str, out_dir: str, results: list) -> None:
+def run_ts(ts_binary: str, out_dir: str, results: list, run_id: str) -> None:
     agent_dir = os.path.join(out_dir, "ts-agent")
     os.makedirs(agent_dir, exist_ok=True)
     seed_agent_dir(agent_dir, cache=False, ts_extension=True)
-    session = "mcp-hint-ts"
-    launch(
-        session,
-        agent_dir,
-        (
-            f"PRIME_AGENT_FAUX_SCRIPT={faux_script_path(agent_dir)} "
-            f"{ts_binary} --daemon-socket {agent_dir}/daemon.sock --model {FAUX_MODEL}"
-        ),
-        short_tmp("ts"),
-    )
-    # Mode-neutral settled-editor needle (queue_edit_parity's proven boot
-    # marker): TS-main opens in Details mode, the Rust build in Collapsed
-    # mode.
-    wait_for(session, "mode (Ctrl+O to expand)", 120.0)
-    time.sleep(2.0)
+    session = f"mcp-hint-{run_id}-ts"
+    # The session is killed on EVERY exit path: a failed launch or a boot
+    # timeout must not leave the pane alive for a later run to reuse.
     try:
+        launch(
+            session,
+            agent_dir,
+            (
+                f"PRIME_AGENT_FAUX_SCRIPT={shlex.quote(faux_script_path(agent_dir))} "
+                f"{ts_binary} --daemon-socket {shlex.quote(os.path.join(agent_dir, 'daemon.sock'))} "
+                f"--model {FAUX_MODEL}"
+            ),
+            short_tmp(run_id, "ts"),
+        )
+        # Mode-neutral settled-editor needle (queue_edit_parity's proven boot
+        # marker): TS-main opens in Details mode, the Rust build in Collapsed
+        # mode.
+        wait_for(session, "mode (Ctrl+O to expand)", 120.0)
+        time.sleep(2.0)
         results.append(("ts_vanished", capture_cell(session, "/plugins", "vanished", "Vanished Fixture", out_dir, "ts_vanished")))
         results.append(("ts_linear", capture_cell(session, "/plugins", "linear", "Linear", out_dir, "ts_linear")))
     finally:
         tmux("kill-session", "-t", session, check=False)
 
 
-def run_rust(rust_binary: str, out_dir: str, results: list, cache: bool) -> None:
+def run_rust(rust_binary: str, out_dir: str, results: list, cache: bool, run_id: str) -> None:
     suffix = "cached" if cache else "uncached"
     agent_dir = os.path.join(out_dir, f"rust-{suffix}-agent")
     os.makedirs(agent_dir, exist_ok=True)
     seed_agent_dir(agent_dir, cache=cache, ts_extension=False)
-    session = f"mcp-hint-rs-{suffix}"
+    session = f"mcp-hint-{run_id}-rs-{suffix}"
     package_dir = os.environ.get("PI_PACKAGE_DIR") or runtime_package_dir()
-    launch(
-        session,
-        agent_dir,
-        (
-            f"PI_PACKAGE_DIR={package_dir} "
-            f"PI_OFFLINE=1 "
-            f"PRIME_AGENT_FAUX_SCRIPT={faux_script_path(agent_dir)} "
-            f"{rust_binary} --daemon-socket {agent_dir}/daemon.sock --model {FAUX_MODEL}"
-        ),
-        short_tmp(suffix),
-    )
-    wait_for(session, "mode (Ctrl+O to expand)", 150.0)
-    time.sleep(2.0)
+    # The session is killed on EVERY exit path: a failed launch or a boot
+    # timeout must not leave the pane alive for a later run to reuse.
     try:
+        launch(
+            session,
+            agent_dir,
+            (
+                f"PI_PACKAGE_DIR={shlex.quote(package_dir)} "
+                f"PI_OFFLINE=1 "
+                f"PRIME_AGENT_FAUX_SCRIPT={shlex.quote(faux_script_path(agent_dir))} "
+                f"{shlex.quote(rust_binary)} --daemon-socket {shlex.quote(os.path.join(agent_dir, 'daemon.sock'))} "
+                f"--model {FAUX_MODEL}"
+            ),
+            short_tmp(run_id, suffix),
+        )
+        wait_for(session, "mode (Ctrl+O to expand)", 150.0)
+        time.sleep(2.0)
         results.append(
             (
                 f"rust_vanished_{suffix}",
@@ -456,26 +471,37 @@ def main() -> int:
         ts_identity.assert_ts_side_is_the_ts_product(ts_binary, rust_binary)
     os.makedirs(args.out_dir, exist_ok=True)
 
+    # One id for every derived name (tmux sessions, TMPDIRs, the reap
+    # needles): concurrent verifier runs must not kill each other's panes
+    # or reap each other's daemons, and a failed run's leftover TMPDIR
+    # must not be picked up by the next one.
+    run_id = uuid.uuid4().hex[:8]
+
     results: list = []
-    def reap(suffix: str) -> None:
-        needle = os.path.join(args.out_dir, suffix)
+    def reap(agent_dir_name: str, tmp_dir: str) -> None:
+        needle = os.path.join(args.out_dir, agent_dir_name)
         batterylib.reap_daemons(
             socket_paths=[os.path.join(needle, "daemon.sock")],
-            needles=[needle, short_tmp(suffix)],
+            needles=[needle, tmp_dir],
         )
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        try:
+            os.rmdir(os.path.dirname(tmp_dir))  # the run root, once empty
+        except OSError:
+            pass
 
     if args.side in ("both", "ts"):
         try:
-            run_ts(ts_binary, args.out_dir, results)
+            run_ts(ts_binary, args.out_dir, results, run_id)
         finally:
-            reap("ts-agent")
+            reap("ts-agent", short_tmp(run_id, "ts"))
     if args.side in ("both", "rust"):
         for cache in (True, False):
             suffix = "cached" if cache else "uncached"
             try:
-                run_rust(rust_binary, args.out_dir, results, cache=cache)
+                run_rust(rust_binary, args.out_dir, results, cache=cache, run_id=run_id)
             finally:
-                reap(f"rust-{suffix}-agent")
+                reap(f"rust-{suffix}-agent", short_tmp(run_id, suffix))
     if args.side in ("ts", "rust"):
         print(f"captured the {args.side} side to {args.out_dir}")
         return 0
