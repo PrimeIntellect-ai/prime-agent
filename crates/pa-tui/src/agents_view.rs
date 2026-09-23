@@ -159,6 +159,7 @@ const PULSE_INTERVAL_MS: u64 = 250;
 
 enum UiInput {
     Key(String),
+    Resize,
     Settled,
     Done,
     /// The saved-catalog fetch landed (TS `armSavedSearchFetch` applying
@@ -1345,6 +1346,7 @@ impl Renderer {
                         };
                         ui_tx.send(UiInput::Key(id)).is_ok()
                     }
+                    crossterm::event::Event::Resize(..) => ui_tx.send(UiInput::Resize).is_ok(),
                     _ => true,
                 });
                 let terminal = ratatui::Terminal::new(crate::hyperlinks::stdout_backend())?;
@@ -1581,10 +1583,11 @@ pub async fn run_agents_view(
     let mut last_pulse = tokio::time::Instant::now();
 
     while mode.running {
+        let mut redraw = false;
         if let Some(input) = first_input(&mut pending) {
             match input {
                 UiInput::Key(key) => mode.handle_key(&key),
-                UiInput::Settled => {}
+                UiInput::Resize | UiInput::Settled => {}
                 // The saved-catalog scan landed (TS `armSavedSearchFetch`
                 // applying its result): the Inactive section builds now.
                 UiInput::SavedLoaded { sessions } => {
@@ -1600,46 +1603,45 @@ pub async fn run_agents_view(
                 // and returns instead of spinning forever.
                 UiInput::Done => mode.running = false,
             }
-            // The exit decision skips the draw: a handled Ctrl+C pair
-            // consumed the reader-armed force-quit deadline
-            // (note_ctrl_c_handled), and the draw is sync terminal I/O a
-            // wedged pty could block — break to the re-arming arm_for_exit
-            // with only memory ops in between.
+            // An exit decision skips sync terminal I/O: a wedged pty must
+            // not prevent the reader-armed force-quit deadline from firing.
             if !mode.running {
                 break;
             }
-            if let Renderer::Terminal(_) = renderer {
-                renderer.draw(&mut mode);
-            }
-        }
-        tokio::select! {
-            maybe_event = events.recv() => {
-                match maybe_event {
-                    Some(DaemonClientEvent::RosterUpdate { changed, removed, resync }) => {
-                        mode.apply_roster_update(changed, removed, resync);
-                    }
-                    Some(_) => {}
-                    None => {
-                        mode.status = Some("the daemon connection closed".to_string());
-                        mode.running = false;
+            redraw = true;
+        } else {
+            tokio::select! {
+                maybe_event = events.recv() => {
+                    match maybe_event {
+                        Some(DaemonClientEvent::RosterUpdate { changed, removed, resync }) => {
+                            mode.apply_roster_update(changed, removed, resync);
+                            redraw = true;
+                        }
+                        Some(_) => {}
+                        None => {
+                            mode.status = Some("the daemon connection closed".to_string());
+                            mode.running = false;
+                            redraw = true;
+                        }
                     }
                 }
-            }
-            maybe_input = ui_rx.recv() => {
-                if let Some(input) = maybe_input {
-                    pending.push(input);
+                maybe_input = ui_rx.recv() => {
+                    if let Some(input) = maybe_input {
+                        pending.push(input);
+                        continue;
+                    }
                 }
+                // Only a running row needs a periodic frame. The timer
+                // stays tied to the last pulse across unrelated inputs.
+                _ = tokio::time::sleep_until(last_pulse + Duration::from_millis(PULSE_INTERVAL_MS)),
+                    if mode.rows.iter().any(|row| row.section == Section::Running) => {}
             }
-            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
         }
-        // The running-row icon animates at the TS working-icon cadence.
-        if mode.rows.iter().any(|row| row.section == Section::Running)
-            && last_pulse.elapsed() >= Duration::from_millis(PULSE_INTERVAL_MS)
-        {
-            last_pulse = tokio::time::Instant::now();
-            mode.pulse = mode.pulse.wrapping_add(1);
+        // Coalesce a due animation pulse with the input or roster frame.
+        redraw |= advance_running_pulse(&mut mode, &mut last_pulse, tokio::time::Instant::now());
+        if redraw {
+            renderer.draw(&mut mode);
         }
-        renderer.draw(&mut mode);
     }
 
     // The view decided to leave: arm the force-quit deadline so the
@@ -1702,6 +1704,23 @@ pub async fn run_agents_view(
             status_message: opened.as_ref().and_then(|row| row.status_message.clone()),
         },
     })
+}
+
+/// Advance the running icon at its fixed cadence, independent of other inputs.
+fn advance_running_pulse(
+    mode: &mut AgentsViewMode,
+    last_pulse: &mut tokio::time::Instant,
+    now: tokio::time::Instant,
+) -> bool {
+    if mode.rows.iter().any(|row| row.section == Section::Running)
+        && now.duration_since(*last_pulse) >= Duration::from_millis(PULSE_INTERVAL_MS)
+    {
+        *last_pulse = now;
+        mode.pulse = mode.pulse.wrapping_add(1);
+        true
+    } else {
+        false
+    }
 }
 
 /// Pop the next queued input, or `None` when the queue is empty.
@@ -2607,5 +2626,40 @@ mod tests {
         let texts = frame_texts(&mut mode);
         assert!(texts[3].contains("session 1"));
         assert_eq!(texts[7].trim(), "...");
+    }
+
+    #[test]
+    fn idle_draws_only_on_running_row_pulses() {
+        for count in [0, 100, 1000] {
+            for running in [false, true] {
+                let (mut mode, _) = mode_with_row("row", "mock-1");
+                let template = mode.rows[0].clone();
+                mode.rows = (0..count)
+                    .map(|n| {
+                        let mut row = template.clone();
+                        row.identity = format!("agent {n}");
+                        row.section = if running {
+                            Section::Running
+                        } else {
+                            Section::Idle
+                        };
+                        row
+                    })
+                    .collect();
+                let start = tokio::time::Instant::now();
+                let mut last_pulse = start;
+                let draws = (1..=20)
+                    .filter(|tick| {
+                        advance_running_pulse(
+                            &mut mode,
+                            &mut last_pulse,
+                            start + Duration::from_millis(tick * 50),
+                        )
+                    })
+                    .count();
+                let expected = if running && count > 0 { 4 } else { 0 };
+                assert_eq!((draws, mode.pulse), (expected, expected));
+            }
+        }
     }
 }
