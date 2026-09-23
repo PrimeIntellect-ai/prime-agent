@@ -1044,12 +1044,9 @@ impl AgentSessionEngine {
         let model = self.resolve_registry_model_unchecked()?;
         let selector = format!("{}/{}", model.provider, model.id);
         let allowlist = crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir);
-<<<<<<< HEAD
         if let Err(refusal) = crate::model_allowlist::assert_allowed(&allowlist, &selector) {
-            if let Some(refusal) = refusal.downcast_ref::<pa_core::models::ModelAllowlistRefusal>() {
             if let Some(refusal) = refusal.downcast_ref::<pa_core::models::ModelAllowlistRefusal>()
             {
->>>>>>> 11040b22c (fix(pa-daemon): the model allowlist fails closed on unreadable settings (Macroscope #2585))
                 self.note_model_refused("session_start", &refusal.selector);
             }
             return Err(refusal);
@@ -6956,6 +6953,18 @@ pub(crate) mod tests {
             agent_dir: dir.join("agent"),
             provider: provider.map(str::to_string),
             model: model.map(str::to_string),
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: None,
+            supervisor_link: None,
+            telemetry_disabled: Some(true),
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .expect("engine")
+    }
 
     /// The daemon model allowlist enforcement at the startup chain
     /// (`resolve_registry_model`): a resolution outside settings
@@ -6975,7 +6984,7 @@ pub(crate) mod tests {
         .unwrap();
         let engine = AgentSessionEngine::new(AgentEngineConfig {
             cwd: dir.path().to_path_buf(),
-            agent_dir,
+            agent_dir: agent_dir.clone(),
             provider: None,
             model: None,
             api_key: None,
@@ -6988,7 +6997,30 @@ pub(crate) mod tests {
             cron_store: None,
             queued_steering_probe: None,
         })
-        .expect("engine")
+        .unwrap();
+        let error = engine
+            .resolve_registry_model()
+            .expect_err("off-allowlist model refused");
+        let refusal = error
+            .downcast_ref::<pa_core::models::ModelAllowlistRefusal>()
+            .expect("typed refusal");
+        assert_eq!(refusal.selector, "battery/mock-1");
+        assert!(
+            error
+                .to_string()
+                .contains("blocked by the daemon model allowlist"),
+            "{error}"
+        );
+
+        // An allowing allowlist opens the gate: the same engine resolves.
+        std::fs::write(
+            engine.config.agent_dir.join("settings.json"),
+            serde_json::json!({ "allowedModels": ["battery/*"] }).to_string(),
+        )
+        .unwrap();
+        let model = engine.resolve_registry_model().expect("resolved model");
+        assert_eq!(model.provider, "battery");
+        assert_eq!(model.id, "mock-1");
     }
 
     /// The revival race this lane fixes (the 2026-09-23 05:57 fleet kill):
@@ -7484,31 +7516,6 @@ pub(crate) mod tests {
             Some("high"),
             "the replacement re-clamps the requested level against its restored model"
         );
-
-        .unwrap();
-        let error = engine
-            .resolve_registry_model()
-            .expect_err("off-allowlist model refused");
-        let refusal = error
-            .downcast_ref::<pa_core::models::ModelAllowlistRefusal>()
-            .expect("typed refusal");
-        assert_eq!(refusal.selector, "battery/mock-1");
-        assert!(
-            error
-                .to_string()
-                .contains("blocked by the daemon model allowlist"),
-            "{error}"
-        );
-
-        // An allowing allowlist opens the gate: the same engine resolves.
-        std::fs::write(
-            engine.config.agent_dir.join("settings.json"),
-            serde_json::json!({ "allowedModels": ["battery/*"] }).to_string(),
-        )
-        .unwrap();
-        let model = engine.resolve_registry_model().expect("resolved model");
-        assert_eq!(model.provider, "battery");
-        assert_eq!(model.id, "mock-1");
     }
 
     /// The engine's switch guard: `switch_model` refuses an off-allowlist
