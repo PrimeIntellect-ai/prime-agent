@@ -177,7 +177,7 @@ impl ClientAuthCommands for TerminalMcpAuth {
 /// blocking pool: raw mode is suspended for the login, and a cancel leaves
 /// the waiting thread parked until a line arrives (the TS dialog's input
 /// races the same way).
-async fn read_terminal_line() -> Option<String> {
+pub(crate) async fn read_terminal_line() -> Option<String> {
     tokio::task::spawn_blocking(|| {
         let mut line = String::new();
         match std::io::stdin().read_line(&mut line) {

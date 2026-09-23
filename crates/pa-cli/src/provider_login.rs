@@ -1,10 +1,12 @@
 //! The composition root's provider auth flows behind the TUI's `/login`
 //! and `/logout` (TS `ProviderAuthFlows`): the provider catalog rows with
-//! their auth status, the API-key store, the MCP device flow, and the
-//! credential removal. The provider OAuth flows (TS `the TS AI library/oauth`:
+//! their auth status, the API-key store, the MCP device flow, the Prime
+//! Inference terminal login (`prime_inference_login`), and the credential
+//! removal. The provider OAuth flows (TS `the TS AI library/oauth`:
 //! Anthropic, GitHub Copilot, OpenAI Codex, xAI subscriptions) and the
-//! Prime browser logins are not ported yet; their rows render (TS shape)
-//! and their flows report the unavailability.
+//! Prime browser logins (the RSA `auth_challenge` flow) are not ported
+//! yet; their rows render (TS shape) and their flows report the
+//! unavailability.
 
 use std::path::PathBuf;
 
@@ -522,9 +524,36 @@ fn login_blocking(
         };
     }
     if provider_row.id == PRIME_INFERENCE_PROVIDER_ID {
-        return ProviderAuthOutcome::Error(
-            "Prime Inference login is not available in this build yet.".to_string(),
-        );
+        // TS `loginProvider`'s prime-inference dispatch: the terminal
+        // API-key flow (the paste prompt, the whoami check, the team
+        // selection; the browser challenge stays unported). The flow
+        // awaits its transport, so drive it to completion on the
+        // dedicated thread (the terminal stays suspended).
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(|runtime| {
+                runtime.block_on(crate::prime_inference_login::run_prime_inference_login(
+                    crate::prime_inference_login::PrimeLoginInputs {
+                        agent_dir: &agent_dir,
+                        provider_name: &provider_row.name,
+                        config: &pa_core::auth::resolve_prime_inference_auth_config(),
+                        http: &pa_core::auth::ReqwestPrimeHttp,
+                        prime_cli_config_path: crate::prime_inference_login::prime_cli_config_path(
+                            &agent_dir,
+                        )
+                        .as_deref(),
+                        prime_team_id: std::env::var("PRIME_TEAM_ID").ok().as_deref(),
+                    },
+                    &crate::prime_inference_login::TerminalPrimeLoginUi,
+                ))
+            })
+            .unwrap_or_else(|error| {
+                ProviderAuthOutcome::Error(format!(
+                    "Failed to login to {}: {error}",
+                    provider_row.name
+                ))
+            });
     }
     if provider_row.auth_type == AuthType::Oauth {
         return ProviderAuthOutcome::Error(format!(

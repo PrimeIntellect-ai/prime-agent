@@ -84,12 +84,15 @@ pub struct ProviderRow {
     pub flow: AuthFlow,
 }
 
-/// The outcome of one login/logout flow: the status row to show, or the
-/// error row.
+/// The outcome of one login/logout flow: the status row to show, the
+/// error row, or a silent cancel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderAuthOutcome {
     Status(String),
     Error(String),
+    /// The flow was cancelled (TS `AuthenticationResult`'s `cancelled`
+    /// state): silent — no status row, no error row.
+    Cancelled,
 }
 
 /// The boxed-future shape of the hook's methods.

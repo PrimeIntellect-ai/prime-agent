@@ -2906,6 +2906,9 @@ impl SessionUi {
             crate::provider_auth::ProviderAuthOutcome::Error(message) => {
                 self.error_row(&message, view);
             }
+            // A cancelled flow stays silent (the TS cancelled state shows
+            // no row either).
+            crate::provider_auth::ProviderAuthOutcome::Cancelled => {}
         }
     }
 

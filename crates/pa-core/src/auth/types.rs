@@ -14,6 +14,33 @@ pub struct PrimeTeamCredential {
     pub created_at: Option<String>,
 }
 
+/// The team half of a Prime Inference key write (TS `setPrimeInferenceApiKey`'s
+/// `primeTeam?: PrimeTeam | null`): an absent argument preserves the stored
+/// team when the key is unchanged, `null` is the personal account.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PrimeTeamAssignment {
+    /// TS `undefined`: keep the stored team, but only on the same key.
+    PreserveWhenKeyMatches,
+    /// TS `null`: the personal account.
+    PersonalAccount,
+    /// TS `PrimeTeam`: this team.
+    Team(PrimeTeamCredential),
+}
+
+/// The stored Prime team selection (TS `getPrimeInferenceTeamSelection`'s
+/// `PrimeTeamCredential | null | undefined`): `undefined` means no stored
+/// selection applies (`PRIME_TEAM_ID` is set, or the active auth source is
+/// not the stored credential).
+#[derive(Debug, Clone, PartialEq)]
+pub enum StoredPrimeTeam {
+    /// TS `undefined`.
+    NotSelected,
+    /// TS `null`: the personal account.
+    PersonalAccount,
+    /// TS `PrimeTeamCredential`.
+    Team(PrimeTeamCredential),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthCredential {
