@@ -4457,17 +4457,18 @@ fn gather_delivery_batch(core: &mut SessionCore, lane: Lane) -> Vec<QueuedItem> 
     {
         core.forced_all_steering = false;
     }
-    let all = forced || mode == "all";
-    while all {
-        let Some(next) = items.front() else { break };
-        if next.policy != first_policy
-            || next.custom_message.is_some()
-            || (forced && !next.forced_batch)
-            || crate::session_commands::parse_prompt_session_command(&next.message).is_some()
-        {
-            break;
+    if forced || mode == "all" {
+        loop {
+            let Some(next) = items.front() else { break };
+            if next.policy != first_policy
+                || next.custom_message.is_some()
+                || (forced && !next.forced_batch)
+                || crate::session_commands::parse_prompt_session_command(&next.message).is_some()
+            {
+                break;
+            }
+            batch.push(items.pop_front().expect("front checked"));
         }
-        batch.push(items.pop_front().expect("front checked"));
     }
     batch
 }
