@@ -1066,7 +1066,7 @@ impl AgentSessionEngine {
     /// settings `allowedModels` allowlist: a resolution outside the
     /// allowlist fails loudly here (the silent-fallback guarantee — the
     /// startup chain never lands a session on a model the daemon may not
-    /// resolve to), and the refusal emits `model refused`. Script
+    /// resolve to), and the refusal emits `model refused`.
     fn resolve_registry_model(&self) -> anyhow::Result<Model> {
         let model = self.resolve_registry_model_unchecked()?;
         let selector = format!("{}/{}", model.provider, model.id);
