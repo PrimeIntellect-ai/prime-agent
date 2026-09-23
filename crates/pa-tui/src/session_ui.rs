@@ -124,7 +124,13 @@ pub(crate) struct ActivityUpdates {
 /// background action surfaces as an error row.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BashActivityUpdate {
-    List(String, Value),
+    /// `epoch` identifies the list request the response answers; only the
+    /// latest issued request's response may land.
+    List {
+        session: String,
+        epoch: u64,
+        data: Value,
+    },
     Tail {
         session: String,
         activity_id: String,
@@ -335,6 +341,9 @@ pub(crate) struct SessionUi {
     heartbeat_catalog: Vec<HeartbeatEntry>,
     /// The current Python bash() registry snapshot from the owning kernel.
     bash_activities: Value,
+    /// Monotonic id of the latest issued kernel-bash list request; a late
+    /// response from an older request must not repaint a newer snapshot.
+    bash_list_epoch: u64,
     bash_updates: mpsc::UnboundedSender<BashActivityUpdate>,
     /// The subagent summary line holds keyboard focus.
     subagents_focused: bool,
@@ -588,6 +597,7 @@ impl SessionUi {
             roster: Vec::new(),
             heartbeat_catalog: Vec::new(),
             bash_activities: serde_json::json!({"activities": []}),
+            bash_list_epoch: 0,
             bash_updates: activity_updates.bash,
             subagents_focused: false,
             activity_group: crate::chrome::ActivityGroup::Subagents,
@@ -1046,6 +1056,12 @@ impl SessionUi {
         let held_bash = matches!(kind, RebuildKind::Resync)
             .then(|| std::mem::take(&mut view.pending_bash))
             .unwrap_or_default();
+        // A rebind replaces the whole view: the previous session's open
+        // activity panel dies with its transcript instead of owning keys
+        // over the new session's sources.
+        if matches!(kind, RebuildKind::Rebind) {
+            view.activity_panel = None;
+        }
         view.clear_chat();
         // The rebuilt transcript invalidates the tracked status row.
         self.last_status_index = None;
@@ -5081,6 +5097,13 @@ impl SessionUi {
             self.dirty = true;
             return;
         }
+        // The activity panel owns the whole frame while open (like its key
+        // dispatch): a paste never lands in the hidden editor prompt,
+        // where a later Enter would submit it unedited.
+        if view.activity_panel.is_some() {
+            self.dirty = true;
+            return;
+        }
         let _ = view.editor.handle_paste(text);
     }
 
@@ -5119,7 +5142,7 @@ impl SessionUi {
         Ok(())
     }
 
-    pub(crate) fn spawn_bash_activity_refresh(&self) {
+    pub(crate) fn spawn_bash_activity_refresh(&mut self) {
         if !self
             .client
             .hello()
@@ -5132,6 +5155,11 @@ impl SessionUi {
         {
             return;
         }
+        // The 2s poll, the panel open, and the post-kill refresh can
+        // overlap: every request stamps the epoch it was issued under, and
+        // only the latest issued request's response lands.
+        self.bash_list_epoch += 1;
+        let epoch = self.bash_list_epoch;
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
         let session_for_update = active_session_id.clone();
@@ -5145,7 +5173,11 @@ impl SessionUi {
                 })
                 .await
             {
-                let _ = tx.send(BashActivityUpdate::List(session_for_update, data));
+                let _ = tx.send(BashActivityUpdate::List {
+                    session: session_for_update,
+                    epoch,
+                    data,
+                });
             }
         });
     }
@@ -5155,7 +5187,7 @@ impl SessionUi {
     /// about, and only that session's frames land.
     pub(crate) fn apply_bash_activity(&mut self, update: BashActivityUpdate, view: &mut AgentView) {
         let session = match &update {
-            BashActivityUpdate::List(session, _) => session,
+            BashActivityUpdate::List { session, .. } => session,
             BashActivityUpdate::Tail { session, .. } => session,
             BashActivityUpdate::Error { session, .. } => session,
         };
@@ -5163,7 +5195,13 @@ impl SessionUi {
             return;
         }
         match update {
-            BashActivityUpdate::List(_, data) => {
+            BashActivityUpdate::List { epoch, data, .. } => {
+                // A late response from an older request must not repaint a
+                // newer snapshot (a killed process must not come back as
+                // running).
+                if epoch != self.bash_list_epoch {
+                    return;
+                }
                 if self.bash_activities == data {
                     return;
                 }
@@ -5307,6 +5345,10 @@ impl SessionUi {
                 let client = self.client.clone();
                 let session = self.active_session_id.clone();
                 let tx = self.bash_updates.clone();
+                // The post-kill refresh lands as the newest issued list
+                // request; a concurrently issued poll supersedes it.
+                self.bash_list_epoch += 1;
+                let epoch = self.bash_list_epoch;
                 tokio::spawn(async move {
                     let result = client
                         .request_ok(DaemonCommand::KillKernelBash {
@@ -5329,7 +5371,11 @@ impl SessionUi {
                                 })
                                 .await;
                             if let Ok(data) = list {
-                                let _ = tx.send(BashActivityUpdate::List(session, data));
+                                let _ = tx.send(BashActivityUpdate::List {
+                                    session,
+                                    epoch,
+                                    data,
+                                });
                             }
                         }
                         Err(error) => {
