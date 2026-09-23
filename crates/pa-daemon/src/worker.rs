@@ -710,6 +710,14 @@ pub struct Worker {
     /// the worker rebinds the live session's jobs onto it after create
     /// and every replacement swap (TS `rebindCronJobsToState`).
     pub(crate) scheduled: std::sync::Arc<crate::scheduled_jobs::ScheduledJobs>,
+    /// Session creation is one serialized critical section (TS
+    /// `openingSessions`: a concurrent open for the same session JOINS
+    /// the in-flight one instead of racing it). Commands run on spawned
+    /// tasks, so without the gate two concurrent `create` requests could
+    /// both pass the `core.created` check while the first still awaits
+    /// its session-model restore — duplicating creation-prefix rows and
+    /// overwriting the initialized core state.
+    create_gate: tokio::sync::Mutex<()>,
 }
 
 /// The kernel cron wiring the worker hands its session engine (TS
@@ -1053,6 +1061,7 @@ impl Worker {
             navigation,
             prompt_admissions,
             scheduled,
+            create_gate: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -1782,6 +1791,12 @@ impl Worker {
     }
 
     async fn handle_create(&self, payload: &Value) -> DaemonResponse {
+        // One create in flight at a time (TS `openingSessions`): the
+        // created check, the session-model restore's awaits, and the core
+        // initialization below are one serialized critical section, so a
+        // concurrent create joins this open and answers with the created
+        // summary below instead of racing a second initialization.
+        let _create_gate = self.create_gate.lock().await;
         {
             let core = self.core.lock().unwrap();
             if core.created {
@@ -1833,8 +1848,10 @@ impl Worker {
             }
         }
         // Explicit model flags from the create config are authoritative for
-        // this session (TS runtime-config propagation): the engine rebinds
-        // its selection instead of falling back to a process-wide model.
+        // this worker's session runtime config (TS runtime-config
+        // propagation): the engine rebinds its selection instead of
+        // falling back to a process-wide model, and the folded flags
+        // survive every session replacement (TS `sessionConfig`).
         let requested_thinking = match payload.get("thinking") {
             None => None,
             Some(Value::String(level)) => {
@@ -1861,7 +1878,7 @@ impl Worker {
                 );
             }
         };
-        self.engine.configure_model(EngineModelSelection {
+        self.engine.configure_create_model(EngineModelSelection {
             provider: payload
                 .get("provider")
                 .and_then(Value::as_str)

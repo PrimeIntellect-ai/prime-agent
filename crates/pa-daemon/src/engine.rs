@@ -452,11 +452,13 @@ pub trait SessionEngine: Send + Sync {
     }
 
     /// Adopt the explicit model selection carried by the session's create
-    /// config. Explicit CLI flags must be authoritative end-to-end: the
-    /// selection reached the worker over the wire, so model resolution must
-    /// honor it instead of a process-wide fallback. Engines without a model
-    /// (the scripted harness) ignore it.
-    fn configure_model(&self, _selection: EngineModelSelection) {}
+    /// command (TS `mergeAgentSessionRuntimeConfig(defaultSessionConfig,
+    /// command.config)`): the flags are authoritative end-to-end AND
+    /// survive every session replacement (TS hands the merged
+    /// `sessionConfig` down through `switchSession`/`fork`/`import`), so
+    /// they must outlive the live selection a `/model` switch mutates.
+    /// Engines without a model (the scripted harness) ignore it.
+    fn configure_create_model(&self, _selection: EngineModelSelection) {}
 
     /// Set the session's resolved service-tier preference before the next request.
     fn configure_service_tier(&self, _tier: Option<pa_types::ai::ServiceTier>) {}
