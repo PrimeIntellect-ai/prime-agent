@@ -443,9 +443,17 @@ def main() -> int:
     parser.add_argument("--out-dir", required=True, help="directory for the captured frames and report")
     parser.add_argument("--side", choices=["both", "ts", "rust"], default="both")
     args = parser.parse_args()
-    rust_binary = args.rust_binary or ts_identity.default_rust_binary()
-    ts_binary = args.ts_binary or default_ts_binary()
-    ts_identity.assert_ts_side_is_the_ts_product(ts_binary, rust_binary)
+    # Each product resolves only when this run drives it: a single-side
+    # capture must not exit before launching when the unselected product is
+    # unavailable (the identity guard compares the pair, so it needs both).
+    rust_binary = None
+    ts_binary = None
+    if args.side in ("both", "rust"):
+        rust_binary = args.rust_binary or ts_identity.default_rust_binary()
+    if args.side in ("both", "ts"):
+        ts_binary = args.ts_binary or default_ts_binary()
+    if rust_binary and ts_binary:
+        ts_identity.assert_ts_side_is_the_ts_product(ts_binary, rust_binary)
     os.makedirs(args.out_dir, exist_ok=True)
 
     results: list = []

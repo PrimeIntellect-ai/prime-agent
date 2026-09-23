@@ -215,7 +215,7 @@ mod tests {
     /// locations beside the agent files and under `catalog/` serve (an
     /// upgrade never costs a cold fetch).
     #[test]
-    fn legacy_locations_read_after_the_primary() {
+    fn historical_locations_read_after_the_primary() {
         let dir = tempfile::tempdir().expect("tempdir");
         let agent = dir.path().join("agent");
         std::fs::create_dir_all(&agent).expect("agent dir");
@@ -224,19 +224,19 @@ mod tests {
         // the packaged bundle is a separate fallback).
         assert!(cache_plugins_snapshot(&agent).is_none());
 
-        // A legacy snapshot beside the agent files serves.
+        // A snapshot at the historical location beside the agent files serves.
         std::fs::write(
             dir.path().join(PLUGINS_CACHE_FILE),
             snapshot_file(serde_json::json!([cache_only_entry()])),
         )
-        .expect("write legacy snapshot");
-        let snapshot = cache_plugins_snapshot(&agent).expect("the legacy location serves");
+        .expect("write the historical-location snapshot");
+        let snapshot = cache_plugins_snapshot(&agent).expect("the historical location serves");
         assert!(snapshot
             .entries
             .iter()
             .any(|entry| entry.server == "cache-only"));
 
-        // The primary path wins over the legacy ones.
+        // The primary path wins over the historical ones.
         std::fs::write(
             agent.join(PLUGINS_CACHE_FILE),
             snapshot_file(serde_json::json!([cache_only_entry(), {
