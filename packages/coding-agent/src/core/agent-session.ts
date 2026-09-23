@@ -1153,7 +1153,7 @@ const VISION_READ_CHILD_ID_HISTORY = 64;
 /** Bound on waiting for the read child's session to publish. */
 const IMAGE_TURN_CHILD_PUBLICATION_TIMEOUT_MS = 30_000;
 const IMAGE_TURN_READING_MAX_CHARS = 4000;
-/** Types the image readers accept; anything else is left for the routing path. */
+/** Types the image readers accept; anything else is skipped and reported in the reading. */
 const IMAGE_TURN_CHILD_MIME_TYPES: readonly string[] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
 /** Hard cap for labels carried into kernel roster entries (snapshots keep the full prompt). */
 const RLM_REGISTRY_LABEL_MAX_LENGTH = 200;
@@ -1552,11 +1552,6 @@ export class AgentSession {
 		thinkingLevel?: ThinkingLevel;
 	}>;
 
-	/**
-	 * Session-scoped image-model reference set by /image-model; unset falls back
-	 * to settings.imageModel. Switching sessions builds a new AgentSession, so
-	 * the override never outlives the session it was set in.
-	 */
 	/**
 	 * Session ids of image-turn read children. Their answer is the reading this
 	 * session consumes, so an agent message from one is noise that would start a
