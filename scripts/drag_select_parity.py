@@ -303,19 +303,24 @@ def main():
         time.sleep(0.5)
         plain = capture(session, escape=False)
         pane_rows = plain.split("\n")
-        anchor = next(
-            (
-                (index, line.find("answer "))
-                for index, line in enumerate(pane_rows)
-                if "answer " in line
-            ),
-            None,
-        )
+        # The pane shows wrapped body rows (the corpus body fills ~90 rows
+        # per turn, so a screenful rarely contains an "answer" heading
+        # row); any distinctive corpus row is a drag target. The needle
+        # must be the row text from the anchor column on — the sweep
+        # expects the highlight to grow over exactly that text.
+        anchor = None
+        for index, line in enumerate(pane_rows):
+            col = line.find("corpus payload")
+            if col < 0:
+                col = line.find("answer ")
+            if col >= 0:
+                anchor = (index, col)
+                break
         if anchor is None or NEEDLE in plain:
             raise AssertionError("the wheel-up never paused into history")
         (run_dir / "before-paused.txt").write_text(capture(session))
         row, col = anchor
-        needle_row_text = pane_rows[row]
+        needle_row_text = pane_rows[row][col:]
         paused_steps = sweep(
             session, run_dir, "paused", row, col, needle_row_text.strip()
         )
