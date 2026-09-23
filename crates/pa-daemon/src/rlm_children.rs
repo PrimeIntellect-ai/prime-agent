@@ -1232,6 +1232,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let watcher_record = Arc::clone(&record);
             let prompt = request.prompt.clone();
             let child_active_session_id = created.active_session_id.clone();
+            let child_session_file = created.session_file.clone();
             // Capture the current turn boundary before detaching: spawn
             // admission happens mid-turn, so the parent's continuation
             // request (already issued for this turn's tool result) is
@@ -1252,12 +1253,31 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     .prompt_child(&child_active_session_id, &prompt)
                     .await
                 {
-                    eprintln!(
-                        "pa-daemon: RLM child task prompt failed for {child_active_session_id}: {error:#}"
-                    );
-                    let _ = watcher_this.kill_child(&child_active_session_id).await;
-                    watcher_record.lock().await.settled_status = Some("error");
-                    return;
+                    // The route can fail ambiguously around a worker
+                    // replacement: the frame reached a dying connection and
+                    // no reply came back. The child's durable session file
+                    // is the record the replacement replays from, so it
+                    // arbitrates the ambiguity - a prompt already in the
+                    // file landed (re-sending would duplicate the first
+                    // turn), a missing prompt provably never landed and one
+                    // retry against the replaced worker is safe.
+                    let landed =
+                        session_file_carries_prompt(child_session_file.as_deref(), &prompt);
+                    let retried = if landed {
+                        Ok(())
+                    } else {
+                        watcher_this
+                            .prompt_child(&child_active_session_id, &prompt)
+                            .await
+                    };
+                    if let Err(retry_error) = retried {
+                        eprintln!(
+                            "pa-daemon: RLM child task prompt failed for {child_active_session_id}: {error:#}; retry failed: {retry_error:#}"
+                        );
+                        let _ = watcher_this.kill_child(&child_active_session_id).await;
+                        watcher_record.lock().await.settled_status = Some("error");
+                        return;
+                    }
                 }
                 watcher_this.watch_child_settle(&watcher_record).await;
             });
@@ -1449,6 +1469,37 @@ impl RlmSubagentHost for SupervisorChildSessions {
             Ok(results)
         })
     }
+}
+
+/// Whether the child's durable session file already carries the task prompt
+/// as a user message. The session file is the record a worker replacement
+/// replays from, so it arbitrates an ambiguous prompt-route failure: a
+/// prompt in the file was durably processed by the dead worker (a re-send
+/// would duplicate the first turn), a missing prompt provably never landed.
+fn session_file_carries_prompt(session_file: Option<&str>, prompt: &str) -> bool {
+    let Some(path) = session_file.filter(|path| !path.is_empty()) else {
+        return false;
+    };
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    content
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|entry| {
+            entry.get("type").and_then(Value::as_str) == Some("message")
+                && entry.pointer("/message/role").and_then(Value::as_str) == Some("user")
+        })
+        .any(|entry| match entry.pointer("/message/content") {
+            Some(Value::String(text)) => text.contains(prompt),
+            Some(Value::Array(blocks)) => blocks.iter().any(|block| {
+                block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.contains(prompt))
+            }),
+            _ => false,
+        })
 }
 
 #[cfg(test)]

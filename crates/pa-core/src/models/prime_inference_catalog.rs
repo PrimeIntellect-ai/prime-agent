@@ -2,7 +2,6 @@
 //! Port of prime-inference-model-catalog.ts.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use pa_types::ai::{Model, ModelCompat, ModelCost, ModelInput};
 use pa_types::JsNumber;
@@ -10,7 +9,6 @@ use serde::{Deserialize, Serialize};
 
 use super::prime_inference::{is_private_prime_inference_model_id, PRIME_INFERENCE_BASE_URL};
 
-const FETCH_TIMEOUT_MS: u64 = 5_000;
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MIN_CATALOG_COVERAGE: f64 = 0.5;
 
@@ -290,47 +288,11 @@ pub fn build_prime_inference_models_with_minimum(
     }
 }
 
-/// Merge: live prime-inference models replace the bundled set for that provider.
-pub fn merge_prime_inference_models(
-    bundled_models: &[Model],
-    live: Option<&[Model]>,
-) -> Vec<Model> {
-    match live {
-        None => bundled_models.to_vec(),
-        Some(live) => {
-            let mut merged: Vec<Model> = bundled_models
-                .iter()
-                .filter(|model| model.provider != "prime-inference")
-                .cloned()
-                .collect();
-            merged.extend(live.iter().cloned());
-            merged
-        }
-    }
-}
-
-/// Persist the raw catalog payload (TS `writeCache`: atomic temp+rename
-/// write, owner-only mode, best-effort).
-fn write_catalog_cache(cache_path: &Path, payload: &serde_json::Value) {
-    let _ = crate::settings::storage::atomic_write(
-        cache_path,
-        &serde_json::to_string(payload).unwrap_or_default(),
-    );
-}
-
-/// Read the disk cache; the bundled catalog remains available on any failure.
-pub fn read_cached_prime_inference_models(
-    cache_path: &Path,
-    bundled: &[Model],
-) -> Option<Vec<Model>> {
-    let content = std::fs::read_to_string(cache_path).ok()?;
-    let payload: serde_json::Value = serde_json::from_str(&content).ok()?;
-    let entries = parse_prime_inference_model_catalog(&payload, false).ok()?;
-    build_prime_inference_models(bundled, &entries, false)
-}
-
-/// Fetch the live catalog (5s timeout, 2 MiB cap).
-pub async fn fetch_prime_inference_model_catalog(
+/// Fetch the live catalog (5s timeout, 2 MiB cap). `base_url` is the API
+/// base (production: [`PRIME_INFERENCE_BASE_URL`]; tests pass a local
+/// server through the shared catalog's seam).
+pub(crate) async fn fetch_prime_inference_model_catalog(
+    base_url: &str,
     headers: Option<&HashMap<String, String>>,
     timeout_ms: u64,
     allow_empty: bool,
@@ -340,7 +302,7 @@ pub async fn fetch_prime_inference_model_catalog(
         .build()
         .map_err(|error| error.to_string())?;
     let mut request = client
-        .get(format!("{PRIME_INFERENCE_BASE_URL}/models"))
+        .get(format!("{base_url}/models"))
         .header("accept", "application/json");
     if let Some(headers) = headers {
         for (name, value) in headers {
@@ -362,28 +324,6 @@ pub async fn fetch_prime_inference_model_catalog(
         serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
     let entries = parse_prime_inference_model_catalog(&payload, allow_empty)?;
     Ok((payload, entries))
-}
-
-/// Refresh: fetch, build, persist; fall back to the disk cache on any failure.
-pub async fn refresh_prime_inference_models(
-    cache_path: &Path,
-    bundled: &[Model],
-    offline: bool,
-) -> Option<Vec<Model>> {
-    let cached = read_cached_prime_inference_models(cache_path, bundled);
-    if offline {
-        return cached;
-    }
-    match fetch_prime_inference_model_catalog(None, FETCH_TIMEOUT_MS, false).await {
-        Ok((payload, entries)) => match build_prime_inference_models(bundled, &entries, false) {
-            Some(models) => {
-                write_catalog_cache(cache_path, &payload);
-                Some(models)
-            }
-            None => cached,
-        },
-        Err(_) => cached,
-    }
 }
 
 #[cfg(test)]
@@ -437,59 +377,5 @@ mod tests {
         let entries = parse_prime_inference_model_catalog(&payload, false).unwrap();
         // 0/1 bundled coverage < 50% -> None.
         assert!(build_prime_inference_models(&bundled(), &entries, false).is_none());
-    }
-
-    #[test]
-    fn merge_replaces_provider_models() {
-        assert_eq!(
-            merge_prime_inference_models(&bundled(), Some(&bundled())).len(),
-            1
-        );
-        assert_eq!(merge_prime_inference_models(&bundled(), None).len(), 1);
-    }
-
-    #[test]
-    fn cache_write_is_private_and_survives_a_failed_write() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("models-cache.json");
-        write_catalog_cache(
-            &path,
-            &serde_json::json!({ "data": [
-                { "id": "z-ai/glm-5.3", "pricing": { "input_usd_per_mtok": 0.6, "output_usd_per_mtok": 2.2 } }
-            ]}),
-        );
-        // The TS cache write is a 0o600 atomic write; the rename carries
-        // the temp's mode onto the destination.
-        #[cfg(unix)]
-        assert_eq!(crate::platform::perms::file_mode(&path), Some(0o600));
-        // Block the temp slot with a directory: the next write fails and
-        // the previous cache survives intact for the next reader.
-        let temp = dir
-            .path()
-            .join(format!("{}.tmp{}", path.display(), std::process::id()));
-        std::fs::create_dir(&temp).unwrap();
-        write_catalog_cache(
-            &path,
-            &serde_json::json!({ "data": [
-                { "id": "z-ai/glm-5.4", "pricing": { "input_usd_per_mtok": 1, "output_usd_per_mtok": 1 } }
-            ]}),
-        );
-        let models = read_cached_prime_inference_models(&path, &bundled()).unwrap();
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "z-ai/glm-5.3");
-    }
-
-    #[test]
-    fn cache_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("models-cache.json");
-        let payload = serde_json::json!({ "data": [
-            { "id": "z-ai/glm-5.3", "pricing": { "input_usd_per_mtok": 0.6, "output_usd_per_mtok": 2.2,
-                "cache_read_usd_per_mtok": 0.06, "cache_write_usd_per_mtok": 0.75 } }
-        ]});
-        std::fs::write(&path, serde_json::to_vec(&payload).unwrap()).unwrap();
-        let models = read_cached_prime_inference_models(&path, &bundled()).unwrap();
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].cost.cache_read.0, 0.06);
     }
 }

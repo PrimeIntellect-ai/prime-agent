@@ -270,7 +270,7 @@ impl Supervisor {
             rest: Default::default(),
         };
         match self.launch_worker(&create, None).await {
-            Ok(resident) => {
+            Ok((resident, _create_summary)) => {
                 self.refresh_roster_entry(&resident).await;
                 WakeOutcome::Woken(resident)
             }
@@ -346,7 +346,7 @@ impl Supervisor {
             rest: Default::default(),
         };
         match self.launch_worker(&create, None).await {
-            Ok(resident) => {
+            Ok((resident, _create_summary)) => {
                 self.refresh_roster_entry(&resident).await;
                 WakeOutcome::Woken(resident)
             }

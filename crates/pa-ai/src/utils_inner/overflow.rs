@@ -27,6 +27,9 @@ fn overflow_patterns() -> &'static Vec<Regex> {
             r"(?i)exceeded model token limit", // Kimi For Coding
             r"(?i)too large for model with \d+ maximum context length", // Mistral
             r"(?i)model_context_window_exceeded", // z.ai non-standard finish_reason surfaced as error text
+            r"(?i)combined input and output tokens", // Prime Inference-style combined ceilings
+            r"(?i)accepts at most \d+ combined",  // "accepts at most 1048576 combined tokens"
+            r"(?i)reduce the input length or requested output length", // combined-limit remedy text
             r"(?i)prompt too long; exceeded (?:max )?context length", // Ollama explicit overflow error
             r"(?i)context[_ ]length[_ ]exceeded",                     // Generic fallback
             r"(?i)too many tokens",                                   // Generic fallback
@@ -187,6 +190,36 @@ mod tests {
     fn detects_length_stop_overflow() {
         let m = message(StopReason::Length, None, usage(99_500, 0, 0));
         assert!(is_context_overflow(&m, Some(100_000)));
+    }
+
+    #[test]
+    fn detects_combined_input_output_limit_overflow() {
+        // The live Prime Inference 400: input + requested output over a
+        // combined ceiling — no single-part wording matches any older
+        // pattern.
+        let m = message(
+            StopReason::Error,
+            Some(
+                "Error: 400 This model configuration accepts at most 1048576 combined input and output tokens. However, your request has 1017457 input tokens and asks for 32000 output tokens (1049457 tokens total). Please reduce the input length or requested output length and try again.",
+            ),
+            usage(1_017_457, 0, 0),
+        );
+        assert!(is_context_overflow(&m, Some(1_048_576)));
+        assert!(error_message_has_overflow(
+            m.error_message.as_deref().unwrap()
+        ));
+    }
+
+    #[test]
+    fn combined_limit_remedy_text_alone_classifies() {
+        // The remedy wording without the leading "combined" phrasing still
+        // matches the combined-limit arm.
+        let m = message(
+            StopReason::Error,
+            Some("400: Please reduce the input length or requested output length and try again."),
+            usage(0, 0, 0),
+        );
+        assert!(is_context_overflow(&m, None));
     }
 
     #[test]

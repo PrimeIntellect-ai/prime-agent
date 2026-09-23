@@ -3,6 +3,9 @@
 //! paragraphs, fenced code, lists, blockquotes, hr, and inline emphasis,
 //! code, and links). Emits styled `Line`s for ratatui instead of ANSI strings.
 
+mod geometry;
+pub(crate) use geometry::markdown_row_count;
+
 use crate::width::str_width;
 use crate::{Line, Span};
 use ratatui::style::{Modifier, Style};
@@ -483,16 +486,7 @@ fn render_block(
     style: &MarkdownStyle,
     out: &mut Vec<Line>,
 ) {
-    // TS pushes a blank line between blocks only when no `space` token sits
-    // between them, i.e. when the blocks are adjacent (no blank source line).
-    let blank_after = |exclude_lists: bool| -> bool {
-        match next {
-            Some(nb) => {
-                !nb.sep_blank && !(exclude_lists && matches!(nb.kind, BlockKind::List { .. }))
-            }
-            None => false,
-        }
-    };
+    let blank_after = |exclude_lists| geometry::blank_after(next, exclude_lists);
     match &block.kind {
         BlockKind::Heading => {
             // The TS source tapers headings by level (h1 bold+underline,
@@ -865,8 +859,21 @@ fn find_closing(chars: &[char], from: usize, delim: char, len: usize) -> Option<
 /// dropped after a wrap break. Adjacent same-style output pieces merge.
 pub fn wrap_spans(spans: &[Span], width: usize, base: Style, out: &mut Vec<Line>) {
     let _ = base;
+    wrap_spans_into(spans, width, &mut geometry::WrapOutput::render(out));
+}
+
+pub(crate) fn wrapped_span_count(spans: &[Span], width: usize) -> usize {
+    let mut output = geometry::WrapOutput::count();
+    wrap_spans_into(spans, width, &mut output);
+    output.rows
+}
+
+fn wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<'_>) {
     if width == 0 {
-        out.push(spans.to_vec());
+        for span in spans {
+            out.push(&span.content, span.style);
+        }
+        out.finish_row(/*trim*/ false);
         return;
     }
     // tokens: (text, style); alternating words and single-space gaps. A gap
@@ -893,23 +900,16 @@ pub fn wrap_spans(spans: &[Span], width: usize, base: Style, out: &mut Vec<Line>
         }
     }
 
-    let mut current: Line = Vec::new();
     let mut col = 0usize;
     let mut i = 0usize;
     while i < tokens.len() {
         let (text, style) = &tokens[i];
         let w = str_width(text);
-        if col + w > width && !current.is_empty() {
+        if col + w > width && out.has_content {
             // A wrapped row never carries its trailing gap: TS
             // wrapTextWithAnsi drops the boundary space, so the styled
             // content ends at the last word and the plain padding follows.
-            while current
-                .last()
-                .is_some_and(|span| span.content.trim().is_empty())
-            {
-                current.pop();
-            }
-            out.push(std::mem::take(&mut current));
+            out.finish_row(/*trim*/ true);
             col = 0;
             // drop leading whitespace at the new line start
             if text.trim().is_empty() {
@@ -943,16 +943,16 @@ pub fn wrap_spans(spans: &[Span], width: usize, base: Style, out: &mut Vec<Line>
             if take.is_empty() {
                 break;
             }
-            current.push(Span::styled(take.clone(), style));
-            out.push(std::mem::take(&mut current));
+            out.push(&take, style);
+            out.finish_row(/*trim*/ false);
             col = 0;
             rest = rest[taken..].to_string();
         }
         col += str_width(&rest);
-        current.push(Span::styled(rest, style));
+        out.push(&rest, style);
         i += 1;
     }
-    out.push(current);
+    out.finish_row(/*trim*/ false);
 }
 
 fn wrap_list_item(

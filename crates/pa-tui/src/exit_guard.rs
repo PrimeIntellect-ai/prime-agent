@@ -251,9 +251,30 @@ fn force_quit() -> ! {
 /// The minimal terminal restore that cannot block meaningfully: cooked
 /// mode, leave the alternate screen, show the cursor, flush. No transcript
 /// flush, no daemon I/O — anything that could block is skipped by design.
+/// The mode set is TS `TUI.stop` + `ProcessTerminal.stop` in their write
+/// order: drain the in-flight input first (`drainInput`), release SGR mouse
+/// tracking, pop the enhanced-key modes, restore the cooked termios, leave
+/// the alternate screen, show the cursor. A mode left armed by this path
+/// is the tty corruption the user carries into the shell — mouse tracking
+/// leaks raw `[<...M` reports into every later click, and a kitty
+/// push left on spews CSI-u sequences on every key press.
 fn restore_terminal_best_effort() {
     use std::io::Write;
     let mut out = std::io::stdout();
+    // The terminal is being released for process exit: no probe may arm a
+    // mode after the restore ran (the kitty probe's answer threads check
+    // this, so a push can never land after the pop below).
+    crate::enhanced_keys::release_for_exit();
+    // In-flight key releases are consumed BEFORE the modes come off (TS
+    // `drainInput` before `stop`): one that lands after raw mode is off
+    // would leak its escape sequence into the parent shell. The exit
+    // budget shrinks the drain cap (the 2s contract window is already
+    // 1.5s spent when the watchdog fires).
+    crate::enhanced_keys::drain_for_exit(&mut out);
+    // SGR mouse tracking releases with the surface (TS `stop` writes the
+    // disable first): leaving it armed hands the shell raw SGR reports
+    // on every click after the exit.
+    let _ = crate::mouse_tracking::disable(&mut out);
     // The enhanced-key modes release with the terminal (TS `stop`):
     // leaving paste mode on would hand the shell stray markers.
     let _ = crate::enhanced_keys::disable(&mut out);

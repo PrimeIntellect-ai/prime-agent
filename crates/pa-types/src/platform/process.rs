@@ -156,21 +156,50 @@ pub fn restore_default_sigint() -> anyhow::Result<()> {
 
 /// True only for a process that is actually running: zombies do not count
 /// (TS `isProcessAlive`). Errors when the platform cannot answer.
+///
+/// `/proc` is authoritative where it is mounted (Linux); platforms without
+/// it (macOS/BSD) previously read every live process as dead here, so lease
+/// staleness judged a live owner reclaimable. The fallback restores the TS
+/// semantics: the `kill(pid, 0)` existence probe (EPERM counts as alive -
+/// the pid exists but is not ours to signal) plus the portable `ps`
+/// zombie demotion.
 #[cfg(unix)]
 pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
     if pid == 0 {
         return Ok(false);
     }
-    if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+    if std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        // A zombie still owns /proc; treat it as dead for lease purposes.
+        if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
+            if let Some(state) = status.lines().find_map(|l| l.strip_prefix("State:")) {
+                return Ok(!state.trim_start().starts_with('Z'));
+            }
+        }
+        return Ok(true);
+    }
+    // No /proc entry: either the platform has no /proc or the pid is gone.
+    // A pid beyond the pid_t range cannot name a process (and must not
+    // wrap into kill's negative "every process" argument).
+    if pid > i32::MAX as u32 {
         return Ok(false);
     }
-    // A zombie still owns /proc; treat it as dead for lease purposes.
-    if let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) {
-        if let Some(state) = status.lines().find_map(|l| l.strip_prefix("State:")) {
-            return Ok(!state.trim_start().starts_with('Z'));
-        }
+    // TS `processIdExists`: signal 0 checks existence only. ESRCH means
+    // dead; EPERM means alive.
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+        return match std::io::Error::last_os_error().raw_os_error() {
+            Some(libc::ESRCH) => Ok(false),
+            Some(libc::EPERM) => Ok(true),
+            code => anyhow::bail!("kill(0) liveness probe failed: {code:?}"),
+        };
     }
-    Ok(true)
+    // The pid resolves: demote zombies with `ps` (TS `isZombieProcess`'s
+    // portable listing) - there is no /proc state line to read here.
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "stat="])
+        .output()?;
+    Ok(!String::from_utf8_lossy(&output.stdout)
+        .trim_start()
+        .starts_with('Z'))
 }
 
 /// Windows: a handle-existence probe with the STILL_ACTIVE exit-code check
@@ -300,6 +329,36 @@ mod windows_tests {
         assert_eq!(process_start_id(u32::MAX), None);
         assert!(!is_process_alive(0).unwrap_or(true));
         assert!(!is_process_alive(u32::MAX).unwrap_or(true));
+    }
+}
+
+/// Liveness answers on every unix, /proc or not: the probe families are
+/// both reachable on Linux (a pid without a /proc entry takes the
+/// kill(0) fallback), so the fallback is testable without /proc.
+#[cfg(all(test, unix))]
+mod liveness_tests {
+    use super::*;
+
+    /// This very process reads alive wherever the probe lands: /proc's
+    /// state line on Linux, kill(0) + `ps` where /proc is not mounted.
+    #[test]
+    fn a_live_process_reads_alive() {
+        assert!(is_process_alive(std::process::id()).expect("liveness probe"));
+    }
+
+    /// A pid beyond pid_t's range cannot name a process - and must not
+    /// wrap into kill's negative "every process" argument.
+    #[test]
+    fn a_pid_beyond_the_pidt_range_is_dead() {
+        assert!(!is_process_alive(u32::MAX).expect("liveness probe"));
+    }
+
+    /// A pid that cannot exist has no /proc entry even on Linux, so it
+    /// exercises the kill(0) fallback on both probe families and reads
+    /// dead.
+    #[test]
+    fn a_nonexistent_pid_reads_dead_through_the_fallback() {
+        assert!(!is_process_alive(100_000_000).expect("liveness probe"));
     }
 }
 

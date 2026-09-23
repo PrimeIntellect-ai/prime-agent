@@ -159,11 +159,12 @@ def run_side(name: str, binary: str, root: Path) -> dict:
         side.env["PI_PACKAGE_DIR"] = str(REPO)
     side.env["PRIME_API_KEY"] = "sk-battery"
     side.write_models_json()
-    # The f14-auto battery settings shape: a 500-token headroom on the
-    # 128k mock model and a tiny keep-recent budget so the seeded turns
-    # are summarizable.
+    # The f14-auto battery settings shape: the mock-reported 126k usage
+    # crosses on both products (TS at window - reserve = 123904, Rust at
+    # the combined input+output ceiling 128000 - 4096 - 4096 = 119808),
+    # and a tiny keep-recent budget keeps the seeded turns summarizable.
     (agent / "settings.json").write_text(json.dumps(
-        {"compaction": {"enabled": True, "reserveTokens": 127500, "keepRecentTokens": 10}}
+        {"compaction": {"enabled": True, "reserveTokens": 4096, "keepRecentTokens": 10}}
     ))
     capture: dict = {}
     try:

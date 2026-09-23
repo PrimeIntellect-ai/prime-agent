@@ -61,6 +61,43 @@ fn box_row(spans: Line, bg: ratatui::style::Style, width: usize) -> Line {
     row
 }
 
+struct SkillBody {
+    text: String,
+    width: usize,
+    style: crate::markdown::MarkdownStyle,
+}
+
+fn expanded_body(
+    row: &SkillInvocationRow,
+    detail: Detail,
+    theme: &Theme,
+    width: usize,
+) -> Option<SkillBody> {
+    if !detail.tool_output_expanded() {
+        return None;
+    }
+    let mut style = crate::markdown::MarkdownStyle::from_theme(theme);
+    style.body = theme.fg_style(ThemeColor::CustomMessageText);
+    Some(SkillBody {
+        text: format!("**{}**\n\n{}", row.name, row.content),
+        width: width.saturating_sub(2).max(1),
+        style,
+    })
+}
+
+pub(crate) fn count_skill_invocation(
+    row: &SkillInvocationRow,
+    detail: Detail,
+    theme: &Theme,
+    width: usize,
+    leading: bool,
+) -> usize {
+    let body_rows = expanded_body(row, detail, theme, width).map_or(0, |body| {
+        crate::markdown::markdown_row_count(&body.text, body.width, &body.style)
+    });
+    usize::from(leading) + 3 + body_rows
+}
+
 /// One skill-invocation card (TS `SkillInvocationMessageComponent`, an
 /// `ExpandableCustomMessageBox`: `Box(1,1)` on `customMessageBg`).
 /// Collapsed: one row, the bold `[skill]` label in `customMessageLabel`
@@ -89,13 +126,9 @@ pub fn render_skill_invocation(
         out.push(Vec::new());
     }
     out.push(blank.clone());
-    if detail.tool_output_expanded() {
+    if let Some(body) = expanded_body(row, detail, theme, width) {
         out.push(box_row(vec![label()], bg, width));
-        let content_width = width.saturating_sub(2).max(1);
-        let mut md = crate::markdown::MarkdownStyle::from_theme(theme);
-        md.body = theme.fg_style(ThemeColor::CustomMessageText);
-        let body = format!("**{}**\n\n{}", row.name, row.content);
-        for line in crate::markdown::render_markdown(&body, content_width, &md) {
+        for line in crate::markdown::render_markdown(&body.text, body.width, &body.style) {
             out.push(box_row(line, bg, width));
         }
     } else {
@@ -115,6 +148,35 @@ pub fn render_skill_invocation(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn geometry_matches_skill_rendering() {
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        for content in [
+            "",
+            "数据 **bold**\n\ntext",
+            "| a | b |\n| --- | --- |\n| long words | 数据 |",
+            "```python\nprint(1)\n```",
+        ] {
+            let row = SkillInvocationRow {
+                name: "test 数据".into(),
+                content: content.into(),
+            };
+            for detail in [Detail::Overview, Detail::Details, Detail::All] {
+                for leading in [false, true] {
+                    let counts: Vec<_> = (0..70)
+                        .map(|width| count_skill_invocation(&row, detail, &theme, width, leading))
+                        .collect();
+                    let rendered: Vec<_> = (0..70)
+                        .map(|width| {
+                            render_skill_invocation(&row, detail, &theme, width, leading).len()
+                        })
+                        .collect();
+                    assert_eq!(counts, rendered);
+                }
+            }
+        }
+    }
+
     use super::*;
     use crate::theme::ColorMode;
 

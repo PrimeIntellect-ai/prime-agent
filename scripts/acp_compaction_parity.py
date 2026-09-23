@@ -65,12 +65,14 @@ FAUX_SCRIPT = {
     ],
 }
 
-# The f14 battery shape: a 500-token headroom on the 128k window and a tiny
-# keep-recent budget so the seeded turns are summarizable.
+# The threshold-crossing shape on the 128k window: turn one crosses on
+# both products — TS at window - reserve = 4596, Rust at the combined
+# input+output ceiling 128000 - 4096 output budget - 123404 reserve = 500
+# — and a tiny keep-recent budget keeps the seeded turns summarizable.
 SETTINGS = {
     "compaction": {
         "enabled": True,
-        "reserveTokens": 127500,
+        "reserveTokens": 123404,
         "keepRecentTokens": 10,
     }
 }

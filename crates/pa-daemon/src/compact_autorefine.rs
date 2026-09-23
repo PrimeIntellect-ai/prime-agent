@@ -146,7 +146,11 @@ impl AgentSessionEngine {
         if busy {
             return Ok(None);
         }
-        let Ok(model) = self.resolve_model() else {
+        // The session's live model (the provider target the turn stream
+        // reads): the compact-trigger review is a summarizer-style model
+        // call, so it follows the session's provider like the compaction
+        // that armed it (R8).
+        let Ok(model) = self.session_model() else {
             // TS `_maybeAutoRefine` keeps the trigger armed when no model
             // is selected; the next boundary retries.
             return Ok(None);
@@ -179,6 +183,11 @@ mod tests {
     use crate::engine::SessionEngine;
     use crate::engine::{CompactionOutcome, CompactionRequest, EngineEvent};
     use serde_json::json;
+
+    /// The faux model's per-request output budget (maxTokens 16_384 under the
+    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// alongside the headroom (the combined input+output ceiling).
+    const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
     /// A declining review reply (the TS `AutoRefineReview` JSON shape).
     const DECLINE: &str = r#"{"shouldRefine": false, "rationale": "one-off tool output"}"#;
@@ -270,7 +279,9 @@ mod tests {
                     {"text": "third reply"},
                 ]
             }),
-            128_000u64.saturating_sub(headroom).max(1),
+            128_000u64
+                .saturating_sub(FAUX_REQUEST_BUDGET + headroom)
+                .max(1),
             true,
         );
         let big_prompt = format!("seed turn {} crossing", "x".repeat(48_000));
@@ -403,7 +414,9 @@ mod tests {
                     {"text": "fourth reply"},
                 ]
             }),
-            128_000u64.saturating_sub(headroom).max(1),
+            128_000u64
+                .saturating_sub(FAUX_REQUEST_BUDGET + headroom)
+                .max(1),
             false,
         );
         let big_prompt = format!("seed turn {} crossing", "x".repeat(48_000));

@@ -837,7 +837,14 @@ pub fn write_rlm_subagent_display(entry: &RlmSubagentDisplayEntry) -> Result<boo
     let dir = Path::new(&entry.session_dir);
     fs::create_dir_all(dir)?;
     let payload = serde_json::to_string(entry)?;
-    let temp = dir.join(format!("rlm-subagent.json.tmp-{}", crate::util::now_ms()));
+    // TS `writeFileAtomicSync` temp naming (`${path}.${pid}.${uuid}.tmp`): a
+    // unique temp per writer, so two processes writing the same display file
+    // (a raced admission and its re-adoption) never share one temp.
+    let temp = dir.join(format!(
+        "rlm-subagent.json.{}.{}.tmp",
+        std::process::id(),
+        uuid::Uuid::new_v4().simple()
+    ));
     // The temp carries the TS display writer's 0o600 mode; the rename
     // preserves it onto the final file.
     let mut options = fs::OpenOptions::new();
@@ -845,6 +852,10 @@ pub fn write_rlm_subagent_display(entry: &RlmSubagentDisplayEntry) -> Result<boo
     pa_core::platform::perms::set_private_mode(&mut options);
     let mut file = options.open(&temp)?;
     file.write_all(format!("{payload}\n").as_bytes())?;
+    // TS `writeFileAtomicSync(..., { fsync: true })`: the temp is durable
+    // before the rename, so a crash mid-write leaves a stale temp and the
+    // previous file intact - never a half-written display state.
+    file.sync_all()?;
     pa_core::platform::rename_onto(&temp, &dir.join("rlm-subagent.json"))
         .with_context(|| format!("persist rlm-subagent display at {}", dir.display()))?;
     Ok(true)

@@ -31,6 +31,12 @@
 //! and the kitty path covers the enhanced-reporting surface crossterm
 //! can parse (kitty CSI-u with shifted alternates resolves to the
 //! produced character in crossterm's own parser).
+//!
+//! Every mode-flag transition is serialized (a module-wide lock pairs each
+//! flag write with its escape write), and the force-quit exit path marks
+//! the terminal released first: a probe answer that lands around the
+//! process exit can never push the kitty flags back on after the exit
+//! restore popped them.
 
 use anyhow::Result;
 use std::io::{IsTerminal, Stdout, Write};
@@ -59,6 +65,34 @@ const KITTY_QUERY_FALLBACK: Duration = Duration::from_millis(150);
 static BRACKETED_PASTE_ACTIVE: AtomicBool = AtomicBool::new(false);
 static KITTY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static QUERY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+/// Serializes every mode-flag read-modify-write with its escape write:
+/// the flag and the terminal must move as one unit, or a probe thread
+/// enabling kitty can interleave with a teardown disabling it (the flags
+/// then read released while the terminal still has the mode armed, or a
+/// push lands after the exit restore's pop). The force-quit watchdog (a
+/// plain thread, no runtime) holds this too, so its restore cannot
+/// interleave with a probe's enable.
+static MODE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// The process is exiting and the terminal is being released for the last
+/// time (the force-quit restore): any in-flight kitty probe must stand
+/// down instead of pushing the flags back on after the restore popped
+/// them — a terminal left in kitty mode spews CSI-u sequences into the
+/// parent shell on every key press.
+static EXIT_RELEASE: AtomicBool = AtomicBool::new(false);
+
+fn lock_modes() -> std::sync::MutexGuard<'static, ()> {
+    MODE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Mark the terminal released for process exit (the force-quit restore
+/// calls this before writing the restore sequences): the kitty probe's
+/// answer paths check it before enabling, so no push can land after the
+/// final pop.
+pub(crate) fn release_for_exit() {
+    EXIT_RELEASE.store(true, Ordering::SeqCst);
+}
 
 /// Enable the enhanced-key modes for a surface start (TS
 /// `ProcessTerminal.start`): bracketed paste unconditionally, the kitty
@@ -70,6 +104,7 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
     if !out.is_terminal() {
         return Ok(());
     }
+    let _modes = lock_modes();
     if !BRACKETED_PASTE_ACTIVE.swap(true, Ordering::SeqCst) {
         write_all(out, ENABLE_BRACKETED_PASTE)?;
     }
@@ -87,6 +122,7 @@ pub(crate) fn disable(out: &mut Stdout) -> Result<()> {
     if !out.is_terminal() {
         return Ok(());
     }
+    let _modes = lock_modes();
     if BRACKETED_PASTE_ACTIVE.swap(false, Ordering::SeqCst) {
         write_all(out, DISABLE_BRACKETED_PASTE)?;
     }
@@ -104,14 +140,25 @@ pub(crate) fn disable(out: &mut Stdout) -> Result<()> {
 /// stops generating new release sequences while the drain runs; input is
 /// then consumed until the idle window closes or the hard cap.
 pub(crate) fn drain(out: &mut Stdout) {
+    drain_bounded(out, DRAIN_MAX);
+}
+
+/// The force-quit variant: the exit is observed inside the 2s contract
+/// window (the watchdog fires 500ms inside it), so the drain cap shrinks
+/// to what that budget allows; the idle window is unchanged.
+pub(crate) fn drain_for_exit(out: &mut Stdout) {
+    drain_bounded(out, EXIT_DRAIN_MAX);
+}
+
+fn drain_bounded(out: &mut Stdout, max: Duration) {
     disable_keyboard_modes(out);
     if !enhanced_keys_active() {
         return;
     }
     let start = std::time::Instant::now();
     let mut last_input = start;
-    while start.elapsed() < DRAIN_MAX && last_input.elapsed() < DRAIN_IDLE {
-        match crossterm::event::poll(DRAIN_IDLE.min(DRAIN_MAX - start.elapsed())) {
+    while start.elapsed() < max && last_input.elapsed() < DRAIN_IDLE {
+        match crossterm::event::poll(DRAIN_IDLE.min(max - start.elapsed())) {
             Ok(true) => {
                 let _ = crossterm::event::read();
                 last_input = std::time::Instant::now();
@@ -125,6 +172,9 @@ pub(crate) fn drain(out: &mut Stdout) {
 /// TS `drainInput` defaults.
 const DRAIN_MAX: Duration = Duration::from_millis(1000);
 const DRAIN_IDLE: Duration = Duration::from_millis(50);
+/// The force-quit drain cap: the exit must be observed within 2s of the
+/// second Ctrl+C, 1.5s of which elapses before the watchdog fires.
+const EXIT_DRAIN_MAX: Duration = Duration::from_millis(400);
 
 /// Whether the kitty keyboard protocol is active (the probe answered).
 /// The key-id layer and the input reader use this to switch the TS
@@ -174,6 +224,7 @@ fn enhanced_keys_active() -> bool {
 /// them first); bracketed paste stays on — TS `drainInput` leaves it to
 /// `stop`.
 fn disable_keyboard_modes(out: &mut Stdout) {
+    let _modes = lock_modes();
     if KITTY_ACTIVE.swap(false, Ordering::SeqCst) {
         let _ = write_all(out, POP_KITTY_FLAGS);
     }
@@ -191,6 +242,14 @@ fn write_all(out: &mut Stdout, sequence: &[u8]) -> Result<()> {
 /// gone — a stray enable would leave the flags pushed over the next
 /// surface's own setup.
 fn enable_kitty(out: &mut Stdout) {
+    let _modes = lock_modes();
+    // The exit release ran: the flags are popped (or never pushed), and a
+    // probe answer arriving around the exit must not push them back on —
+    // the process is about to terminate with the terminal in its final
+    // state.
+    if EXIT_RELEASE.load(Ordering::SeqCst) {
+        return;
+    }
     if !KITTY_ACTIVE.swap(true, Ordering::SeqCst) {
         let _ = write_all(out, ENABLE_KITTY_FLAGS);
     }
@@ -270,6 +329,7 @@ mod tests {
         BRACKETED_PASTE_ACTIVE.store(false, Ordering::SeqCst);
         KITTY_ACTIVE.store(false, Ordering::SeqCst);
         QUERY_IN_FLIGHT.store(false, Ordering::SeqCst);
+        EXIT_RELEASE.store(false, Ordering::SeqCst);
     }
 
     #[test]
@@ -287,6 +347,19 @@ mod tests {
         }
         disable(&mut out).expect("disable");
         assert!(!enhanced_keys_active());
+    }
+
+    #[test]
+    fn release_for_exit_stands_a_late_probe_answer_down() {
+        let _lock = lock_state();
+        reset_state();
+        // The force-quit restore ran (release_for_exit) and a kitty probe
+        // answer arrives afterwards: the push must not happen — the exit
+        // already popped the flags, and the terminal must keep the
+        // post-restore state for the parent shell.
+        release_for_exit();
+        enable_kitty(&mut std::io::stdout());
+        assert!(!KITTY_ACTIVE.load(Ordering::SeqCst));
     }
 
     #[test]

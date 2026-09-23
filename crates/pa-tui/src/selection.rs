@@ -88,7 +88,7 @@ fn selection_span(
 /// `highlightLine`): the selected run drops its styling — the TS writer
 /// strips ANSI and re-wraps the text in `ESC[7m` — so the highlight reads
 /// as default-color inverted text between the untouched surroundings.
-fn highlight_line(line: &Line, from: usize, to: usize) -> Line {
+pub(crate) fn highlight_line(line: &Line, from: usize, to: usize) -> Line {
     let width = line_width(line);
     let from = from.min(width);
     let to = to.min(width);
@@ -187,9 +187,6 @@ pub(crate) struct SelectionState {
     frame_text: Vec<String>,
     /// Selectable spans of the last composed frame's dock rows.
     frame_regions: Vec<FrameRegion>,
-    /// Plain text of the transcript at the last compose, kept only while a
-    /// transcript selection is active (TS `lastTranscript`).
-    transcript_text: Vec<String>,
 }
 
 impl SelectionState {
@@ -198,7 +195,6 @@ impl SelectionState {
         self.head = None;
         self.mode = None;
         self.frame = None;
-        self.transcript_text.clear();
     }
 
     fn has_selection(&self) -> bool {
@@ -316,19 +312,19 @@ impl SelectionState {
     /// `extractSelectionText`): per-line column slices, trailing
     /// whitespace trimmed, joined by newlines; `None` when only whitespace.
     fn extract_transcript_text(
-        &self,
+        rows: &[Line],
         start: SelectionPoint,
         end: SelectionPoint,
     ) -> Option<String> {
         let lines = (start.line..=end.line)
             .filter_map(|line| {
                 let (from, to) = selection_span(line, start, end)?;
-                let row = self.transcript_text.get(line)?;
+                let row = row_text(rows.get(line - start.line)?);
                 let width = row.chars().map(char_width).sum();
                 let from = from.min(width);
                 let to = to.min(width);
                 Some(
-                    slice_text_by_column(row, from, to - from)
+                    slice_text_by_column(&row, from, to - from)
                         .trim_end()
                         .to_string(),
                 )
@@ -373,6 +369,57 @@ impl TrimLength for str {
 }
 
 impl AgentView {
+    /// Shift tail-relative transcript endpoints by `delta` (content that
+    /// grew by `delta` rows below them keeps its position selected only
+    /// when the endpoints move with the growth; TS achieves this by
+    /// keeping absolute rows, the sparse frame keeps tail-relative ones).
+    /// Top-anchored (absolute) endpoints never shift.
+    pub(crate) fn shift_tail_selection_points(&mut self, delta: isize) {
+        if self.selection.mode != Some(SelectionMode::Transcript) {
+            return;
+        }
+        for point in [&mut self.selection.anchor, &mut self.selection.head]
+            .into_iter()
+            .flatten()
+        {
+            point.line = (point.line as isize - delta).max(0) as usize;
+        }
+    }
+
+    /// Rebase transcript endpoints from Top-anchor (absolute) coordinates
+    /// onto the tail frame, given the transcript's total row count: the
+    /// inverse of [`Self::resolve_tail_selection`]. The window re-anchors
+    /// to the tail here (a Top-anchored window that ran off the
+    /// transcript end switches to following), and the selection keeps its
+    /// content highlighted by moving with the frame.
+    pub(crate) fn rebase_top_selection_to_tail(&mut self, total: usize) {
+        if self.selection.mode != Some(SelectionMode::Transcript) {
+            return;
+        }
+        for point in [&mut self.selection.anchor, &mut self.selection.head]
+            .into_iter()
+            .flatten()
+        {
+            point.line = crate::view::lazy::TAIL_SELECTION_ORIGIN
+                .saturating_sub(total.saturating_sub(point.line));
+        }
+    }
+
+    /// Map private end-relative selection coordinates to exact transcript rows.
+    pub(crate) fn resolve_tail_selection(&mut self, total: usize) {
+        if self.selection.mode != Some(SelectionMode::Transcript) {
+            return;
+        }
+        for point in [&mut self.selection.anchor, &mut self.selection.head]
+            .into_iter()
+            .flatten()
+        {
+            point.line = total.saturating_sub(
+                crate::view::lazy::TAIL_SELECTION_ORIGIN.saturating_sub(point.line),
+            );
+        }
+    }
+
     /// The transcript line under a screen row (TS
     /// `transcriptLineForScreenRow`): `None` outside the window unless
     /// clamping, which folds the position onto the nearest window row.
@@ -390,7 +437,7 @@ impl AgentView {
             return None;
         }
         let row = screen_row.clamp(first, last);
-        Some(self.scroll_top + row - HEADER_ROWS)
+        Some(self.selection_window_start() + row - HEADER_ROWS)
     }
 
     /// Begin a transcript selection at a screen position (TS
@@ -465,7 +512,6 @@ impl AgentView {
         self.selection.anchor = Some(point);
         self.selection.head = Some(point);
         self.selection.mode = Some(SelectionMode::Frame);
-        self.selection.transcript_text.clear();
         true
     }
 
@@ -502,7 +548,22 @@ impl AgentView {
         let text = match self.selection.mode {
             Some(SelectionMode::Transcript) => {
                 let sel = ordered_selection(self.selection.anchor, self.selection.head);
-                sel.and_then(|(start, end)| self.selection.extract_transcript_text(start, end))
+                sel.and_then(|(start, end)| {
+                    let sparse = crate::image_component::with_fullscreen_image_fallback(|| {
+                        self.sparse_selection_rows(start.line, end.line - start.line + 1)
+                    });
+                    if let Some(rows) = sparse {
+                        return SelectionState::extract_transcript_text(&rows, start, end);
+                    }
+                    self.resolve_sparse_geometry();
+                    let (start, end) =
+                        ordered_selection(self.selection.anchor, self.selection.head)?;
+                    let rows = crate::image_component::with_fullscreen_image_fallback(|| {
+                        let layout = self.layout_pass(self.layout_width);
+                        self.transcript_window(&layout, start.line, end.line - start.line + 1)
+                    });
+                    SelectionState::extract_transcript_text(&rows, start, end)
+                })
             }
             Some(SelectionMode::Frame) => {
                 let sel = ordered_selection(self.selection.anchor, self.selection.head);
@@ -534,10 +595,13 @@ impl AgentView {
         let (anchor, head) = (self.selection.anchor?, self.selection.head?);
         let first = HEADER_ROWS;
         let last = HEADER_ROWS + self.window_rows.saturating_sub(1);
-        if head.line < anchor.line && screen_row <= first && self.scroll_top > 0 {
+        if head.line < anchor.line && screen_row <= first && self.selection_window_start() > 0 {
             return Some(-1);
         }
-        if head.line > anchor.line && screen_row >= last && self.scroll_top < self.last_max_scroll {
+        if head.line > anchor.line
+            && screen_row >= last
+            && (!self.is_following() || self.scroll_top < self.last_max_scroll)
+        {
             return Some(1);
         }
         None
@@ -550,9 +614,9 @@ impl AgentView {
         if self.selection.mode != Some(SelectionMode::Transcript) {
             return false;
         }
-        let previous = self.scroll_top;
+        let previous = self.selection_window_start();
         self.scroll_by(direction);
-        if self.scroll_top == previous {
+        if self.selection_window_start() == previous {
             return false;
         }
         let edge = if direction < 0 {
@@ -564,13 +628,13 @@ impl AgentView {
         true
     }
 
-    /// Highlight a transcript window row for the active selection (call
-    /// before padding): reverse-video over the selected columns.
-    pub(crate) fn highlight_transcript_row(&self, row: &Line, transcript_line: usize) -> Line {
-        match self.selection.transcript_highlight_span(transcript_line) {
-            Some((from, to)) => highlight_line(row, from, to),
-            None => row.to_vec(),
-        }
+    /// The highlighted column span of one transcript line, if any (the
+    /// selection-diff restyle pairs this with the cached rows).
+    pub(crate) fn transcript_highlight_span(
+        &self,
+        transcript_line: usize,
+    ) -> Option<(usize, usize)> {
+        self.selection.transcript_highlight_span(transcript_line)
     }
 
     /// Apply frame-selection highlights to a freshly composed frame and
@@ -594,22 +658,6 @@ impl AgentView {
                 }
             }
         }
-    }
-
-    /// Whether a transcript selection is live: the frame keeps the whole
-    /// transcript compose while one is (its copy buffer needs the plain
-    /// text of every row, TS `lastTranscript`).
-    pub(crate) fn transcript_selection_active(&self) -> bool {
-        self.selection.mode == Some(SelectionMode::Transcript)
-    }
-
-    /// Record the transcript's plain rows for the active transcript
-    /// selection (TS `lastTranscript`; kept only while one is active).
-    pub(crate) fn note_transcript_text(&mut self, transcript: &[Line]) {
-        if self.selection.mode != Some(SelectionMode::Transcript) {
-            return;
-        }
-        self.selection.transcript_text = transcript.iter().map(|line| row_text(line)).collect();
     }
 }
 
@@ -706,6 +754,228 @@ mod tests {
             );
         }
         assert_eq!(text, expected.join("\n"));
+    }
+
+    #[test]
+    fn unseen_dynamic_mutation_preserves_tail_selection() {
+        let mut v = view();
+        v.push_entry(ChatEntry::Assistant(Box::new(
+            crate::chat::AssistantMessage {
+                blocks: vec![crate::chat::MessageBlock::Text("old hidden stream".into())],
+                has_tool_calls: false,
+                streaming: true,
+                error: None,
+                aborted: false,
+            },
+        )));
+        for index in 0..100 {
+            v.push_entry(ChatEntry::Status {
+                text: format!("original {index}"),
+                kind: crate::chat::StatusKind::Info,
+            });
+        }
+        let frame = v.render_frame(80, 12);
+        let row = (1..1 + v.window_rows)
+            .find(|row| rendered_row(&frame, *row).contains("original"))
+            .unwrap();
+        assert!(v.begin_selection(row, 0));
+        v.extend_active_selection(row, 80);
+        // The user contract the sibling test asserts on the growing
+        // stream: the copy keeps the text the drag saw, even though the
+        // mutation grew an unseen entry above the window.
+        let expected = rendered_row(&frame, row).trim_end().to_string();
+        v.prepare_entry_mutation(0);
+        if let ChatEntry::Assistant(message) = &mut v.chat[0] {
+            message
+                .blocks
+                .push(crate::chat::MessageBlock::Text("new\nnew\nnew".into()));
+        }
+        v.mark_entry_stale(0);
+        v.render_frame(80, 12);
+        assert_eq!(v.end_active_selection(), Some(expected));
+    }
+
+    #[test]
+    fn top_window_reaching_tail_keeps_the_selection_highlighted() {
+        let mut v = view();
+        // A transcript shorter than the window: a Top-anchored walk runs
+        // off the end and re-anchors to the tail with the selection active
+        // (TS keeps the selection through the follow re-pin) — the
+        // endpoints rebase without a geometry resolve and the release
+        // still copies the dragged text.
+        v.push_entry(ChatEntry::Status {
+            text: "short transcript row".into(),
+            kind: crate::chat::StatusKind::Info,
+        });
+        let frame = v.render_frame(80, 30);
+        let row = (1..1 + v.window_rows)
+            .find(|row| rendered_row(&frame, *row).contains("short transcript"))
+            .unwrap();
+        v.scroll_to_top();
+        assert!(v.begin_selection(row, 2));
+        v.extend_active_selection(row, 10);
+        // The re-anchor frame: the highlight must still cover the row.
+        let frame = v.render_frame(80, 30);
+        let highlighted = rendered_row(&frame, row);
+        assert!(
+            highlighted.contains("short transcript"),
+            "the selected row stays rendered after the re-anchor: {highlighted:?}"
+        );
+        let expected = slice_text_by_column(highlighted.trim_end(), 2, 8);
+        assert_eq!(v.end_active_selection(), Some(expected));
+    }
+
+    #[test]
+    fn growing_stream_during_selection_keeps_original_row() {
+        let mut v = view();
+        for index in 0..30 {
+            v.push_entry(ChatEntry::Status {
+                text: format!("original {index}"),
+                kind: crate::chat::StatusKind::Info,
+            });
+        }
+        v.push_entry(ChatEntry::Assistant(Box::new(
+            crate::chat::AssistantMessage {
+                blocks: vec![crate::chat::MessageBlock::Text("stream".into())],
+                has_tool_calls: false,
+                streaming: true,
+                error: None,
+                aborted: false,
+            },
+        )));
+        let frame = v.render_frame(80, 20);
+        let row = (1..1 + v.window_rows)
+            .find(|row| rendered_row(&frame, *row).contains("original"))
+            .unwrap();
+        assert!(v.begin_selection(row, 0));
+        v.extend_active_selection(row, 80);
+        let expected = rendered_row(&frame, row).trim_end().to_string();
+        let index = v.chat.len() - 1;
+        v.prepare_entry_mutation(index);
+        if let ChatEntry::Assistant(message) = &mut v.chat[index] {
+            message
+                .blocks
+                .push(crate::chat::MessageBlock::Text("new\nnew\nnew".into()));
+        }
+        v.mark_entry_stale(index);
+        v.render_frame(80, 20);
+        assert_eq!(v.end_active_selection(), Some(expected));
+    }
+
+    #[test]
+    fn append_during_tail_selection_preserves_original_text() {
+        let mut v = view();
+        for index in 0..30 {
+            v.push_entry(ChatEntry::Status {
+                text: format!("original {index}"),
+                kind: crate::chat::StatusKind::Info,
+            });
+        }
+        let frame = v.render_frame(80, 12);
+        let row = (1..1 + v.window_rows)
+            .find(|row| rendered_row(&frame, *row).contains("original"))
+            .unwrap();
+        assert!(v.begin_selection(row, 0));
+        v.extend_active_selection(row, 80);
+        let expected = rendered_row(&frame, row).trim_end().to_string();
+        v.push_entry(ChatEntry::Status {
+            text: "new content".into(),
+            kind: crate::chat::StatusKind::Info,
+        });
+        v.render_frame(80, 12);
+        v.render_frame(80, 12);
+        assert_eq!(v.end_active_selection(), Some(expected));
+    }
+
+    #[test]
+    fn copy_after_scroll_before_redraw_matches_last_logical_endpoints() {
+        let mut v = view();
+        let mut oracle = view();
+        for index in 0..100 {
+            let entry = ChatEntry::Status {
+                text: format!("row {index}"),
+                kind: crate::chat::StatusKind::Info,
+            };
+            v.push_entry(entry.clone());
+            oracle.push_entry(entry);
+        }
+        let reference =
+            crate::image_component::with_fullscreen_image_fallback(|| oracle.render_transcript(80));
+        v.render_frame(80, 12);
+        assert!(v.begin_selection(2, 0));
+        v.extend_active_selection(4, 80);
+        v.scroll_by(-3);
+        v.extend_active_selection(2, 0);
+        let (mut start, mut end) = ordered_selection(v.selection.anchor, v.selection.head).unwrap();
+        start.line = reference.len() - (crate::view::lazy::TAIL_SELECTION_ORIGIN - start.line);
+        end.line = reference.len() - (crate::view::lazy::TAIL_SELECTION_ORIGIN - end.line);
+        let expected =
+            SelectionState::extract_transcript_text(&reference[start.line..=end.line], start, end);
+        assert_eq!(v.end_active_selection(), expected);
+    }
+
+    #[test]
+    fn sparse_copy_across_multiple_tail_frames_matches_full_rows() {
+        for reverse in [false, true] {
+            let mut v = view();
+            let mut oracle = view();
+            for index in 0..200 {
+                let entry = ChatEntry::Status {
+                    text: format!("row {index}: 界 wide text"),
+                    kind: crate::chat::StatusKind::Info,
+                };
+                v.push_entry(entry.clone());
+                oracle.push_entry(entry);
+            }
+            let reference = crate::image_component::with_fullscreen_image_fallback(|| {
+                oracle.render_transcript(80)
+            });
+            v.render_frame(80, 12);
+            if reverse {
+                v.scroll_by(-50);
+                v.render_frame(80, 12);
+            }
+            assert!(v.begin_selection(2, 2));
+            v.scroll_by(if reverse { 35 } else { -35 });
+            v.render_frame(80, 12);
+            v.render_frame(80, 12);
+            v.extend_active_selection(4, 10);
+            let (mut start, mut end) =
+                ordered_selection(v.selection.anchor, v.selection.head).unwrap();
+            start.line = reference.len() - (crate::view::lazy::TAIL_SELECTION_ORIGIN - start.line);
+            end.line = reference.len() - (crate::view::lazy::TAIL_SELECTION_ORIGIN - end.line);
+            let expected = SelectionState::extract_transcript_text(
+                &reference[start.line..=end.line],
+                start,
+                end,
+            );
+            assert_eq!(v.end_active_selection(), expected);
+        }
+    }
+
+    #[test]
+    fn copy_across_unseen_window_gap_matches_full_reference() {
+        let mut v = view();
+        for index in 0..200 {
+            v.push_entry(ChatEntry::Status {
+                text: format!("row {index}: 界 wide text"),
+                kind: crate::chat::StatusKind::Info,
+            });
+        }
+        v.render_frame(80, 12);
+        v.scroll_to_top();
+        v.render_frame(80, 12);
+        assert!(v.begin_selection(2, 2));
+        let start = v.selection.anchor.unwrap();
+        v.scroll_by(180);
+        v.render_frame(80, 12);
+        v.extend_active_selection(3, 10);
+        let end = v.selection.head.unwrap();
+        let reference =
+            crate::image_component::with_fullscreen_image_fallback(|| v.render_transcript(80));
+        let expected =
+            SelectionState::extract_transcript_text(&reference[start.line..=end.line], start, end);
+        assert_eq!(v.end_active_selection(), expected);
     }
 
     /// A press outside the transcript window (the dock) starts no
@@ -812,10 +1082,10 @@ mod tests {
         v.extend_active_selection(last, 0);
         // The press's draw records the transcript text the release copies.
         v.render_frame(80, 12);
-        let before = v.scroll_top;
+        let before = v.selection_window_start();
         assert!(v.scroll_selection(1, 0));
         assert_eq!(
-            v.scroll_top,
+            v.selection_window_start(),
             before + 1,
             "the window scrolled one line down"
         );

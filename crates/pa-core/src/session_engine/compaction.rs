@@ -8,9 +8,21 @@ use pa_types::session::{AgentMessage, FileEntry};
 pub const DEFAULT_RESERVE_TOKENS: u64 = 16_384;
 pub const DEFAULT_KEEP_RECENT_TOKENS: u64 = 20_000;
 
+/// The percentage of the context window past which a threshold compaction
+/// always fires (guards estimate drift on large windows).
+pub const COMPACT_THRESHOLD_RATIO: f64 = 0.95;
+
+/// The smallest headroom kept under the combined input+output ceiling (the
+/// chars/4 estimate error); `reserve_tokens` raises it when larger.
+pub const COMBINED_LIMIT_HEADROOM_FLOOR: u64 = 4_096;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompactionSettings {
     pub enabled: bool,
+    /// Headroom under the combined input+output ceiling (a floor of
+    /// [`COMBINED_LIMIT_HEADROOM_FLOOR`]): combined-limit providers reject
+    /// `input + requested output > contextWindow`, so the trigger fires
+    /// before the requested output budget no longer fits.
     pub reserve_tokens: u64,
     pub keep_recent_tokens: u64,
 }
@@ -128,10 +140,42 @@ fn div4(chars: u64) -> u64 {
     chars.div_ceil(4)
 }
 
+/// The effective compaction threshold: the earlier of two ceilings.
+///
+/// 1. PERCENTAGE — `context_window * COMPACT_THRESHOLD_RATIO`: estimate
+///    drift on large windows must not ride the last 5% of the window.
+/// 2. COMBINED-LIMIT — `context_window - max_output_tokens - headroom`:
+///    combined-limit providers reject `input + requested output >
+///    contextWindow` (the live 400: 1,017,457 input + 32,000 requested
+///    output on a 1,048,576 window), so the trigger fires while the next
+///    request's output budget still fits. `headroom` is
+///    `max(reserve_tokens, COMBINED_LIMIT_HEADROOM_FLOOR)`, covering the
+///    chars/4 estimate error.
+///
+/// The TS `shouldCompact` checks only `contextWindow - reserveTokens`
+/// (compaction.ts:223); reserving the output budget is a deliberate
+/// Rust-side fix — without it a request can overflow while the trigger
+/// says "not due". A non-positive threshold disables the trigger (the TS
+/// degenerate-config semantics: compaction cannot fix it; overflow
+/// recovery remains the backstop).
+pub fn compaction_threshold(
+    context_window: u64,
+    max_output_tokens: u64,
+    settings: &CompactionSettings,
+) -> u64 {
+    let percentage = (context_window as f64 * COMPACT_THRESHOLD_RATIO) as u64;
+    let headroom = settings.reserve_tokens.max(COMBINED_LIMIT_HEADROOM_FLOOR);
+    let combined = context_window
+        .saturating_sub(max_output_tokens)
+        .saturating_sub(headroom);
+    percentage.min(combined)
+}
+
 /// Whether compaction should trigger.
 pub fn should_compact(
     context_tokens: u64,
     context_window: u64,
+    max_output_tokens: u64,
     settings: &CompactionSettings,
 ) -> bool {
     if !settings.enabled {
@@ -140,7 +184,23 @@ pub fn should_compact(
     if context_window == 0 {
         return false;
     }
-    context_tokens > context_window.saturating_sub(settings.reserve_tokens)
+    let threshold = compaction_threshold(context_window, max_output_tokens, settings);
+    threshold > 0 && context_tokens > threshold
+}
+
+/// The effective requested output budget of the session's next model call:
+/// the per-request default `min(model.maxTokens, 32000)`, plus the thinking
+/// budget budget-folding providers (Anthropic/Bedrock models without
+/// adaptive thinking) add on top of it for the session's reasoning level,
+/// capped at the model's declared max output; 0 when the model declares no
+/// max output. The combined input+output ceiling reserves what the request
+/// will actually claim, or a budget-folded request can overflow while the
+/// trigger still says "not due".
+pub fn request_output_budget(
+    model: &pa_types::ai::Model,
+    thinking: pa_types::ai::ModelThinkingLevel,
+) -> u64 {
+    pa_ai::effective_request_max_tokens(model, thinking)
 }
 
 /// The message-anchored context estimate over the live loop context (TS
@@ -190,14 +250,17 @@ fn message_timestamp(message: &AgentMessage) -> u64 {
 
 /// The threshold-crossing check behind the TS `_checkCompaction` threshold
 /// arm (TS `_getThresholdContextTokens` + `shouldCompact`): whether the
-/// live context crossed the reserve headroom and an automatic compaction
-/// should run. `messages` is the session's live loop context; the newest
-/// `CompactionSummary` in it is the latest compaction boundary — usage from
+/// live context crossed the effective threshold ([`compaction_threshold`]:
+/// the percentage or the combined input+output ceiling, whichever comes
+/// first) and an automatic compaction should run. `messages` is the
+/// session's live loop context; the newest `CompactionSummary` in it is
+/// the latest compaction boundary — usage from
 /// before it reflects the pre-compaction context and never re-triggers
 /// (the TS `assistantIsFromBeforeCompaction` / stale-usage guards).
 pub fn threshold_compaction_due(
     messages: &[AgentMessage],
     context_window: u64,
+    max_output_tokens: u64,
     settings: &CompactionSettings,
 ) -> bool {
     if !settings.enabled || context_window == 0 {
@@ -237,7 +300,7 @@ pub fn threshold_compaction_due(
             calculate_context_tokens(&assistant.usage)
         }
     };
-    should_compact(context_tokens, context_window, settings)
+    should_compact(context_tokens, context_window, max_output_tokens, settings)
 }
 
 /// Valid cut point indices: user/assistant/custom/branch/compaction-summary
@@ -537,7 +600,8 @@ mod tests {
     #[test]
     fn threshold_crosses_the_reserve_headroom() {
         // The f14 battery shape: 126_010 tokens on a 128k window with a
-        // 127_500 reserve leaves a 500-token headroom — the crossing fires.
+        // 127_500 reserve leaves a 500-token combined ceiling (a model
+        // declaring no output budget) — the crossing fires.
         let settings = CompactionSettings {
             enabled: true,
             reserve_tokens: 127_500,
@@ -549,21 +613,105 @@ mod tests {
             user_message("f14 threshold crossing turn", 3),
             assistant_message(126_010, 4),
         ];
-        assert!(threshold_compaction_due(&messages, 128_000, &settings));
+        assert!(threshold_compaction_due(&messages, 128_000, 0, &settings));
         // Below the headroom nothing fires (the seed turn's default usage).
         let messages = vec![
             user_message("f14 auto seed turn", 1),
             assistant_message(110, 2),
         ];
-        assert!(!threshold_compaction_due(&messages, 128_000, &settings));
+        assert!(!threshold_compaction_due(&messages, 128_000, 0, &settings));
         // Disabled settings and unknown windows never compact.
         let disabled = CompactionSettings {
             enabled: false,
             reserve_tokens: 127_500,
             keep_recent_tokens: 10,
         };
-        assert!(!threshold_compaction_due(&messages, 128_000, &disabled));
-        assert!(!threshold_compaction_due(&messages, 0, &settings));
+        assert!(!threshold_compaction_due(&messages, 128_000, 0, &disabled));
+        assert!(!threshold_compaction_due(&messages, 0, 0, &settings));
+    }
+
+    #[test]
+    fn threshold_fires_before_a_combined_limit_overflow() {
+        // The live 400 shape: 1_017_457 input tokens under the old trigger
+        // (window - reserve = 1_032_192) but over the combined ceiling once
+        // the 32_000 requested output no longer fits — the new trigger
+        // fires first.
+        let settings = CompactionSettings::default();
+        let messages = vec![
+            user_message("live session turn", 1),
+            assistant_message(1_017_457, 2),
+        ];
+        assert!(threshold_compaction_due(
+            &messages, 1_048_576, 32_000, &settings
+        ));
+        // Below both ceilings (the old reserve line at 1_032_192 included)
+        // nothing fires.
+        let messages = vec![
+            user_message("live session turn", 1),
+            assistant_message(990_000, 2),
+        ];
+        assert!(!threshold_compaction_due(
+            &messages, 1_048_576, 32_000, &settings
+        ));
+        // A 64k output budget pushes the combined ceiling below the
+        // percentage one (1_048_576 - 65_536 - 16_384 = 966_656): 970_000
+        // fires on the combined ceiling alone — under the old reserve line
+        // AND under 95% of the window.
+        let messages = vec![
+            user_message("live session turn", 1),
+            assistant_message(970_000, 2),
+        ];
+        assert!(threshold_compaction_due(
+            &messages, 1_048_576, 65_536, &settings
+        ));
+        assert!(!threshold_compaction_due(
+            &messages, 1_048_576, 0, &settings
+        ));
+    }
+
+    #[test]
+    fn threshold_percentage_ceiling_guards_large_windows() {
+        // Past 95% of a large window the percentage ceiling fires before
+        // the combined ceiling (1_048_576 * 0.95 = 996_147).
+        let settings = CompactionSettings::default();
+        assert!(should_compact(996_148, 1_048_576, 32_000, &settings));
+        assert!(!should_compact(996_000, 1_048_576, 32_000, &settings));
+    }
+
+    #[test]
+    fn threshold_combined_ceiling_guards_small_windows() {
+        // A 128k window with a 32k output budget: pure 95% (124_518) would
+        // under-reserve — the combined ceiling (131_072 - 32_768 - 16_384
+        // = 81_920) comes first.
+        let settings = CompactionSettings::default();
+        assert_eq!(compaction_threshold(131_072, 32_768, &settings), 81_920);
+        assert!(should_compact(82_000, 131_072, 32_768, &settings));
+        assert!(!should_compact(81_000, 131_072, 32_768, &settings));
+    }
+
+    #[test]
+    fn threshold_headroom_floor_covers_estimate_error() {
+        // A tiny reserve still keeps the 4_096 estimate-error floor:
+        // 131_072 - 32_768 - 4_096 = 94_208 < the 95% ceiling.
+        let settings = CompactionSettings {
+            enabled: true,
+            reserve_tokens: 1,
+            keep_recent_tokens: 10,
+        };
+        assert_eq!(compaction_threshold(131_072, 32_768, &settings), 94_208);
+        // An output budget that cannot fit any context disables the
+        // trigger (the TS degenerate-config semantics: compaction cannot
+        // fix it; overflow recovery remains the backstop).
+        assert_eq!(
+            compaction_threshold(128_000, 124_000, &CompactionSettings::default()),
+            0
+        );
+        assert!(!should_compact(
+            126_000,
+            128_000,
+            124_000,
+            &CompactionSettings::default()
+        ));
     }
 
     #[test]
@@ -580,14 +728,14 @@ mod tests {
             user_message("kept turn", 5),
             assistant_message(126_010, 6),
         ];
-        assert!(!threshold_compaction_due(&messages, 128_000, &settings));
+        assert!(!threshold_compaction_due(&messages, 128_000, 0, &settings));
         // A post-compaction usage crossing still fires.
         let messages = vec![
             compaction_summary(10),
             user_message("new turn", 11),
             assistant_message(126_010, 12),
         ];
-        assert!(threshold_compaction_due(&messages, 128_000, &settings));
+        assert!(threshold_compaction_due(&messages, 128_000, 0, &settings));
     }
 
     #[test]
@@ -613,14 +761,15 @@ mod tests {
     #[test]
     fn should_compact_threshold() {
         let settings = CompactionSettings::default();
-        assert!(should_compact(120_000, 128_000, &settings)); // > 128k - 16k
-        assert!(!should_compact(100_000, 128_000, &settings));
+        // No output budget: the default reserve headroom decides.
+        assert!(should_compact(120_000, 128_000, 0, &settings)); // > 128k - 16k
+        assert!(!should_compact(100_000, 128_000, 0, &settings));
         let disabled = CompactionSettings {
             enabled: false,
             ..settings
         };
-        assert!(!should_compact(200_000, 128_000, &disabled));
-        assert!(!should_compact(1, 0, &settings));
+        assert!(!should_compact(200_000, 128_000, 0, &disabled));
+        assert!(!should_compact(1, 0, 0, &settings));
     }
 
     #[test]

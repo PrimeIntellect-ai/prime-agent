@@ -169,10 +169,24 @@ pub(crate) fn render_injected_prompt(
     theme: &Theme,
     width: usize,
 ) -> Vec<Line> {
+    let mut out = vec![spacer()];
+    let header = prompt_header(row, detail, theme);
+    out.extend(text_rows(header, width));
+    if let Some(body) = expanded_prompt_body(row, detail) {
+        out.extend(markdown_rows(
+            body,
+            ThemeColor::CustomMessageText,
+            theme,
+            width,
+        ));
+    }
+    out
+}
+
+fn prompt_header(row: &InjectedPromptRow, detail: Detail, theme: &Theme) -> Line {
     let muted = theme.fg_style(ThemeColor::Muted);
     let dim = theme.fg_style(ThemeColor::Dim);
     let accent = theme.fg_style(ThemeColor::Accent);
-    let mut out = vec![spacer()];
     let expanded = detail.tool_output_expanded();
     // TS `InjectedPromptMessageComponent.updateDisplay`: the header always
     // renders; the expanded form adds the markdown body below it (the
@@ -232,18 +246,26 @@ pub(crate) fn render_injected_prompt(
     if !expanded && row.body.is_some() {
         header.push(Span::styled(" ".to_string(), dim));
     }
-    out.extend(text_rows(header, width));
-    if expanded {
-        if let Some(body) = &row.body {
-            out.extend(markdown_rows(
-                body,
-                ThemeColor::CustomMessageText,
-                theme,
-                width,
-            ));
-        }
-    }
-    out
+    header
+}
+
+pub(crate) fn count_injected_prompt(
+    row: &InjectedPromptRow,
+    detail: Detail,
+    theme: &Theme,
+    width: usize,
+) -> usize {
+    let header = prompt_header(row, detail, theme);
+    let body = expanded_prompt_body(row, detail).map_or(0, |body| {
+        super::geometry::markdown_row_count(body, ThemeColor::CustomMessageText, theme, width)
+    });
+    1 + super::geometry::text_row_count(&header, width) + body
+}
+
+fn expanded_prompt_body(row: &InjectedPromptRow, detail: Detail) -> Option<&str> {
+    row.body
+        .as_deref()
+        .filter(|_| detail.tool_output_expanded())
 }
 
 /// TS `heartbeatPromptSchedule` over `compactHeartbeatSchedule`: a blank
@@ -290,6 +312,46 @@ fn goal_meta(objective: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn geometry_matches_injected_rendering() {
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let kinds = [
+            InjectedPromptKind::Heartbeat {
+                schedule: Some("every 5 minutes".into()),
+            },
+            InjectedPromptKind::Goal {
+                kind: Some("continuation".into()),
+                objective: Some("long 数据 objective".repeat(10)),
+            },
+            InjectedPromptKind::KernelRestored { restored: true },
+            InjectedPromptKind::RlmChildStatus {
+                outcome: RlmChildOutcome::Failed,
+                session_name: "child 数据".into(),
+            },
+        ];
+        for kind in kinds {
+            for body in [
+                None,
+                Some(String::new()),
+                Some("**bold**\n\n| a | b |\n| --- | --- |\n| 数据 | test |".into()),
+            ] {
+                let row = InjectedPromptRow {
+                    kind: kind.clone(),
+                    body,
+                };
+                for detail in [Detail::Overview, Detail::Details, Detail::All] {
+                    let counts: Vec<_> = (0..70)
+                        .map(|width| count_injected_prompt(&row, detail, &theme, width))
+                        .collect();
+                    let rendered: Vec<_> = (0..70)
+                        .map(|width| render_injected_prompt(&row, detail, &theme, width).len())
+                        .collect();
+                    assert_eq!(counts, rendered);
+                }
+            }
+        }
+    }
+
     use super::*;
     use crate::chat::Detail;
     use crate::theme::{ColorMode, Theme};

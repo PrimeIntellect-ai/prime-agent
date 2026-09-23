@@ -32,6 +32,31 @@ pub(crate) struct WorkerRequest {
     pub(crate) payload: Value,
 }
 
+/// Command-route liveness for one resident worker, watched by the
+/// supervisor's replacement-aware route (`route_command_ready`):
+/// `connected` tracks the live worker socket (both supervisor-side pumps
+/// flip it false when the connection dies), `session_ready` marks the
+/// worker's session-create boundary (a fresh create and a replacement's
+/// create replay; a client command must never overtake it), and `retired`
+/// marks a worker that will not come back (restart give-up, intentional
+/// stop) so waiting routes fail fast instead of parking on the deadline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WorkerRouteState {
+    pub(crate) connected: bool,
+    pub(crate) session_ready: bool,
+    pub(crate) retired: bool,
+}
+
+impl WorkerRouteState {
+    fn initial() -> Self {
+        Self {
+            connected: false,
+            session_ready: false,
+            retired: false,
+        }
+    }
+}
+
 /// One resident session worker: the durable identity (descriptor) plus the
 /// live request channel once the supervisor has connected to the worker.
 pub(crate) struct ResidentWorker {
@@ -65,6 +90,14 @@ pub(crate) struct ResidentWorker {
     /// which captured an older generation — can never store itself back
     /// as fresh over a newer invalidation.
     pub(crate) heartbeat_snapshot_generation: AtomicU64,
+    /// Route liveness, published to waiters through a watch channel (the
+    /// replacement-aware route clones a receiver and sleeps until the
+    /// worker is route-ready or retired).
+    route_state_tx: tokio::sync::watch::Sender<WorkerRouteState>,
+    /// Monotonic connection epoch: only the pumps of the current
+    /// connection may flip `connected` false, so a superseded socket's
+    /// late EOF cannot retire a live replacement.
+    connection_epoch: AtomicU64,
 }
 
 /// The last-good heartbeats rows a worker answered with, tagged with the
@@ -83,6 +116,7 @@ impl ResidentWorker {
         descriptor: DaemonWorkerDescriptor,
         descriptor_path: PathBuf,
     ) -> Arc<Self> {
+        let (route_state_tx, _) = tokio::sync::watch::channel(WorkerRouteState::initial());
         Arc::new(ResidentWorker {
             worker_id,
             descriptor: Mutex::new(descriptor),
@@ -95,7 +129,77 @@ impl ResidentWorker {
             peer_transport_capable: AtomicBool::new(false),
             heartbeat_snapshot: Mutex::new(None),
             heartbeat_snapshot_generation: AtomicU64::new(0),
+            route_state_tx,
+            connection_epoch: AtomicU64::new(0),
         })
+    }
+
+    pub(crate) fn route_state(&self) -> WorkerRouteState {
+        *self.route_state_tx.borrow()
+    }
+
+    /// A receiver that follows every route-state transition (the
+    /// replacement-aware route waits on it).
+    pub(crate) fn route_state_watcher(&self) -> tokio::sync::watch::Receiver<WorkerRouteState> {
+        self.route_state_tx.subscribe()
+    }
+
+    fn publish_route_state(&self, edit: impl FnOnce(&mut WorkerRouteState)) {
+        self.route_state_tx.send_if_modified(|state| {
+            let mut next = *state;
+            edit(&mut next);
+            if next == *state {
+                false
+            } else {
+                *state = next;
+                true
+            }
+        });
+    }
+
+    /// The supervisor wired a live worker socket (a fresh launch, a
+    /// replacement relaunch, or an adoption): connections become routable
+    /// from this moment. Returns the connection's epoch, which the
+    /// reader/writer pumps carry so only this connection can retire it.
+    pub(crate) fn note_connection_live(&self) -> u64 {
+        let epoch = self
+            .connection_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.publish_route_state(|state| state.connected = true);
+        epoch
+    }
+
+    /// A connection's pumps ended (worker death or socket close). Stale
+    /// epochs (a superseded connection ending late) never flip the state.
+    pub(crate) fn note_connection_lost(&self, epoch: u64) {
+        if epoch
+            != self
+                .connection_epoch
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
+        self.publish_route_state(|state| state.connected = false);
+    }
+
+    /// The worker's session create completed (the fresh create response or
+    /// the replacement's create replay): client commands may now be routed
+    /// to it without overtaking the session into existence.
+    pub(crate) fn note_session_ready(&self) {
+        self.publish_route_state(|state| state.session_ready = true);
+    }
+
+    /// A replacement started: the create replay is pending, so routed
+    /// commands must wait for the replayed session.
+    pub(crate) fn note_session_replaying(&self) {
+        self.publish_route_state(|state| state.session_ready = false);
+    }
+
+    /// The worker will not come back (restart give-up or an intentional
+    /// stop): waiting routes fail fast instead of parking.
+    pub(crate) fn note_retired(&self) {
+        self.publish_route_state(|state| state.retired = true);
     }
 
     /// Selector labels: root active session id, session-file stem, name.

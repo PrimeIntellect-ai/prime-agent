@@ -531,7 +531,7 @@ impl PrintGoalSurface {
     pub(crate) async fn natural_continuation(
         &self,
         engine: &Arc<SessionEngine>,
-        context_window: u64,
+        model: &pa_types::ai::Model,
     ) -> NaturalContinuation {
         // TS `_getContinuationMessages`: queued session input owns
         // the boundary before any goal work — the armed budget steer
@@ -550,7 +550,7 @@ impl PrintGoalSurface {
         // `turn_end` and `agent_end`, the TS event order); the boundary
         // compacts, and the driver runs the held turn as the
         // post-compaction turn.
-        if engine.session.auto_compaction_due(context_window).await {
+        if engine.session.auto_compaction_due(model).await {
             if let Some(message) = engine.mint_goal_continuation().await {
                 self.publish_goal_update(engine).await;
                 self.hold_threshold_continuation(message).await;
@@ -1230,15 +1230,20 @@ mod tests {
     #[tokio::test]
     async fn threshold_hold_mints_before_the_compaction_and_runs_after() {
         let _guard = FAUX_TEST_LOCK.lock().await;
+        // A small output budget keeps the 20k window's combined
+        // input+output ceiling satisfiable (threshold 13_904: window
+        // minus the 2_000 budget and the 4_096 estimate-error floor).
+        let mut model_script = script(
+            json!([
+                "crossing reply",
+                "the compaction summary",
+                "continuation reply",
+            ]),
+            20_000,
+        );
+        model_script["maxTokens"] = json!(2_000);
         let bed = goal_bed_with_resumed_goal(
-            script(
-                json!([
-                    "crossing reply",
-                    "the compaction summary",
-                    "continuation reply",
-                ]),
-                20_000,
-            ),
+            model_script,
             json!({
                 "compaction": {
                     "enabled": true,

@@ -59,7 +59,15 @@ pub fn parse_faux_script(script: &Value) -> Result<FauxScript, String> {
                 .and_then(Value::as_u64)
                 .unwrap_or(128_000),
         ),
-        max_tokens: Some(16_384),
+        // The default request budget mirrors the registry faux model;
+        // scripts override it (the combined input+output ceiling fixtures
+        // need a small window and a small output budget).
+        max_tokens: Some(
+            object
+                .get("maxTokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(16_384),
+        ),
     };
     let tokens_per_second = object
         .get("tokensPerSecond")

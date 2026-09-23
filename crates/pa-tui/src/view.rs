@@ -22,9 +22,12 @@ use crate::{Line, Span};
 use pa_types::slash_commands::SlashCommandRegistry;
 use ratatui::style::{Modifier, Style};
 
+mod geometry;
 mod layout;
+pub(crate) mod lazy;
+mod restyle;
 
-use layout::{EntryLayout, TranscriptWindow};
+use layout::EntryLayout;
 
 /// Minimum transcript rows when the dock would crowd them out
 /// (TS `FULLSCREEN_MIN_TRANSCRIPT_ROWS`).
@@ -163,17 +166,26 @@ pub struct AgentView {
     /// re-emits rows whose content changed (mirroring the TS renderer,
     /// which writes a row's marker sequences when it rewrites that row).
     osc_last_rows: std::collections::HashMap<usize, String>,
-    /// Rendered rows per chat entry (incremental layout): a frame re-renders
+    /// Rendered rows per chat entry and detail mode: a frame re-renders
     /// only entries invalidated since the last frame; settled entries keep
     /// their cached rows instead of re-running markdown and code previews.
-    /// A transcript-scale frame pays full layout cost once per entry, not
+    /// A transcript-scale frame pays full layout cost once per entry/detail, not
     /// once per draw. Each slot also stores the spacing decision its rows
     /// were laid out under (TS keeps every component's rendered lines
     /// resident and recomputes only the dynamic conversation-spacing
     /// decision per frame): a settled entry survives a live stream — the
     /// pre-fix render loop re-rendered every agent message in the
     /// transcript on every streaming delta, the dogfood CPU spin.
-    entry_layout: Vec<Option<EntryLayout>>,
+    entry_layout: Vec<[Option<EntryLayout>; 3]>,
+    entry_heights: Vec<[Option<(bool, usize)>; 3]>,
+    sparse_window: Option<lazy::SparseWindow>,
+    sparse_enabled: bool,
+    /// The height of the entry an in-place mutation is about to change,
+    /// captured by `prepare_entry_mutation` and consumed by
+    /// `mark_entry_stale` to grow the sparse window's tail bookkeeping by
+    /// the mutation's delta instead of resolving the whole geometry.
+    sparse_mutation: Option<(usize, usize)>,
+    sparse_entries: std::collections::BTreeSet<usize>,
     /// Per-assistant-entry markdown block caches (TS `Markdown.blockCache`,
     /// one per component instance): a streaming message re-renders every
     /// frame, so its settled blocks replay from the cache instead of
@@ -183,9 +195,9 @@ pub struct AgentView {
     md_caches:
         std::cell::RefCell<std::collections::HashMap<usize, crate::markdown::MarkdownBlockCache>>,
     /// The width the cached rows were laid out for.
-    layout_width: usize,
-    /// The conversation-detail mode the cached rows were laid out for.
-    layout_detail: Detail,
+    pub(crate) layout_width: usize,
+    /// Rendering options that affect cached entry rows.
+    layout_options: Option<(Theme, String, bool, bool)>,
     /// Row texts of the inline frame at the last main-screen flush (TS
     /// `exitFullscreen`'s inline repaint): the next flush diffs against
     /// this, so suspend/resume/exit cycles never duplicate the transcript
@@ -197,6 +209,10 @@ pub struct AgentView {
     /// In-app mouse text selection (TS `FullscreenViewport`'s selection
     /// state): anchor/head points, the mode, and the frame snapshot.
     pub(crate) selection: crate::selection::SelectionState,
+    /// The selection restyle cache (TS re-styles rendered rows per
+    /// frame; the window re-styles only the rows the selection change
+    /// touched): walked base rows, their styled copies, and the spans.
+    pub(crate) selection_restyle: restyle::SelectionRestyle,
 }
 
 impl AgentView {
@@ -239,12 +255,18 @@ impl AgentView {
             window_rows: 0,
             osc_last_rows: std::collections::HashMap::new(),
             entry_layout: Vec::new(),
+            entry_heights: Vec::new(),
+            sparse_window: None,
+            sparse_enabled: true,
+            sparse_entries: std::collections::BTreeSet::new(),
             md_caches: std::cell::RefCell::new(std::collections::HashMap::new()),
             layout_width: 0,
-            layout_detail: Detail::Overview,
+            layout_options: None,
             flushed_frame: Vec::new(),
             frame_rows: 0,
             selection: crate::selection::SelectionState::default(),
+            selection_restyle: restyle::SelectionRestyle::default(),
+            sparse_mutation: None,
         }
     }
 
@@ -293,10 +315,13 @@ impl AgentView {
     }
 
     /// Append one chat component (no cached layout yet: the next frame
-    /// renders it and stores its rows).
+    /// renders it and stores its rows). A paused window keeps its rows:
+    /// the append folds into the sparse window's tail bookkeeping (TS
+    /// keeps `scrollTop` while content appends), never a geometry resolve.
     pub fn push_entry(&mut self, entry: ChatEntry) {
         self.chat.push(entry);
-        self.entry_layout.push(None);
+        self.entry_layout.push([None, None, None]);
+        self.sparse_note_append();
     }
 
     /// The number of chat entries (the status-row in-place update checks
@@ -314,6 +339,7 @@ impl AgentView {
         text: &str,
         kind: crate::chat::StatusKind,
     ) -> bool {
+        self.prepare_entry_mutation(index);
         let Some(ChatEntry::Status {
             text: slot,
             kind: kind_slot,
@@ -387,19 +413,38 @@ impl AgentView {
                     result: Some(view),
                     ..Default::default()
                 })));
-            self.entry_layout.push(None);
+            self.entry_layout.push([None, None, None]);
+            self.sparse_note_append();
             return;
         }
         self.chat.push(item_to_entry(item));
-        self.entry_layout.push(None);
+        self.entry_layout.push([None, None, None]);
+        self.sparse_note_append();
     }
 
     /// Drop the whole transcript and its cached layout (a fresh snapshot
     /// rebuild re-renders every row).
     pub fn clear_chat(&mut self) {
+        self.sparse_enabled = true;
+        self.sparse_entries.clear();
+        self.sparse_window = None;
         self.chat.clear();
         self.entry_layout.clear();
+        self.entry_heights.clear();
         self.md_caches.borrow_mut().clear();
+    }
+
+    /// Prepare an in-place mutation of one entry: capture its current
+    /// height so `mark_entry_stale` folds the growth into the sparse
+    /// window's tail bookkeeping instead of resolving the whole geometry
+    /// (a streaming delta on a paused or selecting view re-styles the
+    /// entry's rows, never the transcript). Top-anchored windows are
+    /// absolute already and need nothing.
+    pub fn prepare_entry_mutation(&mut self, index: usize) {
+        if self.sparse_window_is_tail_anchored() && self.layout_width > 0 {
+            let rows = self.count_entry_rows(index, self.layout_width);
+            self.sparse_mutation = Some((index, rows));
+        }
     }
 
     /// Mark one chat entry's cached rows stale: a mutation changed its
@@ -411,8 +456,17 @@ impl AgentView {
     /// mutation point, which is the animating tail in the streaming case,
     /// not the whole transcript.
     pub fn mark_entry_stale(&mut self, index: usize) {
+        if let Some((pending, before)) = self.sparse_mutation.take() {
+            if pending == index && self.layout_width > 0 {
+                let after = self.count_entry_rows(index, self.layout_width);
+                self.sparse_tail_delta(after as isize - before as isize, index);
+            }
+        }
         if let Some(slot) = self.entry_layout.get_mut(index) {
-            *slot = None;
+            *slot = [None, None, None];
+        }
+        if let Some(slot) = self.entry_heights.get_mut(index) {
+            *slot = [None, None, None];
         }
         for (offset, entry) in self.chat.iter().enumerate().skip(index + 1) {
             if matches!(
@@ -420,7 +474,10 @@ impl AgentView {
                 ChatEntry::AgentMessage(_) | ChatEntry::ShellCompletion(_) | ChatEntry::Tool(_)
             ) {
                 if let Some(slot) = self.entry_layout.get_mut(offset) {
-                    *slot = None;
+                    *slot = [None, None, None];
+                }
+                if let Some(slot) = self.entry_heights.get_mut(offset) {
+                    *slot = [None, None, None];
                 }
             }
         }
@@ -445,6 +502,11 @@ impl AgentView {
     /// a following view pages from the tail; scrolling up pauses following
     /// and reaching the bottom resumes it.
     pub fn scroll_by(&mut self, delta: isize) {
+        if let Some(window) = &mut self.sparse_window {
+            window.scroll_by(delta);
+            self.following = window.at_tail();
+            return;
+        }
         let base = if self.following {
             self.last_max_scroll
         } else {
@@ -460,19 +522,28 @@ impl AgentView {
     /// Jump to the transcript start (TS `scrollToTop`); an empty transcript
     /// keeps following.
     pub fn scroll_to_top(&mut self) {
+        if self.has_selection() {
+            self.resolve_sparse_geometry();
+        }
+        self.sparse_window = Some(lazy::SparseWindow::top(self.detail, self.layout_width));
         self.scroll_top = 0;
-        self.following = self.last_max_scroll == 0;
+        self.following = self.chat.is_empty();
     }
 
     /// Jump to the transcript end and resume following (TS
     /// `scrollToBottom`).
     pub fn scroll_to_bottom(&mut self) {
+        if self.has_selection() {
+            self.resolve_sparse_geometry();
+        }
+        self.sparse_window = None;
         self.scroll_top = self.last_max_scroll;
         self.following = true;
     }
 
     /// Resume following (fresh attach, session switch).
     pub fn follow(&mut self) {
+        self.sparse_window = None;
         self.following = true;
     }
 
@@ -488,7 +559,8 @@ impl AgentView {
     }
 
     /// Scroll state of the last composed frame (TS `ScrollInfo`).
-    pub fn scroll_info(&self) -> ScrollInfo {
+    pub fn scroll_info(&mut self) -> ScrollInfo {
+        self.resolve_sparse_geometry();
         ScrollInfo {
             following: self.following,
             lines_above: self.scroll_top,
@@ -583,6 +655,8 @@ impl AgentView {
         first: bool,
         preceded_by_tool_activity: bool,
     ) -> Vec<Line> {
+        #[cfg(test)]
+        layout::ENTRY_RENDERS.with(|count| count.set(count.get() + 1));
         match entry {
             ChatEntry::Status { text, kind } => {
                 let style = match kind {
@@ -1113,43 +1187,17 @@ impl AgentView {
         let window_height = height
             .saturating_sub(top_rows + dock.len())
             .max(FULLSCREEN_MIN_TRANSCRIPT_ROWS.min(height.saturating_sub(top_rows + dock.len())));
-        // The transcript layout: the frame composes only its scroll window
-        // (the layout pass counts rows, then the window slice clones
-        // `window_height` rows from the cached layouts — a long settled
-        // transcript costs nothing per frame, the layout-cost cut the
-        // dogfood spin needed); a live transcript selection keeps the
-        // whole compose so the copy buffer's text stays fresh.
-        let transcript: TranscriptWindow = if self.transcript_selection_active() {
-            TranscriptWindow::Full(self.render_transcript(width))
-        } else {
-            TranscriptWindow::Window(self.layout_pass(width))
-        };
-        let transcript_len = transcript.len();
-        let max_scroll = transcript_len.saturating_sub(window_height);
-        if self.following {
-            self.scroll_top = max_scroll;
-        } else {
-            self.scroll_top = self.scroll_top.min(max_scroll);
-        }
-        self.last_max_scroll = max_scroll;
-        let start = self.scroll_top.min(max_scroll);
+        let (window_rows, start) = self.visible_transcript_window(width, window_height);
         self.window_rows = window_height;
+        // The selection restyle diff: only the rows the selection change
+        // touched re-style; the rest reuse the cached styled rows.
+        let window_rows = self.selection_styled_window(window_rows, start);
         let mut frame: Vec<Line> = Vec::with_capacity(height);
         if let Some(top) = top {
             frame.push(pad_row(top, width));
         }
-        let window_rows: Vec<Line> = match transcript {
-            TranscriptWindow::Full(rows) => {
-                self.note_transcript_text(&rows);
-                rows[start..(start + window_height).min(rows.len())].to_vec()
-            }
-            TranscriptWindow::Window(layout) => {
-                self.transcript_window(&layout, start, window_height)
-            }
-        };
-        for (window_index, line) in window_rows.iter().enumerate() {
-            let row = self.highlight_transcript_row(line, start + window_index);
-            frame.push(pad_row(row, width));
+        for line in window_rows {
+            frame.push(pad_row(line, width));
         }
         while frame.len() < height.saturating_sub(dock.len()) {
             frame.push(vec![Span::raw(" ".repeat(width))]);

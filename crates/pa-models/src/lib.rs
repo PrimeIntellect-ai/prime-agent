@@ -33,7 +33,7 @@ pub mod transports;
 
 mod chain;
 
-pub use chain::{ModelCatalog, RefreshTrigger};
+pub use chain::{ModelCatalog, PrimeCredentials, RefreshTrigger};
 pub use pa_types::ai::Model;
 
 /// Refresh cadence: every [`CATALOG_REFRESH_INTERVAL_MS`] milliseconds

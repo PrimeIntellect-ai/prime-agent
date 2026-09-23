@@ -21,6 +21,8 @@
 //! drops unknown types instead; the live interactive path is the TUI ground
 //! truth, and the Rust engine persists those types with `display: false`.)
 
+pub(crate) mod geometry;
+pub(crate) use geometry::agent_message_body_count;
 pub(crate) mod injected_prompt;
 pub(crate) mod refinement;
 pub(crate) mod render;

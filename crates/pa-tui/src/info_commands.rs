@@ -746,6 +746,38 @@ fn styled_spans(row: &[ClientSpan], theme: &Theme) -> Line {
         .collect()
 }
 
+/// Count client text using the same styled input runs as rendering.
+pub(crate) fn client_text_row_count(rows: &[ClientLine], theme: &Theme, width: usize) -> usize {
+    1 + rows
+        .iter()
+        .map(|row| {
+            crate::width::wrapped_line_count(
+                &styled_spans(row, theme),
+                width.saturating_sub(2).max(1),
+            )
+        })
+        .sum::<usize>()
+}
+
+fn changelog_style(theme: &Theme, code_block_indent: &str) -> crate::markdown::MarkdownStyle {
+    let mut md = crate::markdown::MarkdownStyle::from_theme(theme);
+    md.code_block_indent = code_block_indent.to_string();
+    md
+}
+
+pub(crate) fn changelog_panel_row_count(
+    markdown: &str,
+    theme: &Theme,
+    code_block_indent: &str,
+    width: usize,
+) -> usize {
+    7 + crate::markdown::markdown_row_count(
+        markdown.trim(),
+        width.saturating_sub(2).max(1),
+        &changelog_style(theme, code_block_indent),
+    )
+}
+
 /// TS `Spacer(1)` + `Text(info, 1, 0)`: one blank row, then each source
 /// line wrapped at `width - 2` with a one-column margin on each side and
 /// rows padded to the full width (continuation rows pad inside the open
@@ -792,8 +824,7 @@ pub fn render_changelog_panel(
     rows.push(crate::chat::pad_to(title, width, Style::default()));
     rows.push(Vec::new());
     rows.push(Vec::new());
-    let mut md = crate::markdown::MarkdownStyle::from_theme(theme);
-    md.code_block_indent = code_block_indent.to_string();
+    let md = changelog_style(theme, code_block_indent);
     rows.extend(crate::chat::render_markdown_block(
         markdown,
         &md,
@@ -819,6 +850,34 @@ mod tests {
 
     fn json(text: &str) -> Value {
         serde_json::from_str(text).expect("fixture json")
+    }
+
+    #[test]
+    fn geometry_matches_client_and_changelog_rows() {
+        let theme = Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let rows = vec![
+            vec![],
+            vec![raw_span("  ")],
+            vec![dim("prefix "), raw_span("wide 界 words words")],
+        ];
+        for width in [0, 1, 2, 7, 23, 80] {
+            assert_eq!(
+                client_text_row_count(&rows, &theme, width),
+                render_client_text(&rows, &theme, width).len()
+            );
+            for markdown in [
+                "",
+                "  ",
+                "# Heading\n\nwrapped words 界 words",
+                "| a | b |\n|---|---|\n| x | y |",
+                "```python\nprint(1)\n```",
+            ] {
+                assert_eq!(
+                    changelog_panel_row_count(markdown, &theme, "    ", width),
+                    render_changelog_panel(markdown, &theme, "    ", width).len()
+                );
+            }
+        }
     }
 
     #[test]

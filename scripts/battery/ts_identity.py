@@ -52,9 +52,15 @@ def default_rust_binary():
 
 def probe_version(command):
     """The first line of a prime-agent binary's `--version` output."""
+    # The probe must isolate the binary's own product identity: a Rust
+    # build launched with PI_PACKAGE_DIR pointed at a TS release reports
+    # the installed package's version, which false-positives the
+    # same-product refusal (seen in a sandbox harness run where the
+    # release sidecar dir IS the TS release dir).
+    env = {k: v for k, v in os.environ.items() if k != "PI_PACKAGE_DIR"}
     try:
         result = subprocess.run(
-            f"{command} --version", shell=True, capture_output=True, text=True, timeout=60
+            f"{command} --version", shell=True, capture_output=True, text=True, timeout=60, env=env,
         )
     except subprocess.TimeoutExpired:
         return ""

@@ -1345,11 +1345,12 @@ fn compaction_metas(updates: &[Value]) -> Vec<Value> {
 /// the `compaction` meta with the summarizer's text (TS `_checkCompaction`
 /// threshold arm, binary level).
 ///
-/// Two turns over a 500-token headroom (the f14 battery shape): the
-/// single-turn compaction skips (nothing before the turn to summarize —
-/// the skip publishes the empty payload, proving the arm ran), then the
-/// second turn's boundary compaction summarizes turn one and publishes
-/// its result.
+/// Two turns over a 500-token combined ceiling (the f14 battery shape:
+/// the window minus the faux harness model's 4_096 per-request output
+/// budget and the reserve): the single-turn compaction skips (nothing
+/// before the turn to summarize — the skip publishes the empty payload,
+/// proving the arm ran), then the second turn's boundary compaction
+/// summarizes turn one and publishes its result.
 #[test]
 fn acp_threshold_auto_compaction_publishes_the_compaction_meta() {
     let script = json!({
@@ -1360,8 +1361,12 @@ fn acp_threshold_auto_compaction_publishes_the_compaction_meta() {
             { "text": "the auto summary" },
         ]
     });
-    let mut client =
-        spawn_with_compaction_settings(&["--mode", "acp", "--no-session"], &script, 127_500, 10);
+    let mut client = spawn_with_compaction_settings(
+        &["--mode", "acp", "--no-session"],
+        &script,
+        128_000 - 4_096 - 500,
+        10,
+    );
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request("session/new", json!({ "mcpServers": [] }));

@@ -46,8 +46,7 @@ pub(crate) fn markdown_rows(
     width: usize,
 ) -> Vec<Line> {
     let content_width = width.saturating_sub(2).max(1);
-    let mut md = crate::markdown::MarkdownStyle::from_theme(theme);
-    md.body = theme.fg_style(body_color);
+    let md = super::geometry::markdown_style(body_color, theme);
     crate::markdown::render_markdown(text, content_width, &md)
         .into_iter()
         .map(|line| {
@@ -132,7 +131,7 @@ pub(crate) fn render_agent_message(
 /// The summary header with the preview truncated to fit the line: the
 /// label and participant keep TS geometry, the preview gets the remaining
 /// width with the `…` ellipsis so the header stays one row.
-fn agent_message_header(row: &AgentMessageRow, theme: &Theme, width: usize) -> Line {
+pub(super) fn agent_message_header(row: &AgentMessageRow, theme: &Theme, width: usize) -> Line {
     let content_width = width.saturating_sub(2).max(1);
     let base = agent_message_summary_line(row.direction, &row.participant, None, theme);
     let Some(preview) = agent_message_preview(&row.message) else {
@@ -164,7 +163,7 @@ fn agent_message_header(row: &AgentMessageRow, theme: &Theme, width: usize) -> L
 /// in `customMessageText`, truncated to the width.
 pub(crate) fn agent_message_body(message: &str, theme: &Theme, width: usize) -> Vec<Line> {
     let safe_width = width.max(1);
-    let text_width = safe_width.saturating_sub(4).max(1);
+    let text_width = super::geometry::agent_body_width(width);
     let body = theme.fg_style(ThemeColor::CustomMessageText);
     let mut lines: Vec<Line> = Vec::new();
     for source in message.split('\n') {
@@ -281,8 +280,7 @@ pub(crate) fn render_custom_panel(row: &CustomPanelRow, theme: &Theme, width: us
     // The box's internal `Spacer(1)`: one blank surface row.
     out.push(blank.clone());
     if !row.content.trim().is_empty() {
-        let mut md = crate::markdown::MarkdownStyle::from_theme(theme);
-        md.body = theme.fg_style(ThemeColor::CustomMessageText);
+        let md = super::geometry::custom_panel_style(theme);
         for line in crate::markdown::render_markdown(&row.content, content_width, &md) {
             out.push(box_row(line, bg, width));
         }

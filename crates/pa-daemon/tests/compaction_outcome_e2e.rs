@@ -113,6 +113,21 @@ fn crossing_usage() -> Value {
     })
 }
 
+/// The dashboard status-line recap (`status_line.rs`) rides the same
+/// provider entry, so its request also lands on the mock. It summarizes
+/// the session's user-visible rows -- the outcome disclosure included --
+/// so the wire-purity scan over model-context requests must skip it.
+fn is_status_line_request(body: &Value) -> bool {
+    body["messages"].as_array().is_some_and(|messages| {
+        messages.iter().any(|message| {
+            message["role"] == "system"
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("You generate a status line"))
+        })
+    })
+}
+
 fn is_summarizer_request(body: &Value) -> bool {
     body["messages"].as_array().is_some_and(|messages| {
         messages.iter().any(|message| {
@@ -380,12 +395,14 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
         .to_string(),
     )
     .expect("write models.json");
-    // The f14-auto battery settings shape: a 500-token headroom on the
-    // 128k window and a tiny keep-recent budget so the seeded turns are
-    // summarizable.
+    // The f14-auto battery settings shape: a tiny reserve (the 4_096
+    // estimate-error floor governs the headroom), so the combined
+    // input+output ceiling sits at 119_808 on the 128k window — the
+    // 126_010 crossing fires. A tiny keep-recent budget keeps the seeded
+    // turns summarizable.
     std::fs::write(
         agent_dir.join("settings.json"),
-        json!({ "compaction": {"enabled": true, "reserveTokens": 127500, "keepRecentTokens": 10} })
+        json!({ "compaction": {"enabled": true, "reserveTokens": 500, "keepRecentTokens": 10} })
             .to_string(),
     )
     .expect("write settings.json");
@@ -560,7 +577,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     let requests = mock.requests.lock().expect("mock lock").clone();
     let next_turn_request = requests[before_next..]
         .iter()
-        .find(|body| !is_summarizer_request(body))
+        .find(|body| !is_summarizer_request(body) && !is_status_line_request(body))
         .expect("the next turn reached the provider")
         .clone();
     let serialized = serde_json::to_string(&next_turn_request).expect("serialize request");

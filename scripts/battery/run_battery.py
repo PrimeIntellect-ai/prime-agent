@@ -4271,20 +4271,22 @@ class Battery:
         after the settled collapsed frame it presses Ctrl+O twice to the
         `all` detail (the markdown body + `Compacted from N tokens`
         metadata), then once more to re-collapse.
-        Settings shape both: reserveTokens 127500 leaves a 500-token
-        headroom on the 128k mock model (the mock-reported 126k usage
-        crosses it), and keepRecentTokens 10 makes the seeded turns
-        compactable (the TS compactor skips sessions whose recent history
-        already fits keepRecentTokens with "Session is too short to
-        compact" — the frozen 20260918T190022Z partial run showed exactly
-        that skip with the default 20000). Frame diff TS vs Rust at each
-        key moment."""
+        Settings shape both: reserveTokens 4096 puts the
+        mock-reported 126k usage over the crossing on both products (TS
+        at window - reserve = 123904; Rust at the combined input+output
+        ceiling 128000 - 4096 output budget - 4096 headroom = 119808),
+        and keepRecentTokens 10 makes the seeded turns compactable (the
+        TS compactor skips sessions whose recent history already fits
+        keepRecentTokens with "Session is too short to compact" — the
+        frozen 20260918T190022Z partial run showed exactly that skip
+        with the default 20000). Frame diff TS vs Rust at each key
+        moment."""
         flow = "f14_compact"
         reply = "f14 parity fixture reply"
         frames: dict[str, dict[str, str]] = {"ts": {}, "rust": {}}
         for side in (self.sides["ts"], self.sides["rust"]):
             settings = self.suppress_first_run_notices(side)
-            settings["compaction"] = {"enabled": True, "reserveTokens": 127500, "keepRecentTokens": 10}
+            settings["compaction"] = {"enabled": True, "reserveTokens": 4096, "keepRecentTokens": 10}
             settings_path = side.agent_dir / "settings.json"
             settings_path.write_text(json.dumps(settings))
             # -- session A: manual /compact --------------------------------

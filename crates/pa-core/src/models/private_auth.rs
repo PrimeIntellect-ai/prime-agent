@@ -38,7 +38,10 @@ pub fn private_prime_authorization_fingerprint(api_key: &str, team_id: &str) -> 
 }
 
 /// Fetch the team's authorized private models; 401/403 settle to empty.
+/// `base_url` is the Prime Inference API base (the shared catalog's, so
+/// hermetic tests aim the whole flow at a local server).
 pub async fn fetch_authorized_private_prime_inference_models(
+    base_url: &str,
     api_key: &str,
     team_headers: &HashMap<String, String>,
     public_model_ids: &HashSet<String>,
@@ -49,7 +52,8 @@ pub async fn fetch_authorized_private_prime_inference_models(
     }
     let mut headers = team_headers.clone();
     headers.insert("Authorization".to_string(), format!("Bearer {api_key}"));
-    let fetch = fetch_prime_inference_model_catalog(Some(&headers), timeout_ms, true).await;
+    let fetch =
+        fetch_prime_inference_model_catalog(base_url, Some(&headers), timeout_ms, true).await;
     let (payload, entries) = match fetch {
         Ok(result) => result,
         Err(error) => {

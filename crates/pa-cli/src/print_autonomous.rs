@@ -51,11 +51,12 @@ pub(crate) fn wire_continuation_hook(
     let weak_engine = Arc::downgrade(engine);
     let weak_goal = Arc::downgrade(goal);
     let weak_autonomous = Arc::downgrade(autonomous);
-    let context_window = model.context_window;
+    let model = Arc::new(model.clone());
     agent.set_continuation_hook(Some(Arc::new(move |context, _signal| {
         let weak_engine = weak_engine.clone();
         let weak_goal = weak_goal.clone();
         let weak_autonomous = weak_autonomous.clone();
+        let model = Arc::clone(&model);
         Box::pin(async move {
             let (Some(engine), Some(goal), Some(autonomous)) = (
                 weak_engine.upgrade(),
@@ -64,7 +65,7 @@ pub(crate) fn wire_continuation_hook(
             ) else {
                 return Ok(Vec::new());
             };
-            match goal.natural_continuation(&engine, context_window).await {
+            match goal.natural_continuation(&engine, &model).await {
                 NaturalContinuation::QueuedInput | NaturalContinuation::RequestedCompaction => {
                     Ok(Vec::new())
                 }

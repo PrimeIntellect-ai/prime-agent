@@ -24,9 +24,7 @@
 //! a refresh here can never clobber user config.
 
 use std::path::PathBuf;
-use std::sync::Arc;
-
-use tokio::task::JoinHandle;
+use std::sync::{Arc, OnceLock};
 
 use crate::bundled::{load_bundled_models, BundledAssets};
 use crate::cache::{CatalogCache, RefreshOptions, PUBLIC_SCOPE};
@@ -34,6 +32,7 @@ use crate::fetch::{CatalogFetcher, MODEL_CATALOG_URL};
 use crate::pinning::{parse_provider_model_catalog, PinnedTemplates};
 use crate::prime_inference::{
     merge_prime_inference_models, PrimeInferenceCatalog, PrimeInferenceCredentials,
+    PRIME_INFERENCE_BASE_URL,
 };
 use crate::transports;
 use crate::Model;
@@ -84,18 +83,45 @@ pub struct ModelCatalog {
     bundled: BundledAssets,
     templates: PinnedTemplates,
     compiled: Arc<Vec<Model>>,
+    /// The Prime Inference API base: the private-authorization fetch (the
+    /// entitlements lane in pa-core) targets the same endpoint as the
+    /// public catalog fetch and reads it from the shared catalog.
+    pi_base_url: Arc<str>,
+    /// Guards [`ModelCatalog::spawn_hourly_refresh`]: one loop per instance.
+    hourly_loop: OnceLock<()>,
 }
 
 impl ModelCatalog {
     /// The production catalog: caches beside `models_dir` (None = in-memory
     /// registry use), bundled assets at the package root.
     pub fn new(models_dir: Option<PathBuf>) -> Self {
-        Self::with_bundled_dir(models_dir, None)
+        Self::with_urls(
+            models_dir,
+            None,
+            MODEL_CATALOG_URL,
+            PRIME_INFERENCE_BASE_URL,
+        )
     }
 
     /// [`ModelCatalog::new`] with an explicit bundled-asset directory
     /// (tests, staged installs).
     pub fn with_bundled_dir(models_dir: Option<PathBuf>, bundled_dir: Option<PathBuf>) -> Self {
+        Self::with_urls(
+            models_dir,
+            bundled_dir,
+            MODEL_CATALOG_URL,
+            PRIME_INFERENCE_BASE_URL,
+        )
+    }
+
+    /// [`ModelCatalog::new`] with both remote URLs overridden (hermetic
+    /// tests run the two fetch layers against a local server).
+    pub fn with_urls(
+        models_dir: Option<PathBuf>,
+        bundled_dir: Option<PathBuf>,
+        model_catalog_url: &str,
+        pi_base_url: &str,
+    ) -> Self {
         let templates = PinnedTemplates::from_compiled();
         let compiled = Arc::new(transports::compiled_models().to_vec());
         let pin_templates = templates.clone();
@@ -106,18 +132,27 @@ impl ModelCatalog {
             .map(|dir| dir.join(PROVIDER_CATALOG_CACHE_FILE));
         Self {
             provider_cache: CatalogCache::new(
-                MODEL_CATALOG_URL,
+                model_catalog_url,
                 cache_path,
                 Arc::new(CatalogFetcher::new()),
                 parse,
             ),
-            prime_inference: PrimeInferenceCatalog::new(models_dir),
+            prime_inference: PrimeInferenceCatalog::with_base_url(models_dir, pi_base_url),
             bundled: bundled_dir
                 .map(BundledAssets::from_dir)
                 .unwrap_or_else(BundledAssets::at_package_root),
             templates,
             compiled,
+            pi_base_url: Arc::from(pi_base_url),
+            hourly_loop: OnceLock::new(),
         }
+    }
+
+    /// The Prime Inference API base URL: the same endpoint the public
+    /// catalog fetch uses, for callers that fetch other credential-scoped
+    /// views of it (the private-authorization lane).
+    pub fn prime_inference_base_url(&self) -> &str {
+        &self.pi_base_url
     }
 
     /// Resolve the current catalog through the no-cold-start chain, merging
@@ -195,13 +230,18 @@ impl ModelCatalog {
         });
     }
 
-    /// The hourly background refresh loop. The returned handle can be
-    /// dropped: the task does not keep the runtime alive, and errors never
-    /// surface.
+    /// The hourly background refresh loop. One loop per catalog instance:
+    /// the process-shared catalog (pa-core's `catalog_chain`) serves the
+    /// whole process, so the first caller arms it and later calls are
+    /// no-ops. Errors never surface; the task does not keep the runtime
+    /// alive.
     pub fn spawn_hourly_refresh(
         self: &Arc<Self>,
         credentials: impl Fn() -> Option<PrimeCredentials> + Send + Sync + 'static,
-    ) -> JoinHandle<()> {
+    ) {
+        if self.hourly_loop.set(()).is_err() {
+            return;
+        }
         let catalog = Arc::clone(self);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(
@@ -212,7 +252,7 @@ impl ModelCatalog {
                 let credentials = credentials();
                 catalog.trigger_refresh_with_credentials(RefreshTrigger::Hourly, credentials);
             }
-        })
+        });
     }
 
     /// Await a direct (non-spawned) refresh — `refreshModelCatalog` in the
@@ -228,6 +268,33 @@ impl ModelCatalog {
                 },
             )
             .await
+    }
+
+    /// Awaited refresh of both catalog layers — the public provider catalog
+    /// and, when `credentials` are given, the credentialed Prime Inference
+    /// snapshot. Unlike [`ModelCatalog::trigger_refresh_with_credentials`]
+    /// (fire-and-forget), `resolve` reflects the refreshed state as soon
+    /// as this future returns. Gating: pass `force` for the forced triggers
+    /// (startup, auth change).
+    pub async fn refresh_with_credentials(
+        &self,
+        force: bool,
+        credentials: Option<&PrimeCredentials>,
+    ) {
+        self.provider_cache
+            .refresh(
+                PUBLIC_SCOPE,
+                RefreshOptions {
+                    force,
+                    headers: Vec::new(),
+                    is_current: None,
+                },
+            )
+            .await;
+        if let Some(credentials) = credentials {
+            let inference = credentials.as_inference();
+            self.prime_inference.refresh(&inference, force).await;
+        }
     }
 }
 
