@@ -1,9 +1,12 @@
 //! The `/heartbeats` inline management view (TS
-//! `HeartbeatManagerComponent`): every user and agent heartbeat scoped to
-//! this session and its live RLM children, one `›`-marker row per
-//! heartbeat with its status, a detail line for the selection, and a
-//! per-heartbeat action pane (pause/resume, stop). Rendered inline-picker
-//! style (the `/model` geometry) instead of the TS full-pane overlay.
+//! `HeartbeatManagerComponent`): the current session's heartbeats (the
+//! TS `scopeHeartbeatsToSession` child-session clause is not carried by
+//! the caller — operator scoping: nested sessions' heartbeats do not
+//! surface here), one `›`-marker row per heartbeat with its status, the
+//! selection's labeled detail block, and a per-heartbeat action pane
+//! (pause/resume, stop). Rendered inline-picker style (the `/model`
+//! geometry — a plain-text title line with the status counts, one
+//! bottom hint line) instead of the TS full-pane overlay.
 
 use serde_json::Value;
 
@@ -17,10 +20,12 @@ use crate::{Line, Span};
 /// `PREFERRED_VISIBLE_HEARTBEATS`).
 const PREFERRED_VISIBLE: usize = 8;
 
-/// Rows the list reserves outside its items (TS
-/// `HEARTBEAT_LIST_RESERVED_ROWS` adapted to the inline geometry: title,
-/// subtitle, blank, detail, blank, hint).
-const LIST_RESERVED_ROWS: usize = 6;
+/// Rows the list reserves outside its items and the detail block (the
+/// inline geometry: rule, title line, blank, blank, blank, hint, rule).
+const LIST_FRAME_ROWS: usize = 7;
+
+/// The selection's detail-block row budget.
+const MAX_DETAIL_ROWS: usize = 6;
 
 /// One scroll-indicator row when the list window is shorter than the list.
 const SCROLL_INDICATOR_ROWS: usize = 1;
@@ -251,48 +256,60 @@ pub fn format_timestamp(value: &str) -> String {
 /// The selected heartbeat's detail line (TS `formatHeartbeatDetails` plus
 /// the last error the TS rows carry as their secondary text: the inline
 /// row has no secondary line, so the error joins the detail).
-fn detail_text(entry: &HeartbeatEntry) -> String {
-    let next = entry
-        .job
-        .next_run_at
-        .as_deref()
-        .map(format_timestamp)
-        .unwrap_or_else(|| "\u{2014}".to_string());
-    let mut text = format!(
-        "{} \u{b7} {} \u{b7} {} \u{b7} {} \u{b7} {} \u{b7} next {} \u{b7} {} runs",
-        source_label(entry),
-        session_label(entry),
-        entry.job.status,
-        entry.job.schedule_expression,
-        delivery_label(entry),
-        next,
-        entry.job.run_count
-    );
+/// The selected heartbeat's detail block: `(label, value)` pairs (the
+/// `/model` picker's detail-block idiom — a labeled two-column block
+/// instead of a metadata run-on).
+fn detail_pairs(entry: &HeartbeatEntry) -> Vec<(&'static str, String)> {
+    let mut pairs = vec![
+        ("created", source_label(entry).to_string()),
+        ("session", session_label(entry)),
+        ("schedule", entry.job.schedule_expression.clone()),
+        ("delivery", delivery_label(entry).to_string()),
+        (
+            "next run",
+            entry
+                .job
+                .next_run_at
+                .as_deref()
+                .map(format_timestamp)
+                .unwrap_or_else(|| "\u{2014}".to_string()),
+        ),
+    ];
     if let Some(error) = entry.job.last_error.as_deref() {
         let error = single_line(error);
         if !error.is_empty() {
-            text.push_str(&format!(" \u{b7} error: {error}"));
+            pairs.push(("last error", error));
         }
     }
-    text
+    pairs
 }
 
-/// The row's secondary detail (TS `details`): the last error when one is
-/// recorded, else source, session, schedule, and delivery.
-fn row_details(entry: &HeartbeatEntry) -> String {
-    if let Some(error) = entry.job.last_error.as_deref() {
-        let error = single_line(error);
-        if !error.is_empty() {
-            return format!("{} \u{b7} error: {error}", source_label(entry));
-        }
+/// Render a `(label, value)` detail block: the dim label column padded
+/// against muted values, one row per pair.
+fn detail_block_lines(theme: &Theme, width: usize, pairs: &[(&'static str, String)]) -> Vec<Line> {
+    if pairs.is_empty() {
+        return Vec::new();
     }
-    format!(
-        "{} \u{b7} {} \u{b7} {} \u{b7} {}",
-        source_label(entry),
-        session_label(entry),
-        entry.job.schedule_expression,
-        delivery_label(entry)
-    )
+    let label_width = pairs
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(16);
+    pairs
+        .iter()
+        .map(|(label, value)| {
+            truncate_line(
+                &vec![
+                    Span::raw("  "),
+                    theme.fg_span(ThemeColor::Dim, format!("{label:<label_width$}  ")),
+                    theme.fg_span(ThemeColor::Muted, value.clone()),
+                ],
+                width,
+                "",
+            )
+        })
+        .collect()
 }
 
 /// The row's primary text (TS `primary`): the label, else the prompt, else
@@ -602,9 +619,19 @@ impl HeartbeatsPicker {
         }
     }
 
+    /// The selection's detail-block row budget, shrinking on short
+    /// viewports so the pane never clips: the frame rows, the scroll
+    /// indicator, and the list rows always render first (frame 7 +
+    /// scroll 1 + list 1 = 9 ride outside the budget) — on very short
+    /// viewports the block yields entirely rather than overspending.
+    fn detail_cap(&self) -> usize {
+        MAX_DETAIL_ROWS.min(self.viewport_rows.saturating_sub(9))
+    }
+
     /// The list's visible-row budget (TS `getListLayout`, inline shape).
     fn visible_items(&self) -> usize {
-        let reserved = LIST_RESERVED_ROWS
+        let reserved = LIST_FRAME_ROWS
+            + self.detail_cap()
             + if self.error.is_some() || self.fetch_error.is_some() {
                 2
             } else {
@@ -630,10 +657,13 @@ impl HeartbeatsPicker {
         }
     }
 
-    /// The list pane: border, title, count subtitle, rows, scroll
-    /// indicator, selection detail, error rows, close hint, border.
+    /// The list pane (the `/model` picker idiom): the title line with the
+    /// status counts, one `›`-marker row per heartbeat, the scroll
+    /// indicator, the selection's labeled detail block, the error rows,
+    /// and a single bottom hint line.
     fn render_list(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
-        let mut lines = self.pane_header(theme, width, "Heartbeats", &self.count_label());
+        let counts: Vec<(ThemeColor, String)> = self.status_counts();
+        let mut lines = pane_header_lines(theme, width, "Heartbeats", &counts, None);
         if self.heartbeats.is_empty() {
             lines.push(vec![
                 Span::raw("  "),
@@ -649,14 +679,6 @@ impl HeartbeatsPicker {
             for (index, entry) in self.heartbeats[start..end].iter().enumerate() {
                 let is_selected = start + index == selected;
                 lines.push(self.heartbeat_row(theme, width, entry, is_selected));
-                // The TS rows carry their details as the row's secondary
-                // text; the inline row keeps one primary line, so the
-                // details ride a dim line under it (TS `details` content:
-                // source, session, schedule, delivery — or the last error).
-                lines.push(vec![
-                    Span::raw("    "),
-                    theme.fg_span(ThemeColor::Muted, row_details(entry)),
-                ]);
             }
             if start > 0 || end < self.heartbeats.len() {
                 lines.push(vec![
@@ -673,15 +695,43 @@ impl HeartbeatsPicker {
                 .filter(|_| self.selected_heartbeat_id.is_some())
             {
                 lines.push(Vec::new());
-                lines.push(detail_line(theme, width, &detail_text(entry)));
+                let cap = self.detail_cap();
+                lines.extend(detail_block_lines(
+                    theme,
+                    width,
+                    &detail_pairs(entry)
+                        .into_iter()
+                        .take(cap)
+                        .collect::<Vec<_>>(),
+                ));
             }
         }
-        lines.extend(self.pane_footer(theme, width, kb, &self.close_hint(kb, true)));
+        lines.extend(self.pane_footer(theme, width, kb, &self.list_hint(kb)));
         lines
     }
 
+    /// The active/paused counts for the title line's right-aligned
+    /// cluster (TS `countLabel`'s numbers, in the status colors).
+    fn status_counts(&self) -> Vec<(ThemeColor, String)> {
+        let active = self
+            .heartbeats
+            .iter()
+            .filter(|entry| entry.job.is_active())
+            .count();
+        let paused = self.heartbeats.len() - active;
+        let mut counts = Vec::new();
+        if active > 0 {
+            counts.push((ThemeColor::Success, format!("{active} active")));
+        }
+        if paused > 0 {
+            counts.push((ThemeColor::Warning, format!("{paused} paused")));
+        }
+        counts
+    }
+
     /// The action pane (TS `createActionPanel`): the heartbeat's name and
-    /// prompt, its detail line, the action rows, and the back/close hint.
+    /// prompt, its labeled detail block, the action rows, and the
+    /// bottom hint line.
     fn render_actions(
         &self,
         theme: &Theme,
@@ -692,12 +742,12 @@ impl HeartbeatsPicker {
     ) -> Vec<Line> {
         let Some(entry) = self.find_entry(heartbeat_id) else {
             // The heartbeat vanished: the TS panel degrades to this text.
-            let mut lines = self.pane_header(theme, width, "Heartbeats", "");
+            let mut lines = pane_header_lines(theme, width, "Heartbeats", &[], None);
             lines.push(vec![
                 Span::raw("  "),
                 theme.fg_span(ThemeColor::Muted, "This heartbeat is no longer available."),
             ]);
-            lines.extend(self.pane_footer(theme, width, kb, &self.close_hint(kb, true)));
+            lines.extend(self.pane_footer(theme, width, kb, &self.actions_hint(kb)));
             return lines;
         };
         let name = entry
@@ -709,8 +759,22 @@ impl HeartbeatsPicker {
             .map(str::to_string)
             .unwrap_or_else(|| default_heartbeat_name(entry).to_string());
         let prompt = single_line(&entry.job.prompt);
-        let mut lines = self.pane_header(theme, width, &name, &prompt);
-        lines.push(detail_line(theme, width, &detail_text(entry)));
+        let mut lines = pane_header_lines(theme, width, &name, &[], Some(&prompt));
+        // The action pane has no list window to absorb a shortage: the
+        // detail block shrinks on short viewports so the pane never
+        // clips (its frame rows, the two action rows, and the hint
+        // always render first; the error block adds two rows) — on very
+        // short viewports the block yields entirely.
+        let error_rows = if self.error.is_some() { 2 } else { 0 };
+        let cap = MAX_DETAIL_ROWS.min(self.viewport_rows.saturating_sub(10 + error_rows));
+        lines.extend(detail_block_lines(
+            theme,
+            width,
+            &detail_pairs(entry)
+                .into_iter()
+                .take(cap)
+                .collect::<Vec<_>>(),
+        ));
         if let Some(error) = &self.error {
             lines.push(Vec::new());
             lines.push(error_line(theme, width, error));
@@ -719,31 +783,42 @@ impl HeartbeatsPicker {
         for (index, (label, _, description)) in Self::available_actions(entry).iter().enumerate() {
             lines.push(self.list_row(theme, width, label, description, index == selected_index));
         }
-        let hint = format!(
-            "{}  {}",
-            key_hint(kb, "app.modal.back", "back", false),
-            key_hint(kb, "tui.select.cancel", "close", true)
-        );
-        lines.extend(self.pane_footer(theme, width, kb, &hint));
+        lines.extend(self.pane_footer(theme, width, kb, &self.actions_hint(kb)));
         lines
     }
 
-    /// TS `countLabel`: `N heartbeats · M paused. Select a heartbeat to
-    /// manage.`
-    fn count_label(&self) -> String {
-        let active = self
-            .heartbeats
-            .iter()
-            .filter(|entry| entry.job.is_active())
-            .count();
-        let paused = self.heartbeats.len() - active;
-        let plural = if self.heartbeats.len() == 1 { "" } else { "s" };
-        let mut label = format!("{} heartbeat{plural}", self.heartbeats.len());
-        if paused > 0 {
-            label.push_str(&format!(" \u{b7} {paused} paused"));
-        }
-        label.push_str(". Select a heartbeat to manage.");
-        label
+    /// The list's bottom hint line: every shortcut in one line (the close
+    /// key never repeats).
+    fn list_hint(&self, kb: &KeybindingsManager) -> String {
+        let key = |binding: &str, fallback: &str| {
+            kb.first_key(binding)
+                .map(|key| format_key_text(&key))
+                .unwrap_or_else(|| fallback.to_string())
+        };
+        format!(
+            "{}/{} move \u{b7} {} manage \u{b7} {} close",
+            key("tui.select.up", "\u{2191}"),
+            key("tui.select.down", "\u{2193}"),
+            key("tui.select.confirm", "Enter"),
+            key("tui.select.cancel", "Esc"),
+        )
+    }
+
+    /// The action pane's bottom hint line.
+    fn actions_hint(&self, kb: &KeybindingsManager) -> String {
+        let key = |binding: &str, fallback: &str| {
+            kb.first_key(binding)
+                .map(|key| format_key_text(&key))
+                .unwrap_or_else(|| fallback.to_string())
+        };
+        format!(
+            "{}/{} move \u{b7} {} run \u{b7} {} back \u{b7} {} close",
+            key("tui.select.up", "\u{2191}"),
+            key("tui.select.down", "\u{2193}"),
+            key("tui.select.confirm", "Enter"),
+            key("app.modal.back", "\u{2190}"),
+            key("tui.select.cancel", "Esc"),
+        )
     }
 
     /// One `›`-marker row: the primary cell (a heartbeat's name, or an
@@ -843,27 +918,6 @@ impl HeartbeatsPicker {
         }
     }
 
-    /// The pane header: top border, title, subtitle, blank (the inline
-    /// adaptation of the TS panel's title block).
-    fn pane_header(&self, theme: &Theme, width: usize, title: &str, subtitle: &str) -> Vec<Line> {
-        let mut lines = vec![
-            vec![theme.fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width.max(1)))],
-            vec![
-                Span::raw("  "),
-                theme.fg_span(ThemeColor::Accent, title.to_string()),
-            ],
-        ];
-        if !subtitle.is_empty() {
-            let line = vec![
-                Span::raw("  "),
-                theme.fg_span(ThemeColor::Muted, subtitle.to_string()),
-            ];
-            lines.push(truncate_line(&line, width, ""));
-        }
-        lines.push(Vec::new());
-        lines
-    }
-
     /// The pane footer: the fetch and action errors, a blank, the hint
     /// line, the bottom border.
     fn pane_footer(
@@ -896,11 +950,55 @@ impl HeartbeatsPicker {
         ]);
         lines
     }
+}
 
-    /// TS `closeHint` / `detailHint`: the formatted key + description.
-    fn close_hint(&self, kb: &KeybindingsManager, primary_only: bool) -> String {
-        key_hint(kb, "tui.select.cancel", "close", primary_only)
+/// The pane's header block: a muted separator rule, then the title row —
+/// the title in plain text (the `/model` picker carries no accent color),
+/// the status counts trailing flush right, an optional muted subtitle,
+/// and a blank line.
+fn pane_header_lines(
+    theme: &Theme,
+    width: usize,
+    title: &str,
+    counts: &[(ThemeColor, String)],
+    subtitle: Option<&str>,
+) -> Vec<Line> {
+    let mut title_row = vec![
+        Span::raw("  "),
+        theme.fg_span(ThemeColor::Text, title.to_string()),
+    ];
+    if !counts.is_empty() {
+        let joined_width = counts
+            .iter()
+            .map(|(_, text)| str_width(text) + 3)
+            .sum::<usize>()
+            .saturating_sub(3);
+        let gap = width
+            .saturating_sub(2 + title.chars().count() + 2 + joined_width)
+            .max(2);
+        title_row.push(Span::raw(" ".repeat(gap)));
+        for (index, (color, text)) in counts.iter().enumerate() {
+            if index > 0 {
+                title_row.push(theme.fg_span(ThemeColor::Muted, " \u{b7} ".to_string()));
+            }
+            title_row.push(theme.fg_span(*color, text.clone()));
+        }
     }
+    let mut lines = vec![
+        vec![theme.fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width.max(1)))],
+        truncate_line(&title_row, width, ""),
+    ];
+    if let Some(subtitle) = subtitle {
+        if !subtitle.is_empty() {
+            let line = vec![
+                Span::raw("  "),
+                theme.fg_span(ThemeColor::Muted, subtitle.to_string()),
+            ];
+            lines.push(truncate_line(&line, width, ""));
+        }
+    }
+    lines.push(Vec::new());
+    lines
 }
 
 /// The hint row (TS `keyHint`: dim key text, muted ` description`).
@@ -908,37 +1006,6 @@ fn hint_line(theme: &Theme, width: usize, hint: &str) -> Line {
     let line = vec![
         Span::raw("  "),
         theme.fg_span(ThemeColor::Dim, hint.to_string()),
-    ];
-    truncate_line(&line, width, "")
-}
-
-/// TS `keyHint`: the formatted key (dim) + ` description` (muted). The
-/// returned string is the plain hint text; the pane renders it muted.
-fn key_hint(
-    kb: &KeybindingsManager,
-    binding: &str,
-    description: &str,
-    primary_only: bool,
-) -> String {
-    let keys = kb.get_keys(binding);
-    let keys = if primary_only {
-        keys.into_iter().take(1).collect::<Vec<_>>()
-    } else {
-        keys
-    };
-    let text = keys
-        .iter()
-        .map(|key| format_key_text(key))
-        .collect::<Vec<_>>()
-        .join("/");
-    format!("{text} {description}")
-}
-
-/// A muted detail line (TS `TruncatedText` over the muted detail).
-fn detail_line(theme: &Theme, width: usize, text: &str) -> Line {
-    let line = vec![
-        Span::raw("  "),
-        theme.fg_span(ThemeColor::Muted, text.to_string()),
     ];
     truncate_line(&line, width, "")
 }
@@ -1078,13 +1145,31 @@ mod tests {
             .map(|line| line.iter().map(|span| span.content.as_str()).collect())
             .collect();
         assert!(text.iter().any(|row| row.contains("Heartbeats")));
-        assert!(text
-            .iter()
-            .any(|row| row.contains("2 heartbeats · 1 paused. Select a heartbeat to manage.")));
+        // The title line carries the status counts in the status colors,
+        // not a TS-style count sentence.
+        assert!(text.iter().any(|row| row.contains("1 active · 1 paused")));
         assert!(text.iter().any(|row| row.contains("tick user-1")));
         assert!(text.iter().any(|row| row.contains("paused")));
-        assert!(text.iter().any(|row| row.contains("Created by you")));
-        assert!(text.iter().any(|row| row.contains("Esc close")));
+        // The selection's detail is a labeled two-column block, not a
+        // metadata run-on; each row stays one line.
+        assert!(text
+            .iter()
+            .any(|row| row.starts_with("  schedule") && row.contains("every 10m")));
+        assert!(text
+            .iter()
+            .any(|row| row.starts_with("  created") && row.contains("Created by you")));
+        assert!(text
+            .iter()
+            .any(|row| row.starts_with("  next run") && row.contains("2026-01-01 00:10")));
+        // Exactly one bottom hint line carries every shortcut.
+        assert_eq!(
+            text.iter().filter(|row| row.contains("Esc close")).count(),
+            1,
+            "the close hint appears once: {text:?}"
+        );
+        assert!(text
+            .iter()
+            .any(|row| row.contains("↑/↓ move · Enter manage · Esc close")));
     }
 
     #[test]
@@ -1218,6 +1303,42 @@ mod tests {
         assert!(text
             .iter()
             .any(|row| row.contains("Heartbeat refresh failed: daemon down")));
+    }
+
+    /// A short viewport shrinks the detail block so the pane never
+    /// exceeds the terminal budget, and the hint line survives the
+    /// squeeze (it is never the clipped row).
+    #[test]
+    fn short_viewports_never_clip_the_list_pane() {
+        for viewport_rows in [9usize, 10, 12, 14] {
+            let picker = HeartbeatsPicker::new(entries(), None, None, viewport_rows);
+            let frame = picker.render(&theme(), 70, &kb());
+            assert!(
+                frame.len() <= viewport_rows,
+                "viewport {viewport_rows} fits: pane is {} rows",
+                frame.len()
+            );
+            let text: Vec<String> = frame
+                .iter()
+                .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+                .collect();
+            assert!(
+                text.iter().any(|row| row.contains("Esc close")),
+                "the hint survives a {viewport_rows}-row viewport"
+            );
+            assert!(text.iter().any(|row| row.contains("tick user-1")));
+        }
+        // The action pane fits too: the fixed rows (name, prompt, two
+        // action rows, hint) always render, the detail block gives way.
+        let mut picker = HeartbeatsPicker::new(entries(), None, None, 12);
+        picker.handle_key("enter", &kb());
+        let frame = picker.render(&theme(), 70, &kb());
+        assert!(frame.len() <= 12, "action pane fits: {}", frame.len());
+        let text: Vec<String> = frame
+            .iter()
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .collect();
+        assert!(text.iter().any(|row| row.contains("Stop heartbeat")));
     }
 
     #[test]

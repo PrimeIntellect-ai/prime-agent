@@ -32,7 +32,6 @@ use crate::utils_inner::stream_failure::{record_stream_failure, ProviderError};
 
 struct StreamingState {
     output: AssistantMessage,
-    blocks: Vec<AssistantContent>,
     text_block: Option<usize>,
     thinking_block: Option<usize>,
     tool_call_blocks_by_index: HashMap<u64, usize>,
@@ -47,7 +46,6 @@ impl StreamingState {
     fn new(output: AssistantMessage) -> Self {
         Self {
             output,
-            blocks: Vec::new(),
             text_block: None,
             thinking_block: None,
             tool_call_blocks_by_index: HashMap::new(),
@@ -63,14 +61,15 @@ impl StreamingState {
         if let Some(index) = self.text_block {
             return index;
         }
-        self.blocks.push(AssistantContent::Text(TextContent {
-            text: String::new(),
-            text_signature: None,
-            rest: Default::default(),
-        }));
-        let index = self.blocks.len() - 1;
+        self.output
+            .content
+            .push(AssistantContent::Text(TextContent {
+                text: String::new(),
+                text_signature: None,
+                rest: Default::default(),
+            }));
+        let index = self.output.content.len() - 1;
         self.text_block = Some(index);
-        self.sync_output();
         writer.push(AssistantMessageEvent::TextStart {
             content_index: index as u64,
             partial: self.output.clone(),
@@ -86,16 +85,16 @@ impl StreamingState {
         if let Some(index) = self.thinking_block {
             return index;
         }
-        self.blocks
+        self.output
+            .content
             .push(AssistantContent::Thinking(ThinkingContent {
                 thinking: String::new(),
                 thinking_signature: Some(thinking_signature.to_string()),
                 redacted: None,
                 rest: Default::default(),
             }));
-        let index = self.blocks.len() - 1;
+        let index = self.output.content.len() - 1;
         self.thinking_block = Some(index);
-        self.sync_output();
         writer.push(AssistantMessageEvent::ThinkingStart {
             content_index: index as u64,
             partial: self.output.clone(),
@@ -125,37 +124,34 @@ impl StreamingState {
             }
             return index;
         }
-        self.blocks.push(AssistantContent::ToolCall(ToolCall {
-            id: id.unwrap_or("").to_string(),
-            name: String::new(),
-            arguments: Default::default(),
-            thought_signature: None,
-            rest: Default::default(),
-        }));
-        let index = self.blocks.len() - 1;
+        self.output
+            .content
+            .push(AssistantContent::ToolCall(ToolCall {
+                id: id.unwrap_or("").to_string(),
+                name: String::new(),
+                arguments: Default::default(),
+                thought_signature: None,
+                rest: Default::default(),
+            }));
+        let index = self.output.content.len() - 1;
         if let Some(stream_index) = stream_index {
             self.tool_call_blocks_by_index.insert(stream_index, index);
         }
         if let Some(id) = id {
             self.tool_call_blocks_by_id.insert(id.to_string(), index);
         }
-        self.sync_output();
         writer.push(AssistantMessageEvent::ToolcallStart {
             content_index: index as u64,
             partial: self.output.clone(),
         });
         index
     }
-
-    fn sync_output(&mut self) {
-        self.output.content = self.blocks.clone();
-    }
 }
 
 /// Finish all open blocks, emitting `*_end` events (port of `finishBlock`).
 fn finish_blocks(state: &mut StreamingState, writer: &AssistantMessageEventWriter) {
-    for index in 0..state.blocks.len() {
-        match &state.blocks[index] {
+    for index in 0..state.output.content.len() {
+        match &state.output.content[index] {
             AssistantContent::Text(text) => writer.push(AssistantMessageEvent::TextEnd {
                 content_index: index as u64,
                 content: text.text.clone(),
@@ -175,11 +171,10 @@ fn finish_blocks(state: &mut StreamingState, writer: &AssistantMessageEventWrite
                     .map(|partial| parse_streaming_json(Some(partial)))
                     .unwrap_or_else(|| json!({}));
                 let arguments = arguments.as_object().cloned().unwrap_or_default();
-                if let AssistantContent::ToolCall(tool_call) = &mut state.blocks[index] {
+                if let AssistantContent::ToolCall(tool_call) = &mut state.output.content[index] {
                     tool_call.arguments = arguments;
                 }
-                state.sync_output();
-                let tool_call = match &state.blocks[index] {
+                let tool_call = match &state.output.content[index] {
                     AssistantContent::ToolCall(tool_call) => tool_call.clone(),
                     _ => unreachable!("index points at a tool call"),
                 };
@@ -260,10 +255,9 @@ fn handle_chunk(
     if let Some(content) = delta.get("content").and_then(|value| value.as_str()) {
         if !content.is_empty() {
             let index = state.ensure_text_block(writer);
-            if let Some(AssistantContent::Text(text)) = state.blocks.get_mut(index) {
+            if let Some(AssistantContent::Text(text)) = state.output.content.get_mut(index) {
                 text.text.push_str(content);
             }
-            state.sync_output();
             writer.push(AssistantMessageEvent::TextDelta {
                 content_index: index as u64,
                 delta: content.to_string(),
@@ -286,10 +280,9 @@ fn handle_chunk(
     }
     if let Some((field, reasoning_delta)) = found_reasoning_field {
         let index = state.ensure_thinking_block(field, writer);
-        if let Some(AssistantContent::Thinking(thinking)) = state.blocks.get_mut(index) {
+        if let Some(AssistantContent::Thinking(thinking)) = state.output.content.get_mut(index) {
             thinking.thinking.push_str(reasoning_delta);
         }
-        state.sync_output();
         writer.push(AssistantMessageEvent::ThinkingDelta {
             content_index: index as u64,
             delta: reasoning_delta.to_string(),
@@ -303,7 +296,7 @@ fn handle_chunk(
             let stream_index = tool_call.get("index").and_then(|value| value.as_u64());
             let id = tool_call.get("id").and_then(|value| value.as_str());
             let index = state.ensure_tool_call_block(stream_index, id, writer);
-            if let Some(AssistantContent::ToolCall(block)) = state.blocks.get_mut(index) {
+            if let Some(AssistantContent::ToolCall(block)) = state.output.content.get_mut(index) {
                 if block.id.is_empty() {
                     if let Some(id) = id {
                         block.id = id.to_string();
@@ -329,14 +322,14 @@ fn handle_chunk(
                 delta_text = arguments.to_string();
                 let entry = state.tool_call_partial_args.entry(index).or_default();
                 entry.push_str(arguments);
-                if let Some(AssistantContent::ToolCall(block)) = state.blocks.get_mut(index) {
+                if let Some(AssistantContent::ToolCall(block)) = state.output.content.get_mut(index)
+                {
                     block.arguments = parse_streaming_json(Some(entry))
                         .as_object()
                         .cloned()
                         .unwrap_or_default();
                 }
             }
-            state.sync_output();
             writer.push(AssistantMessageEvent::ToolcallDelta {
                 content_index: index as u64,
                 delta: delta_text,
@@ -394,7 +387,7 @@ fn handle_chunk(
                     detail.get("data").filter(|value| !value.is_null()),
                 ) {
                     let _ = data;
-                    for block in state.blocks.iter_mut() {
+                    for block in state.output.content.iter_mut() {
                         if let AssistantContent::ToolCall(tool_call) = block {
                             if tool_call.id == id {
                                 tool_call.thought_signature = Some(detail.to_string());
@@ -407,16 +400,16 @@ fn handle_chunk(
         if !state.reasoning_details_by_index.is_empty() {
             if state.reasoning_details_block.is_none() {
                 state
-                    .blocks
+                    .output
+                    .content
                     .push(AssistantContent::Thinking(ThinkingContent {
                         thinking: String::new(),
                         thinking_signature: None,
                         redacted: Some(true),
                         rest: Default::default(),
                     }));
-                let index = state.blocks.len() - 1;
+                let index = state.output.content.len() - 1;
                 state.reasoning_details_block = Some(index);
-                state.sync_output();
                 writer.push(AssistantMessageEvent::ThinkingStart {
                     content_index: index as u64,
                     partial: state.output.clone(),
@@ -426,7 +419,9 @@ fn handle_chunk(
             sorted.sort_by_key(|(index, _)| *index);
             let details: Vec<Value> = sorted.into_iter().map(|(_, detail)| detail).collect();
             if let Some(index) = state.reasoning_details_block {
-                if let Some(AssistantContent::Thinking(thinking)) = state.blocks.get_mut(index) {
+                if let Some(AssistantContent::Thinking(thinking)) =
+                    state.output.content.get_mut(index)
+                {
                     thinking.thinking_signature = Some(encode_reasoning_details(&details));
                 }
             }
@@ -614,15 +609,18 @@ async fn run_stream(
     let mut state = StreamingState::new(output.clone());
     let mut decoder = SseDecoder::new();
     loop {
-        let chunk = match response.next_text().await? {
-            Some(chunk) => chunk,
-            None => break,
+        let chunk = match response.next_text().await {
+            Ok(Some(chunk)) => chunk,
+            Ok(None) => break,
+            Err(error) => {
+                *output = state.output;
+                return Err(error);
+            }
         };
         let events = decoder.push_text(&chunk);
         for event in &events {
             if let Some(chunk) = parse_sse_event_data(event) {
                 handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
-                output.clone_from(&state.output);
             }
         }
     }
@@ -631,10 +629,8 @@ async fn run_stream(
             handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
         }
     }
-    output.clone_from(&state.output);
-
     finish_blocks(&mut state, writer);
-    output.clone_from(&state.output);
+    *output = state.output;
 
     if base_options
         .signal
@@ -660,6 +656,10 @@ async fn run_stream(
 }
 
 /// Parse the JSON payload of an SSE event; `None` for `[DONE]` and comments.
+#[cfg(test)]
+#[path = "stream_bench.rs"]
+mod stream_bench;
+
 fn parse_sse_event_data(event: &ServerSentEvent) -> Option<Value> {
     if event.data.trim() == "[DONE]" {
         return None;

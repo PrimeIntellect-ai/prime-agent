@@ -45,7 +45,10 @@ pub fn durable_create_command(payload: &Value) -> DurableDaemonCreateCommand {
 /// definition shared by the spawn path and the update roster, so the
 /// snapshot cannot drift from the real spawn env. `instance_id` is
 /// per-spawn (a fresh uuid at every relaunch; the roster row pins the
-/// current one as the snapshot).
+/// current one as the snapshot). The session-lease owner id is stamped
+/// per worker (TS `daemon-supervisor.ts` mints it at launch): a lease the
+/// worker acquires must name its own active session, never an id the
+/// supervisor inherited from an ancestor environment.
 pub fn worker_launch_env(
     agent_dir: &Path,
     supervisor_socket: &str,
@@ -77,6 +80,10 @@ pub fn worker_launch_env(
         ),
         (
             crate::worker::WORKER_ACTIVE_SESSION_ID_ENV.to_string(),
+            descriptor.root_active_session_id.clone(),
+        ),
+        (
+            crate::lease::SESSION_LEASE_OWNER_ID_ENV.to_string(),
             descriptor.root_active_session_id.clone(),
         ),
         (
