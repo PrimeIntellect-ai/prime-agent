@@ -8407,10 +8407,11 @@ mod loader_token_tests {
     /// `speedStats`); it only reads once a positive-span sample exists.
     #[test]
     fn speed_stats_average_rate_sums_tokens_over_spans() {
-        let mut stats = SpeedStats::default();
-        stats.tokens = 300;
-        stats.duration_ms = 1500;
-        stats.samples = 1;
+        let mut stats = SpeedStats {
+            tokens: 300,
+            duration_ms: 1500,
+            samples: 1,
+        };
         assert_eq!(stats.average_rate(), 200.0);
         stats.tokens += 100;
         stats.duration_ms += 500;
