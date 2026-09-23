@@ -202,4 +202,33 @@ mod tests {
         #[cfg(unix)]
         assert_eq!(crate::platform::perms::file_mode(&path), Some(0o600));
     }
+
+    /// A relative agent dir (a relative `PRIME_AGENT_CODING_AGENT_DIR`)
+    /// locks and loads: the lock probe's `utimensat` must resolve relative
+    /// lock paths against `AT_FDCWD`. With an invalid `-1` dirfd Linux
+    /// rejected the probe with EBADF, the create self-removed the lock, and
+    /// every settings load under it fell back to the defaults (the
+    /// pr-2578 bisection: an absolute agent dir ignores the dirfd, so only
+    /// relative agent dirs broke).
+    #[test]
+    #[cfg(unix)]
+    fn relative_agent_dir_locks_and_loads() {
+        let cwd = tempfile::tempdir().unwrap();
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(cwd.path()).unwrap();
+        let relative = std::path::PathBuf::from("relative-agent");
+        let storage = FileSettingsStorage::new(cwd.path(), relative.clone());
+        let written = storage.with_lock(SettingsScope::Global, &mut |current| {
+            assert_eq!(current, None);
+            Some(r#"{ "theme": "prime" }"#.to_string())
+        });
+        let read = storage.with_lock(SettingsScope::Global, &mut |current| {
+            assert!(current.unwrap().contains("prime"));
+            None
+        });
+        std::env::set_current_dir(previous).unwrap();
+        written.unwrap();
+        read.unwrap();
+        assert!(relative.join("settings.json").exists());
+    }
 }

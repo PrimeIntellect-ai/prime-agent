@@ -43,7 +43,14 @@ fn set_mtime(path: &Path, tv_sec: i64, tv_nsec: i64) -> io::Result<()> {
         libc::timespec { tv_sec, tv_nsec },
         libc::timespec { tv_sec, tv_nsec },
     ];
-    let result = unsafe { libc::utimensat(-1, path_c.as_ptr(), times.as_ptr(), 0) };
+    // AT_FDCWD, not a bare -1 dirfd: a relative lock path (a relative
+    // agent dir, e.g. a relative PRIME_AGENT_CODING_AGENT_DIR) must
+    // resolve against the process cwd — Linux rejects a relative path
+    // against an invalid dirfd with EBADF, the probe failed, the create
+    // self-removed the lock, and the settings load fell back to defaults.
+    // Absolute paths ignore the dirfd, which is why only relative agent
+    // dirs broke.
+    let result = unsafe { libc::utimensat(libc::AT_FDCWD, path_c.as_ptr(), times.as_ptr(), 0) };
     if result != 0 {
         return Err(io::Error::last_os_error());
     }
