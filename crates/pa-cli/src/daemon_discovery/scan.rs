@@ -248,7 +248,7 @@ fn proc_socket_inodes() -> Vec<(u32, String, std::collections::HashSet<String>)>
         }
         processes.push((pid, comm.trim_end().to_string(), inodes));
     }
-    processes.sort_by(|left, right| left.0.cmp(&right.0));
+    processes.sort_by_key(|process| process.0);
     processes
 }
 
