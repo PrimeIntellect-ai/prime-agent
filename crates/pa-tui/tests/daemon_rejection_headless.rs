@@ -45,6 +45,10 @@ struct MockSupervisor {
     /// Drop the connection when the next prompt arrives (the dead-daemon
     /// transport case: the request gets no answer at all).
     close_on_prompt: bool,
+    /// Reject the `create` command with this message (the saved-session
+    /// open refusal: "session worker create failed: Session is already
+    /// active in <id>: <file>").
+    reject_create: Option<String>,
 }
 
 impl MockSupervisor {
@@ -55,6 +59,7 @@ impl MockSupervisor {
             reject_prompt_index: None,
             hold_turn_ms: 0,
             close_on_prompt: false,
+            reject_create: None,
         }
     }
 
@@ -108,6 +113,19 @@ impl MockSupervisor {
                 .to_string();
             match command_type.as_str() {
                 "create" => {
+                    if let Some(message) = &self.reject_create {
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "create",
+                                "success": false,
+                                "error": message,
+                            }),
+                        );
+                        continue;
+                    }
                     write_json(
                         &mut writer,
                         &json!({
@@ -359,6 +377,8 @@ fn enter() -> KeyEvent {
 struct RunOutcome {
     frames: Vec<String>,
     prompt_requests: Vec<Value>,
+    return_to_agents_view: bool,
+    agents_view_notice: Option<String>,
 }
 
 /// Run the headless plan against a configured mock supervisor.
@@ -392,6 +412,8 @@ fn run_plan_with(
         prompt_requests: Arc::try_unwrap(prompt_requests)
             .map(|locked| locked.into_inner().unwrap())
             .unwrap_or_else(|locked| locked.lock().unwrap().clone()),
+        return_to_agents_view: outcome.return_to_agents_view,
+        agents_view_notice: outcome.agents_view_notice,
     })
 }
 
@@ -494,5 +516,36 @@ fn dead_connection_on_prompt_still_exits_the_run() {
     assert!(
         error.to_string().contains("closed"),
         "the transport failure names the closed connection: {error}"
+    );
+}
+
+/// Opening a saved session whose create the daemon refuses — "session
+/// worker create failed: Session is already active in <id>", another
+/// instance holding the session file — must not exit the client (Kevin's
+/// second reproducer): the run hands off to the agents view with the
+/// refusal as its status line, the session-picker fallback.
+#[test]
+fn refused_saved_session_create_falls_back_to_the_agents_view() {
+    let run = run_plan_with(vec![HeadlessStep::WaitMs(100)], |supervisor| {
+        supervisor.reject_create = Some(
+            "session worker create failed: Session is already active in 245ddb974b6d: /tmp/sess-1.jsonl"
+                .to_string(),
+        );
+    })
+    .expect("the refused create hands off instead of exiting");
+    assert!(
+        run.return_to_agents_view,
+        "the refused create falls back to the agents view, not exit"
+    );
+    let notice = run.agents_view_notice.as_deref().unwrap_or_default();
+    assert!(
+        notice.contains(
+            "the daemon rejected the create request: session worker create failed: Session is already active"
+        ),
+        "the agents-view notice carries the refusal: {notice}"
+    );
+    assert!(
+        run.prompt_requests.is_empty(),
+        "no prompt ever dispatched (the session never opened)"
     );
 }
