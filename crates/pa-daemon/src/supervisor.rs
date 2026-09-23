@@ -859,9 +859,15 @@ impl Supervisor {
                 .pending(&descriptor.root_active_session_id)
                 .cloned();
             if let Some(record) = pending {
+                // `declaredAt` is the disclosure row's identity: the
+                // replacement stamps its persisted entry with it, so a
+                // replay of the same declaration is idempotent even when
+                // the previous replacement died between persisting the
+                // row and the create reply that consumes the record.
                 payload["interruptedCompaction"] = serde_json::json!({
                     "reason": record.reason,
                     "sessionFile": record.session_file,
+                    "declaredAt": record.declared_at,
                 });
                 (payload, Some(descriptor.root_active_session_id.clone()))
             } else {

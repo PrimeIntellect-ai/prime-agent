@@ -70,12 +70,13 @@ impl SessionEntry {
         parent_id: Option<String>,
         used: &HashMap<String, ()>,
         fields: Value,
+        timestamp: &str,
     ) -> Self {
         SessionEntry {
             type_: type_.to_string(),
             id: new_entry_id(used),
             parent_id,
-            timestamp: crate::util::now_iso(),
+            timestamp: timestamp.to_string(),
             fields,
         }
     }
@@ -672,7 +673,13 @@ impl SessionFile {
 
     pub fn append_entry(&mut self, type_: &str, fields: Value) -> String {
         let parent_id = self.leaf_id.clone();
-        let mut entry = SessionEntry::new(type_, parent_id, &self.index_map(), fields);
+        let mut entry = SessionEntry::new(
+            type_,
+            parent_id,
+            &self.index_map(),
+            fields,
+            &crate::util::now_iso(),
+        );
         if self.window.is_some() {
             entry.id = uuid::Uuid::new_v4().to_string();
         }
@@ -753,12 +760,32 @@ impl SessionFile {
     /// durability — when it fails the entry stays indexed (a reload of
     /// the file would load it as the leaf) and the error still surfaces.
     pub fn persist_entry(&mut self, entry_type: &str, fields: Value) -> Result<String> {
+        self.persist_entry_at(entry_type, fields, &crate::util::now_iso())
+    }
+
+    /// Append one entry stamped with the given time. The interrupted-
+    /// compaction replay re-stamps the supervisor's declaration, so the
+    /// entry's timestamp is the row's stable identity: a replacement that
+    /// already persisted the disclosure but died before the supervisor
+    /// consumed the record replays the same declaration, and the create
+    /// handler recognizes its own row instead of duplicating it.
+    pub fn persist_entry_at(
+        &mut self,
+        entry_type: &str,
+        fields: Value,
+        timestamp: &str,
+    ) -> Result<String> {
         anyhow::ensure!(
             self.window.is_none() || self.path.exists(),
             "window-backed session file is missing"
         );
-        let mut entry =
-            SessionEntry::new(entry_type, self.leaf_id.clone(), &self.index_map(), fields);
+        let mut entry = SessionEntry::new(
+            entry_type,
+            self.leaf_id.clone(),
+            &self.index_map(),
+            fields,
+            timestamp,
+        );
         // A windowed index lacks the pre-window IDs, so the short minted ID
         // could collide with unloaded history; a UUID cannot (same rule as
         // `append_entry`).
@@ -1199,6 +1226,48 @@ mod tests {
             .map(|entry| entry.id.as_str())
             .collect();
         assert_eq!(chain, [first.as_str(), third.as_str()]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A declaration-stamped entry is its own stable identity across a
+    /// reload: the create handler recognizes a disclosure row the previous
+    /// replacement already persisted (a crash between the persist and the
+    /// supervisor's record consumption replays the same declaration) and
+    /// appends nothing, while a different declaration stays distinct.
+    #[test]
+    fn declaration_stamped_entry_survives_reload_as_the_same_identity() {
+        let dir = temp_dir();
+        let mut session = SessionFile::create("/tmp", None, 0);
+        let file = dir.join(session_file_name(session.session_id()));
+        session.set_path(file.clone());
+        let disclosure = json!({
+            "customType": "compaction_outcome",
+            "content": "Compaction cancelled",
+            "display": true,
+            "details": { "reason": "threshold", "outcome": "cancelled" },
+        });
+        let declared_at = "2026-09-23T06:00:00Z";
+        session
+            .persist_entry_at("custom_message", disclosure.clone(), declared_at)
+            .unwrap();
+
+        // The rebuilt transcript (a fresh open) holds the exact row: the
+        // replay's dedup predicate — same fields, same declaration stamp —
+        // matches, so the row is not appended twice.
+        let loaded = SessionFile::open(&file).unwrap();
+        assert!(loaded.entries().iter().any(|entry| {
+            entry.type_ == "custom_message"
+                && entry.fields == disclosure
+                && entry.timestamp == declared_at
+        }));
+
+        // A different declaration is a different identity: the row alone
+        // must not swallow it.
+        assert!(!loaded.entries().iter().any(|entry| {
+            entry.type_ == "custom_message"
+                && entry.fields == disclosure
+                && entry.timestamp != declared_at
+        }));
         let _ = fs::remove_dir_all(&dir);
     }
 

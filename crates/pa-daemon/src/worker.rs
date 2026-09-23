@@ -2086,8 +2086,12 @@ impl Worker {
         // the rebuilt transcript discloses the abort with the same
         // `compaction_outcome` row the worker's own auto-abort arms
         // persist. A manual run persists nothing — TS `compact()`'s abort
-        // arm writes no durable row.
-        let interrupted_compaction = crate::compaction::interrupted_compaction_row(payload);
+        // arm writes no durable row. The row is identity-stamped with the
+        // declaration (`declaredAt`): a replacement that persisted it and
+        // died before the supervisor consumed the record replays the same
+        // declaration, and the rebuilt transcript already holding the
+        // exact row means this replay appends nothing.
+        let interrupted_compaction = crate::compaction::interrupted_compaction_disclosure(payload);
         // The core lock stays inside this block: everything after it may
         // await (the schedule-catalog bind), and a std MutexGuard must
         // never ride an await point.
@@ -2097,9 +2101,20 @@ impl Worker {
             core.steering = steering;
             core.follow_up = follow_up;
             core.store = Some(store);
-            if let Some(row) = &interrupted_compaction {
+            if let Some(disclosure) = &interrupted_compaction {
                 if let Some(store) = core.store.as_mut() {
-                    let _ = store.persist_entry("custom_message", row.clone());
+                    let already_disclosed = store.entries().iter().any(|entry| {
+                        entry.type_ == "custom_message"
+                            && entry.fields == disclosure.row
+                            && entry.timestamp == disclosure.declared_at
+                    });
+                    if !already_disclosed {
+                        let _ = store.persist_entry_at(
+                            "custom_message",
+                            disclosure.row.clone(),
+                            &disclosure.declared_at,
+                        );
+                    }
                 }
             }
             core.created = true;

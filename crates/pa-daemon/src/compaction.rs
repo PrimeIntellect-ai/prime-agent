@@ -398,13 +398,28 @@ pub(crate) fn compaction_end_unsuccessful(
     event
 }
 
-/// The durable `compaction_outcome` row of a compaction the supervisor
-/// declared aborted (the abort supervision's create replay): the same
-/// disclosure the worker's own auto-abort arms persist — `cancelled` with
-/// the run's reason, in the wire custom-message field shape the store
-/// persists. A manual run has no row (TS `compact()`'s abort arm writes
-/// none), and any other reason never invents one.
-pub(crate) fn interrupted_compaction_row(payload: &Value) -> Option<Value> {
+/// The durable disclosure of a compaction the supervisor declared aborted
+/// (the abort supervision's create replay): the same `compaction_outcome`
+/// row the worker's own auto-abort arms persist — `cancelled` with the
+/// run's reason, in the wire custom-message field shape the store
+/// persists — plus the declaration's timestamp. A manual run has no row
+/// (TS `compact()`'s abort arm writes none), and any other reason never
+/// invents one. The declaration timestamp is the row's stable identity:
+/// it rides the create payload as `declaredAt` and stamps the persisted
+/// entry, so a replacement that died between persisting the disclosure
+/// and the supervisor consuming the record replays it again and the
+/// create handler recognizes its own row instead of duplicating it.
+pub(crate) struct InterruptedCompactionDisclosure {
+    pub(crate) row: Value,
+    pub(crate) declared_at: String,
+}
+
+/// Rebuild the [`InterruptedCompactionDisclosure`] from the create
+/// payload's `interruptedCompaction` record, or `None` for a run that
+/// persists no row.
+pub(crate) fn interrupted_compaction_disclosure(
+    payload: &Value,
+) -> Option<InterruptedCompactionDisclosure> {
     let record = payload.get("interruptedCompaction")?;
     let reason = match record.get("reason").and_then(Value::as_str) {
         Some("threshold") => CompactionOutcomeReason::Threshold,
@@ -412,6 +427,11 @@ pub(crate) fn interrupted_compaction_row(payload: &Value) -> Option<Value> {
         Some("requested") => CompactionOutcomeReason::Requested,
         _ => return None,
     };
+    let declared_at = record
+        .get("declaredAt")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(crate::util::now_iso);
     let message = crate::session_commands::custom_message_value(
         &pa_core::session_engine::messages::create_compaction_outcome_message(
             "Compaction cancelled",
@@ -419,12 +439,13 @@ pub(crate) fn interrupted_compaction_row(payload: &Value) -> Option<Value> {
             CompactionOutcomeKind::Cancelled,
         ),
     );
-    Some(json!({
+    let row = json!({
         "customType": message.get("customType").cloned().unwrap_or(Value::Null),
         "content": message.get("content").cloned().unwrap_or(Value::Null),
         "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
         "details": message.get("details").cloned().unwrap_or(Value::Null),
-    }))
+    });
+    Some(InterruptedCompactionDisclosure { row, declared_at })
 }
 
 /// The `compaction_end` event payload (TS `AgentSessionEvent`), per outcome:
@@ -602,5 +623,41 @@ mod tests {
                 "errorSeverity": "error",
             })
         );
+    }
+
+    /// The replay disclosure mirrors the worker's own auto-abort row and
+    /// carries the declaration's identity; a manual run (or any reason
+    /// outside the auto arms) persists nothing, like TS `compact()`'s
+    /// abort arm.
+    #[test]
+    fn interrupted_disclosure_is_the_auto_abort_row_stamped_with_the_declaration() {
+        let disclosure = interrupted_compaction_disclosure(&json!({
+            "interruptedCompaction": {
+                "reason": "threshold",
+                "sessionFile": "/sessions/a.jsonl",
+                "declaredAt": "2026-09-23T06:00:00Z",
+            }
+        }))
+        .expect("a threshold run discloses");
+        assert_eq!(
+            disclosure.row,
+            json!({
+                "customType": "compaction_outcome",
+                "content": "Compaction cancelled",
+                "display": true,
+                "details": { "reason": "threshold", "outcome": "cancelled" },
+            })
+        );
+        assert_eq!(disclosure.declared_at, "2026-09-23T06:00:00Z");
+
+        for reason in ["manual", "unknown"] {
+            assert!(
+                interrupted_compaction_disclosure(&json!({
+                    "interruptedCompaction": { "reason": reason, "declaredAt": "2026-09-23T06:00:00Z" }
+                }))
+                .is_none(),
+                "{reason} persists no row"
+            );
+        }
     }
 }
