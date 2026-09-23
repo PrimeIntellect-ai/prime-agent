@@ -191,7 +191,7 @@ fn parse_theme_background(
     let raw = value.as_str()?;
     let trimmed = resolve_var_ref(raw, vars).trim();
     let hex = trimmed.strip_prefix('#').unwrap_or(trimmed);
-    if hex.len() != 6 || !hex.bytes().all(u8::is_ascii_hexdigit) {
+    if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let channel = |range: std::ops::Range<usize>| u8::from_str_radix(&hex[range], 16).ok();
