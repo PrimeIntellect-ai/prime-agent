@@ -283,13 +283,7 @@ fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize, out:
                 // The diff block keeps its own row width at the branch
                 // depth: the four-column continuation prefix plus the
                 // block's internal width make the full width.
-                rich_change_rows(
-                    removed,
-                    added,
-                    theme,
-                    crate::branch::branch_content_width(width),
-                    out,
-                )
+                rich_change_rows(removed, added, theme, width, out)
             }
         }
     }
@@ -309,8 +303,9 @@ fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize, out:
 /// `buildRichDiffLine` over `generateDiffString` with infinite context):
 /// a ` <num> <prefix> ` gutter on the diff backgrounds, wrapped content in
 /// `mdCodeBlock`, continuation rows keep a blank gutter. The whole block
-/// sits on the branch continuation indent (`width` already carries the
-/// branch depth from the caller).
+/// sits on the branch continuation indent: the four-column prefix plus
+/// the block's internal width make the caller's full `width`, and at tiny
+/// widths the prefixed row is clipped to the viewport before paint.
 fn rich_change_rows(
     removed: &[String],
     added: &[String],
@@ -318,6 +313,7 @@ fn rich_change_rows(
     width: usize,
     out: &mut Output,
 ) {
+    let block_width = crate::branch::branch_content_width(width);
     let line_num_width = removed.len().max(added.len()).to_string().len();
     let mut old_num = 1usize;
     let mut new_num = 1usize;
@@ -345,7 +341,7 @@ fn rich_change_rows(
         };
         let gutter = format!(" {num:>line_num_width$} {prefix} ");
         let content = line.replace('\t', "   ");
-        let content_width = width.saturating_sub(str_width(&gutter)).max(1);
+        let content_width = block_width.saturating_sub(str_width(&gutter)).max(1);
         if let Output::Count(count) = out {
             *count += crate::width::wrapped_text_count(&content, content_width);
             continue;
@@ -412,7 +408,11 @@ fn rich_change_rows(
             // branch continuation prefix (chat margin + gutter depth)
             // carries the whole block at the branch depth.
             let mut inset = vec![Span::raw(crate::branch::BRANCH_INDENT)];
-            inset.extend(pad_with(row, width, theme.bg_style(bg)));
+            inset.extend(pad_with(row, block_width, theme.bg_style(bg)));
+            // At tiny widths the branch prefix alone outgrows the
+            // viewport, so clip before paint: `pad_with` only pads, never
+            // truncates.
+            let inset = crate::width::truncate_line(&inset, width, "");
             if let Output::Paint(rows) = out {
                 rows.push(inset);
             }
@@ -474,5 +474,29 @@ mod tests {
                 .fg_style(ThemeColor::ToolDiffAdded)
                 .patch(theme.bg_style(ThemeBg::ToolDiffAddedBg))
         );
+    }
+
+    /// The four-column branch prefix alone outgrows viewports of a few
+    /// columns: every painted row stays inside the width.
+    #[test]
+    fn change_rows_never_overflow_tiny_viewports() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        for width in 0..=8 {
+            let mut out = Output::Paint(Vec::new());
+            rich_change_rows(
+                &["one".to_string()],
+                &["two".to_string()],
+                &theme,
+                width,
+                &mut out,
+            );
+            let Output::Paint(rows) = out else {
+                unreachable!()
+            };
+            for row in &rows {
+                let total: usize = row.iter().map(|s| str_width(&s.content)).sum();
+                assert!(total <= width, "width {width} painted {total}");
+            }
+        }
     }
 }

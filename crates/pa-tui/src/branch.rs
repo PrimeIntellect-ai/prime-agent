@@ -1,10 +1,10 @@
-//! The expansion branch grammar: the indent the expanded content of an
-//! expandable event row hangs on — the same geometry the expanded ipython
-//! cell code (TS `renderCode`'s `\u{2570}\u{2500} ` gutter over
-//! `OUTPUT_INDENT`) and the received agent-message body use, applied to
-//! the refinement and compaction expansions (Kevin/Sebastian product
-//! improvement beyond TS: the TS `ExpandableEventMessage` expansions keep
-//! the plain one-column chat inset).
+//! The branch row grammar for expanded content: the first content row
+//! of an expansion hangs off its event's header row on a dim
+//! `\u{2570}\u{2500} ` gutter, and every following row sits at the
+//! four-column continuation indent (the one-column chat margin plus the
+//! gutter's three columns) — the same geometry the expanded ipython cell
+//! code (TS `renderCode`) and the received agent-message body use (the
+//! divergence note lives in `docs/FEATURE_PARITY.md`).
 
 use crate::{Line, Span};
 
