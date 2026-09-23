@@ -80,11 +80,15 @@ impl AgentSessionEngine {
         self.runtime.block_on(async {
             let mut driver = handles.driver.lock().await;
             let mut session = handles.session.lock().await;
-            driver.finish_for_terminal_message(
+            if let Err(persist_error) = driver.finish_for_terminal_message(
                 &mut session,
                 pa_types::ai::StopReason::Error,
                 Some(error),
-            );
+            ) {
+                // The best-effort terminal hook must not reject the caller
+                // (the state change surfaces through the tracking wrapper).
+                eprintln!("pa-daemon: goal terminal finish persist failed: {persist_error:#}");
+            }
         });
     }
 
@@ -143,15 +147,27 @@ impl AgentSessionEngine {
         }
         let mut driver = handles.driver.lock().await;
         let mut session = handles.session.lock().await;
-        let Some(message) = driver.take_owed_continuation(&mut session) else {
-            // An inactive goal drops the deferral without minting (TS:
-            // "drops the deferral for inactive goals").
-            return;
+        let message = match driver.take_owed_continuation(&mut session) {
+            Ok(Some(message)) => message,
+            Ok(None) => {
+                // An inactive goal drops the deferral without minting (TS:
+                // "drops the deferral for inactive goals").
+                return;
+            }
+            Err(error) => {
+                // The mint's catch (TS `_getGoalContinuationMessages`):
+                // a failed persist drops the deferral without minting.
+                eprintln!("pa-daemon: owed goal continuation mint persist failed: {error:#}");
+                return;
+            }
         };
         // TS `_getContinuationMessages`: new session input arriving
         // during the mint cancels it (the arrival-epoch restore).
         if self.session_input_queued() {
-            driver.rollback_continuation_mint(&mut session);
+            if let Err(error) = driver.rollback_continuation_mint(&mut session) {
+                // The restore hook must not reject: warn and re-owe anyway.
+                eprintln!("pa-daemon: goal mint rollback persist failed: {error:#}");
+            }
             driver.mark_continuation_owed();
             return;
         }
@@ -225,6 +241,16 @@ impl AgentSessionEngine {
             } else {
                 driver.next_continuation_message(&mut session)
             };
+            let message = match message {
+                Ok(message) => message,
+                Err(error) => {
+                    // TS `_getGoalContinuationMessages`'s catch: the hook
+                    // must not reject; a failed persist ends the boundary
+                    // without a continuation.
+                    eprintln!("pa-daemon: goal continuation mint persist failed: {error:#}");
+                    return GoalBoundary::End;
+                }
+            };
             if message.is_none() {
                 return GoalBoundary::End;
             }
@@ -232,7 +258,10 @@ impl AgentSessionEngine {
             // the mint ran rolls the slot back so the next boundary
             // re-mints without double-counting.
             if self.session_input_queued() {
-                driver.rollback_continuation_mint(&mut session);
+                if let Err(error) = driver.rollback_continuation_mint(&mut session) {
+                    // The restore hook must not reject: warn and re-owe anyway.
+                    eprintln!("pa-daemon: goal mint rollback persist failed: {error:#}");
+                }
                 if was_owed {
                     driver.mark_continuation_owed();
                 }

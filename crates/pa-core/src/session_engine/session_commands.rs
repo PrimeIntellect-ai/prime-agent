@@ -351,14 +351,20 @@ async fn execute_goal(
             // waiting in the queue never runs behind the state change.
             GoalCommand::Clear => {
                 engine.purge_queued_goal_contexts();
-                driver.clear(&mut session);
+                driver
+                    .clear(&mut session)
+                    .map_err(|error| format!("{error:#}"))?;
             }
             GoalCommand::Pause => {
                 engine.purge_queued_goal_contexts();
-                driver.pause(&mut session, "Paused by user");
+                driver
+                    .pause(&mut session, "Paused by user")
+                    .map_err(|error| format!("{error:#}"))?;
             }
             GoalCommand::Resume => {
-                context_message = driver.resume(&mut session);
+                context_message = driver
+                    .resume(&mut session)
+                    .map_err(|error| format!("{error:#}"))?;
             }
             GoalCommand::Start {
                 objective,

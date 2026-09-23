@@ -205,11 +205,7 @@ impl GoalDriver {
         }
     }
 
-    fn set_state(
-        &mut self,
-        session: &mut SessionManager,
-        next: GoalState,
-    ) -> anyhow::Result<()> {
+    fn set_state(&mut self, session: &mut SessionManager, next: GoalState) -> anyhow::Result<()> {
         let normalized = normalize_goal_state(GoalState {
             updated_at: Some(now_millis()),
             ..next
@@ -236,10 +232,10 @@ impl GoalDriver {
         usage: &pa_types::ai::Usage,
     ) -> anyhow::Result<UsageOutcome> {
         if self.state.status != GoalStatus::Active {
-            return UsageOutcome::Ignored;
+            return Ok(UsageOutcome::Ignored);
         }
         if !self.accounted_messages.insert(message_id.to_string()) {
-            return UsageOutcome::Ignored;
+            return Ok(UsageOutcome::Ignored);
         }
         let token_delta = goal_token_delta_for_usage(usage.input as i64, usage.output as i64);
         let goal = self.with_accounted_wall_clock();
@@ -251,10 +247,8 @@ impl GoalDriver {
             .token_budget
             .is_some_and(|budget| next_goal.tokens_used >= budget);
         if !budget_reached {
-            let budget = next_goal.token_budget;
-            self.set_state(session, next_goal);
-            let _ = budget;
-            return UsageOutcome::Accounted;
+            self.set_state(session, next_goal)?;
+            return Ok(UsageOutcome::Accounted);
         }
         let token_budget = next_goal.token_budget;
         let budget_reason = token_budget
@@ -269,14 +263,14 @@ impl GoalDriver {
                 last_error: None,
                 ..next_goal
             },
-        );
-        UsageOutcome::BudgetReached
+        )?;
+        Ok(UsageOutcome::BudgetReached)
     }
 
     /// Pause the goal (no-op when not active).
-    pub fn pause(&mut self, session: &mut SessionManager, reason: &str) {
+    pub fn pause(&mut self, session: &mut SessionManager, reason: &str) -> anyhow::Result<()> {
         if self.state.status != GoalStatus::Active {
-            return;
+            return Ok(());
         }
         // TS `_pauseGoal` routes through `_clearQueuedGoalContexts`, which
         // drops any owed continuation with the queued contexts.
@@ -291,18 +285,23 @@ impl GoalDriver {
                 last_error: None,
                 ..goal
             },
-        );
+        )
     }
 
     /// Resume a paused/budget-limited goal. Returns the continuation context
     /// message when the goal becomes active again.
-    pub fn resume(&mut self, session: &mut SessionManager) -> Option<CustomMessage> {
-        self.state.objective.as_ref()?;
+    pub fn resume(
+        &mut self,
+        session: &mut SessionManager,
+    ) -> anyhow::Result<Option<CustomMessage>> {
+        if self.state.objective.is_none() {
+            return Ok(None);
+        }
         if !matches!(
             self.state.status,
             GoalStatus::Paused | GoalStatus::BudgetLimited
         ) {
-            return None;
+            return Ok(None);
         }
         let exhausted = self
             .state
@@ -324,17 +323,19 @@ impl GoalDriver {
                 last_error: None,
                 ..self.state.clone()
             },
-        );
+        )?;
         if next_status == GoalStatus::Active {
-            return create_goal_context_message(&self.state, GoalContextKind::Continuation).ok();
+            return Ok(
+                create_goal_context_message(&self.state, GoalContextKind::Continuation).ok(),
+            );
         }
-        None
+        Ok(None)
     }
 
     /// Complete the goal (host `goal.complete()`).
-    pub fn complete(&mut self, session: &mut SessionManager) {
+    pub fn complete(&mut self, session: &mut SessionManager) -> anyhow::Result<()> {
         if self.state.objective.is_none() || self.state.status == GoalStatus::Idle {
-            return;
+            return Ok(());
         }
         let goal = self.with_accounted_wall_clock();
         self.set_state(
@@ -346,7 +347,7 @@ impl GoalDriver {
                 last_error: None,
                 ..goal
             },
-        );
+        )
     }
 
     /// Terminal-assistant handling: `aborted` keeps the goal, `error` fails it.
@@ -355,9 +356,9 @@ impl GoalDriver {
         session: &mut SessionManager,
         stop_reason: pa_types::ai::StopReason,
         error_message: Option<&str>,
-    ) {
+    ) -> anyhow::Result<()> {
         if self.state.status != GoalStatus::Active {
-            return;
+            return Ok(());
         }
         use pa_types::ai::StopReason;
         match stop_reason {
@@ -376,10 +377,11 @@ impl GoalDriver {
                         last_error: Some(reason.to_string()),
                         ..goal
                     },
-                );
+                )?;
             }
             _ => {}
         }
+        Ok(())
     }
 
     /// Build the next continuation context, consuming one continuation
@@ -390,9 +392,9 @@ impl GoalDriver {
     pub fn next_continuation_message(
         &mut self,
         session: &mut SessionManager,
-    ) -> Option<CustomMessage> {
+    ) -> anyhow::Result<Option<CustomMessage>> {
         if self.state.status != GoalStatus::Active || self.state.objective.is_none() {
-            return None;
+            return Ok(None);
         }
         self.set_state(
             session,
@@ -402,8 +404,8 @@ impl GoalDriver {
                 last_error: None,
                 ..self.state.clone()
             },
-        );
-        create_goal_context_message(&self.state, GoalContextKind::Continuation).ok()
+        )?;
+        Ok(create_goal_context_message(&self.state, GoalContextKind::Continuation).ok())
     }
 
     /// TS `_getGoalContinuationMessages`'s quiescence arm: the natural
@@ -428,11 +430,11 @@ impl GoalDriver {
     pub fn take_owed_continuation(
         &mut self,
         session: &mut SessionManager,
-    ) -> Option<CustomMessage> {
+    ) -> anyhow::Result<Option<CustomMessage>> {
         let owed = self.owed_continuation_for_rlm_work;
         self.owed_continuation_for_rlm_work = false;
         if !owed {
-            return None;
+            return Ok(None);
         }
         self.next_continuation_message(session)
     }
@@ -441,9 +443,12 @@ impl GoalDriver {
     /// restores the goal snapshot when new session input arrived during the
     /// mint; the threshold-cancel rollback decrements the same way): the
     /// next boundary re-mints instead of double-counting.
-    pub fn rollback_continuation_mint(&mut self, session: &mut SessionManager) {
+    pub fn rollback_continuation_mint(
+        &mut self,
+        session: &mut SessionManager,
+    ) -> anyhow::Result<()> {
         if self.state.continuations_used == 0 {
-            return;
+            return Ok(());
         }
         self.set_state(
             session,
@@ -451,7 +456,7 @@ impl GoalDriver {
                 continuations_used: self.state.continuations_used - 1,
                 ..self.state.clone()
             },
-        );
+        )
     }
 
     /// Whether the goal drives session wake-ups.
@@ -526,7 +531,7 @@ mod tests {
         assert!(!GoalDriver::is_branch_seedable(&session));
         let mut driver = GoalDriver::load_persisted(&session);
         assert_eq!(driver.state(), &expected);
-        driver.pause(&mut session, "pause");
+        driver.pause(&mut session, "pause").unwrap();
         assert_eq!(GoalDriver::load_persisted(&session).state(), driver.state());
         assert!(!session.is_full_history());
         assert!(std::fs::read_to_string(&path)
@@ -553,10 +558,10 @@ mod tests {
         assert!(driver.start(&mut session, &long, None).is_err());
         assert!(driver.start(&mut session, "ok", Some(0)).is_err());
         // Pause keeps the objective; resume returns a continuation context.
-        driver.pause(&mut session, "Paused by user");
+        driver.pause(&mut session, "Paused by user").unwrap();
         assert_eq!(driver.state().status, GoalStatus::Paused);
         assert!(!driver.owns_continuation_wakeup());
-        let continuation = driver.resume(&mut session).unwrap();
+        let continuation = driver.resume(&mut session).unwrap().unwrap();
         assert_eq!(
             continuation.custom_type,
             crate::goals::GOAL_CONTEXT_CUSTOM_TYPE
@@ -573,7 +578,7 @@ mod tests {
             Some("ship the mission")
         );
         // Clear resets everything.
-        driver.clear(&mut session);
+        driver.clear(&mut session).unwrap();
         assert_eq!(driver.state().status, GoalStatus::Idle);
         assert_eq!(driver.state().objective, None);
     }
@@ -584,19 +589,25 @@ mod tests {
         let mut driver = GoalDriver::new();
         driver.start(&mut session, "work", Some(100)).unwrap();
         assert_eq!(
-            driver.record_assistant_usage(&mut session, "a1", &usage(30, 10)),
+            driver
+                .record_assistant_usage(&mut session, "a1", &usage(30, 10))
+                .unwrap(),
             UsageOutcome::Accounted
         );
         assert_eq!(driver.state().tokens_used, 40);
         // Double-counting the same message is ignored.
         assert_eq!(
-            driver.record_assistant_usage(&mut session, "a1", &usage(30, 10)),
+            driver
+                .record_assistant_usage(&mut session, "a1", &usage(30, 10))
+                .unwrap(),
             UsageOutcome::Ignored
         );
         assert_eq!(driver.state().tokens_used, 40);
         // Budget reached transitions to budget_limited.
         assert_eq!(
-            driver.record_assistant_usage(&mut session, "a2", &usage(50, 10)),
+            driver
+                .record_assistant_usage(&mut session, "a2", &usage(50, 10))
+                .unwrap(),
             UsageOutcome::BudgetReached
         );
         assert_eq!(driver.state().status, GoalStatus::BudgetLimited);
@@ -606,11 +617,13 @@ mod tests {
         );
         // Usage while inactive is ignored.
         assert_eq!(
-            driver.record_assistant_usage(&mut session, "a3", &usage(50, 10)),
+            driver
+                .record_assistant_usage(&mut session, "a3", &usage(50, 10))
+                .unwrap(),
             UsageOutcome::Ignored
         );
         // Resuming an exhausted goal stays budget_limited.
-        assert!(driver.resume(&mut session).is_none());
+        assert!(driver.resume(&mut session).unwrap().is_none());
         assert_eq!(driver.state().status, GoalStatus::BudgetLimited);
     }
 
@@ -621,21 +634,23 @@ mod tests {
         let mut driver = GoalDriver::new();
         driver.start(&mut session, "work", None).unwrap();
         // Aborted keeps the goal active.
-        driver.finish_for_terminal_message(&mut session, StopReason::Aborted, None);
+        driver
+            .finish_for_terminal_message(&mut session, StopReason::Aborted, None)
+            .unwrap();
         assert_eq!(driver.state().status, GoalStatus::Active);
         // Error fails it with the provided message.
-        driver.finish_for_terminal_message(
-            &mut session,
-            StopReason::Error,
-            Some("provider exploded"),
-        );
+        driver
+            .finish_for_terminal_message(&mut session, StopReason::Error, Some("provider exploded"))
+            .unwrap();
         assert_eq!(driver.state().status, GoalStatus::Error);
         assert_eq!(
             driver.state().last_error.as_deref(),
             Some("provider exploded")
         );
         // Terminal handling is inert when the goal is not active.
-        driver.finish_for_terminal_message(&mut session, StopReason::Error, None);
+        driver
+            .finish_for_terminal_message(&mut session, StopReason::Error, None)
+            .unwrap();
         assert_eq!(driver.state().status, GoalStatus::Error);
     }
 
@@ -644,21 +659,33 @@ mod tests {
         let mut session = persisted_session();
         let mut driver = GoalDriver::new();
         driver.start(&mut session, "work", None).unwrap();
-        let first = driver.next_continuation_message(&mut session).unwrap();
+        let first = driver
+            .next_continuation_message(&mut session)
+            .unwrap()
+            .unwrap();
         let UserContent::Text(text) = &first.content else {
             panic!("expected text content");
         };
         assert!(text.contains("- status: active"));
         assert_eq!(driver.state().continuations_used, 1);
-        assert!(driver.next_continuation_message(&mut session).is_some());
+        assert!(driver
+            .next_continuation_message(&mut session)
+            .unwrap()
+            .is_some());
         assert_eq!(driver.state().continuations_used, 2);
         // Inactive goals produce no continuations.
-        driver.pause(&mut session, "Paused by user");
-        assert!(driver.next_continuation_message(&mut session).is_none());
+        driver.pause(&mut session, "Paused by user").unwrap();
+        assert!(driver
+            .next_continuation_message(&mut session)
+            .unwrap()
+            .is_none());
         // The mint persists the state change: the session branch's latest
         // goal-state entry carries the incremented count.
         driver.start(&mut session, "work again", None).unwrap();
-        driver.next_continuation_message(&mut session).unwrap();
+        assert!(driver
+            .next_continuation_message(&mut session)
+            .unwrap()
+            .is_some());
         assert_eq!(driver.state().continuations_used, 1);
         let reloaded = GoalDriver::load_persisted(&session);
         assert_eq!(reloaded.state().continuations_used, 1);
@@ -679,7 +706,10 @@ mod tests {
         assert!(driver.owes_continuation());
         assert_eq!(driver.state().continuations_used, 0);
         // Delivery: one slot consumed, the flag clears.
-        let delivered = driver.take_owed_continuation(&mut session).unwrap();
+        let delivered = driver
+            .take_owed_continuation(&mut session)
+            .unwrap()
+            .unwrap();
         let UserContent::Text(text) = &delivered.content else {
             panic!("expected text content");
         };
@@ -687,18 +717,24 @@ mod tests {
         assert_eq!(driver.state().continuations_used, 1);
         assert!(!driver.owes_continuation());
         // A second take (a racing settle site) delivers nothing.
-        assert!(driver.take_owed_continuation(&mut session).is_none());
+        assert!(driver
+            .take_owed_continuation(&mut session)
+            .unwrap()
+            .is_none());
         assert_eq!(driver.state().continuations_used, 1);
         // An inactive goal drops the deferral without minting (TS:
         // "drops the deferral for inactive goals").
         driver.mark_continuation_owed();
-        driver.pause(&mut session, "Paused by user");
-        assert!(driver.take_owed_continuation(&mut session).is_none());
+        driver.pause(&mut session, "Paused by user").unwrap();
+        assert!(driver
+            .take_owed_continuation(&mut session)
+            .unwrap()
+            .is_none());
         assert_eq!(driver.state().continuations_used, 1);
         assert!(!driver.owes_continuation());
         // Pause/clear/start reset the flag with the queued contexts.
         driver.mark_continuation_owed();
-        driver.clear(&mut session);
+        driver.clear(&mut session).unwrap();
         assert!(!driver.owes_continuation());
         driver.start(&mut session, "again", None).unwrap();
         driver.mark_continuation_owed();
@@ -714,9 +750,12 @@ mod tests {
         let mut session = persisted_session();
         let mut driver = GoalDriver::new();
         driver.start(&mut session, "work", None).unwrap();
-        driver.next_continuation_message(&mut session).unwrap();
+        assert!(driver
+            .next_continuation_message(&mut session)
+            .unwrap()
+            .is_some());
         assert_eq!(driver.state().continuations_used, 1);
-        driver.rollback_continuation_mint(&mut session);
+        driver.rollback_continuation_mint(&mut session).unwrap();
         assert_eq!(driver.state().continuations_used, 0);
         // The rollback persists: the reloaded branch sees the restored
         // count (TS `_setGoalState` re-persists the snapshot).
@@ -727,7 +766,10 @@ mod tests {
             0
         );
         // The next mint counts from the restored slot.
-        driver.next_continuation_message(&mut session).unwrap();
+        assert!(driver
+            .next_continuation_message(&mut session)
+            .unwrap()
+            .is_some());
         assert_eq!(driver.state().continuations_used, 1);
     }
 
@@ -739,9 +781,9 @@ mod tests {
         let mut session = persisted_session();
         let mut driver = GoalDriver::new();
         driver.start(&mut session, "ship it", None).unwrap();
-        driver.pause(&mut session, "Paused by user");
+        driver.pause(&mut session, "Paused by user").unwrap();
         let paused = driver.state().clone();
-        driver.resume(&mut session).unwrap();
+        assert!(driver.resume(&mut session).unwrap().is_some());
         assert_eq!(driver.state().goal_id, paused.goal_id);
         assert_eq!(driver.state().objective.as_deref(), Some("ship it"));
         assert_eq!(driver.state().status, GoalStatus::Active);
@@ -750,9 +792,11 @@ mod tests {
         let mut limited = persisted_session();
         let mut driver = GoalDriver::new();
         driver.start(&mut limited, "ship it", Some(100)).unwrap();
-        driver.record_assistant_usage(&mut limited, "a1", &usage(120, 0));
+        driver
+            .record_assistant_usage(&mut limited, "a1", &usage(120, 0))
+            .unwrap();
         assert_eq!(driver.state().status, GoalStatus::BudgetLimited);
-        assert!(driver.resume(&mut limited).is_none());
+        assert!(driver.resume(&mut limited).unwrap().is_none());
         assert_eq!(driver.state().status, GoalStatus::BudgetLimited);
         assert_eq!(
             driver.state().last_reason.as_deref(),
@@ -807,7 +851,10 @@ mod tests {
             continuations_used: 2,
             ..empty_goal_state()
         });
-        driver.next_continuation_message(&mut session).unwrap();
+        assert!(driver
+            .next_continuation_message(&mut session)
+            .unwrap()
+            .is_some());
         assert_eq!(driver.state().continuations_used, 3);
     }
 
@@ -821,13 +868,15 @@ mod tests {
         assert!(!GoalDriver::is_branch_seedable(&session));
         // Messages also block seeding.
         let mut other = persisted_session();
-        other.append_message(pa_types::session::AgentMessage::User(
-            pa_types::ai::UserMessage {
-                content: UserContent::Text("hi".to_string()),
-                timestamp: 0,
-                rest: Default::default(),
-            },
-        ));
+        other
+            .append_message(pa_types::session::AgentMessage::User(
+                pa_types::ai::UserMessage {
+                    content: UserContent::Text("hi".to_string()),
+                    timestamp: 0,
+                    rest: Default::default(),
+                },
+            ))
+            .unwrap();
         assert!(!GoalDriver::is_branch_seedable(&other));
     }
 
@@ -837,7 +886,9 @@ mod tests {
     /// through its own state machine.
     fn append_goal_row(session: &mut SessionManager, state: &GoalState) {
         let value = serde_json::to_value(state).unwrap();
-        session.append_custom_entry(GOAL_STATE_CUSTOM_TYPE, Some(value));
+        session
+            .append_custom_entry(GOAL_STATE_CUSTOM_TYPE, Some(value))
+            .unwrap();
     }
 
     /// TS `agent-session-goal.test.ts` "reloads the goal state from the
@@ -854,7 +905,9 @@ mod tests {
 
         // Bill usage through the same path a real assistant message uses.
         assert_eq!(
-            driver.record_assistant_usage(&mut session, "a1", &usage(40, 10)),
+            driver
+                .record_assistant_usage(&mut session, "a1", &usage(40, 10))
+                .unwrap(),
             UsageOutcome::Accounted
         );
         assert!(driver.state().tokens_used >= 50);
@@ -899,7 +952,9 @@ mod tests {
 
         // Bill usage until the budget gate fires.
         assert_eq!(
-            driver.record_assistant_usage(&mut session, "a1", &usage(60, 50)),
+            driver
+                .record_assistant_usage(&mut session, "a1", &usage(60, 50))
+                .unwrap(),
             UsageOutcome::BudgetReached
         );
         assert_eq!(driver.state().status, GoalStatus::BudgetLimited);
@@ -932,7 +987,9 @@ mod tests {
         let mut driver = GoalDriver::new();
         driver.start(&mut session, "first goal", None).unwrap();
         assert_eq!(
-            driver.record_assistant_usage(&mut session, "a1", &usage(40, 10)),
+            driver
+                .record_assistant_usage(&mut session, "a1", &usage(40, 10))
+                .unwrap(),
             UsageOutcome::Accounted
         );
 
@@ -988,13 +1045,15 @@ mod tests {
 
         // An invalid row (missing the counters) lands after the valid one:
         // the scan skips it and keeps the branch's last VALID entry.
-        session.append_custom_entry(
-            GOAL_STATE_CUSTOM_TYPE,
-            Some(serde_json::json!({
-                "active": true,
-                "status": "active",
-            })),
-        );
+        session
+            .append_custom_entry(
+                GOAL_STATE_CUSTOM_TYPE,
+                Some(serde_json::json!({
+                    "active": true,
+                    "status": "active",
+                })),
+            )
+            .unwrap();
         driver.reload_from_branch(&session, GoalBranchReload::FaithfulBranch);
         assert_eq!(driver.state().status, GoalStatus::Active);
         assert!(driver.state().goal_id.is_some());
@@ -1003,13 +1062,15 @@ mod tests {
         // A branch without any goal entry reloads to the empty state and
         // drops the anchor.
         let mut fresh = persisted_session();
-        fresh.append_message(pa_types::session::AgentMessage::User(
-            pa_types::ai::UserMessage {
-                content: UserContent::Text("no goal here".to_string()),
-                timestamp: 0,
-                rest: Default::default(),
-            },
-        ));
+        fresh
+            .append_message(pa_types::session::AgentMessage::User(
+                pa_types::ai::UserMessage {
+                    content: UserContent::Text("no goal here".to_string()),
+                    timestamp: 0,
+                    rest: Default::default(),
+                },
+            ))
+            .unwrap();
         driver.reload_from_branch(&fresh, GoalBranchReload::FaithfulBranch);
         assert_eq!(driver.state(), &empty_goal_state());
         assert!(driver.accounting_started_at.is_none());

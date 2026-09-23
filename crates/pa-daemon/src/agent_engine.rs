@@ -1160,10 +1160,12 @@ impl AgentSessionEngine {
                 let mut manager = self
                     .runtime
                     .block_on(async { handles.session.lock().await });
-                manager.append_custom_entry(
+                if let Err(error) = manager.append_custom_entry(
                     "rlm_max_depth_state",
                     Some(json!({ "maxDepth": max_depth })),
-                );
+                ) {
+                    eprintln!("pa-daemon: failed to persist rlm_max_depth_state: {error:#}");
+                }
             }
             None => {
                 *self
@@ -1196,10 +1198,12 @@ impl AgentSessionEngine {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
         if let Some(max_depth) = pending {
-            manager.append_custom_entry(
+            if let Err(error) = manager.append_custom_entry(
                 "rlm_max_depth_state",
                 Some(json!({ "maxDepth": max_depth })),
-            );
+            ) {
+                eprintln!("pa-daemon: failed to flush pending rlm_max_depth_state: {error:#}");
+            }
         }
     }
 
@@ -1326,8 +1330,17 @@ impl SessionEngine for AgentSessionEngine {
             let mut session = handles.session.lock().await;
             // The mint persists the `thread_goal_state` entry (TS
             // `_setGoalState`) and consumes one continuation slot; an
-            // inactive or objective-less goal mints nothing.
-            let message = driver.next_continuation_message(&mut session)?;
+            // inactive or objective-less goal mints nothing. A failed
+            // persist ends the boundary without a continuation (TS
+            // `_maybeResumeGoalContinuationAfterRlmWork`'s catch: the
+            // hook must not reject; the unchanged count retries).
+            let message = match driver.next_continuation_message(&mut session) {
+                Ok(message) => message,
+                Err(error) => {
+                    eprintln!("pa-daemon: goal continuation mint persist failed: {error:#}");
+                    None
+                }
+            }?;
             let goal_update = self.publish_goal_state(driver.state());
             Some((
                 crate::engine::PromptRequest {
@@ -2745,7 +2758,7 @@ impl AgentSessionEngine {
                             .await;
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
-                            session.append_model_change(&next.provider, &next.id);
+                            session.append_model_change(&next.provider, &next.id)?;
                         }
                         Ok(())
                     }
@@ -2779,7 +2792,7 @@ impl AgentSessionEngine {
                             session.append_model_change(
                                 &primary_model.provider,
                                 &primary_model.id,
-                            );
+                            )?;
                         }
                         Ok(Some(format!(
                             "{}/{}",
@@ -3385,17 +3398,28 @@ impl AgentSessionEngine {
                                         // `goal_update` with the next emit),
                                         // and the natural boundary mints the
                                         // budget-limit wrap-up steer.
-                                        if driver.record_assistant_usage(
-                                            &mut session,
-                                            &message_id,
-                                            &message.usage,
-                                        ) == pa_core::session_engine::goal_driver::UsageOutcome::BudgetReached
+                                        // TS `_shouldStopAfterTurn`'s catch:
+                                        // goal accounting must not interrupt
+                                        // the core agent loop; a failed
+                                        // persist only warns.
+                                        match driver
+                                            .record_assistant_usage(&mut session, &message_id, &message.usage)
                                         {
-                                            // TS `_shouldStopAfterTurn`'s budget
-                                            // arm arms the wrap-up steer: the
-                                            // natural boundary reads it.
-                                            goal_budget_crossed
-                                                .store(true, std::sync::atomic::Ordering::SeqCst);
+                                            Ok(
+                                                pa_core::session_engine::goal_driver::UsageOutcome::BudgetReached,
+                                            ) => {
+                                                // TS `_shouldStopAfterTurn`'s budget
+                                                // arm arms the wrap-up steer: the
+                                                // natural boundary reads it.
+                                                goal_budget_crossed
+                                                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                                            }
+                                            Ok(_) => {}
+                                            Err(error) => {
+                                                eprintln!(
+                                                    "pa-daemon: goal usage accounting persist failed: {error:#}"
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -4473,7 +4497,7 @@ pub(crate) mod tests {
         engine.runtime.block_on(async {
             let mut driver = handles.driver.lock().await;
             let mut session = handles.session.lock().await;
-            driver.complete(&mut session);
+            driver.complete(&mut session).unwrap();
         });
         let mut turn_events: Vec<EngineEvent> = Vec::new();
         admit_request(&engine, request, &mut turn_events);

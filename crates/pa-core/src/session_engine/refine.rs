@@ -602,7 +602,9 @@ Reviewer instructions: record it"
     async fn execute_refinement_persists_state_and_entries() {
         let dir = TempDir::new().unwrap();
         let mut session = persisted_session(&dir);
-        session.append_message(user_message("do a thing twice"));
+        session
+            .append_message(user_message("do a thing twice"))
+            .unwrap();
         let global_dir = dir.path().join("harness");
         let reply = r#"{"summary":"note it","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
         let result = execute_refinement(

@@ -375,10 +375,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut manager = SessionManager::in_memory(tmp.path());
         // Creation prefix only: no user content.
-        manager.append_model_change("openai", "m");
-        manager.append_thinking_level_change("medium");
+        manager.append_model_change("openai", "m").unwrap();
+        manager.append_thinking_level_change("medium").unwrap();
         assert!(!manager.has_user_content());
-        manager.append_message(user("real content"));
+        manager.append_message(user("real content")).unwrap();
         assert!(manager.has_user_content());
     }
 
@@ -391,7 +391,7 @@ mod tests {
         assert!(manager.get_entry_by_id(&label_entry).is_some());
         assert_eq!(manager.get_label(&a).as_deref(), Some("checkpoint"));
         // Clear the label.
-        manager.append_label_change(&a, None);
+        manager.append_label_change(&a, None).unwrap();
         assert_eq!(manager.get_label(&a), None);
         // Agent status visible on the active branch.
         let status_id = manager

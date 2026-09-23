@@ -1352,26 +1352,28 @@ mod tests {
     fn append_compaction_serializes_the_full_ts_record() {
         let tmp = tempfile::tempdir().unwrap();
         let mut manager = SessionManager::in_memory(tmp.path());
-        manager.append_compaction(pa_types::session::CompactionEntry {
-            summary: "the overflow summary".to_string(),
-            first_kept_entry_id: "e4".to_string(),
-            tokens_before: 214,
-            details: Some(serde_json::json!({
-                "readFiles": [],
-                "modifiedFiles": [],
-            })),
-            from_hook: Some(false),
-            custom_instructions: None,
-            usage: Some(pa_types::ai::Usage {
-                input: 20,
-                output: 10,
-                cache_read: 80,
-                cache_write: 0,
-                total_tokens: 110,
-                cost: Default::default(),
-            }),
-            harness_digest: None,
-        });
+        manager
+            .append_compaction(pa_types::session::CompactionEntry {
+                summary: "the overflow summary".to_string(),
+                first_kept_entry_id: "e4".to_string(),
+                tokens_before: 214,
+                details: Some(serde_json::json!({
+                    "readFiles": [],
+                    "modifiedFiles": [],
+                })),
+                from_hook: Some(false),
+                custom_instructions: None,
+                usage: Some(pa_types::ai::Usage {
+                    input: 20,
+                    output: 10,
+                    cache_read: 80,
+                    cache_write: 0,
+                    total_tokens: 110,
+                    cost: Default::default(),
+                }),
+                harness_digest: None,
+            })
+            .unwrap();
         let line = serialize_entry(
             manager
                 .get_entries()
@@ -1393,21 +1395,23 @@ mod tests {
         // Pre-model entries are not flushed until an assistant message exists.
         let first = manager.append_thinking_level_change("high");
         assert!(!manager.get_session_file().unwrap().exists());
-        manager.append_message(AgentMessage::Assistant(pa_types::ai::AssistantMessage {
-            content: vec![],
-            api: "anthropic-messages".to_string(),
-            provider: "anthropic".to_string(),
-            model: "claude-x".to_string(),
-            response_model: None,
-            response_id: None,
-            diagnostics: None,
-            usage: pa_types::ai::Usage::default(),
-            stop_reason: pa_types::ai::StopReason::Stop,
-            stop_reason_raw: None,
-            error_message: None,
-            timestamp: 0,
-            rest: Default::default(),
-        }));
+        manager
+            .append_message(AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+                content: vec![],
+                api: "anthropic-messages".to_string(),
+                provider: "anthropic".to_string(),
+                model: "claude-x".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: Default::default(),
+            }))
+            .unwrap();
         let file = manager.get_session_file().unwrap().to_path_buf();
         assert!(file.exists());
         // The assistant append rewrote the whole file, including the earlier entry.
@@ -1442,7 +1446,7 @@ mod tests {
             timestamp: 0,
             rest: Default::default(),
         });
-        manager.append_message(assistant.clone());
+        manager.append_message(assistant.clone()).unwrap();
         let file = manager.get_session_file().unwrap().to_path_buf();
         // Simulate crash damage: torn tail (no trailing newline).
         let content = std::fs::read_to_string(&file).unwrap();
@@ -1457,7 +1461,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("sessions");
         let mut manager = SessionManager::persisted(tmp.path(), &dir);
-        manager.append_session_info("my session");
+        manager.append_session_info("my session").unwrap();
         // session_info persists even without an assistant message.
         assert!(manager.get_session_file().unwrap().exists());
         assert_eq!(manager.get_session_name().as_deref(), Some("my session"));

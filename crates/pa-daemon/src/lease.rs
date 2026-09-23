@@ -283,7 +283,9 @@ impl SessionLease {
         with_lease_guard(&self.directory, || {
             let owner = read_owner(&self.directory)?;
             anyhow::ensure!(
-                owner.as_ref().is_some_and(|owner| owner.token == self.token)
+                owner
+                    .as_ref()
+                    .is_some_and(|owner| owner.token == self.token)
                     && !self.released.load(std::sync::atomic::Ordering::SeqCst),
                 "session lease lost ownership before append"
             );

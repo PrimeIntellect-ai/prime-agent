@@ -483,12 +483,24 @@ impl PrintGoalSurface {
                                 // guard: the loop does not assign message ids
                                 // in-process.
                                 let message_id = format!("a-{}", wire.timestamp);
+                                // TS `_shouldStopAfterTurn`'s catch: goal
+                                // accounting must not interrupt the loop;
+                                // a failed persist only warns.
                                 let outcome =
                                     engine.record_goal_usage(&message_id, &wire.usage).await;
                                 surface.publish_goal_update(&engine).await;
-                                if outcome == UsageOutcome::BudgetReached {
-                                    if let Some(steer) = engine.goal_budget_limit_steer().await {
-                                        surface.arm_budget_steer(steer).await;
+                                match outcome {
+                                    Ok(UsageOutcome::BudgetReached) => {
+                                        if let Some(steer) = engine.goal_budget_limit_steer().await
+                                        {
+                                            surface.arm_budget_steer(steer).await;
+                                        }
+                                    }
+                                    Ok(_) => {}
+                                    Err(error) => {
+                                        eprintln!(
+                                            "pa-cli: goal usage accounting persist failed: {error:#}"
+                                        );
                                     }
                                 }
                             }
@@ -624,7 +636,8 @@ impl PrintGoalSurface {
             {
                 engine
                     .fail_goal_for_terminal_error(message.as_deref())
-                    .await;
+                    .await
+                    .map_err(|error| format!("{error:#}"))?;
                 self.publish_goal_update(engine).await;
             }
             return Ok(engine.goal_state().await.status == pa_types::goal::GoalStatus::Active);
@@ -671,7 +684,8 @@ impl PrintGoalSurface {
         {
             engine
                 .fail_goal_for_terminal_error(error_message.as_deref())
-                .await;
+                .await
+                .map_err(|error| format!("{error:#}"))?;
             self.publish_goal_update(engine).await;
         }
         self.emit_action_drained().await;
@@ -1381,21 +1395,24 @@ mod tests {
             &dir.path().join("sessions"),
         );
         session_manager.materialize_session_file(Some(dir.path().join("sessions")));
-        session_manager.append_message(pa_types::session::AgentMessage::User(
-            pa_types::ai::UserMessage {
-                content: pa_types::ai::UserContent::Text(
-                    // A large history turn: it crosses the reserve headroom
-                    // on the crossing turn's request estimate (the resumed
-                    // context rides every request), and the threshold
-                    // compaction summarizes it away — the post-compaction
-                    // context sits back under the headroom.
-                    String::from("a resumed history turn ") + &"x".repeat(60000),
-                ),
-                timestamp: 1,
-                rest: Default::default(),
-            },
-        ));
-        session_manager.append_message(pa_types::session::AgentMessage::Assistant(
+        session_manager
+            .append_message(pa_types::session::AgentMessage::User(
+                pa_types::ai::UserMessage {
+                    content: pa_types::ai::UserContent::Text(
+                        // A large history turn: it crosses the reserve headroom
+                        // on the crossing turn's request estimate (the resumed
+                        // context rides every request), and the threshold
+                        // compaction summarizes it away — the post-compaction
+                        // context sits back under the headroom.
+                        String::from("a resumed history turn ") + &"x".repeat(60000),
+                    ),
+                    timestamp: 1,
+                    rest: Default::default(),
+                },
+            ))
+            .expect("the resumed user turn appends");
+        session_manager
+            .append_message(pa_types::session::AgentMessage::Assistant(
             serde_json::from_value(json!({
                 "role": "assistant",
                 "content": [{ "type": "text", "text": "resumed history reply" }],
@@ -1411,7 +1428,8 @@ mod tests {
                 "timestamp": 2,
             }))
             .expect("the history reply deserializes"),
-        ));
+        ))
+            .expect("the resumed history reply appends");
         {
             let mut driver = pa_core::session_engine::goal_driver::GoalDriver::new();
             driver

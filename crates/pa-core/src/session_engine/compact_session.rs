@@ -423,39 +423,43 @@ mod tests {
     fn session_with_turns(cwd: &std::path::Path, turns: usize) -> SessionManager {
         let mut session = SessionManager::in_memory(cwd);
         for i in 0..turns {
-            session.append_message(AgentMessage::User(pa_types::ai::UserMessage {
-                content: UserContent::Text(format!("turn {i} message with some words")),
-                timestamp: 0,
-                rest: Default::default(),
-            }));
-            session.append_message(AgentMessage::Assistant(AssistantMessage {
-                content: vec![pa_types::ai::AssistantContentBlock::Text(
-                    pa_types::ai::TextContent {
-                        text: format!("reply {i}"),
-                        text_signature: None,
-                        rest: Default::default(),
+            session
+                .append_message(AgentMessage::User(pa_types::ai::UserMessage {
+                    content: UserContent::Text(format!("turn {i} message with some words")),
+                    timestamp: 0,
+                    rest: Default::default(),
+                }))
+                .unwrap();
+            session
+                .append_message(AgentMessage::Assistant(AssistantMessage {
+                    content: vec![pa_types::ai::AssistantContentBlock::Text(
+                        pa_types::ai::TextContent {
+                            text: format!("reply {i}"),
+                            text_signature: None,
+                            rest: Default::default(),
+                        },
+                    )],
+                    api: "openai-completions".to_string(),
+                    provider: "test".to_string(),
+                    model: "m".to_string(),
+                    response_model: None,
+                    response_id: None,
+                    diagnostics: None,
+                    usage: pa_types::ai::Usage {
+                        input: 100,
+                        output: 20,
+                        cache_read: 0,
+                        cache_write: 0,
+                        total_tokens: 120,
+                        cost: Default::default(),
                     },
-                )],
-                api: "openai-completions".to_string(),
-                provider: "test".to_string(),
-                model: "m".to_string(),
-                response_model: None,
-                response_id: None,
-                diagnostics: None,
-                usage: pa_types::ai::Usage {
-                    input: 100,
-                    output: 20,
-                    cache_read: 0,
-                    cache_write: 0,
-                    total_tokens: 120,
-                    cost: Default::default(),
-                },
-                stop_reason: pa_types::ai::StopReason::Stop,
-                stop_reason_raw: None,
-                error_message: None,
-                timestamp: 0,
-                rest: Default::default(),
-            }));
+                    stop_reason: pa_types::ai::StopReason::Stop,
+                    stop_reason_raw: None,
+                    error_message: None,
+                    timestamp: 0,
+                    rest: Default::default(),
+                }))
+                .unwrap();
         }
         session
     }
@@ -578,12 +582,16 @@ mod tests {
                 rest: Default::default(),
             })
         };
-        session.append_message(user("turn one"));
-        session.append_message(reply("reply one"));
-        session.append_message(user(&format!("big turn {}", "x".repeat(4_000))));
-        session.append_message(reply(&format!("reply {}", "y".repeat(4_000))));
-        session.append_message(user("turn three"));
-        session.append_message(reply("reply three"));
+        session.append_message(user("turn one")).unwrap();
+        session.append_message(reply("reply one")).unwrap();
+        session
+            .append_message(user(&format!("big turn {}", "x".repeat(4_000))))
+            .unwrap();
+        session
+            .append_message(reply(&format!("reply {}", "y".repeat(4_000))))
+            .unwrap();
+        session.append_message(user("turn three")).unwrap();
+        session.append_message(reply("reply three")).unwrap();
         // The tiny keep-recent budget lands the cut on the big turn's
         // assistant reply — a mid-turn cut.
         let (cut, _) = compute_cut(&session, 10);
@@ -792,10 +800,10 @@ mod tests {
 
         // ONE representation (the fixed engine branch): the goal turn is
         // the custom row plus its reply.
-        session.append_message(user("seed turn"));
-        session.append_message(reply("seed reply"));
+        session.append_message(user("seed turn")).unwrap();
+        session.append_message(reply("seed reply")).unwrap();
         let kept_goal_row_id = goal_row(&mut session).unwrap();
-        session.append_message(reply("goal reply"));
+        session.append_message(reply("goal reply")).unwrap();
         let outcome = execute_compaction(
             &mut session,
             CompactOptions {
@@ -844,11 +852,13 @@ mod tests {
             record_summary(seen.clone()),
         ]);
         let mut doubled = SessionManager::in_memory(tmp.path());
-        doubled.append_message(user("seed turn"));
-        doubled.append_message(reply("seed reply"));
-        goal_row(&mut doubled);
-        doubled.append_message(user("[goal: continuation] keep going"));
-        doubled.append_message(reply("goal reply"));
+        doubled.append_message(user("seed turn")).unwrap();
+        doubled.append_message(reply("seed reply")).unwrap();
+        goal_row(&mut doubled).unwrap();
+        doubled
+            .append_message(user("[goal: continuation] keep going"))
+            .unwrap();
+        doubled.append_message(reply("goal reply")).unwrap();
         let outcome = execute_compaction(
             &mut doubled,
             CompactOptions {
@@ -947,10 +957,14 @@ mod tests {
         };
         // One big turn only: the cut splits it, and nothing precedes the
         // turn start, so there is no history to summarize.
-        session.append_message(user(&format!("big turn {}", "x".repeat(4_000))));
-        session.append_message(reply(&format!("reply {}", "y".repeat(4_000))));
-        session.append_message(user("small"));
-        session.append_message(reply("small reply"));
+        session
+            .append_message(user(&format!("big turn {}", "x".repeat(4_000))))
+            .unwrap();
+        session
+            .append_message(reply(&format!("reply {}", "y".repeat(4_000))))
+            .unwrap();
+        session.append_message(user("small")).unwrap();
+        session.append_message(reply("small reply")).unwrap();
         let (cut, _) = compute_cut(&session, 10);
         assert!(cut.is_split_turn);
         assert_eq!(cut.turn_start_index, Some(1));
@@ -1026,29 +1040,33 @@ mod tests {
                 rest: Default::default(),
             })
         };
-        session.append_message(user(&format!("big turn {}", "x".repeat(4_000))));
-        session.append_message(AgentMessage::Assistant(AssistantMessage {
-            content: vec![pa_types::ai::AssistantContentBlock::Text(
-                pa_types::ai::TextContent {
-                    text: format!("reply {}", "y".repeat(4_000)),
-                    text_signature: None,
-                    rest: Default::default(),
-                },
-            )],
-            api: "faux".to_string(),
-            provider: "faux".to_string(),
-            model: "compact-m".to_string(),
-            response_model: None,
-            response_id: None,
-            diagnostics: None,
-            usage: pa_types::ai::Usage::default(),
-            stop_reason: pa_types::ai::StopReason::Stop,
-            stop_reason_raw: None,
-            error_message: None,
-            timestamp: 0,
-            rest: Default::default(),
-        }));
-        session.append_message(user("small"));
+        session
+            .append_message(user(&format!("big turn {}", "x".repeat(4_000))))
+            .unwrap();
+        session
+            .append_message(AgentMessage::Assistant(AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: format!("reply {}", "y".repeat(4_000)),
+                        text_signature: None,
+                        rest: Default::default(),
+                    },
+                )],
+                api: "faux".to_string(),
+                provider: "faux".to_string(),
+                model: "compact-m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: Default::default(),
+            }))
+            .unwrap();
+        session.append_message(user("small")).unwrap();
         let entries = session.get_all_entries().to_vec();
         let preparation = prepare_compaction(&entries, 10).expect("split compaction prepares");
         assert!(preparation.cut.is_split_turn);
@@ -1057,7 +1075,7 @@ mod tests {
         assert_eq!(preparation.previous_summary, None);
         // A fresh small session with no cut history still skips.
         let mut small = SessionManager::in_memory(tmp.path());
-        small.append_message(user("one small turn"));
+        small.append_message(user("one small turn")).unwrap();
         let entries = small.get_all_entries().to_vec();
         assert_eq!(
             prepare_compaction(&entries, 10_000),
@@ -1209,9 +1227,9 @@ mod tests {
                 rest: Default::default(),
             })
         };
-        session.append_message(user("turn zero"));
-        session.append_message(user("turn one"));
-        session.append_message(user("turn two"));
+        session.append_message(user("turn zero")).unwrap();
+        session.append_message(user("turn one")).unwrap();
+        session.append_message(user("turn two")).unwrap();
         let settings = super::super::compaction::CompactionSettings {
             keep_recent_tokens: 2,
             ..Default::default()
@@ -1242,8 +1260,8 @@ mod tests {
         assert!(!requests[0].contains("<previous-summary>"));
 
         // New turns after the first compaction.
-        session.append_message(user("turn three"));
-        session.append_message(user("turn four"));
+        session.append_message(user("turn three")).unwrap();
+        session.append_message(user("turn four")).unwrap();
         let outcome = execute_compaction(
             &mut session,
             CompactOptions {
@@ -1364,8 +1382,8 @@ mod tests {
                 rest: Default::default(),
             })
         };
-        session.append_message(user("turn zero"));
-        session.append_message(user("turn one"));
+        session.append_message(user("turn zero")).unwrap();
+        session.append_message(user("turn one")).unwrap();
         let settings = super::super::compaction::CompactionSettings {
             keep_recent_tokens: 1,
             ..Default::default()
@@ -1389,12 +1407,16 @@ mod tests {
         // lands mid big turn (keep budget 10), with the first compaction's
         // retained turns as the history and the big turn's user message as
         // the split prefix.
-        session.append_message(user("kept small turn"));
-        session.append_message(reply("small kept reply"));
-        session.append_message(user(&format!("big turn {}", "x".repeat(4_000))));
-        session.append_message(reply(&format!("reply {}", "y".repeat(4_000))));
-        session.append_message(user("final small turn"));
-        session.append_message(reply("final reply"));
+        session.append_message(user("kept small turn")).unwrap();
+        session.append_message(reply("small kept reply")).unwrap();
+        session
+            .append_message(user(&format!("big turn {}", "x".repeat(4_000))))
+            .unwrap();
+        session
+            .append_message(reply(&format!("reply {}", "y".repeat(4_000))))
+            .unwrap();
+        session.append_message(user("final small turn")).unwrap();
+        session.append_message(reply("final reply")).unwrap();
         let outcome = execute_compaction(
             &mut session,
             CompactOptions {
@@ -1782,12 +1804,14 @@ mod tests {
         let model = registration.get_model();
         let tmp = tempfile::tempdir().unwrap();
         let mut session = session_with_turns(tmp.path(), 3);
-        session.append_compaction(pa_types::session::CompactionEntry {
-            summary: "summary".to_string(),
-            first_kept_entry_id: "e1".to_string(),
-            tokens_before: 100,
-            ..Default::default()
-        });
+        session
+            .append_compaction(pa_types::session::CompactionEntry {
+                summary: "summary".to_string(),
+                first_kept_entry_id: "e1".to_string(),
+                tokens_before: 100,
+                ..Default::default()
+            })
+            .unwrap();
         let outcome = execute_compaction(
             &mut session,
             CompactOptions {
@@ -1866,12 +1890,16 @@ mod tests {
                 rest: Default::default(),
             })
         };
-        session.append_message(probe("seed turn"));
-        session.append_message(reply(settled, false));
-        session.append_message(probe(&("overflow probe ".to_string() + &"x".repeat(400))));
+        session.append_message(probe("seed turn")).unwrap();
+        session.append_message(reply(settled, false)).unwrap();
+        session
+            .append_message(probe(&("overflow probe ".to_string() + &"x".repeat(400))))
+            .unwrap();
         // The overflow error turn: stopReason "error" with zeroed usage
         // (what the provider returns for a failed request).
-        session.append_message(reply(Default::default(), true));
+        session
+            .append_message(reply(Default::default(), true))
+            .unwrap();
         // TS: 110 (last valid usage) + ceil(415/4) (the probe turn) = 214.
         assert_eq!(
             context_tokens(session.get_all_entries(), session.get_leaf_id()),

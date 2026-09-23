@@ -126,7 +126,7 @@ fn complete_goal_from_host(
     if driver.state().objective.is_none() || driver.state().status == GoalStatus::Idle {
         anyhow::bail!("cannot complete goal because this thread has no goal");
     }
-    driver.complete(session);
+    driver.complete(session)?;
     Ok(driver.state().clone())
 }
 

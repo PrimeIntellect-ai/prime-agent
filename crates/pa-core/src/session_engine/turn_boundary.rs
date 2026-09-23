@@ -653,20 +653,24 @@ mod tests {
         let mut session = SessionManager::in_memory(dir.path());
         session.materialize_session_file(Some(session_dir));
         for text in ["alpha task", "beta task", "gamma task"] {
-            session.append_message(user_entry(text));
-            session.append_message(assistant_entry(&format!("{text} done")));
+            session.append_message(user_entry(text)).unwrap();
+            session
+                .append_message(assistant_entry(&format!("{text} done")))
+                .unwrap();
         }
         if end_with_compaction {
             let first_kept = session.get_all_entries()[1]
                 .id()
                 .unwrap_or_default()
                 .to_string();
-            session.append_compaction(pa_types::session::CompactionEntry {
-                summary: "summary".to_string(),
-                first_kept_entry_id: first_kept.clone(),
-                tokens_before: 10,
-                ..Default::default()
-            });
+            session
+                .append_compaction(pa_types::session::CompactionEntry {
+                    summary: "summary".to_string(),
+                    first_kept_entry_id: first_kept.clone(),
+                    tokens_before: 10,
+                    ..Default::default()
+                })
+                .unwrap();
         }
         session
     }
@@ -1148,8 +1152,10 @@ mod tests {
             total_tokens: 130,
             cost: Default::default(),
         };
-        session.append_message(assistant);
-        session.append_message(user_entry("a somewhat long trailing message"));
+        session.append_message(assistant).unwrap();
+        session
+            .append_message(user_entry("a somewhat long trailing message"))
+            .unwrap();
         let entries = session.get_all_entries().to_vec();
         // Unknown context window -> None.
         assert!(context_usage(&entries, None).is_none());
@@ -1169,12 +1175,14 @@ mod tests {
             .id()
             .unwrap_or_default()
             .to_string();
-        session.append_compaction(pa_types::session::CompactionEntry {
-            summary: "summary".to_string(),
-            first_kept_entry_id: first_kept.clone(),
-            tokens_before: 10,
-            ..Default::default()
-        });
+        session
+            .append_compaction(pa_types::session::CompactionEntry {
+                summary: "summary".to_string(),
+                first_kept_entry_id: first_kept.clone(),
+                tokens_before: 10,
+                ..Default::default()
+            })
+            .unwrap();
         let entries = session.get_all_entries().to_vec();
         let usage = context_usage(&entries, Some(100_000)).unwrap();
         assert_eq!(usage.tokens, None);

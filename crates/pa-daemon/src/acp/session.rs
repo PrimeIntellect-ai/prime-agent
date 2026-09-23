@@ -273,14 +273,23 @@ async fn subscribe_engine_events(
                             // double-counting guard: the loop does not
                             // assign message ids in-process.
                             let message_id = format!("a-{}", wire.timestamp);
-                            if driver.record_assistant_usage(
-                                &mut persistence,
-                                &message_id,
-                                &wire.usage,
-                            )
-                                == pa_core::session_engine::goal_driver::UsageOutcome::BudgetReached
+                            // TS `_shouldStopAfterTurn`'s catch: goal
+                            // accounting must not interrupt the loop; a
+                            // failed persist only warns.
+                            match driver
+                                .record_assistant_usage(&mut persistence, &message_id, &wire.usage)
                             {
-                                goal_budget_crossed.store(true, Ordering::SeqCst);
+                                Ok(
+                                    pa_core::session_engine::goal_driver::UsageOutcome::BudgetReached,
+                                ) => {
+                                    goal_budget_crossed.store(true, Ordering::SeqCst);
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    eprintln!(
+                                        "pa-daemon: goal usage accounting persist failed: {error:#}"
+                                    );
+                                }
                             }
                         }
                     }

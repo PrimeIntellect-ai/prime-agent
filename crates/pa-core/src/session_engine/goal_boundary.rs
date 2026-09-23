@@ -81,7 +81,7 @@ impl SessionEngine {
         &self,
         message_id: &str,
         usage: &pa_types::ai::Usage,
-    ) -> UsageOutcome {
+    ) -> anyhow::Result<UsageOutcome> {
         let persistence = self.session.shared_persistence();
         let mut driver = self.goal_driver.lock().await;
         let mut session = persistence.lock().await;
@@ -104,7 +104,10 @@ impl SessionEngine {
     /// Mint one goal continuation (TS `_getGoalContinuationMessages`): an
     /// active goal with an objective consumes one continuation slot and
     /// returns its context row; the state change persists before the turn
-    /// is admitted. `None` when the goal cannot mint.
+    /// is admitted. `None` when the goal cannot mint. A failed persist
+    /// fails the goal with the write error and mints nothing (the TS
+    /// catch arm: `_finishGoalWithError(error)`, then no continuation —
+    /// the hook must not reject).
     pub async fn mint_goal_continuation(&self) -> Option<CustomMessage> {
         let persistence = self.session.shared_persistence();
         let mut driver = self.goal_driver.lock().await;
@@ -112,24 +115,32 @@ impl SessionEngine {
             return None;
         }
         let mut session = persistence.lock().await;
-        driver.next_continuation_message(&mut session)
-    }
-
-    /// Roll back one just-minted continuation (TS
-    /// `_clearQueuedGoalContinuationAfterCancelledThresholdCompaction` and
-    /// the continuation hook's input-arrival restore): the slot returns so
-    /// the next natural stop re-mints without double-counting.
-    pub async fn rollback_goal_continuation_mint(&self) {
-        let persistence = self.session.shared_persistence();
-        let mut driver = self.goal_driver.lock().await;
-        let mut session = persistence.lock().await;
-        driver.rollback_continuation_mint(&mut session);
+        match driver.next_continuation_message(&mut session) {
+            Ok(message) => message,
+            Err(error) => {
+                let message = format!("{error:#}");
+                tracing::warn!("goal continuation mint failed the persist: {message}");
+                // TS `_finishGoalWithError`: best-effort — its own persist
+                // failure must not reject the boundary hook either.
+                if let Err(fail_error) = driver.finish_for_terminal_message(
+                    &mut session,
+                    pa_types::ai::StopReason::Error,
+                    Some(&message),
+                ) {
+                    tracing::warn!("goal error finish also failed: {fail_error:#}");
+                }
+                None
+            }
+        }
     }
 
     /// A failed terminal assistant message fails an active goal (TS
     /// `_finishGoalForTerminalAssistantMessage` at `agent_end`): the error
     /// text becomes the goal's terminal reason; an abort keeps the goal.
-    pub async fn fail_goal_for_terminal_error(&self, error_message: Option<&str>) {
+    pub async fn fail_goal_for_terminal_error(
+        &self,
+        error_message: Option<&str>,
+    ) -> anyhow::Result<()> {
         let persistence = self.session.shared_persistence();
         let mut driver = self.goal_driver.lock().await;
         let mut session = persistence.lock().await;
@@ -137,7 +148,7 @@ impl SessionEngine {
             &mut session,
             pa_types::ai::StopReason::Error,
             error_message,
-        );
+        )
     }
 
     /// The current goal state (the drivers' publish-dedupe read).

@@ -1874,7 +1874,7 @@ mod compaction_outcome_tests {
         let sessions = tmp.path().join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
         let mut manager = SessionManager::persisted(tmp.path(), &sessions);
-        manager.append_message(seeded_assistant());
+        manager.append_message(seeded_assistant()).unwrap();
         let file = manager.get_session_file().unwrap().to_path_buf();
         assert!(file.exists(), "the session file materialized");
         // Replace the session file with a directory at the same path: every
@@ -1889,7 +1889,8 @@ mod compaction_outcome_tests {
                 CompactionOutcomeKind::Skipped,
                 "Auto-compaction skipped: Already compacted",
             )
-            .await;
+            .await
+            .unwrap();
         // The write failed (the file path is a directory) — but the entry
         // chain and a context rebuild keep the disclosure.
         let entries = session.entries().await;

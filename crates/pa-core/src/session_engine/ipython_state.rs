@@ -458,7 +458,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut session = SessionManager::in_memory(tmp.path());
         for text in ["turn zero", "turn one", "turn two"] {
-            session.append_message(user_turn(text));
+            session.append_message(user_turn(text)).unwrap();
         }
         let agent = std::sync::Arc::new(Agent::new(AgentOptions::default()));
         let mut engine = AgentSession::new(agent.clone(), session, Vec::new())

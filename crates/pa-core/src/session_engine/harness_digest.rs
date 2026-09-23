@@ -347,7 +347,7 @@ impl super::AgentSession {
         messages.push(message);
         self.agent.set_messages(messages).await;
         let mut session = self.session.lock().await;
-        persist_digest(&mut session, &digest);
+        persist_digest(&mut session, &digest)?;
         Ok(())
     }
 
