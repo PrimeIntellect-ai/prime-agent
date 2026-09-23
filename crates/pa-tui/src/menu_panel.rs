@@ -203,6 +203,50 @@ fn finish_menu_row(theme: &Theme, row: Line, width: usize, selected: bool) -> Li
     row
 }
 
+/// How far the selection hug trails past the text (TS
+/// `OnboardingChoiceComponent`'s `ROW_TRAILING`).
+pub(crate) const HUG_TRAILING: usize = 6;
+
+/// The selection hug's floor (TS `MIN_ROW_WIDTH`).
+pub(crate) const MIN_HUG_WIDTH: usize = 30;
+
+/// The selected row's wash width (TS `OnboardingChoiceComponent.render`'s
+/// `rowWidth`): the content plus a little trailing pad, floored at
+/// [`MIN_HUG_WIDTH`] and capped at the pane width — never the full-width
+/// band of the plain menu rows.
+pub(crate) fn hug_width(content_width: usize, width: usize) -> usize {
+    (content_width + HUG_TRAILING).max(MIN_HUG_WIDTH).min(width)
+}
+
+/// One hug row: the content truncated to the pane, the selected row
+/// padded to its wash width and washed over the hug only (the
+/// onboarding-highlight treatment — a little past the text, not the
+/// whole terminal width).
+pub(crate) fn hug_row(
+    theme: &Theme,
+    row: Line,
+    content_width: usize,
+    selected: bool,
+    width: usize,
+) -> Line {
+    let mut row = truncate_line(&row, width, "");
+    if !selected {
+        return row;
+    }
+    let used = crate::width::spans_width(&row);
+    let hug = hug_width(content_width, width);
+    if used < hug {
+        row.push(Span::raw(" ".repeat(hug - used)));
+    }
+    let wash = crate::onboarding::highlight_wash(theme);
+    row.into_iter()
+        .map(|mut span| {
+            span.style = span.style.bg(wash);
+            span
+        })
+        .collect()
+}
+
 /// The inline search field (TS `MenuSearchInput.render`, inline mode): a
 /// full-width border rule, the field row, a border rule. The field is the
 /// single-line input with its `"> "` prompt; an empty field shows the dim

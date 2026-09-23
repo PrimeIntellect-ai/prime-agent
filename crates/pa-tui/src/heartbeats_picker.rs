@@ -1,34 +1,43 @@
-//! The `/heartbeats` inline management view (TS
-//! `HeartbeatManagerComponent`): the current session's heartbeats (the
-//! TS `scopeHeartbeatsToSession` child-session clause is not carried by
-//! the caller — operator scoping: nested sessions' heartbeats do not
-//! surface here), one `›`-marker row per heartbeat with its status, the
-//! selection's labeled detail block, and a per-heartbeat action pane
-//! (pause/resume, stop). Rendered inline-picker style (the `/model`
-//! geometry — a plain-text title line with the status counts, one
-//! bottom hint line) instead of the TS full-pane overlay.
+//! The `/heartbeats` management view (TS `HeartbeatManagerComponent`,
+//! redesigned per the operator's 2026-09-23 directive): the current
+//! session's heartbeats as a columned table (interval, label, next run,
+//! status) instead of text blobs, and Enter on a row opens the detail
+//! drill-in — the full prompt text, which agent created it, and the
+//! management actions (pause/resume, stop) as up/down-selectable rows in
+//! the same control pattern as the `/mcp` view. The selected row washes a
+//! little past its text (the onboarding choice panel's treatment), never
+//! the whole terminal width. Rendered inline-picker style (the `/model`
+//! geometry — a plain-text title line with the status counts, one bottom
+//! hint line).
 
 use serde_json::Value;
 
 use crate::keybindings::{format_key_text, KeybindingsManager};
-use crate::menu_panel::menu_list_layout;
+use crate::menu_panel::{hug_row, menu_list_layout};
 use crate::theme::{Theme, ThemeColor};
-use crate::width::{str_width, truncate_line};
+use crate::width::{str_width, truncate_line, wrap_text};
 use crate::{Line, Span};
 
 /// The preferred visible rows of the list (TS
 /// `PREFERRED_VISIBLE_HEARTBEATS`).
 const PREFERRED_VISIBLE: usize = 8;
 
-/// Rows the list reserves outside its items and the detail block (the
-/// inline geometry: rule, title line, blank, blank, blank, hint, rule).
-const LIST_FRAME_ROWS: usize = 7;
+/// The detail pane's prompt-line budget floor: a short viewport renders
+/// at least this many wrapped prompt lines when any fit.
+const MIN_PROMPT_LINES: usize = 1;
 
-/// The selection's detail-block row budget.
+/// Rows the list reserves outside its items (the inline geometry: rule,
+/// title, blank, column header, scroll indicator, blank, hint, rule).
+const LIST_FRAME_ROWS: usize = 8;
+
+/// The detail pane's labeled-pair row budget.
 const MAX_DETAIL_ROWS: usize = 6;
 
-/// One scroll-indicator row when the list window is shorter than the list.
-const SCROLL_INDICATOR_ROWS: usize = 1;
+/// The table's column width caps: the schedule expression and the label
+/// shrink to their content, the timestamp column is the fixed
+/// `YYYY-MM-DD HH:MM` cell, and the status word keeps its own width.
+const INTERVAL_CAP: usize = 18;
+const LABEL_CAP: usize = 32;
 
 /// The management-action vocabulary (TS `AgentHeartbeatManagementAction`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,17 +262,13 @@ pub fn format_timestamp(value: &str) -> String {
     }
 }
 
-/// The selected heartbeat's detail line (TS `formatHeartbeatDetails` plus
-/// the last error the TS rows carry as their secondary text: the inline
-/// row has no secondary line, so the error joins the detail).
-/// The selected heartbeat's detail block: `(label, value)` pairs (the
-/// `/model` picker's detail-block idiom — a labeled two-column block
-/// instead of a metadata run-on).
+/// The detail drill-in's labeled pairs (the `/model` picker's
+/// detail-block idiom): who created the heartbeat and the structured
+/// schedule facts.
 fn detail_pairs(entry: &HeartbeatEntry) -> Vec<(&'static str, String)> {
     let mut pairs = vec![
         ("created", source_label(entry).to_string()),
         ("session", session_label(entry)),
-        ("schedule", entry.job.schedule_expression.clone()),
         ("delivery", delivery_label(entry).to_string()),
         (
             "next run",
@@ -274,6 +279,7 @@ fn detail_pairs(entry: &HeartbeatEntry) -> Vec<(&'static str, String)> {
                 .map(format_timestamp)
                 .unwrap_or_else(|| "\u{2014}".to_string()),
         ),
+        ("runs", entry.job.run_count.to_string()),
     ];
     if let Some(error) = entry.job.last_error.as_deref() {
         let error = single_line(error);
@@ -329,14 +335,17 @@ fn row_primary(entry: &HeartbeatEntry) -> String {
         .unwrap_or_else(|| default_heartbeat_name(entry).to_string())
 }
 
-/// The pane's interactive mode (TS `HeartbeatManagerMode`).
+/// The pane's interactive mode: the columned list, or the selected
+/// heartbeat's detail drill-in (TS `HeartbeatManagerMode`, redesigned).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Mode {
     List,
-    /// The selected heartbeat's action pane, `selected_index` in its rows.
-    Actions {
+    /// The selected heartbeat's detail drill-in: the full prompt text,
+    /// the created-by facts, and the action rows (`action_index` in
+    /// their selection).
+    Detail {
         heartbeat_id: String,
-        selected_index: usize,
+        action_index: usize,
     },
 }
 
@@ -386,7 +395,7 @@ impl HeartbeatsPicker {
             error: None,
             viewport_rows,
         };
-        // A carried selection (the activity panel's chosen row) survives the
+        // A carried selection (the dock's chosen row) survives the
         // open; anything else lands on the first row (TS default).
         picker.selected_heartbeat_id = preselect
             .filter(|id| picker.heartbeats.iter().any(|entry| &entry.job.id == id))
@@ -455,10 +464,10 @@ impl HeartbeatsPicker {
         }
     }
 
-    /// Drop an actions pane whose heartbeat vanished (TS `render`'s mode
+    /// Drop a detail pane whose heartbeat vanished (TS `render`'s mode
     /// fallback).
     fn dirty_conform_mode(&mut self) {
-        if let Mode::Actions { heartbeat_id, .. } = self.mode.clone() {
+        if let Mode::Detail { heartbeat_id, .. } = self.mode.clone() {
             if !self
                 .heartbeats
                 .iter()
@@ -517,7 +526,7 @@ impl HeartbeatsPicker {
         {
             return HeartbeatsPickerAction::Close;
         }
-        // Back (left): the action pane returns to the list, the list closes.
+        // Back (left): the detail pane returns to the list, the list closes.
         if kb.matches(key, "app.modal.back") {
             if self.mode == Mode::List {
                 return HeartbeatsPickerAction::Close;
@@ -536,9 +545,9 @@ impl HeartbeatsPicker {
             return HeartbeatsPickerAction::None;
         }
         // The open-selected binding (right) opens the selected heartbeat's
-        // action pane from the list.
+        // detail drill-in from the list.
         if self.mode == Mode::List && kb.matches(key, "app.heartbeats.openSelected") {
-            self.open_actions();
+            self.open_detail();
             return HeartbeatsPickerAction::None;
         }
         if kb.matches(key, "tui.select.confirm") {
@@ -548,7 +557,7 @@ impl HeartbeatsPicker {
     }
 
     /// Move the selection (TS `moveSelection`): the list walks rows by job
-    /// id, the action pane walks its rows by index.
+    /// id, the detail pane walks its action rows by index.
     fn move_selection(&mut self, delta: isize) {
         match self.mode.clone() {
             Mode::List => {
@@ -559,41 +568,41 @@ impl HeartbeatsPicker {
                 let next = (index + delta).clamp(0, self.heartbeats.len() as isize - 1) as usize;
                 self.selected_heartbeat_id = Some(self.heartbeats[next].job.id.clone());
             }
-            Mode::Actions {
+            Mode::Detail {
                 heartbeat_id,
-                selected_index,
+                action_index,
             } => {
                 let Some(entry) = self.find_entry(&heartbeat_id) else {
                     return;
                 };
                 let count = Self::available_actions(entry).len();
-                let next = (selected_index as isize + delta).clamp(0, count as isize - 1) as usize;
-                self.mode = Mode::Actions {
+                let next = (action_index as isize + delta).clamp(0, count as isize - 1) as usize;
+                self.mode = Mode::Detail {
                     heartbeat_id,
-                    selected_index: next,
+                    action_index: next,
                 };
             }
         }
     }
 
-    /// Enter on the list opens the selected heartbeat's action pane; Enter
-    /// on an action row runs it (TS `confirmSelection`).
+    /// Enter on the list opens the selected heartbeat's detail drill-in;
+    /// Enter on an action row runs it (TS `confirmSelection`).
     fn confirm_selection(&mut self) -> HeartbeatsPickerAction {
         match self.mode.clone() {
             Mode::List => {
-                self.open_actions();
+                self.open_detail();
                 HeartbeatsPickerAction::None
             }
-            Mode::Actions {
+            Mode::Detail {
                 heartbeat_id,
-                selected_index,
+                action_index,
             } => {
                 let Some(entry) = self.find_entry(&heartbeat_id) else {
                     self.mode = Mode::List;
                     return HeartbeatsPickerAction::None;
                 };
                 let actions = Self::available_actions(entry);
-                let Some((_, action, _)) = actions.get(selected_index) else {
+                let Some((_, action, _)) = actions.get(action_index) else {
                     return HeartbeatsPickerAction::None;
                 };
                 HeartbeatsPickerAction::Manage {
@@ -605,33 +614,23 @@ impl HeartbeatsPicker {
         }
     }
 
-    /// Open the selected heartbeat's action pane (TS `confirmSelection`'s
-    /// list branch).
-    fn open_actions(&mut self) {
+    /// Open the selected heartbeat's detail drill-in (TS
+    /// `confirmSelection`'s list branch).
+    fn open_detail(&mut self) {
         let Some(id) = self.selected_heartbeat_id.clone() else {
             return;
         };
         if self.find_entry(&id).is_some() {
-            self.mode = Mode::Actions {
+            self.mode = Mode::Detail {
                 heartbeat_id: id,
-                selected_index: 0,
+                action_index: 0,
             };
         }
-    }
-
-    /// The selection's detail-block row budget, shrinking on short
-    /// viewports so the pane never clips: the frame rows, the scroll
-    /// indicator, and the list rows always render first (frame 7 +
-    /// scroll 1 + list 1 = 9 ride outside the budget) — on very short
-    /// viewports the block yields entirely rather than overspending.
-    fn detail_cap(&self) -> usize {
-        MAX_DETAIL_ROWS.min(self.viewport_rows.saturating_sub(9))
     }
 
     /// The list's visible-row budget (TS `getListLayout`, inline shape).
     fn visible_items(&self) -> usize {
         let reserved = LIST_FRAME_ROWS
-            + self.detail_cap()
             + if self.error.is_some() || self.fetch_error.is_some() {
                 2
             } else {
@@ -642,25 +641,25 @@ impl HeartbeatsPicker {
             PREFERRED_VISIBLE,
             self.heartbeats.len(),
             reserved,
-            SCROLL_INDICATOR_ROWS,
+            1,
         )
     }
 
-    /// Render the view's frame: the list pane or the action pane.
+    /// Render the view's frame: the columned list or the detail drill-in.
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         match &self.mode {
             Mode::List => self.render_list(theme, width, kb),
-            Mode::Actions {
+            Mode::Detail {
                 heartbeat_id,
-                selected_index,
-            } => self.render_actions(theme, width, kb, heartbeat_id, *selected_index),
+                action_index,
+            } => self.render_detail(theme, width, kb, heartbeat_id, *action_index),
         }
     }
 
-    /// The list pane (the `/model` picker idiom): the title line with the
-    /// status counts, one `›`-marker row per heartbeat, the scroll
-    /// indicator, the selection's labeled detail block, the error rows,
-    /// and a single bottom hint line.
+    /// The list pane (the `/model` picker idiom over a columned table):
+    /// the title line with the status counts, the dim column header, one
+    /// row per heartbeat, the scroll indicator, and a single bottom hint
+    /// line.
     fn render_list(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let counts: Vec<(ThemeColor, String)> = self.status_counts();
         let mut lines = pane_header_lines(theme, width, "Heartbeats", &counts, None);
@@ -670,6 +669,8 @@ impl HeartbeatsPicker {
                 theme.fg_span(ThemeColor::Muted, "No running or paused heartbeats"),
             ]);
         } else {
+            let columns = Columns::new(width, &self.heartbeats);
+            lines.push(columns.header_row(theme, width));
             let selected = self.selected_index();
             let visible = self.visible_items();
             let start = selected
@@ -678,7 +679,7 @@ impl HeartbeatsPicker {
             let end = (start + visible).min(self.heartbeats.len());
             for (index, entry) in self.heartbeats[start..end].iter().enumerate() {
                 let is_selected = start + index == selected;
-                lines.push(self.heartbeat_row(theme, width, entry, is_selected));
+                lines.push(columns.entry_row(theme, width, entry, is_selected));
             }
             if start > 0 || end < self.heartbeats.len() {
                 lines.push(vec![
@@ -689,24 +690,8 @@ impl HeartbeatsPicker {
                     ),
                 ]);
             }
-            if let Some(entry) = self
-                .heartbeats
-                .get(selected)
-                .filter(|_| self.selected_heartbeat_id.is_some())
-            {
-                lines.push(Vec::new());
-                let cap = self.detail_cap();
-                lines.extend(detail_block_lines(
-                    theme,
-                    width,
-                    &detail_pairs(entry)
-                        .into_iter()
-                        .take(cap)
-                        .collect::<Vec<_>>(),
-                ));
-            }
         }
-        lines.extend(self.pane_footer(theme, width, kb, &self.list_hint(kb)));
+        lines.extend(self.pane_footer(theme, width, &self.list_hint(kb)));
         lines
     }
 
@@ -729,16 +714,16 @@ impl HeartbeatsPicker {
         counts
     }
 
-    /// The action pane (TS `createActionPanel`): the heartbeat's name and
-    /// prompt, its labeled detail block, the action rows, and the
-    /// bottom hint line.
-    fn render_actions(
+    /// The detail drill-in: the heartbeat's name and schedule, the full
+    /// prompt text (wrapped, never single-lined), the created-by facts,
+    /// and the action rows in the `/mcp` view's control pattern.
+    fn render_detail(
         &self,
         theme: &Theme,
         width: usize,
         kb: &KeybindingsManager,
         heartbeat_id: &str,
-        selected_index: usize,
+        action_index: usize,
     ) -> Vec<Line> {
         let Some(entry) = self.find_entry(heartbeat_id) else {
             // The heartbeat vanished: the TS panel degrades to this text.
@@ -747,7 +732,7 @@ impl HeartbeatsPicker {
                 Span::raw("  "),
                 theme.fg_span(ThemeColor::Muted, "This heartbeat is no longer available."),
             ]);
-            lines.extend(self.pane_footer(theme, width, kb, &self.actions_hint(kb)));
+            lines.extend(self.pane_footer(theme, width, &self.detail_hint(kb)));
             return lines;
         };
         let name = entry
@@ -758,32 +743,83 @@ impl HeartbeatsPicker {
             .filter(|label| !label.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| default_heartbeat_name(entry).to_string());
-        let prompt = single_line(&entry.job.prompt);
-        let mut lines = pane_header_lines(theme, width, &name, &[], Some(&prompt));
-        // The action pane has no list window to absorb a shortage: the
-        // detail block shrinks on short viewports so the pane never
-        // clips (its frame rows, the two action rows, and the hint
-        // always render first; the error block adds two rows) — on very
-        // short viewports the block yields entirely.
-        let error_rows = if self.error.is_some() { 2 } else { 0 };
-        let cap = MAX_DETAIL_ROWS.min(self.viewport_rows.saturating_sub(10 + error_rows));
-        lines.extend(detail_block_lines(
-            theme,
-            width,
-            &detail_pairs(entry)
-                .into_iter()
-                .take(cap)
-                .collect::<Vec<_>>(),
-        ));
-        if let Some(error) = &self.error {
+        let subtitle = format!(
+            "{} \u{b7} {}",
+            entry.job.schedule_expression, entry.job.status
+        );
+        let mut lines = pane_header_lines(theme, width, &name, &[], Some(&subtitle));
+        let actions = Self::available_actions(entry);
+        let pairs = detail_pairs(entry);
+        // The pane's fixed rows: the header block (rule, title, subtitle,
+        // blank), the blank before the actions, the action rows, the
+        // footer (blank, hint, rule), and the error rows when present.
+        let error_rows = match (self.fetch_error.is_some(), self.error.is_some()) {
+            (true, true) => 4,
+            (some, _) if some => 2,
+            (_, true) => 2,
+            _ => 0,
+        };
+        let fixed = 4 + 1 + actions.len() + 3 + error_rows;
+        // The created-by pairs shrink first (they summarize; the full
+        // prompt text is the drill-in's content), then the prompt clips
+        // its tail — the action rows never yield. The prompt block's own
+        // leading blank and label ride the budget too, and the pairs
+        // block's blank renders only with its rows.
+        let prompt_width = width.saturating_sub(4).max(10);
+        let wrapped = wrap_text(&entry.job.prompt, prompt_width);
+        let mut pairs_rows = pairs.len().min(MAX_DETAIL_ROWS);
+        let mut prompt_budget = self
+            .viewport_rows
+            .saturating_sub(fixed + 1 + pairs_rows + 2);
+        if prompt_budget == 0 && pairs_rows > 0 {
+            pairs_rows = pairs_rows.min(self.viewport_rows.saturating_sub(fixed + 2));
+            prompt_budget = self
+                .viewport_rows
+                .saturating_sub(fixed + 1 + pairs_rows + 2);
+        }
+        if prompt_budget > 0 && !entry.job.prompt.trim().is_empty() {
             lines.push(Vec::new());
-            lines.push(error_line(theme, width, error));
+            lines.push(vec![
+                Span::raw("  "),
+                theme.fg_span(ThemeColor::Dim, "Prompt".to_string()),
+            ]);
+            let mut shown = wrapped.len().min(prompt_budget);
+            let mut clipped = false;
+            if wrapped.len() > shown {
+                shown = shown.max(MIN_PROMPT_LINES) - 1;
+                clipped = true;
+            }
+            for line in wrapped[..shown].iter() {
+                let mut row = vec![Span::raw("  ")];
+                row.extend(line.iter().cloned());
+                lines.push(truncate_line(&row, width, ""));
+            }
+            if clipped {
+                lines.push(vec![
+                    Span::raw("  "),
+                    theme.fg_span(ThemeColor::Dim, "\u{2026}".to_string()),
+                ]);
+            }
+        }
+        if pairs_rows > 0 {
+            lines.push(Vec::new());
+            lines.extend(detail_block_lines(
+                theme,
+                width,
+                &pairs.into_iter().take(pairs_rows).collect::<Vec<_>>(),
+            ));
         }
         lines.push(Vec::new());
-        for (index, (label, _, description)) in Self::available_actions(entry).iter().enumerate() {
-            lines.push(self.list_row(theme, width, label, description, index == selected_index));
+        for (index, (label, _, description)) in actions.iter().enumerate() {
+            lines.push(action_row(
+                theme,
+                width,
+                label,
+                description,
+                index == action_index,
+            ));
         }
-        lines.extend(self.pane_footer(theme, width, kb, &self.actions_hint(kb)));
+        lines.extend(self.pane_footer(theme, width, &self.detail_hint(kb)));
         lines
     }
 
@@ -796,7 +832,7 @@ impl HeartbeatsPicker {
                 .unwrap_or_else(|| fallback.to_string())
         };
         format!(
-            "{}/{} move \u{b7} {} manage \u{b7} {} close",
+            "{}/{} move \u{b7} {} open \u{b7} {} close",
             key("tui.select.up", "\u{2191}"),
             key("tui.select.down", "\u{2193}"),
             key("tui.select.confirm", "Enter"),
@@ -804,8 +840,8 @@ impl HeartbeatsPicker {
         )
     }
 
-    /// The action pane's bottom hint line.
-    fn actions_hint(&self, kb: &KeybindingsManager) -> String {
+    /// The detail pane's bottom hint line.
+    fn detail_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
                 .map(|key| format_key_text(&key))
@@ -821,112 +857,9 @@ impl HeartbeatsPicker {
         )
     }
 
-    /// One `›`-marker row: the primary cell (a heartbeat's name, or an
-    /// action's label) with a colored trailing cluster — the status word
-    /// for heartbeats, the action description for actions (the inline
-    /// adaptation of TS `MenuRow`'s meta cell).
-    fn list_row(
-        &self,
-        theme: &Theme,
-        width: usize,
-        primary: &str,
-        trailing: &str,
-        selected: bool,
-    ) -> Line {
-        self.row_with_trailing(theme, width, primary, trailing, None, selected)
-    }
-
-    /// One heartbeat row: primary name, the status word trailing
-    /// (success/warning colored, TS `formatStatus`).
-    fn heartbeat_row(
-        &self,
-        theme: &Theme,
-        width: usize,
-        entry: &HeartbeatEntry,
-        selected: bool,
-    ) -> Line {
-        let status_color = if entry.job.is_active() {
-            ThemeColor::Success
-        } else {
-            ThemeColor::Warning
-        };
-        self.row_with_trailing(
-            theme,
-            width,
-            &row_primary(entry),
-            &entry.job.status,
-            Some(status_color),
-            selected,
-        )
-    }
-
-    /// A `›`-marker row with an optionally colored trailing cluster right
-    /// aligned (the inline `MenuRow` geometry: marker, primary, filler,
-    /// trailing, padded to width, soft selection background).
-    fn row_with_trailing(
-        &self,
-        theme: &Theme,
-        width: usize,
-        primary: &str,
-        trailing: &str,
-        trailing_color: Option<ThemeColor>,
-        selected: bool,
-    ) -> Line {
-        let inner_width = width.saturating_sub(2).max(1);
-        let trailing_budget = inner_width.saturating_sub(5).max(1);
-        let trailing = truncate_plain(trailing, trailing_budget);
-        let trailing_width = str_width(&trailing);
-        let gap = if trailing_width > 0 { 2 } else { 0 };
-        let primary_width = inner_width.saturating_sub(trailing_width + gap).max(1);
-        let primary = truncate_plain(primary, primary_width);
-        let filler = inner_width
-            .saturating_sub(str_width(&primary))
-            .saturating_sub(trailing_width);
-        let mut row: Line = Vec::with_capacity(8);
-        row.push(Span::raw(if selected { "\u{203a}" } else { " " }));
-        row.push(Span::raw(" "));
-        if selected {
-            row.push(theme.bold(Span::raw(primary)));
-        } else {
-            row.push(Span::raw(primary));
-        }
-        if filler > 0 {
-            row.push(Span::raw(" ".repeat(filler)));
-        }
-        if !trailing.is_empty() {
-            let span = match trailing_color {
-                Some(color) => theme.fg_span(color, trailing),
-                None => theme.fg_span(ThemeColor::Muted, trailing),
-            };
-            row.push(span);
-        }
-        let used = crate::width::spans_width(&row);
-        if used < width {
-            row.push(Span::raw(" ".repeat(width - used)));
-        }
-        let row = truncate_line(&row, width, "");
-        if selected {
-            let style = theme.soft_selection_style();
-            row.into_iter()
-                .map(|mut span| {
-                    span.style = span.style.patch(style);
-                    span
-                })
-                .collect()
-        } else {
-            row
-        }
-    }
-
     /// The pane footer: the fetch and action errors, a blank, the hint
     /// line, the bottom border.
-    fn pane_footer(
-        &self,
-        theme: &Theme,
-        width: usize,
-        _kb: &KeybindingsManager,
-        hint: &str,
-    ) -> Vec<Line> {
+    fn pane_footer(&self, theme: &Theme, width: usize, hint: &str) -> Vec<Line> {
         let mut lines = Vec::new();
         if let Some(fetch_error) = &self.fetch_error {
             lines.push(Vec::new());
@@ -950,6 +883,156 @@ impl HeartbeatsPicker {
         ]);
         lines
     }
+}
+
+/// The table's column geometry: the interval, label, next-run, and status
+/// cells sized over the rows and their header labels (the operator's
+/// columned-table directive), with the label column taking whatever width
+/// remains.
+struct Columns {
+    interval: usize,
+    label: usize,
+    next_run: usize,
+    status: usize,
+}
+
+impl Columns {
+    fn new(width: usize, entries: &[HeartbeatEntry]) -> Self {
+        let interval_content = entries
+            .iter()
+            .map(|entry| str_width(&entry.job.schedule_expression))
+            .chain([str_width("Interval")])
+            .max()
+            .unwrap_or(0)
+            .min(INTERVAL_CAP);
+        let status = entries
+            .iter()
+            .map(|entry| str_width(&entry.job.status))
+            .chain([str_width("Status")])
+            .max()
+            .unwrap_or(0);
+        let label_content = entries
+            .iter()
+            .map(|entry| str_width(&row_primary(entry)))
+            .chain([str_width("Label")])
+            .max()
+            .unwrap_or(0);
+        // The fixed cells: the indent, the three two-column gaps, the
+        // timestamp column, and the status column.
+        let fixed = 2 + 2 + 2 + 2 + 2 + 16 + status;
+        let label = label_content
+            .min(LABEL_CAP)
+            .min(width.saturating_sub(fixed + interval_content));
+        Self {
+            interval: interval_content.min(width.saturating_sub(fixed + label)),
+            label,
+            next_run: 16,
+            status,
+        }
+    }
+
+    /// The full span the row content covers (the hug's content width).
+    fn content_width(&self) -> usize {
+        2 + self.interval + 2 + self.label + 2 + self.next_run + 2 + self.status
+    }
+
+    /// The dim column header row.
+    fn header_row(&self, theme: &Theme, width: usize) -> Line {
+        let mut row = vec![Span::raw("  ")];
+        row.push(theme.fg_span(
+            ThemeColor::Dim,
+            format!("{:<width$}", "Interval", width = self.interval),
+        ));
+        row.push(Span::raw("  "));
+        row.push(theme.fg_span(
+            ThemeColor::Dim,
+            format!("{:<width$}", "Label", width = self.label),
+        ));
+        row.push(Span::raw("  "));
+        row.push(theme.fg_span(ThemeColor::Dim, "Next run".to_string()));
+        row.push(Span::raw(" ".repeat(16 - "Next run".len())));
+        row.push(Span::raw("  "));
+        row.push(theme.fg_span(ThemeColor::Dim, "Status".to_string()));
+        truncate_line(&row, width, "")
+    }
+
+    /// One columned row: the schedule expression, the label, the next
+    /// run, and the status word in its status color. The selected row's
+    /// wash hugs the columns plus a little trailing pad.
+    fn entry_row(
+        &self,
+        theme: &Theme,
+        width: usize,
+        entry: &HeartbeatEntry,
+        selected: bool,
+    ) -> Line {
+        let status_color = if entry.job.is_active() {
+            ThemeColor::Success
+        } else {
+            ThemeColor::Warning
+        };
+        let mut row = vec![Span::raw(if selected { "\u{203a}" } else { " " })];
+        row.push(Span::raw(" "));
+        row.push(theme.fg_span(
+            ThemeColor::Muted,
+            plain_cell(&entry.job.schedule_expression, self.interval),
+        ));
+        row.push(Span::raw("  "));
+        if selected {
+            row.push(theme.bold(Span::raw(plain_cell(&row_primary(entry), self.label))));
+        } else {
+            row.push(theme.fg_span(
+                ThemeColor::Text,
+                plain_cell(&row_primary(entry), self.label),
+            ));
+        }
+        row.push(Span::raw("  "));
+        row.push(
+            theme.fg_span(
+                ThemeColor::Muted,
+                entry
+                    .job
+                    .next_run_at
+                    .as_deref()
+                    .map(format_timestamp)
+                    .unwrap_or_else(|| "\u{2014}".to_string()),
+            ),
+        );
+        row.push(Span::raw("  "));
+        row.push(theme.fg_span(status_color, entry.job.status.clone()));
+        hug_row(theme, row, self.content_width(), selected, width)
+    }
+}
+
+/// One action row (the `/mcp` view's control pattern): the `›`-marker
+/// label with its dim description trailing, the selected row washed over
+/// its hug.
+fn action_row(theme: &Theme, width: usize, label: &str, description: &str, selected: bool) -> Line {
+    let mut row = vec![Span::raw(if selected { "\u{203a}" } else { " " })];
+    row.push(Span::raw(" "));
+    if selected {
+        row.push(theme.bold(Span::raw(label.to_string())));
+    } else {
+        row.push(theme.fg_span(ThemeColor::Text, label.to_string()));
+    }
+    row.push(theme.fg_span(ThemeColor::Dim, format!("  {description}")));
+    hug_row(
+        theme,
+        row,
+        str_width(label) + 2 + 2 + str_width(description),
+        selected,
+        width,
+    )
+}
+
+/// One plain-text cell truncated to its column budget (no ellipsis: the
+/// table stays aligned; the detail drill-in carries the full text).
+fn plain_cell(text: &str, width: usize) -> String {
+    let mut cell: String = text.chars().take(width).collect();
+    if cell.chars().count() < width {
+        cell.push_str(&" ".repeat(width - cell.chars().count()));
+    }
+    cell
 }
 
 /// The pane's header block: a muted separator rule, then the title row —
@@ -1019,16 +1102,6 @@ fn error_line(theme: &Theme, width: usize, message: &str) -> Line {
     truncate_line(&line, width, "")
 }
 
-/// Plain-text truncate with the `…` marker (the list rows' budgeting).
-fn truncate_plain(text: &str, width: usize) -> String {
-    if str_width(text) <= width {
-        return text.to_string();
-    }
-    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
-    cut.push('\u{2026}');
-    cut
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1072,21 +1145,11 @@ mod tests {
         parsed
     }
 
-    #[test]
-    fn a_carried_selection_opens_on_that_row() {
-        let catalog = entries();
-        let ids: Vec<_> = catalog.iter().map(|entry| entry.job.id.clone()).collect();
-        let picker = HeartbeatsPicker::new(catalog.clone(), None, Some(ids[1].clone()), 24);
-        assert_eq!(
-            picker.selected_heartbeat_id.as_deref(),
-            Some(ids[1].as_str())
-        );
-        // An id that is not in the catalog falls back to the first row.
-        let picker = HeartbeatsPicker::new(catalog, None, Some("missing".to_string()), 24);
-        assert_eq!(
-            picker.selected_heartbeat_id.as_deref(),
-            Some(ids[0].as_str())
-        );
+    fn frame_text(frame: &[Line]) -> Vec<String> {
+        frame
+            .iter()
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .collect()
     }
 
     #[test]
@@ -1136,31 +1199,52 @@ mod tests {
         assert!(scope_heartbeats(entries(), None, None, &[]).is_empty());
     }
 
+    /// A carried selection (the dock's chosen heartbeat) opens on that
+    /// row; anything else falls back to the first.
     #[test]
-    fn the_list_renders_rows_status_and_hints() {
+    fn a_carried_selection_opens_on_that_row() {
+        let catalog = entries();
+        let ids: Vec<_> = catalog.iter().map(|entry| entry.job.id.clone()).collect();
+        let picker = HeartbeatsPicker::new(catalog.clone(), None, Some(ids[1].clone()), 24);
+        assert_eq!(
+            picker.selected_heartbeat_id.as_deref(),
+            Some(ids[1].as_str())
+        );
+        let picker = HeartbeatsPicker::new(catalog, None, Some("missing".to_string()), 24);
+        assert_eq!(picker.selected_heartbeat_id.as_deref(), Some("user-1"));
+    }
+
+    /// The list is a columned table: a dim column header naming the
+    /// operator's columns (interval, label, next run, status), the rows
+    /// aligned under it, and one bottom hint line — no text blobs.
+    #[test]
+    fn the_list_renders_columned_rows_and_one_hint() {
         let picker = HeartbeatsPicker::new(entries(), None, None, 24);
         let frame = picker.render(&theme(), 70, &kb());
-        let text: Vec<String> = frame
-            .iter()
-            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
-            .collect();
+        let text = frame_text(&frame);
         assert!(text.iter().any(|row| row.contains("Heartbeats")));
-        // The title line carries the status counts in the status colors,
-        // not a TS-style count sentence.
+        // The title line carries the status counts in the status colors.
         assert!(text.iter().any(|row| row.contains("1 active · 1 paused")));
-        assert!(text.iter().any(|row| row.contains("tick user-1")));
-        assert!(text.iter().any(|row| row.contains("paused")));
-        // The selection's detail is a labeled two-column block, not a
-        // metadata run-on; each row stays one line.
-        assert!(text
+        // The dim column header names the four columns.
+        let header = text
             .iter()
-            .any(|row| row.starts_with("  schedule") && row.contains("every 10m")));
-        assert!(text
+            .find(|row| row.contains("Interval") && row.contains("Next run"))
+            .expect("a column header row");
+        assert!(header.contains("Label"));
+        assert!(header.contains("Status"));
+        // The rows align under the columns: the schedule expression, the
+        // label, the next-run timestamp, and the status word all ride
+        // one row.
+        let row = text
             .iter()
-            .any(|row| row.starts_with("  created") && row.contains("Created by you")));
-        assert!(text
-            .iter()
-            .any(|row| row.starts_with("  next run") && row.contains("2026-01-01 00:10")));
+            .find(|row| row.contains("every 10m"))
+            .expect("a columned row");
+        assert!(row.contains("tick user-1"));
+        assert!(row.contains("2026-01-01 00:10"));
+        assert!(row.contains("paused"));
+        // The prompt does not blob into the list: the detail drill-in
+        // owns it.
+        assert!(!text.iter().any(|row| row.starts_with("  created")));
         // Exactly one bottom hint line carries every shortcut.
         assert_eq!(
             text.iter().filter(|row| row.contains("Esc close")).count(),
@@ -1169,11 +1253,53 @@ mod tests {
         );
         assert!(text
             .iter()
-            .any(|row| row.contains("↑/↓ move · Enter manage · Esc close")));
+            .any(|row| row.contains("↑/↓ move · Enter open · Esc close")));
+        for line in &frame {
+            assert!(
+                crate::width::spans_width(line) <= 70,
+                "every row fits the width"
+            );
+        }
     }
 
+    /// The selected row's wash hugs the columns plus a little trailing
+    /// pad (the onboarding choice treatment), never the whole terminal
+    /// width.
     #[test]
-    fn enter_opens_the_action_pane_and_runs_the_pause_action() {
+    fn the_selection_hug_stops_a_little_past_the_text() {
+        let picker = HeartbeatsPicker::new(entries(), None, None, 24);
+        let frame = picker.render(&theme(), 90, &kb());
+        let selected = frame
+            .iter()
+            .find(|line| {
+                line.iter()
+                    .any(|span| span.style.bg.is_some() && span.content.contains("tick user-1"))
+            })
+            .expect("the selected row carries the wash");
+        let used = crate::width::spans_width(selected);
+        assert!(
+            used < 90,
+            "the wash never spans the whole terminal width: {used}"
+        );
+        assert!(
+            used >= crate::menu_panel::MIN_HUG_WIDTH,
+            "the wash floors at the onboarding hug width: {used}"
+        );
+        // The unselected row carries no wash at all.
+        let plain = frame
+            .iter()
+            .find(|line| {
+                line.iter()
+                    .any(|span| span.content.contains("tick agent-1"))
+            })
+            .expect("the other row");
+        assert!(plain.iter().all(|span| span.style.bg.is_none()));
+    }
+
+    /// Enter on a list row opens the detail drill-in; Enter on an action
+    /// row runs it (TS `confirmSelection`).
+    #[test]
+    fn enter_opens_the_detail_drill_in_and_runs_the_resume_action() {
         let mut picker = HeartbeatsPicker::new(entries(), None, None, 24);
         // The user row (first) is paused: its first action is resume.
         assert_eq!(
@@ -1182,9 +1308,9 @@ mod tests {
         );
         assert_eq!(
             picker.mode,
-            Mode::Actions {
+            Mode::Detail {
                 heartbeat_id: "user-1".to_string(),
-                selected_index: 0,
+                action_index: 0,
             }
         );
         assert_eq!(
@@ -1195,17 +1321,54 @@ mod tests {
                 action: HeartbeatAction::Resume,
             }
         );
-        // The action pane renders the TS labels.
+    }
+
+    /// The drill-in renders the full prompt text (wrapped, not
+    /// single-lined), which agent created the heartbeat, and the action
+    /// rows in the `/mcp` control pattern.
+    #[test]
+    fn the_detail_renders_the_full_prompt_created_by_and_actions() {
+        let mut catalog = entries();
+        catalog[0].job.prompt = "first line of the prompt\n\nsecond\nparagraph".to_string();
+        let mut picker = HeartbeatsPicker::new(catalog, None, None, 40);
+        picker.handle_key("enter", &kb());
         let frame = picker.render(&theme(), 70, &kb());
-        let text: Vec<String> = frame
+        let text = frame_text(&frame);
+        // The full prompt wraps over lines: every word renders, on more
+        // than one row, and nothing collapses.
+        let joined = text.join("\n");
+        for word in [
+            "first",
+            "line",
+            "of",
+            "the",
+            "prompt",
+            "second",
+            "paragraph",
+        ] {
+            assert!(joined.contains(word), "the prompt renders {word}: {joined}");
+        }
+        assert!(
+            text.iter().any(|row| row.starts_with("  Prompt")),
+            "the prompt block carries its label"
+        );
+        // Which agent created it.
+        assert!(text
             .iter()
-            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
-            .collect();
+            .any(|row| row.starts_with("  created") && row.contains("Created by you")));
+        assert!(text
+            .iter()
+            .any(|row| row.starts_with("  session") && row.contains("the session")));
+        assert!(text.iter().any(|row| row.contains("runs")));
+        // The actions.
         assert!(text.iter().any(|row| row.contains("Resume heartbeat")));
         assert!(text.iter().any(|row| row.contains("Stop heartbeat")));
         assert!(text
             .iter()
             .any(|row| row.contains("Continue scheduled deliveries")));
+        assert!(text
+            .iter()
+            .any(|row| row.contains("↑/↓ move · Enter run · ← back · Esc close")));
     }
 
     #[test]
@@ -1237,6 +1400,33 @@ mod tests {
         assert_eq!(picker.selected_heartbeat_id.as_deref(), Some("agent-1"));
         assert_eq!(picker.handle_key("up", &kb()), HeartbeatsPickerAction::None);
         assert_eq!(picker.selected_heartbeat_id.as_deref(), Some("user-1"));
+    }
+
+    /// The detail pane walks its action rows (up/down select the action,
+    /// never a heartbeat row).
+    #[test]
+    fn the_detail_pane_walks_its_action_rows() {
+        let mut picker = HeartbeatsPicker::new(entries(), None, None, 24);
+        picker.handle_key("enter", &kb());
+        assert_eq!(
+            picker.handle_key("down", &kb()),
+            HeartbeatsPickerAction::None
+        );
+        assert_eq!(
+            picker.mode,
+            Mode::Detail {
+                heartbeat_id: "user-1".to_string(),
+                action_index: 1,
+            }
+        );
+        assert_eq!(picker.handle_key("up", &kb()), HeartbeatsPickerAction::None);
+        assert_eq!(
+            picker.mode,
+            Mode::Detail {
+                heartbeat_id: "user-1".to_string(),
+                action_index: 0,
+            }
+        );
     }
 
     #[test]
@@ -1271,10 +1461,7 @@ mod tests {
         assert_eq!(picker.heartbeats.len(), 2);
         assert_eq!(picker.fetch_error.as_deref(), Some("daemon busy"));
         let frame = picker.render(&theme(), 70, &kb());
-        let text: Vec<String> = frame
-            .iter()
-            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
-            .collect();
+        let text = frame_text(&frame);
         assert!(text
             .iter()
             .any(|row| row.contains("Heartbeat refresh failed: daemon busy")));
@@ -1293,10 +1480,7 @@ mod tests {
         assert!(picker.heartbeats.is_empty());
         assert_eq!(picker.selected_heartbeat_id, None);
         let frame = picker.render(&theme(), 70, &kb());
-        let text: Vec<String> = frame
-            .iter()
-            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
-            .collect();
+        let text = frame_text(&frame);
         assert!(text
             .iter()
             .any(|row| row.contains("No running or paused heartbeats")));
@@ -1305,11 +1489,11 @@ mod tests {
             .any(|row| row.contains("Heartbeat refresh failed: daemon down")));
     }
 
-    /// A short viewport shrinks the detail block so the pane never
-    /// exceeds the terminal budget, and the hint line survives the
-    /// squeeze (it is never the clipped row).
+    /// A short viewport shrinks the panes so they never exceed the
+    /// terminal budget, and the hint line survives the squeeze (it is
+    /// never the clipped row).
     #[test]
-    fn short_viewports_never_clip_the_list_pane() {
+    fn short_viewports_never_clip_the_panes() {
         for viewport_rows in [9usize, 10, 12, 14] {
             let picker = HeartbeatsPicker::new(entries(), None, None, viewport_rows);
             let frame = picker.render(&theme(), 70, &kb());
@@ -1318,27 +1502,45 @@ mod tests {
                 "viewport {viewport_rows} fits: pane is {} rows",
                 frame.len()
             );
-            let text: Vec<String> = frame
-                .iter()
-                .map(|line| line.iter().map(|span| span.content.as_str()).collect())
-                .collect();
+            let text = frame_text(&frame);
             assert!(
                 text.iter().any(|row| row.contains("Esc close")),
                 "the hint survives a {viewport_rows}-row viewport"
             );
-            assert!(text.iter().any(|row| row.contains("tick user-1")));
         }
-        // The action pane fits too: the fixed rows (name, prompt, two
-        // action rows, hint) always render, the detail block gives way.
+        // The detail pane fits too: the fixed rows (name, schedule, the
+        // two action rows, the hint) always render, and the prompt and
+        // pairs blocks give way.
         let mut picker = HeartbeatsPicker::new(entries(), None, None, 12);
         picker.handle_key("enter", &kb());
         let frame = picker.render(&theme(), 70, &kb());
-        assert!(frame.len() <= 12, "action pane fits: {}", frame.len());
-        let text: Vec<String> = frame
-            .iter()
-            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
-            .collect();
+        assert!(frame.len() <= 12, "detail pane fits: {}", frame.len());
+        let text = frame_text(&frame);
         assert!(text.iter().any(|row| row.contains("Stop heartbeat")));
+    }
+
+    /// A long prompt clips with an ellipsis marker row rather than
+    /// overspending the viewport.
+    #[test]
+    fn a_long_prompt_clips_with_a_marker() {
+        let mut catalog = entries();
+        catalog[0].job.prompt = (1..=40)
+            .map(|n| format!("word-{n:02}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut picker = HeartbeatsPicker::new(catalog, None, None, 20);
+        picker.handle_key("enter", &kb());
+        let frame = picker.render(&theme(), 70, &kb());
+        assert!(frame.len() <= 20, "the drill-in fits: {}", frame.len());
+        let text = frame_text(&frame);
+        assert!(
+            text.iter().any(|row| row.trim() == "…"),
+            "the clipped tail carries a marker: {text:?}"
+        );
+        // The first words render; the last ones do not.
+        let joined = text.join(" ");
+        assert!(joined.contains("word-01"));
+        assert!(!joined.contains("word-40"));
     }
 
     #[test]
