@@ -14,17 +14,33 @@ use super::{evaluate_shutdown_quiet_period, DaemonStateRoot, DiscoveredDaemonPro
 /// stuck (TS `SHUTDOWN_CONVERGENCE_TIMEOUT_MS`).
 const SHUTDOWN_CONVERGENCE_TIMEOUT_MS: u128 = 10_000;
 
-/// SIGTERM, then SIGKILL after a 1s grace (TS `forceKillDaemon`).
-pub(super) fn force_kill_daemon(pid: u32) {
+/// Verified force-kill (TS `forceKillDaemon`, hardened): SIGTERM, a 1s
+/// grace, then SIGKILL, then a poll loop (25ms slices, 1s deadline) that
+/// reports the kill only once the process is confirmed gone (zombies count
+/// as dead — [`is_process_alive`]'s lease semantics). TS fires the
+/// SIGKILL and returns without verifying; the supervisor-side stop paths
+/// here must not claim a stop a D-state process never performed, so the
+/// verdict is the divergence.
+pub(super) fn force_kill_daemon(pid: u32) -> bool {
     kill_daemon(pid);
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
     while std::time::Instant::now() < deadline {
         if !is_alive(pid) {
-            return;
+            return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     kill_pid(pid as i32, Signal::Kill);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
+    loop {
+        if !is_alive(pid) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 pub(super) fn kill_daemon(pid: u32) {
@@ -198,6 +214,16 @@ pub(super) fn terminate_verified_listener(listener: &DiscoveredDaemonProcess) ->
     }
     if process_start_id(listener.pid).as_deref() == Some(start_id.as_str()) {
         kill_pid(listener.pid as i32, Signal::Kill);
+        // Verified death (the same hardening as `force_kill_daemon`): a
+        // single post-SIGKILL check races a slow teardown or reads a
+        // mid-death process as survived, so poll the identity until it
+        // changes or the deadline lapses.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
+        while process_start_id(listener.pid).as_deref() == Some(start_id.as_str())
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
     process_start_id(listener.pid).as_deref() != Some(start_id.as_str())
 }
@@ -266,6 +292,75 @@ mod tests {
             );
             assert!(failed.is_empty(), "sweep rooted at {dir} must fail nothing");
         }
+    }
+
+    fn spawn_term_ignoring_shell() -> std::process::Child {
+        // A shell that swallows SIGTERM: the force-kill must escalate to
+        // SIGKILL to make it die (the grandchild `sleep 1` exits on its own
+        // at most a second after the shell dies, so no stray processes).
+        std::process::Command::new("sh")
+            .arg("-c")
+            .arg("trap : TERM; while :; do sleep 1; done")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a TERM-ignoring shell")
+    }
+
+    #[test]
+    fn force_kill_daemon_confirms_the_death_of_a_killable_process() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a sleep child");
+        assert!(
+            force_kill_daemon(child.id()),
+            "a TERM-killable process must die before SIGKILL"
+        );
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn force_kill_daemon_escalates_to_sigkill_and_waits_for_the_death() {
+        let mut child = spawn_term_ignoring_shell();
+        // This child ignores the 1s SIGTERM grace, so the confirmed-death
+        // verdict can only come from the post-SIGKILL verify loop.
+        assert!(
+            force_kill_daemon(child.id()),
+            "the post-SIGKILL verify loop must confirm the death"
+        );
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn force_kill_daemon_reports_an_already_dead_pid_as_dead() {
+        let mut child = std::process::Command::new("true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a true child");
+        let pid = child.id();
+        let _ = child.wait();
+        assert!(force_kill_daemon(pid));
+    }
+
+    #[test]
+    fn terminate_verified_listener_confirms_the_death_of_a_live_listener() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a sleep child");
+        let listener = DiscoveredDaemonProcess {
+            pid: child.id(),
+            socket_path: PathBuf::from("/tmp/never-a-listener.sock"),
+            uptime_seconds: None,
+        };
+        assert!(terminate_verified_listener(&listener));
+        let _ = child.wait();
     }
 
     #[test]

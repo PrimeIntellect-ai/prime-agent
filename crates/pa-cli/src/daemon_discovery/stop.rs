@@ -282,13 +282,17 @@ fn run_shutdown_converging(json: bool, force: bool, root: &DaemonStateRoot) -> i
                 } else if let Some(pid) = pid.filter(|pid| {
                     is_daemon_process_listening(*pid, &action.daemon.socket_path, root)
                 }) {
-                    force_kill_daemon(pid);
-                    handled_pids.insert(pid);
-                    remove_socket_file(&action.daemon.socket_path);
-                    stopped.push((
-                        socket_path.clone(),
-                        format!("killed unreachable background service (pid {pid})"),
-                    ));
+                    apply_stop(
+                        verified_force_kill(
+                            pid,
+                            &action.daemon.socket_path,
+                            format!("killed unreachable background service (pid {pid})"),
+                            &mut handled_pids,
+                        ),
+                        &socket_path,
+                        &mut stopped,
+                        &mut failed,
+                    );
                 } else {
                     remove_socket_file(&action.daemon.socket_path);
                     stopped.push((
@@ -375,12 +379,34 @@ fn stop_background_service(
     if !force {
         return StopOutcome::Skipped("did not stop gracefully; retry with --force".to_string());
     }
-    force_kill_daemon(pid);
+    verified_force_kill(
+        pid,
+        socket_path,
+        format!("force-killed unresponsive background service (pid {pid})"),
+        handled_pids,
+    )
+}
+
+/// Verified force-kill for one daemon (the supervisor-side contract the
+/// worker-side `stop_tracked_process` already implements): the pid joins
+/// `handled_pids` and the socket file is removed only on confirmed death —
+/// a daemon that survives SIGKILL is reported as failed, with its socket
+/// file deliberately kept so the invisible listener stays discoverable
+/// for the `--force` residual sweep and the doctor's re-probe.
+fn verified_force_kill(
+    pid: u32,
+    socket_path: &Path,
+    success_action: String,
+    handled_pids: &mut std::collections::HashSet<u32>,
+) -> StopOutcome {
+    if !force_kill_daemon(pid) {
+        return StopOutcome::Skipped(format!(
+            "could not safely stop daemon (pid {pid}); it survived SIGKILL"
+        ));
+    }
     handled_pids.insert(pid);
     remove_socket_file(socket_path);
-    StopOutcome::Reaped(format!(
-        "force-killed unresponsive background service (pid {pid})"
-    ))
+    StopOutcome::Reaped(success_action)
 }
 
 /// Ask the daemon to stop and confirm it actually stopped listening: the ack
@@ -486,4 +512,71 @@ fn shutdown_report_json(stopped: &[(String, String)], failed: &[(String, String)
         failed: reason_entries(failed),
     })
     .unwrap_or_default()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verified_force_kill_reports_confirmed_death_and_removes_the_socket() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let socket_path = tmp.path().join("daemon.sock");
+        std::fs::write(&socket_path, b"").expect("create the socket file");
+        let mut child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a sleep child");
+        let pid = child.id();
+        let mut handled_pids = std::collections::HashSet::new();
+
+        let outcome = verified_force_kill(
+            pid,
+            &socket_path,
+            "killed unreachable background service".to_string(),
+            &mut handled_pids,
+        );
+
+        match outcome {
+            StopOutcome::Reaped(action) => {
+                assert_eq!(action, "killed unreachable background service");
+            }
+            StopOutcome::Skipped(reason) => panic!("expected a reaped outcome, got {reason}"),
+        }
+        // Only the confirmed death joins the handled set and unlinks the
+        // socket (the contract this helper enforces).
+        assert!(handled_pids.contains(&pid));
+        assert!(!socket_path.exists(), "a confirmed death removes the socket file");
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn shutdown_report_json_pins_the_failure_shape() {
+        // Every failure path funnels into this report (TS prints
+        // `{stopped, failed}`); the shape is the `--json` contract, so a
+        // survived SIGKILL must surface as a `failed` reason entry.
+        let report = serde_json::from_str::<serde_json::Value>(&shutdown_report_json(
+            &[],
+            &[(
+                "/tmp/r6-shape.sock".to_string(),
+                "could not safely stop daemon (pid 4242); it survived SIGKILL".to_string(),
+            )],
+        ))
+        .expect("well-formed JSON");
+        assert_eq!(
+            report,
+            serde_json::json!({
+                "stopped": [],
+                "failed": [
+                    {
+                        "socketPath": "/tmp/r6-shape.sock",
+                        "reason": "could not safely stop daemon (pid 4242); it survived SIGKILL"
+                    }
+                ]
+            })
+        );
+    }
 }
