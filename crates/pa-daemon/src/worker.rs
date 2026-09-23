@@ -5215,6 +5215,13 @@ impl TurnRunner {
             // that end without a model turn (session commands, pre-model
             // failures).
             let mut engine_turn_ended = false;
+            // The last error of the active retry episode (the
+            // `auto_retry_start` errorMessage): the episode's durable
+            // outcome row names it on success too — the final event
+            // carries no error then (SANCTIONED DIVERGENCE, operator
+            // ruling 2026-09-23: one outcome row replaces the per-attempt
+            // error rows TS keeps).
+            let mut last_retry_error: Option<String> = None;
             let mut emit = |mut event: EngineEvent| -> bool {
                 // Sequence + persist under the core lock, then broadcast.
                 // The abort flag lives on the session core (`abort`
@@ -5504,6 +5511,10 @@ impl TurnRunner {
                         error_message,
                         reason,
                     } => {
+                        // The episode remembers its latest error so the
+                        // outcome row can name it on success (the end event
+                        // carries no error then).
+                        last_retry_error = Some(error_message.clone());
                         let mut event = json!({
                             "type": "auto_retry_start",
                             "attempt": attempt,
@@ -5533,13 +5544,46 @@ impl TurnRunner {
                             "success": success,
                             "attempt": attempt,
                         });
-                        if let Some(final_error) = final_error {
+                        if let Some(final_error) = &final_error {
                             event["finalError"] = json!(final_error);
                         }
                         if let Some(restored_model) = restored_model {
                             event["restoredModel"] = json!(restored_model);
                         }
-                        vec![event]
+                        // The episode's ONE durable outcome row (SANCTIONED
+                        // DIVERGENCE, operator ruling 2026-09-23): the
+                        // chat keeps a single resolved/terminal line for
+                        // the whole episode — live, through the message
+                        // pair below, and rebuilt, through the session
+                        // transcript — instead of one error row per failed
+                        // attempt. On success the row names the error the
+                        // starts reported (the end event carries none).
+                        let error = final_error
+                            .clone()
+                            .or_else(|| last_retry_error.take())
+                            .unwrap_or_else(|| "Unknown error".to_string());
+                        last_retry_error = None;
+                        let outcome = pa_core::session_engine::messages::
+                            create_provider_retry_outcome_message(success, attempt, &error);
+                        let outcome = crate::session_commands::custom_message_value(&outcome);
+                        if outcome.is_object() {
+                            if let Some(store) = core.store.as_mut() {
+                                let _ = store.persist_entry(
+                                    "custom_message",
+                                    json!({
+                                        "customType": outcome.get("customType").cloned().unwrap_or(Value::Null),
+                                        "content": outcome.get("content").cloned().unwrap_or(Value::Null),
+                                        "display": outcome.get("display").cloned().unwrap_or(Value::Bool(true)),
+                                        "details": outcome.get("details").cloned().unwrap_or(Value::Null),
+                                    }),
+                                );
+                            }
+                        }
+                        vec![
+                            event,
+                            json!({ "type": "message_start", "message": outcome }),
+                            json!({ "type": "message_end", "message": outcome }),
+                        ]
                     }
                 };
                 // Verification seam: dump the emitted session events for

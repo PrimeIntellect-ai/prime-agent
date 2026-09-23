@@ -3346,6 +3346,24 @@ impl Supervisor {
         // Registration rebuilt the resident: refresh its roster entry from
         // the live worker so the roster reflects the re-registered state.
         self.refresh_roster_entry(&resident).await;
+        // A worker that registers after the boot seed (a supervisor
+        // restart's re-registration, a mid-tree resume, a wakened ledger
+        // child) publishes its passive ledger family in the background:
+        // TS reseeds the family when the worker's first roster snapshot
+        // applies (`applyWorkerRosterSnapshot`), and this port's workers
+        // push only their own summary, so the daemon walks the family
+        // here instead. Registration answers on the client's open path -
+        // the seed never blocks it.
+        let family_root = {
+            let descriptor = resident.descriptor.lock().await;
+            descriptor
+                .session_file
+                .clone()
+                .or_else(|| descriptor.create_command.session_path.clone())
+        };
+        if let Some(root) = family_root {
+            self.spawn_roster_registration_seed(Path::new(&root));
+        }
         response_success(
             Some(command_id),
             type_name,
@@ -3877,8 +3895,17 @@ impl Supervisor {
         // bounded background hydration fills each newly seeded row's
         // durable display fields (cwd, model, thinking level) and
         // publishes them as one update. A fresh session has no family;
-        // the guards skip every row another surface already seeded.
-        if let Some(root) = summary.get("sessionFile").and_then(Value::as_str) {
+        // the guards skip every row another surface already seeded. The
+        // root is the CREATE response's session file (the authoritative
+        // durable path, exactly what admission reads): a get_state that
+        // answers mid-replay without its session file must not skip a
+        // resume's family, and a live get_state file that differs is
+        // still the same session.
+        if let Some(root) = summary
+            .get("sessionFile")
+            .and_then(Value::as_str)
+            .or_else(|| create_summary.get("sessionFile").and_then(Value::as_str))
+        {
             let seeded = self.seed_roster_family_edges(Path::new(&root)).await;
             if !seeded.is_empty() {
                 self.spawn_seeded_hydration(seeded);

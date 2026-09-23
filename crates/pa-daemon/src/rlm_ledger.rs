@@ -437,6 +437,29 @@ impl RlmSpawnLedger {
             .collect())
     }
 
+    /// Whether the given spawn edge is still live (not tombstoned, and
+    /// both its child and parent transcripts present - the same
+    /// reconciliation `live_edges` applies) - the seed arms' per-write
+    /// liveness revalidation: an edge deleted (or a file removed) while
+    /// a seed was mid-read never writes its row. The child id is
+    /// matched together with the child path: ids can be shared by
+    /// edges with different paths, and only the exact edge a seed
+    /// snapshotted counts as live. A broken ledger reads as not-live,
+    /// like every other read here degrades to nothing.
+    pub fn edge_is_live(&self, child_id: &str, child: &str) -> bool {
+        let child = canonical_session_path(Path::new(child));
+        self.seed_once().is_ok()
+            && self.replay_cached().is_ok_and(|state| {
+                state.edges.iter().any(|edge| {
+                    edge.child_id == child_id
+                        && edge.deleted.is_none()
+                        && canonical_session_path(Path::new(&edge.child)) == child
+                        && is_file(Path::new(&edge.child))
+                        && is_file(Path::new(&edge.parent))
+                })
+            })
+    }
+
     fn seed_once(&self) -> Result<()> {
         if self.seed_attempted.swap(true, Ordering::SeqCst) {
             return Ok(());
@@ -967,6 +990,66 @@ mod tests {
         assert_eq!(tombstones[0].deleted, Some(RlmLedgerDeleteReason::User));
         // The stat guard serves the same replay until the file changes.
         assert_eq!(ledger.edges(true).unwrap(), tombstones);
+    }
+
+    #[test]
+    fn edge_is_live_reflects_tombstones_and_files() {
+        let dir = temp_dir("liveness");
+        let ledger = ledger_for(&dir);
+        let parent = dir.join("p.jsonl");
+        let child = dir.join("c.jsonl");
+        fs::write(&parent, "{}").unwrap();
+        fs::write(&child, "{}").unwrap();
+        let child_path = child.to_string_lossy().into_owned();
+        ledger
+            .append_spawn(RlmSpawnInput {
+                child_id: "sub-1".into(),
+                parent: parent.to_string_lossy().into_owned(),
+                child: child_path.clone(),
+                depth: 1,
+                name: "w".into(),
+            })
+            .unwrap();
+        assert!(ledger.edge_is_live("sub-1", &child_path));
+        // The child file vanishing flips the answer even without a
+        // tombstone.
+        fs::remove_file(&child).unwrap();
+        assert!(!ledger.edge_is_live("sub-1", &child_path));
+        fs::write(&child, "{}").unwrap();
+        assert!(ledger.edge_is_live("sub-1", &child_path));
+        // A dead parent reads as not-live, like `live_edges` drops it.
+        fs::remove_file(&parent).unwrap();
+        assert!(!ledger.edge_is_live("sub-1", &child_path));
+        fs::write(&parent, "{}").unwrap();
+        assert!(ledger.edge_is_live("sub-1", &child_path));
+        // A completed delete tombstones the edge: no resurrection, and
+        // a different edge sharing the child id (a different child
+        // path) cannot keep the deleted edge live.
+        let other_child = dir.join("other.jsonl");
+        fs::write(&other_child, "{}").unwrap();
+        let other_path = other_child.to_string_lossy().into_owned();
+        ledger
+            .append_spawn(RlmSpawnInput {
+                child_id: "sub-1".into(),
+                parent: parent.to_string_lossy().into_owned(),
+                child: other_path,
+                depth: 1,
+                name: "w2".into(),
+            })
+            .unwrap();
+        ledger
+            .append_delete("sub-1", &child_path, RlmLedgerDeleteReason::User)
+            .unwrap();
+        assert!(
+            !ledger.edge_is_live("sub-1", &child_path),
+            "the tombstoned edge stays dead beside a shared-id sibling"
+        );
+        assert!(
+            ledger.edge_is_live("sub-1", &other_child.to_string_lossy()),
+            "the live sibling still reads live"
+        );
+        // An unknown child reads as not-live.
+        assert!(!ledger.edge_is_live("sub-none", &child_path));
     }
 
     #[test]

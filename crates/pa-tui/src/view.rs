@@ -346,6 +346,24 @@ impl AgentView {
         self.chat.len()
     }
 
+    /// Pop the LAST chat entry with its cached layout (the retry-episode
+    /// collapse: the superseded failed attempt's error row leaves the
+    /// chat when its retry replaces it — SANCTIONED DIVERGENCE from TS,
+    /// operator ruling 2026-09-23). The sparse window's tail shrinks by
+    /// the entry's rows, mirroring `push_entry`'s growth note.
+    pub fn pop_chat_entry(&mut self) -> Option<ChatEntry> {
+        let index = self.chat.len().checked_sub(1)?;
+        if self.sparse_window_is_tail_anchored() && self.layout_width > 0 {
+            let rows = self.count_entry_rows(index, self.layout_width);
+            self.sparse_tail_delta(-(rows as isize), index);
+        }
+        self.md_caches.borrow_mut().remove(&index);
+        self.sparse_entries.remove(&index);
+        self.entry_heights.pop();
+        self.entry_layout.pop();
+        self.chat.pop()
+    }
+
     /// Replace the text and tone of the status entry at `index` (TS
     /// `showStatus` updates its previous status row in place when nothing
     /// followed it). Returns `false` when the entry is not a status row.
