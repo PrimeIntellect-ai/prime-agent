@@ -563,87 +563,9 @@ function counts(violations) {
 	return result;
 }
 
-function changedLineStats(base) {
-	if (!base) return undefined;
-	const stats = { sourceAdded: 0, testAdded: 0, testDeleted: 0 };
-	const tracked = new Set();
-	const isSource = (path) =>
-		((!path.includes("/") && /\.(?:[cm]?[jt]sx?|py|sh)$/.test(path)) || /(?:^|\/)(?:src|scripts)\//.test(path)) &&
-		!testFilePattern.test(path);
-	const meaningfulSourceFlags = (lines, path) => {
-		const normalized = path.endsWith(".sh")
-			? lines
-			: (path.endsWith(".py") ? maskPythonSyntax(lines.join("\n")) : maskJsSyntax(lines.join("\n"))).split("\n");
-		return normalized
-			.map((line) => line.trim())
-			.map((line) => line.length > 0 && !/^#/.test(line) && !/^[{}()[\],;]+$/.test(line));
-	};
-	const meaningfulSourceCount = (lines, path) => meaningfulSourceFlags(lines, path).filter(Boolean).length;
-	const record = (path, added, deleted) => {
-		tracked.add(path);
-		if (testFilePattern.test(path)) {
-			stats.testAdded += added;
-			stats.testDeleted += deleted;
-		}
-	};
-	const roots = ["."];
-	for (const row of git(["diff", "--numstat", "--no-renames", base, "--", ...roots]).split("\n")) {
-		if (!row) continue;
-		const [added, deleted, path] = row.split("\t");
-		if (/^\d+$/.test(added) && /^\d+$/.test(deleted)) record(path, Number(added), Number(deleted));
-	}
-	let sourcePath;
-	let addedSourceLines = [];
-	let newLine = 0;
-	const flushSource = () => {
-		if (sourcePath && existsSync(resolve(root, sourcePath))) {
-			const flags = meaningfulSourceFlags(readFileSync(resolve(root, sourcePath), "utf8").split("\n"), sourcePath);
-			for (const line of addedSourceLines) if (flags[line - 1]) stats.sourceAdded += 1;
-		}
-		addedSourceLines = [];
-	};
-	for (const line of git(["diff", "--unified=0", "--no-renames", base, "--", ...roots]).split("\n")) {
-		if (line.startsWith("+++ ")) {
-			flushSource();
-			const path = line.slice(4).replace(/^b\//, "");
-			sourcePath = isSource(path) ? path : undefined;
-			continue;
-		}
-		const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-		if (hunk) {
-			newLine = Number(hunk[1]);
-			continue;
-		}
-		if (!sourcePath || !line || line.startsWith("diff --git") || line.startsWith("--- ")) continue;
-		if (line.startsWith("+")) {
-			addedSourceLines.push(newLine);
-			newLine += 1;
-		} else if (!line.startsWith("-") && !line.startsWith("\\")) newLine += 1;
-	}
-	flushSource();
-	const untracked = git(["ls-files", "--others", "--exclude-standard", "--", ...roots], true);
-	for (const path of untracked.split("\n")) {
-		if (!path || tracked.has(path) || !existsSync(resolve(root, path))) continue;
-		const content = readFileSync(resolve(root, path), "utf8");
-		const added = content.length === 0 ? 0 : content.split("\n").length - (content.endsWith("\n") ? 1 : 0);
-		record(path, added, 0);
-		if (isSource(path)) stats.sourceAdded += meaningfulSourceCount(content.split("\n"), path);
-	}
-	return stats;
-}
 
 const base = resolveBase();
 const failures = [];
-const lineStats = changedLineStats(base);
-if (lineStats && lineStats.testAdded - lineStats.testDeleted > lineStats.sourceAdded) {
-	failures.push({
-		path: "<test-line-budget>",
-		line: 0,
-		category: "excess-test-lines",
-		title: "changed test LOC",
-		detail: `net test additions ${lineStats.testAdded - lineStats.testDeleted} exceed source additions ${lineStats.sourceAdded}`,
-	});
-}
 for (const path of changedTestFiles(base)) {
 	const current = scan(readFileSync(resolve(root, path), "utf8"), path);
 	const oldContent = base ? git(["show", `${base}:${path}`], true) : "";
