@@ -230,6 +230,14 @@ impl Supervisor {
         let mut seen: HashSet<String> = HashSet::new();
         let mut failed: Option<DaemonResponse> = None;
         for resident in self.live_workers_in_creation_order().await {
+            // The generation this read captures (TS queues one more refresh
+            // pass when `heartbeats_changed` lands mid-read; Rust instead
+            // never lets an in-flight read publish over a newer
+            // invalidation): a stored snapshot is only fresh while its
+            // generation is still current.
+            let generation = resident
+                .heartbeat_snapshot_generation
+                .load(Ordering::Relaxed);
             let response = self
                 .forward_with_catalog_timeout(&resident, command, client_id)
                 .await;
@@ -255,10 +263,14 @@ impl Supervisor {
             let list = match list {
                 Some(list) => list,
                 None => {
-                    let fresh = !resident.heartbeat_snapshot_stale.load(Ordering::Relaxed);
                     let snapshot = resident.heartbeat_snapshot.lock().await;
-                    match snapshot.as_ref().filter(|_| fresh) {
-                        Some(snapshot) => snapshot.clone(),
+                    match snapshot.as_ref().filter(|snapshot| {
+                        snapshot.generation
+                            == resident
+                                .heartbeat_snapshot_generation
+                                .load(Ordering::Relaxed)
+                    }) {
+                        Some(snapshot) => snapshot.rows.clone(),
                         None => {
                             failed.get_or_insert(response);
                             continue;
@@ -266,10 +278,15 @@ impl Supervisor {
                     }
                 }
             };
-            *resident.heartbeat_snapshot.lock().await = Some(list.clone());
-            resident
-                .heartbeat_snapshot_stale
-                .store(false, Ordering::Relaxed);
+            // The stored snapshot carries the generation captured before
+            // the forward: an invalidation that landed during the read bumps
+            // the current generation past it, so the store lands already
+            // stale instead of clearing the newer invalidation.
+            *resident.heartbeat_snapshot.lock().await =
+                Some(crate::registry::WorkerHeartbeatSnapshot {
+                    rows: list.clone(),
+                    generation,
+                });
             for heartbeat in list {
                 let Some(id) = heartbeat
                     .get("job")

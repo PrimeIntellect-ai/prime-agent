@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -47,14 +47,29 @@ pub(crate) struct ResidentWorker {
     /// response (TS `workerAuthAdvertisesPeerTransport`).
     pub(crate) peer_transport_capable: AtomicBool,
     /// The last-good selector-less heartbeats catalog the worker answered
-    /// with (TS `worker.heartbeatSnapshot`): served when the worker is too
-    /// busy to answer a fresh list, so a slow turn cannot empty the merged
-    /// catalog while its scheduler keeps firing.
-    pub(crate) heartbeat_snapshot: Mutex<Option<Vec<Value>>>,
-    /// The worker announced `heartbeats_changed` since the snapshot was
-    /// taken (TS `worker.heartbeatSnapshotStale`): the rows can no longer
-    /// be trusted as fresh.
-    pub(crate) heartbeat_snapshot_stale: AtomicBool,
+    /// with (TS `worker.heartbeatSnapshot`), tagged with the catalog
+    /// generation it was read at: served when the worker is too busy to
+    /// answer a fresh list, so a slow turn cannot empty the merged catalog
+    /// while its scheduler keeps firing. Fresh only while the generation
+    /// is still current (see `heartbeat_snapshot_generation`).
+    pub(crate) heartbeat_snapshot: Mutex<Option<WorkerHeartbeatSnapshot>>,
+    /// The worker's heartbeat-catalog generation (TS
+    /// `worker.heartbeatSnapshotStale` + the queued re-read): bumped by
+    /// every `heartbeats_changed` invalidation. A snapshot is fresh only
+    /// while its generation is current, so an in-flight catalog read —
+    /// which captured an older generation — can never store itself back
+    /// as fresh over a newer invalidation.
+    pub(crate) heartbeat_snapshot_generation: AtomicU64,
+}
+
+/// The last-good heartbeats rows a worker answered with, tagged with the
+/// catalog generation they were read at (TS `worker.heartbeatSnapshot`):
+/// the rows are only trustworthy while their generation is still current
+/// (TS `worker.heartbeatSnapshotStale !== true`).
+#[derive(Debug)]
+pub(crate) struct WorkerHeartbeatSnapshot {
+    pub(crate) rows: Vec<Value>,
+    pub(crate) generation: u64,
 }
 
 impl ResidentWorker {
@@ -73,7 +88,7 @@ impl ResidentWorker {
             consecutive_failures: AtomicU32::new(0),
             peer_transport_capable: AtomicBool::new(false),
             heartbeat_snapshot: Mutex::new(None),
-            heartbeat_snapshot_stale: AtomicBool::new(false),
+            heartbeat_snapshot_generation: AtomicU64::new(0),
         })
     }
 
