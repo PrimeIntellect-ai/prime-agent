@@ -354,13 +354,20 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("spawn a sleep child");
+        let pid = child.id();
+        // A dead direct child lingers as a zombie until its parent reaps
+        // it, and a zombie's start id never changes - the production
+        // daemon's parent (the spawning shell) reaps it, so the test
+        // reaps concurrently or the identity poll would outwait both
+        // deadlines on a process that is already dead.
+        let reaper = std::thread::spawn(move || child.wait());
         let listener = DiscoveredDaemonProcess {
-            pid: child.id(),
+            pid,
             socket_path: PathBuf::from("/tmp/never-a-listener.sock"),
             uptime_seconds: None,
         };
         assert!(terminate_verified_listener(&listener));
-        let _ = child.wait();
+        let _ = reaper.join();
     }
 
     #[test]
