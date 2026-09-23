@@ -100,6 +100,8 @@ pub trait InteractionTelemetry: Send + Sync {
         &self,
         children_total: u64,
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// An actionable activity group was opened; never includes command or goal text.
+    fn activity_opened(&self, kind: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// An image was pasted into the editor from the clipboard (event
     /// `tui image pasted`); `mime_type` is the attachment's sniffed format.
     fn image_pasted(&self, mime_type: &str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
@@ -648,6 +650,7 @@ pub async fn run_interactive(
     // open view.
     let (heartbeats_tx, mut heartbeats_rx) =
         mpsc::unbounded_channel::<crate::session_ui::HeartbeatsUpdate>();
+    let (bash_tx, mut bash_rx) = mpsc::unbounded_channel::<Value>();
     // The double-Ctrl+C force-quit guard: the terminal reader observes the
     // pair even while this loop is wedged in a daemon request, and a plain
     // std-thread watchdog enforces the exit deadline without the runtime.
@@ -700,7 +703,10 @@ pub async fn run_interactive(
         share_tx,
         reload_tx,
         catalog_tx,
-        heartbeats_tx,
+        crate::session_ui::ActivityUpdates {
+            heartbeats: heartbeats_tx,
+            bash: bash_tx,
+        },
     )
     .await
     {
@@ -767,6 +773,7 @@ pub async fn run_interactive(
     // The scoped heartbeat catalog seeds the tray heartbeat label (TS
     // refreshes the catalog on chat open; failures stay silent).
     session.spawn_heartbeat_refresh();
+    session.spawn_bash_activity_refresh();
     session.rebuild_view(&mut view, crate::session_ui::RebuildKind::Rebind);
     if let Some(notice) = check_tmux_keyboard_setup().await {
         view.push_entry(crate::chat::ChatEntry::Status {
@@ -816,6 +823,7 @@ pub async fn run_interactive(
     }
 
     let mut pending: VecDeque<UiInput> = VecDeque::new();
+    let mut last_bash_refresh = Instant::now();
     // The enhanced-key modes settle once (kitty answer or fallback) and
     // report one adoption event; headless runs hold pipes and never probe.
     let mut enhanced_keys_pending = renderer.is_terminal();
@@ -1294,6 +1302,11 @@ pub async fn run_interactive(
                     session.apply_heartbeat_update(update, &mut view);
                 }
             }
+            maybe_bash = bash_rx.recv() => {
+                if let Some(update) = maybe_bash {
+                    session.apply_bash_activity(update, &mut view);
+                }
+            }
             _reconnect_tick = async {
                 match reconnect.as_ref() {
                     Some(state) => tokio::time::sleep_until(state.next_attempt).await,
@@ -1450,6 +1463,10 @@ pub async fn run_interactive(
                 // arrives, which is the only time this arm runs at that
                 // cadence.
                 session.selection_auto_scroll_tick(&mut view);
+                if last_bash_refresh.elapsed() >= Duration::from_secs(2) {
+                    last_bash_refresh = Instant::now();
+                    session.spawn_bash_activity_refresh();
+                }
             }
             _frame = async {
                 match render_deadline {

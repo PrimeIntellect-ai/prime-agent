@@ -12,6 +12,7 @@ pub mod ansi;
 pub mod app;
 pub mod autocomplete;
 mod autolink;
+pub mod bash_activity_picker;
 pub mod bash_bang;
 pub mod bash_card;
 pub mod chat;

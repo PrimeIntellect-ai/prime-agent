@@ -196,7 +196,7 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
         "app.tools.expand",
         def!(&["ctrl+o"], "Cycle conversation detail", scope "editor"),
     ),
-    ("app.subagents.focus", def!(&["alt+a"], "Open child agents")),
+    ("app.subagents.focus", def!(&["alt+a"], "Focus activity")),
     (
         "app.heartbeats.open",
         def!(&["ctrl+r"], "Manage heartbeats"),

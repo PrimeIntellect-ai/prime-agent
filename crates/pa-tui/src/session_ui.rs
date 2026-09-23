@@ -10,6 +10,7 @@ use pa_types::daemon::DaemonCommand;
 use pa_types::slash_commands::{SlashCommandExecution, SlashCommandRegistry};
 use serde_json::Value;
 
+use crate::bash_activity_picker::{BashActivityPicker, BashActivityPickerAction};
 use crate::chat::{
     ChatEntry, CompactionReason, CompactionState, MessageBlock, RetryState, StatusKind,
     ToolResultView, WorkingState,
@@ -17,7 +18,7 @@ use crate::chat::{
 use crate::daemon_client::{DaemonClient, DaemonClientEvent};
 use crate::effort_picker::{self, EffortPickerAction};
 use crate::export_share::{self, GhAuthStatus, GistOutcome};
-use crate::goal_surface::{format_goal_status, tray_goal_label, GoalView};
+use crate::goal_surface::{format_goal_status, GoalView};
 use crate::heartbeats_picker::{
     parse_heartbeats, scope_heartbeats, sort_heartbeats, HeartbeatAction, HeartbeatEntry,
     HeartbeatsPicker, HeartbeatsPickerAction,
@@ -109,6 +110,11 @@ pub(crate) struct CompactionAbortNote {
 pub(crate) struct HeartbeatsUpdate {
     pub heartbeats: Vec<HeartbeatEntry>,
     pub fetch_error: Option<String>,
+}
+
+pub(crate) struct ActivityUpdates {
+    pub heartbeats: mpsc::UnboundedSender<HeartbeatsUpdate>,
+    pub bash: mpsc::UnboundedSender<Value>,
 }
 
 /// A landed `get_model_catalog` refresh: the full catalog and the providers
@@ -308,8 +314,12 @@ pub(crate) struct SessionUi {
     /// `getScopedHeartbeats`): drives the tray heartbeat label and seeds
     /// the `/heartbeats` view; refreshed by `heartbeats_changed`.
     heartbeat_catalog: Vec<HeartbeatEntry>,
+    /// The current Python bash() registry snapshot from the owning kernel.
+    bash_activities: Value,
+    bash_updates: mpsc::UnboundedSender<Value>,
     /// The subagent summary line holds keyboard focus.
     subagents_focused: bool,
+    activity_group: crate::chrome::ActivityGroup,
     /// The last computed descendant counts (selectability reads them between
     /// roster updates).
     subagent_counts: crate::subagents::SubagentCounts,
@@ -485,7 +495,7 @@ impl SessionUi {
         share_notes: mpsc::UnboundedSender<ShareNote>,
         reload_notes: mpsc::UnboundedSender<ReloadNote>,
         catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
-        heartbeat_updates: mpsc::UnboundedSender<HeartbeatsUpdate>,
+        activity_updates: ActivityUpdates,
     ) -> Result<SessionUi> {
         let active_session_id = match &options.session {
             SessionSelection::New => create_session(&client, options, None).await?,
@@ -509,7 +519,7 @@ impl SessionUi {
             default_thinking_level: options.default_thinking_level.clone(),
             models_fetched_at: None,
             catalog_updates,
-            heartbeat_updates,
+            heartbeat_updates: activity_updates.heartbeats,
             telemetry_disabled: options.telemetry_disabled,
             code_block_indent: options.code_block_indent.clone(),
             tree_filter_mode: crate::tree_list::filter_mode_from_str(&options.tree_filter_mode),
@@ -558,7 +568,10 @@ impl SessionUi {
             scoped_agents_view: None,
             roster: Vec::new(),
             heartbeat_catalog: Vec::new(),
+            bash_activities: serde_json::json!({"activities": []}),
+            bash_updates: activity_updates.bash,
             subagents_focused: false,
+            activity_group: crate::chrome::ActivityGroup::Subagents,
             subagent_counts: crate::subagents::SubagentCounts::default(),
             session_file: None,
             pending_selection: None,
@@ -870,9 +883,7 @@ impl SessionUi {
         }
     }
 
-    /// Recompute the subagent summary box from the roster (TS
-    /// `updateSubagentSummaryLine`): live counts over this session's
-    /// descendants, focused when the summary line holds the focus.
+    /// Refresh the one-line activity dock from the existing session feeds.
     fn update_subagent_summary(&mut self, view: &mut AgentView) {
         let identity = crate::subagents::SessionIdentity::new(
             (!self.active_session_id.is_empty()).then(|| self.active_session_id.clone()),
@@ -881,40 +892,64 @@ impl SessionUi {
         );
         let counts = crate::subagents::count_descendants(&self.roster, &identity);
         self.subagent_counts = counts;
-        if counts.total == 0 {
-            self.subagents_focused = false;
-            view.chrome.subagents = None;
-            return;
-        }
-        view.chrome.subagents = Some(crate::chrome::SubagentSummary {
-            running: counts.running,
-            idle: counts.idle,
-            inactive: counts.inactive,
+
+        let goal = &self.goal_view.goal;
+        let goal_tokens = (goal.status != pa_types::goal::GoalStatus::Idle).then(|| {
+            (
+                goal.status.slug().to_string(),
+                goal.tokens_used,
+                goal.token_budget,
+            )
+        });
+        let dock = crate::chrome::ActivityDock {
+            subagents: counts.total,
+            heartbeats: self.heartbeat_catalog.len(),
+            bash_total: crate::bash_activity_picker::parse_bash_activities(&self.bash_activities)
+                .len(),
+            goal_tokens,
+            selected: self.activity_group,
             focused: self.subagents_focused,
-            openable: self.return_to_agents_view,
+        };
+        if !dock.visible() {
+            self.subagents_focused = false;
+        }
+        view.chrome.activity = dock.visible().then_some(crate::chrome::ActivityDock {
+            focused: self.subagents_focused,
+            ..dock
         });
     }
 
-    /// Whether the subagent summary line may take focus (TS `isSelectable`):
-    /// children exist and the run can open the scoped agents view.
-    fn subagents_selectable(&self) -> bool {
-        self.return_to_agents_view && self.subagent_counts.total > 0
+    fn activity_selectable(&self, group: crate::chrome::ActivityGroup) -> bool {
+        match group {
+            crate::chrome::ActivityGroup::Subagents => {
+                self.return_to_agents_view && self.subagent_counts.total > 0
+            }
+            crate::chrome::ActivityGroup::Heartbeats => !self.heartbeat_catalog.is_empty(),
+            crate::chrome::ActivityGroup::Bash => {
+                !crate::bash_activity_picker::parse_bash_activities(&self.bash_activities)
+                    .is_empty()
+            }
+        }
     }
 
-    /// Hand the focus to the subagent summary line (TS
-    /// `focusSubagentSummary`, shared by `app.subagents.focus` and the
-    /// editor's move-below-prompt hook): the tray override label blocks
-    /// the hand-off — the armed Ctrl+C exit hint, and the streaming
-    /// follow-up-queue hint while a draft sits in the editor (TS
-    /// `getTrayOverrideLabel`) — and a non-selectable line never takes
-    /// it. The inline pickers never reach this point: they own the whole
-    /// key dispatch before the editor path (TS `isInlinePickerOpen`).
+    /// The editor's Down and Alt+A hand focus to the compact dock.
     fn focus_subagents_summary(&mut self, view: &mut AgentView) -> bool {
         if self.tray_override().is_some()
             || (self.turn_active && !view.editor.get_text().trim().is_empty())
-            || !self.subagents_selectable()
         {
             return false;
+        }
+        if !self.activity_selectable(self.activity_group) {
+            let Some(group) = [
+                crate::chrome::ActivityGroup::Subagents,
+                crate::chrome::ActivityGroup::Heartbeats,
+                crate::chrome::ActivityGroup::Bash,
+            ]
+            .into_iter()
+            .find(|group| self.activity_selectable(*group)) else {
+                return false;
+            };
+            self.activity_group = group;
         }
         self.subagents_focused = true;
         self.update_subagent_summary(view);
@@ -1128,9 +1163,9 @@ impl SessionUi {
     /// The tray goal label follows the current goal state (TS
     /// `syncGoalTray`; the label itself is `getTrayGoalLabel`).
     pub(crate) fn sync_goal_tray(&mut self, view: &mut AgentView) {
-        let label = tray_goal_label(&self.goal_view.goal);
-        if view.chrome.goal_label != label {
-            view.chrome.goal_label = label;
+        let previous = view.chrome.activity.clone();
+        self.update_subagent_summary(view);
+        if view.chrome.goal_label.take().is_some() || previous != view.chrome.activity {
             self.dirty = true;
         }
     }
@@ -4829,6 +4864,7 @@ impl SessionUi {
         let overlay_focused = view.model_picker.is_some()
             || view.effort_picker.is_some()
             || view.heartbeats_picker.is_some()
+            || view.bash_activity_picker.is_some()
             || view.tree_selector.is_some()
             || view.fork_selector.is_some()
             || view.share_loader.is_some()
@@ -5022,6 +5058,125 @@ impl SessionUi {
             None => {}
         }
         Ok(())
+    }
+
+    async fn handle_bash_activity_picker_key(
+        &mut self,
+        key: KeyEvent,
+        view: &mut AgentView,
+    ) -> Result<()> {
+        let Some(id) = key_event_to_id(&key) else {
+            return Ok(());
+        };
+        if id == "ctrl+c" {
+            self.exit_guard.note_ctrl_c_handled();
+        }
+        let action = view
+            .bash_activity_picker
+            .as_mut()
+            .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
+        match action {
+            Some(BashActivityPickerAction::Close) => {
+                view.bash_activity_picker = None;
+            }
+            Some(BashActivityPickerAction::ViewOutput { id }) => {
+                let result = self
+                    .bounded_request(
+                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                        DaemonCommand::TailKernelBash {
+                            id: None,
+                            active_session_id: self.active_session_id.clone(),
+                            activity_id: id.clone(),
+                            lines: Some(50),
+                            rest: Default::default(),
+                        },
+                    )
+                    .await;
+                match result {
+                    Ok(data) => {
+                        if let Some(tail) = data.get("tail").and_then(Value::as_str) {
+                            if let Some(picker) = view.bash_activity_picker.as_mut() {
+                                picker.set_output_tail(&id, tail);
+                            }
+                        }
+                    }
+                    Err(error) => self.error_row(&format!("Bash output: {error:#}"), view),
+                }
+            }
+            Some(BashActivityPickerAction::Kill { id }) => {
+                let result = self
+                    .bounded_request(
+                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                        DaemonCommand::KillKernelBash {
+                            id: None,
+                            active_session_id: self.active_session_id.clone(),
+                            activity_id: id,
+                            rest: Default::default(),
+                        },
+                    )
+                    .await;
+                if let Err(error) = result {
+                    self.error_row(&format!("Could not kill bash command: {error:#}"), view);
+                }
+                self.spawn_bash_activity_refresh();
+            }
+            Some(BashActivityPickerAction::None) | None => {}
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    async fn open_bash_activity_view(&mut self, view: &mut AgentView) {
+        self.spawn_bash_activity_refresh();
+        view.bash_activity_picker = Some(BashActivityPicker::new(
+            &self.bash_activities,
+            picker_viewport_rows(view.terminal_rows()),
+        ));
+        self.subagents_focused = false;
+        self.update_subagent_summary(view);
+        self.dirty = true;
+    }
+
+    pub(crate) fn spawn_bash_activity_refresh(&self) {
+        if !self
+            .client
+            .hello()
+            .get("serverCapabilities")
+            .and_then(Value::as_array)
+            .is_some_and(|caps| {
+                caps.iter()
+                    .any(|cap| cap.as_str() == Some("kernel_bash_activity"))
+            })
+        {
+            return;
+        }
+        let client = self.client.clone();
+        let active_session_id = self.active_session_id.clone();
+        let tx = self.bash_updates.clone();
+        tokio::spawn(async move {
+            if let Ok(data) = client
+                .request_ok(DaemonCommand::ListKernelBash {
+                    id: None,
+                    active_session_id,
+                    rest: Default::default(),
+                })
+                .await
+            {
+                let _ = tx.send(data);
+            }
+        });
+    }
+
+    pub(crate) fn apply_bash_activity(&mut self, data: Value, view: &mut AgentView) {
+        if self.bash_activities == data {
+            return;
+        }
+        self.bash_activities = data;
+        if let Some(picker) = view.bash_activity_picker.as_mut() {
+            picker.apply_rows(&self.bash_activities);
+        }
+        self.update_subagent_summary(view);
+        self.dirty = true;
     }
 
     /// One key press while the `/heartbeats` view is open: Esc/Ctrl+C/close
@@ -5283,9 +5438,9 @@ impl SessionUi {
     /// The tray heartbeat label follows the scoped catalog (TS
     /// `getTrayHeartbeatLabel`): `N heartbeats · M paused (Ctrl+R)`.
     pub(crate) fn sync_heartbeat_tray(&mut self, view: &mut AgentView) {
-        let label = tray_heartbeat_label(&self.heartbeat_catalog, &self.keybindings);
-        if view.chrome.heartbeat_label != label {
-            view.chrome.heartbeat_label = label;
+        let previous = view.chrome.activity.clone();
+        self.update_subagent_summary(view);
+        if view.chrome.heartbeat_label.take().is_some() || previous != view.chrome.activity {
             self.dirty = true;
         }
     }
@@ -5777,6 +5932,9 @@ impl SessionUi {
         if view.heartbeats_picker.is_some() {
             return self.handle_heartbeats_picker_key(key, view).await;
         }
+        if view.bash_activity_picker.is_some() {
+            return self.handle_bash_activity_picker_key(key, view).await;
+        }
         // The `/tree` and `/fork` selectors own the frame the same way.
         if view.tree_selector.is_some() {
             return self.handle_tree_selector_key(key, view).await;
@@ -5862,14 +6020,52 @@ impl SessionUi {
         // `onChatAction` -> `focusEditor` -> the editor handles it).
         if self.subagents_focused {
             let kb = view.editor.keybindings();
-            if kb.matches(&id, "tui.select.confirm") || kb.matches(&id, "app.agents.open") {
-                self.open_scoped_agents_view(view);
+            if kb.matches(&id, "tui.select.confirm") {
+                if let Some(telemetry) = self.telemetry.clone() {
+                    let kind = match self.activity_group {
+                        crate::chrome::ActivityGroup::Subagents => "subagents",
+                        crate::chrome::ActivityGroup::Heartbeats => "heartbeats",
+                        crate::chrome::ActivityGroup::Bash => "bash",
+                    };
+                    tokio::spawn(async move {
+                        telemetry.activity_opened(kind).await;
+                    });
+                }
+                match self.activity_group {
+                    crate::chrome::ActivityGroup::Subagents => self.open_scoped_agents_view(view),
+                    crate::chrome::ActivityGroup::Heartbeats => {
+                        self.open_heartbeats_view(view).await
+                    }
+                    crate::chrome::ActivityGroup::Bash => self.open_bash_activity_view(view).await,
+                }
                 return Ok(());
             }
-            if kb.matches(&id, "tui.select.up")
-                || kb.matches(&id, "tui.select.cancel")
-                || kb.matches(&id, "app.agents.back")
-            {
+            if id == "left" || id == "right" {
+                let groups = [
+                    crate::chrome::ActivityGroup::Subagents,
+                    crate::chrome::ActivityGroup::Heartbeats,
+                    crate::chrome::ActivityGroup::Bash,
+                ];
+                let current = groups
+                    .iter()
+                    .position(|group| *group == self.activity_group)
+                    .unwrap_or(0);
+                let candidates: Box<dyn Iterator<Item = _>> = if id == "left" {
+                    Box::new(groups[..current].iter().rev())
+                } else {
+                    Box::new(groups[current + 1..].iter())
+                };
+                if let Some(next) = candidates
+                    .copied()
+                    .find(|group| self.activity_selectable(*group))
+                {
+                    self.activity_group = next;
+                    self.update_subagent_summary(view);
+                    self.dirty = true;
+                }
+                return Ok(());
+            }
+            if kb.matches(&id, "tui.select.up") || kb.matches(&id, "tui.select.cancel") {
                 self.subagents_focused = false;
                 self.update_subagent_summary(view);
                 self.dirty = true;
@@ -7484,31 +7680,6 @@ pub(crate) fn resume_hint_from_stats(stats: &Value) -> Option<String> {
 /// The picker's viewport row budget (TS `showConfigurationMenu` passes
 /// `min(20, rows - 3)` and `ConfigurationMenuComponent` subtracts one more
 /// row for its hint).
-/// TS `getTrayHeartbeatLabel`: `N heartbeats[ · M paused] (Ctrl+R)` over
-/// the scoped catalog; `None` when no heartbeat is in scope.
-fn tray_heartbeat_label(
-    heartbeats: &[HeartbeatEntry],
-    kb: &crate::keybindings::KeybindingsManager,
-) -> Option<String> {
-    if heartbeats.is_empty() {
-        return None;
-    }
-    let paused = heartbeats
-        .iter()
-        .filter(|entry| entry.job.status == "paused")
-        .count();
-    let plural = if heartbeats.len() == 1 { "" } else { "s" };
-    let mut label = format!("{} heartbeat{plural}", heartbeats.len());
-    if paused > 0 {
-        label.push_str(&format!(" \u{b7} {paused} paused"));
-    }
-    if let Some(key) = kb.first_key("app.heartbeats.open") {
-        let key = crate::keybindings::format_key_text(&key);
-        label.push_str(&format!(" ({key})"));
-    }
-    Some(label)
-}
-
 fn picker_viewport_rows(terminal_rows: u16) -> usize {
     let terminal_rows = terminal_rows as usize;
     let menu_rows = 20.min(terminal_rows.saturating_sub(3).max(1));

@@ -108,7 +108,7 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
         r#"| `{exit}` | Exit (when editor is empty) |
 | `{select_model}` | Open model selector |
 | `{expand_tools}` | Cycle overview → thinking + diffs → all output |
-| `{focus_subagents}` | Focus the subagent summary / open the scoped agents view |
+| `{focus_subagents}` | Focus activity (←/→ select group, Enter open) |
 | `{manage_heartbeats}` | Manage heartbeats |
 | `{external_editor}` | Edit message in external editor |
 | `{prompt_stash}` | Stash or restore draft prompt |
