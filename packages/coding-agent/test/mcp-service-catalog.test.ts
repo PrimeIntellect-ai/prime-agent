@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { McpServiceEntry } from "@earendil-works/pi-ai/mcp";
-import { createMcpOAuthProvider, SERVICE_CATALOG } from "@earendil-works/pi-ai/mcp";
+import { createMcpOAuthProvider, parseMcpServiceCatalogFile } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage, type McpStaticTokenCredential } from "../src/core/auth-storage.js";
@@ -51,6 +52,17 @@ function oauthCredential(expiresInMs = 3600_000, endpoint?: string) {
 		expires: Date.now() + expiresInMs,
 		...(endpoint !== undefined ? { endpoint } : {}),
 	};
+}
+
+function bundledMcpServiceEntries(): readonly McpServiceEntry[] {
+	return parseMcpServiceCatalogFile(
+		JSON.parse(
+			readFileSync(
+				join(dirname(fileURLToPath(import.meta.url)), "..", "catalog", "mcp-services.bundled.json"),
+				"utf8",
+			),
+		),
+	).entries;
 }
 
 describe("service catalog views", () => {
@@ -1053,14 +1065,18 @@ describe("/mcp and /plugins picker row counts", () => {
 		// more non-pasteable survivors (CockroachDB Cloud, Dynatrace, Sourcegraph, PayPal Sandbox, Render), and the
 		// single-credential cut dropped the two named-header pairs (Datadog, Cloudinary MediaFlows). Pin the shipped length
 		// so silent re-growth changes the counter loudly.
-		expect(SERVICE_CATALOG.length).toBe(68);
+		const entries = bundledMcpServiceEntries();
+		const services = defaultServiceCatalogProvider()();
+		expect(entries).toHaveLength(68);
+		expect(services.map((service) => service.serviceId).sort()).toEqual(entries.map((entry) => entry.server).sort());
 	});
 
 	it("counts rows as the shipped catalog plus pinned installed connections — unique, no off-by-N", () => {
 		// Kevin's live state: figma and huggingface-skills were cut from the shipped catalog but their connections are
 		// installed, so their records pin durable descriptors and the picker legitimately lists 70 + 2 = 72 rows. Every row
 		// is unique — the counter matches the rendered list.
-		const catalogIds = new Set(SERVICE_CATALOG.map((entry) => entry.server));
+		const shippedCatalog = defaultServiceCatalogProvider()();
+		const catalogIds = new Set(shippedCatalog.map((entry) => entry.serviceId));
 		expect(catalogIds.has("figma")).toBe(false);
 		expect(catalogIds.has("huggingface-skills")).toBe(false);
 		const now = Date.now();
@@ -1080,7 +1096,7 @@ describe("/mcp and /plugins picker row counts", () => {
 			}
 			const resolution = resolveMcpServiceCatalog({ records: store.records() });
 			expect(resolution.diagnostics).toEqual([]);
-			expect(resolution.descriptors).toHaveLength(SERVICE_CATALOG.length + 2);
+			expect(resolution.descriptors).toHaveLength(shippedCatalog.length + 2);
 			expect(resolution.descriptors.filter((descriptor) => descriptor.pinnedFromRecord)).toHaveLength(2);
 			const views = buildPluginViews({
 				services: resolution.descriptors,
@@ -1088,8 +1104,8 @@ describe("/mcp and /plugins picker row counts", () => {
 				authStorage: AuthStorage.inMemory(),
 				connectionStore: store,
 			});
-			expect(views).toHaveLength(SERVICE_CATALOG.length + 2);
-			expect(new Set(views.map((view) => view.serviceId)).size).toBe(SERVICE_CATALOG.length + 2);
+			expect(views).toHaveLength(shippedCatalog.length + 2);
+			expect(new Set(views.map((view) => view.serviceId)).size).toBe(shippedCatalog.length + 2);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

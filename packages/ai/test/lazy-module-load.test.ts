@@ -92,9 +92,15 @@ describe("lazy provider module loading", () => {
 
 	it("loads only the Anthropic SDK when dispatching through streamSimple", () => {
 		const result = runProbe(`
-			const model = mod.getModel("anthropic", "claude-sonnet-4-6");
+			const model = mod.getModel("anthropic", "claude-fable-5");
 			const context = { messages: [{ role: "user", content: "hi" }] };
-			await mod.streamSimple(model, context).result();
+			try {
+				await mod.streamSimple(model, context).result();
+			} catch (error) {
+				// A missing API key is expected without credentials; the assertion
+				// is about which SDK modules the dispatch loads, not the request.
+				if (!/api key|credential|unauthorized|401/i.test(String(error))) throw error;
+			}
 		`);
 
 		expect(result.loadedSpecifiers).toEqual(["@anthropic-ai/sdk"]);

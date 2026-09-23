@@ -52,6 +52,7 @@ jobs:
       production_version: ${{ steps.context.outputs.production_version }}
       publish_beta: ${{ steps.context.outputs.publish_beta }}
       publish_production: ${{ steps.context.outputs.publish_production }}
+      stale: ${{ steps.staleness.outputs.stale }}
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -142,15 +143,44 @@ jobs:
           echo "Production: $publish_production ${production_version:+v${production_version}}"
           echo "Beta: $publish_beta ${beta_version:+v${beta_version}}"
 
+      - name: Skip superseded push builds
+        id: staleness
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_PRODUCTION: ${{ steps.context.outputs.publish_production }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" != "push" ] || [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "Event is ${GITHUB_EVENT_NAME} on ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}; building as usual."
+            echo "stale=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [ "${PUBLISH_PRODUCTION}" = "true" ]; then
+            echo "This run can publish production; building even though a newer commit may exist."
+            echo "stale=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          # Fail open: a tip-check hiccup must never skip a real release build.
+          latest_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_REF_NAME}" --jq .sha 2>/dev/null || echo "${GITHUB_SHA}")"
+          if [ "${latest_sha}" = "${GITHUB_SHA}" ]; then
+            echo "This commit is the tip of ${GITHUB_REF_NAME}; building."
+            echo "stale=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "${GITHUB_SHA} is superseded by ${latest_sha} on ${GITHUB_REF_NAME}; skipping the superseded beta build."
+            echo "stale=true" >> "${GITHUB_OUTPUT}"
+          fi
+
   standalone:
     needs: release-context
+    if: needs.release-context.result == 'success' && needs.release-context.outputs.stale != 'true'
     uses: ./.github/workflows/standalone-binaries.yml
     with:
       build_ref: ${{ needs.release-context.outputs.build_ref }}
+    secrets: inherit
 
   build:
     runs-on: ubuntu-latest
     needs: [release-context, standalone]
+    if: needs.release-context.result == 'success' && needs.release-context.outputs.stale != 'true'
     permissions:
       contents: read
     env:
@@ -175,6 +205,18 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Checkout catalog assets
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: PrimeIntellect-ai/prime-agent-catalog
+          ref: main
+          token: ${{ secrets.PRIME_CATALOG_REPO_TOKEN || github.token }}
+          path: prime-agent-catalog
+          persist-credentials: false
+
+      - name: Generate catalog assets
+        run: npm run catalog:assets -- --catalog-dir prime-agent-catalog
 
       - name: Build
         run: npm run build
@@ -280,6 +322,7 @@ jobs:
   validate-macos:
     name: Final release (${{ matrix.platform }})
     needs: [release-context, build]
+    if: needs.release-context.result == 'success' && needs.release-context.outputs.stale != 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -365,7 +408,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && needs.release-context.result == 'success' && needs.release-context.outputs.stale != 'true'
     runs-on: ubuntu-latest
     needs: [release-context, build, validate-macos]
     permissions:

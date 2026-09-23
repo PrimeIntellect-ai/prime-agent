@@ -43,7 +43,10 @@ VERSION = "0.0.0-benchmark"
 ORIGIN = "http://127.0.0.1:18741"
 BUN_VERSION = "1.4.0"
 # Node transport benches: harness script, recorded metric, and the run timeout.
-TRANSPORT_BENCHES: tuple[tuple[str, Metric, int], ...] = (("frame-decode-bench.mjs", "frame_decode", 180),)
+TRANSPORT_BENCHES: tuple[tuple[str, Metric, int], ...] = (
+    ("switch-fetch-bench.mjs", "switch_fetch", 180),
+    ("frame-decode-bench.mjs", "frame_decode", 180),
+)
 
 
 def clean_error(error: Exception) -> str:
@@ -199,6 +202,13 @@ def prepare(request: Request, side: Side) -> None:
     actual = run_as("builder", ["git", "rev-parse", "HEAD"], SOURCE).strip()
     if actual != request.sha:
         raise RuntimeError("Checkout did not resolve to the requested commit")
+    run_as(
+        "builder",
+        ["npm", "run", "--if-present", "catalog:assets"],
+        SOURCE,
+        timeout=120,
+        log=log,
+    )
     for package in ("tui", "ai", "agent", "coding-agent"):
         run_as(
             "builder",

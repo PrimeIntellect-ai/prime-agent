@@ -8,7 +8,6 @@ import {
 	type Context,
 	createAssistantMessageEventStream,
 	fauxAssistantMessage,
-	getModel,
 	type Usage,
 } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -28,10 +27,11 @@ import {
 import { SessionManager } from "../src/core/session-manager.js";
 import { type Settings, SettingsManager } from "../src/core/settings-manager.js";
 import { startSideQuestion } from "../src/core/side-question.js";
+import { getCodingAgentFixtureModel } from "./fixture-models.js";
 import { createHarness, type Harness } from "./suite/harness.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
 
-const model = getModel("anthropic", "claude-sonnet-4-5")!;
+const model = getCodingAgentFixtureModel("anthropic", "claude-sonnet-4-5");
 
 function usage(): Usage {
 	return {

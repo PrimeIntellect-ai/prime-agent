@@ -1,42 +1,36 @@
 #!/usr/bin/env tsx
 
-import { writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "fs";
+import { join } from "path";
+import { parse as parseYaml } from "yaml";
 import { fileURLToPath } from "url";
-import { getAnthropicCacheCosts } from "../src/cache-pricing.js";
 import { COPILOT_CLIENT_HEADERS } from "../src/copilot-client-version.js";
 import { getOpenRouterReasoningCapabilities } from "../src/openrouter-reasoning.js";
-import {
-	getPrimeInferenceReasoningControls,
-	isPrivatePrimeInferenceModelId,
-	parsePrimeInferenceModelCatalog,
-	type PrimeInferenceCatalogEntry,
-} from "../src/prime-inference-model-catalog.js";
+import { parseModelCatalog } from "../src/model-catalog.js";
 import {
 	CLOUDFLARE_AI_GATEWAY_ANTHROPIC_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/providers/cloudflare.js";
-import {
+import type {
+	AnthropicMessagesCompat,
 	Api,
-	type AnthropicMessagesCompat,
 	KnownProvider,
 	Model,
-	type OpenAICompletionsCompat,
+	OpenAICompletionsCompat,
 } from "../src/types.js";
-import { MODELS as EXISTING_MODELS } from "../src/models.generated.js";
-import { renderModelsFile } from "./render-models.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const packageRoot = join(__dirname, "..");
 
 interface ModelsDevModel {
 	id: string;
 	name: string;
 	tool_call?: boolean;
 	reasoning?: boolean;
+	reasoning_options?: {
+		type?: string;
+		values?: string[];
+	}[];
 	limit?: {
 		context?: number;
 		output?: number;
@@ -56,19 +50,11 @@ interface ModelsDevModel {
 	};
 }
 
-interface AiGatewayModel {
-	id: string;
-	name?: string;
-	context_window?: number;
-	max_tokens?: number;
-	tags?: string[];
-	pricing?: {
-		input?: string | number;
-		output?: string | number;
-		input_cache_read?: string | number;
-		input_cache_write?: string | number;
-	};
+interface ModelsDevProviderData {
+	models?: Record<string, ModelsDevModel>;
 }
+
+type ModelsDevApiData = Record<string, ModelsDevProviderData>;
 
 const COPILOT_STATIC_HEADERS = COPILOT_CLIENT_HEADERS;
 
@@ -76,8 +62,10 @@ const KIMI_STATIC_HEADERS = {
 	"User-Agent": "KimiCLI/1.5",
 } as const;
 
-const AI_GATEWAY_MODELS_URL = "https://ai-gateway.vercel.sh/v1";
 const AI_GATEWAY_BASE_URL = "https://ai-gateway.vercel.sh";
+const MODELS_DEV_FETCH_HEADERS = {
+	"User-Agent": "prime-agent-model-catalog-exporter/1.0",
+} as const;
 const ZAI_TOOL_STREAM_UNSUPPORTED_MODELS = new Set(["glm-4.5", "glm-4.5-air", "glm-4.5-flash", "glm-4.5v"]);
 const EAGER_TOOL_INPUT_STREAMING_UNSUPPORTED_ANTHROPIC_MODELS = new Set([
 	"github-copilot:claude-haiku-4.5",
@@ -114,103 +102,6 @@ const ZAI_THINKING_COMPAT: OpenAICompletionsCompat = {
 	thinkingFormat: "zai",
 };
 
-const PRIME_INFERENCE_BASE_URL = "https://api.pinference.ai/api/v1";
-const PRIME_INFERENCE_COMPAT: OpenAICompletionsCompat = {
-	supportsStore: false,
-	supportsDeveloperRole: false,
-	supportsReasoningEffort: true,
-	maxTokensField: "max_tokens",
-	supportsStrictMode: false,
-};
-interface PrimeInferenceModelMetadata {
-	contextWindow?: number;
-	maxTokens?: number;
-	vision?: boolean;
-	name?: string;
-}
-
-// Prime's /models endpoint is authoritative for route metadata. OpenRouter and
-// these overrides only fill gaps for older or incomplete endpoint entries;
-// requests always go to Prime's own baseUrl.
-const PRIME_INFERENCE_MODEL_METADATA: Record<string, PrimeInferenceModelMetadata> = {
-	// These routes accept 200k, checked against the live API 2026-07-08. The
-	// other Claude routes take the full window their spec lists.
-	"anthropic/claude-sonnet-4": { contextWindow: 200000 },
-	"anthropic/claude-sonnet-4.5": { contextWindow: 200000 },
-	// Windows confirmed against the live API 2026-07-08 where they are SMALLER
-	// than the published spec — over-declaring breaks context tracking.
-	"meta-llama/llama-3.2-1b-instruct": { contextWindow: 60000 },
-	"meta-llama/llama-3.2-3b-instruct": { contextWindow: 80000 },
-	"minimax/minimax-m3": { contextWindow: 524288 },
-	"moonshotai/kimi-k2-0905": { contextWindow: 98304 },
-	"nvidia/nemotron-3-super-120b-a12b": { contextWindow: 262144, maxTokens: 4096 },
-	// Enforced window is LARGER than OpenRouter's listing.
-	"qwen/qwen3-30b-a3b-instruct-2507": { contextWindow: 262144 },
-	// OpenRouter has no max_completion_tokens for the rest of these.
-	"moonshotai/kimi-k2.5": { maxTokens: 65535 },
-	"minimax/minimax-m2.7": { maxTokens: 131072 },
-	// models.dev (moonshotai + openrouter) both list output = context for k2.6.
-	"moonshotai/kimi-k2.6": { maxTokens: 262144 },
-	"moonshotai/kimi-k3": { maxTokens: 1048576 },
-	"openai/gpt-4.1": { maxTokens: 32768 },
-	"openai/gpt-5-nano": { maxTokens: 128000 },
-	"openai/gpt-oss-20b": { maxTokens: 131072 },
-	"qwen/qwen3.5-397b-a17b": { maxTokens: 65536 },
-	"x-ai/grok-4.20": { maxTokens: 30000 },
-	"x-ai/grok-4.20-multi-agent": { maxTokens: 30000 },
-	"xiaomi/mimo-v2.5": { maxTokens: 131072 },
-	"z-ai/glm-5": { maxTokens: 131072 },
-};
-
-// Flagship models pinned above the long tail in the model picker, so the full
-// catalog doesn't flood /model. Everything else stays selectable via search.
-const PRIME_INFERENCE_FEATURED_MODELS = new Set([
-	"anthropic/claude-fable-5",
-	"anthropic/claude-haiku-4.5",
-	"anthropic/claude-opus-4.6",
-	"anthropic/claude-opus-4.7",
-	"anthropic/claude-opus-4.8",
-	"anthropic/claude-sonnet-4.5",
-	"anthropic/claude-sonnet-4.6",
-	"anthropic/claude-sonnet-5",
-	"deepseek/deepseek-v3.2",
-	"deepseek/deepseek-v4-flash",
-	"deepseek/deepseek-v4-pro",
-	"minimax/minimax-m3",
-	"moonshotai/kimi-k2.7-code",
-	"moonshotai/kimi-k3",
-	"nvidia/nemotron-3-nano-30b-a3b",
-	"nvidia/nemotron-3-super-120b-a12b",
-	"openai/gpt-5.3-codex",
-	"openai/gpt-5.4",
-	"openai/gpt-5.4-mini",
-	"openai/gpt-5.4-pro",
-	"openai/gpt-5.5",
-	"qwen/qwen3-30b-a3b-instruct-2507",
-	"qwen/qwen3-coder-next",
-	"qwen/qwen3-max",
-	"qwen/qwen3-vl-235b-a22b-thinking",
-	"qwen/qwen3.8-max",
-	"x-ai/grok-4.20",
-	"x-ai/grok-4.20-multi-agent",
-	"z-ai/glm-5",
-	"z-ai/glm-5.1",
-	"z-ai/glm-5.2",
-]);
-
-// Prime ids whose OpenRouter listing uses a different id (e.g. after an
-// OpenRouter route rename); metadata lookups resolve through this mapping.
-const PRIME_INFERENCE_OPENROUTER_ALIASES: Record<string, string> = {
-	// OpenRouter renamed its route to the dated id; Prime still serves the undated one.
-	"qwen/qwen3.8-max": "qwen/qwen3.8-max-0902",
-};
-
-// Conservative fallbacks for catalog models with no OpenRouter match and no
-// override above: an under-declared window degrades gracefully, an
-// over-declared one breaks context tracking.
-const PRIME_INFERENCE_DEFAULT_CONTEXT_WINDOW = 128000;
-const PRIME_INFERENCE_DEFAULT_MAX_TOKENS = 8192;
-
 const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
 	"gpt-5.1",
 	"gpt-5.2",
@@ -224,6 +115,95 @@ const OPENAI_RESPONSES_NONE_REASONING_MODELS = new Set([
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
 ]);
+
+const MODELS_DEV_PROVIDER_IDS = [
+	"amazon-bedrock",
+	"anthropic",
+	"azure-openai-responses",
+	"cerebras",
+	"cloudflare-ai-gateway",
+	"cloudflare-workers-ai",
+	"deepseek",
+	"fireworks",
+	"github-copilot",
+	"google",
+	"google-vertex",
+	"groq",
+	"huggingface",
+	"kimi-coding",
+	"minimax",
+	"minimax-cn",
+	"mistral",
+	"moonshotai",
+	"moonshotai-cn",
+	"openai",
+	"opencode",
+	"opencode-go",
+	"vercel-ai-gateway",
+	"xai",
+	"xiaomi",
+	"xiaomi-token-plan-ams",
+	"xiaomi-token-plan-cn",
+	"xiaomi-token-plan-sgp",
+	"zai",
+] as const;
+
+interface CatalogCollection {
+	providers: Record<string, Model<Api>[]>;
+	skippedProviders: Record<string, string>;
+	skippedModels: CatalogSkippedModel[];
+}
+
+interface CatalogSkippedModel {
+	provider: string;
+	id: string;
+	reason: string;
+}
+
+interface SyncSummary {
+	provider: string;
+	updated: number;
+	added: number;
+	delisted: number;
+	notInUpstream: number;
+	skipped: number;
+	manual?: boolean;
+	skippedReason?: string;
+}
+
+type CatalogModelRecord = Record<string, unknown> & { id: string };
+
+interface WhitelistPolicy {
+	source: string;
+	ids: string[];
+	globs: string[];
+}
+
+interface CatalogPolicy {
+	whitelists: Map<string, WhitelistPolicy>;
+	manuals: Map<string, CatalogModelRecord[]>;
+}
+
+interface CatalogEnvelope {
+	schemaVersion: 1;
+	models: CatalogModelRecord[];
+}
+
+interface AdmissionManifest {
+	schemaVersion: 1;
+	admitted: Record<string, string[]>;
+}
+
+interface GlobAdmission {
+	id: string;
+	glob: string;
+}
+
+interface MergeSummary extends Omit<SyncSummary, "provider" | "manual" | "skippedReason"> {
+	globAdmitted: GlobAdmission[];
+	delistedIds: string[];
+	notInUpstreamIds: string[];
+}
 
 function mergeThinkingLevelMap(model: Model<any>, map: NonNullable<Model<any>["thinkingLevelMap"]>): void {
 	model.thinkingLevelMap = { ...model.thinkingLevelMap, ...map };
@@ -256,9 +236,6 @@ function isGemma4Model(modelId: string): boolean {
 }
 
 function applyThinkingLevelMetadata(model: Model<any>): void {
-	// Prime Inference routes with catalog- or OpenRouter-derived thinking
-	// levels skip the family heuristics; routes without live data keep them.
-	if (model.provider === "prime-inference" && model.thinkingLevelMap) return;
 	if (
 		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
 		model.id.startsWith("gpt-5")
@@ -357,276 +334,17 @@ function getBedrockBaseUrl(modelId: string): string {
 	return "https://bedrock-runtime.us-east-1.amazonaws.com";
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
-}
-
-function getOptionalNumber(value: unknown): number | undefined {
-	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function getPrimeInferenceCacheCosts(modelId: string, inputCost: number): { cacheRead: number; cacheWrite: number } {
-	return modelId.toLowerCase().startsWith("anthropic/")
-		? getAnthropicCacheCosts(inputCost, "5m")
-		: { cacheRead: 0, cacheWrite: 0 };
-}
-
-function getExistingPrimeInferenceModels(): Model<"openai-completions">[] {
-	const models = EXISTING_MODELS["prime-inference"] as unknown as Record<string, Model<"openai-completions">>;
-	return Object.values(models)
-		.filter((model) => !isPrivatePrimeInferenceModelId(model.id))
-		.map((model) => ({
-			...model,
-			input: [...model.input],
-			cost: {
-				...model.cost,
-				...getPrimeInferenceCacheCosts(model.id, model.cost.input),
-			},
-			...(model.compat ? { compat: { ...model.compat } } : {}),
-			...(model.thinkingLevelMap ? { thinkingLevelMap: { ...model.thinkingLevelMap } } : {}),
-			...(model.headers ? { headers: { ...model.headers } } : {}),
-		}));
-}
-
-function mergePrimeInferenceModels(
-	snapshotModels: Model<"openai-completions">[],
-	catalogModels: Model<"openai-completions">[],
-): Model<"openai-completions">[] {
-	const models = new Map<string, Model<"openai-completions">>();
-	for (const model of snapshotModels) {
-		models.set(model.id.toLowerCase(), model);
-	}
-	for (const model of catalogModels) {
-		models.set(model.id.toLowerCase(), model);
-	}
-	return Array.from(models.values());
-}
-
-function refreshPrimeInferenceAliasLimits(
-	snapshotModels: Model<"openai-completions">[],
-	catalogModels: Model<"openai-completions">[],
-): Model<"openai-completions">[] {
-	const liveModels = new Map(catalogModels.map((model) => [model.id.toLowerCase(), model]));
-	return snapshotModels.map((model) => {
-		const canonicalId = PRIME_INFERENCE_OPENROUTER_ALIASES[model.id.toLowerCase()];
-		const canonical = canonicalId ? liveModels.get(canonicalId) : undefined;
-		if (!canonical) {
-			return model;
-		}
-		return {
-			...model,
-			contextWindow: canonical.contextWindow,
-			maxTokens: canonical.maxTokens,
-		};
-	});
-}
-
-function getPrimeInferenceDisplayName(modelId: string): string {
-	const rawName = modelId.split("/").at(-1) ?? modelId;
-	return rawName
-		.split(/[-_]+/)
-		.filter((part) => part.length > 0)
-		.map((part) => {
-			if (part === part.toUpperCase() || /\d/.test(part)) return part.toUpperCase();
-			if (part.length <= 3) return part.toUpperCase();
-			return part.charAt(0).toUpperCase() + part.slice(1);
-		})
-		.join(" ");
-}
-
-function isPrimeInferenceReasoningModel(modelId: string, catalogReasoning?: boolean): boolean {
-	if (catalogReasoning !== undefined) {
-		return catalogReasoning;
-	}
-
-	const id = modelId.toLowerCase();
-	return (
-		id.includes("thinking") ||
-		id.includes("deepseek-v4") ||
-		id.startsWith("minimax/minimax-m") ||
-		id.startsWith("moonshotai/kimi") ||
-		id.startsWith("x-ai/grok-4") ||
-		id.startsWith("z-ai/glm-") ||
-		(id.startsWith("openai/gpt-5") && !id.includes("-chat")) ||
-		/^anthropic\/claude-(?:fable-5|opus-4|sonnet-(?:4|5))/.test(id)
-	);
-}
-
-function getPrimeInferenceCompat(modelId: string): OpenAICompletionsCompat {
-	// Family fallbacks for routes that do not declare supported_parameters;
-	// live catalog controls override these in createPrimeInferenceModel.
-	const id = modelId.toLowerCase();
-	if (id.includes("deepseek-v4")) {
-		return {
-			...PRIME_INFERENCE_COMPAT,
-			...DEEPSEEK_V4_COMPAT,
-		};
-	}
-
-	return PRIME_INFERENCE_COMPAT;
-}
-
-interface PrimeInferenceOpenRouterMetadata {
-	contextWindow?: number;
-	maxTokens?: number;
-	vision: boolean;
-	reasoning: boolean;
-	thinkingLevelMap?: Model<"openai-completions">["thinkingLevelMap"];
-	supportsReasoningEffort?: boolean;
-}
-
-function buildPrimeInferenceOpenRouterIndex(catalog: unknown[]): Map<string, PrimeInferenceOpenRouterMetadata> {
-	const index = new Map<string, PrimeInferenceOpenRouterMetadata>();
-	for (const item of catalog) {
-		if (!isRecord(item) || typeof item.id !== "string") {
-			continue;
-		}
-		const topProvider = isRecord(item.top_provider) ? item.top_provider : {};
-		const architecture = isRecord(item.architecture) ? item.architecture : {};
-		const modalities = Array.isArray(architecture.input_modalities) ? architecture.input_modalities : [];
-		const supportedParameters = Array.isArray(item.supported_parameters) ? item.supported_parameters : [];
-		const reasoningCapabilities = getOpenRouterReasoningCapabilities(item);
-		index.set(item.id.toLowerCase(), {
-			contextWindow: getOptionalNumber(item.context_length) ?? getOptionalNumber(topProvider.context_length),
-			maxTokens: getOptionalNumber(topProvider.max_completion_tokens),
-			vision: modalities.includes("image"),
-			// Same signal the OpenRouter provider path uses; the top-level
-			// `reasoning` object over-reports (e.g. qwen3-max carries one despite
-			// not accepting reasoning params).
-			reasoning: supportedParameters.includes("reasoning"),
-			...(reasoningCapabilities?.thinkingLevelMap
-				? { thinkingLevelMap: reasoningCapabilities.thinkingLevelMap }
-				: {}),
-			...(reasoningCapabilities?.supportsReasoningEffort === false
-				? { supportsReasoningEffort: false }
-				: {}),
-		});
-	}
-	return index;
-}
-
-function getPrimeInferenceOpenRouterMetadata(
-	index: Map<string, PrimeInferenceOpenRouterMetadata>,
-	modelId: string,
-): PrimeInferenceOpenRouterMetadata | undefined {
-	const id = modelId.toLowerCase();
-	return index.get(PRIME_INFERENCE_OPENROUTER_ALIASES[id] ?? id);
-}
-
-async function fetchPrimeInferenceModels(): Promise<Model<"openai-completions">[]> {
-	let catalog: PrimeInferenceCatalogEntry[] = [];
-
-	try {
-		console.log("Fetching public models from Prime Inference API...");
-		const response = await fetch(`${PRIME_INFERENCE_BASE_URL}/models`);
-		catalog = parsePrimeInferenceModelCatalog(await response.json());
-	} catch (error) {
-		console.error("Failed to fetch Prime Inference models:", error);
-	}
-
-	let openRouterIndex = new Map<string, PrimeInferenceOpenRouterMetadata>();
-	try {
-		openRouterIndex = buildPrimeInferenceOpenRouterIndex(await fetchOpenRouterCatalog());
-	} catch (error) {
-		console.error("Failed to fetch OpenRouter catalog for Prime Inference metadata:", error);
-	}
-	if (openRouterIndex.size === 0) {
-		// Without OpenRouter metadata every model would regress to the defaults;
-		// keep the previous snapshot instead.
-		console.error("OpenRouter catalog unavailable; keeping snapshot Prime Inference models");
-		return getExistingPrimeInferenceModels();
-	}
-
-	const catalogModels = catalog
-		.filter((entry) => !isPrivatePrimeInferenceModelId(entry.id))
-		.map((entry) =>
-			createPrimeInferenceModel(
-				entry,
-				PRIME_INFERENCE_MODEL_METADATA[entry.id.toLowerCase()],
-				getPrimeInferenceOpenRouterMetadata(openRouterIndex, entry.id),
-			),
-		);
-	let snapshotModels = getExistingPrimeInferenceModels();
-	if (catalog.length > 0 && catalogModels.length < Math.ceil(snapshotModels.length * 0.5)) {
-		console.error("Prime Inference catalog is severely truncated; keeping snapshot models");
-		return snapshotModels;
-	}
-	if (catalog.length > 0) {
-		const liveIds = new Set(catalogModels.map((model) => model.id.toLowerCase()));
-		snapshotModels = snapshotModels.filter((model) => liveIds.has(model.id.toLowerCase()));
-	}
-	snapshotModels = refreshPrimeInferenceAliasLimits(snapshotModels, catalogModels);
-	const models = mergePrimeInferenceModels(snapshotModels, catalogModels);
-	console.log(`Loaded ${models.length} Prime Inference models (${catalogModels.length} from the live catalog)`);
-	return models;
-}
-
-function createPrimeInferenceModel(
-	entry: PrimeInferenceCatalogEntry,
-	override: PrimeInferenceModelMetadata | undefined,
-	openRouter: PrimeInferenceOpenRouterMetadata | undefined,
-): Model<"openai-completions"> {
-	const vision = entry.vision ?? override?.vision ?? openRouter?.vision ?? false;
-	const fallbackCacheCosts = getPrimeInferenceCacheCosts(entry.id, entry.input);
-	const cacheCosts = {
-		cacheRead: entry.cacheRead ?? fallbackCacheCosts.cacheRead,
-		cacheWrite: entry.cacheWrite ?? fallbackCacheCosts.cacheWrite,
-	};
-	const contextWindow =
-		entry.contextWindow ??
-		override?.contextWindow ??
-		openRouter?.contextWindow ??
-		PRIME_INFERENCE_DEFAULT_CONTEXT_WINDOW;
-	// Sources are independent, so an OpenRouter output cap can exceed a
-	// gateway-measured window override; clamp to keep the pair coherent.
-	const maxTokens = Math.min(
-		entry.maxTokens ?? override?.maxTokens ?? openRouter?.maxTokens ?? PRIME_INFERENCE_DEFAULT_MAX_TOKENS,
-		contextWindow,
-	);
-	const compat: OpenAICompletionsCompat = { ...getPrimeInferenceCompat(entry.id) };
-	const controls = getPrimeInferenceReasoningControls(entry);
-	if (controls) {
-		// The live catalog is authoritative for which reasoning parameters the
-		// route accepts; never emit one it does not declare.
-		compat.supportsReasoningEffort = controls.supportsReasoningEffort;
-		if (controls.thinkingFormat) compat.thinkingFormat = controls.thinkingFormat;
-		else delete compat.thinkingFormat;
-	} else if (openRouter?.supportsReasoningEffort === false) {
-		// No live declarations: fall back to OpenRouter metadata, whose `reasoning`
-		// object shape the gateway also accepts.
-		compat.supportsReasoningEffort = false;
-		if (!compat.thinkingFormat) compat.thinkingFormat = "openrouter";
-	}
-	const thinkingLevelMap = controls ? controls.thinkingLevelMap : openRouter?.thinkingLevelMap;
-	return {
-		id: entry.id,
-		...(PRIME_INFERENCE_FEATURED_MODELS.has(entry.id.toLowerCase()) ? { featured: true } : {}),
-		name: entry.name ?? override?.name ?? getPrimeInferenceDisplayName(entry.id),
-		api: "openai-completions",
-		provider: "prime-inference",
-		baseUrl: PRIME_INFERENCE_BASE_URL,
-		reasoning: isPrimeInferenceReasoningModel(entry.id, entry.reasoning ?? openRouter?.reasoning),
-		...(thinkingLevelMap ? { thinkingLevelMap: { ...thinkingLevelMap } } : {}),
-		input: vision ? ["text", "image"] : ["text"],
-		cost: {
-			input: entry.input,
-			output: entry.output,
-			...cacheCosts,
-		},
-		contextWindow,
-		maxTokens,
-		compat,
-	};
-}
-
 let openRouterCatalogPromise: Promise<any[]> | undefined;
 
 function fetchOpenRouterCatalog(): Promise<any[]> {
 	openRouterCatalogPromise ??= (async () => {
 		console.log("Fetching models from OpenRouter API...");
 		const response = await fetch("https://openrouter.ai/api/v1/models");
-		const data = await response.json();
-		return Array.isArray(data?.data) ? data.data : [];
+		if (!response.ok) {
+			throw new Error(`OpenRouter catalog request failed with HTTP ${response.status}`);
+		}
+		const data = (await response.json()) as { data?: unknown[] };
+		return Array.isArray(data.data) ? data.data : [];
 	})();
 	return openRouterCatalogPromise;
 }
@@ -702,75 +420,74 @@ async function fetchOpenRouterModels(): Promise<Model<any>[]> {
 		console.log(`Fetched ${models.length} tool-capable models from OpenRouter`);
 		return models;
 	} catch (error) {
-		console.error("Failed to fetch OpenRouter models:", error);
-		return [];
+		throw new Error(`Failed to fetch OpenRouter models: ${formatError(error)}`);
 	}
 }
 
-async function fetchAiGatewayModels(): Promise<Model<any>[]> {
-	try {
-		console.log("Fetching models from Vercel AI Gateway API...");
-		const response = await fetch(`${AI_GATEWAY_MODELS_URL}/models`);
-		const data = await response.json();
-		const models: Model<any>[] = [];
-
-		const toNumber = (value: string | number | undefined): number => {
-			if (typeof value === "number") {
-				return Number.isFinite(value) ? value : 0;
-			}
-			const parsed = parseFloat(value ?? "0");
-			return Number.isFinite(parsed) ? parsed : 0;
-		};
-
-		const items = Array.isArray(data.data) ? (data.data as AiGatewayModel[]) : [];
-		for (const model of items) {
-			const tags = Array.isArray(model.tags) ? model.tags : [];
-			// Only include models that support tools
-			if (!tags.includes("tool-use")) continue;
-
-			const input: ("text" | "image")[] = ["text"];
-			if (tags.includes("vision")) {
-				input.push("image");
-			}
-
-			const inputCost = toNumber(model.pricing?.input) * 1_000_000;
-			const outputCost = toNumber(model.pricing?.output) * 1_000_000;
-			const cacheReadCost = toNumber(model.pricing?.input_cache_read) * 1_000_000;
-			const cacheWriteCost = toNumber(model.pricing?.input_cache_write) * 1_000_000;
-
-			models.push({
-				id: model.id,
-				name: model.name || model.id,
-				api: "anthropic-messages",
-				baseUrl: AI_GATEWAY_BASE_URL,
-				provider: "vercel-ai-gateway",
-				// DeepSeek's *-thinking routes always think; the gateway omits the tag.
-				reasoning: tags.includes("reasoning") || model.id.includes("-thinking"),
-				input,
-				cost: {
-					input: inputCost,
-					output: outputCost,
-					cacheRead: cacheReadCost,
-					cacheWrite: cacheWriteCost,
-				},
-				contextWindow: model.context_window || 4096,
-				maxTokens: model.max_tokens || 4096,
-			});
-		}
-
-		console.log(`Fetched ${models.length} tool-capable models from Vercel AI Gateway`);
-		return models;
-	} catch (error) {
-		console.error("Failed to fetch Vercel AI Gateway models:", error);
+function getModelsDevInputModalities(model: ModelsDevModel): ("text" | "image")[] {
+	if (!Array.isArray(model.modalities?.input) || model.modalities.input.length === 0) {
 		return [];
 	}
+	return model.modalities.input.includes("image") ? ["text", "image"] : ["text"];
+}
+
+function getModelsDevRequiredNumber(value: number | undefined): number {
+	return value as number;
+}
+
+function getModelsDevCacheCost(value: number | undefined): number {
+	return value ?? 0;
+}
+
+function getModelsDevCost(model: ModelsDevModel): Model<any>["cost"] {
+	return {
+		input: getModelsDevRequiredNumber(model.cost?.input),
+		output: getModelsDevRequiredNumber(model.cost?.output),
+		cacheRead: getModelsDevCacheCost(model.cost?.cache_read),
+		cacheWrite: getModelsDevCacheCost(model.cost?.cache_write),
+	};
+}
+
+function getModelsDevContextWindow(model: ModelsDevModel): number {
+	return getModelsDevRequiredNumber(model.limit?.context);
+}
+
+function getModelsDevMaxTokens(model: ModelsDevModel): number {
+	return getModelsDevRequiredNumber(model.limit?.output);
+}
+
+export function getModelsDevThinkingLevelMap(model: ModelsDevModel): NonNullable<Model<any>["thinkingLevelMap"]> | undefined {
+	const effortOption = model.reasoning_options?.find(
+		(option) => option.type === "effort" && Array.isArray(option.values),
+	);
+	if (!effortOption) {
+		return undefined;
+	}
+
+	const supportedValues = new Set(effortOption.values);
+	const map: NonNullable<Model<any>["thinkingLevelMap"]> = {};
+	const setLevel = (level: keyof NonNullable<Model<any>["thinkingLevelMap"]>, upstreamValue: string): void => {
+		map[level] = supportedValues.has(upstreamValue) ? upstreamValue : null;
+	};
+
+	map.off = supportedValues.has("none") ? "none" : supportedValues.has("off") ? "off" : null;
+	setLevel("minimal", "minimal");
+	setLevel("low", "low");
+	setLevel("medium", "medium");
+	setLevel("high", "high");
+	setLevel("xhigh", "xhigh");
+	setLevel("max", "max");
+	return map;
 }
 
 async function loadModelsDevData(): Promise<Model<any>[]> {
 	try {
 		console.log("Fetching models from models.dev API...");
-		const response = await fetch("https://models.dev/api.json");
-		const data = await response.json();
+		const response = await fetch("https://models.dev/api.json", { headers: MODELS_DEV_FETCH_HEADERS });
+		if (!response.ok) {
+			throw new Error(`models.dev catalog request failed with HTTP ${response.status}`);
+		}
+		const data = (await response.json()) as ModelsDevApiData;
 
 		const models: Model<any>[] = [];
 
@@ -799,15 +516,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "amazon-bedrock" as const,
 					baseUrl: getBedrockBaseUrl(id),
 					reasoning: m.reasoning === true,
-					input: (m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"]) as ("text" | "image")[],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 				});
 			}
 		}
@@ -825,15 +538,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "anthropic",
 					baseUrl: "https://api.anthropic.com",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 				});
 			}
 		}
@@ -858,15 +567,36 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "google",
 					baseUrl: "https://generativelanguage.googleapis.com/v1beta",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
+				});
+			}
+		}
+
+		// Process Google Vertex Gemini models. models.dev also lists Vertex
+		// Anthropic routes; those use a different runtime than our google-vertex
+		// provider, so keep this provider on the Gemini surface.
+		if (data["google-vertex"]?.models) {
+			for (const [modelId, model] of Object.entries(data["google-vertex"].models)) {
+				const m = model as ModelsDevModel;
+				if (m.tool_call !== true) continue;
+				if (m.provider?.npm === "@ai-sdk/google-vertex/anthropic") continue;
+
+				models.push({
+					id: modelId,
+					name: m.name || modelId,
+					api: "google-vertex",
+					provider: "google-vertex",
+					baseUrl: "https://{location}-aiplatform.googleapis.com",
+					reasoning: m.reasoning === true,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 				});
 			}
 		}
@@ -884,15 +614,55 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "openai",
 					baseUrl: "https://api.openai.com/v1",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
+				});
+			}
+		}
+
+		// Process Azure OpenAI models
+		if (data.azure?.models) {
+			for (const [modelId, model] of Object.entries(data.azure.models)) {
+				const m = model as ModelsDevModel;
+				if (m.tool_call !== true) continue;
+
+				models.push({
+					id: modelId,
+					name: m.name || modelId,
+					api: "azure-openai-responses",
+					provider: "azure-openai-responses",
+					baseUrl: "",
+					reasoning: m.reasoning === true,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
+				});
+			}
+		}
+
+		// Process DeepSeek models
+		if (data.deepseek?.models) {
+			for (const [modelId, model] of Object.entries(data.deepseek.models)) {
+				const m = model as ModelsDevModel;
+				if (m.tool_call !== true) continue;
+
+				models.push({
+					id: modelId,
+					name: m.name || modelId,
+					api: "openai-completions",
+					provider: "deepseek",
+					baseUrl: "https://api.deepseek.com",
+					reasoning: m.reasoning === true,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 				});
 			}
 		}
@@ -910,15 +680,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "groq",
 					baseUrl: "https://api.groq.com/openai/v1",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 				});
 			}
 		}
@@ -936,15 +702,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "cerebras",
 					baseUrl: "https://api.cerebras.ai/v1",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 				});
 			}
 		}
@@ -962,15 +724,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "cloudflare-workers-ai",
 					baseUrl: CLOUDFLARE_WORKERS_AI_BASE_URL,
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 					compat: { sendSessionAffinityHeaders: true },
 				});
 			}
@@ -1017,15 +775,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "cloudflare-ai-gateway",
 					baseUrl,
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 					...(compat ? { compat } : {}),
 				});
 			}
@@ -1044,15 +798,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "xai",
 					baseUrl: "https://api.x.ai/v1",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 				});
 			}
 		}
@@ -1062,7 +812,6 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			for (const [modelId, model] of Object.entries(data["zai-coding-plan"].models)) {
 				const m = model as ModelsDevModel;
 				if (m.tool_call !== true) continue;
-				const supportsImage = m.modalities?.input?.includes("image");
 
 				models.push({
 					id: modelId,
@@ -1071,20 +820,16 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "zai",
 					baseUrl: "https://api.z.ai/api/coding/paas/v4",
 					reasoning: m.reasoning === true,
-					input: supportsImage ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
 					compat: {
 						supportsDeveloperRole: false,
 						thinkingFormat: ZAI_THINKING_COMPAT.thinkingFormat,
 						...(!ZAI_TOOL_STREAM_UNSUPPORTED_MODELS.has(modelId) ? { zaiToolStream: true } : {}),
 					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 				});
 			}
 		}
@@ -1102,15 +847,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "mistral",
 					baseUrl: "https://api.mistral.ai",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 				});
 			}
 		}
@@ -1128,18 +869,14 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "huggingface",
 					baseUrl: "https://router.huggingface.co/v1",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
 					compat: {
 						supportsDeveloperRole: false,
 					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 				});
 			}
 		}
@@ -1158,15 +895,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					// Fireworks Anthropic-compatible API - SDK appends /v1/messages
 					baseUrl: "https://api.fireworks.ai/inference",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 				});
 			}
 		}
@@ -1183,9 +916,10 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		] as const;
 
 		for (const variant of opencodeVariants) {
-			if (!data[variant.key]?.models) continue;
+			const variantModels = data[variant.key]?.models;
+			if (!variantModels) continue;
 
-			for (const [modelId, model] of Object.entries(data[variant.key].models)) {
+			for (const [modelId, model] of Object.entries(variantModels)) {
 				const m = model as ModelsDevModel & { status?: string };
 				if (m.tool_call !== true) continue;
 				if (m.status === "deprecated") continue;
@@ -1242,16 +976,12 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: variant.provider,
 					baseUrl,
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
 					...(compat ? { compat } : {}),
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 				});
 			}
 		}
@@ -1285,15 +1015,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider: "github-copilot",
 					baseUrl: "https://api.individual.githubcopilot.com",
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 128000,
-					maxTokens: m.limit?.output || 8192,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 					headers: { ...COPILOT_STATIC_HEADERS },
 					...(anthropicCompat ? { compat: anthropicCompat } : {}),
 					// compat only applies to openai-completions
@@ -1330,23 +1056,19 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						// MiniMax's Anthropic-compatible API - SDK appends /v1/messages
 						baseUrl,
 						reasoning: m.reasoning === true,
-						input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-						cost: {
-							input: m.cost?.input || 0,
-							output: m.cost?.output || 0,
-							cacheRead: m.cost?.cache_read || 0,
-							cacheWrite: m.cost?.cache_write || 0,
-						},
-						contextWindow: m.limit?.context || 4096,
-						maxTokens: m.limit?.output || 4096,
+						...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+						input: getModelsDevInputModalities(m),
+						cost: getModelsDevCost(m),
+						contextWindow: getModelsDevContextWindow(m),
+						maxTokens: getModelsDevMaxTokens(m),
 					});
 				}
 			}
 		}
 
 		// Process Kimi For Coding models
-		if (data["kimi-for-coding"]?.models) {
-			const kimiModels = data["kimi-for-coding"].models as Record<string, ModelsDevModel>;
+		if (data["kimi-code-plan-cn"]?.models) {
+			const kimiModels = data["kimi-code-plan-cn"].models as Record<string, ModelsDevModel>;
 			const hasCanonicalModel = Object.prototype.hasOwnProperty.call(kimiModels, "kimi-for-coding");
 
 			const kimiAliases = new Set(["k2p5", "k2p6"]);
@@ -1370,15 +1092,11 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					baseUrl: "https://api.kimi.com/coding",
 					headers: { ...KIMI_STATIC_HEADERS },
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 				});
 			}
 		}
@@ -1410,16 +1128,36 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 					provider,
 					baseUrl,
 					reasoning: m.reasoning === true,
-					input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-					cost: {
-						input: m.cost?.input || 0,
-						output: m.cost?.output || 0,
-						cacheRead: m.cost?.cache_read || 0,
-						cacheWrite: m.cost?.cache_write || 0,
-					},
-					contextWindow: m.limit?.context || 4096,
-					maxTokens: m.limit?.output || 4096,
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 					compat: moonshotCompat,
+				});
+			}
+		}
+
+		// Process Vercel AI Gateway models. Vercel's models.dev slug is "vercel".
+		// Some gateway entries omit tool_call even though the gateway catalog has
+		// historically advertised tool-use; refresh any structurally complete entry
+		// so existing catalog ids can stay billing-authoritative to models.dev.
+		if (data.vercel?.models) {
+			for (const [modelId, model] of Object.entries(data.vercel.models)) {
+				const m = model as ModelsDevModel;
+
+				models.push({
+					id: modelId,
+					name: m.name || modelId,
+					api: "anthropic-messages",
+					provider: "vercel-ai-gateway",
+					baseUrl: AI_GATEWAY_BASE_URL,
+					reasoning: m.reasoning === true || modelId.includes("-thinking"),
+					...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+					input: getModelsDevInputModalities(m),
+					cost: getModelsDevCost(m),
+					contextWindow: getModelsDevContextWindow(m),
+					maxTokens: getModelsDevMaxTokens(m),
 				});
 			}
 		}
@@ -1429,15 +1167,27 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		// keys from platform.xiaomimimo.com). The three `xiaomi-token-plan-*`
 		// providers cover prepaid Token Plan endpoints in cn / ams / sgp.
 		const xiaomiVariants = [
-			{ provider: "xiaomi", baseUrl: "https://api.xiaomimimo.com/anthropic" },
-			{ provider: "xiaomi-token-plan-cn", baseUrl: "https://token-plan-cn.xiaomimimo.com/anthropic" },
-			{ provider: "xiaomi-token-plan-ams", baseUrl: "https://token-plan-ams.xiaomimimo.com/anthropic" },
-			{ provider: "xiaomi-token-plan-sgp", baseUrl: "https://token-plan-sgp.xiaomimimo.com/anthropic" },
+			{ key: "xiaomi", provider: "xiaomi", baseUrl: "https://api.xiaomimimo.com/anthropic" },
+			{
+				key: "xiaomi-token-plan-cn",
+				provider: "xiaomi-token-plan-cn",
+				baseUrl: "https://token-plan-cn.xiaomimimo.com/anthropic",
+			},
+			{
+				key: "xiaomi-token-plan-ams",
+				provider: "xiaomi-token-plan-ams",
+				baseUrl: "https://token-plan-ams.xiaomimimo.com/anthropic",
+			},
+			{
+				key: "xiaomi-token-plan-sgp",
+				provider: "xiaomi-token-plan-sgp",
+				baseUrl: "https://token-plan-sgp.xiaomimimo.com/anthropic",
+			},
 		] as const;
 
-		if (data.xiaomi?.models) {
-			for (const { provider, baseUrl } of xiaomiVariants) {
-				for (const [modelId, model] of Object.entries(data.xiaomi.models)) {
+		for (const { key, provider, baseUrl } of xiaomiVariants) {
+			if (!data[key]?.models) continue;
+			for (const [modelId, model] of Object.entries(data[key].models)) {
 					const m = model as ModelsDevModel;
 					if (m.tool_call !== true) continue;
 
@@ -1448,40 +1198,45 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 						provider,
 						baseUrl,
 						reasoning: m.reasoning === true,
-						input: m.modalities?.input?.includes("image") ? ["text", "image"] : ["text"],
-						cost: {
-							input: m.cost?.input || 0,
-							output: m.cost?.output || 0,
-							cacheRead: m.cost?.cache_read || 0,
-							cacheWrite: m.cost?.cache_write || 0,
-						},
-						contextWindow: m.limit?.context || 4096,
-						maxTokens: m.limit?.output || 4096,
+						...(getModelsDevThinkingLevelMap(m) ? { thinkingLevelMap: getModelsDevThinkingLevelMap(m) } : {}),
+						input: getModelsDevInputModalities(m),
+						cost: getModelsDevCost(m),
+						contextWindow: getModelsDevContextWindow(m),
+						maxTokens: getModelsDevMaxTokens(m),
 					});
-				}
 			}
 		}
 
-		console.log(`Loaded ${models.length} tool-capable models from models.dev`);
+		console.log(`Loaded ${models.length} models from models.dev`);
 		return models;
 	} catch (error) {
-		console.error("Failed to load models.dev data:", error);
-		return [];
+		throw new Error(`Failed to load models.dev data: ${formatError(error)}`);
 	}
 }
 
-async function generateModels() {
-	// Fetch models from both sources
-	// models.dev: Anthropic, Google, OpenAI, Groq, Cerebras
-	// OpenRouter: xAI and other providers (excluding Anthropic, Google, OpenAI)
-	// AI Gateway: OpenAI-compatible catalog with tool-capable models
-	const modelsDevModels = await loadModelsDevData();
-	const openRouterModels = await fetchOpenRouterModels();
-	const aiGatewayModels = await fetchAiGatewayModels();
+async function collectCatalogModelsWithStatus(): Promise<CatalogCollection> {
+	const skippedProviders: Record<string, string> = {};
+	const skippedModels: CatalogSkippedModel[] = [];
+	const collectedModels: Model<Api>[] = [];
 
-	// Combine models (models.dev has priority)
-	const allModels = [...modelsDevModels, ...openRouterModels, ...aiGatewayModels].filter(
+	try {
+		collectedModels.push(...(await loadModelsDevData()));
+	} catch (error) {
+		const reason = formatError(error);
+		for (const provider of MODELS_DEV_PROVIDER_IDS) {
+			skippedProviders[provider] = reason;
+		}
+	}
+
+	try {
+		collectedModels.push(...(await fetchOpenRouterModels()));
+	} catch (error) {
+		skippedProviders.openrouter = formatError(error);
+	}
+
+	const allModels = collectedModels.filter(
 		(model) =>
+			model.provider !== "prime-inference" &&
 			!((model.provider === "opencode" || model.provider === "opencode-go") && model.id === "gpt-5.3-codex-spark"),
 	);
 
@@ -2314,56 +2069,559 @@ async function generateModels() {
 	];
 	allModels.push(...vertexModels);
 
-	const primeInferenceModels = await fetchPrimeInferenceModels();
-	allModels.push(...primeInferenceModels);
-
-	const azureOpenAiModels: Model<Api>[] = allModels
-		.filter((model) => model.provider === "openai" && model.api === "openai-responses")
-		.map((model) => ({
-			...model,
-			api: "azure-openai-responses",
-			provider: "azure-openai-responses",
-			baseUrl: "",
-		}));
-	allModels.push(...azureOpenAiModels);
 
 	for (const model of allModels) {
 		applyThinkingLevelMetadata(model);
 	}
 
-	// Group by provider and deduplicate by model ID
-	const providers: Record<string, Record<string, Model<Api>>> = {};
+	const providers: Record<string, Model<Api>[]> = {};
+	const seenProviderModelIds = new Set<string>();
 	for (const model of allModels) {
-		if (!providers[model.provider]) {
-			providers[model.provider] = {};
+		if (skippedProviders[model.provider]) {
+			continue;
 		}
-		// Use model ID as key to automatically deduplicate
-		// Only add if not already present (models.dev takes priority over OpenRouter)
-		if (!providers[model.provider][model.id]) {
-			providers[model.provider][model.id] = model;
+		const invalidReason = getInvalidModelReason(model);
+		if (invalidReason) {
+			skippedModels.push({ provider: model.provider, id: model.id || "<missing>", reason: invalidReason });
+			continue;
+		}
+		const dedupeKey = `${model.provider}\u0000${model.id}`;
+		if (seenProviderModelIds.has(dedupeKey)) {
+			continue;
+		}
+		seenProviderModelIds.add(dedupeKey);
+		providers[model.provider] ??= [];
+		providers[model.provider].push(model);
+	}
+
+	return { providers, skippedProviders, skippedModels };
+}
+
+
+function formatError(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function getInvalidModelReason(model: Model<Api>): string | undefined {
+	if (!model.id) return "missing id";
+	if (!model.name) return "missing name";
+	if (!model.api) return "missing api";
+	if (!model.provider) return "missing provider";
+	if (typeof model.baseUrl !== "string") return "missing baseUrl";
+	if (typeof model.reasoning !== "boolean") return "missing reasoning";
+	if (!Array.isArray(model.input) || model.input.length === 0) return "missing input modalities";
+	if (!model.input.every((input) => input === "text" || input === "image")) return "invalid input modality";
+	if (!isFiniteNumber(model.cost?.input)) return "missing input cost";
+	if (!isFiniteNumber(model.cost?.output)) return "missing output cost";
+	if (!isFiniteNumber(model.cost?.cacheRead)) return "missing cacheRead cost";
+	if (!isFiniteNumber(model.cost?.cacheWrite)) return "missing cacheWrite cost";
+	if (!isFiniteNumber(model.contextWindow) || model.contextWindow <= 0) return "missing contextWindow";
+	if (!isFiniteNumber(model.maxTokens) || model.maxTokens <= 0) return "missing maxTokens";
+	return undefined;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value);
+}
+
+function readJsonFile(path: string): unknown {
+	return JSON.parse(readFileSync(path, "utf8"));
+}
+
+function writeCanonicalJson(path: string, value: unknown): void {
+	writeFileSync(path, `${JSON.stringify(value, null, "\t")}\n`);
+}
+
+function isCatalogModelRecord(value: unknown): value is CatalogModelRecord {
+	return typeof value === "object" && value !== null && typeof (value as { id?: unknown }).id === "string";
+}
+
+const REFRESH_METADATA_KEYS = [
+	"name",
+	"cost",
+	"contextWindow",
+	"maxTokens",
+	"input",
+	"reasoning",
+	"thinkingLevelMap",
+	"compat",
+] as const;
+
+const OPTIONAL_REFRESH_METADATA_KEYS = new Set<string>(["thinkingLevelMap", "compat"]);
+
+const LIVE_UPSTREAM_PROVIDER_SOURCES: Record<string, string> = {
+	"amazon-bedrock": "amazon-bedrock",
+	anthropic: "anthropic",
+	"azure-openai-responses": "azure",
+	cerebras: "cerebras",
+	"cloudflare-ai-gateway": "cloudflare-ai-gateway",
+	"cloudflare-workers-ai": "cloudflare-workers-ai",
+	deepseek: "deepseek",
+	fireworks: "fireworks-ai",
+	"github-copilot": "github-copilot",
+	google: "google",
+	"google-vertex": "google-vertex",
+	groq: "groq",
+	huggingface: "huggingface",
+	"kimi-coding": "kimi-code-plan-cn",
+	minimax: "minimax",
+	"minimax-cn": "minimax-cn",
+	mistral: "mistral",
+	moonshotai: "moonshotai",
+	"moonshotai-cn": "moonshotai-cn",
+	openai: "openai",
+	opencode: "opencode",
+	"opencode-go": "opencode-go",
+	openrouter: "openrouter-api",
+	"vercel-ai-gateway": "vercel",
+	xai: "xai",
+	xiaomi: "xiaomi",
+	"xiaomi-token-plan-ams": "xiaomi-token-plan-ams",
+	"xiaomi-token-plan-cn": "xiaomi-token-plan-cn",
+	"xiaomi-token-plan-sgp": "xiaomi-token-plan-sgp",
+	zai: "zai-coding-plan",
+};
+
+/**
+ * Providers backed by a live upstream catalog endpoint. Only these are synced.
+ * Admission is controlled by models/whitelist/<provider>.yml in the catalog repo.
+ */
+const LIVE_UPSTREAM_PROVIDERS = new Set<string>(Object.keys(LIVE_UPSTREAM_PROVIDER_SOURCES));
+
+/**
+ * The client's catalog schema rejects request headers on catalog entries
+ * (createModelCatalog strips them; parseModelCatalog drops entries that carry
+ * them). Header values live in the compiled transport templates instead —
+ * catalog data must never change where credentials are sent.
+ */
+function stripCatalogHeaders<T extends Model<Api>>(model: T): T {
+	if (!("headers" in model) || model.headers === undefined) return model;
+	const clone = { ...model };
+	delete clone.headers;
+	return clone;
+}
+
+export function mergeProviderModelsForCatalog(
+	existingModels: CatalogModelRecord[],
+	collectedModels: Model<Api>[],
+	admission: { ids: string[]; globs: string[] },
+): { models: CatalogModelRecord[]; summary: MergeSummary } {
+	const sanitizedModels = collectedModels.map(stripCatalogHeaders);
+	const collectedById = new Map(sanitizedModels.map((model) => [model.id, model]));
+	const existingById = new Map(existingModels.map((model) => [model.id, model]));
+	const admittedIds: string[] = [];
+	const admittedSet = new Set<string>();
+
+	for (const id of admission.ids) {
+		admittedIds.push(id);
+		admittedSet.add(id);
+	}
+
+	const globAdmitted: GlobAdmission[] = [];
+	for (const collected of sanitizedModels) {
+		if (admittedSet.has(collected.id)) {
+			continue;
+		}
+		const glob = admission.globs.find((candidate) => matchesGlob(collected.id, candidate));
+		if (!glob) {
+			continue;
+		}
+		admittedIds.push(collected.id);
+		admittedSet.add(collected.id);
+		globAdmitted.push({ id: collected.id, glob });
+	}
+
+	let skipped = 0;
+	for (const existing of existingModels) {
+		if (admittedSet.has(existing.id)) {
+			continue;
+		}
+		if (!admission.globs.some((glob) => matchesGlob(existing.id, glob))) {
+			continue;
+		}
+		admittedIds.push(existing.id);
+		admittedSet.add(existing.id);
+		skipped += 1;
+	}
+
+	const nextModels: CatalogModelRecord[] = [];
+	const notInUpstreamIds: string[] = [];
+	let updated = 0;
+	let added = 0;
+
+	for (const id of admittedIds) {
+		const collected = collectedById.get(id);
+		const existing = existingById.get(id);
+		if (collected) {
+			if (existing) {
+				updated += 1;
+				nextModels.push(mergeExistingCatalogModel(existing, collected));
+			} else {
+				added += 1;
+				nextModels.push(cloneJson(collected) as CatalogModelRecord);
+			}
+			continue;
+		}
+		if (!existing) {
+			throw new Error(`Whitelisted model id ${id} is missing from both upstream and the committed provider file`);
+		}
+		notInUpstreamIds.push(id);
+		nextModels.push(sanitizeExistingCatalogModel(existing));
+	}
+
+	const delistedIds = existingModels.filter((model) => !admittedSet.has(model.id)).map((model) => model.id);
+
+	return {
+		models: nextModels,
+		summary: {
+			updated,
+			added,
+			delisted: delistedIds.length,
+			notInUpstream: notInUpstreamIds.length,
+			skipped,
+			globAdmitted,
+			delistedIds,
+			notInUpstreamIds,
+		},
+	};
+}
+
+const CATALOG_MODEL_KEYS = new Set([
+	"id", "name", "api", "provider", "baseUrl", "reasoning", "thinkingLevelMap",
+	"input", "cost", "contextWindow", "maxTokens", "featured", "compat",
+]);
+
+function sanitizeExistingCatalogModel(existing: CatalogModelRecord): CatalogModelRecord {
+	return Object.fromEntries(Object.entries(existing).filter(([key]) => CATALOG_MODEL_KEYS.has(key))) as CatalogModelRecord;
+}
+
+function mergeExistingCatalogModel(existing: CatalogModelRecord, collected: Model<Api>): CatalogModelRecord {
+	const collectedRecord = collected as unknown as Record<string, unknown>;
+	const next: Record<string, unknown> = {};
+	const seenKeys = new Set<string>();
+	for (const [key, value] of Object.entries(sanitizeExistingCatalogModel(existing))) {
+		seenKeys.add(key);
+		if (!REFRESH_METADATA_KEYS.includes(key as (typeof REFRESH_METADATA_KEYS)[number])) {
+			next[key] = value;
+			continue;
+		}
+		if (Object.prototype.hasOwnProperty.call(collectedRecord, key)) {
+			next[key] = cloneJson(collectedRecord[key]);
+		} else if (!OPTIONAL_REFRESH_METADATA_KEYS.has(key)) {
+			next[key] = value;
 		}
 	}
 
-	// Generate TypeScript file. JSON string literals prevent remote catalog
-	// text from becoming executable source code.
-	const output = renderModelsFile(providers);
+	for (const key of REFRESH_METADATA_KEYS) {
+		if (!seenKeys.has(key) && Object.prototype.hasOwnProperty.call(collectedRecord, key)) {
+			next[key] = cloneJson(collectedRecord[key]);
+		}
+	}
 
-	// Write file
-	writeFileSync(join(packageRoot, "src/models.generated.ts"), output);
-	console.log("Generated src/models.generated.ts");
+	return next as CatalogModelRecord;
+}
 
-	// Print statistics
-	const totalModels = allModels.length;
-	const reasoningModels = allModels.filter(m => m.reasoning).length;
+function cloneJson(value: unknown): unknown {
+	return JSON.parse(JSON.stringify(value));
+}
 
-	console.log(`\nModel Statistics:`);
-	console.log(`  Total tool-capable models: ${totalModels}`);
-	console.log(`  Reasoning-capable models: ${reasoningModels}`);
+function matchesGlob(value: string, glob: string): boolean {
+	let source = "^";
+	for (const char of glob) {
+		if (char === "*") {
+			source += ".*";
+		} else if (char === "?") {
+			source += ".";
+		} else {
+			source += char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		}
+	}
+	return new RegExp(`${source}$`).test(value);
+}
 
-	for (const [provider, models] of Object.entries(providers)) {
-		console.log(`  ${provider}: ${Object.keys(models).length} models`);
+function readYamlFile(path: string): unknown {
+	try {
+		return parseYaml(readFileSync(path, "utf8"));
+	} catch (error) {
+		throw new Error(`${path}: invalid YAML: ${formatError(error)}`);
 	}
 }
 
-// Run the generator
-generateModels().catch(console.error);
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function assertStringArray(value: unknown, path: string): string[] {
+	if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+		throw new Error(`${path} must be a string array`);
+	}
+	const seen = new Set<string>();
+	for (const item of value) {
+		if (seen.has(item)) {
+			throw new Error(`${path} contains duplicate value ${item}`);
+		}
+		seen.add(item);
+	}
+	return value;
+}
+
+function readYamlPolicyDir(dir: string, label: string): string[] {
+	if (!existsSync(dir)) {
+		throw new Error(`Catalog ${label} directory does not exist: ${dir}`);
+	}
+	return readdirSync(dir, { withFileTypes: true })
+		.sort((left, right) => left.name.localeCompare(right.name))
+		.map((item) => {
+			if (!item.isFile() || !item.name.endsWith(".yml")) {
+				throw new Error(`${dir} must contain only .yml files; found ${item.name}`);
+			}
+			return item.name;
+		});
+}
+
+export function readCatalogPolicy(catalogDir: string): CatalogPolicy {
+	const whitelistDir = join(catalogDir, "models", "whitelist");
+	const manualDir = join(catalogDir, "models", "manual");
+	const whitelists = new Map<string, WhitelistPolicy>();
+	const manuals = new Map<string, CatalogModelRecord[]>();
+
+	for (const file of readYamlPolicyDir(whitelistDir, "whitelist")) {
+		const provider = file.slice(0, -".yml".length);
+		if (!LIVE_UPSTREAM_PROVIDERS.has(provider)) {
+			throw new Error(
+				`models/whitelist/${file} has no upstream exporter mapping; use models/manual/${file} for curated providers`,
+			);
+		}
+		const path = join(whitelistDir, file);
+		const parsed = readYamlFile(path);
+		if (!isRecord(parsed)) {
+			throw new Error(`${path} must contain an object`);
+		}
+		const extras = Object.keys(parsed).filter((key) => !["source", "ids", "globs"].includes(key));
+		if (extras.length > 0) {
+			throw new Error(`${path} has unsupported keys: ${extras.join(", ")}`);
+		}
+		if (typeof parsed.source !== "string") {
+			throw new Error(`${path}.source must be a string`);
+		}
+		const expectedSource = LIVE_UPSTREAM_PROVIDER_SOURCES[provider];
+		if (parsed.source !== expectedSource) {
+			throw new Error(`${path}.source is ${parsed.source}, expected ${expectedSource}`);
+		}
+		whitelists.set(provider, {
+			source: parsed.source,
+			ids: assertStringArray(parsed.ids, `${path}.ids`),
+			globs: assertStringArray(parsed.globs, `${path}.globs`),
+		});
+	}
+
+	for (const file of readYamlPolicyDir(manualDir, "manual")) {
+		const provider = file.slice(0, -".yml".length);
+		if (whitelists.has(provider)) {
+			throw new Error(`${provider} is present in both models/whitelist and models/manual`);
+		}
+		const path = join(manualDir, file);
+		const parsed = readYamlFile(path);
+		if (!isRecord(parsed)) {
+			throw new Error(`${path} must contain an object`);
+		}
+		const extras = Object.keys(parsed).filter((key) => key !== "models");
+		if (extras.length > 0) {
+			throw new Error(`${path} has unsupported keys: ${extras.join(", ")}`);
+		}
+		if (!Array.isArray(parsed.models) || !parsed.models.every(isCatalogModelRecord)) {
+			throw new Error(`${path}.models must be an array of model objects with string ids`);
+		}
+		const manualModels = parsed.models.map((model) => stripCatalogHeaders(model as unknown as Model<Api>) as unknown as CatalogModelRecord);
+		for (const model of manualModels) {
+			if (model.provider !== provider) {
+				throw new Error(`${path}: model ${model.id} provider must match ${provider}`);
+			}
+			const invalidReason = getInvalidModelReason(model as unknown as Model<Api>);
+			if (invalidReason) {
+				throw new Error(`${path}: model ${model.id} is invalid: ${invalidReason}`);
+			}
+		}
+		manuals.set(provider, manualModels);
+	}
+
+	return { whitelists, manuals };
+}
+
+function readCommittedCatalog(path: string): CatalogEnvelope {
+	const parsed = readJsonFile(path);
+	if (!isRecord(parsed) || parsed.schemaVersion !== 1 || !Array.isArray(parsed.models)) {
+		throw new Error(`${path} must be an object with schemaVersion 1 and a models array`);
+	}
+	if (!parsed.models.every(isCatalogModelRecord)) {
+		throw new Error(`${path}.models must contain model objects with string ids`);
+	}
+	return { schemaVersion: 1, models: parsed.models };
+}
+
+function groupCatalogModelsByProvider(models: CatalogModelRecord[]): Map<string, CatalogModelRecord[]> {
+	const providers = new Map<string, CatalogModelRecord[]>();
+	for (const model of models) {
+		if (typeof model.provider !== "string") {
+			throw new Error(`models/catalog.v1.json: model ${model.id} provider must be a string`);
+		}
+		providers.set(model.provider, [...(providers.get(model.provider) ?? []), model]);
+	}
+	return providers;
+}
+
+function buildAdmissionManifest(models: CatalogModelRecord[]): AdmissionManifest {
+	const admitted: Record<string, string[]> = {};
+	for (const model of models) {
+		if (typeof model.provider !== "string") {
+			throw new Error(`models/catalog.v1.json: model ${model.id} provider must be a string`);
+		}
+		admitted[model.provider] ??= [];
+		admitted[model.provider].push(model.id);
+	}
+	return { schemaVersion: 1, admitted };
+}
+
+function parseArgs(argv: string[]): { catalogOut?: string } {
+	let catalogOut: string | undefined;
+	for (let index = 0; index < argv.length; index += 1) {
+		const arg = argv[index];
+		if (arg === "--catalog-out") {
+			const value = argv[index + 1];
+			if (!value) {
+				throw new Error("--catalog-out requires a directory");
+			}
+			catalogOut = value;
+			index += 1;
+			continue;
+		}
+		throw new Error(`Unknown argument: ${arg}`);
+	}
+	return { catalogOut };
+}
+
+export async function syncCatalog(catalogDir: string): Promise<number> {
+	const policy = readCatalogPolicy(catalogDir);
+	const collection = await collectCatalogModelsWithStatus();
+	const catalogPath = join(catalogDir, "models", "catalog.v1.json");
+	const manifestPath = join(catalogDir, "models", "admission-manifest.v1.json");
+	const existingCatalog = readCommittedCatalog(catalogPath);
+	const existingByProvider = groupCatalogModelsByProvider(existingCatalog.models);
+
+	for (const provider of existingByProvider.keys()) {
+		if (!policy.whitelists.has(provider) && !policy.manuals.has(provider)) {
+			throw new Error(
+				`${provider} is present in models/catalog.v1.json but not in models/whitelist or models/manual; add an explicit policy file`,
+			);
+		}
+	}
+
+	const summaries: SyncSummary[] = [];
+	const nextModels: CatalogModelRecord[] = [];
+	for (const provider of [...policy.whitelists.keys(), ...policy.manuals.keys()].sort()) {
+		const whitelist = policy.whitelists.get(provider);
+		const manual = policy.manuals.get(provider);
+		if (whitelist && manual) {
+			throw new Error(`${provider} is present in both models/whitelist and models/manual`);
+		}
+
+		if (manual) {
+			nextModels.push(...manual);
+			summaries.push({
+				provider,
+				updated: manual.length,
+				added: 0,
+				delisted: 0,
+				notInUpstream: 0,
+				skipped: 0,
+				manual: true,
+			});
+			continue;
+		}
+
+		if (!whitelist) {
+			throw new Error(`${provider} is present in models/manual but not readable as a manual policy`);
+		}
+
+		const existing = existingByProvider.get(provider) ?? [];
+		const skippedReason = collection.skippedProviders[provider];
+		if (skippedReason) {
+			if (existing.length === 0) {
+				throw new Error(`${provider} upstream sync failed and no committed models/catalog.v1.json entries exist to keep`);
+			}
+			nextModels.push(...existing.map(sanitizeExistingCatalogModel));
+			summaries.push({
+				provider,
+				updated: 0,
+				added: 0,
+				delisted: 0,
+				notInUpstream: 0,
+				skipped: 0,
+				skippedReason,
+			});
+			continue;
+		}
+
+		const providerSkippedModels = collection.skippedModels.filter((model) => model.provider === provider);
+		const merged = mergeProviderModelsForCatalog(existing, collection.providers[provider] ?? [], whitelist);
+		merged.summary.skipped = providerSkippedModels.length;
+		nextModels.push(...merged.models);
+		summaries.push({ provider, ...merged.summary });
+
+		for (const admission of merged.summary.globAdmitted) {
+			console.log(`${provider}: glob-admitted ${admission.id} via ${admission.glob}`);
+		}
+		for (const id of merged.summary.delistedIds) {
+			console.error(`${provider}: delisted ${id} (not admitted by whitelist)`);
+		}
+		for (const id of merged.summary.notInUpstreamIds) {
+			console.error(`${provider}: not-in-upstream ${id}; kept committed aggregate entry`);
+		}
+		for (const skipped of providerSkippedModels) {
+			console.error(`${provider}: skipped ${skipped.id}: ${skipped.reason}`);
+		}
+	}
+
+	const nextCatalog: CatalogEnvelope = { schemaVersion: 1, models: nextModels };
+	parseModelCatalog(nextCatalog);
+	const manifest = buildAdmissionManifest(nextCatalog.models);
+	writeCanonicalJson(catalogPath, nextCatalog);
+	writeCanonicalJson(manifestPath, manifest);
+
+	console.log("Catalog sync summary:");
+	for (const summary of summaries) {
+		if (summary.skippedReason) {
+			console.error(`${summary.provider}: skipped provider: ${summary.skippedReason}`);
+		} else if (summary.manual) {
+			console.log(`${summary.provider}: manual ${summary.updated}, added 0, delisted 0, not-in-upstream 0, skipped 0`);
+		} else {
+			console.log(
+				`${summary.provider}: updated ${summary.updated}, added ${summary.added}, delisted ${summary.delisted}, not-in-upstream ${summary.notInUpstream}, skipped ${summary.skipped}`,
+			);
+		}
+	}
+	console.log(`Wrote ${manifestPath}`);
+
+	return Object.keys(collection.skippedProviders).length > 0 ? 1 : 0;
+}
+
+async function main(): Promise<void> {
+	try {
+		const args = parseArgs(process.argv.slice(2));
+		if (!args.catalogOut) {
+			console.error(
+				"The compiled full model catalog moved to PrimeIntellect-ai/prime-agent-catalog. Run this exporter with --catalog-out <catalog-repo-dir> to sync that checkout. This command no longer writes packages/ai/src/models.generated.ts.",
+			);
+			process.exitCode = 1;
+			return;
+		}
+		process.exitCode = await syncCatalog(args.catalogOut);
+	} catch (error) {
+		console.error(formatError(error));
+		process.exitCode = 1;
+	}
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+	void main();
+}

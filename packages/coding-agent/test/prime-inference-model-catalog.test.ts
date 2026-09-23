@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, test, vi } from "vitest";
 import {
 	buildPrimeInferenceModels,
 	PRIME_INFERENCE_BASE_URL,
+	readCachedPrimeInferenceModels,
 	refreshPrimeInferenceModels,
 } from "../src/core/prime-inference-model-catalog.js";
 import {
@@ -151,7 +152,7 @@ describe("Prime Inference model catalog", () => {
 	test("caches valid responses and falls back to the cache when the fetch fails", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "prime-models-"));
 		directories.push(directory);
-		const cachePath = join(directory, "cache.json");
+		const cachePath = join(directory, "models", "cache.json");
 		const bundled = [model("vendor/model")];
 		const fetched = await refreshPrimeInferenceModels(cachePath, bundled, {
 			fetchFn: vi.fn(async () => response(payloadEntry("vendor/model"))),
@@ -164,6 +165,20 @@ describe("Prime Inference model catalog", () => {
 			}),
 		});
 		expect(fallback?.[0]?.name).toBe("Live vendor/model");
+	});
+
+	test("uses a valid flat legacy cache when the new cache has insufficient coverage", () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-models-legacy-"));
+		directories.push(directory);
+		const cachePath = join(directory, "models", "prime-inference-models-cache.json");
+		mkdirSync(join(directory, "models"));
+		const bundled = [model("vendor/model")];
+		writeFileSync(cachePath, JSON.stringify({ object: "list", data: [payloadEntry("unrelated/model")] }));
+		writeFileSync(
+			join(directory, "prime-inference-models-cache.json"),
+			JSON.stringify({ object: "list", data: [payloadEntry("vendor/model")] }),
+		);
+		expect(readCachedPrimeInferenceModels(cachePath, bundled)?.[0]?.name).toBe("Live vendor/model");
 	});
 
 	test("keeps authenticated private routes with complete metadata and sends the auth headers", async () => {

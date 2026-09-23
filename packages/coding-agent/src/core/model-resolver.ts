@@ -8,6 +8,7 @@ import chalk from "chalk";
 import { minimatch } from "minimatch";
 import { isValidThinkingLevel } from "../cli/args.js";
 import { APP_NAME } from "../config.js";
+import { getPreferredDefaultModelId, resolvePreferredDefaultModel } from "./default-model-catalog.js";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.js";
 import type { ModelRegistry } from "./model-registry.js";
 import { isPrivatePrimeInferenceModel } from "./prime-inference-models.js";
@@ -194,7 +195,14 @@ function buildFallbackModel(provider: string, modelId: string, availableModels: 
 	};
 }
 
-function findPreferredDefaultModel(availableModels: Model<Api>[]): Model<Api> | undefined {
+function findPreferredDefaultModel(availableModels: Model<Api>[], preferredId?: string): Model<Api> | undefined {
+	// The catalog-defined default wins when it resolves to an available model: retiring
+	// or replacing the default ships to every installed client without a release.
+	const catalogDefault = resolvePreferredDefaultModel(preferredId, availableModels);
+	if (catalogDefault) {
+		return catalogDefault;
+	}
+
 	const primeInferenceDefault = availableModels.find(
 		(model) => model.provider === "prime-inference" && model.id === PRIME_INFERENCE_DEFAULT_MODEL_ID,
 	);
@@ -590,7 +598,7 @@ export async function findInitialModel(options: {
 		}
 	}
 	if (availableModels.length > 0) {
-		const defaultModel = findPreferredDefaultModel(availableModels);
+		const defaultModel = findPreferredDefaultModel(availableModels, getPreferredDefaultModelId());
 		if (defaultModel) {
 			return { model: defaultModel, thinkingLevel: DEFAULT_THINKING_LEVEL, fallbackMessage: undefined };
 		}
@@ -692,7 +700,8 @@ export async function restoreModelFromSession(
 		};
 	}
 	if (availableModels.length > 0) {
-		const fallbackModel = findPreferredDefaultModel(availableModels) ?? availableModels[0];
+		const fallbackModel =
+			findPreferredDefaultModel(availableModels, getPreferredDefaultModelId()) ?? availableModels[0];
 
 		if (shouldPrintMessages) {
 			console.log(chalk.dim(`Falling back to: ${fallbackModel.provider}/${fallbackModel.id}`));

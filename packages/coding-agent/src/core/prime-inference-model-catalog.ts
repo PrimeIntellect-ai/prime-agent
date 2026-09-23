@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import {
 	type Api,
 	getPrimeInferenceReasoningControls,
@@ -100,19 +101,30 @@ export function readCachedPrimeInferenceModels(
 	cachePath: string,
 	bundledModels: readonly Model<"openai-completions">[],
 ): Model<"openai-completions">[] | undefined {
-	if (!existsSync(cachePath)) return undefined;
-	try {
-		return buildPrimeInferenceModels(
-			bundledModels,
-			parsePrimeInferenceModelCatalog(JSON.parse(readFileSync(cachePath, "utf8")) as unknown),
-		);
-	} catch {
-		return undefined;
+	// Backward-compatible cache reads: the historical flat location (beside
+	// models.json) and the intermediate "catalog" location remain readable so
+	// upgrading never costs a cold fetch; writes go to the new path only.
+	const flat = join(dirname(cachePath), "..", basename(cachePath));
+	const catalog = join(dirname(cachePath), "..", "catalog", basename(cachePath));
+	const candidates = [cachePath, flat, catalog];
+	for (const candidate of candidates) {
+		if (!existsSync(candidate)) continue;
+		try {
+			const models = buildPrimeInferenceModels(
+				bundledModels,
+				parsePrimeInferenceModelCatalog(JSON.parse(readFileSync(candidate, "utf8")) as unknown),
+			);
+			if (models) return models;
+		} catch {
+			// Try the next candidate location.
+		}
 	}
+	return undefined;
 }
 
 function writeCache(cachePath: string, value: unknown): void {
 	try {
+		mkdirSync(dirname(cachePath), { recursive: true });
 		writeFileAtomicSync(cachePath, JSON.stringify(value), { mode: 0o600 });
 	} catch {
 		// The bundled catalog remains available when the cache cannot be persisted.
@@ -164,7 +176,7 @@ export async function fetchPrimeInferenceModelCatalog(
 export async function refreshPrimeInferenceModels(
 	cachePath: string,
 	bundledModels: readonly Model<"openai-completions">[],
-	options: { fetchFn?: typeof fetch; offline?: boolean } = {},
+	options: { fetchFn?: typeof fetch; headers?: Record<string, string>; offline?: boolean } = {},
 ): Promise<Model<"openai-completions">[] | undefined> {
 	const cached = readCachedPrimeInferenceModels(cachePath, bundledModels);
 	if (options.offline) return cached;
@@ -172,7 +184,10 @@ export async function refreshPrimeInferenceModels(
 	if (existing) return existing;
 	const promise = (async () => {
 		try {
-			const { payload, entries } = await fetchPrimeInferenceModelCatalog({ fetchFn: options.fetchFn });
+			const { payload, entries } = await fetchPrimeInferenceModelCatalog({
+				fetchFn: options.fetchFn,
+				headers: options.headers,
+			});
 			const models = buildPrimeInferenceModels(bundledModels, entries);
 			if (!models) return cached;
 			writeCache(cachePath, payload);

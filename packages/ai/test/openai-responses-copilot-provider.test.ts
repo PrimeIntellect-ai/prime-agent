@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.js";
 import { streamOpenAIResponses } from "../src/providers/openai-responses.js";
 import type { Model } from "../src/types.js";
+import { getFixtureModel } from "./fixture-models.js";
 
 type CapturedHeaders = Headers | string[][] | Record<string, string | readonly string[]> | undefined;
 
@@ -18,12 +19,13 @@ function getHeader(headers: CapturedHeaders, name: string): string | null {
 	return null;
 }
 
-const proxyModel = (compat?: Model<"openai-responses">["compat"]): Model<"openai-responses"> => ({
-	...getModel("openai", "gpt-5.4"),
-	provider: "opencode",
-	baseUrl: "https://proxy.example.com/v1",
-	...(compat ? { compat } : {}),
-});
+const proxyModel = (compat?: Model<"openai-responses">["compat"]): Model<"openai-responses"> =>
+	({
+		...getFixtureModel<"openai-responses">("openai", "gpt-5.4")!,
+		provider: "opencode",
+		baseUrl: "https://proxy.example.com/v1",
+		...(compat ? { compat } : {}),
+	}) as Model<"openai-responses">;
 
 /** Drives one request against a stubbed SSE endpoint and returns the payload plus request headers. */
 async function captureRequest(
@@ -69,14 +71,14 @@ const REASONING_DEFAULTS: Array<{
 		provider: "github-copilot",
 		modelId: "gpt-5-mini",
 		effort: "absent",
-		model: () => getModel("github-copilot", "gpt-5-mini"),
+		model: () => getModel("github-copilot", "gpt-5-mini")!,
 	},
 	...(["gpt-5.1", "gpt-5.2", "gpt-5.3-codex", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5"] as const).map(
 		(modelId) => ({
 			provider: "openai" as const,
 			modelId,
 			effort: "none" as const,
-			model: () => getModel("openai", modelId),
+			model: () => getFixtureModel<"openai-responses">("openai", modelId)!,
 		}),
 	),
 	...(["gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-5-pro", "gpt-5.2-pro", "gpt-5.4-pro", "gpt-5.5-pro"] as const).map(
@@ -84,7 +86,7 @@ const REASONING_DEFAULTS: Array<{
 			provider: "openai" as const,
 			modelId,
 			effort: "absent" as const,
-			model: () => getModel("openai", modelId),
+			model: () => getFixtureModel<"openai-responses">("openai", modelId)!,
 		}),
 	),
 ];
@@ -110,7 +112,7 @@ describe("openai-responses provider defaults", () => {
 	it.each([
 		{
 			name: "official OpenAI Responses requests with a sessionId",
-			model: () => getModel("openai", "gpt-5.4"),
+			model: () => getFixtureModel<"openai-responses">("openai", "gpt-5.4")!,
 			options: { sessionId: "session-123" },
 			expected: { sessionId: "session-123", clientRequestId: "session-123" },
 		},
@@ -128,7 +130,7 @@ describe("openai-responses provider defaults", () => {
 		},
 		{
 			name: "explicit header overrides",
-			model: () => getModel("openai", "gpt-5.4"),
+			model: () => getFixtureModel<"openai-responses">("openai", "gpt-5.4")!,
 			options: {
 				sessionId: "session-123",
 				headers: { session_id: "override-session", "x-client-request-id": "override-request" },
@@ -137,7 +139,7 @@ describe("openai-responses provider defaults", () => {
 		},
 		{
 			name: "cacheRetention none",
-			model: () => getModel("openai", "gpt-5.4"),
+			model: () => getFixtureModel<"openai-responses">("openai", "gpt-5.4")!,
 			options: { cacheRetention: "none" as const, sessionId: "session-123" },
 			expected: { sessionId: null, clientRequestId: null },
 		},
@@ -152,7 +154,10 @@ describe("openai-responses provider defaults", () => {
 		["github-copilot" as const, "default" as const, false],
 		["openai" as const, "default" as const, true],
 	])("scopes service_tier serialization to the provider (%s, %s)", async (provider, serviceTier, expected) => {
-		const model = { ...getModel("openai", "gpt-5.4"), provider };
+		const model = {
+			...getFixtureModel<"openai-responses">("openai", "gpt-5.4")!,
+			provider,
+		} as Model<"openai-responses">;
 		const sse = `data: ${JSON.stringify({
 			type: "response.completed",
 			response: {

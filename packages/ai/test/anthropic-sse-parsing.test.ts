@@ -1,9 +1,9 @@
 import type Anthropic from "@anthropic-ai/sdk";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.js";
 import { streamAnthropic } from "../src/providers/anthropic.js";
 import type { Context, ToolCall } from "../src/types.js";
+import { getFixtureModel } from "./fixture-models.js";
 
 function createSseResponse(events: Array<{ event: string; data: string }>): Response {
 	const body = events.map(({ event, data }) => `event: ${event}\ndata: ${data}\n`).join("\n");
@@ -141,7 +141,7 @@ describe("Anthropic raw SSE parsing", () => {
 			expectedCacheWriteCost: 0.0018125,
 		},
 	])("prices $name from the reported Anthropic usage breakdown", async (testCase) => {
-		const model = getModel("anthropic", "claude-haiku-4-5");
+		const model = getFixtureModel<"anthropic-messages">("anthropic", "claude-haiku-4-5");
 		const response = createSseResponse(createCacheUsageEvents(testCase.cacheCreation));
 		const result = await streamAnthropic(
 			model,
@@ -157,7 +157,7 @@ describe("Anthropic raw SSE parsing", () => {
 	});
 
 	it("reprices cache writes from a message_delta usage breakdown", async () => {
-		const model = getModel("anthropic", "claude-haiku-4-5");
+		const model = getFixtureModel<"anthropic-messages">("anthropic", "claude-haiku-4-5");
 		const response = createSseResponse(
 			createCacheUsageEvents(
 				{ ephemeral_5m_input_tokens: 1000, ephemeral_1h_input_tokens: 0 },
@@ -175,7 +175,7 @@ describe("Anthropic raw SSE parsing", () => {
 		expect(result.usage.cost.cacheWrite).toBeCloseTo(0.004, 6);
 	});
 	it("preserves configured cache write pricing for non-Anthropic models", async () => {
-		const model = getModel("minimax", "MiniMax-M2.7-highspeed");
+		const model = getFixtureModel<"anthropic-messages">("minimax", "MiniMax-M2.7-highspeed");
 		const response = createSseResponse(
 			createCacheUsageEvents({ ephemeral_5m_input_tokens: 1000, ephemeral_1h_input_tokens: 0 }),
 		);
@@ -190,7 +190,7 @@ describe("Anthropic raw SSE parsing", () => {
 	});
 
 	it("repairs malformed SSE JSON and malformed streamed tool JSON", async () => {
-		const model = getModel("anthropic", "claude-haiku-4-5");
+		const model = getFixtureModel<"anthropic-messages">("anthropic", "claude-haiku-4-5");
 		const context: Context = {
 			messages: [{ role: "user", content: "Use the edit tool.", timestamp: Date.now() }],
 			tools: [
@@ -277,7 +277,7 @@ describe("Anthropic raw SSE parsing", () => {
 	});
 
 	it("ignores unknown SSE events after message_stop", async () => {
-		const model = getModel("anthropic", "claude-haiku-4-5");
+		const model = getFixtureModel<"anthropic-messages">("anthropic", "claude-haiku-4-5");
 		const context: Context = {
 			messages: [{ role: "user", content: "Say hello.", timestamp: Date.now() }],
 		};

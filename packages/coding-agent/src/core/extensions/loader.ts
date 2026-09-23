@@ -5,15 +5,16 @@
 
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
-import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { KeyId } from "@earendil-works/pi-tui";
 import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.js";
+import { resolveUserPath } from "../../utils/paths.js";
 import { createEventBus, type EventBus } from "../event-bus.js";
 import type { ExecOptions } from "../exec.js";
 import { execCommand } from "../exec.js";
 import { createSyntheticSourceInfo } from "../source-info.js";
+import { collectExtensionEntries, resolveExtensionEntries } from "./discovery.js";
 import type {
 	Extension,
 	ExtensionAPI,
@@ -42,6 +43,7 @@ function getAliases(): Record<string, string> {
 
 	const typeboxEntry = require.resolve("typebox");
 	const typeboxCompileEntry = require.resolve("typebox/compile");
+	const typeboxSchemaEntry = require.resolve("typebox/schema");
 	const typeboxValueEntry = require.resolve("typebox/value");
 
 	const packagesRoot = path.resolve(__dirname, "../../../../");
@@ -72,38 +74,15 @@ function getAliases(): Record<string, string> {
 		"@mariozechner/pi-ai/oauth": piAiOauthEntry,
 		typebox: typeboxEntry,
 		"typebox/compile": typeboxCompileEntry,
+		"typebox/schema": typeboxSchemaEntry,
 		"typebox/value": typeboxValueEntry,
 		"@sinclair/typebox": typeboxEntry,
 		"@sinclair/typebox/compile": typeboxCompileEntry,
+		"@sinclair/typebox/schema": typeboxSchemaEntry,
 		"@sinclair/typebox/value": typeboxValueEntry,
 	};
 
 	return _aliases;
-}
-
-const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
-
-function normalizeUnicodeSpaces(str: string): string {
-	return str.replace(UNICODE_SPACES, " ");
-}
-
-function expandPath(p: string): string {
-	const normalized = normalizeUnicodeSpaces(p);
-	if (normalized.startsWith("~/")) {
-		return path.join(os.homedir(), normalized.slice(2));
-	}
-	if (normalized.startsWith("~")) {
-		return path.join(os.homedir(), normalized.slice(1));
-	}
-	return normalized;
-}
-
-function resolvePath(extPath: string, cwd: string): string {
-	const expanded = expandPath(extPath);
-	if (path.isAbsolute(expanded)) {
-		return expanded;
-	}
-	return path.resolve(cwd, expanded);
 }
 
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
@@ -377,7 +356,7 @@ async function loadExtension(
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
 ): Promise<{ extension: Extension | null; error: string | null }> {
-	const resolvedPath = resolvePath(extensionPath, cwd);
+	const resolvedPath = resolveUserPath(extensionPath, cwd);
 
 	try {
 		const factory = await loadExtensionModule(resolvedPath);
@@ -441,111 +420,6 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	};
 }
 
-interface PiManifest {
-	extensions?: string[];
-	themes?: string[];
-	skills?: string[];
-	prompts?: string[];
-}
-
-function readPiManifest(packageJsonPath: string): PiManifest | null {
-	try {
-		const content = fs.readFileSync(packageJsonPath, "utf-8");
-		const pkg = JSON.parse(content);
-		if (pkg.pi && typeof pkg.pi === "object") {
-			return pkg.pi as PiManifest;
-		}
-		return null;
-	} catch {
-		return null;
-	}
-}
-
-function isExtensionFile(name: string): boolean {
-	return name.endsWith(".ts") || name.endsWith(".js");
-}
-
-/**
- * Resolve extension entry points from a directory.
- *
- * Checks for:
- * 1. package.json with "pi.extensions" field -> returns declared paths
- * 2. index.ts or index.js -> returns the index file
- *
- * Returns resolved paths or null if no entry points found.
- */
-function resolveExtensionEntries(dir: string): string[] | null {
-	const packageJsonPath = path.join(dir, "package.json");
-	if (fs.existsSync(packageJsonPath)) {
-		const manifest = readPiManifest(packageJsonPath);
-		if (manifest?.extensions?.length) {
-			const entries: string[] = [];
-			for (const extPath of manifest.extensions) {
-				const resolvedExtPath = path.resolve(dir, extPath);
-				if (fs.existsSync(resolvedExtPath)) {
-					entries.push(resolvedExtPath);
-				}
-			}
-			if (entries.length > 0) {
-				return entries;
-			}
-		}
-	}
-
-	const indexTs = path.join(dir, "index.ts");
-	const indexJs = path.join(dir, "index.js");
-	if (fs.existsSync(indexTs)) {
-		return [indexTs];
-	}
-	if (fs.existsSync(indexJs)) {
-		return [indexJs];
-	}
-
-	return null;
-}
-
-/**
- * Discover extensions in a directory.
- *
- * Discovery rules:
- * 1. Direct files: `extensions/*.ts` or `*.js` → load
- * 2. Subdirectory with index: `extensions/* /index.ts` or `index.js` → load
- * 3. Subdirectory with package.json: `extensions/* /package.json` with "pi" field → load what it declares
- *
- * No recursion beyond one level. Complex packages must use package.json manifest.
- */
-function discoverExtensionsInDir(dir: string): string[] {
-	if (!fs.existsSync(dir)) {
-		return [];
-	}
-
-	const discovered: string[] = [];
-
-	try {
-		const entries = fs.readdirSync(dir, { withFileTypes: true });
-
-		for (const entry of entries) {
-			const entryPath = path.join(dir, entry.name);
-
-			if ((entry.isFile() || entry.isSymbolicLink()) && isExtensionFile(entry.name)) {
-				discovered.push(entryPath);
-				continue;
-			}
-
-			if (entry.isDirectory() || entry.isSymbolicLink()) {
-				const entries = resolveExtensionEntries(entryPath);
-				if (entries) {
-					discovered.push(...entries);
-				}
-			}
-		}
-	} catch {
-		return [];
-	}
-
-	return discovered;
-}
-
 /**
  * Discover and load extensions from standard locations.
  */
@@ -569,20 +443,20 @@ export async function discoverAndLoadExtensions(
 	};
 
 	const localExtDir = path.join(cwd, CONFIG_DIR_NAME, "extensions");
-	addPaths(discoverExtensionsInDir(localExtDir));
+	addPaths(collectExtensionEntries(localExtDir));
 
 	const globalExtDir = path.join(agentDir, "extensions");
-	addPaths(discoverExtensionsInDir(globalExtDir));
+	addPaths(collectExtensionEntries(globalExtDir));
 
 	for (const p of configuredPaths) {
-		const resolved = resolvePath(p, cwd);
+		const resolved = resolveUserPath(p, cwd);
 		if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
 			const entries = resolveExtensionEntries(resolved);
 			if (entries) {
 				addPaths(entries);
 				continue;
 			}
-			addPaths(discoverExtensionsInDir(resolved));
+			addPaths(collectExtensionEntries(resolved));
 			continue;
 		}
 

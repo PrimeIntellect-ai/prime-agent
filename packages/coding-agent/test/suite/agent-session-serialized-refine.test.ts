@@ -278,7 +278,7 @@ describe("Serialized refine", () => {
 			kind: "memory",
 			title: "Shared",
 			content: "planning baseline",
-			path: "general",
+			topic: "general",
 			scope: "local",
 			reference: {},
 			arguments: {},

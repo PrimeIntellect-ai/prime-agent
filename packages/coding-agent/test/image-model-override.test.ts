@@ -5,13 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent } from "@earendil-works/pi-ai";
-import { EventStream, getModel, type ImageContent } from "@earendil-works/pi-ai";
+import { EventStream, type ImageContent } from "@earendil-works/pi-ai";
 import { expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { getCodingAgentFixtureModel } from "./fixture-models.js";
 import { assistantMsg, createTestResourceLoader } from "./utilities.js";
 
 const IMAGE: ImageContent = { type: "image", mimeType: "image/png", data: "aGk=" };
@@ -49,7 +50,7 @@ it.each([
 ])("%s", async (_name, settings, vision, images, served, reject, cycleAfter?: boolean, cycleMidStream?: boolean) => {
 	const dir = mkdtempSync(join(tmpdir(), "pi-image-model-"));
 	writeFileSync(join(dir, "settings.json"), JSON.stringify(settings));
-	const base = getModel("anthropic", "claude-opus-4-7")!;
+	const base = getCodingAgentFixtureModel("anthropic", "claude-opus-4-7");
 	const sessionModel = (vision ? base : { ...base, id: "claude-opus-4-7-text-only", input: ["text"] }) as typeof base;
 	const servedIds: string[] = [];
 	let cycleMidStreamHook: (() => void) | undefined;

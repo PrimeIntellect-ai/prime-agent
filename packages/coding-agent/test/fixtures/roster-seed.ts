@@ -17,6 +17,7 @@ export function seedSupervisorRoster(supervisor: object, ...workers: RosterWorke
 		pendingRosterChanged: new Set(),
 		pendingRosterRemoved: new Set(),
 		publishedRosterIds: new Set(),
+		publishedRosterJson: new Map(),
 		rosterPushScheduled: false,
 		clients: internals.clients ?? new Set(),
 	});

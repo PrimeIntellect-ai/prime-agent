@@ -1,5 +1,5 @@
 import { MODELS } from "./models.generated.js";
-import type { Api, KnownProvider, Model, ModelThinkingLevel, Usage } from "./types.js";
+import type { Api, KnownProvider, Model, ModelThinkingLevel, ServiceTier, Usage } from "./types.js";
 
 const modelRegistry: Map<string, Map<string, Model<Api>>> = new Map();
 
@@ -11,38 +11,82 @@ for (const [provider, models] of Object.entries(MODELS)) {
 	modelRegistry.set(provider, providerModels);
 }
 
-type ModelApi<
+type ModelApi<TProvider extends KnownProvider> = (typeof MODELS)[TProvider][keyof (typeof MODELS)[TProvider]] extends {
+	api: infer TApi;
+}
+	? TApi extends Api
+		? TApi
+		: Api
+	: Api;
+
+type ModelApiForId<
 	TProvider extends KnownProvider,
 	TModelId extends keyof (typeof MODELS)[TProvider],
-> = (typeof MODELS)[TProvider][TModelId] extends { api: infer TApi } ? (TApi extends Api ? TApi : never) : never;
+> = (typeof MODELS)[TProvider][TModelId] extends { api: infer TApi } ? (TApi extends Api ? TApi : Api) : Api;
 
 export function getModel<TProvider extends KnownProvider, TModelId extends keyof (typeof MODELS)[TProvider]>(
 	provider: TProvider,
 	modelId: TModelId,
-): Model<ModelApi<TProvider, TModelId>> {
+): Model<ModelApiForId<TProvider, TModelId>>;
+export function getModel<TProvider extends KnownProvider>(
+	provider: TProvider,
+	modelId: string,
+): Model<ModelApi<TProvider>> | undefined;
+export function getModel<TProvider extends KnownProvider>(
+	provider: TProvider,
+	modelId: string,
+): Model<ModelApi<TProvider>> | undefined {
 	const providerModels = modelRegistry.get(provider);
-	return providerModels?.get(modelId as string) as Model<ModelApi<TProvider, TModelId>>;
+	return providerModels?.get(modelId) as Model<ModelApi<TProvider>> | undefined;
 }
 
 export function getProviders(): KnownProvider[] {
 	return Array.from(modelRegistry.keys()) as KnownProvider[];
 }
 
-export function getModels<TProvider extends KnownProvider>(
-	provider: TProvider,
-): Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[] {
+export function getModels<TProvider extends KnownProvider>(provider: TProvider): Model<ModelApi<TProvider>>[] {
 	const models = modelRegistry.get(provider);
-	return models ? (Array.from(models.values()) as Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[]) : [];
+	return models ? (Array.from(models.values()) as Model<ModelApi<TProvider>>[]) : [];
+}
+
+/** Whether a model's provider accepts (and honors) a requested service tier. */
+export function supportsServiceTier<TApi extends Api>(model: Model<TApi>, tier: ServiceTier): boolean {
+	if (tier === null || tier === "default") return true;
+	// OpenRouter accepts top-level service_tier (flex|priority) for every model,
+	// routes to matching tier endpoints where they exist, and bills by the tier
+	// that actually served the request:
+	// https://openrouter.ai/docs/guides/features/service-tiers
+	if (model.provider === "openrouter" && model.api === "openai-completions") {
+		return tier === "flex" || tier === "priority";
+	}
+	const openaiResponses = model.provider === "openai" && model.api === "openai-responses";
+	const codexResponses = model.provider === "openai-codex" && model.api === "openai-codex-responses";
+	if (!openaiResponses && !codexResponses) return false;
+	// "auto" defers the tier choice to OpenAI and is valid for every model there;
+	// "scale" is entitlement-gated, so pass it through for callers that have it.
+	if (tier === "auto" || tier === "scale") return true;
+	const eligibleId =
+		model.id === "gpt-5.4" ||
+		model.id === "gpt-5.5" ||
+		model.id === "gpt-5.6" ||
+		model.id === "gpt-6-astra" ||
+		model.id.startsWith("gpt-5.6-");
+	if (tier === "priority") return eligibleId;
+	// Flex processing is an API-key feature; the ChatGPT (Codex OAuth) backend has no flex tier.
+	return tier === "flex" && eligibleId && openaiResponses;
+}
+
+/** Clamp a requested tier to "default" when the model does not support it. */
+export function clampServiceTier<TApi extends Api>(
+	model: Model<TApi> | null | undefined,
+	tier: ServiceTier,
+): ServiceTier {
+	if (tier === null || tier === "default") return tier;
+	return model && supportsServiceTier(model, tier) ? tier : "default";
 }
 
 export function supportsFastMode<TApi extends Api>(model: Model<TApi>): boolean {
-	const eligibleId =
-		model.id === "gpt-5.4" || model.id === "gpt-5.5" || model.id === "gpt-5.6" || model.id.startsWith("gpt-5.6-");
-	return (
-		eligibleId &&
-		((model.provider === "openai-codex" && model.api === "openai-codex-responses") ||
-			(model.provider === "openai" && model.api === "openai-responses"))
-	);
+	return supportsServiceTier(model, "priority");
 }
 
 export interface CostOverrides {

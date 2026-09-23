@@ -12,6 +12,7 @@ export {
 	getServiceCatalogEntry,
 	isLiteralPrivateOrLoopbackHost,
 	listServiceCatalog,
+	parseMcpServiceCatalogFile,
 	registerBuiltinMcpOAuthProviders,
 	SERVICE_CATALOG,
 	searchServiceCatalog,

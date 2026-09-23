@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -8,6 +8,7 @@ import { NATIVE_PLATFORMS } from "../src/utils/native-installation.js";
 
 interface Step {
 	name?: string;
+	id?: string;
 	run?: string;
 	uses?: string;
 	if?: string;
@@ -17,6 +18,7 @@ interface Step {
 interface Job {
 	needs?: string | string[];
 	if?: string;
+	outputs?: Record<string, string>;
 	"continue-on-error"?: boolean;
 	"runs-on"?: string;
 	strategy?: { matrix: { include: { platform: string; runner: string }[] } };
@@ -37,6 +39,8 @@ const releasePlatforms = spawnSync(process.execPath, [join(repository, "scripts/
 	.split("\n");
 const release: Workflow = parse(readFileSync(join(repository, ".github/workflows/build-binaries.yml"), "utf8"));
 const standalone: Workflow = parse(readFileSync(join(repository, ".github/workflows/standalone-binaries.yml"), "utf8"));
+// The skip-superseded gate: dependent jobs build only when release-context succeeded on a current tip.
+const staleGate = "needs.release-context.result == 'success' && needs.release-context.outputs.stale != 'true'";
 
 function step(job: Job, name: string): Step {
 	const found = job.steps.find((entry) => entry.name === name);
@@ -65,7 +69,7 @@ describe("release workflow signature gates", () => {
 		]);
 		const publish = release.jobs.publish!;
 		expect(publish.needs).toEqual(expect.arrayContaining(["build", "validate-macos"]));
-		expect(publish.if).toBe("github.event_name != 'pull_request'");
+		expect(publish.if).toBe(`github.event_name != 'pull_request' && ${staleGate}`);
 		requiresSuccess(validation);
 		requiresSuccess(publish);
 	});
@@ -238,9 +242,69 @@ ${step(validation, "Verify and exercise exact final Mac archives").run}`,
 					expect(pack.run).toContain(`--channel ${channel}`);
 					expect(pack.run).toContain("--binary-dir packages/coding-agent/binaries");
 				}
-				expect(release.jobs.publish!.if).toBe("github.event_name != 'pull_request'");
+				expect(release.jobs.publish!.if).toBe(`github.event_name != 'pull_request' && ${staleGate}`);
 			} finally {
 				rmSync(directory, { recursive: true, force: true });
+			}
+		},
+	);
+
+	it("wires the staleness check into the standalone, build, validation, and publish gates", () => {
+		const context = release.jobs["release-context"]!;
+		const staleness = step(context, "Skip superseded push builds");
+		expect(staleness.id).toBe("staleness");
+		expect(context.outputs?.stale).toBe(`\${{ steps.staleness.outputs.stale }}`);
+		for (const name of ["standalone", "build", "validate-macos", "publish"]) {
+			const job = release.jobs[name]!;
+			expect([job.needs ?? []].flat()).toContain("release-context");
+			expect(job.if).toContain(staleGate);
+		}
+	});
+
+	// test-policy: allow conditional-or-disabled-test -- the step script is POSIX bash, matching the packer-paths guard
+	it.skipIf(process.platform === "win32")(
+		"marks only superseded beta pushes stale and fails open when the tip check breaks",
+		() => {
+			const staleness = step(release.jobs["release-context"]!, "Skip superseded push builds");
+			for (const scenario of [
+				{ event: "pull_request", refType: "branch", production: "false", gh: undefined, stale: "false" },
+				{ event: "push", refType: "tag", production: "false", gh: undefined, stale: "false" },
+				{ event: "push", refType: "branch", production: "true", gh: "tip", stale: "false" },
+				{ event: "push", refType: "branch", production: "false", gh: "broken", stale: "false" },
+				{ event: "push", refType: "branch", production: "false", gh: "tip", stale: "true" },
+			]) {
+				const directory = mkdtempSync(join(tmpdir(), "prime-release-staleness-"));
+				try {
+					if (scenario.gh) {
+						const bin = join(directory, "bin");
+						mkdirSync(bin);
+						writeFileSync(
+							join(bin, "gh"),
+							scenario.gh === "tip" ? "#!/bin/sh\necho tip-sha\n" : "#!/bin/sh\nexit 1\n",
+						);
+						chmodSync(join(bin, "gh"), 0o755);
+					}
+					const output = join(directory, "output");
+					const result = spawnSync("bash", ["-e", "-o", "pipefail", "-c", staleness.run!], {
+						cwd: repository,
+						env: {
+							...process.env,
+							...(scenario.gh ? { PATH: `${join(directory, "bin")}:${process.env.PATH}` } : {}),
+							GITHUB_EVENT_NAME: scenario.event,
+							GITHUB_REF_TYPE: scenario.refType,
+							GITHUB_REF_NAME: "main",
+							GITHUB_REPOSITORY: "PrimeIntellect-ai/prime-agent",
+							GITHUB_SHA: "run-sha",
+							GITHUB_OUTPUT: output,
+							PUBLISH_PRODUCTION: scenario.production,
+						},
+						encoding: "utf8",
+					});
+					expect(result.status, result.stderr).toBe(0);
+					expect(readFileSync(output, "utf8")).toBe(`stale=${scenario.stale}\n`);
+				} finally {
+					rmSync(directory, { recursive: true, force: true });
+				}
 			}
 		},
 	);

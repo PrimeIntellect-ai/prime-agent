@@ -16,7 +16,6 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEventStream,
 	type Context,
-	getModel,
 	type Model,
 	type SimpleStreamOptions,
 	Type,
@@ -33,6 +32,7 @@ import type { ResourceLoader } from "../src/core/resource-loader.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { getCodingAgentFixtureModel } from "./fixture-models.js";
 
 type Transport = "sse" | "websocket" | "websocket-cached" | "auto";
 
@@ -277,7 +277,7 @@ async function main(): Promise<void> {
 	const authStorage = AuthStorage.create();
 	const modelRegistry = ModelRegistry.create(authStorage);
 
-	const model = getModel("openai-codex", "gpt-5.5");
+	const model = getCodingAgentFixtureModel("openai-codex", "gpt-5.5");
 	if (!model) {
 		throw new Error("Model openai-codex/gpt-5.5 not found");
 	}

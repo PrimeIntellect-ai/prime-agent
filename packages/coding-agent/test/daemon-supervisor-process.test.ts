@@ -812,7 +812,7 @@ describe("daemon supervisor resident workers", () => {
 			throw new Error("Fixture session did not persist");
 		}
 		const cronStore = new AgentCronJobStore(getCronJobsPath(agentDir));
-		const heartbeat = cronStore.createHeartbeat({
+		const heartbeat = await cronStore.createHeartbeat({
 			activeSessionId: "old-active-session",
 			sessionId: sessionManager.getSessionId(),
 			sessionFile,
@@ -863,7 +863,7 @@ describe("daemon supervisor resident workers", () => {
 			throw new Error("Fixture session did not persist");
 		}
 		const cronStore = new AgentCronJobStore(getCronJobsPath(agentDir));
-		const heartbeat = cronStore.createHeartbeat({
+		const heartbeat = await cronStore.createHeartbeat({
 			activeSessionId: "deleted-worker",
 			sessionId: sessionManager.getSessionId(),
 			sessionFile,
@@ -1555,6 +1555,12 @@ describe("daemon supervisor resident workers", () => {
 		expect(replacementMessageCounts).toContain(0);
 		const switchedBack = await client.request({ type: "switch_session", activeSessionId, sessionPath: sessionFile });
 		expect(switchedBack.success).toBe(true);
+		// The switch reports the file it resolved, so a client that sent a relative
+		// path can still correlate the replacement snapshot it waits on.
+		expect(switchedBack.success ? switchedBack.data : undefined).toMatchObject({
+			cancelled: false,
+			sessionFile,
+		});
 		const restoredReplacementDeadline = Date.now() + 5000;
 		while (replacementMessageCounts.at(-1) !== 2 && Date.now() < restoredReplacementDeadline) {
 			await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));

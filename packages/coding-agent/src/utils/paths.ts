@@ -1,5 +1,37 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
+import { expandTildePath } from "../config.js";
+
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+/** Replace Unicode space variants that users paste with plain spaces. */
+export function normalizeUnicodeSpaces(str: string): string {
+	return str.replace(UNICODE_SPACES, " ");
+}
+
+/**
+ * Resolve a user-configured resource path (skill, prompt, extension) against a
+ * working directory, after trimming, Unicode space normalization and tilde expansion.
+ */
+export function resolveUserPath(input: string, cwd: string): string {
+	const expanded = expandTildePath(normalizeUnicodeSpaces(input.trim()));
+	return isAbsolute(expanded) ? expanded : resolvePath(cwd, expanded);
+}
+
+/** Convert a native path to posix separators, for ignore matching and display. */
+export function toPosixPath(path: string): string {
+	return path.split(sep).join("/");
+}
+
+/** True if an already resolved target path is the root directory or lives inside it. */
+export function isUnderPath(target: string, root: string): boolean {
+	const normalizedRoot = resolvePath(root);
+	if (target === normalizedRoot) {
+		return true;
+	}
+	const prefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
+	return target.startsWith(prefix);
+}
 
 /**
  * Resolve a path to its canonical (real) form, following symlinks.

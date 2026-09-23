@@ -5,7 +5,7 @@
 import { join } from "node:path";
 import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
 import { registerOAuthProvider, unregisterOAuthProvider } from "@earendil-works/pi-ai/oauth";
-import { getAgentDir } from "../../config.js";
+import { getAgentDir, getMcpCacheDir } from "../../config.js";
 import type { AuthStorage } from "../auth-storage.js";
 import type { McpServerConfig } from "../settings-manager.js";
 import type { AcpMcpServerConfig } from "./acp-mcp-types.js";
@@ -26,7 +26,9 @@ import {
 	mcpLoginEligibility,
 	mcpStaticTokenUsable,
 	oauthGrantUsable,
+	onRemoteMcpServiceCatalogChange,
 	pagePluginViews,
+	refreshRemoteMcpServiceCatalog,
 	reservedMcpOwnership,
 	resolveMcpOAuthIdentity,
 	searchPluginViews,
@@ -109,6 +111,7 @@ export class McpManager {
 	private readonly connectionStore: McpConnectionStore;
 	private readonly probeConnection: typeof probeMcpEndpoint | undefined;
 	private readonly noBackgroundVerification: boolean;
+	private readonly unsubscribeRemoteMcpServiceCatalogChange: () => void;
 	private integrations = new Map<string, ResolvedIntegration>();
 	private services: readonly McpServiceDescriptor[] = [];
 	private acpServers = new Map<string, AcpMcpServerConfig>();
@@ -128,11 +131,14 @@ export class McpManager {
 			defaultServiceCatalogProvider(
 				() => this.getCatalogSources?.() ?? [],
 				() => this.connectionStore.records(),
+				() => join(getMcpCacheDir(), "mcp-service-catalog.v2.json"),
 			);
 		this.connectionStore =
 			options.connectionStore ?? McpConnectionStore.open(join(getAgentDir(), "mcp-connections.json"));
 		this.probeConnection = options.probeConnection;
 		this.noBackgroundVerification = options.noBackgroundVerification ?? false;
+		this.unsubscribeRemoteMcpServiceCatalogChange = onRemoteMcpServiceCatalogChange(() => this.refresh());
+		void refreshRemoteMcpServiceCatalog(join(getMcpCacheDir(), "mcp-service-catalog.v2.json"), false).catch(() => {});
 		this.refresh();
 	}
 
@@ -145,6 +151,10 @@ export class McpManager {
 		this.connectionStore.load();
 		this.resolveIntegrations();
 		this.registerProviders();
+	}
+
+	dispose(): void {
+		this.unsubscribeRemoteMcpServiceCatalogChange();
 	}
 
 	canReleaseAcpServers(ownerId: string): boolean {
@@ -194,10 +204,11 @@ export class McpManager {
 		for (const service of this.services) {
 			if (service.transport.type !== "http" || !service.transport.url) continue;
 			const usesOAuth = service.authStrategy === "oauth" || service.authStrategy === "unknown";
+			const record = this.connectionStore.get(service.serviceId);
 			const eligibility = mcpLoginEligibility({
 				connectionId: service.serviceId,
 				service,
-				record: this.connectionStore.get(service.serviceId),
+				record,
 				credential: this.authStorage.get(this.providerId(service.serviceId)),
 			});
 			// Token services authenticate with a pasted static token credential:
@@ -209,10 +220,7 @@ export class McpManager {
 				label: service.label,
 				config: {
 					type: "http",
-					url:
-						eligibility.repair && this.connectionStore.get(service.serviceId)
-							? eligibility.endpoint!
-							: service.transport.url,
+					url: record && eligibility.endpoint ? eligibility.endpoint : service.transport.url,
 					...(usesOAuth ? { oauth: true } : {}),
 					...(staticToken ? { credentialSource: "static-token" as const } : {}),
 				},
@@ -248,7 +256,7 @@ export class McpManager {
 				label: `${service.label} (${record.connectionId})`,
 				config: {
 					type: "http",
-					url: eligibility.repair ? eligibility.endpoint! : service.transport.url,
+					url: eligibility.endpoint ?? record.endpoint,
 					...(usesOAuth ? { oauth: true } : {}),
 					...(staticToken ? { credentialSource: "static-token" as const } : {}),
 				},
@@ -305,12 +313,18 @@ export class McpManager {
 			if (service.setup.status !== "ready") continue;
 			if (service.authStrategy !== "oauth" && service.authStrategy !== "unknown") continue;
 			if (this.isUserOwnedName(service.serviceId)) continue;
+			const eligibility = mcpLoginEligibility({
+				connectionId: service.serviceId,
+				service,
+				record: this.connectionStore.get(service.serviceId),
+				credential: this.authStorage.get(this.providerId(service.serviceId)),
+			});
 			desired.set(
 				this.providerId(service.serviceId),
 				createConfiguredMcpProvider({
 					server: service.serviceId,
 					label: service.label,
-					url: service.transport.url,
+					url: eligibility.endpoint ?? service.transport.url,
 					reviewedScopes: service.reviewedScopes,
 					clientRegistration: service.clientRegistration,
 				}),
@@ -348,12 +362,18 @@ export class McpManager {
 			if (service.authStrategy !== "oauth" && service.authStrategy !== "unknown") continue;
 			if (this.isUserOwnedName(record.connectionId)) continue;
 			const parentConfig = this.getUserServers()?.[record.serviceId];
+			const eligibility = mcpLoginEligibility({
+				connectionId: record.connectionId,
+				service,
+				record,
+				credential: this.authStorage.get(this.providerId(record.connectionId)),
+			});
 			desired.set(
 				this.providerId(record.connectionId),
 				createConfiguredMcpProvider({
 					server: record.connectionId,
 					label: `${service.label} (${record.connectionId})`,
-					url: service.transport.url,
+					url: eligibility.endpoint ?? service.transport.url,
 					// A per-account record inherits its PARENT's client identity:
 					// settings config for user-declared parents, catalog
 					// advisory for catalog parents — never the bare record.
