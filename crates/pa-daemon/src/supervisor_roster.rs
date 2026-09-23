@@ -605,7 +605,10 @@ mod tests {
         let fresh = supervisor
             .write_roster_summary_for_resident(&resident, &fresh_pull)
             .await;
-        assert!(fresh.is_some(), "a stamped-zero pull starts the slot: {fresh:?}");
+        assert!(
+            fresh.is_some(),
+            "a stamped-zero pull starts the slot: {fresh:?}"
+        );
         assert_eq!(entry_level(), serde_json::json!("off"));
         // In-order deltas apply (the newer level lands).
         let applied = delta(&supervisor, "seq-token", "high", Some(2), "i1").await;
