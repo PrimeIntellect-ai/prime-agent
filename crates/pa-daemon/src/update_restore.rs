@@ -801,11 +801,11 @@ mod tests {
         let progress = RestoreProgress::new();
         progress.begin(Some(&two_row_roster()));
         // Every selector shape SessionRegistry::resolve accepts owns the
-        // row: durable id, transient active id, session-file stem, the
-        // session name, and normalized suffixes of either id shape.
-        for selector in [
-            "a-1", "active-a", "a-1", "alpha", "ve-a", "IVEA", "b-2", "urable-b",
-        ] {
+        // row: the durable id (the registry's exact-key lookup), the
+        // transient active id, the session-file stem, the session name,
+        // and normalized suffixes of the active id and stem (the durable
+        // id is exact-key only, exactly like the registry's map lookup).
+        for selector in ["a-1", "active-a", "alpha", "ve-a", "IVEA", "b-2", "e-b"] {
             assert!(progress.owns_target(selector), "owns {selector}");
         }
         assert!(!progress.owns_target("unknown"));
