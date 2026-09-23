@@ -31,7 +31,7 @@ const FAILURE_BACKOFF_CAP_MS: u64 = 3_600_000;
 /// The pause after `consecutive_failures` failed fires: `base * 2^(n-1)`
 /// capped at [`FAILURE_BACKOFF_CAP_MS`]. The first failure pauses 2m, the
 /// second 4m, then 8m, 16m, 32m, 1h.
-pub fn failure_backoff_ms(consecutive_failures: u32) -> u64 {
+pub(crate) fn failure_backoff_ms(consecutive_failures: u32) -> u64 {
     FAILURE_BACKOFF_BASE_MS
         .saturating_mul(2u64.saturating_pow(consecutive_failures.saturating_sub(1)))
         .min(FAILURE_BACKOFF_CAP_MS)

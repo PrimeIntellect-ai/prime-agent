@@ -78,7 +78,7 @@ impl Worker {
         // The delete error the rejected waiter sees (TS
         // `QueuedMessageError`); a prompt_and_wait caller surfaces it as
         // the command failure.
-        const DELETED: &str = "Queued prompt was deleted before delivery.";
+        const DELETED: &str = crate::worker::QUEUED_PROMPT_DELETED;
         let index = index as usize;
         let (status, queue_changed): (&'static str, bool) = {
             let mut core = self.core.lock().unwrap();

@@ -3722,7 +3722,9 @@ impl AgentSessionEngine {
                 TurnResult::Aborted => {
                     self.reset_overflow_recovery();
                     self.drop_turn_boundary_requests();
-                    emit(EngineEvent::Done(Err("No response produced.".to_string())));
+                    emit(EngineEvent::Done(Err(
+                        crate::worker::ABORTED_TURN_SETTLE_ERROR.to_string(),
+                    )));
                     return;
                 }
                 TurnResult::Error { error, assistant } => {

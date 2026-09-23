@@ -265,6 +265,23 @@ pub(crate) fn restored_turn_policy(payload: &Value) -> TurnPolicy {
     }
 }
 
+/// The settle error of an aborted turn: the fire ran, but the model turn
+/// never produced an assistant message (a user abort, a queued-input
+/// suspension). Scheduled-fire bookkeeping records a clean run, the TS
+/// `promptHeartbeat` behavior (it resolves normally when the turn
+/// aborts; no `lastError`, no failure backoff).
+pub(crate) const ABORTED_TURN_SETTLE_ERROR: &str = "No response produced.";
+
+/// The settle error of a prompt cancelled before delivery (the
+/// queue-invisible abort path). A scheduled fire withdrawn this way
+/// records a skip, like the TS unrunnable-at-admission verdict.
+pub(crate) const PROMPT_ABORTED_BEFORE_DELIVERY: &str = "Prompt aborted before delivery.";
+
+/// The settle error of a queued prompt deleted through a queue mutation
+/// (TS `QueuedMessageError` verbatim). A scheduled fire whose queued row
+/// the user deleted records a skip, not a failure.
+pub(crate) const QUEUED_PROMPT_DELETED: &str = "Queued prompt was deleted before delivery.";
+
 #[derive(Debug)]
 pub(crate) struct QueuedItem {
     pub(crate) message: String,
@@ -3547,7 +3564,7 @@ impl Worker {
                             let _ = self.prompt_admissions.cancel(id);
                         }
                         if let Some(done) = item.done {
-                            let _ = done.send(Err("Prompt aborted before delivery.".to_string()));
+                            let _ = done.send(Err(PROMPT_ABORTED_BEFORE_DELIVERY.to_string()));
                         }
                     }
                 }

@@ -245,30 +245,38 @@ impl AgentCronJobStore {
     /// Push a job's next run later, never earlier (the scheduler's
     /// consecutive-failure backoff). `until_ms` is an epoch-ms deadline; an
     /// already-later `nextRunAt` wins, and non-active jobs are untouched.
+    ///
+    /// Runs under the store's state locks (the `mutate_states` path, like
+    /// `record_dispatch_result`): a cancel that lands between the failure
+    /// and this defer must stay cancelled, so the active-status check and
+    /// the write are one atomic state mutation — a read-modify-write over
+    /// the merged jobs would race a concurrent cancel and could write a
+    /// stale active copy back over it.
     pub fn defer_next_run(&self, id: &str, until_ms: u64) -> Option<AgentCronJob> {
         let until_iso = iso_from_millis(until_ms);
         let mut updated = None;
-        let jobs: Vec<AgentCronJob> = self
-            .read_jobs()
-            .into_iter()
-            .map(|mut job| {
-                if job.id != id || job.status != JobStatus::Active {
-                    return job;
-                }
-                if let Some(current) = job.next_run_at.as_deref().and_then(parse_iso_millis) {
-                    if current >= until_ms {
+        self.mutate_states(|state| {
+            state.jobs = state
+                .jobs
+                .clone()
+                .into_iter()
+                .map(|mut job| {
+                    if job.id != id || job.status != JobStatus::Active {
                         return job;
                     }
-                }
-                job.next_run_at = Some(until_iso.clone());
-                job.updated_at = iso_from_millis(now_millis());
-                updated = Some(job.clone());
-                job
-            })
-            .collect();
-        if updated.is_some() {
-            self.write_jobs(&jobs);
-        }
+                    if let Some(current) = job.next_run_at.as_deref().and_then(parse_iso_millis) {
+                        if current >= until_ms {
+                            return job;
+                        }
+                    }
+                    job.next_run_at = Some(until_iso.clone());
+                    job.updated_at = iso_from_millis(now_millis());
+                    updated = Some(job.clone());
+                    job
+                })
+                .collect();
+            Vec::new()
+        });
         updated
     }
 

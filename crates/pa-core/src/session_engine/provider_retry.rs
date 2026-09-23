@@ -90,7 +90,7 @@ pub fn is_context_overflow_failure(message: &AssistantMessage, context_window: u
 /// prime-inference as a 404 whose body the SDK surfaces verbatim:
 /// `404 No endpoints found that support tool use. Try disabling ...`).
 /// Matched case-insensitively against the user-facing failure text.
-pub const UNSUPPORTED_TOOL_FAILURE_MARKER: &str = "no endpoints found that support tool use";
+const UNSUPPORTED_TOOL_FAILURE_MARKER: &str = "no endpoints found that support tool use";
 
 /// A router rejection for a model that cannot serve tool use. Unlike the
 /// plain routing-blip 404 (transient), the request's tools make this a
