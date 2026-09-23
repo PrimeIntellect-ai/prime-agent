@@ -1,0 +1,1 @@
+- Added the Yolo-Auto provider to the built-in provider display names and to per-provider default model selection (`yolo`).

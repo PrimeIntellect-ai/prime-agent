@@ -87,6 +87,7 @@ prime-agent
 | Xiaomi MiMo Token Plan (China) | `XIAOMI_TOKEN_PLAN_CN_API_KEY` | `xiaomi-token-plan-cn` |
 | Xiaomi MiMo Token Plan (Amsterdam) | `XIAOMI_TOKEN_PLAN_AMS_API_KEY` | `xiaomi-token-plan-ams` |
 | Xiaomi MiMo Token Plan (Singapore) | `XIAOMI_TOKEN_PLAN_SGP_API_KEY` | `xiaomi-token-plan-sgp` |
+| Yolo-Auto | `YOLO_AUTO_API_KEY` | `yolo-auto` |
 
 Reference for environment variables and `auth.json` keys: [`env-api-keys.ts`](../../ai/src/env-api-keys.ts).
 

@@ -1,0 +1,1 @@
+- Added the Yolo-Auto provider (OpenAI-compatible endpoint at https://yolo-auto.com/v1) with the contractual `yolo` and `yolo-small` aliases, `YOLO_AUTO_API_KEY` credential lookup, and conservative compiled transport templates whose model list is discoverable at `/v1/models`.
