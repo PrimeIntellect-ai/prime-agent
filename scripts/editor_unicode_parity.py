@@ -271,8 +271,11 @@ def run_session(
                 f.write(frame)
     finally:
         # A wait timeout must not leak the detached pane (and the shell and
-        # daemon inside it) past the run (Macroscope, PR #2600).
-        vp.tmux("kill-session", "-t", session)
+        # daemon inside it) past the run (Macroscope, PR #2600). The kill is
+        # idempotent cleanup: a session that already died (binary crash, or
+        # the settle timeout fired after the pane vanished) must not raise
+        # and mask the original error.
+        vp.tmux("kill-session", "-t", session, check=False)
     return frames
 
 
