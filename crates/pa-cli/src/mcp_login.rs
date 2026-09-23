@@ -26,15 +26,17 @@ use pa_tui::client_auth::{AuthFuture, ClientAuthCommands};
 /// the host request absent (TS registers `mcp.begin_login` only when a
 /// login is wired).
 pub(crate) fn cli_mcp_manager(cwd: &std::path::Path, agent_dir: &std::path::Path) -> McpManager {
-    let cwd = cwd.to_path_buf();
-    let agent_dir = agent_dir.to_path_buf();
+    let user_cwd = cwd.to_path_buf();
+    let user_agent_dir = agent_dir.to_path_buf();
+    let catalog_cwd = cwd.to_path_buf();
+    let catalog_agent_dir = agent_dir.to_path_buf();
     McpManager::new(McpManagerOptions {
         auth_storage: AuthStorage::create_with_oauth(
-            &agent_dir,
+            agent_dir,
             std::sync::Arc::new(pa_core::mcp::McpOAuth::new()),
         ),
         get_user_servers: Box::new(move || {
-            let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
+            let settings = pa_core::settings::SettingsManager::create(&user_cwd, &user_agent_dir);
             Some(
                 settings
                     .settings()
@@ -51,9 +53,10 @@ pub(crate) fn cli_mcp_manager(cwd: &std::path::Path, agent_dir: &std::path::Path
             )
         }),
         begin_login: None,
-        agent_dir: Some(agent_dir.clone()),
+        agent_dir: Some(agent_dir.to_path_buf()),
         get_catalog_sources: Some(Box::new(move || {
-            let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
+            let settings =
+                pa_core::settings::SettingsManager::create(&catalog_cwd, &catalog_agent_dir);
             settings
                 .settings()
                 .mcp_catalog_sources
