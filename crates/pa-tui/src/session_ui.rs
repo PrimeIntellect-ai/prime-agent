@@ -596,11 +596,14 @@ impl SessionUi {
     /// supervisor issues a ticket (best effort: every failure keeps the
     /// supervisor-routed path, and a failed direct attach retries once over
     /// the supervisor).
+    ///
+    /// The NEW attach lands before the old id detaches: a failed re-attach
+    /// (a replacement mid-teardown, a dead worker) must not strand the pane
+    /// locally bound but server-detached - the previous subscription stays
+    /// until the new one exists, and the next supersede notice or the
+    /// submit-path retry re-attaches when a worker can serve the session.
     pub(crate) async fn attach_session(&mut self, active_session_id: &str) -> Result<()> {
         let previous = self.active_session_id.clone();
-        if !previous.is_empty() && previous != active_session_id {
-            let _ = self.detach().await;
-        }
         // A direct link is bound to one session: drop it when switching.
         if self
             .client
@@ -649,6 +652,22 @@ impl SessionUi {
         let attach = attach_data_from_response(&data)?;
         let reconstructed = reconstruct(&attach);
         self.active_session_id = attach.active_session_id;
+        // The new attachment exists (the snapshot above rebuilt from it):
+        // retire the superseded id's subscription now, addressed by the
+        // captured previous id (the detach must target the OLD address,
+        // not the id the pane just adopted).
+        if !previous.is_empty() && previous != self.active_session_id {
+            let _ = self
+                .bounded_request(
+                    Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                    DaemonCommand::Detach {
+                        id: None,
+                        active_session_id: Some(previous),
+                        rest: Default::default(),
+                    },
+                )
+                .await;
+        }
         self.session_id = reconstructed.session_id;
         self.session_name = reconstructed.session_name.clone();
         self.service_tier = reconstructed.service_tier.clone();
@@ -1046,19 +1065,6 @@ impl SessionUi {
             }
             crate::clipboard::OscSink::Stdout => Vec::new(),
         }
-    }
-
-    pub(crate) async fn detach(&self) -> Result<()> {
-        self.bounded_request(
-            Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-            DaemonCommand::Detach {
-                id: None,
-                active_session_id: Some(self.active_session_id.clone()),
-                rest: Default::default(),
-            },
-        )
-        .await
-        .map(|_| ())
     }
 
     /// Detach on the agents-view handoff without blocking it: the request

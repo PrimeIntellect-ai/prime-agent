@@ -278,7 +278,12 @@ impl Supervisor {
                         match self.binding_target(active_session_id).await {
                             Some(resident) => {
                                 let current = self
-                                    .rebind_connection(active_session_id, &resident, attached)
+                                    .rebind_connection(
+                                        active_session_id,
+                                        &resident,
+                                        attached,
+                                        crate::supervisor::RebindSubscription::Retarget,
+                                    )
                                     .await;
                                 // The admission follows the rebind: a
                                 // cancellation by the advertised current id
@@ -335,8 +340,15 @@ impl Supervisor {
         if let Some(current) = &rebound_to {
             payload["activeSessionId"] = json!(current);
         }
+        // The replacement-aware route: a prompt aimed at a worker being
+        // replaced waits out the replay inside its own budget instead of
+        // bouncing off the worker's require-created gate, and a send that
+        // provably never left the supervisor retries on the next
+        // connection - the admission id stays the idempotency key, so the
+        // prompt still lands exactly once (the generic client route's
+        // contract).
         let response = self
-            .route_command(&resident, command_type, payload, timeout)
+            .route_command_ready(&resident, command_type, payload, timeout)
             .await;
         let mut response = match response {
             Ok(response) => response,

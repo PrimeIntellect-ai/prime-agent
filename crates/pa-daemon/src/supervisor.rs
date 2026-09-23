@@ -119,6 +119,20 @@ pub(crate) enum ClientRouting {
     RosterSubscribers,
 }
 
+/// How a stale-id rebind treats the connection's session subscription
+/// (the attached vec): commands that keep working with the session
+/// (prompts, steers, attaches) carry the subscription to the
+/// replacement id, while a `Detach` ends the addressed subscription -
+/// rebinding it would force a subscription to a replacement the client
+/// is explicitly leaving.
+pub(crate) enum RebindSubscription {
+    /// The subscription follows the rebind to the current id.
+    Retarget,
+    /// The addressed subscription ends with the detach; the routing
+    /// rewrite alone rides the rebind.
+    End,
+}
+
 pub struct Supervisor {
     pub(crate) options: SupervisorOptions,
     descriptor_dir: PathBuf,
@@ -288,33 +302,43 @@ impl Supervisor {
 
     /// Retarget one connection at a session's current resident after its
     /// selector was superseded (the stale-active-id rebind seam shared by
-    /// the generic route and the admission route). The connection keeps
-    /// exactly its prior attached-ness under the current id, and a
-    /// previously-attached client is told where it now points through a
-    /// `session_binding` frame routed to the id it now holds - the
-    /// supersede-time notice raced the attach roster, so this one cannot
-    /// be dropped. Returns the current id the routed frame must carry.
+    /// the generic route and the admission route). Under
+    /// [`RebindSubscription::Retarget`] the connection keeps exactly its
+    /// prior attached-ness under the current id, and a previously-attached
+    /// client is told where it now points through a `session_binding`
+    /// frame routed to the id it now holds - the supersede-time notice
+    /// raced the attach roster, so this one cannot be dropped. Under
+    /// [`RebindSubscription::End`] the routing rewrite alone rides the
+    /// rebind: the addressed subscription ends with the detach. Returns
+    /// the current id the routed frame must carry.
     pub(crate) async fn rebind_connection(
         &self,
         selector: &str,
         resident: &Arc<ResidentWorker>,
         attached: &Arc<std::sync::Mutex<Vec<String>>>,
+        subscription: RebindSubscription,
     ) -> String {
         let current = resident.worker_id.clone();
         self.log_line(&format!(
             "rebinding stale session id {selector} -> {current}"
         ));
         self.note_daemon_event("session_rebound", None);
-        let was_attached = {
-            let mut attached = attached.lock().unwrap();
-            let was = attached.iter().any(|id| id == selector);
-            if was {
-                attached.retain(|id| id != selector);
-                if !attached.iter().any(|id| id == &current) {
-                    attached.push(current.clone());
+        let was_attached = match subscription {
+            RebindSubscription::Retarget => {
+                let mut attached = attached.lock().unwrap();
+                let was = attached.iter().any(|id| id == selector);
+                if was {
+                    attached.retain(|id| id != selector);
+                    if !attached.iter().any(|id| id == &current) {
+                        attached.push(current.clone());
+                    }
                 }
+                was
             }
-            was
+            // A detach ends the addressed subscription; the detach's own
+            // response handling retires the addressed id, and the rebind
+            // must not leave a subscription to the replacement behind.
+            RebindSubscription::End => false,
         };
         if was_attached {
             let (session_id, session_file) = {
@@ -359,6 +383,16 @@ impl Supervisor {
         // connected` instead of the unknown-session failure the client can
         // act on.
         if resident.cmd_tx.lock().await.is_none() {
+            return None;
+        }
+        // Only a session-ready resident rebinds: a replacement's command
+        // channel exists before its create replay finishes, so a command
+        // routed mid-replay would bounce off the worker's require-created
+        // gate instead of waiting out the replacement. `None` keeps the
+        // unknown-session failure - the client's own retry (the TUI
+        // re-attaches by the durable session id) rides the
+        // replacement-aware route and lands once the replay answers.
+        if !resident.route_state().session_ready {
             return None;
         }
         Some(resident)
@@ -818,15 +852,31 @@ impl Supervisor {
                 response.error.unwrap_or_default()
             ));
         }
-        let mut descriptor = resident.descriptor.lock().await;
-        descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
-        // The persisted failure count stays: the give-up cap and any
-        // adoption decision read the real history, not a relaunch-blanked one.
-        let _ = persist_worker(&resident.descriptor_path, &descriptor);
-        drop(descriptor);
+        {
+            let mut descriptor = resident.descriptor.lock().await;
+            descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
+            // The persisted failure count stays: the give-up cap and any
+            // adoption decision read the real history, not a
+            // relaunch-blanked one.
+            let _ = persist_worker(&resident.descriptor_path, &descriptor);
+        }
         // The replayed create restored the session: routed client commands
         // may run against this worker again.
         resident.note_session_ready();
+        // The replacement is identity-complete and its session replay
+        // answered: record the binding now. The replacement's boot
+        // registration carries no session id (it races the create), so its
+        // record supersedes nothing - this is the record that retargets
+        // every stale client id at the replacement, delivered exactly
+        // when the replacement can actually serve them.
+        {
+            let descriptor = resident.descriptor.lock().await;
+            self.record_session_binding(
+                &resident.worker_id,
+                descriptor.root_session_id.as_deref(),
+                descriptor.session_file.as_deref(),
+            );
+        }
         Ok(child)
     }
 
@@ -1435,6 +1485,11 @@ impl Supervisor {
             Ok(child) => child,
             Err(error) => {
                 self.registry.remove(&worker_id).await;
+                // The half-launched worker's descriptor dies with the
+                // launch: a restart must not adopt it and replay its
+                // durable create after the client was told the create
+                // failed.
+                let _ = std::fs::remove_file(&descriptor_path);
                 return Err(error);
             }
         };
@@ -1443,6 +1498,8 @@ impl Supervisor {
             let mut child = child;
             let _ = child.kill().await;
             self.registry.remove(&worker_id).await;
+            // The half-launched worker's descriptor dies with the launch.
+            let _ = std::fs::remove_file(&descriptor_path);
             return Err(error);
         }
         let create_payload = {
@@ -1461,6 +1518,8 @@ impl Supervisor {
                 // retry mints a second worker over it.
                 let _ = child.kill().await;
                 self.registry.remove(&worker_id).await;
+                // The half-launched worker's descriptor dies with the launch.
+                let _ = std::fs::remove_file(&descriptor_path);
                 return Err(error);
             }
         };
@@ -3474,8 +3533,24 @@ impl Supervisor {
                         // the current resident delivers it exactly once.
                         match self.binding_target(&selector).await {
                             Some(resident) => {
+                                // A detach rebinding to the replacement ends
+                                // the addressed subscription instead of
+                                // carrying it along; every other command
+                                // keeps working with the session.
+                                let subscription =
+                                    if matches!(command, DaemonCommand::Detach { .. }) {
+                                        RebindSubscription::End
+                                    } else {
+                                        RebindSubscription::Retarget
+                                    };
                                 rebound_to = Some(
-                                    self.rebind_connection(&selector, &resident, attached).await,
+                                    self.rebind_connection(
+                                        &selector,
+                                        &resident,
+                                        attached,
+                                        subscription,
+                                    )
+                                    .await,
                                 );
                                 resident
                             }
@@ -3692,10 +3767,13 @@ impl Supervisor {
                 if let DaemonCommand::Detach { .. } = command {
                     if response.success {
                         self.note_daemon_event("detach", None);
-                        attached
-                            .lock()
-                            .unwrap()
-                            .retain(|id| id != &resident.worker_id);
+                        // The detach retires the id the client ADDRESSED -
+                        // for a rebound detach that is the superseded
+                        // selector (the rebind's route rewrite made the
+                        // worker accept it), never the replacement id the
+                        // rebind may have swapped in as the connection's
+                        // live subscription.
+                        attached.lock().unwrap().retain(|id| id != &selector);
                     }
                 }
                 if let DaemonCommand::Kill { .. } = command {

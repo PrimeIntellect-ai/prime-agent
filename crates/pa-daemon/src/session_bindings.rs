@@ -51,10 +51,17 @@ impl SessionBindingTable {
     }
 
     /// Record one binding. Returns every superseded active id (all older
-    /// ids of the session, sorted) with the new binding when the session
-    /// file was already bound to a different worker - the old->new binding
-    /// events' trigger. All older ids repoint at the new binding, so a
-    /// client holding any of them converges on the current identity.
+    /// ids of the session, sorted) with the new binding when the SAME
+    /// durable session (matching session file AND session id) was already
+    /// bound to a different worker - the old->new binding events'
+    /// trigger. A different session at a reused file path never
+    /// supersedes: the old ids must keep their own session's identity
+    /// (and keep its unknown-session refusal) instead of silently
+    /// rebinding into a foreign session. All older ids repoint at the new
+    /// binding, so a client holding any of them converges on the current
+    /// identity. A record without a session id (a boot registration
+    /// racing the create) carries no identity to match and supersedes
+    /// nothing - the create-completion record does.
     pub(crate) fn record(
         &self,
         active_session_id: &str,
@@ -77,14 +84,17 @@ impl SessionBindingTable {
         let mut by_active_id = self.locked(&self.by_active_id);
         let mut by_session_file = self.locked(&self.by_session_file);
         by_active_id.insert(active_session_id.to_string(), Arc::clone(&binding));
-        // Every id still holding an older binding for this session file is
-        // superseded - not just the immediately previous one, so a client
-        // that missed an intermediate supersede still converges.
+        // Every id still holding an older binding for this same durable
+        // session is superseded - not just the immediately previous one,
+        // so a client that missed an intermediate supersede still
+        // converges. The session id must match too: only the same
+        // session's ids may repoint at the new binding.
         let file = binding.session_file.as_deref().expect("file-backed");
         let mut superseded_ids: Vec<String> = by_active_id
             .iter()
             .filter(|(_, bound)| {
                 bound.session_file.as_deref() == Some(file)
+                    && bound.session_id == binding.session_id
                     && bound.active_session_id != binding.active_session_id
             })
             .map(|(id, _)| id.clone())
@@ -286,6 +296,58 @@ mod tests {
             Some("b")
         );
         assert!(table.binding_for("worker-1").is_none());
+    }
+
+    #[test]
+    fn a_different_session_at_a_reused_file_path_never_supersedes() {
+        let table = SessionBindingTable::new();
+        table.record("worker-1", Some("sess-a"), Some("/tmp/sess.jsonl"));
+        // The file path is reused by a DIFFERENT durable session: the old
+        // session's ids keep their own identity - no supersede, no silent
+        // rebind into the foreign session.
+        assert!(table
+            .record("worker-2", Some("sess-b"), Some("/tmp/sess.jsonl"))
+            .is_none());
+        assert_eq!(
+            table
+                .binding_for("worker-1")
+                .expect("kept")
+                .session_id
+                .as_deref(),
+            Some("sess-a")
+        );
+        assert_eq!(
+            table
+                .binding_for("worker-2")
+                .expect("kept")
+                .session_id
+                .as_deref(),
+            Some("sess-b")
+        );
+    }
+
+    #[test]
+    fn an_identity_less_record_never_supersedes() {
+        // A boot registration racing the create carries no session id: it
+        // supersedes nothing (the identity cannot match), and the
+        // create-completion record does.
+        let table = SessionBindingTable::new();
+        table.record("worker-1", Some("sess-a"), Some("/tmp/sess.jsonl"));
+        assert!(table
+            .record("worker-2", None, Some("/tmp/sess.jsonl"))
+            .is_none());
+        assert_eq!(
+            table
+                .binding_for("worker-1")
+                .expect("kept")
+                .session_id
+                .as_deref(),
+            Some("sess-a")
+        );
+        let superseded = table
+            .record("worker-2", Some("sess-a"), Some("/tmp/sess.jsonl"))
+            .expect("supersede at create completion");
+        assert_eq!(superseded.0, vec!["worker-1".to_string()]);
     }
 
     #[test]

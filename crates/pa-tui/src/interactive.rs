@@ -697,9 +697,25 @@ pub async fn run_interactive(
             // agents view with the failure as its status line instead of
             // dying to the shell. Every other startup failure (daemon
             // down, create failure) stays fatal.
-            let rendered = format!("{error:#}");
-            if rendered.contains("Unknown active session") {
-                if let SessionSelection::Attach(selector) = &options.session {
+            //
+            // The check matches the daemon's RAW refusal exactly - it must
+            // name this attach's own selector - instead of a substring of
+            // the rendered chain: the chain's context lines echo the
+            // user-typed selector, so a selector that happens to contain
+            // the phrase could not forge the refusal into a transport
+            // failure's report (and vice versa).
+            let unknown_session_refusal = |selector: &str| {
+                let expected = format!("Unknown active session: {selector}");
+                error.chain().any(|cause| {
+                    cause
+                        .to_string()
+                        .strip_prefix("the daemon rejected the ")
+                        .and_then(|rejection| rejection.rsplit_once(" request: "))
+                        .is_some_and(|(_, daemon_error)| daemon_error == expected)
+                })
+            };
+            if let SessionSelection::Attach(selector) = &options.session {
+                if unknown_session_refusal(selector) {
                     // The handoff keeps the process alive: disarm the
                     // double-Ctrl+C force-quit watchdog like the normal
                     // agents-view handoff does.
@@ -1128,27 +1144,19 @@ pub async fn run_interactive(
                         // lives under a new active id, so re-attach to it -
                         // event routing follows the attach, and the
                         // transcript rebuilds from the snapshot (silent, no
-                        // banner). A failed re-attach keeps the old binding;
-                        // the submit-path rebind retries on the next send.
+                        // banner). A failed re-attach changes nothing: the
+                        // new attach never landed, so the pane keeps its
+                        // current id and subscription (the old one detaches
+                        // only after a new attach succeeds); the next
+                        // supersede notice or the submit-path retry
+                        // re-attaches once a worker can serve the session.
                         if let Some(current) = session.pending_rebind.take() {
                             match session.attach_session(&current).await {
                                 Ok(()) => session.rebuild_view(&mut view),
-                                Err(error) => {
-                                    // The failed re-attach already detached
-                                    // the held id: restore that attachment
-                                    // so events keep flowing (a superseded
-                                    // attach selector rebinds server-side).
-                                    let held = session.active_session_id.clone();
-                                    match session.attach_session(&held).await {
-                                        Ok(()) => session.rebuild_view(&mut view),
-                                        Err(restore_error) => session.note(
-                                            &format!(
-                                                "session rebind failed: {error:#}; re-attach failed: {restore_error:#}"
-                                            ),
-                                            &mut view,
-                                        ),
-                                    }
-                                }
+                                Err(error) => session.note(
+                                    &format!("session rebind failed: {error:#}"),
+                                    &mut view,
+                                ),
                             }
                         }
                         // An update close frame arms the reconnect driver
