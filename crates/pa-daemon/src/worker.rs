@@ -389,10 +389,9 @@ pub(crate) struct SessionCore {
     pub(crate) service_tier: Option<pa_types::ai::ServiceTier>,
     /// The queue delivery modes (TS `agent.steeringMode` / `followUpMode`):
     /// `"all"` or `"one-at-a-time"`. The steering default is `"all"`
-    /// (Kevin's batch spec: every queued steer co-delivers as ONE turn at
-    /// the next tool-call boundary — a deliberate divergence from the TS
-    /// default "one-at-a-time", which stays selectable via the setting);
-    /// the follow-up default keeps the TS "one-at-a-time" (follow-ups
+    /// (every queued steer co-delivers as ONE turn at the next
+    /// tool-call boundary; `"one-at-a-time"` stays selectable via the
+    /// setting). The follow-up default is `"one-at-a-time"` (follow-ups
     /// drain when the session goes idle, one per turn).
     pub(crate) steering_mode: String,
     pub(crate) follow_up_mode: String,
@@ -8610,10 +8609,9 @@ mod turn_stream_tests {
         );
     }
 
-    /// The product default (Kevin's batch spec): the steering lane's
-    /// default mode co-delivers the queued same-class prefix as ONE batched
-    /// turn at the boundary without any explicit mode set — the default
-    /// change from the TS "one-at-a-time" is the deliberate divergence.
+    /// The product default: with no explicit mode set, the steering
+    /// lane co-delivers the queued same-class prefix as ONE batched turn
+    /// at the boundary.
     #[tokio::test]
     async fn the_default_mode_co_delivers_the_queued_steering_prefix() {
         let engine: Arc<dyn SessionEngine> = Arc::new(
@@ -8661,9 +8659,8 @@ mod turn_stream_tests {
     }
 
     /// Queue mode "one-at-a-time" (selectable via the `steeringMode`
-    /// setting; the TS default — this port's product default is "all",
-    /// Kevin's batch spec): each queued steer is its own turn — one reply
-    /// each, delivered in order.
+    /// setting; the product default is "all"): each queued steer is its
+    /// own turn — one reply each, delivered in order.
     #[tokio::test]
     async fn one_at_a_time_delivers_each_queued_steer_as_its_own_turn() {
         // The burst harness has no session store, so the scripted engine
@@ -8861,9 +8858,9 @@ mod turn_stream_tests {
     /// messages send together as the next batched turn — the follow-up
     /// lane stays queued behind it (never discarded, never merged), then
     /// runs in order once the session goes idle; the arm co-delivers
-    /// under any mode (the product default is "all" now, Kevin's batch
-    /// spec), and with nothing armable queued the abort runs abort-only
-    /// (the queue parks behind the suspension).
+    /// under any mode (the product default is "all"), and with nothing
+    /// armable queued the abort runs abort-only (the queue parks behind
+    /// the suspension).
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
     async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups() {

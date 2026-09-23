@@ -552,10 +552,8 @@ impl SettingsManager {
     /// The steering queue's delivery mode (TS `steeringMode`): `all`
     /// batches every queued steering message into ONE co-delivered turn
     /// at the next turn boundary; `one-at-a-time` delivers one per turn.
-    /// The product default is `all` (Kevin 2026-09-23: "if we have many
-    /// messages in the steer queue, then ALL of them should be sent after
-    /// the next tool call") — a deliberate divergence from the TS default
-    /// ("one-at-a-time"); the setting surface keeps both modes.
+    /// The product default is `all`; both modes stay selectable through
+    /// the setting surface.
     pub fn get_steering_mode(&self) -> QueueModeSetting {
         self.merged.steering_mode.unwrap_or(QueueModeSetting::All)
     }
@@ -871,10 +869,9 @@ mod tests {
         assert_eq!(manager.get_code_block_indent(), "    ");
     }
 
-    /// The steering default is "all" (Kevin's batch spec: every queued
-    /// steer co-delivers as ONE turn at the next tool-call boundary) — a
-    /// deliberate divergence from the TS default "one-at-a-time", which
-    /// stays selectable; the follow-up default keeps the TS value.
+    /// The steering default is "all" (every queued steer co-delivers as
+    /// ONE turn at the next tool-call boundary) with "one-at-a-time"
+    /// selectable; the follow-up default stays "one-at-a-time".
     #[test]
     fn steering_mode_defaults_to_all_follow_ups_stay_one_at_a_time() {
         let mut manager = SettingsManager::in_memory(Settings::default());

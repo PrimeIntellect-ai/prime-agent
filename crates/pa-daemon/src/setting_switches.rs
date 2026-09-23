@@ -617,11 +617,9 @@ mod tests {
 
     /// The connection state carries the settings-seeded switches: the TS
     /// default service tier ("default", not the old hard-coded "auto")
-    /// and the queue modes. The steering default is "all" (Kevin's batch
-    /// spec: every queued steer co-delivers as ONE turn at the next
-    /// tool-call boundary — the deliberate divergence from the TS
-    /// default "one-at-a-time"); the follow-up default keeps the TS
-    /// "one-at-a-time".
+    /// and the queue modes. The steering default is "all" (every queued
+    /// steer co-delivers as ONE turn at the next tool-call boundary);
+    /// the follow-up default is "one-at-a-time".
     #[tokio::test]
     async fn connection_state_seeds_the_settings_switches() {
         let worker = created_worker().await;
