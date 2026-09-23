@@ -1011,7 +1011,12 @@ impl SessionUi {
 
     /// The editor's Down and Alt+A hand focus to the compact dock.
     fn focus_subagents_summary(&mut self, view: &mut AgentView) -> bool {
-        if self.tray_override(view).is_some() || !self.subagents_selectable() {
+        // The tray override label blocks the hand-off (TS
+        // `focusSubagentSummary`'s `getTrayOverrideLabel()` gate): the
+        // armed Ctrl+C exit hint, or the streaming follow-up hint over a
+        // non-empty draft — the override covers the streaming arm, so no
+        // separate draft check is needed.
+        if self.tray_override(view).is_some() {
             return false;
         }
         if !self.activity_selectable(self.activity_group) {
