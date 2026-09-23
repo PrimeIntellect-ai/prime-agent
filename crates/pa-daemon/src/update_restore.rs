@@ -57,6 +57,10 @@ const RESTORE_ATTACH_WAIT_MS: u64 = 120_000;
 struct RestoreTarget {
     active_session_id: String,
     session_file: String,
+    /// Set the moment the pass finishes this row (or the adoption pass
+    /// brings the worker up): the per-target waiters wake immediately
+    /// instead of queueing behind the rest of the recovery.
+    settled: bool,
     failure: Option<String>,
 }
 
@@ -85,9 +89,16 @@ impl RestoreProgress {
     }
 
     /// Record the boot's update identity (spec §6 step 2) before serving,
-    /// so hellos report the resume contract from the first connection.
-    pub(crate) fn begin(&self, update_id: Option<UpdateId>) {
-        *self.update_id.lock().unwrap() = update_id;
+    /// so hellos report the resume contract from the first connection,
+    /// and register the roster rows: a client that reconnects while the
+    /// recovery is still working queues behind its own session's row
+    /// (spec §10.4) instead of failing with the plain unknown-session
+    /// error, from the first adoption onward.
+    pub(crate) fn begin(&self, roster: Option<&UpdateRoster>) {
+        *self.update_id.lock().unwrap() = roster.map(|roster| roster.update_id.clone());
+        if let Some(roster) = roster {
+            self.register_targets(roster);
+        }
     }
 
     pub(crate) fn update_id(&self) -> Option<UpdateId> {
@@ -103,10 +114,6 @@ impl RestoreProgress {
         }
     }
 
-    fn is_in_flight(&self) -> bool {
-        !self.state.lock().unwrap().done
-    }
-
     /// Register the roster rows the restore pass will settle (attach
     /// queuing matches selectors against these).
     fn register_targets(&self, roster: &UpdateRoster) {
@@ -117,10 +124,31 @@ impl RestoreProgress {
                 RestoreTarget {
                     active_session_id: row.active_session_id.clone(),
                     session_file: row.session_file.clone(),
+                    settled: false,
                     failure: None,
                 },
             );
         }
+    }
+
+    /// Record one row's settle outcome the moment the recovery finishes
+    /// it (the restore pass's per-row outcome, or a descriptor adoption
+    /// that brought the worker up): the row's waiters wake immediately
+    /// instead of queueing behind the rest of the recovery (spec §10.4:
+    /// the attach streams "once the session comes up"). Idempotent; a
+    /// no-op for a selector no in-flight pass owns.
+    pub(crate) fn settle_target(&self, selector: &str, failure: Option<String>) {
+        {
+            let mut state = self.state.lock().unwrap();
+            let Some(target) = restore_target_mut(&mut state.targets, selector) else {
+                return;
+            };
+            if !target.settled {
+                target.settled = true;
+                target.failure = failure;
+            }
+        }
+        self.notify.notify_waiters();
     }
 
     /// Mark the pass settled: per-row outcomes, counts, and the waiters'
@@ -138,6 +166,7 @@ impl RestoreProgress {
                 by_file.insert(failure.session_file.as_str(), failure.message.as_str());
             }
             for target in state.targets.values_mut() {
+                target.settled = true;
                 target.failure = by_file
                     .get(target.session_file.as_str())
                     .map(|message| message.to_string());
@@ -165,17 +194,27 @@ impl RestoreProgress {
         !state.done && restore_target(&state.targets, selector).is_some()
     }
 
-    /// Wait for the restore pass to settle if one is in flight (spec §10.4:
-    /// attaches queue server-side behind the pass).
-    async fn wait_for_settle(&self) {
+    /// Wait for one target's settle outcome, not the whole pass (spec
+    /// §10.4: the attach queues server-side and streams "once the session
+    /// comes up" — a slow recovery of unrelated sessions must not hold
+    /// this request). The §10.4 deadline still bounds the queue: a pass
+    /// wedged on one slow row cannot hold a client longer than the
+    /// global budget.
+    async fn wait_for_settle_target(&self, selector: &str) {
         let deadline = tokio::time::Instant::now()
             + std::time::Duration::from_millis(RESTORE_ATTACH_WAIT_MS.max(1));
         loop {
             // Register interest before re-checking: a settle that runs
             // between the check and the registration must still wake us.
             let notified = self.notify.notified();
-            if !self.is_in_flight() {
-                // Settled (or no pass at all): the caller re-resolves.
+            let settled = {
+                let state = self.state.lock().unwrap();
+                state.done
+                    || restore_target(&state.targets, selector).is_none_or(|target| target.settled)
+            };
+            if settled {
+                // This row settled (or the whole pass did): the caller
+                // re-resolves.
                 return;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -189,6 +228,20 @@ impl RestoreProgress {
     }
 }
 
+/// Whether one target answers the selector: by transient active id or
+/// session-file stem (the durable id is the map key, checked by the
+/// callers).
+fn matches_selector(target: &RestoreTarget, selector: &str) -> bool {
+    if target.active_session_id == selector {
+        return true;
+    }
+    let stem = Path::new(&target.session_file)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_default();
+    !stem.is_empty() && stem == selector
+}
+
 /// The roster row a selector addresses: by durable id, transient active id,
 /// or session-file stem (the same selectors `SessionRegistry::resolve`
 /// accepts).
@@ -196,21 +249,24 @@ fn restore_target<'a>(
     targets: &'a BTreeMap<String, RestoreTarget>,
     selector: &str,
 ) -> Option<&'a RestoreTarget> {
-    let file_stem = |file: &str| {
-        Path::new(file)
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().to_string())
-            .unwrap_or_default()
-    };
     targets
         .values()
-        .find(|target| {
-            target.active_session_id == selector || {
-                let stem = file_stem(&target.session_file);
-                !stem.is_empty() && stem == selector
-            }
-        })
+        .find(|target| matches_selector(target, selector))
         .or_else(|| targets.get(selector))
+}
+
+/// The mutable counterpart of [`restore_target`]: resolve the key with an
+/// immutable scan first, then re-borrow mutably.
+fn restore_target_mut<'a>(
+    targets: &'a mut BTreeMap<String, RestoreTarget>,
+    selector: &str,
+) -> Option<&'a mut RestoreTarget> {
+    let key = targets
+        .iter()
+        .find(|(_, target)| matches_selector(target, selector))
+        .map(|(key, _)| key.clone())
+        .unwrap_or_else(|| selector.to_string());
+    targets.get_mut(&key)
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +360,6 @@ pub(crate) async fn restore_pass(
             .settle(UpdateStatusCounts::default(), Vec::new());
         return;
     };
-    supervisor.restore.register_targets(&roster);
     let mut rows: Vec<&UpdateRosterSession> = roster.sessions.iter().collect();
     sort_rows_bottom_up(&mut rows);
     let mut counts = UpdateStatusCounts::default();
@@ -320,23 +375,34 @@ pub(crate) async fn restore_pass(
             // already brought the session up.
             Some(resident) => {
                 counts.restored += 1;
+                // Settle the row before the continuation treatment: the
+                // waiters attach to the live worker now, while the
+                // continuation prompt is this session's own stream.
+                supervisor.restore.settle_target(&row.session_id, None);
                 continuation_treatment(supervisor, &resident, row, &mut counts).await;
             }
             None => match restore_session(supervisor, row).await {
                 Ok(resident) => {
                     counts.restored += 1;
+                    supervisor.restore.settle_target(&row.session_id, None);
                     continuation_treatment(supervisor, &resident, row, &mut counts).await;
                 }
                 Err(error) => {
                     // Restore never fails the boot (spec §9): record the
-                    // row and leave the session on disk.
+                    // row and leave the session on disk. The row's waiters
+                    // get the typed failure now, not behind the rest of
+                    // the pass.
+                    let message = format!("{error:#}");
                     supervisor.log_line(&format!(
-                        "update restore: could not restore {}: {error:#}",
+                        "update restore: could not restore {}: {message}",
                         row.session_file
                     ));
+                    supervisor
+                        .restore
+                        .settle_target(&row.session_id, Some(message.clone()));
                     failures.push(UpdateStatusFailure {
                         session_file: row.session_file.clone(),
-                        message: format!("{error:#}"),
+                        message,
                     });
                     counts.failed += 1;
                 }
@@ -518,7 +584,10 @@ impl Supervisor {
             // fail immediately, not wait out the restore).
             return;
         }
-        self.restore.wait_for_settle().await;
+        // Queue behind this session's own row only, never behind the
+        // whole recovery (spec §10.4): an unrelated slow restore must not
+        // hold a control-plane request.
+        self.restore.wait_for_settle_target(selector).await;
     }
 
     /// Spec §10.4: the settled per-row failure for one selector, as the
@@ -559,11 +628,62 @@ mod tests {
     use super::*;
     use pa_types::daemon::update_flow::UpdateStatusCounts;
 
+    /// A two-row roster (update `u-1`): row `a-1`, and row `durable-b`
+    /// whose session-file stem (`b-2`) differs from its durable id (the
+    /// selector shapes the attach queue and the adoption settle both use).
+    fn two_row_roster() -> UpdateRoster {
+        serde_json::from_value(serde_json::json!({
+            "format_version": 1,
+            "update_id": "u-1",
+            "socket_path": "/tmp/s.sock",
+            "created_at": "2026-01-01T00:00:00Z",
+            "supervisor": { "pid": 1, "process_start_id": "p", "generation": "g" },
+            "binary": { "from_version": "0.1", "to_version": "0.2" },
+            "sessions": [
+                {
+                    "session_id": "a-1",
+                    "active_session_id": "active-a",
+                    "session_file": "/sessions/a-1.jsonl",
+                    "kind": "top-level",
+                    "rlm_depth": 0,
+                    "cwd": "/w",
+                    "runtime_config": {},
+                    "queue": { "next_turn": [], "actions": {} },
+                    "in_flight": {
+                        "streaming": false, "compacting": false, "bash_running": false,
+                        "rlm_children": false, "retrying": false, "prompt_in_flight": false
+                    },
+                    "should_resume": false
+                },
+                {
+                    "session_id": "durable-b",
+                    "active_session_id": "active-b",
+                    "session_file": "/sessions/b-2.jsonl",
+                    "kind": "top-level",
+                    "rlm_depth": 0,
+                    "cwd": "/w",
+                    "runtime_config": {},
+                    "queue": { "next_turn": [], "actions": {} },
+                    "in_flight": {
+                        "streaming": false, "compacting": false, "bash_running": false,
+                        "rlm_children": false, "retrying": false, "prompt_in_flight": false
+                    },
+                    "should_resume": false
+                }
+            ],
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn hello_resume_reports_progress_before_and_after_settle() {
         let progress = RestoreProgress::new();
-        progress.begin(Some(UpdateId::from("u-1".to_string())));
+        progress.begin(Some(&two_row_roster()));
         assert!(!progress.hello_resume().complete);
+        assert_eq!(
+            progress.hello_resume().update_id,
+            Some(UpdateId::from("u-1".to_string()))
+        );
         progress.settle(
             UpdateStatusCounts {
                 total: 2,
@@ -585,19 +705,57 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn queued_attach_waits_for_settle_then_unblocks() {
+    async fn queued_attach_unblocks_when_only_its_target_settles() {
         let progress = std::sync::Arc::new(RestoreProgress::new());
-        progress.begin(None);
-        let settler = {
-            let progress = std::sync::Arc::clone(&progress);
-            tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                progress.settle(UpdateStatusCounts::default(), Vec::new());
-            })
+        progress.begin(Some(&two_row_roster()));
+        let waiter = |progress: &std::sync::Arc<RestoreProgress>, selector: &str| {
+            let progress = std::sync::Arc::clone(progress);
+            let selector = selector.to_string();
+            tokio::spawn(async move { progress.wait_for_settle_target(&selector).await })
         };
-        progress.wait_for_settle().await;
-        assert!(progress.hello_resume().complete);
-        settler.await.unwrap();
+        let mut queued_a = waiter(&progress, "a-1");
+        let mut queued_b = waiter(&progress, "durable-b");
+        // Neither row settled: both waiters queue behind their own rows
+        // (the deadline, not this test's ticks, bounds the queue).
+        let tick = std::time::Duration::from_millis(1);
+        assert!(tokio::time::timeout(tick, &mut queued_a).await.is_err());
+        assert!(tokio::time::timeout(tick, &mut queued_b).await.is_err());
+        // One row settles (an adoption brought `durable-b` up; a client
+        // may address it by stem): only that row's waiter wakes, while
+        // the other row's keeps queueing behind the rest of the pass.
+        progress.settle_target("b-2", None);
+        assert!(tokio::time::timeout(tick, queued_b).await.is_ok());
+        assert!(tokio::time::timeout(tick, &mut queued_a).await.is_err());
+        // The whole pass settling unblocks the remaining row's waiter.
+        progress.settle(UpdateStatusCounts::default(), Vec::new());
+        assert!(tokio::time::timeout(tick, queued_a).await.is_ok());
+    }
+
+    #[test]
+    fn settle_target_failure_answers_the_typed_attach_error_per_row() {
+        let progress = RestoreProgress::new();
+        progress.begin(Some(&two_row_roster()));
+        progress.settle_target("durable-b", Some("worker create failed".to_string()));
+        // Every selector shape for the failed row resolves the failure;
+        // the still-queued row has none yet (its attach waits, it does
+        // not fail early).
+        for selector in ["durable-b", "active-b", "b-2"] {
+            let (file, message) = progress.settled_failure(selector).unwrap();
+            assert_eq!(file, "/sessions/b-2.jsonl");
+            assert_eq!(message, "worker create failed");
+        }
+        assert!(progress.settled_failure("a-1").is_none());
+        assert!(progress.settled_failure("unknown-id").is_none());
+    }
+
+    #[test]
+    fn settle_target_without_a_registered_pass_is_a_no_op() {
+        let progress = RestoreProgress::new();
+        // No pass began: the adoption settle on a normal boot (no
+        // roster) must be a silent no-op.
+        progress.settle_target("a-1", None);
+        progress.settle_target("a-1", Some("never happens".to_string()));
+        assert!(progress.settled_failure("a-1").is_none());
     }
 
     #[test]

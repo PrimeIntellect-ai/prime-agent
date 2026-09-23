@@ -306,15 +306,16 @@ impl Supervisor {
         // with serving — the accept loop must keep serving hellos so
         // reconnecting clients see the resume contract (§10.3).
         let roster = crate::update_restore::consume_roster_env();
-        self.restore
-            .begin(roster.as_ref().map(|roster| roster.update_id.clone()));
+        self.restore.begin(roster.as_ref());
         crate::update_restore::boot_sweep(&self.options.agent_dir, &self.options.socket_path);
         // Descriptor adoption runs concurrently with the accept loop: a
         // supervisor restarted over live sessions must accept their
         // self-registrations immediately, not behind the whole descriptor
-        // scan. The restore pass awaits this task (spec §6 step 2's
-        // create-or-adopt order: kept workers relaunch from their
-        // descriptors first, the roster covers the rest).
+        // scan. The fan-out is capped (recovery_pacing) so a large
+        // sessions dir cannot starve the control plane. The restore pass
+        // awaits this task (spec §6 step 2's create-or-adopt order: kept
+        // workers relaunch from their descriptors first, the roster covers
+        // the rest).
         let adoption = {
             let supervisor = Arc::clone(&self);
             tokio::spawn(async move {
@@ -424,19 +425,23 @@ impl Supervisor {
     }
 
     /// Adopt or relaunch persisted workers, concurrently: one dead worker's
-    /// relaunch (create replay) must not delay adopting live sessions.
+    /// relaunch (create replay) must not delay adopting live sessions. The
+    /// fan-out is capped ([`crate::recovery_pacing::ADOPTION_CONCURRENCY`]):
+    /// a large sessions dir must not turn the pass into a relaunch storm
+    /// that starves the control plane for its whole duration.
     async fn adopt_persisted_workers(self: &Arc<Self>) {
         let descriptors = load_descriptors(&self.descriptor_dir, &self.options.socket_path);
-        let mut tasks = Vec::new();
-        for (path, descriptor) in descriptors {
-            let supervisor = Arc::clone(self);
-            tasks.push(tokio::spawn(async move {
-                supervisor.adopt_persisted_worker(path, descriptor).await;
-            }));
-        }
-        for task in tasks {
-            let _ = task.await;
-        }
+        let jobs: Vec<_> = descriptors
+            .into_iter()
+            .map(|(path, descriptor)| {
+                let supervisor = Arc::clone(self);
+                move || async move {
+                    supervisor.adopt_persisted_worker(path, descriptor).await;
+                }
+            })
+            .collect();
+        crate::recovery_pacing::run_bounded(jobs, crate::recovery_pacing::ADOPTION_CONCURRENCY)
+            .await;
     }
 
     /// Adopt one persisted worker descriptor. Serialized against worker
@@ -484,6 +489,18 @@ impl Supervisor {
                 self.spawn_monitor(Arc::clone(&resident), None, pid);
                 // The adopted worker joins the roster from its live state.
                 self.refresh_roster_entry(&resident).await;
+                // A restore pass that owns this session's roster row can
+                // settle it now (spec §10.4): the per-target waiters attach
+                // to the live worker instead of queueing behind the rest
+                // of the recovery. No pass, no roster row: a no-op.
+                if let Some(session_file) = resident.descriptor.lock().await.session_file.clone() {
+                    if let Some(stem) = Path::new(&session_file)
+                        .file_stem()
+                        .map(|stem| stem.to_string_lossy().to_string())
+                    {
+                        self.restore.settle_target(&stem, None);
+                    }
+                }
                 self.log_line(&format!(
                     "adopted session worker {worker_id} (was alive: {alive})"
                 ));
