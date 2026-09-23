@@ -10,6 +10,10 @@ use serde_json::{json, Value};
 use crate::kernel::shared::{host_handler, HostRequestHandlers};
 
 pub const AGENT_MESSAGE_CUSTOM_TYPE: &str = "agent_message";
+/// TS `AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL`: the queue-strip preview label
+/// for a delivered agent message (`queuedAgentMessagePreview` renders
+/// "<label>: <details.message>").
+pub const AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL: &str = "Agent message received";
 pub const AGENT_MESSAGE_SOURCE: &str = "agent_message";
 pub const AGENT_MESSAGE_ID_PREFIX: &str = "agentmsg_";
 pub const DEFAULT_AGENT_MESSAGE_MAX_CHARS: usize = 16_384;

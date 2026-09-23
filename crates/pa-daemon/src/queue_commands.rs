@@ -613,4 +613,99 @@ mod tests {
             Err("Queued prompt was deleted before delivery.".to_string())
         );
     }
+
+    /// TS `mutateQueuedMessage` rejects a `replace` on an accepted
+    /// agent-message delivery (`payload.acceptedAgentMessage` guard): the
+    /// delivery rides the `agent_message` custom row, whose content must
+    /// stay byte-identical to the prompt the turn runs on. Move and delete
+    /// stay applicable.
+    #[tokio::test]
+    async fn replace_rejects_a_queued_agent_message_delivery() {
+        let worker = created_worker().await;
+        let delivered = worker
+            .dispatch(
+                "worker_deliver_message",
+                &json!({
+                    "targetActiveSessionId": "queue-session",
+                    "message": "the research is done",
+                    "sender": {
+                        "activeSessionId": "source-session",
+                        "sessionName": "research-lane",
+                        "runtimeKind": "subagent",
+                    },
+                }),
+            )
+            .await;
+        assert!(delivered.success, "deliver failed: {delivered:?}");
+        // The queue strip addresses the delivery by its labeled preview
+        // (TS `queuedAgentMessagePreview`), not the rendered prompt.
+        let expected = "Agent message received: the research is done";
+        // A second queued prompt gives the delivery a move neighbor.
+        worker
+            .core
+            .lock()
+            .unwrap()
+            .steering
+            .push_back(crate::worker::QueuedItem {
+                preview: None,
+                message: "plain prompt".to_string(),
+                custom_message: None,
+                agent_message: None,
+                queue_key: None,
+                admission_id: None,
+                images: Vec::new(),
+                done: None,
+                queue_visible: true,
+            });
+
+        let replaced = worker
+            .dispatch(
+                "mutate_queued_message",
+                &json!({
+                    "activeSessionId": "queue-session",
+                    "lane": "steering",
+                    "index": 0,
+                    "expectedText": expected,
+                    "mutation": { "type": "replace", "text": "edited" },
+                }),
+            )
+            .await;
+        assert_eq!(replaced.data, Some(json!({ "status": "rejected" })));
+
+        let moved = worker
+            .dispatch(
+                "mutate_queued_message",
+                &json!({
+                    "activeSessionId": "queue-session",
+                    "lane": "steering",
+                    "index": 0,
+                    "expectedText": expected,
+                    "mutation": { "type": "move", "direction": 1 },
+                }),
+            )
+            .await;
+        assert_eq!(moved.data, Some(json!({ "status": "applied" })));
+
+        let deleted = worker
+            .dispatch(
+                "mutate_queued_message",
+                &json!({
+                    "activeSessionId": "queue-session",
+                    "lane": "steering",
+                    "index": 1,
+                    "expectedText": expected,
+                    "mutation": { "type": "delete" },
+                }),
+            )
+            .await;
+        assert_eq!(deleted.data, Some(json!({ "status": "applied" })));
+        let remaining = worker
+            .core
+            .lock()
+            .unwrap()
+            .steering
+            .front()
+            .map(|item| item.message.clone());
+        assert_eq!(remaining.as_deref(), Some("plain prompt"));
+    }
 }

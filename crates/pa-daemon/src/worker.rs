@@ -2567,7 +2567,13 @@ impl Worker {
                 Lane::FollowUp => &mut core.follow_up,
             }
             .push_back(QueuedItem {
-                preview: None,
+                // The labeled queue-strip row (TS `queuedAgentMessagePreview`:
+                // an agent-session-message custom row previews as
+                // "Agent message received: <details.message>").
+                preview: Some(format!(
+                    "{}: {message}",
+                    pa_core::session_engine::agent_messaging::AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL
+                )),
                 message: prompt,
                 custom_message: Some(custom_message),
                 // The agent-message marker: `agent_messages_clear` /
@@ -5251,7 +5257,7 @@ mod agent_message_tests {
         assert!(response.success, "deliver failed: {response:?}");
         let data = response.data.expect("receipt data");
         let prompt = "[agent-message from child:research-lane]\n\nthe research is done";
-        let (custom, message, agent_message) = {
+        let (custom, message, agent_message, preview) = {
             let core = worker.core.lock().unwrap();
             let item = core.steering.front().expect("the delivery queued");
             (
@@ -5260,8 +5266,14 @@ mod agent_message_tests {
                     .expect("the agent_message row rides the delivery"),
                 item.message.clone(),
                 item.agent_message.clone(),
+                item.preview.clone(),
             )
         };
+        // The queue strip serves the TS labeled preview.
+        assert_eq!(
+            preview.as_deref(),
+            Some("Agent message received: the research is done")
+        );
         assert_eq!(custom["role"], "custom");
         assert_eq!(custom["customType"], "agent_message");
         assert_eq!(custom["content"], prompt);
