@@ -221,13 +221,15 @@ def styled_segment(line, text):
     i = 0
     while i < len(line):
         if line[i] == "\x1b":
-            # An escape strictly inside the segment (a color change mid-
-            # segment) belongs to it; the one AT the segment's end starts
-            # the next span (the context label) and must stay out.
-            if start <= plain_pos < end:
-                out.append(line[i])
             match = _re.match(r"\x1b\[[0-9;]*[A-Za-z]", line[i:])
-            i += match.end() if match else 1
+            sequence = match.group(0) if match else line[i]
+            # An escape strictly inside the segment (a color change mid-
+            # segment) belongs to it — the WHOLE sequence, so the byte-
+            # exact compare sees real styling; the one AT the segment's
+            # end starts the next span (the context label) and stays out.
+            if start <= plain_pos < end:
+                out.append(sequence)
+            i += len(sequence)
             continue
         if start <= plain_pos < end:
             out.append(line[i])

@@ -1,3 +1,0 @@
-supervisor started pid 2292358
-[2026-09-23T08:02:12.112Z] session worker 976dafe49e7c registered (epoch 1, pid 2292381)
-[2026-09-23T08:02:12.473Z] session worker 976dafe49e7c re-registered (epoch 2, pid 2292381)

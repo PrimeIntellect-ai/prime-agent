@@ -1,8 +1,0 @@
-{
-  "version": 1,
-  "socketPath": "/home/ubuntu/lane-worktrees/steer-family/scripts/steer-queue-runs/ts-20260923T080800Z/tmp/prime-agent-1000/daemon.sock",
-  "defaultSessionConfig": {
-    "cwd": "/home/ubuntu/lane-worktrees/steer-family",
-    "agentDir": "/home/ubuntu/lane-worktrees/steer-family/scripts/steer-queue-runs/ts-20260923T080800Z/agent"
-  }
-}

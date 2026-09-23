@@ -1,5 +1,0 @@
-{
-  "version": 1,
-  "socketPath": "/home/ubuntu/lane-worktrees/steer-family/scripts/steer-queue-runs/rust-20260923T080023Z/daemon.sock",
-  "defaultSessionDir": "/home/ubuntu/lane-worktrees/steer-family/scripts/steer-queue-runs/rust-20260923T080023Z/agent/sessions"
-}

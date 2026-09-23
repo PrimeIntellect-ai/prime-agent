@@ -1,3 +1,0 @@
-supervisor started pid 2288421
-[2026-09-23T08:00:23.548Z] session worker ae64404fd645 registered (epoch 1, pid 2288436)
-[2026-09-23T08:00:23.830Z] session worker ae64404fd645 re-registered (epoch 2, pid 2288436)

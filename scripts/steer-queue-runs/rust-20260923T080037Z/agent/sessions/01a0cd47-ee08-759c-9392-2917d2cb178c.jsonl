@@ -1,7 +1,0 @@
-{"type":"session","version":3,"id":"01a0cd47-ee08-759c-9392-2917d2cb178c","timestamp":"2026-09-23T08:00:38.408Z","cwd":"/home/ubuntu/lane-worktrees/steer-family/scripts/steer-queue-runs/rust-20260923T080037Z/work-o","rlmDepth":0}
-{"type":"model_change","id":"d83a7701","parentId":null,"timestamp":"2026-09-23T08:00:38.422Z","provider":"prime-inference","modelId":"mock-1"}
-{"type":"thinking_level_change","id":"e499ed07","parentId":"d83a7701","timestamp":"2026-09-23T08:00:38.422Z","thinkingLevel":"off"}
-{"type":"service_tier_change","id":"ff5dcd6f","parentId":"e499ed07","timestamp":"2026-09-23T08:00:38.423Z","serviceTier":"default"}
-{"type":"session_state","id":"c7d905ad","parentId":"ff5dcd6f","timestamp":"2026-09-23T08:00:38.423Z","state":{"status":"active"}}
-{"type":"message","id":"3e0e011b","parentId":"c7d905ad","timestamp":"2026-09-23T08:00:39.014Z","message":{"role":"user","content":[{"type":"text","text":"session b own task"}],"timestamp":1790150439014}}
-{"type":"message","id":"54cfb7a3","parentId":"3e0e011b","timestamp":"2026-09-23T08:00:39.080Z","message":{"role":"assistant","content":[{"type":"text","text":"B completed its own turn"}],"api":"openai-completions","provider":"prime-inference","model":"mock-1","responseId":"chatcmpl-battery","usage":{"input":20,"output":10,"cacheRead":80,"cacheWrite":0,"totalTokens":110,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":1790150439065}}

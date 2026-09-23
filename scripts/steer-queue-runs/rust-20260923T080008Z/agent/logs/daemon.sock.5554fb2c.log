@@ -1,3 +1,0 @@
-supervisor started pid 2288092
-[2026-09-23T08:00:08.524Z] session worker 0c6d9f531752 registered (epoch 1, pid 2288098)
-[2026-09-23T08:00:08.940Z] session worker 0c6d9f531752 re-registered (epoch 2, pid 2288098)
