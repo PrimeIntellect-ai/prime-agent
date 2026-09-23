@@ -120,18 +120,23 @@ impl AgentRoster {
     /// snapshotted after that delta stamped, so it carries the delta's
     /// change and possibly more). A pull from a generation the slot no
     /// longer names is a replaced process's delayed answer — stale by
-    /// construction, dropped. A counter of `0` (the summary carries no
-    /// sequence) is an unsequenced authoritative write and always
-    /// applies without touching the slot.
+    /// construction, dropped. A summary WITHOUT the counter stamp is an
+    /// unsequenced authoritative write (a legacy build predating the
+    /// sequence wire field) and always applies without touching the
+    /// slot; a STAMPED counter — zero included, the worker's counter
+    /// before its first push — orders against the slot exactly like any
+    /// other pull, so a delayed zero-counter snapshot never overwrites
+    /// a newer delta's state and a predecessor's zero-counter answer
+    /// never overwrites the replacement's row.
     pub(crate) fn accept_roster_pull(
         &mut self,
         worker_id: &str,
         instance: &str,
-        counter: u64,
+        counter: Option<u64>,
     ) -> bool {
-        if counter == 0 {
+        let Some(counter) = counter else {
             return true;
-        }
+        };
         match self.delta_watermarks.get_mut(worker_id) {
             Some(slot) if slot.instance == instance => {
                 if counter < slot.watermark {
@@ -545,34 +550,49 @@ mod tests {
     fn pull_gate_orders_authoritative_writes_by_the_snapshot_counter() {
         let roster = locked();
         let mut roster = roster.lock().unwrap();
-        // An unsequenced summary (no embedded counter) is an
-        // authoritative write and applies without touching the slot.
-        assert!(roster.accept_roster_pull("w1", "i1", 0));
+        // A stamped ZERO counter (the worker's counter before its first
+        // push — the create/registration pull of a fresh worker) starts
+        // the slot and applies.
+        assert!(roster.accept_roster_pull("w1", "i1", Some(0)));
         assert!(roster.accept_delta_sequence("w1", "i1", 1));
+        // An unsequenced summary (no embedded counter at all — a legacy
+        // build) is an authoritative write and applies without touching
+        // the slot.
+        assert!(roster.accept_roster_pull("w1", "i1", None));
         // The pull with the snapshot's counter applies and raises the
         // watermark: a delta still in flight when the pull answered
         // (sequence at or below the counter) never overwrites the pull.
-        assert!(roster.accept_roster_pull("w1", "i1", 5));
+        assert!(roster.accept_roster_pull("w1", "i1", Some(5)));
         assert!(!roster.accept_delta_sequence("w1", "i1", 5));
         assert!(!roster.accept_delta_sequence("w1", "i1", 4));
         assert!(roster.accept_delta_sequence("w1", "i1", 6));
         // The raise never lowers the watermark.
-        assert!(!roster.accept_roster_pull("w1", "i1", 3));
+        assert!(!roster.accept_roster_pull("w1", "i1", Some(3)));
         // A pull AT the applied watermark still applies: its snapshot
         // was taken after that delta stamped, so it carries the delta's
         // change and possibly more (a rename the deltas never push).
-        assert!(roster.accept_roster_pull("w1", "i1", 6));
+        assert!(roster.accept_roster_pull("w1", "i1", Some(6)));
         // A pull whose counter is below the applied watermark is stale:
         // a delta stamped after the pull's snapshot already applied.
         assert!(roster.accept_delta_sequence("w1", "i1", 8));
-        assert!(!roster.accept_roster_pull("w1", "i1", 7));
+        assert!(!roster.accept_roster_pull("w1", "i1", Some(7)));
+        // The stamped-zero pull is sequenced like any other: after the
+        // first delta applied, a DELAYED zero-counter snapshot (taken
+        // before the first push) is the stale one and drops instead of
+        // overwriting the newer delta's state.
+        assert!(!roster.accept_roster_pull("w1", "i1", Some(0)));
         // A pull from a replaced process's delayed answer drops on the
-        // generation mismatch (the registration noted the replacement).
+        // generation mismatch (the registration noted the replacement)
+        // — at any counter, the stamped zero included.
         roster.note_worker_generation("w1", "i2");
-        assert!(!roster.accept_roster_pull("w1", "i1", 9_000_000));
+        assert!(!roster.accept_roster_pull("w1", "i1", Some(9_000_000)));
+        assert!(!roster.accept_roster_pull("w1", "i1", Some(0)));
         // The replacement's own pull is authoritative for the new
-        // generation: it applies from the fresh watermark.
-        assert!(roster.accept_roster_pull("w1", "i2", 3));
+        // generation: it applies from the fresh watermark, and its own
+        // stamped zero (a replacement that pushed nothing yet) refreshes
+        // at the noted watermark.
+        assert!(roster.accept_roster_pull("w1", "i2", Some(0)));
+        assert!(roster.accept_roster_pull("w1", "i2", Some(3)));
         assert!(!roster.accept_delta_sequence("w1", "i2", 3));
         assert!(roster.accept_delta_sequence("w1", "i2", 4));
     }
@@ -586,11 +606,11 @@ mod tests {
         for generation in 1..=64 {
             roster.note_worker_generation("w1", &format!("i{generation}"));
             assert!(roster.accept_delta_sequence("w1", &format!("i{generation}"), 1));
-            assert!(roster.accept_roster_pull("w1", &format!("i{generation}"), 2));
+            assert!(roster.accept_roster_pull("w1", &format!("i{generation}"), Some(2)));
             assert_eq!(roster.delta_watermarks.len(), 1);
             // Every earlier generation's delayed frames and pulls drop.
             assert!(!roster.accept_delta_sequence("w1", &format!("i{}", generation - 1), 5));
-            assert!(!roster.accept_roster_pull("w1", &format!("i{}", generation - 1), 5));
+            assert!(!roster.accept_roster_pull("w1", &format!("i{}", generation - 1), Some(5)));
         }
         roster.forget_worker_sequences("w1");
         assert!(roster.delta_watermarks.is_empty());

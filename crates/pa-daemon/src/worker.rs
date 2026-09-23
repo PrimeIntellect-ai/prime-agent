@@ -2672,7 +2672,11 @@ impl Worker {
             // lock, and every push stamps its snapshot after the state
             // change it describes and before its counter increment, so
             // a counter this summary embeds already includes every
-            // change the snapshot reflects.
+            // change the snapshot reflects. The PRE-first-push stamp of
+            // zero is a sequenced counter (the supervisor gates it like
+            // any other — a delayed pre-push pull never overwrites a
+            // newer delta's state); only a summary that carries no
+            // counter at all is the unsequenced legacy write.
             roster_delta_sequence: Some(
                 self.roster_delta_sequence
                     .load(std::sync::atomic::Ordering::SeqCst),

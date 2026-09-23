@@ -257,10 +257,16 @@ impl Supervisor {
                 .clone()
                 .unwrap_or_default(),
         };
+        // The counter stamp stays an Option: ABSENT means unsequenced
+        // (a legacy summary that predates the sequence wire field) — an
+        // authoritative write — while PRESENT-and-zero is the worker's
+        // counter before its first push, a sequenced snapshot the gate
+        // orders like any other (a delayed zero-counter pull must not
+        // overwrite a newer delta's state, and a predecessor's must not
+        // overwrite the replacement's row).
         let counter = summary
             .get("rosterDeltaSequence")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
+            .and_then(serde_json::Value::as_u64);
         let entry = {
             let mut roster = self.roster.lock().unwrap();
             if !roster.accept_roster_pull(&resident.worker_id, &instance, counter) {
@@ -584,6 +590,23 @@ mod tests {
                 .await
         }
 
+        // A fresh worker's create/registration pull stamps the ZERO
+        // counter (the worker has pushed nothing yet): it starts the
+        // slot and applies — the create path's first authoritative
+        // write.
+        let resident = supervisor
+            .registry
+            .get("seq-worker")
+            .await
+            .expect("resident");
+        let mut fresh_pull = summary("off");
+        fresh_pull["rosterDeltaSequence"] = serde_json::json!(0);
+        fresh_pull["workerInstanceId"] = serde_json::json!("i1");
+        let fresh = supervisor
+            .write_roster_summary_for_resident(&resident, &fresh_pull)
+            .await;
+        assert!(fresh.is_some(), "a stamped-zero pull starts the slot: {fresh:?}");
+        assert_eq!(entry_level(), serde_json::json!("off"));
         // In-order deltas apply (the newer level lands).
         let applied = delta(&supervisor, "seq-token", "high", Some(2), "i1").await;
         assert!(applied.success, "sequence 2 applies: {applied:?}");
@@ -613,11 +636,6 @@ mod tests {
         let mut pulled = summary("off");
         pulled["rosterDeltaSequence"] = serde_json::json!(4);
         pulled["workerInstanceId"] = serde_json::json!("i1");
-        let resident = supervisor
-            .registry
-            .get("seq-worker")
-            .await
-            .expect("resident");
         let pull = supervisor
             .write_roster_summary_for_resident(&resident, &pulled)
             .await;
@@ -645,6 +663,21 @@ mod tests {
                 .await
                 .is_none(),
             "an older in-flight refresh drops"
+        );
+        assert_eq!(entry_level(), serde_json::json!("off"));
+        // A delayed ZERO-counter pull is sequenced like any other: its
+        // snapshot was taken before the first push, so once a newer
+        // delta applied it is the stale one and drops instead of
+        // overwriting the newer state with pre-change data.
+        let mut zero_pull = summary("high");
+        zero_pull["rosterDeltaSequence"] = serde_json::json!(0);
+        zero_pull["workerInstanceId"] = serde_json::json!("i1");
+        assert!(
+            supervisor
+                .write_roster_summary_for_resident(&resident, &zero_pull)
+                .await
+                .is_none(),
+            "a delayed pre-push pull never overwrites a newer delta"
         );
         assert_eq!(entry_level(), serde_json::json!("off"));
         // A replacement process registers (the registration notes the
@@ -682,6 +715,20 @@ mod tests {
                 .await
                 .is_none(),
             "a superseded pull drops"
+        );
+        assert_eq!(entry_level(), serde_json::json!("medium"));
+        // The predecessor's DELAYED zero-counter pull drops the same
+        // way on the generation mismatch: the stamped zero orders
+        // against the slot, it is not the unsequenced legacy value.
+        let mut predecessor_zero_pull = summary("low");
+        predecessor_zero_pull["rosterDeltaSequence"] = serde_json::json!(0);
+        predecessor_zero_pull["workerInstanceId"] = serde_json::json!("i1");
+        assert!(
+            supervisor
+                .write_roster_summary_for_resident(&resident, &predecessor_zero_pull)
+                .await
+                .is_none(),
+            "a superseded zero-counter pull drops"
         );
         assert_eq!(entry_level(), serde_json::json!("medium"));
         // An unsequenced delta applies (a caller that stamped nothing).
