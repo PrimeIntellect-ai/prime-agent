@@ -316,6 +316,7 @@ pub struct SessionManager {
     persist: bool,
     flushed: bool,
     has_assistant_entry: bool,
+    append_ownership: super::window::AppendOwnership,
     file_entries: Vec<FileEntry>,
     window: Option<super::window::WindowedSessionStore>,
     by_id: HashMap<String, usize>,
@@ -343,6 +344,7 @@ impl SessionManager {
             persist,
             flushed: false,
             has_assistant_entry: false,
+            append_ownership: super::window::AppendOwnership::Unleased,
             file_entries: Vec::new(),
             window: None,
             by_id: HashMap::new(),
@@ -427,11 +429,29 @@ impl SessionManager {
     }
 
     /// Adopt a verified read-only window into an externally persisted manager.
+    /// The adopted file is complete and appendable (the window's boundary
+    /// proves real message history), so the manager joins with the same
+    /// durable-append invariants the test constructor installs: rows go
+    /// straight to disk — never deferred behind the bootstrap rule, whose
+    /// `flushed = false` would later send `flush_now` into the
+    /// window-failing rewrite path.
     pub fn adopt_window(&mut self, window: super::window::WindowedSessionStore) {
         self.file_entries = window.entries().to_vec();
         self.build_index();
         self.leaf_id = Some(window.leaf_id().to_owned());
+        self.has_assistant_entry = true;
+        self.flushed = true;
         self.window = Some(window);
+    }
+
+    /// Whether this manager's durable appends may certify the window cache
+    /// incrementally. Only a caller holding this session's runtime lease may
+    /// raise it (exactly one writer per lease; the lease's release flushes the
+    /// certified snapshot to the sidecar), and every other manager keeps the
+    /// unleased default that evicts the live snapshot instead of extending a
+    /// certification it cannot guarantee.
+    pub fn set_append_ownership(&mut self, ownership: super::window::AppendOwnership) {
+        self.append_ownership = ownership;
     }
 
     /// Capture a historical read request while locked; await it after releasing
@@ -1072,11 +1092,7 @@ impl SessionManager {
             if let Some(session_file) = &self.session_file {
                 let mut line = entry.into_bytes();
                 line.push(b'\n');
-                super::window::append_cached(
-                    session_file,
-                    &line,
-                    super::window::AppendOwnership::Unleased,
-                )?;
+                super::window::append_cached(session_file, &line, self.append_ownership)?;
             }
             self.notify_persist_listeners();
         }

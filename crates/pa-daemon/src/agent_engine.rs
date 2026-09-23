@@ -609,6 +609,19 @@ impl AgentSessionEngine {
             .await?;
             if let Some(window) = window {
                 built.session.restore_windowed_context(window).await;
+                // This worker holds the session's runtime lease for the
+                // engine's lifetime: its durable appends may certify the
+                // window cache incrementally (exactly one writer per
+                // lease), and the lease's release flushes the certified
+                // snapshot to the sidecar for the next warm open.
+                built
+                    .session
+                    .shared_persistence()
+                    .lock()
+                    .await
+                    .set_append_ownership(
+                        pa_core::session::window::AppendOwnership::SessionLeaseHeld,
+                    );
             } else if let Some(entries) = branch.filter(|entries| !entries.is_empty()) {
                 built.session.rebuild_branch_context(entries).await?;
             }

@@ -442,9 +442,10 @@ impl GoalDriver {
     }
 
     /// TS `_maybeResumeGoalContinuationAfterRlmWork`: deliver the owed
-    /// continuation once, consuming one slot. Always clears the flag —
-    /// an inactive goal drops the deferral (minting nothing), a live
-    /// one mints. `None` when no continuation was owed or the goal
+    /// continuation once, consuming one slot. Clears the flag — an
+    /// inactive goal drops the deferral (minting nothing), a live one
+    /// mints; a failed mint restores the deferral so the boundary
+    /// retries. `None` when no continuation was owed or the goal
     /// cannot mint.
     pub fn take_owed_continuation(
         &mut self,
@@ -455,7 +456,16 @@ impl GoalDriver {
         if !owed {
             return Ok(None);
         }
-        self.next_continuation_message(session)
+        match self.next_continuation_message(session) {
+            Ok(message) => Ok(message),
+            Err(error) => {
+                // A failed mint (the durable continuation slot never landed)
+                // restores the deferral: the natural boundary retries instead
+                // of silently dropping the owed continuation.
+                self.owed_continuation_for_rlm_work = true;
+                Err(error)
+            }
+        }
     }
 
     /// Roll back one just-minted continuation (TS `_getContinuationMessages`
