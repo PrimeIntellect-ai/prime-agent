@@ -28,8 +28,10 @@ verified MCP handshake, not just stored credentials; `pending` means
 credentials exist but verification hasn't run or succeeded yet. Entries may
 also carry `setupHint` (why a service isn't connectable yet), `unverified`
 (imported but not vetted), `verifiedAt`/`toolCount`, and `connectionIds`
-(empty when not dispatchable). Entries with `setup_required` need a developer
-app or API key first — say so honestly instead of promising one-click.
+(empty when not dispatchable). `pasteToken` marks a row the user connects by
+pasting a token in `/plugins`; there is no agent-side credential paste. Entries
+with `setup_required` need a developer app or API key first — say so honestly
+instead of promising one-click.
 
 ## Recommend, never connect
 

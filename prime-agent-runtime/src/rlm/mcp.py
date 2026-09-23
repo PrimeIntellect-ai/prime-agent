@@ -72,7 +72,8 @@ _MAX_TOOL_SEARCH_LIMIT = 50
 _MAX_TOOL_SEARCH_SERVERS = 8
 # Defensive only: the host must already whitelist safe metadata in inventory
 # entries. Never applied to live tool schemas or results — argument names there
-# are server-defined and legitimately credential-like.
+# are server-defined and legitimately credential-like. Boolean values are
+# inventory markers, not secrets, and never match (see _is_secret_key).
 _SECRET_KEY_PATTERN = re.compile(r"token|secret|password|credential|authorization|api[_-]?key|private[_-]?key", re.I)
 
 
@@ -763,6 +764,20 @@ def _plugin_page(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_secret_key(key: Any, value: Any) -> bool:
+    """Whether one inventory key is dropped as secret-looking.
+
+    A credential is a string or a structure, never a boolean: a boolean value is
+    a view marker whose name can legitimately contain a secret word
+    (``pasteToken: true`` marks the rows the user connects by pasting a token).
+    Markers are therefore kept, and every non-boolean value under a
+    secret-named key is still dropped.
+    """
+    if not isinstance(key, str) or isinstance(value, bool):
+        return False
+    return bool(_SECRET_KEY_PATTERN.search(key))
+
+
 def _sanitize_inventory_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """Copy one inventory entry, dropping secret-looking keys defensively.
 
@@ -772,7 +787,7 @@ def _sanitize_inventory_entry(entry: dict[str, Any]) -> dict[str, Any]:
     """
     cleaned: dict[str, Any] = {}
     for key, value in entry.items():
-        if isinstance(key, str) and _SECRET_KEY_PATTERN.search(key):
+        if _is_secret_key(key, value):
             continue
         cleaned[key] = _sanitize_inventory_value(value)
     return cleaned
