@@ -496,8 +496,7 @@ impl SessionFile {
                 Some(parent) => Some(parent),
                 // A minted-but-never-persisted parent: bridge to the file
                 // predecessor. The first entry has none, so the walk ends
-                // there, exactly like a plain root (`then_some` would still
-                // evaluate the subtraction at position zero and underflow).
+                // there, exactly like a plain root.
                 None if entry.parent_id.is_some() => (position > 0).then(|| position - 1),
                 None => None,
             };
