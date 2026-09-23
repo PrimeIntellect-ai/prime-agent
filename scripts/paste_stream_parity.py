@@ -295,9 +295,12 @@ def run_side(binary, corpus, script_path, out_dir, width, height):
         wait_gone(session, STREAMING_RE, timeout=40)
         (out_dir / f"{binary}-stream-done.txt").write_text(capture(session))
 
-        # The queued editor text submits whole after the turn.
+        # The queued editor text submits whole after the turn. The second
+        # turn rebuilds the full resumed context, so the TS worker can take
+        # minutes on the 19MB corpus — the ack wait is not a latency
+        # assertion and gets a generous budget.
         tmux("send-keys", "-t", session, "Enter")
-        wait_for(session, PASTE_ACK, timeout=40)
+        wait_for(session, PASTE_ACK, timeout=300)
         (out_dir / f"{binary}-submitted.txt").write_text(capture(session))
 
         # Submission integrity from the session file (ground truth, both
