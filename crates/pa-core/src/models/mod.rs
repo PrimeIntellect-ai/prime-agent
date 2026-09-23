@@ -29,8 +29,7 @@ pub use prime_inference::{
     private_prime_inference_models, PRIME_INFERENCE_BASE_URL,
 };
 pub use prime_inference_catalog::{
-    build_prime_inference_models, parse_prime_inference_model_catalog,
-    PrimeInferenceCatalogEntry,
+    build_prime_inference_models, parse_prime_inference_model_catalog, PrimeInferenceCatalogEntry,
 };
 pub use resolver::{
     build_fallback_model, failover_candidates, find_exact_model_reference_match,
