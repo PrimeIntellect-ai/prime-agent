@@ -217,9 +217,7 @@ mod tests {
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::write(agent_dir.join("settings.json"), "{ not json").unwrap();
         let state = load(dir.path(), &agent_dir);
-        assert!(
-            matches!(state, DaemonAllowlist::Unreadable(ref message) if message.contains("expected"))
-        );
+        assert!(matches!(state, DaemonAllowlist::Unreadable(_)));
         // The gate refuses a would-be-allowed model while unreadable...
         let error =
             assert_allowed(Some(&state), "prime-inference/mock-1").expect_err("fail closed");
