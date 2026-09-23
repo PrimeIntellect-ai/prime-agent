@@ -132,7 +132,7 @@ fn kept_region_messages(store: &SessionFile) -> Vec<&Value> {
         .rev()
         .find(|position| entries[**position].type_ == "compaction")
         .map(|compaction| {
-            entries[**compaction]
+            entries[*compaction]
                 .fields
                 .get("firstKeptEntryId")
                 .and_then(Value::as_str)
@@ -142,11 +142,11 @@ fn kept_region_messages(store: &SessionFile) -> Vec<&Value> {
     chain
         .iter()
         .filter(|position| match boundary {
-            Some(boundary) => **position >= *boundary,
+            Some(boundary) => **position >= boundary,
             None => true,
         })
         .filter(|position| entries[**position].type_ == "message")
-        .filter_map(|position| entries[**position].fields.get("message"))
+        .filter_map(|position| entries[*position].fields.get("message"))
         .collect()
 }
 
