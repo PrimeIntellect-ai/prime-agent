@@ -370,7 +370,7 @@ fn parse_update_options(args: &[String]) -> Option<UpdateInvocation> {
                     Some(value) if !value.starts_with('-') => value.clone(),
                     _ => {
                         fail(
-                            &format!("Missing value for {arg}."),
+                            format!("Missing value for {arg}."),
                             Some(format!("Run \"{APP_NAME} help update\" for usage.")),
                         );
                         return None;
@@ -385,7 +385,7 @@ fn parse_update_options(args: &[String]) -> Option<UpdateInvocation> {
             }
             other => {
                 fail(
-                    &format!("Unknown option for update: {other}"),
+                    format!("Unknown option for update: {other}"),
                     Some(format!("Run \"{APP_NAME} help update\" for usage.")),
                 );
                 return None;
