@@ -140,7 +140,10 @@ impl Supervisor {
     /// `worker_roster_delta`: a worker pushes its slim session summary (the
     /// Rust-native form of the TS `roster_delta` worker frame) so the
     /// roster tracks live status without polling. Authenticated by the
-    /// worker token, like `worker_register`.
+    /// worker token, like `worker_register`. One delta pushes one
+    /// `roster_update`: the summary write and any removals batch into a
+    /// single frame (TS `applyWorkerRosterDelta` + its coalescing
+    /// `scheduleRosterPush`), never one push per mutation.
     pub(crate) async fn handle_worker_roster_delta(
         self: &Arc<Self>,
         command_id: &str,
@@ -157,10 +160,17 @@ impl Supervisor {
                 None,
             );
         };
-        let mut changed = Vec::new();
-        if let Some(entry) = self.write_roster_summary(&summary, Some(&resident.worker_id)) {
-            changed.push(entry);
-        }
+        // The delta write skips `write_roster_summary`'s per-write push
+        // (that helper serves the create/adoption flows, where one write
+        // is one push): the entry write and the removals batch into one
+        // `roster_update`, the TS `applyWorkerRosterDelta` cadence (its
+        // scheduleRosterPush coalesces the whole frame's mutations).
+        let changed = vec![
+            self.roster
+                .lock()
+                .unwrap()
+                .write_summary(summary, Some(&resident.worker_id), None),
+        ];
         let mut removed_ids = Vec::new();
         for agent_id in removed {
             let mut roster = self.roster.lock().unwrap();
@@ -479,5 +489,293 @@ mod tests {
         // or thinking level rides the seeded row.
         assert!(missing.summary.get("model").is_none());
         assert!(missing.summary.get("thinkingLevel").is_none());
+    }
+
+    // --- the `worker_roster_delta` push contract ---
+
+    /// A supervisor with one registered resident worker, carrying the
+    /// token `handle_worker_roster_delta` authenticates.
+    async fn supervisor_with_registered_worker(dir: &Path) -> Supervisor {
+        let supervisor = Supervisor::new(crate::supervisor::SupervisorOptions {
+            socket_path: dir.join("daemon.sock"),
+            agent_dir: dir.join("agent"),
+        })
+        .expect("supervisor");
+        let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
+            version: 1,
+            worker_id: "w-delta".to_string(),
+            pid: 4242,
+            process_start_id: None,
+            socket_path: dir.join("worker.sock").to_string_lossy().to_string(),
+            recovery_journal_path: dir.join("recovery.jsonl").to_string_lossy().to_string(),
+            orphan_process_journal_path: None,
+            supervisor_socket_path: dir.join("daemon.sock").to_string_lossy().to_string(),
+            authentication_token: "delta-token".to_string(),
+            worker_instance_id: None,
+            root_active_session_id: "a-delta".to_string(),
+            owner_client_id: None,
+            root_session_id: None,
+            session_file: Some(dir.join("session.jsonl").to_string_lossy().to_string()),
+            session_dir: Some(dir.to_string_lossy().to_string()),
+            telemetry_disabled: Some(true),
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+            lifecycle: pa_types::daemon::DaemonWorkerLifecycle::Ready,
+            create_command: pa_types::daemon::DurableDaemonCreateCommand {
+                session_path: None,
+                no_session: None,
+                rest: Default::default(),
+            },
+            consecutive_failures: 0,
+            stop_requested_at: None,
+            archive_on_stop: None,
+            last_failure_at: None,
+            last_error: None,
+            rest: Default::default(),
+        };
+        supervisor
+            .registry
+            .insert(ResidentWorker::new(
+                "w-delta".to_string(),
+                descriptor,
+                dir.join("descriptor.json"),
+            ))
+            .await;
+        supervisor
+    }
+
+    /// The worker's session summary in the wire shape `push_roster_delta`
+    /// sends (worker.rs `session_summary`): the busy flip carries
+    /// `activity: "working"` / `isStreaming: true`, the idle flip settles
+    /// both back.
+    fn flip_summary(dir: &Path, busy: bool) -> Value {
+        json!({
+            "id": "a-delta",
+            "lifecycle": "active",
+            "activity": if busy { "working" } else { "idle" },
+            "isSessionActive": busy,
+            "isStreaming": busy,
+            "isCompacting": false,
+            "activeSessionId": "a-delta",
+            "sessionId": "s-delta",
+            "sessionFile": dir.join("session.jsonl").to_string_lossy(),
+            "sessionName": "bench",
+            "cwd": dir.to_string_lossy(),
+            "rlmDepth": 0,
+            "runtimeKind": "top-level",
+            "messageCount": 12,
+            "attachedClients": 0,
+            "thinkingLevel": "default",
+            "lastActivityAt": "2026-09-23T00:00:00.000Z",
+            "created": "2026-09-23T00:00:00.000Z",
+            "modified": "2026-09-23T00:00:00.000Z",
+            "workerState": "ready",
+            "workerPid": 4242,
+        })
+    }
+
+    /// Drain the pushed roster frames (the events a subscribed client
+    /// pump forwards); anything else on the channel is not a roster push.
+    fn drain_roster_pushes(
+        events: &mut tokio::sync::broadcast::Receiver<(ClientRouting, Value)>,
+    ) -> Vec<Value> {
+        let mut pushes = Vec::new();
+        loop {
+            match events.try_recv() {
+                Ok((ClientRouting::RosterSubscribers, payload)) => pushes.push(payload),
+                Ok(_) => continue,
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(missed)) => {
+                    panic!("roster push subscriber lagged by {missed}; drain per delta");
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+            }
+        }
+        pushes
+    }
+
+    /// TS parity for the delta push cadence (`daemon-supervisor.ts`
+    /// `applyWorkerRosterDelta` + `scheduleRosterPush`): one
+    /// `worker_roster_delta` produces one `roster_update` — the entry
+    /// write and the removals batch into one coalesced flush, never one
+    /// push per mutation. A subscriber counts the pushes, so a duplicate
+    /// is wire-visible.
+    #[tokio::test]
+    async fn worker_roster_delta_pushes_one_update_per_flip() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let supervisor = Arc::new(supervisor_with_registered_worker(dir.path()).await);
+        let mut events = supervisor.events.subscribe();
+
+        // The busy flip of a turn start: one push, running.
+        supervisor
+            .handle_worker_roster_delta(
+                "d1",
+                "worker_roster_delta",
+                "delta-token",
+                flip_summary(dir.path(), true),
+                Vec::new(),
+            )
+            .await;
+        let pushes = drain_roster_pushes(&mut events);
+        assert_eq!(pushes.len(), 1, "one roster_update per delta: {pushes:?}");
+        assert_eq!(pushes[0]["changed"][0]["status"], "running");
+        assert_eq!(
+            pushes[0]["changed"][0]["summary"]["activeSessionId"],
+            "a-delta"
+        );
+
+        // The idle flip at settle: one push, idle.
+        supervisor
+            .handle_worker_roster_delta(
+                "d2",
+                "worker_roster_delta",
+                "delta-token",
+                flip_summary(dir.path(), false),
+                Vec::new(),
+            )
+            .await;
+        let pushes = drain_roster_pushes(&mut events);
+        assert_eq!(pushes.len(), 1, "one roster_update per delta: {pushes:?}");
+        assert_eq!(pushes[0]["changed"][0]["status"], "idle");
+    }
+
+    /// A delta carrying removals batches them with the summary write into
+    /// the same single push (the TS apply writes entries and deletes
+    /// removals before the one `scheduleRosterPush` flush).
+    #[tokio::test]
+    async fn worker_roster_delta_batches_removals_into_the_same_push() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let supervisor = Arc::new(supervisor_with_registered_worker(dir.path()).await);
+        let mut events = supervisor.events.subscribe();
+
+        // A child agent the delta will remove: a subagent summary keyed
+        // parent session path + child id.
+        let child_summary = json!({
+            "activity": "idle",
+            "isSessionActive": false,
+            "activeSessionId": "a-child",
+            "sessionId": "s-child",
+            "rlmChildId": "c-1",
+            "parentSessionPath": dir
+                .path()
+                .join("session.jsonl")
+                .to_string_lossy(),
+            "runtimeKind": "subagent",
+            "rlmDepth": 1,
+        });
+        supervisor
+            .handle_worker_roster_delta(
+                "d1",
+                "worker_roster_delta",
+                "delta-token",
+                child_summary,
+                Vec::new(),
+            )
+            .await;
+        let child_pushes = drain_roster_pushes(&mut events);
+        assert_eq!(
+            child_pushes.len(),
+            1,
+            "one roster_update per delta: {child_pushes:?}"
+        );
+        let child_agent_id = child_pushes[0]["changed"][0]["agentId"]
+            .as_str()
+            .expect("child agent id")
+            .to_string();
+
+        // One delta carrying both the parent's summary and the child
+        // removal: still exactly one push, entry and removal together.
+        supervisor
+            .handle_worker_roster_delta(
+                "d2",
+                "worker_roster_delta",
+                "delta-token",
+                flip_summary(dir.path(), true),
+                vec![child_agent_id.clone()],
+            )
+            .await;
+        let pushes = drain_roster_pushes(&mut events);
+        assert_eq!(
+            pushes.len(),
+            1,
+            "removals batch into the delta push: {pushes:?}"
+        );
+        assert_eq!(pushes[0]["changed"].as_array().map(Vec::len), Some(1));
+        assert_eq!(pushes[0]["removed"][0], json!(child_agent_id));
+    }
+
+    /// The busy/idle flip cadence benchmark: alternating deltas against a
+    /// subscribed supervisor, counting `roster_update` pushes and their
+    /// serialized payloads per flip. Each push serializes twice
+    /// supervisor-side (the changed entries and the outbound frame), so
+    /// the serialization count is double the push count. Run with
+    /// `cargo test -p pa-daemon roster_delta_push_benchmark -- --ignored
+    /// --nocapture`.
+    #[ignore]
+    #[tokio::test]
+    async fn roster_delta_push_benchmark() {
+        const FLIPS: usize = 2000;
+        const WARMUP_FLIPS: usize = 50;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let supervisor = Arc::new(supervisor_with_registered_worker(dir.path()).await);
+        let mut events = supervisor.events.subscribe();
+
+        // Warm-up flips keep allocator noise out of the timed window.
+        for i in 0..WARMUP_FLIPS {
+            let summary = flip_summary(dir.path(), i % 2 == 0);
+            supervisor
+                .handle_worker_roster_delta(
+                    "warm",
+                    "worker_roster_delta",
+                    "delta-token",
+                    summary,
+                    Vec::new(),
+                )
+                .await;
+            drain_roster_pushes(&mut events);
+        }
+
+        let mut pushes = 0usize;
+        let mut payload_bytes = 0usize;
+        let mut handler_nanos = 0u128;
+        for i in 0..FLIPS {
+            let summary = flip_summary(dir.path(), i % 2 == 0);
+            let start = std::time::Instant::now();
+            supervisor
+                .handle_worker_roster_delta(
+                    "b",
+                    "worker_roster_delta",
+                    "delta-token",
+                    summary,
+                    Vec::new(),
+                )
+                .await;
+            handler_nanos += start.elapsed().as_nanos();
+            for push in drain_roster_pushes(&mut events) {
+                pushes += 1;
+                payload_bytes += serde_json::to_string(&push)
+                    .map(|payload| payload.len())
+                    .unwrap_or(0);
+            }
+        }
+        let flips = FLIPS as f64;
+        println!("flips: {FLIPS}");
+        println!(
+            "roster_update pushes: {pushes} ({:.3}/flip)",
+            pushes as f64 / flips
+        );
+        println!(
+            "supervisor-side serializations: {} ({:.3}/flip; two per push)",
+            2 * pushes,
+            2.0 * pushes as f64 / flips
+        );
+        println!(
+            "pushed payload bytes: {payload_bytes} ({:.0}/flip)",
+            payload_bytes as f64 / flips
+        );
+        println!(
+            "handler wall time: {:.2} us/flip",
+            handler_nanos as f64 / flips / 1000.0
+        );
     }
 }
