@@ -632,6 +632,8 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
 
     stop_processes(user)
     write_fixtures(agent_dir, workspace, spec, uid=uid)
+    # Flush so dirty-page write-back of the fresh fixture cannot land inside the timed cold-resume window.
+    os.sync()
     env = environment(user)
     runuser = "/usr/sbin/runuser"
     try:
@@ -796,6 +798,8 @@ def ui_measure(request: Request, side: Side, trial: int, *, results: Path, homes
         metric = "scheduled_catalog"
         stop_processes(user)
         cold_path, expected_jobs = write_catalog_fixtures(agent_dir, workspace, uid=uid)
+        # Flush so dirty-page write-back of the fresh fixture cannot land in the timed create->ready window.
+        os.sync()
         socket_path = Path(f"/tmp/prime-catalog-{uid}-{trial}.sock")
         with (results / f"catalog-daemon-{trial}.log").open("w") as log:
             catalog_daemon = subprocess.Popen(

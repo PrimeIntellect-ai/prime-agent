@@ -140,6 +140,7 @@ raw trials before acting on small changes; sandbox scheduling and filesystem cac
 A separate probe drives the interactive TUI over a PTY with the same `pexpect`/`pyte` harness the
 startup metrics use, against a deterministic on-disk fixture set. Every UI trial regenerates the
 sessions directory, session artifacts, and spawn ledger from scratch, so trials cannot inherit state.
+Each fixture write is followed by `os.sync()` so its write-back cannot overlap the timed windows.
 
 The fixture set is fixed and mirrors a long-lived install: 194 top-level sessions (3 large —
 one of them a very large ~40 MB transcript — 150 medium, 40 small fan-out children of the chain
