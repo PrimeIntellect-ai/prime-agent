@@ -6475,18 +6475,34 @@ mod tests {
             agent_starts, 3,
             "the held turn, the steers' ONE batched turn, the follow-up's: {events:?}"
         );
-        let replies: Vec<&Value> = events
+        let replies: Vec<String> = events
             .iter()
             .filter(|event| {
                 event.get("type").and_then(Value::as_str) == Some("message_end")
                     && event["message"]["role"] == "assistant"
                     && event["message"].get("stopReason").and_then(Value::as_str) != Some("aborted")
             })
+            .filter_map(|event| {
+                let message = event.get("message")?;
+                let content = message.get("content")?;
+                content
+                    .as_array()
+                    .and_then(|parts| parts.first())
+                    .and_then(|part| part.get("text"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
             .collect();
+        // The batch's one reply is the next scripted response; the
+        // follow-up's turn takes the one after it - the steers never
+        // consume one reply each.
         assert_eq!(
-            replies.len(),
-            3,
-            "one reply per turn - the steers' batch answers once, never per steer: {events:?}"
+            replies,
+            [
+                "steering one reply".to_string(),
+                "steering two reply".to_string()
+            ],
+            "ONE reply for the whole steers' batch, one for the follow-up: {events:?}"
         );
         assert!(
             events.iter().any(|event| {
