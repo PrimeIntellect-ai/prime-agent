@@ -3394,11 +3394,8 @@ impl Worker {
     /// anything armed; an empty lane (or an all-injected one) arms nothing
     /// and the caller falls back to the plain abort (TS
     /// `queuedSteering.length === 0 || !canResume`).
-    // The caller is the `abort_and_send_queued` handler (schema 29), owned
-    // by the abort-parity lane per the fleet surface split: this branch
-    // precedes it, so the seam is lint-silenced until the rebase onto its
-    // head wires the call (the merged tree carries both).
-    #[allow(dead_code)]
+    // Called by the `abort_and_send_queued` funnel (the wire command's
+    // body, #2599's handler once rebased).
     pub(crate) fn arm_forced_all_steering(&self) -> bool {
         let mut core = self.core.lock().unwrap();
         let armable = |item: &QueuedItem| {
@@ -3416,6 +3413,7 @@ impl Worker {
         true
     }
 
+EAD
     /// TS `requestAbort()`: the abort funnel behind both abort commands
     /// (`abort` and `abort_and_send_queued`) - suspend queued-input
     /// admission, cancel the queue-invisible turn actions, abort the
@@ -8504,6 +8502,239 @@ mod turn_stream_tests {
             ],
             "the follow-up prefix batched into one turn: {rows:?}"
         );
+    }
+
+    /// Kevin's acceptance case (the multi-steer abort flow, TS
+    /// `abortAndSendQueued` + `interactive-mode.ts`'s Ctrl+C path): on the
+    /// abort of a streaming turn, ALL visible queued plain-user steering
+    /// messages send together as the next batched turn — the follow-up
+    /// lane stays queued behind it (never discarded, never merged), then
+    /// runs in order once the session goes idle; the default queue mode
+    /// ("one-at-a-time") is unchanged, and with nothing armable queued the
+    /// abort runs abort-only (the queue parks behind the suspension).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+    async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups() {
+        let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir =
+            std::env::temp_dir().join(format!("pa-worker-abort-send-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = WorkerConfig {
+            socket_path: dir.join("worker.sock"),
+            supervisor_socket_path: PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "abort-send-family".to_string(),
+            agent_dir: dir.join("agent"),
+            recovery_journal_path: dir.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(json!({
+                "engine": "faux",
+                "responses": [
+                    { "text": "held reply", "delayMs": 600000 },
+                    "batch reply",
+                    "follow-up reply"
+                ],
+            })),
+        };
+        let worker = std::sync::Arc::new(Worker::new(config, None));
+        let created = worker
+            .dispatch(
+                "create",
+                &json!({ "noSession": true, "cwd": "/tmp", "name": "abort-send-family" }),
+            )
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        // The held turn parks the queue behind it (the 600s fetch hold).
+        let prompt = worker
+            .dispatch(
+                "prompt",
+                &json!({
+                    "activeSessionId": "abort-send-family",
+                    "message": "held turn for the batch abort",
+                }),
+            )
+            .await;
+        assert!(prompt.success, "prompt failed: {prompt:?}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if worker.core.lock().unwrap().busy {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the held turn was never admitted"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        // Two steering messages and one follow-up behind the streaming
+        // turn (the real wire admission path: queue-visible, policy-queued
+        // rows).
+        for message in ["steering one", "steering two"] {
+            let steered = worker
+                .dispatch("steer", &json!({ "message": message }))
+                .await;
+            assert!(steered.success, "steer failed: {steered:?}");
+        }
+        let follow = worker
+            .dispatch(
+                "follow_up",
+                &json!({ "message": "follow up after the batch" }),
+            )
+            .await;
+        assert!(follow.success, "follow_up failed: {follow:?}");
+        // The funnel (the wire command's body — #2599's handler calls it):
+        // arm the visible plain-user steering, abort the run, resume the
+        // pump. The default queue mode stays "one-at-a-time".
+        let sent = worker.abort_and_send_queued();
+        assert!(sent, "the armed steering batch sent with the abort");
+        let idle = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            worker.dispatch("wait_for_idle", &json!({})),
+        )
+        .await;
+        assert!(idle.is_ok(), "the session never went idle after the abort");
+        assert!(idle.unwrap().success, "wait_for_idle failed");
+        // The aborted turn's row + the batched steers + the follow-up, in
+        // order: the two steers share ONE turn (one reply), the follow-up
+        // runs after it as its own turn.
+        let messages = worker.dispatch("get_messages", &json!({})).await;
+        assert!(messages.success, "get_messages failed: {messages:?}");
+        let wire_messages = messages
+            .data
+            .as_ref()
+            .and_then(|data| data.get("messages"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let texts: Vec<String> = wire_messages
+            .iter()
+            .filter(|message| crate::types::message_role(message) == Some("user"))
+            .map(crate::types::message_text)
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "held turn for the batch abort",
+                "steering one",
+                "steering two",
+                "follow up after the batch",
+            ],
+            "the steering batch sent as one turn; the follow-up ran after it: {texts:?}"
+        );
+        // The reply granularity: the aborted row, then ONE assistant
+        // reply for the whole steering batch, then the follow-up's own
+        // reply (never one per steer).
+        let replies: Vec<String> = wire_messages
+            .iter()
+            .filter(|message| crate::types::message_role(message) == Some("assistant"))
+            .map(crate::types::message_text)
+            .collect();
+        assert_eq!(
+            replies.len(),
+            3,
+            "the aborted row, the batch's one reply, the follow-up's reply: {replies:?}"
+        );
+        assert_eq!(
+            &replies[1..],
+            &["batch reply".to_string(), "follow-up reply".to_string()],
+            "one reply for the batch, one for the follow-up: {replies:?}"
+        );
+        {
+            let core = worker.core.lock().unwrap();
+            assert!(
+                core.steering.is_empty() && core.follow_up.is_empty(),
+                "both lanes drained in order"
+            );
+            assert_eq!(
+                core.steering_mode, "one-at-a-time",
+                "the default mode is untouched"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The abort-only arm (TS `queuedSteering.length === 0`): with no
+    /// armable steering queued the funnel aborts and the queue parks
+    /// behind the suspension — a follow-up never rides a forced batch.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
+    async fn abort_and_send_queued_with_no_steering_aborts_only_and_parks_the_queue() {
+        let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir =
+            std::env::temp_dir().join(format!("pa-worker-abort-only-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = WorkerConfig {
+            socket_path: dir.join("worker.sock"),
+            supervisor_socket_path: PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "abort-only-family".to_string(),
+            agent_dir: dir.join("agent"),
+            recovery_journal_path: dir.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(json!({
+                "engine": "faux",
+                "responses": [{ "text": "held again", "delayMs": 600000 }, "later"]
+            })),
+        };
+        let worker = std::sync::Arc::new(Worker::new(config, None));
+        let created = worker
+            .dispatch(
+                "create",
+                &json!({ "noSession": true, "cwd": "/tmp", "name": "abort-only-family" }),
+            )
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        let prompt = worker
+            .dispatch(
+                "prompt",
+                &json!({
+                    "activeSessionId": "abort-only-family",
+                    "message": "held turn for the abort-only arm",
+                }),
+            )
+            .await;
+        assert!(prompt.success, "prompt failed: {prompt:?}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if worker.core.lock().unwrap().busy {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the held turn was never admitted"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        // Only a follow-up parks (nothing armable in the steering lane).
+        let follow = worker
+            .dispatch("follow_up", &json!({ "message": "follow up parked" }))
+            .await;
+        assert!(follow.success, "follow_up failed: {follow:?}");
+        let sent = worker.abort_and_send_queued();
+        assert!(!sent, "nothing armable: the funnel ran abort-only");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        {
+            let core = worker.core.lock().unwrap();
+            assert!(
+                core.queued_input_suspended,
+                "the abort parked the queue behind the suspension"
+            );
+            assert_eq!(
+                core.follow_up.len(),
+                1,
+                "the parked follow-up survived the abort, undelivered"
+            );
+            assert!(core.steering.is_empty(), "the steering lane stays empty");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The waiting prompt resolves only after the turn fully unwinds (TS
