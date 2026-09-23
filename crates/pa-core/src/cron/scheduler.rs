@@ -142,12 +142,19 @@ impl Drop for RunningGuard<'_> {
 
 impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
     pub async fn run_due_at(&self, now: u64) -> anyhow::Result<usize> {
-        if self.running.load(Ordering::SeqCst)
-            || (self.stopped.load(Ordering::SeqCst) && self.has_started.load(Ordering::SeqCst))
+        // Claim the pass atomically: a load-then-store pair let two
+        // concurrent calls both pass, and the second's pass-head
+        // recovery cleared the first call's LIVE dispatch (its result
+        // recording found nothing, and one-shot jobs could complete
+        // before their invocation settled).
+        if (self.stopped.load(Ordering::SeqCst) && self.has_started.load(Ordering::SeqCst))
+            || self
+                .running
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_err()
         {
             return Ok(0);
         }
-        self.running.store(true, Ordering::SeqCst);
         // Panic safety: a claim/dispatch that unwinds must not wedge the
         // re-entrancy flag at `true` — that would silence every later
         // pass while the timer keeps spinning. The guard resets it on
@@ -322,13 +329,22 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
         let core = self.core.clone();
         let handle = tokio::spawn(async move {
             loop {
+                // Register the wake BEFORE reading the store (the enabled
+                // future holds a waiter slot from here): a mutation whose
+                // notify_waiters lands between the read and the await is
+                // captured, never dropped on an un-registered park (the
+                // pre-fix race let a job created in that window strand a
+                // parked timer forever).
+                let notified = core.wake.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
                 let Some(next) = core.store.next_active_run_at() else {
                     // Nothing to fire: park until a mutation re-arms
                     // (an explicit stop is the only exit).
                     if core.stopped.load(Ordering::SeqCst) {
                         return;
                     }
-                    core.wake.notified().await;
+                    notified.await;
                     continue;
                 };
                 let now = core.hooks.now();
@@ -337,7 +353,7 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
                 );
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => {}
-                    _ = core.wake.notified() => continue,
+                    _ = &mut notified => continue,
                 }
                 if core.stopped.load(Ordering::SeqCst) {
                     return;
