@@ -452,6 +452,8 @@ mod tests {
             }),
         )
         .await
+        // The timeout layer unwraps; the panic surfaces as the join
+        // error underneath it.
         .expect("first pass settles");
         assert!(first.is_err(), "the panicking pass surfaced: {first:?}");
         // A second job becomes due; the pass must still claim and run it
@@ -468,6 +470,7 @@ mod tests {
         )
         .await
         .expect("second pass settles")
+        .expect("second pass joined")
         .expect("second pass ran");
         assert!(ran > 0, "the wedged flag skipped the second pass: {ran}");
         scheduler.stop().await;
