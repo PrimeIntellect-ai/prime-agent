@@ -435,7 +435,11 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let store = Arc::new(AgentCronJobStore::new(dir.path().join("jobs.json")));
         let now = 1_700_000_000_000;
-        store.create(&input("tick", "every 10m", now)).unwrap();
+        // Created 10m ago on the fixed test clock: due immediately (a
+        // job created at `now` would sit 10m out and never dispatch).
+        store
+            .create(&input("tick", "every 10m", now - 600_000))
+            .unwrap();
         let hooks = Arc::new(PanickingHooks {
             runs: Arc::new(AtomicUsize::new(0)),
             panic_first: AtomicBool::new(true),
