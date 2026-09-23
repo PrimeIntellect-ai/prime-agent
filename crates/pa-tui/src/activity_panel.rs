@@ -452,10 +452,14 @@ impl ActivityPanel {
             let detail_rows = budget.saturating_sub(tail_rows).min(detail_cap(row.group));
             lines.extend(detail_lines(theme, width, row, detail_rows));
             if let Some((_, tail)) = tail {
+                // A zero budget renders no tail at all: the heading itself
+                // would spend a line the frame needs on a short viewport.
                 let tail_budget = budget.saturating_sub(detail_rows);
-                lines.push(text(ThemeColor::Muted, "Output tail".to_string()));
-                for output in tail.iter().take(tail_budget.saturating_sub(1)) {
-                    lines.push(text(ThemeColor::Muted, output.clone()));
+                if tail_budget > 0 {
+                    lines.push(text(ThemeColor::Muted, "Output tail".to_string()));
+                    for output in tail.iter().take(tail_budget.saturating_sub(1)) {
+                        lines.push(text(ThemeColor::Muted, output.clone()));
+                    }
                 }
             }
         }
