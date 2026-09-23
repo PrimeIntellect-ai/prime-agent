@@ -38,6 +38,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -163,16 +164,27 @@ def launch(session, binary, sandbox, script_path, shared_cwd):
         "-c", shared_cwd,
     )
     time.sleep(0.5)
-    env = (
-        f"HOME={home} TMPDIR={tmp} "
-        f"PRIME_AGENT_CODING_AGENT_DIR={agent} "
-        f"PRIME_AGENT_FAUX_SCRIPT={script_path} "
-        "PRIME_AGENT_DISABLE_ANALYTICS=1 "
-    )
+    # The pane's shell parses the typed command: every path is
+    # shell-quoted (an --out with spaces must not split the environment
+    # assignment) and the binary resolves to an absolute path first (a
+    # relative one would be looked up under shared_cwd, the new
+    # session's cwd, not the checkout the harness ran from).
     package_dir = os.environ.get("PI_PACKAGE_DIR") or find_runtime_package_dir()
+    env = " ".join(
+        f"{name}={shlex.quote(value)}"
+        for name, value in (
+            ("HOME", home),
+            ("TMPDIR", tmp),
+            ("PRIME_AGENT_CODING_AGENT_DIR", agent),
+            ("PRIME_AGENT_FAUX_SCRIPT", script_path),
+            ("PRIME_AGENT_DISABLE_ANALYTICS", "1"),
+            ("PI_PACKAGE_DIR", package_dir),
+        )
+    )
     command = (
-        f"{env} PI_PACKAGE_DIR={package_dir} "
-        f"{binary} --daemon-socket {agent}/daemon.sock --model {TS_SCRIPT_MODEL}"
+        f"{env} {shlex.quote(os.path.abspath(binary))} "
+        f"--daemon-socket {shlex.quote(os.path.join(agent, 'daemon.sock'))} "
+        f"--model {TS_SCRIPT_MODEL}"
     )
     tmux("send-keys", "-t", session, command, "Enter")
     wait_for(session, "Collapsed mode", timeout=60)
