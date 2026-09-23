@@ -175,6 +175,49 @@ pub struct Supervisor {
         std::sync::Mutex<crate::compaction_supervision::TerminalCompactionJournal>,
 }
 
+/// The boot the descriptor-adoption pass runs under. An update boot
+/// relaunches kept workers from their descriptors before the roster
+/// restore walks the rows (spec §6 step 2's create-or-adopt order). A
+/// plain startup adopts live workers and revives only genuinely
+/// interrupted ones: a supervisor restart must not mass-revive the
+/// historical idle/completed sessions a TS daemon leaves down (their
+/// clients reopen them lazily through a fresh create).
+#[derive(Clone, PartialEq, Eq)]
+enum AdoptionBoot {
+    /// Update boot: the roster's kept workers (by worker id) relaunch
+    /// eagerly ahead of the restore pass; busy-at-crash workers revive
+    /// too. Descriptors the update does not keep stay down — the update
+    /// must not revive the sessions a plain boot parked (a reopened
+    /// session file may already have a newer worker). The kept set is
+    /// shared (an `Arc`): one clone per descriptor task, not a deep
+    /// copy of every kept id per task.
+    UpdateRoster {
+        kept: Arc<std::collections::HashSet<String>>,
+    },
+    /// Plain startup: only journal-proven live work revives.
+    PlainStartup,
+}
+
+/// One descriptor's boot-adoption decision, reported as a count in the
+/// pass's `worker_adoption` event (telemetry: counts only, never session
+/// payload).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdoptionOutcome {
+    /// Live socket adopted (incl. a worker that re-registered before the
+    /// descriptor scan reached it).
+    AdoptedLive,
+    /// Dead descriptor relaunched (busy evidence on a plain boot, kept
+    /// worker on an update boot).
+    Revived,
+    /// Dead descriptor with no durable busy evidence: stayed down.
+    SkippedIdle,
+    /// The descriptor carried a durable stop tombstone: the boot re-ran
+    /// the stop's finalization instead of adopting or reviving.
+    Stopped,
+    /// Adoption or relaunch failed.
+    Failed,
+}
+
 impl Supervisor {
     pub fn new(options: SupervisorOptions) -> Result<Self> {
         let descriptor_dir =
@@ -240,6 +283,32 @@ impl Supervisor {
         }
         if let Some(client) = &*self.telemetry.lock().unwrap() {
             pa_core::session_engine::telemetry::track_worker_children_closed(client, count);
+        }
+    }
+
+    /// Emit the boot descriptor-adoption pass's `daemon event` (schema v1,
+    /// kind `worker_adoption`): the boot kind and per-outcome counts,
+    /// primitives only — never session payload.
+    #[allow(clippy::too_many_arguments)]
+    fn note_worker_adoption(
+        &self,
+        boot: &str,
+        adopted_live: usize,
+        revived: usize,
+        skipped_idle: usize,
+        stopped: usize,
+        failed: usize,
+    ) {
+        if let Some(client) = &*self.telemetry.lock().unwrap() {
+            pa_core::session_engine::telemetry::track_worker_adoption(
+                client,
+                boot,
+                adopted_live,
+                revived,
+                skipped_idle,
+                stopped,
+                failed,
+            );
         }
     }
 
@@ -480,8 +549,20 @@ impl Supervisor {
         // the rest).
         let adoption = {
             let supervisor = Arc::clone(&self);
+            let boot = match roster.as_ref() {
+                Some(roster) => AdoptionBoot::UpdateRoster {
+                    kept: Arc::new(
+                        roster
+                            .workers
+                            .iter()
+                            .map(|worker| worker.worker_id.clone())
+                            .collect(),
+                    ),
+                },
+                None => AdoptionBoot::PlainStartup,
+            };
             tokio::spawn(async move {
-                supervisor.adopt_persisted_workers().await;
+                supervisor.adopt_persisted_workers(boot).await;
             })
         };
         {
@@ -590,20 +671,62 @@ impl Supervisor {
     /// relaunch (create replay) must not delay adopting live sessions. The
     /// fan-out is capped ([`crate::recovery_pacing::ADOPTION_CONCURRENCY`]):
     /// a large sessions dir must not turn the pass into a relaunch storm
-    /// that starves the control plane for its whole duration.
-    async fn adopt_persisted_workers(self: &Arc<Self>) {
+    /// that starves the control plane for its whole duration. The pass
+    /// reports its decisions as one `worker_adoption` event (counts only,
+    /// never session payload).
+    async fn adopt_persisted_workers(self: &Arc<Self>, boot: AdoptionBoot) {
         let descriptors = load_descriptors(&self.descriptor_dir, &self.options.socket_path);
+        let adopted_live = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let revived = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let skipped_idle = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let failed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let jobs: Vec<_> = descriptors
             .into_iter()
             .map(|(path, descriptor)| {
                 let supervisor = Arc::clone(self);
+                let boot = boot.clone();
+                let adopted_live = Arc::clone(&adopted_live);
+                let revived = Arc::clone(&revived);
+                let skipped_idle = Arc::clone(&skipped_idle);
+                let stopped = Arc::clone(&stopped);
+                let failed = Arc::clone(&failed);
                 move || async move {
-                    supervisor.adopt_persisted_worker(path, descriptor).await;
+                    let outcome = supervisor
+                        .adopt_persisted_worker(path, descriptor, boot)
+                        .await;
+                    let counter = match outcome {
+                        AdoptionOutcome::AdoptedLive => adopted_live,
+                        AdoptionOutcome::Revived => revived,
+                        AdoptionOutcome::SkippedIdle => skipped_idle,
+                        AdoptionOutcome::Stopped => stopped,
+                        AdoptionOutcome::Failed => failed,
+                    };
+                    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             })
             .collect();
         crate::recovery_pacing::run_bounded(jobs, crate::recovery_pacing::ADOPTION_CONCURRENCY)
             .await;
+        let adopted_live = adopted_live.load(std::sync::atomic::Ordering::Relaxed);
+        let revived = revived.load(std::sync::atomic::Ordering::Relaxed);
+        let skipped_idle = skipped_idle.load(std::sync::atomic::Ordering::Relaxed);
+        let stopped = stopped.load(std::sync::atomic::Ordering::Relaxed);
+        let failed = failed.load(std::sync::atomic::Ordering::Relaxed);
+        if adopted_live + revived + skipped_idle + stopped + failed > 0 {
+            let boot_label = match boot {
+                AdoptionBoot::UpdateRoster { .. } => "update",
+                AdoptionBoot::PlainStartup => "plain",
+            };
+            self.note_worker_adoption(
+                boot_label,
+                adopted_live,
+                revived,
+                skipped_idle,
+                stopped,
+                failed,
+            );
+        }
     }
 
     /// Adopt one persisted worker descriptor. Serialized against worker
@@ -614,7 +737,8 @@ impl Supervisor {
         self: &Arc<Self>,
         path: PathBuf,
         descriptor: crate::descriptor::WorkerDescriptor,
-    ) {
+        boot: AdoptionBoot,
+    ) -> AdoptionOutcome {
         let worker_id = descriptor.worker_id.clone();
         let guard = self.registry.adoption_guard(&worker_id).await;
         if self.registry.get(&worker_id).await.is_some() {
@@ -622,11 +746,12 @@ impl Supervisor {
             self.log_line(&format!(
                 "session worker {worker_id} already registered; skipping descriptor adoption"
             ));
-            return;
+            return AdoptionOutcome::AdoptedLive;
         }
         let socket_path = PathBuf::from(&descriptor.socket_path);
         let alive = socket::can_connect(&socket_path, Duration::from_millis(500)).await;
         let pid = descriptor.pid;
+        let journal_path = PathBuf::from(&descriptor.recovery_journal_path);
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, path);
         // The stop tombstone outranks liveness (TS's stop ownership: the
         // kill was durable intent BEFORE the worker was told): a
@@ -670,7 +795,7 @@ impl Supervisor {
                     "tombstoned stop of session worker {worker_id} not settled; descriptor kept"
                 ));
             }
-            return;
+            return AdoptionOutcome::Stopped;
         }
         let result = if alive {
             let adopted = self
@@ -684,12 +809,32 @@ impl Supervisor {
             }
             adopted
         } else {
-            // Dead worker: relaunch from the durable create command. The
-            // worker rehydrates the session store, restoring history and
-            // the persisted queue snapshot.
+            let interrupted =
+                crate::journal::WorkerRecoveryJournal::read_interrupted(&journal_path);
+            let kept = match &boot {
+                AdoptionBoot::UpdateRoster { kept } => kept.contains(&worker_id),
+                AdoptionBoot::PlainStartup => false,
+            };
+            if !interrupted && !kept {
+                // Dead worker with no durable busy state — and, on an
+                // update boot, not kept by the update's roster: not
+                // interrupted work. Leave it down (the descriptor stays
+                // on disk, inert) — the session reopens lazily through
+                // the next client create, like a TS supervisor that
+                // parks dead workers instead of reviving them; an
+                // update that did not keep it must not revive it either.
+                self.log_line(&format!(
+                    "session worker {worker_id} was idle at exit; not revived (reopens on the next client open)"
+                ));
+                return AdoptionOutcome::SkippedIdle;
+            }
+            // Dead worker with journal-proven live work (or a kept
+            // worker on an update boot): relaunch from the durable
+            // create command. The worker rehydrates the session store,
+            // restoring history and the persisted queue snapshot.
             self.relaunch_worker(&resident).await.map(|_| ())
         };
-        match result {
+        let outcome = match result {
             Ok(()) => {
                 self.registry.insert(Arc::clone(&resident)).await;
                 self.spawn_monitor(Arc::clone(&resident), None, pid);
@@ -712,12 +857,19 @@ impl Supervisor {
                 self.log_line(&format!(
                     "adopted session worker {worker_id} (was alive: {alive})"
                 ));
+                if alive {
+                    AdoptionOutcome::AdoptedLive
+                } else {
+                    AdoptionOutcome::Revived
+                }
             }
             Err(error) => {
                 self.log_line(&format!("could not adopt worker {worker_id}: {error:#}"));
+                AdoptionOutcome::Failed
             }
-        }
+        };
         drop(guard);
+        outcome
     }
 
     /// Watch a worker process: on unexpected exit, restart with backoff.

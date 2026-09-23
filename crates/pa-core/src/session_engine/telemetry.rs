@@ -559,6 +559,31 @@ pub fn track_sessions_archived(client: &TelemetryClient, count: usize) {
     client.track("daemon event", properties);
 }
 
+/// Track the boot descriptor-adoption pass's `daemon event` (schema v1,
+/// kind `worker_adoption`): the boot kind and per-outcome counts, never
+/// session payload. `skipped_idle` counts the dead descriptors the durable
+/// busy-evidence filter parked (plain boots only; update boots revive every
+/// kept worker ahead of the roster restore).
+pub fn track_worker_adoption(
+    client: &TelemetryClient,
+    boot: &str,
+    adopted_live: usize,
+    revived: usize,
+    skipped_idle: usize,
+    stopped: usize,
+    failed: usize,
+) {
+    let mut properties = base_properties("daemon");
+    properties.set("kind", Value::from("worker_adoption"));
+    properties.set("boot", Value::from(boot));
+    properties.set("adopted_live", Value::from(adopted_live));
+    properties.set("revived", Value::from(revived));
+    properties.set("skipped_idle", Value::from(skipped_idle));
+    properties.set("stopped", Value::from(stopped));
+    properties.set("failed", Value::from(failed));
+    client.track("daemon event", properties);
+}
+
 /// Track the live-catalog warm-up settle's `daemon event` (schema v1,
 /// kind `catalog_refresh`): how many models the resolved
 /// no-cold-start chain serves after the daemon's startup refresh. A

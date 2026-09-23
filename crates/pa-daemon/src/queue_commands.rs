@@ -147,10 +147,12 @@ impl Worker {
         // emits the queue update).
         let core = self.core.lock().unwrap();
         let snapshot = self.snapshot_locked(&core);
-        let lanes = crate::worker::queue_lanes(&core);
-        let active_session_id = core.active_session_id.clone();
         drop(core);
-        self.persist_queue_snapshot(&active_session_id, &lanes);
+        // The edit refreshed the lanes: the verdict follows them (a delete
+        // of the last queued item settles the session back to idle).
+        self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
+            operation: "queue_mutated",
+        });
         let _ = self.emit_action_update(&snapshot);
         if mutation_type != "move" {
             self.work_notify.notify_one();

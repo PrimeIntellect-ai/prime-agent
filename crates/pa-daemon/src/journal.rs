@@ -367,6 +367,18 @@ impl WorkerRecoveryJournal {
         Ok(parse_worker_records(path)?.into_values().collect())
     }
 
+    /// Does the journal prove live work at the worker's last exit? A plain
+    /// supervisor startup adopts a dead worker only when this holds (a
+    /// restart must not mass-revive historical sessions): a latest `busy`
+    /// record marks an in-flight turn or an admitted-but-undelivered
+    /// prompt/queue lane. An unreadable journal proves nothing —
+    /// uncertainty must not revive a session.
+    pub fn read_interrupted(path: &Path) -> bool {
+        Self::read_latest(path)
+            .map(|records| records.iter().any(|record| record.busy))
+            .unwrap_or(false)
+    }
+
     pub fn record(
         &mut self,
         active_session_id: &str,
@@ -581,6 +593,39 @@ mod tests {
         assert_eq!(latest.len(), 2);
         let s1 = latest.iter().find(|r| r.active_session_id == "s1").unwrap();
         assert!(!s1.busy);
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn worker_journal_interrupted_evidence_tracks_latest_busy() {
+        let path = temp_path("interrupted.recovery.jsonl");
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        // Idle sessions prove nothing: no interrupted work to revive.
+        journal
+            .record("s1", "sess1", None, false, "shutdown")
+            .unwrap();
+        journal.record("s2", "sess2", None, false, "ready").unwrap();
+        assert!(!WorkerRecoveryJournal::read_interrupted(&path));
+        // One busy session is durable evidence of interrupted work.
+        journal
+            .record("s2", "sess2", Some("/b.jsonl"), true, "create")
+            .unwrap();
+        assert!(WorkerRecoveryJournal::read_interrupted(&path));
+        // The latest record per session decides: s2 settles back to idle.
+        journal
+            .record("s2", "sess2", None, false, "shutdown")
+            .unwrap();
+        assert!(!WorkerRecoveryJournal::read_interrupted(&path));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn worker_journal_missing_or_unreadable_file_is_not_interrupted() {
+        let path = temp_path("missing.recovery.jsonl");
+        // No journal: no evidence, so no revival on uncertainty.
+        assert!(!WorkerRecoveryJournal::read_interrupted(&path));
+        std::fs::write(&path, "not json").unwrap();
+        assert!(!WorkerRecoveryJournal::read_interrupted(&path));
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 }

@@ -167,9 +167,16 @@ session's current worker (the stale-id rebind).
 
 | property | type | notes |
 |---|---|---|
-| `kind` | string | `worker_spawned`, `worker_exited`, `worker_restarted`, `attach`, `reattach`, `detach`, `sessions_archived`, `worker_children_closed`, `session_rebound`, `catalog_refresh`, `compaction_abort_declared` |
+| `kind` | string | `worker_spawned`, `worker_exited`, `worker_restarted`, `attach`, `reattach`, `detach`, `sessions_archived`, `worker_children_closed`, `session_rebound`, `catalog_refresh`, `compaction_abort_declared`, `worker_adoption` |
 | `exit_reason` | string | only for `worker_exited`: `normal` / `crash` |
 | `count` | number | only for `sessions_archived`, `worker_children_closed`, `catalog_refresh`, and `compaction_abort_declared` (always 1): how many sessions the sweep moved to the archive / how many resident RLM children the supervisor closed with a hard-killed parent worker / how many models the resolved no-cold-start chain serves after the daemon's startup catalog refresh / one wedged-worker compaction the supervisor declared aborted |
+| `boot` | string | only for `worker_adoption`: `plain` / `update` — the boot the descriptor-adoption pass ran under |
+| `adopted_live` | number | only for `worker_adoption`: descriptors whose live socket the pass adopted |
+| `revived` | number | only for `worker_adoption`: dead descriptors relaunched (busy evidence on a plain boot, kept worker on an update boot) |
+| `skipped_idle` | number | only for `worker_adoption`: dead descriptors the durable busy-evidence filter parked (idle at exit; plain boots only) |
+| `stopped` | number | only for `worker_adoption`: descriptors whose durable stop tombstone the boot re-finalized instead of adopting or reviving |
+| `failed` | number | only for `worker_adoption`: descriptors whose adoption or relaunch failed |
+
 
 ### `mcp connector used`
 

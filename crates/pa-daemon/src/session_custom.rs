@@ -213,9 +213,16 @@ impl Worker {
             }
             actions.len()
         };
-        // TS records the worker recovery state once per successful restore.
+        // TS records the worker recovery state once per successful restore
+        // with busy=true: restored lanes are undelivered live work. The
+        // claim must be true — the lane snapshot rides the same locked
+        // read as the verdict (one checkpoint), so a revived worker
+        // replays them and a concurrent queue clear cannot leave a
+        // stale snapshot behind.
         if restored > 0 {
-            let _ = self.record_recovery(false, "actions_restored");
+            self.checkpoint_queue(crate::worker::QueueCheckpoint::Admitted {
+                operation: "actions_restored",
+            });
             self.work_notify.notify_one();
         }
         response_success(

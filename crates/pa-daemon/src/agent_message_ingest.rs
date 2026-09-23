@@ -163,10 +163,12 @@ impl Worker {
         }
         core.follow_up = retained_follow_up;
         let snapshot = self.snapshot_locked(&core);
-        let lanes = crate::worker::queue_lanes(&core);
-        let active_session_id = core.active_session_id.clone();
         drop(core);
-        self.persist_queue_snapshot(&active_session_id, &lanes);
+        // The sweep removed queued agent messages: the verdict follows the
+        // remaining lanes (a swept-out last item settles the session).
+        self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
+            operation: "queue_mutated",
+        });
         let _ = self.emit_action_update(&snapshot);
         json!({ "steering": steering, "followUp": follow_up })
     }
