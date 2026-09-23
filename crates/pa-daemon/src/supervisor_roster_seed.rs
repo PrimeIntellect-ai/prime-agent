@@ -52,6 +52,13 @@ impl Supervisor {
         // seeded rows (its passivation already settled and never
         // revisits them).
         let roots = self.roster_seed_roots().await;
+        // The ledger handle for the per-write liveness revalidation
+        // (memoized by the supervisor: the same instance the edge
+        // snapshot read, so its replay cache carries the deletions
+        // that land during this seed).
+        let Ok(ledger) = self.rlm_spawn_ledger_for(None).await else {
+            return;
+        };
         let mut changed = Vec::new();
         let mut retry = Vec::new();
         for edge in &edges {
@@ -78,11 +85,15 @@ impl Supervisor {
             // lock and on the blocking pool (TS: a large ledger must
             // not fan out into concurrent reads).
             let candidate = candidate.hydrate().await;
-            // The hydrate awaited, so the roots are revalidated
-            // immediately before the write: a root that stopped during
-            // the read must not receive rows (its passivation already
-            // settled and never revisits seeded rows).
-            if !family_descends_from(&parent_by_child, &parent, &self.roster_seed_roots().await) {
+            // The hydrate awaited, so both sides of the edge are
+            // revalidated immediately before the write: a root that
+            // stopped, or a child whose edge a completed delete
+            // tombstoned during the read, must not receive rows (the
+            // delete's roster removal already settled and never
+            // revisits them).
+            if !ledger.edge_is_live(&edge.child_id)
+                || !family_descends_from(&parent_by_child, &parent, &self.roster_seed_roots().await)
+            {
                 continue;
             }
             let mut roster = self.roster.lock().unwrap();
@@ -96,7 +107,7 @@ impl Supervisor {
             }
             changed.push(roster.write_seeded(candidate.summary, candidate.seeded_cwd));
         }
-        self.push_roster_update(changed, Vec::new());
+        self.push_seeded_rows(changed);
         // Unhydrated seeded rows the guards found already rostered get
         // their retry here, after the fresh rows: serial, one read per
         // row, and a write-back only while the row is still the exact
@@ -203,6 +214,12 @@ impl Supervisor {
                 return Vec::new();
             }
         };
+        // The ledger handle for the per-write liveness revalidation
+        // (memoized by the supervisor: the same instance the edge
+        // snapshot read).
+        let Ok(ledger) = self.rlm_spawn_ledger_for(None).await else {
+            return Vec::new();
+        };
         let mut changed = Vec::new();
         let mut retry = Vec::new();
         {
@@ -210,6 +227,13 @@ impl Supervisor {
             for edge in &edges {
                 let parent = canonical_session_path(Path::new(&edge.parent));
                 if !family_descends_from(&parent_by_child, &parent, &roots) {
+                    continue;
+                }
+                // The edge snapshot predates this loop by the
+                // ledger-read await: a child deleted in that window
+                // never seeds (its completed delete must not be
+                // followed by a fresh row).
+                if !ledger.edge_is_live(&edge.child_id) {
                     continue;
                 }
                 let candidate = SeededRosterEntry::edge_only(edge);
@@ -229,7 +253,7 @@ impl Supervisor {
                 changed.push(roster.write_seeded(candidate.summary, candidate.seeded_cwd));
             }
         }
-        self.push_roster_update(changed.clone(), Vec::new());
+        self.push_seeded_rows(changed.clone());
         // The returned hydration set: fresh rows first, then the
         // unhydrated seeded rows found already rostered - the caller's
         // bounded background hydration reads each once more.
@@ -300,6 +324,23 @@ impl Supervisor {
                 changed.push(roster.write_seeded(summary, false));
             }
         }
+        self.push_seeded_rows(changed);
+    }
+
+    /// Publish seeded rows only while the roster still holds the exact
+    /// row that was written (TS applies `roster_update` entries
+    /// idempotently by agent id, so a stale snapshot pushed after a
+    /// newer worker write would regress a subscriber's view to the
+    /// seeded row): a batch that accumulated across its hydration
+    /// awaits publishes only the rows no live worker replaced.
+    fn push_seeded_rows(&self, changed: Vec<AgentRosterEntry>) {
+        let changed = {
+            let roster = self.roster.lock().unwrap();
+            changed
+                .into_iter()
+                .filter(|entry| roster.get(&entry.agent_id) == Some(entry))
+                .collect::<Vec<_>>()
+        };
         self.push_roster_update(changed, Vec::new());
     }
 
@@ -925,6 +966,57 @@ pub(crate) mod tests {
         assert_eq!(row.summary["model"]["provider"], "live");
         assert_eq!(row.summary["cwd"], "/the/live/cwd");
         assert_eq!(row.status, AgentRosterStatus::Running);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The seeded publish filter: rows accumulate across a seed's
+    /// hydration awaits, so a row a live worker replaced while the
+    /// batch ran never publishes (subscribers apply updates
+    /// idempotently by agent id - a stale snapshot would regress their
+    /// view to the seeded row).
+    #[tokio::test]
+    async fn stale_seeded_snapshots_never_publish() {
+        let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        let agent_dir = dir.join("agent");
+        append_family_edge(
+            &agent_dir,
+            &agent_dir.join("sessions"),
+            "sub-9",
+            &root_file,
+            &child_file,
+        );
+        // A stale seeded snapshot: the row the family seed wrote.
+        let stale = {
+            let mut roster = supervisor.roster.lock().unwrap();
+            let candidate = crate::supervisor_roster_seed::SeededRosterEntry::edge_only(
+                &crate::rlm_ledger::RlmLedgerEdge {
+                    child_id: "sub-9".to_string(),
+                    parent: root_file.to_string_lossy().to_string(),
+                    child: child_file.to_string_lossy().to_string(),
+                    depth: 1,
+                    name: "w9".to_string(),
+                    deleted: None,
+                },
+            );
+            roster.write_seeded(candidate.summary, candidate.seeded_cwd)
+        };
+        // A newer worker write replaces it and publishes the live row.
+        let mut events = supervisor.events.subscribe();
+        supervisor
+            .write_roster_summary(&live_child_summary(&root_file, &child_file), Some("w-live"));
+        assert_eq!(drain_roster_pushes(&mut events).len(), 1);
+
+        // The stale snapshot's publish is dropped by the identity
+        // filter: the roster no longer holds that row.
+        supervisor.push_seeded_rows(vec![stale]);
+        assert!(
+            drain_roster_pushes(&mut events).is_empty(),
+            "a stale seeded row never publishes"
+        );
+        // A snapshot the roster still holds verbatim publishes.
+        let current = roster_row_for_child(&supervisor, "sub-9");
+        supervisor.push_seeded_rows(vec![current]);
+        assert_eq!(drain_roster_pushes(&mut events).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

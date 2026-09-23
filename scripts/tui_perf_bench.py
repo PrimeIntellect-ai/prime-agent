@@ -183,7 +183,9 @@ def make_fixture(root, transcript_mb, children, child_mb):
 
 def wait_for(marker_fn, timeout, desc, t0):
     while True:
-        pane = tmux("capture-pane", "-p", "-t", "bench:0.0", "-S", "-100")
+        # The visible pane only: history would carry a prior view's
+        # marker and answer a switch before its repaint landed.
+        pane = tmux("capture-pane", "-p", "-t", "bench:0.0")
         if marker_fn(pane):
             return time.monotonic() - t0
         if time.monotonic() - t0 > timeout:
@@ -207,22 +209,23 @@ def main():
     args = ap.parse_args()
 
     root = tempfile.mkdtemp(prefix="pa-tui-perf-bench-")
-    agent_dir, target, marker = make_fixture(root, args.transcript_mb, args.children, args.child_mb)
-    socket = os.path.join(root, "daemon.sock")
+    daemon = None
     results = {"fixture": {"transcript_mb": args.transcript_mb,
                           "children": args.children, "child_mb": args.child_mb}}
-    daemon_log = open(os.path.join(root, "daemon.log"), "wb")
-    daemon = subprocess.Popen(
-        [args.bin, "--mode", "daemon", "--daemon-socket", socket],
-        stdout=daemon_log, stderr=daemon_log, stdin=subprocess.DEVNULL,
-        env=env(agent_dir), start_new_session=True,
-    )
-    t0 = time.time()
-    while not os.path.exists(socket):
-        if time.time() - t0 > 60:
-            raise RuntimeError("daemon socket never appeared")
-        time.sleep(0.05)
     try:
+        agent_dir, target, marker = make_fixture(root, args.transcript_mb, args.children, args.child_mb)
+        socket = os.path.join(root, "daemon.sock")
+        daemon_log = open(os.path.join(root, "daemon.log"), "wb")
+        daemon = subprocess.Popen(
+            [args.bin, "--mode", "daemon", "--daemon-socket", socket],
+            stdout=daemon_log, stderr=daemon_log, stdin=subprocess.DEVNULL,
+            env=env(agent_dir), start_new_session=True,
+        )
+        t0 = time.time()
+        while not os.path.exists(socket):
+            if time.time() - t0 > 60:
+                raise RuntimeError("daemon socket never appeared")
+            time.sleep(0.05)
         bin_env = env(agent_dir)
         t0 = time.monotonic()
         tmux("new-session", "-d", "-s", "bench", "-x", "200", "-y", "45", "-c", root,
@@ -248,11 +251,16 @@ def main():
         tmux("send-keys", "-t", "bench:0.0", "C-c")
     finally:
         tmux("kill-server", check=False)
-        daemon.terminate()
-        try:
-            daemon.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            daemon.kill()
+        if daemon is not None:
+            daemon.terminate()
+            try:
+                daemon.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                daemon.kill()
+        if not args.keep_fixture:
+            shutil.rmtree(root, ignore_errors=True)
+        else:
+            print("fixture kept at", root)
     print(json.dumps(results, indent=2))
     failed = False
     if results["open_cold_s"] > args.open_budget:
@@ -261,10 +269,6 @@ def main():
     if results["switch_to_session_2_s"] > args.switch_budget:
         print("FAIL: warm switch %.2fs > budget %.2fs" % (results["switch_to_session_2_s"], args.switch_budget))
         failed = True
-    if not args.keep_fixture:
-        shutil.rmtree(root, ignore_errors=True)
-    else:
-        print("fixture kept at", root)
     return 1 if failed else 0
 
 

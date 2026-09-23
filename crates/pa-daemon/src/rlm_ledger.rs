@@ -437,6 +437,22 @@ impl RlmSpawnLedger {
             .collect())
     }
 
+    /// Whether one child's spawn edge is still live (not tombstoned, its
+    /// transcript present) - the seed arms' per-write liveness
+    /// revalidation: an edge deleted (or a child file removed) while a
+    /// seed was mid-read never writes its row. A broken ledger reads as
+    /// not-live, like every other read here degrades to nothing.
+    pub fn edge_is_live(&self, child_id: &str) -> bool {
+        self.seed_once().is_ok()
+            && self.replay_cached().is_ok_and(|state| {
+                state.edges.iter().any(|edge| {
+                    edge.child_id == child_id
+                        && edge.deleted.is_none()
+                        && is_file(Path::new(&edge.child))
+                })
+            })
+    }
+
     fn seed_once(&self) -> Result<()> {
         if self.seed_attempted.swap(true, Ordering::SeqCst) {
             return Ok(());
@@ -967,6 +983,42 @@ mod tests {
         assert_eq!(tombstones[0].deleted, Some(RlmLedgerDeleteReason::User));
         // The stat guard serves the same replay until the file changes.
         assert_eq!(ledger.edges(true).unwrap(), tombstones);
+    }
+
+    #[test]
+    fn edge_is_live_reflects_tombstones_and_files() {
+        let dir = temp_dir("liveness");
+        let ledger = ledger_for(&dir);
+        let parent = dir.join("p.jsonl");
+        let child = dir.join("c.jsonl");
+        fs::write(&parent, "{}").unwrap();
+        fs::write(&child, "{}").unwrap();
+        ledger
+            .append_spawn(RlmSpawnInput {
+                child_id: "sub-1".into(),
+                parent: parent.to_string_lossy().into(),
+                child: child.to_string_lossy().into(),
+                depth: 1,
+                name: "w".into(),
+            })
+            .unwrap();
+        assert!(ledger.edge_is_live("sub-1"));
+        // The file vanishing flips the answer even without a tombstone.
+        fs::remove_file(&child).unwrap();
+        assert!(!ledger.edge_is_live("sub-1"));
+        fs::write(&child, "{}").unwrap();
+        assert!(ledger.edge_is_live("sub-1"));
+        // A completed delete tombstones the edge: no resurrection.
+        ledger
+            .append_delete(
+                "sub-1",
+                &child.to_string_lossy(),
+                RlmLedgerDeleteReason::User,
+            )
+            .unwrap();
+        assert!(!ledger.edge_is_live("sub-1"));
+        // An unknown child reads as not-live.
+        assert!(!ledger.edge_is_live("sub-none"));
     }
 
     #[test]
