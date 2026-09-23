@@ -1315,9 +1315,6 @@ impl AgentView {
         self.apply_frame_selection(&mut frame, width);
         // The action toasts overlay the transcript window's top rows
         // (newest at the bottom of the stack), above the selection restyle
-        // so the transient text stays legible.
-        // The action toasts overlay the transcript window's top rows
-        // (newest at the bottom of the stack), above the selection restyle
         // so the transient text stays legible. The overlay never runs
         // past the window's last row (a short transcript keeps the dock
         // untouched) and sits out an in-progress selection drag: the
@@ -1325,14 +1322,13 @@ impl AgentView {
         // releasing over covered text could copy content that was not
         // visible.
         let now = std::time::Instant::now();
-        let toasts: Vec<String> = if self.selection_drag_active() {
+        let toasts: Vec<String> = if self.selection.is_dragging() {
             Vec::new()
         } else {
             self.toasts.active(now).map(str::to_string).collect()
         };
         if !toasts.is_empty() {
-            // The action ack renders in the Success color (a completed
-            // action); anything needing another tone grows the kind then.
+            // The action ack renders in the Success color.
             let style = self.theme.fg_style(crate::theme::ThemeColor::Success);
             crate::toast::overlay_toasts(
                 &mut frame,
@@ -1344,13 +1340,6 @@ impl AgentView {
             );
         }
         frame
-    }
-
-    /// Whether a mouse selection drag is in progress over the frame (the
-    /// toast overlay sits it out while one is: the selection must never
-    /// read rows the transient overlay covers).
-    fn selection_drag_active(&self) -> bool {
-        self.selection.is_dragging()
     }
 
     /// The `/share` loader rows (TS `BorderedLoader` + `CancellableLoader`):
