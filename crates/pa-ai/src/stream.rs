@@ -30,11 +30,15 @@ fn estimated_input_tokens(context: &Context) -> u64 {
         .map_or(0, |text| text.chars().count()) as u64;
     // Tool definitions serialize into every request (the provider sends
     // each schema on every call), so they claim input room like the
-    // tool-call arguments below.
+    // tool-call arguments below. Providers wrap each schema in their own
+    // envelope on the wire (OpenAI-completions:
+    // `{"type":"function","function":...}` plus flags like `strict`), so
+    // every tool also counts the widest envelope's chars.
+    const TOOL_ENVELOPE_CHARS: u64 = 48;
     for tool in context.tools.iter().flatten() {
         chars = chars.saturating_add(
             serde_json::to_string(tool)
-                .map(|json| json.chars().count() as u64)
+                .map(|json| TOOL_ENVELOPE_CHARS + json.chars().count() as u64)
                 .unwrap_or(0),
         );
     }
@@ -211,10 +215,11 @@ mod tests {
         let serialized = serde_json::to_string(&tool).expect("tool serializes");
         let mut context = text_context(3_000);
         context.tools = Some(vec![tool]);
-        // The tool schema's serialized bytes join the text under chars/4.
+        // The tool schema's serialized bytes plus its wire envelope join
+        // the text under chars/4.
         assert_eq!(
             estimated_input_tokens(&context),
-            (3_000 + serialized.chars().count() as u64).div_ceil(4)
+            (3_000 + 48 + serialized.chars().count() as u64).div_ceil(4)
         );
     }
 
@@ -262,7 +267,8 @@ mod tests {
         // 250 exactly fit the 750-token text input; the schema's
         // serialized tokens leave less room than the budget requests,
         // so the budget clamps to exactly what is left.
-        let room = 1_000u64.saturating_sub((3_000 + serialized.chars().count() as u64).div_ceil(4));
+        let room =
+            1_000u64.saturating_sub((3_000 + 48 + serialized.chars().count() as u64).div_ceil(4));
         assert_eq!(options.max_tokens, Some(room));
         assert!(room > 0 && room < 250);
     }
