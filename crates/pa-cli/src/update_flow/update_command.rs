@@ -28,6 +28,15 @@ pub struct UpdateCommandOptions {
     pub force: bool,
     pub rollback: bool,
     pub channel: Option<pa_core::update::version::UpdateChannel>,
+    /// The manual/direct install: stage this local payload (a release
+    /// archive or a payload directory) instead of resolving the channel.
+    /// The release version comes from the payload binary's `--version`
+    /// output and the install goes through the same staged, atomic
+    /// activation as a channel update — never an in-place copy.
+    pub archive: Option<std::path::PathBuf>,
+    /// The `http(s)://` origin recorded as the release's install source
+    /// (required with `archive`; future updates resolve from it).
+    pub source: Option<String>,
 }
 
 /// `prime-agent update`: plan, stage, spawn the coordinator, and relay its
@@ -70,14 +79,18 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
     writer.set_state(UpdateState::Planning)?;
     let budget = UpdateTimeoutBudget::from_env();
     let download_base = std::env::var("PRIME_AGENT_DOWNLOAD_BASE_URL").ok();
-    let planned = plan(
-        &install_root,
-        options.force,
-        options.rollback,
-        options.channel,
-        download_base.as_deref(),
-    )
-    .await;
+    let planned = if options.archive.is_some() {
+        plan_direct(&install_root, options).await
+    } else {
+        plan(
+            &install_root,
+            options.force,
+            options.rollback,
+            options.channel,
+            download_base.as_deref(),
+        )
+        .await
+    };
     let (coordinator_exe, candidate_dir) = match planned {
         Ok(UpdatePlan::Update {
             version,
@@ -115,6 +128,19 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             let _ = std::fs::remove_file(&archive);
             super::swap::validate_candidate(&release_dir.join("prime-agent"), &version).await?;
             (release_dir.join("prime-agent"), release_dir)
+        }
+        Ok(UpdatePlan::Direct {
+            version,
+            candidate_dir,
+        }) => {
+            // `Staged` directly: the payload was staged by `plan_direct`
+            // (scratch + fsync + atomic rename); the probe below re-checks
+            // the binary's `--version` against the version the release
+            // name carries.
+            writer.set_state(UpdateState::Staged)?;
+            phases.phase(writer.current());
+            super::swap::validate_candidate(&candidate_dir.join("prime-agent"), &version).await?;
+            (candidate_dir.join("prime-agent"), candidate_dir)
         }
         Ok(UpdatePlan::Rollback {
             coordinator_exe,
@@ -203,6 +229,49 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
         0
     } else {
         1
+    })
+}
+
+/// The manual/direct install (`--archive <payload>`): no manifest and no
+/// channel decision — the operator names the payload, the version comes
+/// from the payload binary's `--version` probe, and the staging is
+/// copy-to-scratch + fsync + atomic rename (the in-place `cp` over a
+/// running binary that corrupted two installs is structurally impossible
+/// here). The current launcher must already name a valid release — the
+/// coordinator's rollback boot depends on it — so a broken launcher is
+/// refused with a repair hint before any binary is replaced (the flag
+/// parser validated `--source`; the staging boundary re-validates it).
+async fn plan_direct(
+    install_root: &std::path::Path,
+    options: &UpdateCommandOptions,
+) -> Result<UpdatePlan> {
+    let archive = options
+        .archive
+        .as_deref()
+        .context("the direct install needs a release payload")?;
+    let source = options.source.as_deref().context(
+        "the direct install needs --source <https-url> (recorded as the release's install origin)",
+    )?;
+    if !archive.exists() {
+        anyhow::bail!("the release payload {} does not exist", archive.display());
+    }
+    // The active launcher must name a valid release before anything is
+    // replaced: the coordinator records it as the rollback target.
+    if pa_core::update::install::read_installation(
+        install_root,
+        pa_core::update::install::CURRENT_LAUNCHER,
+    )
+    .is_err()
+    {
+        anyhow::bail!(
+            "The active launcher does not point at a valid managed release. Repair the installation (reinstall with the published installer) before a direct install."
+        );
+    }
+    let (candidate_dir, version) =
+        pa_core::update::download::stage_local_payload(archive, install_root, source).await?;
+    Ok(UpdatePlan::Direct {
+        version,
+        candidate_dir,
     })
 }
 

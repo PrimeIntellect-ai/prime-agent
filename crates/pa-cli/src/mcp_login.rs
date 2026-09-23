@@ -17,6 +17,57 @@ use pa_core::mcp::{
 };
 use pa_tui::client_auth::{AuthFuture, ClientAuthCommands};
 
+/// The CLI's live MCP manager: the shared auth store, settings-declared
+/// user servers (`mcpServers`), and local service-catalog sources
+/// (`mcpCatalogSources`) all re-read per resolve — the same closures TS
+/// `createAgentSessionServices` wires into every CLI session. No
+/// interactive login: hosts with a login UI call `set_begin_login`
+/// before the session registers host handlers; headless surfaces keep
+/// the host request absent (TS registers `mcp.begin_login` only when a
+/// login is wired).
+pub(crate) fn cli_mcp_manager(cwd: &std::path::Path, agent_dir: &std::path::Path) -> McpManager {
+    let user_cwd = cwd.to_path_buf();
+    let user_agent_dir = agent_dir.to_path_buf();
+    let catalog_cwd = cwd.to_path_buf();
+    let catalog_agent_dir = agent_dir.to_path_buf();
+    McpManager::new(McpManagerOptions {
+        auth_storage: AuthStorage::create_with_oauth(
+            agent_dir,
+            std::sync::Arc::new(pa_core::mcp::McpOAuth::new()),
+        ),
+        get_user_servers: Box::new(move || {
+            let settings = pa_core::settings::SettingsManager::create(&user_cwd, &user_agent_dir);
+            Some(
+                settings
+                    .settings()
+                    .mcp_servers
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|(server, config)| {
+                        serde_json::from_value::<McpServerConfig>(config)
+                            .ok()
+                            .map(|parsed| (server, parsed))
+                    })
+                    .collect(),
+            )
+        }),
+        begin_login: None,
+        agent_dir: Some(agent_dir.to_path_buf()),
+        get_catalog_sources: Some(Box::new(move || {
+            let settings =
+                pa_core::settings::SettingsManager::create(&catalog_cwd, &catalog_agent_dir);
+            settings
+                .settings()
+                .mcp_catalog_sources
+                .clone()
+                .unwrap_or_default()
+        })),
+        remote_source: None,
+        probe_override: None,
+    })
+}
+
 /// `/mcp login` / `/mcp logout` against one daemon's shared directories.
 #[derive(Clone)]
 pub struct TerminalMcpAuth {
@@ -33,49 +84,10 @@ impl TerminalMcpAuth {
     }
 
     /// The manager that resolves integrations the same way the session
-    /// engine's gating does (settings `mcpServers` + the builtin catalog).
+    /// engine's gating does (settings `mcpServers` + the builtin catalog):
+    /// the crate's one live-manager construction.
     fn manager(&self) -> McpManager {
-        let cwd = self.cwd.clone();
-        let agent_dir = self.agent_dir.clone();
-        McpManager::new(McpManagerOptions {
-            auth_storage: AuthStorage::create_with_oauth(
-                &self.agent_dir,
-                std::sync::Arc::new(pa_core::mcp::McpOAuth::new()),
-            ),
-            get_user_servers: Box::new(move || {
-                let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
-                Some(
-                    settings
-                        .settings()
-                        .mcp_servers
-                        .clone()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|(server, config)| {
-                            serde_json::from_value::<McpServerConfig>(config)
-                                .ok()
-                                .map(|parsed| (server, parsed))
-                        })
-                        .collect(),
-                )
-            }),
-            begin_login: None,
-            agent_dir: Some(self.agent_dir.clone()),
-            get_catalog_sources: Some(Box::new({
-                let cwd = self.cwd.clone();
-                let agent_dir = self.agent_dir.clone();
-                move || {
-                    let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
-                    settings
-                        .settings()
-                        .mcp_catalog_sources
-                        .clone()
-                        .unwrap_or_default()
-                }
-            })),
-            remote_source: None,
-            probe_override: None,
-        })
+        cli_mcp_manager(&self.cwd, &self.agent_dir)
     }
 
     /// Run one login against an injectable UI/transport (the product uses

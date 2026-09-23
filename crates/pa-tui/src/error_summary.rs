@@ -25,6 +25,26 @@ pub fn should_collapse_error_details(text: &str) -> bool {
     normalize_error_details(text).contains('\n')
 }
 
+/// `LOGIN_RECOVERY_MESSAGE` (TS core/auth-guidance.ts): the login hint the
+/// daemon appends to authentication-failure errors.
+const LOGIN_RECOVERY_MESSAGE: &str = "Run /login to update credentials.";
+
+/// `formatInlineLoginRecoveryMessage` (TS assistant-message.ts): an error
+/// whose normalized text ends with `\n\n` + the login-recovery hint renders
+/// as one inline line — `{base} · {hint}` with `base` the suffix-stripped,
+/// end-trimmed remainder. `None` keeps the normal error paths: no suffix,
+/// an empty base, or a base that would itself collapse (multi-line).
+pub fn format_inline_login_recovery_message(text: &str) -> Option<String> {
+    let normalized = normalize_error_details(text);
+    let base = normalized
+        .strip_suffix(&format!("\n\n{LOGIN_RECOVERY_MESSAGE}"))?
+        .trim_end();
+    if base.is_empty() || should_collapse_error_details(base) {
+        return None;
+    }
+    Some(format!("{base} · {LOGIN_RECOVERY_MESSAGE}"))
+}
+
 /// `startsStackContext` (trimmed line): the leading rows of a traceback.
 fn starts_stack_context(line: &str) -> bool {
     line.starts_with("Traceback ")
@@ -151,6 +171,62 @@ mod tests {
         assert_eq!(
             strip_ansi("\u{1b}]8;;http://x\u{1b}\\link\u{1b}]8;;\u{1b}\\"),
             "link"
+        );
+    }
+
+    #[test]
+    fn inline_login_recovery_merges_suffix_terminated_errors() {
+        // The exact daemon wording (pa-daemon agent_engine.rs).
+        assert_eq!(
+            format_inline_login_recovery_message(
+                "Authentication failed for \"prime-inference\". Credentials may have expired or network is unavailable.\n\nRun /login to update credentials."
+            )
+            .as_deref(),
+            Some(
+                "Authentication failed for \"prime-inference\". Credentials may have expired or network is unavailable. · Run /login to update credentials."
+            )
+        );
+        // The base is suffix-stripped and end-trimmed; ANSI and CRLF
+        // normalize away first (`normalizeErrorDetails`).
+        assert_eq!(
+            format_inline_login_recovery_message(
+                "Auth failed. \r\n\r\nRun /login to update credentials.\u{1b}[0m"
+            )
+            .as_deref(),
+            Some("Auth failed. · Run /login to update credentials.")
+        );
+    }
+
+    #[test]
+    fn inline_login_recovery_keeps_the_normal_error_paths() {
+        // No suffix at all.
+        assert_eq!(
+            format_inline_login_recovery_message("Authentication failed for \"prime-inference\"."),
+            None
+        );
+        // Suffix not at the end.
+        assert_eq!(
+            format_inline_login_recovery_message(
+                "Auth failed.\n\nRun /login to update credentials.\nProvider degraded."
+            ),
+            None
+        );
+        // Bare hint without the blank-line separator.
+        assert_eq!(
+            format_inline_login_recovery_message("Run /login to update credentials."),
+            None
+        );
+        // Empty base: the hint alone stays collapsible.
+        assert_eq!(
+            format_inline_login_recovery_message("\n\nRun /login to update credentials."),
+            None
+        );
+        // Multi-line base falls back to the collapsible path.
+        assert_eq!(
+            format_inline_login_recovery_message(
+                "Auth failed\nfor provider.\n\nRun /login to update credentials."
+            ),
+            None
         );
     }
 }

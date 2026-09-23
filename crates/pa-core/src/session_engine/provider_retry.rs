@@ -86,6 +86,28 @@ pub fn is_context_overflow_failure(message: &AssistantMessage, context_window: u
     pa_ai::is_context_overflow(&wire, (context_window > 0).then_some(context_window))
 }
 
+/// The model router's tool-use rejection marker (observed on
+/// prime-inference as a 404 whose body the SDK surfaces verbatim:
+/// `404 No endpoints found that support tool use. Try disabling ...`).
+/// Matched case-insensitively against the user-facing failure text,
+/// but only together with the classified 404 status: the text alone is
+/// provider-controllable and must never steer the retry policy on its
+/// own (a transient 5xx quoting the same words stays retryable).
+const UNSUPPORTED_TOOL_FAILURE_MARKER: &str = "no endpoints found that support tool use";
+
+/// A router rejection for a model that cannot serve tool use. Unlike the
+/// plain routing-blip 404 (transient), the request's tools make this a
+/// permanent capability mismatch: every provider serving the same model
+/// rejects it identically, so it is never retried and never fails over.
+pub fn is_unsupported_tool_failure(message: &AssistantMessage) -> bool {
+    provider_stream_failure_status(message) == Some(404)
+        && message.error_message.as_deref().is_some_and(|error| {
+            error
+                .to_ascii_lowercase()
+                .contains(UNSUPPORTED_TOOL_FAILURE_MARKER)
+        })
+}
+
 /// The `details` payload of the `provider_stream_failure` diagnostic.
 pub fn provider_stream_failure_details(message: &AssistantMessage) -> Option<&Value> {
     message
@@ -195,6 +217,7 @@ where
         if retries_performed >= max_retries
             || is_agent_lifecycle_failure(&message)
             || is_faux_provider_queue_exhausted(&message)
+            || is_unsupported_tool_failure(&message)
         {
             return Ok(message);
         }
@@ -638,5 +661,71 @@ mod tests {
         assert_eq!(provider_stream_failure_retry_after_ms(&message), Some(120));
         let retry_after = provider_retry_delay(1, Some(120), &DEFAULT_PROVIDER_RETRY_POLICY);
         assert_eq!(retry_after, ProviderRetryDelay::Wait { delay_ms: 2000 });
+    }
+
+    /// The router's tool-use rejection (the dogfood incident text) is
+    /// permanent, matched case-insensitively — but only together with
+    /// the classified 404 status: provider-controllable text alone
+    /// never steers the retry policy. A plain routing-blip 404 without
+    /// the marker stays transient, and a 5xx quoting the marker stays
+    /// retryable.
+    #[test]
+    fn unsupported_tool_rejections_are_terminal() {
+        let mut unsupported = error_message(Some("invalid_request"), Some(404), None);
+        unsupported.error_message = Some(
+            "404 No endpoints found that support tool use. Try disabling \"ipython\".".to_string(),
+        );
+        assert!(is_unsupported_tool_failure(&unsupported));
+        let mut upper = unsupported.clone();
+        upper.error_message = Some("404 NO ENDPOINTS FOUND THAT SUPPORT TOOL USE".to_string());
+        assert!(is_unsupported_tool_failure(&upper));
+        let mut blip = error_message(Some("invalid_request"), Some(404), None);
+        blip.error_message = Some("404 model route not found".to_string());
+        assert!(!is_unsupported_tool_failure(&blip));
+        // The marker text without the 404 status is not a tool-capability
+        // rejection: a transient 5xx quoting the router's words stays
+        // retryable (the status gate keeps the text from steering the
+        // policy on its own).
+        let mut transient = error_message(Some("server_error"), Some(503), None);
+        transient.error_message = Some("503 No endpoints found that support tool use".to_string());
+        assert!(!is_unsupported_tool_failure(&transient));
+        // No classified status at all: same rule.
+        let mut unclassified = error_message(Some("server_error"), None, None);
+        unclassified.error_message = Some("No endpoints found that support tool use".to_string());
+        assert!(!is_unsupported_tool_failure(&unclassified));
+        let empty = error_message(Some("server_error"), Some(500), None);
+        assert!(!is_unsupported_tool_failure(&empty));
+    }
+
+    #[tokio::test]
+    async fn unsupported_tool_failures_never_retry() {
+        let policy = ProviderRetryPolicy {
+            enabled: true,
+            max_retries: 3,
+            base_delay_ms: 5,
+            max_retry_delay_ms: 50,
+            max_delay_ms: UNBOUNDED_BACKOFF_MS,
+        };
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_attempt = std::sync::Arc::clone(&attempts);
+        let message = complete_with_provider_retry(
+            &policy,
+            None,
+            |_| async { true },
+            move || {
+                let attempts = std::sync::Arc::clone(&attempts_for_attempt);
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut unsupported = error_message(Some("invalid_request"), Some(404), None);
+                    unsupported.error_message =
+                        Some("404 No endpoints found that support tool use.".to_string());
+                    Ok(unsupported)
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(message.stop_reason, StopReason::Error);
     }
 }

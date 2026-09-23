@@ -8,6 +8,7 @@
 //! request-storms.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -24,6 +25,10 @@ pub struct FlagsClient {
     api_key: String,
     distinct_id: String,
     cache: std::sync::Mutex<Option<CacheEntry>>,
+    /// Latched when the decide endpoint answers 401 (bad or missing-scope
+    /// credentials): no further decide is attempted, so a permanently
+    /// rejected key cannot poll the endpoint every TTL.
+    auth_terminal: AtomicBool,
 }
 
 struct CacheEntry {
@@ -44,6 +49,7 @@ impl FlagsClient {
             api_key: endpoint.api_key.clone(),
             distinct_id: distinct_id.into(),
             cache: std::sync::Mutex::new(None),
+            auth_terminal: AtomicBool::new(false),
         }
     }
 
@@ -53,6 +59,9 @@ impl FlagsClient {
     /// the (empty) result is cached for the TTL so a dead endpoint is polled
     /// at most once per TTL per client.
     pub async fn flag_enabled(&self, name: &str, default: bool) -> bool {
+        if self.auth_terminal.load(Ordering::Relaxed) {
+            return default;
+        }
         if let Some(value) = self.cached_flag(name) {
             let value = value.unwrap_or(Value::Null);
             return truthy(&value).unwrap_or(default);
@@ -105,6 +114,13 @@ impl FlagsClient {
             .send()
             .await
             .ok()?;
+        if response.status().as_u16() == 401 {
+            // Terminal, not retried: bad or missing-scope credentials fail
+            // every decide; stop polling instead of re-asking each TTL.
+            self.auth_terminal.store(true, Ordering::Relaxed);
+            tracing::debug!("feature-flag decide rejected with 401, polling disabled");
+            return None;
+        }
         if !response.status().is_success() {
             tracing::debug!(status = %response.status(), "feature-flag decide rejected");
             return None;

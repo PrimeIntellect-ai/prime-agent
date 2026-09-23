@@ -105,6 +105,22 @@ pub fn parse_prime_inference_model_catalog(
             .and_then(|name| name.as_str())
             .map(strip_control)
             .filter(|name| !name.is_empty());
+        // Capability filtering (documented deviation from the TS parser,
+        // which never reads this field): a model that declares its
+        // supported request parameters without "tools" can never serve a
+        // prime-agent turn — the session always attaches its tool set and
+        // the router answers `404 No endpoints found that support tool
+        // use` — so it never enters the selectable catalog. Entries
+        // without the field stay: no signal, historical behavior.
+        let supported_parameters = string_array(
+            item.get("supported_parameters")
+                .unwrap_or(&serde_json::Value::Null),
+        );
+        if supported_parameters
+            .is_some_and(|parameters| !parameters.iter().any(|parameter| parameter == "tools"))
+        {
+            continue;
+        }
         let specs = item.get("specs").cloned().unwrap_or_default();
         let modalities = specs.get("modalities").cloned().unwrap_or_default();
         let input_modalities =
@@ -377,5 +393,26 @@ mod tests {
         let entries = parse_prime_inference_model_catalog(&payload, false).unwrap();
         // 0/1 bundled coverage < 50% -> None.
         assert!(build_prime_inference_models(&bundled(), &entries, false).is_none());
+    }
+
+    /// Capability filtering: a model that declares its supported request
+    /// parameters without "tools" can never serve a session (the router
+    /// answers 404 "No endpoints found that support tool use"), so it
+    /// never enters the catalog. Entries without the declaration stay.
+    #[test]
+    fn entries_without_tool_support_are_filtered() {
+        let payload = serde_json::json!({ "data": [
+            { "id": "z-ai/glm-5.3",
+              "pricing": { "input_usd_per_mtok": 0.6, "output_usd_per_mtok": 2.2 },
+              "supported_parameters": ["max_tokens", "temperature", "tools", "tool_choice"] },
+            { "id": "meta-llama/Llama-3.2-1B-Instruct",
+              "pricing": { "input_usd_per_mtok": 0.1, "output_usd_per_mtok": 0.2 },
+              "supported_parameters": ["max_tokens", "temperature", "top_p"] },
+            { "id": "qwen/qwen3.8-max",
+              "pricing": { "input_usd_per_mtok": 1, "output_usd_per_mtok": 4 } }
+        ]});
+        let entries = parse_prime_inference_model_catalog(&payload, false).unwrap();
+        let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids, vec!["z-ai/glm-5.3", "qwen/qwen3.8-max"]);
     }
 }

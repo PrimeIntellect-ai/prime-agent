@@ -167,6 +167,62 @@ impl UpdateChannel {
     }
 }
 
+/// Whether a version carries a prerelease tag (`0.10.0-rust-64f66e3d`,
+/// `0.9.5-beta.1986.1.6f413ac`). The stable channel publishes untagged
+/// releases; a tagged version there is a build train that was never
+/// promoted, and installing it can replace newer code with an obsolete
+/// train (the `0.10.0-rust-*` dogfood trains over the port).
+pub fn has_prerelease_tag(version: &str) -> bool {
+    parse_package_version(version)
+        .and_then(|parsed| parsed.prerelease)
+        .is_some()
+}
+
+/// Whether `candidate_version` beats `current_version` only through an
+/// opaque alphanumeric build-tag comparison at the same base version.
+/// `0.10.0-rust-64f66e3d` ranks above `0.10.0-rust-4a8bcb15` by git-sha
+/// string order, which is not build recency: the identifier pair that
+/// decides the comparison must both be numeric (nightly trains number
+/// their builds, `beta.1986.1` < `beta.1987.2`) for the ordering to be
+/// update evidence. Same-base tag shuffles are never auto-selected
+/// candidates (`--force` reinstalls explicitly).
+fn same_base_opaque_build_tag(candidate_version: &str, current_version: &str) -> bool {
+    let Some(candidate) = parse_package_version(candidate_version) else {
+        return false;
+    };
+    let Some(current) = parse_package_version(current_version) else {
+        return false;
+    };
+    if candidate.major != current.major
+        || candidate.minor != current.minor
+        || candidate.patch != current.patch
+    {
+        return false;
+    }
+    let (Some(candidate_tag), Some(current_tag)) = (candidate.prerelease, current.prerelease)
+    else {
+        return false;
+    };
+    let candidate_parts: Vec<&str> = candidate_tag.split('.').collect();
+    let current_parts: Vec<&str> = current_tag.split('.').collect();
+    for index in 0..candidate_parts.len().max(current_parts.len()) {
+        match (candidate_parts.get(index), current_parts.get(index)) {
+            (Some(left), Some(right)) if left == right => continue,
+            // A missing side loses (semver), but both tags are still opaque:
+            // a prefix extension (`beta.1986.1` over `beta.1986`) is not a
+            // recency claim either.
+            (Some(_), None) | (None, Some(_)) => return true,
+            (Some(left), Some(right)) => {
+                let left_numeric = left.chars().all(|c| c.is_ascii_digit());
+                let right_numeric = right.chars().all(|c| c.is_ascii_digit());
+                return !(left_numeric && right_numeric);
+            }
+            (None, None) => return false,
+        }
+    }
+    false
+}
+
 /// Whether `candidate_version` should replace `current_version` on the
 /// effective channel (TS `isReleaseUpdateCandidate`): same-channel updates
 /// must be strictly newer; an explicit switch to another channel accepts any
@@ -178,6 +234,15 @@ pub fn is_release_update_candidate(
     current_version: &str,
     channel: Option<UpdateChannel>,
 ) -> bool {
+    // The opaque-tag refusal applies to the current channel (the default
+    // path, where the `0.10.0-rust-<sha>` dogfood trains installed an
+    // obsolete build) — an explicit switch to another channel is operator
+    // intent and the channel-switch branch below evaluates it.
+    if channel.is_none() || channel == Some(resolve_update_channel(current_version, None)) {
+        if same_base_opaque_build_tag(candidate_version, current_version) {
+            return false;
+        }
+    }
     if is_newer_package_version(candidate_version, current_version) {
         return true;
     }
@@ -245,6 +310,64 @@ mod tests {
         assert!(is_base_version_downgrade("1.2.2", "1.3.0"));
         assert!(!is_base_version_downgrade("1.2.3-beta.9", "1.2.3"));
         assert!(!is_base_version_downgrade("junk", "1.2.3"));
+    }
+
+    #[test]
+    fn opaque_build_tag_shuffles_are_never_candidates() {
+        // Same-base dogfood trains: the git-sha tag orders by string, not
+        // by build recency — never auto-selected.
+        assert!(same_base_opaque_build_tag(
+            "0.10.0-rust-64f66e3d",
+            "0.10.0-rust-4a8bcb15"
+        ));
+        assert!(!is_release_update_candidate(
+            "0.10.0-rust-64f66e3d",
+            "0.10.0-rust-4a8bcb15",
+            None
+        ));
+        // An explicit switch to another channel is operator intent and is
+        // evaluated by the channel-switch branch, not by the opaque guard.
+        assert!(is_release_update_candidate(
+            "1.2.3-beta.5",
+            "1.2.3-rust-aaaa",
+            Some(UpdateChannel::Nightly)
+        ));
+        assert!(is_release_update_candidate(
+            "0.10.0-rust-64f66e3d",
+            "0.10.0-rust-4a8bcb15",
+            Some(UpdateChannel::Nightly)
+        ));
+        // A rebuilt train with identical numbers: still an opaque shuffle.
+        assert!(same_base_opaque_build_tag(
+            "0.9.5-beta.1986.1.6f413ac",
+            "0.9.5-beta.1986.1.9d2ecd0b"
+        ));
+        // Numbered nightly trains order meaningfully and stay candidates.
+        assert!(!same_base_opaque_build_tag(
+            "0.9.5-beta.1987.1.9d2ecd0b",
+            "0.9.5-beta.1986.1.6f413ac"
+        ));
+        assert!(is_release_update_candidate(
+            "0.9.5-beta.1987.1.9d2ecd0b",
+            "0.9.5-beta.1986.1.6f413ac",
+            None
+        ));
+        // Different base versions are normal semver decisions, and an
+        // untagged side is the TS channel-switch territory, not a shuffle.
+        assert!(!same_base_opaque_build_tag(
+            "0.10.1",
+            "0.10.0-rust-64f66e3d"
+        ));
+        assert!(!same_base_opaque_build_tag("0.10.0-beta.5", "0.10.0"));
+        assert!(!same_base_opaque_build_tag("junk", "0.10.0-rust-64f66e3d"));
+    }
+
+    #[test]
+    fn prerelease_tags_are_detected() {
+        assert!(has_prerelease_tag("0.10.0-rust-64f66e3d"));
+        assert!(has_prerelease_tag("v0.9.5-beta.1986.1.6f413ac"));
+        assert!(!has_prerelease_tag("0.1.0"));
+        assert!(!has_prerelease_tag("junk"));
     }
 
     #[test]

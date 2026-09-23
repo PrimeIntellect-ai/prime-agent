@@ -259,6 +259,25 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
     };
     let steering_mode = Some(queue_mode(queue_settings.get_steering_mode()));
     let follow_up_mode = Some(queue_mode(queue_settings.get_follow_up_mode()));
+    // TS `createAgentSessionServices` builds every CLI session — print
+    // included — on a manager whose `getUserServers`/`getCatalogSources`
+    // closures re-read settings on every resolution (construction and
+    // each later `refresh()`: the API the remote-catalog change
+    // subscription drives mid-session), and whose declared local catalog
+    // sources resolve. The session's `mcp.config` host handler keeps
+    // serving the registration-time integrations (the pa-core handler
+    // design, shared with the daemon worker). Auth construction blocks;
+    // run it off the async runtime like the engine's own gating does.
+    let mcp_manager = {
+        let cwd = config.cwd.clone();
+        let agent_dir = config.agent_dir.clone();
+        let manager = tokio::task::spawn_blocking(move || {
+            crate::mcp_login::cli_mcp_manager(&cwd, &agent_dir)
+        })
+        .await
+        .map_err(|error| format!("MCP manager construction failed: {error}"))?;
+        std::sync::Arc::new(std::sync::Mutex::new(manager))
+    };
     let engine = pa_core::session_engine::engine::create_session(
         pa_core::session_engine::engine::SessionEngineConfig {
             cron_store: None,
@@ -267,7 +286,7 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
             follow_up_mode,
             cwd: config.cwd.clone(),
             agent_dir: config.agent_dir.clone(),
-            mcp_manager: None,
+            mcp_manager: Some(mcp_manager),
             model: Some(agent_model),
             thinking_level: Some(resolve_thinking_level(config, &model)),
             stream_fn: Some(stream_fn),
@@ -625,18 +644,24 @@ fn build_session_manager(
 ) -> Result<pa_core::session::manager::SessionManager, String> {
     use pa_core::session::manager::SessionManager;
     let cwd = options.config.cwd.clone();
-    if let Some(selector) = &options.session.fork {
-        // TS print mode forks through SessionManager.forkFrom; the Rust port
-        // does not implement fork yet, so fail loudly instead of silently
-        // starting an unrelated fresh session.
-        let _ = selector;
-        return Err("--fork is not supported in print mode yet".to_string());
-    }
     let session_dir = options
         .session
         .session_dir
         .clone()
         .unwrap_or_else(|| options.config.agent_dir.join("sessions"));
+    // TS `createSessionManager`'s fork arm: every resolution shape forks —
+    // a GLOBAL session is exactly what --fork is for (a different
+    // project's session copied into this cwd) — with no daemon-active
+    // guard: the copy writes a fresh file, never the hosted source.
+    if let Some(selector) = &options.session.fork {
+        let resolved =
+            resolve_session_path(selector, &cwd, &session_dir).map_err(render_selector_error)?;
+        let source = match resolved {
+            ResolvedSession::Path(path) | ResolvedSession::Local(path) => path,
+            ResolvedSession::Global { path, .. } => path,
+        };
+        return SessionManager::fork_from(&source, &cwd, &session_dir);
+    }
     // main.ts `explicitCwdOverride`: with --cwd, the flag's directory wins
     // over the stored session cwd on resume.
     let explicit_cwd_override = options.session.cwd_from_flag.then_some(cwd.as_path());
@@ -1386,6 +1411,163 @@ mod tests {
         assert_eq!(
             value["assistantMessageEvent"],
             serde_json::json!({"type": "text_delta", "contentIndex": 0, "delta": "first reply"})
+        );
+    }
+
+    // --- print-mode MCP wiring (TS `createAgentSessionServices` parity) ---
+
+    /// The print session's MCP manager serves a settings-declared server
+    /// through the `mcp.config` host request the kernel dispatches
+    /// (`rlm/mcp.py` resolution), and resolves its settings LIVE: a
+    /// settings rewrite reaches the next `refresh()` — the re-resolver
+    /// the remote-catalog change subscription drives mid-session. The
+    /// `mcp.config` handler itself keeps the registration-time
+    /// integrations (the pa-core handler design, shared with the daemon
+    /// worker), so the pre-refresh handler still answers the old roster —
+    /// asserted here so the test states the real production behavior.
+    #[tokio::test]
+    async fn print_mode_mcp_manager_serves_settings_servers_and_resolves_live() {
+        let home = tempfile::TempDir::new().unwrap();
+        let cwd = home.path().to_path_buf();
+        let agent_dir = home.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({
+                "mcpServers": {
+                    "fixture-echo": {
+                        "type": "stdio",
+                        "command": "python3",
+                        "args": ["echo.py"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut manager = crate::mcp_login::cli_mcp_manager(&cwd, &agent_dir);
+        assert_eq!(
+            manager.get_enabled_persistent_generic_servers(),
+            vec!["fixture-echo".to_string()]
+        );
+        // The kernel's config host request serves the declared server with
+        // the declared stdio config (registration-time integrations).
+        let mut handlers = pa_core::kernel::shared::HostRequestHandlers::default();
+        manager.register_host_handlers(&mut handlers);
+        let config = handlers.get("mcp.config").unwrap().clone();
+        let result = config(pa_core::kernel::shared::HostRequestPayload {
+            data: serde_json::json!({ "server": "fixture-echo" }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(result["type"], "stdio");
+        assert_eq!(result["command"], "python3");
+        assert_eq!(result["args"], serde_json::json!(["echo.py"]));
+        // A settings rewrite reaches the same manager on the next refresh:
+        // the closures re-read settings per resolution.
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            serde_json::json!({
+                "mcpServers": {
+                    "second-echo": {
+                        "type": "stdio",
+                        "command": "node",
+                        "args": ["echo.mjs"]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        manager.refresh();
+        assert_eq!(
+            manager.get_enabled_persistent_generic_servers(),
+            vec!["second-echo".to_string()]
+        );
+        // The already-registered handler keeps its registration-time
+        // integrations — the registration shape a live session dispatches.
+        let result = config(pa_core::kernel::shared::HostRequestPayload {
+            data: serde_json::json!({ "server": "fixture-echo" }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            result["command"], "python3",
+            "the registered handler serves its registration-time integrations"
+        );
+        let missing = config(pa_core::kernel::shared::HostRequestPayload {
+            data: serde_json::json!({ "server": "second-echo" }),
+            cell_source_code: None,
+        })
+        .await
+        .unwrap();
+        assert!(
+            missing.as_object().unwrap().is_empty(),
+            "the pre-refresh handler does not know the new server"
+        );
+    }
+
+    /// Local service-catalog sources (`mcpCatalogSources`) reach the print
+    /// manager's catalog resolution (TS `getCatalogSources`): the declared
+    /// file's entry surfaces as a local descriptor, and dropping the
+    /// declaration withdraws it on the next resolve — the same live
+    /// settings read as the user-server closure.
+    #[test]
+    fn print_mode_mcp_manager_resolves_declared_catalog_sources() {
+        let home = tempfile::TempDir::new().unwrap();
+        let agent_dir = home.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let catalog = home.path().join("local-catalog.json");
+        std::fs::write(
+            &catalog,
+            serde_json::json!({
+                "version": 1,
+                "entries": [{
+                    "server": "my-local", "service": "my-local", "label": "My Local",
+                    "url": "https://my-local.example/mcp", "aliases": [],
+                    "transport": { "type": "http", "url": "https://my-local.example/mcp" },
+                    "auth": { "strategy": "oauth", "clientRegistration": "dynamic" },
+                    "setup": { "status": "ready" },
+                    "verification": { "status": "unverified" },
+                    "legacyBuiltin": false,
+                    "provenance": [{ "source": "user" }]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let settings = |sources: &[&str]| {
+            serde_json::json!({
+                "mcpCatalogSources": sources
+                    .iter()
+                    .map(|path| path.to_string())
+                    .collect::<Vec<_>>()
+            })
+            .to_string()
+        };
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            settings(&[&catalog.display().to_string()]),
+        )
+        .unwrap();
+        let mut manager = crate::mcp_login::cli_mcp_manager(home.path(), &agent_dir);
+        let my_local = manager
+            .service_descriptors()
+            .iter()
+            .find(|service| service.service_id == "my-local")
+            .expect("declared source entry resolved");
+        assert!(my_local.local_source);
+        // Live: dropping the declaration withdraws the entry on refresh.
+        std::fs::write(agent_dir.join("settings.json"), settings(&[])).unwrap();
+        manager.refresh();
+        assert!(
+            !manager
+                .service_descriptors()
+                .iter()
+                .any(|service| service.service_id == "my-local"),
+            "the dropped source no longer resolves"
         );
     }
 }
