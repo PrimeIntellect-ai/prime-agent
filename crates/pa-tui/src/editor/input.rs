@@ -285,4 +285,22 @@ mod tests {
             .any(|event| matches!(event, EditorEvent::Submitted(_))));
         assert_eq!(e.get_text(), "/goal ");
     }
+
+    /// A typed ZWJ family sequence lands in the buffer byte-exact (the
+    /// 2026-09-22 harness reproduction of the audit crash class verified
+    /// the editor MODEL is correct end to end: one key event per cluster
+    /// char, each char inserted at the cursor).
+    #[test]
+    fn typed_zwj_family_lands_intact() {
+        let mut e = ed();
+        for ch in "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}x".chars() {
+            e.handle_input(&ch.to_string());
+        }
+        eprintln!("text: {:?}", e.get_text());
+        eprintln!("lines: {:?}", e.lines);
+        assert_eq!(
+            e.get_text(),
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}x"
+        );
+    }
 }
