@@ -496,7 +496,15 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
-        assert_eq!(*waited.lock().unwrap(), vec![5, 10]);
+        // The waits sit in the ±20% jitter band around the 5ms/10ms
+        // ladder steps (SANCTIONED DIVERGENCE, operator ruling
+        // 2026-09-23): [4, 7] and [8, 14] with rounding headroom.
+        let waits = waited.lock().unwrap().clone();
+        assert_eq!(waits.len(), 2, "two waits: {waits:?}");
+        assert!(
+            (4..=7).contains(&waits[0]) && (8..=14).contains(&waits[1]),
+            "jittered waits {waits:?} outside the [4,7]/[8,14] bands"
+        );
         assert_eq!(message.stop_reason, StopReason::Stop);
         let AssistantContent::Text(text) = &message.content[0] else {
             panic!("text content");
