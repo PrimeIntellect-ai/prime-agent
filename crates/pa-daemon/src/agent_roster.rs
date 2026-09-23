@@ -70,7 +70,15 @@ impl AgentRoster {
         sequence: u64,
     ) -> bool {
         if sequence == 0 {
-            return true;
+            // Unsequenced frames (a caller that stamped nothing) apply
+            // only from the slot's own generation: a replaced process's
+            // delayed unsequenced frame must not overwrite the
+            // replacement, whose registration pull already wrote its
+            // state. No slot (an unstamped resident) accepts.
+            return !self
+                .delta_watermarks
+                .get(worker_id)
+                .is_some_and(|slot| slot.instance != instance);
         }
         match self.delta_watermarks.get_mut(worker_id) {
             Some(slot) if slot.instance == instance => {
