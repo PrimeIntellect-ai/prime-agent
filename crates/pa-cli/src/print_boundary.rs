@@ -630,11 +630,7 @@ impl TurnBoundary {
                 // `compaction_end` pair streams in json mode (the outcome
                 // persists in the session entries the headless terminal
                 // result reads in text mode).
-                if engine
-                    .session
-                    .auto_compaction_due(model.context_window)
-                    .await
-                {
+                if engine.session.auto_compaction_due(model).await {
                     self.emit_json(compaction_start_event(
                         CompactionOutcomeReason::Threshold.wire(),
                         None,
@@ -971,6 +967,11 @@ mod tests {
     use pa_core::session_engine::engine::{create_session, SessionEngineConfig};
     use pa_types::session::FileEntry;
     use serde_json::json;
+
+    /// The faux model's per-request output budget (maxTokens 16_384 under the
+    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// alongside the headroom (the combined input+output ceiling).
+    const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
     /// The faux provider registers process-globally; one test at a time
     /// keeps the queued responses deterministic. Async-aware: the guard
@@ -1876,7 +1877,7 @@ mod tests {
             json!({
                 "compaction": {
                     "enabled": true,
-                    "reserveTokens": 128_000u64.saturating_sub(headroom).max(1),
+                    "reserveTokens": 128_000u64.saturating_sub(FAUX_REQUEST_BUDGET + headroom).max(1),
                     "keepRecentTokens": 10
                 }
             }),
@@ -1957,7 +1958,7 @@ mod tests {
             json!({
                 "compaction": {
                     "enabled": true,
-                    "reserveTokens": 128_000u64.saturating_sub(headroom).max(1),
+                    "reserveTokens": 128_000u64.saturating_sub(FAUX_REQUEST_BUDGET + headroom).max(1),
                     "keepRecentTokens": 10
                 },
                 "autoRefine": { "enabled": false }
@@ -2047,7 +2048,7 @@ mod tests {
         let settings = json!({
             "compaction": {
                 "enabled": true,
-                "reserveTokens": 128_000u64.saturating_sub(headroom).max(1),
+                "reserveTokens": 128_000u64.saturating_sub(FAUX_REQUEST_BUDGET + headroom).max(1),
                 "keepRecentTokens": 10,
             }
         });
@@ -2223,6 +2224,9 @@ mod tests {
         let (engine_a, dir_a, _model_a) = faux_engine_with_settings(
             json!({
                 "contextWindow": 20000,
+                // A small output budget keeps the combined input+output
+                // ceiling satisfiable on the 20k window.
+                "maxTokens": 2000,
                 "responses": [{"text": "seed reply"}, {"text": "crossing reply"}],
             }),
             json!({
@@ -2263,6 +2267,7 @@ mod tests {
         let (engine_b, _dir_b, model_b) = faux_engine_with_settings(
             json!({
                 "contextWindow": 20000,
+                "maxTokens": 2000,
                 "responses": [{"text": "the resumed summary"}, {"text": "recovered after the resume"}],
             }),
             json!({

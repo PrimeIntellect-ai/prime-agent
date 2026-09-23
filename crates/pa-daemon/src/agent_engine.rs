@@ -674,7 +674,10 @@ impl AgentSessionEngine {
         &self,
         command: &pa_core::session_engine::slash_commands::SessionSlashCommand,
     ) -> anyhow::Result<SessionCommandExecution> {
-        let model = self.resolve_model()?;
+        // The session's live model (`/compact` runs a summarizer call):
+        // the provider target the turn stream reads, not a fresh
+        // startup-chain resolution (R8).
+        let model = self.session_model()?;
         self.ensure_core_session(&model)?;
         let api_key = self.resolve_request_api_key(&model);
         let mut autonomous = self.autonomous.blocking_lock();
@@ -776,6 +779,40 @@ impl AgentSessionEngine {
             return Ok(model);
         }
         self.resolve_registry_model()
+    }
+
+    /// The session's live model for summarization-side model calls
+    /// (compaction summarizers, branch summaries, side questions, and the
+    /// compaction-triggered refinement): the provider target the built
+    /// session's stream reads per call — the model the session is actually
+    /// running on. TS `_runAutoCompaction` runs its summarizer on
+    /// `this.model`, the session's live model, never a fresh resolution.
+    ///
+    /// [`Self::resolve_model`] consults a registry built from scratch each
+    /// call (startup chain over the live catalog, settings, and auth), so
+    /// two consecutive calls can resolve differently and a summarizer arm
+    /// can land on a provider the session never used — the R8 report: a
+    /// live prime-inference session whose threshold auto-compaction
+    /// resolved to `amazon-bedrock` and failed with "No AWS credentials
+    /// available for Bedrock" while the session's turns kept streaming
+    /// through the target's provider. The turn loop already follows the
+    /// target (the stream reads it per call); the summarizer arms follow
+    /// the same chain.
+    ///
+    /// Falls back to [`Self::resolve_model`] before the session's first
+    /// build (the target is set at build): the same resolution the build
+    /// itself would make, for the surfaces that can run before any turn
+    /// (the `/compact` wire command on a fresh session).
+    pub(crate) fn session_model(&self) -> anyhow::Result<Model> {
+        if let Some(target) = self
+            .provider_target
+            .read()
+            .expect("provider target lock")
+            .clone()
+        {
+            return Ok(target.model);
+        }
+        self.resolve_model()
     }
 
     /// The effective session thinking level (the sdk.ts `createAgentSession`
@@ -1579,7 +1616,10 @@ impl SessionEngine for AgentSessionEngine {
         request: CompactionRequest,
         signal: &pa_agent::abort::AbortSignal,
     ) -> CompactionOutcome {
-        let model = match self.resolve_model() {
+        // The session's live model (the provider target the turn stream
+        // reads), never a fresh startup-chain resolution (R8: a
+        // re-resolution landed the summarizer on an unconfigured provider).
+        let model = match self.session_model() {
             Ok(model) => model,
             Err(error) => {
                 return CompactionOutcome::Failed {
@@ -1690,7 +1730,10 @@ impl SessionEngine for AgentSessionEngine {
         request: BranchSummaryRequest,
         signal: &pa_agent::abort::AbortSignal,
     ) -> BranchSummaryOutcome {
-        let model = match self.resolve_model() {
+        // The session's live model (the provider target the turn stream
+        // reads): the branch summarizer runs on the session model like the
+        // compaction summarizer (R8).
+        let model = match self.session_model() {
             Ok(model) => model,
             Err(error) => {
                 return BranchSummaryOutcome::Failed {
@@ -1943,7 +1986,10 @@ impl SessionEngine for AgentSessionEngine {
         signal: &pa_agent::abort::AbortSignal,
         sink: &pa_core::session_engine::side_question::SideQuestionSink,
     ) -> SideQuestionOutcome {
-        let model = match self.resolve_model() {
+        // The session's live model (the provider target the turn stream
+        // reads): the side question runs on the session model like the
+        // compaction summarizer (R8).
+        let model = match self.session_model() {
             Ok(model) => model,
             Err(error) => {
                 return SideQuestionOutcome::Failed {
@@ -2782,7 +2828,10 @@ impl AgentSessionEngine {
         if !has_pending {
             return BoundaryRun::Proceed;
         }
-        let model = match self.resolve_model() {
+        // The session's live model (the provider target the turn stream
+        // reads), never a fresh startup-chain resolution (R8: a
+        // re-resolution landed the summarizer on an unconfigured provider).
+        let model = match self.session_model() {
             Ok(model) => model,
             Err(error) => {
                 eprintln!("pa-daemon: boundary request could not resolve a model: {error:#}");
@@ -3777,6 +3826,11 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) use super::FAUX_TEST_LOCK;
+
+    /// The faux model's per-request output budget (maxTokens 16_384 under the
+    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// alongside the headroom (the combined input+output ceiling).
+    const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
     /// A models.json custom provider (name has no env-key mapping), with an
     /// apiKey the registry must resolve for request auth (the env-key map
@@ -4909,7 +4963,9 @@ pub(crate) mod tests {
                     {"text": "the summary"},
                 ],
             }),
-            128_000u64.saturating_sub(headroom).max(1),
+            128_000u64
+                .saturating_sub(FAUX_REQUEST_BUDGET + headroom)
+                .max(1),
         );
 
         let mut events: Vec<EngineEvent> = Vec::new();
@@ -4986,6 +5042,211 @@ pub(crate) mod tests {
         assert_eq!((start_count, end_count), (1, 1));
     }
 
+    /// The compaction summarizer stays on the session's provider when a
+    /// fresh startup-chain resolution drifts mid-session (R8): the live
+    /// report was a prime-inference session whose threshold
+    /// auto-compaction re-resolved to `amazon-bedrock` and failed with
+    /// "No AWS credentials available for Bedrock" while the session's
+    /// turns kept streaming through the target's provider. The session
+    /// builds on the models.json faux model; the settings default then
+    /// changes under it (the drift a live catalog or settings edit
+    /// produces), so [`AgentSessionEngine::resolve_model`] now lands on
+    /// a dead provider — but the threshold arm follows the session's
+    /// provider target ([`AgentSessionEngine::session_model`]): the
+    /// summarizer request still hits the faux provider and the
+    /// compaction succeeds instead of failing on the drift model.
+    #[test]
+    fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        // The session's provider: the process-global faux provider
+        // (api "faux"), serving the turn replies and the summarizer.
+        let script = json!({
+            "responses": [
+                {"text": "seed reply"},
+                {"text": "crossing reply"},
+                {"text": "the drifted summary"},
+            ],
+        });
+        let parsed = pa_ai::faux::script::parse_faux_script(&script).expect("faux script parses");
+        let registration = pa_ai::faux::script::register_faux_provider_from_script(&parsed);
+        // The registry catalog: the faux model the session builds on,
+        // and the drift model — an openai-completions endpoint nothing
+        // serves (the live R8 shape: Bedrock with no credentials), so a
+        // request against it fails.
+        std::fs::write(
+            agent_dir.join("models.json"),
+            json!({
+                "providers": {
+                    "faux": {
+                        "api": "faux",
+                        "baseUrl": "http://localhost:0",
+                        "apiKey": "sk-faux",
+                        "models": [{
+                            "id": "faux-1",
+                            "name": "Faux Model",
+                            "contextWindow": 128000,
+                            "maxTokens": 16384,
+                        }],
+                    },
+                    "drift": {
+                        "api": "openai-completions",
+                        "baseUrl": "http://127.0.0.1:9",
+                        "apiKey": "sk-drift",
+                        "models": [{
+                            "id": "drift-1",
+                            "name": "Drift Model",
+                            "contextWindow": 128000,
+                            "maxTokens": 16384,
+                        }],
+                    },
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let write_settings = |default_provider: &str, default_model: &str, reserve_tokens: u64| {
+            std::fs::write(
+                agent_dir.join("settings.json"),
+                json!({
+                    "defaultProvider": default_provider,
+                    "defaultModel": default_model,
+                    "compaction": {
+                        "enabled": true,
+                        "reserveTokens": reserve_tokens,
+                        "keepRecentTokens": 10,
+                    },
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        let new_engine = || {
+            AgentSessionEngine::new(AgentEngineConfig {
+                cwd: dir.path().to_path_buf(),
+                agent_dir: agent_dir.clone(),
+                provider: None,
+                model: None,
+                api_key: None,
+                thinking: None,
+                session_dir: None,
+                session_file: None,
+                faux_script: None,
+                supervisor_link: None,
+                telemetry_disabled: None,
+                cron_store: None,
+                queued_steering_probe: None,
+            })
+            .unwrap()
+        };
+        // Probe: the baseline turn's total usage (the faux provider
+        // estimates usage from the serialized context, system prompt
+        // included) with the threshold far away.
+        write_settings("faux", "faux-1", 1);
+        let probe = new_engine();
+        let mut probe_events: Vec<EngineEvent> = Vec::new();
+        admit(&probe, "seed turn".to_string(), &mut probe_events);
+        let baseline = probe_events
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::AssistantMessage(message) => message["usage"]["totalTokens"].as_u64(),
+                _ => None,
+            })
+            .expect("probe turn produced usage");
+        assert!(baseline < 100_000, "implausible baseline: {baseline}");
+        drop(probe);
+
+        // The threshold engine: the combined input+output ceiling sits
+        // between the seed turn's usage and the crossing turn's (the
+        // same probe margins the sibling threshold tests use; the
+        // 16_384 per-request output budget is part of the ceiling).
+        let big_prompt = format!("seed turn {} crossing", "x".repeat(48_000));
+        let big_tokens = (48_000 + "seed turn  crossing".len() as u64).div_ceil(4);
+        let headroom = baseline + big_tokens / 2;
+        let reserve = 128_000u64
+            .saturating_sub(FAUX_REQUEST_BUDGET + headroom)
+            .max(1);
+        write_settings("faux", "faux-1", reserve);
+        registration.set_responses(parsed.responses.clone());
+        let engine = new_engine();
+        let mut events: Vec<EngineEvent> = Vec::new();
+        admit(&engine, "seed turn".to_string(), &mut events);
+        assert_eq!(assistant_texts(&events), vec!["seed reply".to_string()]);
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                EngineEvent::CompactionStart { .. } | EngineEvent::Compaction { .. }
+            )),
+            "no compaction below the threshold"
+        );
+
+        // The mid-session resolution drift (the live R8 shape): the
+        // settings default changes under the built session, so a fresh
+        // startup-chain resolution lands on the dead provider while the
+        // session's live model stays the provider target.
+        write_settings("drift", "drift-1", reserve);
+        let drifted = engine.resolve_model().expect("the drift model resolves");
+        assert_eq!(
+            (drifted.provider.as_str(), drifted.id.as_str()),
+            ("drift", "drift-1")
+        );
+        let session = engine
+            .session_model()
+            .expect("the session model resolves");
+        assert_eq!(
+            (session.provider.as_str(), session.id.as_str()),
+            ("faux", "faux-1")
+        );
+
+        // The threshold arm compacts on the session's provider: the
+        // crossing turn's boundary runs the summarizer through the faux
+        // provider (its queued reply is the compaction result), never
+        // the dead drift model.
+        let calls_before_crossing = registration.call_count();
+        let mut crossing_events: Vec<EngineEvent> = Vec::new();
+        admit(&engine, big_prompt, &mut crossing_events);
+        let starts = crossing_events
+            .iter()
+            .filter(
+                |event| matches!(event, EngineEvent::CompactionStart { event } if event["reason"] == "threshold"),
+            )
+            .count();
+        let ends = crossing_events
+            .iter()
+            .filter(|event| matches!(event, EngineEvent::Compaction { .. }))
+            .count();
+        assert_eq!((starts, ends), (1, 1));
+        let summary = crossing_events
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::Compaction { event, .. } => {
+                    event["result"]["summary"].as_str().map(str::to_string)
+                }
+                _ => None,
+            })
+            .expect("the compaction end carries the summarizer's text");
+        assert_eq!(summary, "the drifted summary");
+        // The crossing turn and the summarizer both served through the
+        // session's provider — the drift model was never called.
+        assert_eq!(
+            registration.call_count(),
+            calls_before_crossing + 2,
+            "the crossing turn and the summarizer ran on the session provider"
+        );
+        assert_eq!(
+            assistant_texts(&crossing_events),
+            vec!["crossing reply".to_string()]
+        );
+        assert!(matches!(
+            crossing_events.last(),
+            Some(EngineEvent::Done(Ok(())))
+        ));
+    }
+
     /// End the session telemetry (flushing every queued event through the
     /// local mirror sink) and read one named event's properties: the
     /// transparency mirror is the product's own observable surface for the
@@ -5051,7 +5312,9 @@ pub(crate) mod tests {
                     {"text": "the summary"},
                 ],
             }),
-            128_000u64.saturating_sub(headroom).max(1),
+            128_000u64
+                .saturating_sub(FAUX_REQUEST_BUDGET + headroom)
+                .max(1),
         );
         let mut events: Vec<EngineEvent> = Vec::new();
         admit(&engine, "seed turn".to_string(), &mut events);
@@ -5314,7 +5577,9 @@ pub(crate) mod tests {
         let headroom = baseline + big_tokens / 2;
         let (engine, _engine_dir) = faux_engine_with_settings(
             serde_json::json!({ "responses": [{"text": "crossing reply"}] }),
-            128_000u64.saturating_sub(headroom).max(1),
+            128_000u64
+                .saturating_sub(FAUX_REQUEST_BUDGET + headroom)
+                .max(1),
         );
         let mut events: Vec<EngineEvent> = Vec::new();
         admit(&engine, big_prompt, &mut events);
@@ -5574,7 +5839,9 @@ pub(crate) mod tests {
                     {"text": "the summary", "delayMs": 30_000},
                 ],
             }),
-            128_000u64.saturating_sub(headroom).max(1),
+            128_000u64
+                .saturating_sub(FAUX_REQUEST_BUDGET + headroom)
+                .max(1),
         );
         let engine = std::sync::Arc::new(engine);
         let mut seed_events: Vec<EngineEvent> = Vec::new();

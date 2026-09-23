@@ -295,9 +295,11 @@ impl AgentSession {
     /// Whether an automatic threshold compaction is due at a turn boundary
     /// (the TS `_checkCompaction` threshold arm, fired at `agent_end` and
     /// before the next admitted prompt): the live loop context over the
-    /// model's context window and the compaction reserve headroom. Usage
+    /// model's context window against the effective threshold
+    /// (`compaction::compaction_threshold`: the percentage ceiling or the
+    /// combined input+output ceiling, whichever comes first). Usage
     /// from before the latest compaction never re-triggers.
-    pub async fn auto_compaction_due(&self, context_window: u64) -> bool {
+    pub async fn auto_compaction_due(&self, model: &pa_types::ai::Model) -> bool {
         let state = self.agent.state().await;
         // The live loop context is the agent's message list (the same JSON
         // round-trip `compact` uses for its rebuilt context).
@@ -307,7 +309,12 @@ impl AgentSession {
             .filter_map(|message| serde_json::to_value(message).ok())
             .filter_map(|value| serde_json::from_value(value).ok())
             .collect();
-        compaction::threshold_compaction_due(&messages, context_window, &self.compaction)
+        compaction::threshold_compaction_due(
+            &messages,
+            model.context_window,
+            compaction::request_output_budget(model),
+            &self.compaction,
+        )
     }
 
     /// Remove the trailing assistant message from the loop context (TS retry:

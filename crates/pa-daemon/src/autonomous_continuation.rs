@@ -207,7 +207,10 @@ impl AgentSessionEngine {
     /// Whether a threshold compaction is due at this turn boundary (the
     /// core session's context estimate over the resolved model's window).
     async fn autonomous_threshold_due(&self) -> bool {
-        let Ok(model) = self.resolve_model() else {
+        // The same live model the threshold arm compacts on (the provider
+        // target): the consult and the arm must agree, or a continuation
+        // queues for a threshold crossing the arm never sees (R8).
+        let Ok(model) = self.session_model() else {
             return false;
         };
         let Some(mirror) = self.autonomous_boundary_mirror() else {
@@ -225,6 +228,7 @@ impl AgentSessionEngine {
         pa_core::session_engine::compaction::threshold_compaction_due(
             &messages,
             model.context_window,
+            pa_core::session_engine::compaction::request_output_budget(&model),
             &mirror.compaction,
         )
     }

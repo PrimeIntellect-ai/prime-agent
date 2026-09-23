@@ -5,6 +5,21 @@ use crate::types::{
     Model, ModelThinkingLevel, SimpleStreamOptions, StreamOptions, ThinkingBudgets,
 };
 
+/// The per-request output cap when the caller sets no `max_tokens` (TS
+/// `buildBaseOptions`: `Math.min(model.maxTokens, 32000)`).
+pub const REQUEST_MAX_TOKENS_CAP: u64 = 32_000;
+
+/// The smallest output budget a request may keep after clamping (TS
+/// `adjustMaxTokensForThinking`: `minOutputTokens`).
+pub const MIN_OUTPUT_TOKENS: u64 = 1_024;
+
+/// The default per-request output budget for a model (TS `buildBaseOptions`):
+/// the model's max output capped at [`REQUEST_MAX_TOKENS_CAP`], or `None` when
+/// the model declares no max output (providers that default server-side).
+pub fn default_request_max_tokens(model: &Model) -> Option<u64> {
+    (model.max_tokens > 0).then(|| model.max_tokens.min(REQUEST_MAX_TOKENS_CAP))
+}
+
 pub fn build_base_options(
     model: &Model,
     options: Option<&SimpleStreamOptions>,
@@ -17,8 +32,7 @@ pub fn build_base_options(
         temperature: base.temperature,
         max_tokens: match base.max_tokens {
             Some(tokens) => Some(tokens),
-            None if model.max_tokens > 0 => Some(model.max_tokens.min(32_000)),
-            None => None,
+            None => default_request_max_tokens(model),
         },
         signal: base.signal,
         api_key: Some(api_key.map(|key| key.to_string()).unwrap_or_default())
@@ -69,7 +83,7 @@ pub fn adjust_max_tokens_for_thinking(
         },
         None => default_budgets,
     };
-    let min_output_tokens = 1024u64;
+    let min_output_tokens = MIN_OUTPUT_TOKENS;
     let min_thinking_tokens = 1024u64;
     let level = clamp_reasoning(reasoning_level);
     let level_budget = match level {

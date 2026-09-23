@@ -380,12 +380,14 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
         .to_string(),
     )
     .expect("write models.json");
-    // The f14-auto battery settings shape: a 500-token headroom on the
-    // 128k window and a tiny keep-recent budget so the seeded turns are
-    // summarizable.
+    // The f14-auto battery settings shape: a tiny reserve (the 4_096
+    // estimate-error floor governs the headroom), so the combined
+    // input+output ceiling sits at 119_808 on the 128k window — the
+    // 126_010 crossing fires. A tiny keep-recent budget keeps the seeded
+    // turns summarizable.
     std::fs::write(
         agent_dir.join("settings.json"),
-        json!({ "compaction": {"enabled": true, "reserveTokens": 127500, "keepRecentTokens": 10} })
+        json!({ "compaction": {"enabled": true, "reserveTokens": 500, "keepRecentTokens": 10} })
             .to_string(),
     )
     .expect("write settings.json");

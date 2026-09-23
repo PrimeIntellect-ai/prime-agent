@@ -137,6 +137,12 @@ pub(super) async fn fail_goal_for_terminal_error(
 mod tests {
     use super::*;
     use crate::agent_engine::FAUX_TEST_LOCK;
+
+    /// The faux model's per-request output budget (maxTokens 16_384 under the
+    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// alongside the headroom (the combined input+output ceiling).
+    const FAUX_REQUEST_BUDGET: u64 = 16_384;
+
     use pa_core::session::manager::SessionManager;
     use pa_core::session_engine::engine::{create_session, SessionEngineConfig};
     use pa_core::session_engine::provider_adapter::{json_round_trip, real_stream_fn};
@@ -515,7 +521,9 @@ mod tests {
                     "two",
                 ]
             }),
-            127_500,
+            // A 500-token combined ceiling (the window minus the faux
+            // request budget and the reserve).
+            128_000u64.saturating_sub(FAUX_REQUEST_BUDGET + 500),
         )
         .await;
         // The harness shape: a seeded crossing turn whose boundary
@@ -630,7 +638,9 @@ mod tests {
                     { "text": "the summary", "delayMs": 30_000 },
                 ]
             }),
-            127_500,
+            // A 500-token combined ceiling (the window minus the faux
+            // request budget and the reserve).
+            128_000u64.saturating_sub(FAUX_REQUEST_BUDGET + 500),
         )
         .await;
         // The harness shape: a seeded crossing turn (its boundary
