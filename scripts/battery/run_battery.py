@@ -922,6 +922,144 @@ class Battery:
             frames,
             normalizer=self.normalize_transcript_frame,
         )
+        # The mid-turn dogfood phase: /btw during a busy main turn.
+        self.f5_side_questions_client_midturn()
+
+    def f5_side_questions_client_midturn(self) -> None:
+        """The /btw pane opened DURING a busy main turn (the live-dogfood
+        report: "stuck in thinking"). The side question is a parallel model
+        call: the pane must answer while the main turn is still waiting on
+        its provider, and the main turn must then complete unaffected."""
+        flow = "f5_side_questions"
+        frames: dict[str, str] = {}
+        for side in (self.sides["ts"], self.sides["rust"]):
+            self.ensure_daemon(side)
+            # Text-scoped queues (the side run clones the main conversation,
+            # so its request body carries the main turn's text too — the
+            # side queue matches first because queue order decides). The
+            # main turn's reply is delayed (delayMs), holding the session
+            # mid-turn while the side question runs.
+            side.mock.set_responses(
+                [{"text": "status"}],
+                queues=[
+                    {
+                        "name": "side-turns",
+                        "match": ["what is the busy side answer"],
+                        "responses": [{"text": "btw busy answer from mock"}],
+                    },
+                    {
+                        "name": "main-turns",
+                        "match": ["run the slow main task"],
+                        "responses": [{"text": "main turn reply while busy", "delayMs": 20000}],
+                    },
+                    {
+                        "name": "statusline",
+                        "matchModels": [STATUSLINE_MODEL_ID],
+                        "responses": [{"text": "status"}],
+                    },
+                ],
+            )
+            session = f"{self.runid}-f5m-{side.name}"
+            argv = P.launch_argv(side, side.daemon_socket)
+            B.tmux_launch(session, argv, side.env, side.work_dir)
+            self.settle_first_run(session)
+            mark = len(side.mock.requests())
+            # The main turn starts and parks on the delayed provider reply.
+            B.tmux_send(session, "run the slow main task")
+            busy = B.tmux_wait_text(session, "Waiting", timeout=30)
+            side.evidence(flow, "20-midturn-busy.txt", busy)
+            # /btw mid-turn: the pane opens on the thinking state and must
+            # render the streamed answer while the main turn is still
+            # waiting.
+            B.tmux_send(session, "/btw what is the busy side answer?")
+            pane = B.tmux_wait_text(session, "btw busy answer from mock", timeout=60)
+            side.evidence(flow, "21-midturn-btw-answered.txt", pane)
+            requests = self.new_mock_requests(side, mark)
+            side.evidence_json(flow, "20-midturn-mock-requests.json", requests)
+            side_order = [
+                index
+                for index, request in enumerate(requests)
+                if "busy side answer" in json.dumps(request.get("body") or {})
+            ]
+            if "/btw" in pane and "btw busy answer from mock" in pane:
+                if "main turn reply while busy" not in pane and side_order:
+                    self.record(
+                        flow,
+                        "behavior",
+                        f"{side.name}: /btw answered while the main turn was still waiting on its provider (the side run is a parallel model call)",
+                        gap=False,
+                    )
+                elif "main turn reply while busy" in pane:
+                    self.record(
+                        flow,
+                        "behavior",
+                        f"{side.name}: the /btw pane answered only after the main turn finished (the side run queued behind the busy main turn)",
+                        evidence=side.root / flow / "21-midturn-btw-answered.txt",
+                    )
+                else:
+                    self.record(
+                        flow,
+                        "protocol",
+                        f"{side.name}: the side pane answered without a side provider request (the run never reached the provider)",
+                        evidence=side.root / flow / "20-midturn-mock-requests.json",
+                    )
+            else:
+                self.record(
+                    flow,
+                    "behavior",
+                    f"{side.name}: /btw pane never rendered the side answer mid-turn (stuck in thinking)",
+                    evidence=side.root / flow / "21-midturn-btw-answered.txt",
+                )
+            # The main turn completes, unaffected by the side question; the
+            # answered pane stays mounted.
+            settled = B.tmux_wait_text(session, "main turn reply while busy", timeout=60)
+            side.evidence(flow, "22-midturn-settled.txt", settled)
+            if "btw busy answer from mock" in settled:
+                self.record(
+                    flow,
+                    "behavior",
+                    f"{side.name}: the main turn completed with the /btw pane still answered (the main session was never blocked)",
+                    gap=False,
+                )
+            else:
+                self.record(
+                    flow,
+                    "behavior",
+                    f"{side.name}: the settled frame lost the answered side pane",
+                    evidence=side.root / flow / "22-midturn-settled.txt",
+                )
+            # esc closes the pane; the main thread continues.
+            B.tmux_send(session, "Escape", enter=False)
+            time.sleep(1.5)
+            after_esc = B.tmux_capture(session)
+            side.evidence(flow, "23-midturn-after-esc.txt", after_esc)
+            if (
+                "busy side answer" in after_esc
+                or "esc to return to session" in after_esc
+            ):
+                self.record(
+                    flow,
+                    "behavior",
+                    f"{side.name}: esc did not close the mid-turn /btw pane",
+                    evidence=side.root / flow / "23-midturn-after-esc.txt",
+                )
+            else:
+                self.record(
+                    flow,
+                    "behavior",
+                    f"{side.name}: esc closes the mid-turn /btw pane with the main thread intact",
+                    gap=False,
+                )
+            frames[side.name] = settled
+            B.tmux_kill(session)
+        # Capture-compare: the settled frame (main reply landed, pane
+        # answered), normalized like the other real-surface flows.
+        self.frame_diff(
+            flow,
+            "btw-pane-midturn-settled",
+            frames,
+            normalizer=self.normalize_transcript_frame,
+        )
 
     def overflow_wire_projection(self, events: list) -> list:
         """The overflow-relevant wire surface of one session: the
