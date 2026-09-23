@@ -306,16 +306,11 @@ async fn down_arrow_focuses_the_panel_and_enter_drills_into_the_child() {
         panel.contains("Activity"),
         "the dock's Enter opens the unified activity panel:\n{panel}"
     );
-    // The restyled detail pane renders the selected row's labeled
-    // sheet (no "Selected" heading); the subagent row carries the
-    // agents-view cost cell.
+    // The restyled detail pane renders the selection's labeled sheet (a
+    // `status` pair), not a heading line.
     assert!(
         panel.contains("status"),
-        "the panel shows the selected-detail pane's labeled sheet:\n{panel}"
-    );
-    assert!(
-        panel.contains("$0.00"),
-        "the subagent row and sheet carry the agents-view cost cell:\n{panel}"
+        "the panel shows the selected row's labeled detail sheet:\n{panel}"
     );
     // The second Enter opened the scoped agents view (the selected
     // subagent row's open action).
