@@ -166,7 +166,14 @@ fn fold_child_usage_attributions(entries: &mut [SessionEntry]) {
         else {
             continue;
         };
-        let Some(aggregate) = entry.fields.get("aggregateUsage") else {
+        // A malformed aggregate (null, a scalar) must not overwrite the
+        // row's valid usage with nothing — the typed session reader
+        // rejects invalid attribution payloads the same way.
+        let Some(aggregate) = entry
+            .fields
+            .get("aggregateUsage")
+            .filter(|aggregate| aggregate.is_object())
+        else {
             continue;
         };
         folds.push((*row, aggregate.clone()));
@@ -371,6 +378,16 @@ impl SessionFile {
     }
 
     fn push_index(&mut self, entry: SessionEntry) {
+        self.push_index_inner(entry, true);
+    }
+
+    /// The load and in-memory build paths fold live attributions as they
+    /// push (the end-of-load fold re-applies idempotently); the
+    /// rewrite-persist path defers the fold until the rewrite succeeds —
+    /// a failed rewrite rolls the index back, and the target row must not
+    /// keep a fold whose durable attribution row never landed (TS reverts
+    /// the live row in the same failure path).
+    fn push_index_inner(&mut self, entry: SessionEntry, fold_live: bool) {
         // The live-append seam of the attribution fold (TS
         // `SessionManager.append_child_usage_attribution` folds after the
         // durable append): an attribution entry joining the index folds its
@@ -378,12 +395,25 @@ impl SessionFile {
         // keeps stale usage until a reopen. The end-of-load fold re-applies
         // idempotently (the fold SETS the aggregate) and also catches forward
         // references in foreign files.
-        if entry.type_ == "child_usage_attributed" {
+        if fold_live && entry.type_ == "child_usage_attributed" {
             self.fold_live_attribution(&entry);
         }
         self.by_id.insert(entry.id.clone(), self.entries.len());
         self.leaf_id = Some(entry.id.clone());
         self.entries.push(entry);
+    }
+
+    /// Fold one already-indexed attribution entry's aggregate (the
+    /// rewrite-persist path calls this after the durable write succeeds).
+    fn fold_attribution_id(&mut self, id: &str) {
+        let Some(&row) = self.by_id.get(id) else {
+            return;
+        };
+        if self.entries[row].type_ != "child_usage_attributed" {
+            return;
+        }
+        let entry = self.entries[row].clone();
+        self.fold_live_attribution(&entry);
     }
 
     /// Fold one attribution entry's aggregate into its already-indexed
@@ -397,7 +427,14 @@ impl SessionFile {
         else {
             return;
         };
-        let Some(aggregate) = entry.fields.get("aggregateUsage") else {
+        // A malformed aggregate (null, a scalar) must not overwrite the
+        // row's valid usage with nothing — the typed session reader
+        // rejects invalid attribution payloads the same way.
+        let Some(aggregate) = entry
+            .fields
+            .get("aggregateUsage")
+            .filter(|aggregate| aggregate.is_object())
+        else {
             return;
         };
         // TS assigns `target.message.usage = cloneUsage(aggregate)`:
@@ -915,15 +952,18 @@ impl SessionFile {
             self.push_index(entry);
         } else {
             // The rewrite path serializes the whole index, so the entry must
-            // be indexed first; a failed rewrite rolls the index back.
+            // be indexed first; a failed rewrite rolls the index back. The
+            // live attribution fold is DEFERRED until the rewrite succeeds —
+            // the rolled-back index must leave the target row untouched.
             let previous_leaf = self.leaf_id.clone();
-            self.push_index(entry);
+            self.push_index_inner(entry, false);
             if let Err(error) = self.rewrite() {
                 self.by_id.remove(&id);
                 self.entries.pop();
                 self.leaf_id = previous_leaf;
                 return Err(error);
             }
+            self.fold_attribution_id(&id);
         }
         Ok(id)
     }
@@ -1435,6 +1475,33 @@ mod tests {
             row.fields["message"]["usage"]["cost"]["total"].as_f64(),
             Some(0.01)
         );
+    }
+
+    #[test]
+    fn a_malformed_aggregate_does_not_zero_the_target_row() {
+        let mut store = SessionFile::create("/tmp", None, 0);
+        store.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+        let assistant = store.append_message(json!({
+            "role": "assistant", "content": "hello", "provider": "p", "model": "m",
+            "timestamp": 2u64,
+            "usage": {"input": 10, "output": 2, "cacheRead": 0, "cacheWrite": 0,
+                      "totalTokens": 12,
+                      "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}},
+        }));
+        // A malformed aggregate (null / a scalar) must not overwrite the
+        // row's valid usage with nothing — the fold skips it, exactly like
+        // the typed session reader rejects invalid attribution payloads.
+        store.append_entry(
+            "child_usage_attributed",
+            json!({"targetId": assistant, "origin": "spawn_task", "aggregateUsage": null}),
+        );
+        store.append_entry(
+            "child_usage_attributed",
+            json!({"targetId": assistant, "origin": "direct_user", "aggregateUsage": 42}),
+        );
+        let row = store.entry(&assistant).unwrap();
+        assert_eq!(row.fields["message"]["usage"]["input"], json!(10));
+        assert_eq!(row.fields["message"]["usage"]["totalTokens"], json!(12));
     }
 
     #[test]
