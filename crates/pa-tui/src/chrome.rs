@@ -99,8 +99,10 @@ pub enum ActivityGroup {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivityDock {
-    /// The session's live descendant subagents (the whole tree —
-    /// subagents of subagents count).
+    /// The session's LIVE descendant subagents (the whole tree —
+    /// subagents of subagents count): running and idle only; dead
+    /// registry rows (passivated children the ledger still seeds)
+    /// never bloat the indicator (operator directive 2026-09-23).
     pub subagents: usize,
     /// How many of those descendants are actively running.
     pub subagents_running: usize,
@@ -111,11 +113,11 @@ pub struct ActivityDock {
     pub heartbeats_paused: usize,
     /// Bash processes actively running right now (the current session's
     /// kernel registry only): finished runs never inflate the indicator
-    /// — they stay as dimmed rows inside the panel.
+    /// — they stay as rows inside the bash view.
     pub bash_running: usize,
     /// Every catalogued kernel-bash run, finished ones included: this
-    /// keeps the dock (and so the panel's dimmed history) reachable when
-    /// no run is live; the rendered indicator count stays `bash_running`.
+    /// keeps the dock (and so the bash view's history) reachable when no
+    /// run is live; the rendered indicator count stays `bash_running`.
     pub bash_total: usize,
     /// The active goal's token progress `(used, budget)`; `None` unless
     /// the goal is actively being pursued (a completed or idle goal
@@ -534,7 +536,7 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
         (ActivityGroup::Subagents, subagents),
         (ActivityGroup::Heartbeats, heartbeats),
         // Only live bash runs count in the dock's indicator (operator
-        // scoping); the panel keeps the dimmed finished rows.
+        // scoping); the bash view keeps the finished rows.
         (ActivityGroup::Bash, format!("▸ {} bash", dock.bash_running)),
     ];
     let mut line = vec![Span::raw(" ")];
@@ -632,9 +634,9 @@ mod tests {
             text,
             " ◆ 2 subagents · 0 running  ·  ◷ 1 heartbeat  ·  ▸ 0 bash"
         );
-        // Finished-only bash rows keep the dock mounted (the panel's
-        // dimmed history stays reachable) while the indicator reads
-        // zero live runs.
+        // Finished-only bash rows keep the dock mounted (the bash view's
+        // history stays reachable) while the indicator reads zero live
+        // runs.
         let dock = ActivityDock {
             bash_total: 2,
             ..ActivityDock::default()

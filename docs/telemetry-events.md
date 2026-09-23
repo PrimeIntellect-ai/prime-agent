@@ -378,16 +378,16 @@ subagent inspection surface; emitted once per open action).
 
 ### `tui activity opened`
 
-The user opened an activity surface from the session view: the unified
-panel itself (dock Enter, a second Alt+A, or a dock group's Enter) or a
-group's management view from the panel (the scoped agents view, the
-heartbeats view, a bash output tail). The goal indicator is read-only and
-does not emit this event. No command, output, prompt, or goal content is
-collected.
+The user opened an activity view from the dock (the operator's
+direct-navigation redesign): dock Enter or a second Alt+A opens the
+focused group's own view directly — the scoped agents view, the
+heartbeats view, or the bash view (the grouped panel is gone). The goal
+indicator is read-only and does not emit this event. No command, output,
+prompt, or goal content is collected.
 
 | property | type | notes |
 |---|---|---|
-| `kind` | string | `panel` / `subagents` / `heartbeats` / `bash` |
+| `kind` | string | `subagents` / `heartbeats` / `bash` |
 
 ### `tui prompt stash`
 
