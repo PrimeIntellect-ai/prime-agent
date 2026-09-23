@@ -186,12 +186,12 @@ impl ActivityPanel {
                 .unwrap_or(self.selected.min(self.rows.len().saturating_sub(1))),
             None => 0,
         };
-        let selected_id = self.rows.get(self.selected).map(|row| row.id.clone());
-        if self
-            .bash_tail
-            .as_ref()
-            .is_some_and(|(id, _)| Some(id) != selected_id.as_ref())
-        {
+        if self.bash_tail.as_ref().is_some_and(|(id, _)| {
+            !self
+                .rows
+                .get(self.selected)
+                .is_some_and(|row| row.group == ActivityPanelGroup::Bash && &row.id == id)
+        }) {
             self.bash_tail = None;
         }
     }
@@ -264,9 +264,12 @@ impl ActivityPanel {
             0
         };
         if delta != 0 && !self.rows.is_empty() {
-            self.selected =
+            let next =
                 (self.selected as isize + delta).clamp(0, self.rows.len() as isize - 1) as usize;
-            self.bash_tail = None;
+            if next != self.selected {
+                self.selected = next;
+                self.bash_tail = None;
+            }
             return ActivityPanelAction::None;
         }
         let Some(row) = self.rows.get(self.selected) else {
@@ -384,10 +387,11 @@ impl ActivityPanel {
                 .detail_budget()
                 .saturating_sub(row.detail.len().min(MAX_DETAIL_LINES))
                 .max(1);
-            let tail = self
-                .bash_tail
-                .as_ref()
-                .filter(|(id, _)| Some(id) == self.rows.get(self.selected).map(|row| &row.id));
+            let tail = self.bash_tail.as_ref().filter(|(id, _)| {
+                self.rows
+                    .get(self.selected)
+                    .is_some_and(|row| row.group == ActivityPanelGroup::Bash && &row.id == id)
+            });
             if let Some((_, tail)) = tail {
                 lines.push(text(ThemeColor::Muted, "Output tail".to_string()));
                 for output in tail.iter().take(tail_budget) {
@@ -411,7 +415,8 @@ impl ActivityPanel {
             + self
                 .bash_tail
                 .as_ref()
-                .map(|(_, tail)| tail.len().min(MAX_TAIL_LINES))
+                // The rendered heading plus the bounded tail lines.
+                .map(|(_, tail)| 1 + tail.len().min(MAX_TAIL_LINES))
                 .unwrap_or(0)
     }
 }
@@ -1006,6 +1011,83 @@ mod tests {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
         let kb = KeybindingsManager::new();
         let _ = panel.render(&theme, 60, &kb);
+    }
+
+    #[test]
+    fn boundary_moves_keep_the_fetched_tail() {
+        let (roster, goal, heartbeats, bash) = full_sources();
+        let identity = identity();
+        let src = sources(&identity, &roster, &goal, &heartbeats, &bash);
+        let mut panel = ActivityPanel::new(&src, Some(ActivityPanelGroup::Bash), 16);
+        let kb = KeybindingsManager::new();
+        panel.set_bash_tail("a", "one\ntwo\nthree");
+        // Down past the last bash row clamps at the boundary: the selection
+        // does not move, so the fetched tail stays.
+        panel.handle_key("down", &kb);
+        assert_eq!(panel.selected_row().map(|row| row.id.as_str()), Some("b"));
+        panel.set_bash_tail("b", "kept");
+        panel.handle_key("down", &kb);
+        assert_eq!(panel.selected_row().map(|row| row.id.as_str()), Some("b"));
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let lines = panel.render(&theme, 60, &kb);
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.iter())
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(
+            rendered.contains("Output tail"),
+            "no-op move keeps the tail"
+        );
+        assert!(rendered.contains("kept"));
+    }
+
+    #[test]
+    fn a_tail_never_attaches_to_a_non_bash_row_with_the_same_id() {
+        // The id namespaces are independent: a subagent's roster id and a
+        // kernel bash id can collide, so the cache must match the group too.
+        let roster = vec![json!({
+            "agentId": "a1",
+            "status": "idle",
+            "summary": {
+                "runtimeKind": "subagent",
+                "lifecycle": "live",
+                "parentActiveSessionId": "root",
+                "activeSessionId": "a",
+                "sessionName": "clash"
+            }
+        })];
+        let goal = goal(false);
+        let heartbeats = Vec::new();
+        let bash = json!({"activities": [
+            {"id":"a","command":"sleep 9","status":"running"},
+        ]});
+        let identity = identity();
+        let src = sources(&identity, &roster, &goal, &heartbeats, &bash);
+        let mut panel = ActivityPanel::new(&src, Some(ActivityPanelGroup::Bash), 16);
+        let kb = KeybindingsManager::new();
+        panel.set_bash_tail("a", "process output");
+        assert_eq!(
+            panel.selected_row().map(|row| row.group),
+            Some(ActivityPanelGroup::Bash)
+        );
+        // The bash feed disappears: the clamped fallback lands on the
+        // subagent row whose id is also "a" - the tail must not follow.
+        let emptied = json!({"activities": []});
+        let src2 = sources(&identity, &roster, &goal, &heartbeats, &emptied);
+        panel.apply_sources(&src2);
+        assert_eq!(panel.selected_row().map(|row| row.id.as_str()), Some("a"));
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let lines = panel.render(&theme, 60, &kb);
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.iter())
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(
+            !rendered.contains("process output"),
+            "the tail never renders under a non-bash row: {rendered}"
+        );
     }
 
     #[test]

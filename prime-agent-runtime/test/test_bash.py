@@ -74,6 +74,18 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             activity_request("tail", activity_id, 201)
         self.assertFalse(activity_request("kill", activity_id)["killed"])
 
+    async def test_activity_tail_frame_stays_under_the_wire_cap(self):
+        # json escaping can expand one byte to six (\uXXXX), so the cap
+        # must hold on the serialized frame, not the decoded slice.
+        handle = bash("printf 'x\n'; python3 -c 'print("\\u0000" * 20000)'")
+        await handle
+        from rlm.bash import activity_request
+
+        activity_id = handle._activity_id
+        tail = activity_request("tail", activity_id, 200)["tail"]
+        self.assertGreater(len(tail), 0)
+        self.assertLessEqual(len(json.dumps({"tail": tail})), 16_384)
+
     async def test_await_returns_result(self):
         result = await bash("echo hi")
         self.assertEqual(result.exit_code, 0)

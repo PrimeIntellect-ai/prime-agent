@@ -1252,7 +1252,15 @@ def activity_request(action: str, activity_id: str | None = None, lines: int = 5
             raise ValueError("lines must be an integer between 1 and 200")
         # Each retained buffer is bounded, and the response has a further byte cap.
         tail = "\n".join(handle._buffer.text().splitlines()[-lines:])
-        return {"activityId": activity_id, "tail": tail.encode("utf-8")[-16_384:].decode("utf-8", errors="replace")}
+        payload = tail.encode("utf-8")[-16_384:].decode("utf-8", errors="replace")
+        # The cap is on the serialized frame: json escaping can expand one
+        # character to six bytes (\uXXXX), so a byte-slice of the decoded
+        # text cannot bound the wire size by itself. Trim by the escaped
+        # overflow; each pass removes at least a sixth of it.
+        while len(json.dumps(payload)) > 16_384:
+            excess = len(json.dumps(payload)) - 16_384
+            payload = payload[: max(0, len(payload) - excess // 6 - 1)]
+        return {"activityId": activity_id, "tail": payload}
     if action == "kill":
         if handle._reaped:
             return {"activityId": activity_id, "killed": False}
