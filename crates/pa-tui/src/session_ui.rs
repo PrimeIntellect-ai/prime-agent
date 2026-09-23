@@ -2636,6 +2636,22 @@ impl SessionUi {
             // hook); the other management subcommands surface through the
             // `mcp` CLI command instead of the TUI.
             "mcp" => self.handle_mcp_command(resolved, view).await?,
+            // `/plugins [search]` (TS `handlePluginsCommand` ->
+            // `showServiceCatalogPicker`): the external-services catalog
+            // picker. This client folds the catalog into the `/mcp` view
+            // (the same resolved `services` cards the daemon serves both
+            // surfaces), so the command opens that view; an argument
+            // prefills its search field like TS's initial search.
+            "plugins" => {
+                self.track_command_used("plugins");
+                self.open_mcp_view(view).await?;
+                let search = resolved.args.trim();
+                if !search.is_empty() {
+                    if let Some(mcp) = view.mcp_view.as_mut() {
+                        mcp.paste(search);
+                    }
+                }
+            }
             // TS `handleExportCommand`: an explicit `.jsonl` path exports
             // the current branch; anything else (including no argument)
             // exports HTML.
