@@ -565,7 +565,7 @@ def gate_facts(key, facts):
             # parked (workers were found and stopped) and the force quit
             # fired — an ordinary quit path or a missed deadline must not
             # pass for it.
-            if facts.get("workers_found") is not true_count(facts):
+            if not true_count(facts):
                 failures.append(f"{key}:no-workers-to-wedge")
             if facts.get("force_exited") is not True:
                 failures.append(f"{key}:force-quit-did-not-fire")
