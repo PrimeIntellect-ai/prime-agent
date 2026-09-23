@@ -1041,11 +1041,13 @@ impl Worker {
                                 item.queue_key.as_deref() != Some(AUTONOMOUS_QUEUE_KEY)
                             });
                         }
-                        // The withdraw settles the verdict: `/autonomous
+                        // The withdraw settles the rows: `/autonomous
                         // off` dropping the last queued row must not
                         // leave its admission busy=true promising a revive
                         // work that was withdrawn (and the snapshot must
-                        // not keep replaying the withdrawn row).
+                        // not keep replaying the withdrawn row). Mid-turn
+                        // the verdict stays busy — the in-flight turn is
+                        // live work until its own `turn_end`.
                         checkpoint_queue_recovery(
                             &purge_recovery,
                             &purge_core,
@@ -1089,7 +1091,8 @@ impl Worker {
                     // Same settle as the autonomous withdraw: the
                     // withdrawal must refresh the verdict (and the
                     // snapshot) so a pause/clear cannot leave busy=true
-                    // over withdrawn rows.
+                    // over withdrawn rows (a mid-turn withdrawal stays
+                    // busy through the in-flight turn).
                     checkpoint_queue_recovery(
                         &purge_recovery,
                         &purge_core,
@@ -3982,7 +3985,8 @@ impl Worker {
         drop(core);
         // The cleared lanes are idle again: the verdict refresh rides the
         // same checkpoint as the snapshot (a stale busy=true from the
-        // cleared items' admission must not revive an empty session).
+        // cleared items' admission must not revive an empty session; a
+        // clear mid-turn keeps the verdict busy through the turn).
         self.checkpoint_queue(QueueCheckpoint::Settle {
             operation: "queue_cleared",
         });
@@ -4540,7 +4544,7 @@ pub(crate) fn checkpoint_queue_recovery(
     // no persist can interleave between this read and the appends, and a
     // mutating non-persist (a runner pop) is corrected by the next
     // checkpoint's fresh read.
-    let (active_session_id, session_id, session_file, lanes) = {
+    let (active_session_id, session_id, session_file, lanes, turn_in_flight) = {
         let core = core_lock.lock().unwrap();
         (
             core.active_session_id.clone(),
@@ -4552,12 +4556,20 @@ pub(crate) fn checkpoint_queue_recovery(
                 .as_ref()
                 .map(|s| s.path.to_string_lossy().to_string()),
             queue_lanes(&core),
+            core.busy,
         )
     };
     let (busy, operation) = match checkpoint {
         QueueCheckpoint::Admitted { operation } => (true, operation),
+        // TS computes a settled verdict from live session work
+        // (`hasLiveSessionWork` — an active session counts — plus retries
+        // and accepted prompts), never from the lanes alone: a withdrawal
+        // landing mid-turn (queue purge, clear, drop) must not flip the
+        // journal to idle while the turn still streams, or a crash in
+        // that window parks live work. The turn's own settle reads the
+        // idle flip first, so `turn_in_flight` is false at `turn_end`.
         QueueCheckpoint::Settle { operation } => (
-            !lanes.steering.is_empty() || !lanes.follow_up.is_empty(),
+            turn_in_flight || !lanes.steering.is_empty() || !lanes.follow_up.is_empty(),
             operation,
         ),
     };
@@ -5603,13 +5615,14 @@ impl TurnRunner {
         };
         // The settle checkpoint (TS `turn_end`, busy computed): the
         // journal's latest record must track liveness, not the last
-        // structural write. A turn that settled with empty lanes leaves
-        // the session idle, so an unclean kill from here on must NOT
-        // read as interrupted work; undelivered lanes stay busy (they
-        // are admitted work a revive must redeliver). The busy verdict
-        // and the queue snapshot come from one locked read, so a
-        // concurrent enqueue cannot be overwritten by a stale idle
-        // verdict.
+        // structural write. The idle flip above precedes it, so the
+        // settle's in-flight term reads false here: a turn that settled
+        // with empty lanes leaves the session idle, so an unclean kill
+        // from here on must NOT read as interrupted work; undelivered
+        // lanes stay busy (they are admitted work a revive must
+        // redeliver). The busy verdict and the queue snapshot come from
+        // one locked read, so a concurrent enqueue cannot be overwritten
+        // by a stale idle verdict.
         checkpoint_queue_recovery(
             &self.recovery,
             &self.core,
@@ -9982,6 +9995,49 @@ mod recovery_verdict_tests {
         assert!(
             steering.is_empty() && follow_up.is_empty(),
             "lanes: {steering:?} {follow_up:?}"
+        );
+        let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+    }
+
+    /// A withdrawal landing mid-turn settles the rows but never the
+    /// verdict: the in-flight turn is live work (TS computes settled
+    /// busy from `isSessionActive`, never from the lanes alone), so a
+    /// crash after the withdrawal still reads interrupted. Only the
+    /// turn's own `turn_end` — after the runner's idle flip — settles
+    /// the same empty lanes back to idle.
+    #[tokio::test]
+    async fn mid_turn_withdrawal_keeps_the_in_flight_turn_busy() {
+        let worker = created_worker_with_journal().await;
+        // Mid-turn: the runner is streaming, and the withdrawal leaves
+        // nothing queued behind it.
+        worker.core.lock().unwrap().busy = true;
+        worker.dispatch("clear_queue", &json!({})).await;
+        let latest = latest_record(&worker);
+        assert_eq!(latest.operation, "queue_cleared");
+        assert!(
+            latest.busy,
+            "the in-flight turn keeps the withdrawal's verdict busy"
+        );
+        let (steering, follow_up) = WorkerRecoveryJournal::read_queue_snapshot(
+            &worker.config.recovery_journal_path,
+            "target-session",
+        )
+        .unwrap()
+        .expect("the withdrawal flushed its snapshot");
+        assert!(
+            steering.is_empty() && follow_up.is_empty(),
+            "the withdrawn rows left the snapshot: {steering:?} {follow_up:?}"
+        );
+        // The turn ends: the runner's idle flip precedes its settle, so
+        // the same empty lanes now record busy=false.
+        worker.core.lock().unwrap().busy = false;
+        worker.dispatch("clear_queue", &json!({})).await;
+        let latest = latest_record(&worker);
+        assert_eq!(latest.operation, "queue_cleared");
+        assert!(!latest.busy, "the settled turn leaves the session idle");
+        assert!(
+            !WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+            "the settled session proves nothing"
         );
         let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
     }

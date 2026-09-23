@@ -620,7 +620,8 @@ impl Worker {
         // The cancelled rows leave the lanes: settle the verdict so the
         // drop cannot leave the admission's busy=true (or its snapshot
         // rows) promising a revive work that was cancelled. A drop with
-        // other rows still queued stays busy — that work is real.
+        // other rows still queued stays busy — that work is real, and a
+        // mid-turn drop stays busy through the in-flight turn.
         self.checkpoint_queue(crate::worker::QueueCheckpoint::Settle {
             operation: "queue_dropped",
         });
