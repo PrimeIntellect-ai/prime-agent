@@ -1,0 +1,25 @@
+{
+  "jobs": [
+    {
+      "id": "691bfe66-54ce-4641-9bbd-beae27ba32e5",
+      "status": "cancelled",
+      "source": "heartbeat",
+      "runtimeKind": "top-level",
+      "deliveryMode": "steer",
+      "activeSessionId": "44501de88487",
+      "sessionId": "01a0cd97-7e52-7402-96f7-578933c6e36a",
+      "sessionFile": "/root/stop-lifecycle-runs/rust/agent/sessions/01a0cd97-7e52-7402-96f7-578933c6e36a.jsonl",
+      "cwd": "/root/stop-lifecycle-runs/rust/work",
+      "prompt": "liveness ping",
+      "schedule": {
+        "kind": "interval",
+        "expression": "every 10s",
+        "intervalMs": 10000
+      },
+      "createdAt": "2026-09-23T09:27:33.460Z",
+      "updatedAt": "2026-09-23T09:27:33.634Z",
+      "runCount": 0
+    }
+  ],
+  "dispatches": []
+}

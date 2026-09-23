@@ -1,0 +1,25 @@
+{
+  "jobs": [
+    {
+      "id": "74ae6093-5b26-476d-bd66-a83ce95fe07c",
+      "status": "cancelled",
+      "source": "heartbeat",
+      "runtimeKind": "top-level",
+      "deliveryMode": "steer",
+      "activeSessionId": "31201d1f3c9e",
+      "sessionId": "01a0cd97-d5cb-72bc-9177-5035f7acc9f4",
+      "sessionFile": "/root/stop-lifecycle-runs/ts/agent/sessions/01a0cd97-d5cb-72bc-9177-5035f7acc9f4.jsonl",
+      "cwd": "/root/stop-lifecycle-runs/ts/work",
+      "prompt": "liveness ping",
+      "schedule": {
+        "kind": "interval",
+        "expression": "every 10s",
+        "intervalMs": 10000
+      },
+      "createdAt": "2026-09-23T09:27:56.119Z",
+      "updatedAt": "2026-09-23T09:27:56.544Z",
+      "runCount": 0
+    }
+  ],
+  "dispatches": []
+}

@@ -1,0 +1,74 @@
+[
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "daemon created the session",
+    "evidence": ""
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "the goal start turn ran",
+    "evidence": ""
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "heartbeat_set registered the heartbeat",
+    "evidence": ""
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "the heartbeat job is active in the durable store",
+    "evidence": ""
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "the wire kill succeeded",
+    "evidence": ""
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "the killed session's heartbeat cancelled in the durable store",
+    "evidence": ""
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "the killed session's file archived",
+    "evidence": ""
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "the killed session never revived after the restart",
+    "evidence": ""
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "the stopped session's goal record froze",
+    "evidence": ""
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "the stopped session's file froze",
+    "evidence": ""
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "the durable cancel held across the restart",
+    "evidence": ""
+  },
+  {
+    "side": "ts",
+    "ok": true,
+    "summary": "the archived state held across the restart",
+    "evidence": ""
+  }
+]
