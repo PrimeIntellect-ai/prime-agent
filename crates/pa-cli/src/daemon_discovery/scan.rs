@@ -185,22 +185,32 @@ pub(crate) fn merge_discovered(
 ///
 /// Byte-level on purpose: a unix socket pathname may contain any byte
 /// sequence (unix(7) — one non-UTF-8 name anywhere in the file must not
-/// reject the whole census), and it may contain spaces, so the first seven
-/// columns parse separately and the *remainder* of each line is the path.
-/// A row whose pathname is not valid UTF-8 drops out on its own (product
-/// socket paths are UTF-8; the rest of the census stands). The header row
-/// fails the hex flag parse and drops out; unnamed and non-listening rows
-/// (no path, or no `SS_ACCEPTCONN`) drop out too.
+/// reject the whole census), and it may contain spaces. The kernel pads
+/// the fixed columns with runs of spaces, so the seven columns scan with
+/// padding collapsed and the path keeps the whole row remainder. A row
+/// whose pathname is not valid UTF-8 drops out on its own (product socket
+/// paths are UTF-8; the rest of the census stands). The header row fails
+/// the hex flag parse and drops out; unnamed and non-listening rows (no
+/// path, or no `SS_ACCEPTCONN`) drop out too.
 #[cfg(target_os = "linux")]
 fn parse_proc_net_unix(bytes: &[u8]) -> Vec<(String, String)> {
     const SS_ACCEPTCONN: u32 = 0x0001_0000;
     let mut listeners = Vec::new();
     for line in bytes.split(|byte| *byte == b'\n') {
-        let mut columns = line.splitn(8, |byte: &u8| byte.is_ascii_whitespace());
-        let columns: Vec<&[u8]> = (0..8).filter_map(|_| columns.next()).collect();
-        if columns.len() < 8 {
+        let mut rest = line;
+        let mut columns: Vec<&[u8]> = Vec::with_capacity(7);
+        for _ in 0..7 {
+            rest = skip_ascii_whitespace(rest);
+            let Some((token, after)) = split_first_token(rest) else {
+                break;
+            };
+            columns.push(token);
+            rest = after;
+        }
+        if columns.len() < 7 {
             continue;
         }
+        let path = skip_ascii_whitespace(rest);
         let Some(flags) = std::str::from_utf8(columns[3])
             .ok()
             .and_then(|flags| u32::from_str_radix(flags, 16).ok())
@@ -210,7 +220,7 @@ fn parse_proc_net_unix(bytes: &[u8]) -> Vec<(String, String)> {
         if flags & SS_ACCEPTCONN == 0 {
             continue;
         }
-        let Some(path) = std::str::from_utf8(columns[7]).ok() else {
+        let Some(path) = std::str::from_utf8(path).ok() else {
             continue;
         };
         if !path.starts_with('/') {
@@ -222,6 +232,30 @@ fn parse_proc_net_unix(bytes: &[u8]) -> Vec<(String, String)> {
         listeners.push((inode.to_string(), path.to_string()));
     }
     listeners
+}
+
+/// Skip leading ASCII whitespace bytes.
+#[cfg(target_os = "linux")]
+fn skip_ascii_whitespace(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    &bytes[start..]
+}
+
+/// Split the first whitespace-terminated token from the front of the row:
+/// the token, and the bytes after it (None when the row is exhausted).
+#[cfg(target_os = "linux")]
+fn split_first_token(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let end = bytes
+        .iter()
+        .position(|byte| byte.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    Some((&bytes[..end], &bytes[end..]))
 }
 
 /// Every live process and the unix-socket inodes it holds, from
