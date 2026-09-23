@@ -194,6 +194,10 @@ struct ChildRecord {
     /// A follow-up usage watcher is live for this retained child
     /// (delayed agent messaging after the task run settled).
     usage_watch_live: bool,
+    /// A delivery arrived while the follow-up usage watcher was live:
+    /// the live watcher observes this delivery's turn too (re-arms at
+    /// its settle) instead of a second watcher stacking behind it.
+    usage_rearm: bool,
 }
 
 impl ChildRecord {
@@ -484,6 +488,7 @@ impl SupervisorChildSessions {
                 session_file: None,
                 attributed_rows: 0,
                 usage_watch_live: false,
+                usage_rearm: false,
             })));
     }
 
@@ -1128,7 +1133,17 @@ impl SupervisorChildSessionsInner {
     async fn arm_usage_watch(this: &Arc<Self>, record: &Arc<Mutex<ChildRecord>>) {
         {
             let mut record = record.lock().await;
-            if record.usage_watch_live || record.closed_by_parent {
+            if record.closed_by_parent {
+                return;
+            }
+            if record.usage_watch_live {
+                // A watcher is already observing this child (armed for an
+                // earlier delivery): ask IT to observe this delivery's
+                // turn too, instead of arming a second watcher — the live
+                // watcher retires only when no delivery is owed, so a
+                // turn queued behind the one under observation never goes
+                // unobserved.
+                record.usage_rearm = true;
                 return;
             }
             record.usage_watch_live = true;
@@ -1140,87 +1155,134 @@ impl SupervisorChildSessionsInner {
         });
     }
 
-    /// Observe one follow-up turn's usage: wait for the delivered
-    /// message to start the child's turn (bounded — a delivery the child
-    /// never picks up attributes nothing), then idle-wait slices until
-    /// the turn settles, emitting observed rows along the way exactly
-    /// like the task-run watcher's slices.
+    /// Observe follow-up turns' usage: wait for the child to sit idle
+    /// once (the arm can land mid-run — a message delivered during the
+    /// task run queues behind it), wait for the delivered turn to start
+    /// (bounded — a delivery the child never picks up attributes
+    /// nothing), then idle-wait slices until the turn settles, emitting
+    /// observed rows along the way exactly like the task-run watcher's
+    /// slices. A delivery that arrived while this watcher was live
+    /// re-arms it for another turn instead of arming a second watcher,
+    /// so consecutive follow-up turns each get an observation.
     async fn watch_child_usage(self: Arc<Self>, record: Arc<Mutex<ChildRecord>>) {
-        // Phase 1: the turn must start before it can be observed.
-        let start_deadline = Instant::now() + Duration::from_millis(FOLLOWUP_START_GRACE_MS);
         loop {
-            if record.lock().await.closed_by_parent {
+            // Phase 0: the child must sit idle once before the delivered
+            // turn can start (the run in flight at arm time is NOT the
+            // delivered turn; retiring on its settle would leave the
+            // queued follow-up unobserved).
+            let mut unreachable_polls: u32 = 0;
+            loop {
+                if record.lock().await.closed_by_parent {
+                    record.lock().await.usage_watch_live = false;
+                    return;
+                }
+                let active_session_id = record.lock().await.active_session_id.clone();
+                match self.child_busy(&active_session_id).await {
+                    Ok(false) => break,
+                    Ok(true) => {}
+                    Err(_) => {
+                        unreachable_polls += 1;
+                        if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
+                            // A dead child keeps whatever rows its file
+                            // already holds; capture them, then stop.
+                            self.emit_child_usage(&record).await;
+                            record.lock().await.usage_watch_live = false;
+                            return;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(FOLLOWUP_START_POLL_MS)).await;
+            }
+            // Phase 1: the delivered turn must start before it can be
+            // observed.
+            let start_deadline = Instant::now() + Duration::from_millis(FOLLOWUP_START_GRACE_MS);
+            let mut turn_started = false;
+            loop {
+                if record.lock().await.closed_by_parent {
+                    record.lock().await.usage_watch_live = false;
+                    return;
+                }
+                let active_session_id = record.lock().await.active_session_id.clone();
+                match self.child_busy(&active_session_id).await {
+                    Ok(true) => {
+                        turn_started = true;
+                        break;
+                    }
+                    Ok(false) if Instant::now() >= start_deadline => break,
+                    Ok(false) => {}
+                    Err(_) if Instant::now() >= start_deadline => break,
+                    Err(_) => {}
+                }
+                tokio::time::sleep(Duration::from_millis(FOLLOWUP_START_POLL_MS)).await;
+            }
+            if !turn_started {
+                // The turn never showed busy: it either completed
+                // between two polls (its rows are on disk — bill them) or
+                // the delivery never started a turn (the cursor walk is a
+                // no-op). Observe once before the tail decides whether
+                // another delivery is owed — the TS subscription never
+                // stops observing a live child.
+                self.emit_child_usage(&record).await;
+            } else {
+                // Phase 2: slice-wait until the turn settles (the
+                // task-run watcher's cadence, minus its settle
+                // bookkeeping).
+                let mut unreachable_polls: u32 = 0;
+                loop {
+                    if record.lock().await.closed_by_parent {
+                        break;
+                    }
+                    let active_session_id = record.lock().await.active_session_id.clone();
+                    self.wait_for_child(
+                        &active_session_id,
+                        Duration::from_millis(WATCH_WAIT_SLICE_MS),
+                    )
+                    .await;
+                    match self.child_busy(&active_session_id).await {
+                        Ok(false) => {
+                            // Settle grace: the delivered-turn pop races
+                            // the idle snapshot (the queue and the busy
+                            // flag change under different locks on the
+                            // far side of a socket).
+                            tokio::time::sleep(Duration::from_millis(WATCH_SETTLE_GRACE_MS)).await;
+                            if matches!(self.child_busy(&active_session_id).await, Ok(false)) {
+                                self.emit_child_usage(&record).await;
+                                break;
+                            }
+                        }
+                        Ok(true) => {
+                            // Mid-turn rows landed since the last slice.
+                            self.emit_child_usage(&record).await;
+                            unreachable_polls = 0;
+                        }
+                        Err(_) => {
+                            unreachable_polls += 1;
+                            if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
+                                // A dead child keeps whatever rows its
+                                // file already holds; capture them, then
+                                // stop.
+                                self.emit_child_usage(&record).await;
+                                break;
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
+                }
+            }
+            // The tail: a delivery that arrived while this watcher was
+            // live re-arms it for another turn (the flag was set instead
+            // of a second watcher); otherwise the observation retires.
+            let rearm = {
+                let mut record = record.lock().await;
+                let rearm = record.usage_rearm;
+                record.usage_rearm = false;
+                rearm
+            };
+            if !rearm {
                 record.lock().await.usage_watch_live = false;
                 return;
             }
-            let active_session_id = record.lock().await.active_session_id.clone();
-            match self.child_busy(&active_session_id).await {
-                Ok(true) => break,
-                Ok(false) if Instant::now() >= start_deadline => {
-                    // The turn never showed busy: it either completed
-                    // between two polls (its rows are on disk — bill
-                    // them) or the delivery never started a turn (the
-                    // cursor walk is a no-op). Observe once before
-                    // retiring — the TS subscription never stops
-                    // observing a live child.
-                    self.emit_child_usage(&record).await;
-                    record.lock().await.usage_watch_live = false;
-                    return;
-                }
-                Ok(false) => {}
-                Err(_) if Instant::now() >= start_deadline => {
-                    // An unreachable child's rows stay on its file: one
-                    // final cursor walk before the observation retires.
-                    self.emit_child_usage(&record).await;
-                    record.lock().await.usage_watch_live = false;
-                    return;
-                }
-                Err(_) => {}
-            }
-            tokio::time::sleep(Duration::from_millis(FOLLOWUP_START_POLL_MS)).await;
         }
-        // Phase 2: slice-wait until the turn settles (the task-run
-        // watcher's cadence, minus its settle bookkeeping).
-        let mut unreachable_polls: u32 = 0;
-        loop {
-            if record.lock().await.closed_by_parent {
-                break;
-            }
-            let active_session_id = record.lock().await.active_session_id.clone();
-            self.wait_for_child(
-                &active_session_id,
-                Duration::from_millis(WATCH_WAIT_SLICE_MS),
-            )
-            .await;
-            match self.child_busy(&active_session_id).await {
-                Ok(false) => {
-                    // Settle grace: the delivered-turn pop races the idle
-                    // snapshot (the queue and the busy flag change under
-                    // different locks on the far side of a socket).
-                    tokio::time::sleep(Duration::from_millis(WATCH_SETTLE_GRACE_MS)).await;
-                    if matches!(self.child_busy(&active_session_id).await, Ok(false)) {
-                        self.emit_child_usage(&record).await;
-                        break;
-                    }
-                }
-                Ok(true) => {
-                    // Mid-turn rows landed since the last slice.
-                    self.emit_child_usage(&record).await;
-                    unreachable_polls = 0;
-                }
-                Err(_) => {
-                    unreachable_polls += 1;
-                    if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
-                        // A dead child keeps whatever rows its file
-                        // already holds; capture them, then stop.
-                        self.emit_child_usage(&record).await;
-                        break;
-                    }
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
-        }
-        record.lock().await.usage_watch_live = false;
     }
 
     /// Abort one child's live run (see
@@ -1583,6 +1645,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 session_file: created.session_file.clone(),
                 attributed_rows: 0,
                 usage_watch_live: false,
+                usage_rearm: false,
             };
             let record = Arc::new(Mutex::new(record));
             this.children.lock().await.push(Arc::clone(&record));
@@ -2295,6 +2358,7 @@ mod usage_emit_tests {
             session_file: Some(session_file.display().to_string()),
             attributed_rows: 0,
             usage_watch_live: false,
+            usage_rearm: false,
         }))
     }
 
