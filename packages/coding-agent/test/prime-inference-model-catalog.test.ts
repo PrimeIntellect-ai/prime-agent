@@ -119,6 +119,18 @@ describe("Prime Inference model catalog", () => {
 			map: { high: "high" },
 		},
 		{
+			name: "effort route without declared efforts keeps the template map",
+			entry: () => ({
+				...entry("z-ai/glm-5.3"),
+				reasoning: true,
+				supportedParameters: ["max_tokens", "reasoning", "reasoning_effort"],
+				reasoningMandatory: false,
+			}),
+			thinkingFormat: undefined,
+			supportsReasoningEffort: true,
+			map: { high: "high" },
+		},
+		{
 			name: "no-parameter route keeps the stale template",
 			entry: () => entry("z-ai/glm-5.3"),
 			thinkingFormat: "zai",

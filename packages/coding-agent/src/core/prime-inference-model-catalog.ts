@@ -59,7 +59,16 @@ export function buildPrimeInferenceModels(
 			if (controls.thinkingFormat) compat.thinkingFormat = controls.thinkingFormat;
 			else delete compat.thinkingFormat;
 		}
-		const thinkingLevelMap = controls ? controls.thinkingLevelMap : template?.thinkingLevelMap;
+		// The live map is authoritative when present; no reported parameter
+		// support keeps the whole stale template. A route that declares
+		// reasoning_effort but no supported efforts keeps the template's map:
+		// the param is accepted but its values are unknown, and the template
+		// bounds the selection better than the raw default levels. A route that
+		// declares supported parameters but no reasoning controls drops the
+		// template map entirely.
+		const thinkingLevelMap = !controls
+			? template?.thinkingLevelMap
+			: (controls.thinkingLevelMap ?? (controls.supportsReasoningEffort ? template?.thinkingLevelMap : undefined));
 		// Anthropic models cache with explicit breakpoints, not automatic
 		// server-side prefix caching; cacheControlFormat makes the provider add
 		// anthropic-style cache_control markers for these entries. The catalog
