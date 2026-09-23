@@ -2384,6 +2384,13 @@ mod usage_emit_tests {
                 reports.lock().expect("reports lock").push(report);
             })
         }
+
+        fn forget(
+            &self,
+            _rlm_child_id: &str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {})
+        }
     }
 
     /// A child record aimed at a real temp child session file.
