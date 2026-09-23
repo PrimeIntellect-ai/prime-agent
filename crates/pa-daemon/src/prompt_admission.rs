@@ -67,10 +67,22 @@ impl PromptAdmissionTable {
         if admission_id.is_empty() {
             return Err("admissionId must not be empty".to_string());
         }
+        // The registry key joins its halves with NUL, so a NUL in either
+        // half makes the separator ambiguous: an admission id carrying NUL
+        // forges the stale-id cancel's NUL-prefixed suffix match, and a
+        // session id carrying NUL forges a different half-split of the
+        // same exact key. Registered halves stay NUL-free, so every key
+        // carries exactly one NUL and both lookups are unambiguous.
+        if admission_id.contains('\0') {
+            return Err("admissionId must not contain NUL".to_string());
+        }
         if active_session_id.is_empty() {
             return Err(
                 "Prompt admission requires string activeSessionId and admissionId".to_string(),
             );
+        }
+        if active_session_id.contains('\0') {
+            return Err("activeSessionId must not contain NUL".to_string());
         }
         let key = prompt_admission_key(active_session_id, admission_id);
         let mut admissions = self
@@ -112,23 +124,28 @@ impl PromptAdmissionTable {
 
     /// Move one admission under a new key (the stale-active-id rebind: a
     /// cancellation addresses the admission by the session id the client
-    /// currently holds). A missing source is a settled admission; the
-    /// entry stays wherever it is.
-    fn rekey(&self, from: &str, to: &str) {
+    /// currently holds). Returns whether the admission now lives at `to`:
+    /// a missing source is a settled admission and an occupied
+    /// destination stays intact (overwriting would lose a concurrent
+    /// prompt's record), so on `false` the caller keeps addressing the
+    /// entry where it is.
+    fn rekey(&self, from: &str, to: &str) -> bool {
         if from == to {
-            return;
+            return true;
         }
         let mut admissions = self
             .admissions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // An occupied destination stays intact: overwriting would lose a
-        // concurrent prompt's record and cancel/route the wrong prompt.
         if admissions.contains_key(to) {
-            return;
+            return false;
         }
-        if let Some(admission) = admissions.remove(from) {
-            admissions.insert(to.to_string(), admission);
+        match admissions.remove(from) {
+            Some(admission) => {
+                admissions.insert(to.to_string(), admission);
+                true
+            }
+            None => false,
         }
     }
 
@@ -270,8 +287,9 @@ impl Supervisor {
                                     &current,
                                     input_admission_id(command).unwrap_or_default(),
                                 );
-                                connection.prompt_admissions.rekey(&key, &rekeyed);
-                                key = rekeyed;
+                                if connection.prompt_admissions.rekey(&key, &rekeyed) {
+                                    key = rekeyed;
+                                }
                                 rebound_to = Some(current);
                                 resident
                             }
@@ -653,12 +671,12 @@ mod tests {
             .expect("register admission");
         let old_key = prompt_admission_key("stale-id", "adm-1");
         let new_key = prompt_admission_key("current-id", "adm-1");
-        table.rekey(&old_key, &new_key);
+        assert!(table.rekey(&old_key, &new_key));
         assert!(table.with(&old_key, |_| ()).is_none());
         assert!(table.with(&new_key, |_| ()).is_some());
         // A settled (already-removed) admission stays absent.
         table.remove(&new_key);
-        table.rekey(&new_key, &old_key);
+        assert!(!table.rekey(&new_key, &old_key));
         assert!(table.with(&old_key, |_| ()).is_none());
     }
 
@@ -669,9 +687,10 @@ mod tests {
         table.register("current-id", "adm-1").expect("register");
         let from = prompt_admission_key("stale-id", "adm-1");
         let to = prompt_admission_key("current-id", "adm-1");
-        table.rekey(&from, &to);
-        // Both records survive: the occupied destination stays, the
-        // source stays where it was.
+        // The refusal is reported: the caller keeps addressing the
+        // admission under `from` (the route's cancel/remove stay keyed
+        // there instead of hitting the concurrent prompt's record).
+        assert!(!table.rekey(&from, &to));
         assert!(table.with(&from, |_| ()).is_some());
         assert!(table.with(&to, |_| ()).is_some());
     }
@@ -689,5 +708,28 @@ mod tests {
         table.register("sess-b", "adm-1").expect("register");
         assert_eq!(table.sole_key_for_admission_id("adm-1"), None);
         assert_eq!(table.sole_key_for_admission_id(""), None);
+    }
+
+    #[test]
+    fn a_nul_in_either_key_half_is_refused_at_registration() {
+        let table = PromptAdmissionTable::default();
+        // A NUL in the admission id forges the stale-id cancel's
+        // NUL-prefixed suffix match ("prefix<NUL>target" ends with
+        // "<NUL>target").
+        assert_eq!(
+            table.register("sess-a", "prefix\0target"),
+            Err("admissionId must not contain NUL".to_string())
+        );
+        // A NUL in the session id forges a different half-split of the
+        // same exact key (session "s<NUL>t" + admission "u" builds the
+        // key that session "s" + admission "t<NUL>u" addresses).
+        assert_eq!(
+            table.register("s\0t", "u"),
+            Err("activeSessionId must not contain NUL".to_string())
+        );
+        // Both refusals left nothing registered, so neither forged key
+        // exists under any half-split.
+        assert!(table.sole_key_for_admission_id("target").is_none());
+        assert!(table.sole_key_for_admission_id("t\0u").is_none());
     }
 }

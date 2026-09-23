@@ -10,6 +10,12 @@
 //! the binding, not the worker, is what the client's stale id addresses.
 //! A supervisor restart empties it - the descriptor-file fallback in
 //! [`crate::supervisor`] covers that case from disk.
+//!
+//! Growth is bounded by sessions that exist on disk: a binding without a
+//! session file is never recorded (a rebind resolves through the file, so
+//! a file-less worker can never serve one), and a deleted session file
+//! forgets its binding with the delete (nothing can take the file over
+//! once it is gone).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -28,10 +34,11 @@ pub(crate) struct SessionBinding {
     pub(crate) session_file: Option<String>,
 }
 
-/// The remembered bindings, keyed by every active id ever seen and by the
-/// canonical session file. Two maps, one shared binding per session: a
-/// supersede (a new worker taking over a session file) repoints the old
-/// active id at the new binding, so lookups by either id converge.
+/// The remembered bindings, keyed by every file-backed active id ever
+/// seen and by the canonical session file. Two maps, one shared binding
+/// per session: a supersede (a new worker taking over a session file)
+/// repoints the old active id at the new binding, so lookups by either id
+/// converge.
 #[derive(Default)]
 pub(crate) struct SessionBindingTable {
     by_active_id: Mutex<HashMap<String, Arc<SessionBinding>>>,
@@ -57,12 +64,15 @@ impl SessionBindingTable {
         if active_session_id.is_empty() {
             return None;
         }
+        // Nothing durable to remember: a rebind resolves through the
+        // session file (`binding_target` has no file, no successor), so a
+        // file-less worker (an in-memory session) is never a rebind
+        // source and earns no entry.
+        let session_file = session_file.filter(|file| !file.is_empty())?;
         let binding = Arc::new(SessionBinding {
             active_session_id: active_session_id.to_string(),
             session_id: session_id.filter(|id| !id.is_empty()).map(str::to_string),
-            session_file: session_file
-                .filter(|file| !file.is_empty())
-                .map(canonical_binding_path),
+            session_file: Some(canonical_binding_path(session_file)),
         });
         let mut by_active_id = self.locked(&self.by_active_id);
         let mut by_session_file = self.locked(&self.by_session_file);
@@ -70,24 +80,17 @@ impl SessionBindingTable {
         // Every id still holding an older binding for this session file is
         // superseded - not just the immediately previous one, so a client
         // that missed an intermediate supersede still converges.
-        let mut superseded_ids: Vec<String> = binding
-            .session_file
-            .as_deref()
-            .map(|file| {
-                by_active_id
-                    .iter()
-                    .filter(|(_, bound)| {
-                        bound.session_file.as_deref() == Some(file)
-                            && bound.active_session_id != binding.active_session_id
-                    })
-                    .map(|(id, _)| id.clone())
-                    .collect()
+        let file = binding.session_file.as_deref().expect("file-backed");
+        let mut superseded_ids: Vec<String> = by_active_id
+            .iter()
+            .filter(|(_, bound)| {
+                bound.session_file.as_deref() == Some(file)
+                    && bound.active_session_id != binding.active_session_id
             })
-            .unwrap_or_default();
+            .map(|(id, _)| id.clone())
+            .collect();
         superseded_ids.sort();
-        if let Some(file) = binding.session_file.as_deref() {
-            by_session_file.insert(file.to_string(), Arc::clone(&binding));
-        }
+        by_session_file.insert(file.to_string(), Arc::clone(&binding));
         // The superseded ids keep addressing the session through the new
         // binding: `by_active_id[old] = new`.
         for previous in &superseded_ids {
@@ -105,6 +108,20 @@ impl SessionBindingTable {
         self.locked(&self.by_active_id)
             .get(active_session_id)
             .cloned()
+    }
+
+    /// Forget a session file's binding (the session-delete prune): a file
+    /// that no longer exists can never take a successor worker, so every
+    /// id still addressing it stays at the unknown-session failure and the
+    /// entries drop. The argument is the canonical key `record` stores -
+    /// the delete path computes it while the file still exists. Bindings
+    /// of live files stay (a stopped worker's session can be re-opened -
+    /// that rebind is this table's purpose).
+    pub(crate) fn forget_file(&self, session_file: &str) {
+        let mut by_active_id = self.locked(&self.by_active_id);
+        let mut by_session_file = self.locked(&self.by_session_file);
+        by_session_file.remove(session_file);
+        by_active_id.retain(|_, bound| bound.session_file.as_deref() != Some(session_file));
     }
 }
 
@@ -221,16 +238,54 @@ mod tests {
     #[test]
     fn a_binding_without_a_session_file_never_supersedes() {
         let table = SessionBindingTable::new();
-        // A no-session worker (in-memory) has no durable identity to bind.
+        // A no-session worker (in-memory) has no durable identity to bind
+        // and can never serve a rebind: nothing is retained for it.
         assert!(table.record("worker-1", None, None).is_none());
         assert!(table.record("worker-2", None, None).is_none());
+        assert!(table.binding_for("worker-1").is_none());
+        assert!(table.binding_for("worker-2").is_none());
+    }
+
+    #[test]
+    fn a_deleted_session_file_forgets_its_ids() {
+        let table = SessionBindingTable::new();
+        table.record("worker-1", Some("sess-uuid"), Some("/tmp/sess.jsonl"));
+        table.record("worker-2", Some("sess-uuid"), Some("/tmp/sess.jsonl"));
+        // The file leaves disk (a client delete): no successor worker can
+        // ever take it over, so every id addressing it drops with it.
+        table.forget_file("/tmp/sess.jsonl");
+        assert!(table.binding_for("worker-1").is_none());
+        assert!(table.binding_for("worker-2").is_none());
+        // A re-record after the prune rebuilds the binding (the delete
+        // pruned the old state, not the session's future).
+        assert!(table
+            .record("worker-3", Some("sess-uuid"), Some("/tmp/sess.jsonl"))
+            .is_none());
         assert_eq!(
             table
-                .binding_for("worker-1")
-                .expect("kept")
+                .binding_for("worker-3")
+                .expect("re-recorded")
                 .active_session_id,
-            "worker-1"
+            "worker-3"
         );
+    }
+
+    #[test]
+    fn forgetting_one_file_keeps_other_files_bound() {
+        let table = SessionBindingTable::new();
+        table.record("worker-1", Some("a"), Some("/tmp/a.jsonl"));
+        table.record("worker-2", Some("b"), Some("/tmp/b.jsonl"));
+        table.forget_file("/tmp/a.jsonl");
+        // The untouched file's ids stay rebindable through their binding.
+        assert_eq!(
+            table
+                .binding_for("worker-2")
+                .expect("kept")
+                .session_id
+                .as_deref(),
+            Some("b")
+        );
+        assert!(table.binding_for("worker-1").is_none());
     }
 
     #[test]

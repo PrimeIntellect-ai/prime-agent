@@ -706,7 +706,7 @@ impl Supervisor {
         if let Err(error) = self.connect_worker(resident, deadline).await {
             // Never leave a spawned-but-unwired worker process behind.
             let mut child = child;
-            let _ = child.start_kill();
+            let _ = child.kill().await;
             return Err(error);
         }
         let payload = {
@@ -724,7 +724,7 @@ impl Supervisor {
             // holding its socket path against the next one).
             Err(error) => {
                 let mut child = child;
-                let _ = child.start_kill();
+                let _ = child.kill().await;
                 return Err(error);
             }
         };
@@ -735,14 +735,14 @@ impl Supervisor {
                 .route_command(resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
                 .await;
             let mut child = child;
-            let _ = child.start_kill();
+            let _ = child.kill().await;
             return Err(anyhow!("supervisor is shutting down"));
         }
         if !response.success {
             // Same rule as the route error above: a worker whose create
             // replay failed must not be left running.
             let mut child = child;
-            let _ = child.start_kill();
+            let _ = child.kill().await;
             return Err(anyhow!(
                 "worker create failed on relaunch: {}",
                 response.error.unwrap_or_default()
@@ -826,7 +826,7 @@ impl Supervisor {
             probe_worker_socket(&resident.worker_id, &worker_socket, connect_deadline).await
         {
             let mut child = child;
-            let _ = child.start_kill();
+            let _ = child.kill().await;
             return Err(error);
         }
         Ok(child)
@@ -1259,7 +1259,7 @@ impl Supervisor {
         if let Err(error) = self.connect_worker(&resident, deadline).await {
             // Never leave a spawned-but-unwired worker process behind.
             let mut child = child;
-            let _ = child.start_kill();
+            let _ = child.kill().await;
             self.registry.remove(&worker_id).await;
             return Err(error);
         }
@@ -1277,13 +1277,13 @@ impl Supervisor {
                 // The connected child dies with the failed create: an
                 // unmanaged survivor would keep the session file while a
                 // retry mints a second worker over it.
-                let _ = child.start_kill();
+                let _ = child.kill().await;
                 self.registry.remove(&worker_id).await;
                 return Err(error);
             }
         };
         if !response.success {
-            let _ = child.start_kill();
+            let _ = child.kill().await;
             let _ = std::fs::remove_file(&descriptor_path);
             self.registry.remove(&worker_id).await;
             return Err(anyhow!(

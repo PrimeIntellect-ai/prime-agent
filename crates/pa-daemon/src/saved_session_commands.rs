@@ -527,6 +527,17 @@ impl Supervisor {
                     .forward_with_catalog_timeout(&owner, command, client_id)
                     .await;
                 response.id = Some(command_id.to_string());
+                // The owning worker deleted the file: its binding dies with
+                // it (no successor worker can ever take the file over).
+                if response
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("ok"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                {
+                    self.session_bindings.forget_file(&canonical);
+                }
                 return (vec![response_line(&response)], false);
             }
             return (
@@ -552,6 +563,12 @@ impl Supervisor {
         let result = delete_session_file(Path::new(session_path));
         let removed = result.get("ok").and_then(Value::as_bool) == Some(true);
         if removed {
+            // The deleted file's binding dies with it: a stale id for the
+            // session can never rebind again (no successor worker can take
+            // the file over), so the entries drop instead of leaking for
+            // the daemon's lifetime. `canonical` was resolved while the
+            // file still existed - the same key the table stores.
+            self.session_bindings.forget_file(&canonical);
             if let Some(entry) = roster_entry {
                 let agent_id = entry.agent_id.clone();
                 self.roster
