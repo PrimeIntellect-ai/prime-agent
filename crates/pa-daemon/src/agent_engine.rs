@@ -275,6 +275,14 @@ pub struct AgentSessionEngine {
     link: Arc<crate::supervisor_link::SupervisorLink>,
     /// Supervisor-backed RLM children; `None` for standalone workers.
     pub(crate) children: Option<Arc<SupervisorChildSessions>>,
+    /// The attribution producer the children registry's sink last got:
+    /// the session's live children outlive an engine rebuild, and their
+    /// spawn registrations live on the producer of the build that
+    /// spawned them — every rebuild adopts them forward before the new
+    /// sink starts observing.
+    usage_producer: std::sync::Mutex<
+        Option<std::sync::Arc<pa_core::session_engine::rlm_usage::RlmChildUsageAttributions>>,
+    >,
     /// This worker's own session summary (worker-pushed at create/rename),
     /// read by the kernel messaging controller to render sender identity.
     own_summary: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
@@ -521,6 +529,7 @@ impl AgentSessionEngine {
             )),
             link,
             children,
+            usage_producer: std::sync::Mutex::new(None),
             autonomous_driver,
             autonomous_driver_default: std::sync::atomic::AtomicBool::new(true),
             held_autonomous_continuation: std::sync::Mutex::new(None),
@@ -631,13 +640,26 @@ impl AgentSessionEngine {
         self.install_autonomous_continuation_hook_on(built.session.agent());
         // The children registry's usage observation feeds the engine's
         // attribution producer (TS `flushPendingChildUsageAttribution`'s
-        // Rust seam): one sink per build, replacing the retired engine's
-        // (a rebuild closes the old children first, so no observation
-        // crosses the swap).
+        // Rust seam): one sink per build. The session's live children are
+        // separate worker processes that OUTLIVE the rebuild — their
+        // spawns were registered on the previous build's producer, so
+        // adopt those registrations forward before the new sink starts
+        // observing, or the first post-swap report drops against a
+        // producer that never saw the spawn.
         if let Some(children) = &self.children {
+            let retired = self
+                .usage_producer
+                .lock()
+                .expect("usage producer lock")
+                .take();
+            if let Some(retired) = retired {
+                built.rlm_usage.adopt_registrations(&retired).await;
+            }
             children.set_usage_sink(std::sync::Arc::new(ProducerUsageSink(
                 std::sync::Arc::clone(&built.rlm_usage),
             )));
+            *self.usage_producer.lock().expect("usage producer lock") =
+                Some(std::sync::Arc::clone(&built.rlm_usage));
         }
         // The eager-abort target rides the same mirror (see
         // [`Self::turn_agent`]).

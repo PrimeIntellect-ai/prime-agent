@@ -58,15 +58,6 @@ pub(crate) fn attribute_child_usage(parent_usage: &mut Usage, child_usage: &Usag
     parent_usage.total_tokens = parent_context_tokens;
 }
 
-/// One observed child-usage batch, per origin (TS `ChildUsageAttributionEntry`'s
-/// per-origin flush granularity).
-#[derive(Debug, Clone)]
-pub struct RlmChildUsageBatch {
-    pub rlm_child_id: String,
-    pub origin: ChildUsageOrigin,
-    pub usage: Usage,
-}
-
 /// Per-origin batches observed for one child at one observation boundary,
 /// in first-seen origin order (TS `pendingChildUsage` Map order).
 #[derive(Debug, Clone)]
@@ -191,6 +182,35 @@ impl RlmChildUsageAttributions {
                     eprintln!("pa-core: RLM child usage attribution not persisted: {error}");
                 }
             }
+        }
+    }
+
+    /// A rebuild keeps the session's live children (separate worker
+    /// processes; only the engine session rebuilds): their spawns were
+    /// registered on the retired engine's producer, so the new producer
+    /// adopts the registrations and the aggregate bases before it starts
+    /// observing — otherwise the first post-swap report drops against a
+    /// producer that never saw the spawn, and the aggregate chain would
+    /// restart from the spawn-time base and double-count every row the
+    /// retired producer already attributed. The target rows are the same
+    /// file rows in the rebuilt session; a replacement onto a MOVED file
+    /// drops the adopted registrations at the durable append (the same
+    /// recoverable "no durable target" failure every unregistered report
+    /// takes).
+    pub async fn adopt_registrations(&self, retired: &Self) {
+        {
+            let retired_children = retired.children.lock().expect("rlm usage children lock");
+            let mut children = self.children.lock().expect("rlm usage children lock");
+            for (rlm_child_id, target_id) in retired_children.iter() {
+                children
+                    .entry(rlm_child_id.clone())
+                    .or_insert_with(|| target_id.clone());
+            }
+        }
+        let mut retired_bases = retired.bases.lock().await;
+        let mut bases = self.bases.lock().await;
+        for (target_id, base) in retired_bases.iter() {
+            bases.entry(target_id.clone()).or_insert_with(|| *base);
         }
     }
 }
@@ -368,6 +388,77 @@ mod tests {
             .expect("assistant row");
         assert_eq!(folded.1.input, 52_898);
         assert_eq!(folded.1.total_tokens, 23_032);
+    }
+
+    /// The rebuild seam (Macroscope #2671: attribution lost during session
+    /// replacement): the session's live children OUTLIVE an engine
+    /// rebuild, and the fresh producer must adopt the retired producer's
+    /// registrations and aggregate bases — a post-swap report from a
+    /// surviving child attributes onto the SAME target row and the
+    /// aggregate chain CONTINUES (the base already carries the retired
+    /// producer's attributed rows) instead of dropping. A producer
+    /// without the adoption drops the same report (the registration is
+    /// the gate).
+    #[tokio::test]
+    async fn rebuild_adoption_continues_the_aggregate_chain() {
+        let raw_parent = usage_block(1_000, 0, 0, 0, 4_096, 0.0);
+        let (_tmp, manager) = manager_with_assistant(raw_parent).await;
+        let retired = RlmChildUsageAttributions::new(manager.clone());
+        let fresh = RlmChildUsageAttributions::new(manager.clone());
+        retired.register_spawn("sub-rebuild1").await;
+        retired
+            .record_child_usage(RlmChildUsageReport {
+                rlm_child_id: "sub-rebuild1".to_string(),
+                batches: vec![(
+                    ChildUsageOrigin::SpawnTask,
+                    usage_block(10, 5, 0, 0, 15, 0.01),
+                )],
+            })
+            .await;
+        // The rebuild swap: the fresh producer takes the sink before the
+        // surviving child's next observation delivers.
+        fresh.adopt_registrations(&retired).await;
+        fresh
+            .record_child_usage(RlmChildUsageReport {
+                rlm_child_id: "sub-rebuild1".to_string(),
+                batches: vec![(
+                    ChildUsageOrigin::AgentMessage,
+                    usage_block(7, 3, 0, 0, 10, 0.02),
+                )],
+            })
+            .await;
+        let rows = file_rows(&manager).await;
+        let attributed: Vec<&serde_json::Value> = rows
+            .iter()
+            .filter(|row| row["type"] == "child_usage_attributed")
+            .collect();
+        assert_eq!(attributed.len(), 2, "both observations durably attributed");
+        // The post-swap row continues the chain: its aggregate carries
+        // BOTH batches' input (10 + 7 over the parent's 1,000) and the
+        // parent's frozen context tokens.
+        assert_eq!(attributed[1]["origin"], "agent_message");
+        assert_eq!(attributed[1]["aggregateUsage"]["input"], 1_017);
+        assert_eq!(attributed[1]["aggregateUsage"]["totalTokens"], 4_096);
+        // The un-adopted producer drops the same child's report.
+        let orphan = RlmChildUsageAttributions::new(manager.clone());
+        orphan
+            .record_child_usage(RlmChildUsageReport {
+                rlm_child_id: "sub-rebuild1".to_string(),
+                batches: vec![(
+                    ChildUsageOrigin::DirectUser,
+                    usage_block(1, 1, 0, 0, 2, 0.0),
+                )],
+            })
+            .await;
+        let rows_after = file_rows(&manager).await;
+        assert_eq!(
+            rows_after
+                .iter()
+                .filter(|row| row["type"] == "child_usage_attributed")
+                .count(),
+            2,
+            "the un-adopted producer drops the report"
+        );
     }
 
     /// Multiple children of one assistant row share the cumulative base

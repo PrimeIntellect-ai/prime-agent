@@ -1075,29 +1075,43 @@ impl SupervisorChildSessionsInner {
         let Some(sink) = sink else {
             return;
         };
-        // The cursor read and its advance hold one record lock: two
-        // observers (the run watcher and a follow-up arm) can overlap for
-        // a retained child, and a re-read of the same rows would
-        // double-bill.
-        let (rlm_child_id, batches) = {
-            let mut record = record.lock().await;
-            let Some(session_file) = record.session_file.clone().filter(|path| !path.is_empty())
-            else {
-                return;
-            };
-            let from = record.attributed_rows;
-            let Ok(store) = crate::session_store::SessionFile::open(Path::new(&session_file))
-            else {
-                return;
-            };
-            let (batches, next) =
-                crate::rlm_child_usage::child_usage_batches(store.entries(), from);
-            record.attributed_rows = next;
-            (record.rlm_child_id.clone(), batches)
+        // The read, the cursor advance, AND the sink delivery hold one
+        // record lock: two observers (the run watcher and a follow-up
+        // arm) can overlap for a retained child, and an interleaved
+        // re-read would double-bill — while an interleaved DELIVERY would
+        // break the durable rows' cumulative aggregate chain (the reader
+        // fold keeps the last row's aggregate, so the second observer's
+        // rows would silently drop out of the folded row). The whole
+        // emission serializes per child.
+        let mut record_guard = record.lock().await;
+        let Some(session_file) = record_guard
+            .session_file
+            .clone()
+            .filter(|path| !path.is_empty())
+        else {
+            return;
         };
+        let from = record_guard.attributed_rows;
+        // The open+parse is a blocking read of a file that can reach tens
+        // of megabytes: run it on the blocking pool, never the async
+        // worker (a slow file read must not stall unrelated tasks on the
+        // runtime).
+        let path = PathBuf::from(session_file);
+        let joined =
+            tokio::task::spawn_blocking(move || crate::session_store::SessionFile::open(&path))
+                .await
+                .ok();
+        let Ok(store) = joined else {
+            // Same failure contract as before: a torn or unreadable file
+            // leaves the cursor untouched — the next observation retries.
+            return;
+        };
+        let (batches, next) = crate::rlm_child_usage::child_usage_batches(store.entries(), from);
+        record_guard.attributed_rows = next;
         if batches.is_empty() {
             return;
         }
+        let rlm_child_id = record_guard.rlm_child_id.clone();
         sink.record(RlmChildUsageReport {
             rlm_child_id,
             batches,
@@ -1143,11 +1157,21 @@ impl SupervisorChildSessionsInner {
             match self.child_busy(&active_session_id).await {
                 Ok(true) => break,
                 Ok(false) if Instant::now() >= start_deadline => {
+                    // The turn never showed busy: it either completed
+                    // between two polls (its rows are on disk — bill
+                    // them) or the delivery never started a turn (the
+                    // cursor walk is a no-op). Observe once before
+                    // retiring — the TS subscription never stops
+                    // observing a live child.
+                    self.emit_child_usage(&record).await;
                     record.lock().await.usage_watch_live = false;
                     return;
                 }
                 Ok(false) => {}
                 Err(_) if Instant::now() >= start_deadline => {
+                    // An unreachable child's rows stay on its file: one
+                    // final cursor walk before the observation retires.
+                    self.emit_child_usage(&record).await;
                     record.lock().await.usage_watch_live = false;
                     return;
                 }
@@ -1337,6 +1361,13 @@ impl SupervisorChildSessionsInner {
                 close_error.get_or_insert(error);
                 continue;
             }
+            // Rows can land between the pre-kill capture and the kill
+            // reaching the worker (a turn that completed just before the
+            // kill aborted the in-flight one): the post-kill walk is the
+            // last observation — nothing observes the child after the
+            // kill. The cursor keeps the second walk free of
+            // double-billing.
+            self.emit_child_usage(record).await;
             self.children
                 .lock()
                 .await
@@ -1733,6 +1764,13 @@ impl RlmSubagentHost for SupervisorChildSessions {
             this.command(&command, KILL_TIMEOUT_MS)
                 .await
                 .with_context(|| format!("kill RLM child \"{target}\""))?;
+            // Rows can land between the pre-kill capture and the kill
+            // reaching the worker (a turn that completed just before the
+            // kill aborted the in-flight one): the post-kill walk is the
+            // LAST observation — after this the record closes and no
+            // watcher reads the file again. The cursor keeps the second
+            // walk free of double-billing.
+            this.emit_child_usage(&record).await;
             // The watcher owns an Arc to this record; deleting the roster
             // row alone cannot stop its polling loop.
             record.lock().await.closed_by_parent = true;
