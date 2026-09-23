@@ -700,6 +700,10 @@ pub async fn run_interactive(
             let rendered = format!("{error:#}");
             if rendered.contains("Unknown active session") {
                 if let SessionSelection::Attach(selector) = &options.session {
+                    // The handoff keeps the process alive: disarm the
+                    // double-Ctrl+C force-quit watchdog like the normal
+                    // agents-view handoff does.
+                    exit_guard.cancel();
                     let frames = renderer.finish(&mut view, true);
                     return Ok(InteractiveOutcome {
                         return_to_agents_view: true,
@@ -1129,10 +1133,22 @@ pub async fn run_interactive(
                         if let Some(current) = session.pending_rebind.take() {
                             match session.attach_session(&current).await {
                                 Ok(()) => session.rebuild_view(&mut view),
-                                Err(error) => session.note(
-                                    &format!("session rebind failed: {error:#}"),
-                                    &mut view,
-                                ),
+                                Err(error) => {
+                                    // The failed re-attach already detached
+                                    // the held id: restore that attachment
+                                    // so events keep flowing (a superseded
+                                    // attach selector rebinds server-side).
+                                    let held = session.active_session_id.clone();
+                                    match session.attach_session(&held).await {
+                                        Ok(()) => session.rebuild_view(&mut view),
+                                        Err(restore_error) => session.note(
+                                            &format!(
+                                                "session rebind failed: {error:#}; re-attach failed: {restore_error:#}"
+                                            ),
+                                            &mut view,
+                                        ),
+                                    }
+                                }
                             }
                         }
                         // An update close frame arms the reconnect driver

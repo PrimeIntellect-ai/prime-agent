@@ -110,6 +110,23 @@ impl PromptAdmissionTable {
         admissions.get_mut(key).map(f)
     }
 
+    /// Move one admission under a new key (the stale-active-id rebind: a
+    /// cancellation addresses the admission by the session id the client
+    /// currently holds). A missing source is a settled admission; the
+    /// entry stays wherever it is.
+    fn rekey(&self, from: &str, to: &str) {
+        if from == to {
+            return;
+        }
+        let mut admissions = self
+            .admissions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(admission) = admissions.remove(from) {
+            admissions.insert(to.to_string(), admission);
+        }
+    }
+
     fn remove(&self, key: &str) {
         self.admissions
             .lock()
@@ -163,7 +180,7 @@ impl Supervisor {
         type_name: String,
         active_session_id: &str,
     ) -> (Vec<Value>, bool) {
-        let key = prompt_admission_key(
+        let mut key = prompt_admission_key(
             active_session_id,
             input_admission_id(command).unwrap_or_default(),
         );
@@ -220,19 +237,18 @@ impl Supervisor {
                         // it exactly once.
                         match self.binding_target(active_session_id).await {
                             Some(resident) => {
-                                let current = resident.worker_id.clone();
-                                self.log_line(&format!(
-                                    "rebinding stale session id {active_session_id} -> {current}"
-                                ));
-                                self.note_daemon_event("session_rebound", None);
-                                let mut attached = attached.lock().unwrap();
-                                if attached.iter().any(|id| id == active_session_id) {
-                                    attached.retain(|id| id != active_session_id);
-                                    if !attached.iter().any(|id| id == &current) {
-                                        attached.push(current.clone());
-                                    }
-                                }
-                                drop(attached);
+                                let current = self
+                                    .rebind_connection(active_session_id, &resident, attached)
+                                    .await;
+                                // The admission follows the rebind: a
+                                // cancellation by the advertised current id
+                                // must find the in-flight admission.
+                                let rekeyed = prompt_admission_key(
+                                    &current,
+                                    input_admission_id(command).unwrap_or_default(),
+                                );
+                                connection.prompt_admissions.rekey(&key, &rekeyed);
+                                key = rekeyed;
                                 rebound_to = Some(current);
                                 resident
                             }
@@ -321,7 +337,23 @@ impl Supervisor {
         else {
             return self.admission_failure(command_id, type_name, "invalid command");
         };
-        let key = prompt_admission_key(active_session_id, admission_id);
+        let mut key = prompt_admission_key(active_session_id, admission_id);
+        if connection.prompt_admissions.with(&key, |_| ()).is_none() {
+            // The stale-active-id rebind: a rebound prompt's admission
+            // moved under the session's current id, so a cancel still
+            // addressed by the superseded id follows it through the
+            // binding table.
+            if let Some(binding) = self.session_bindings.binding_for(active_session_id) {
+                let rebound = prompt_admission_key(&binding.active_session_id, admission_id);
+                if connection
+                    .prompt_admissions
+                    .with(&rebound, |_| ())
+                    .is_some()
+                {
+                    key = rebound;
+                }
+            }
+        }
         // A waiting admission with no worker yet cancels outright (the TS
         // `handleLine` pre-check: the prompt route fails with the TS
         // cancellation error at its next check).
@@ -572,5 +604,27 @@ impl Worker {
                 )
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rekey_moves_a_live_admission_under_the_new_session_id() {
+        let table = PromptAdmissionTable::default();
+        table
+            .register("stale-id", "adm-1")
+            .expect("register admission");
+        let old_key = prompt_admission_key("stale-id", "adm-1");
+        let new_key = prompt_admission_key("current-id", "adm-1");
+        table.rekey(&old_key, &new_key);
+        assert!(table.with(&old_key, |_| ()).is_none());
+        assert!(table.with(&new_key, |_| ()).is_some());
+        // A settled (already-removed) admission stays absent.
+        table.remove(&new_key);
+        table.rekey(&new_key, &old_key);
+        assert!(table.with(&old_key, |_| ()).is_none());
     }
 }

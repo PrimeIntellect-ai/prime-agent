@@ -232,28 +232,84 @@ impl Supervisor {
         session_id: Option<&str>,
         session_file: Option<&str>,
     ) {
-        if let Some((previous, binding)) =
+        if let Some((previous_ids, binding)) =
             self.session_bindings
                 .record(active_session_id, session_id, session_file)
         {
-            self.log_line(&format!(
-                "session binding superseded: {previous} -> {} (file {:?})",
-                binding.active_session_id, binding.session_file
-            ));
-            let event = json!({
-                "type": "session_binding",
-                "previousActiveSessionId": previous,
-                "activeSessionId": binding.active_session_id,
-                "sessionId": binding.session_id,
-                "sessionFile": binding.session_file,
-            });
+            for previous in previous_ids {
+                self.log_line(&format!(
+                    "session binding superseded: {previous} -> {} (file {:?})",
+                    binding.active_session_id, binding.session_file
+                ));
+                let event = json!({
+                    "type": "session_binding",
+                    "previousActiveSessionId": previous,
+                    "activeSessionId": binding.active_session_id,
+                    "sessionId": binding.session_id,
+                    "sessionFile": binding.session_file,
+                });
+                let _ = self.events.send((
+                    ClientRouting::AttachedSession {
+                        active_session_id: previous,
+                    },
+                    event,
+                ));
+            }
+        }
+    }
+
+    /// Retarget one connection at a session's current resident after its
+    /// selector was superseded (the stale-active-id rebind seam shared by
+    /// the generic route and the admission route). The connection keeps
+    /// exactly its prior attached-ness under the current id, and a
+    /// previously-attached client is told where it now points through a
+    /// `session_binding` frame routed to the id it now holds - the
+    /// supersede-time notice raced the attach roster, so this one cannot
+    /// be dropped. Returns the current id the routed frame must carry.
+    pub(crate) async fn rebind_connection(
+        &self,
+        selector: &str,
+        resident: &Arc<ResidentWorker>,
+        attached: &Arc<std::sync::Mutex<Vec<String>>>,
+    ) -> String {
+        let current = resident.worker_id.clone();
+        self.log_line(&format!(
+            "rebinding stale session id {selector} -> {current}"
+        ));
+        self.note_daemon_event("session_rebound", None);
+        let was_attached = {
+            let mut attached = attached.lock().unwrap();
+            let was = attached.iter().any(|id| id == selector);
+            if was {
+                attached.retain(|id| id != selector);
+                if !attached.iter().any(|id| id == &current) {
+                    attached.push(current.clone());
+                }
+            }
+            was
+        };
+        if was_attached {
+            let (session_id, session_file) = {
+                let descriptor = resident.descriptor.lock().await;
+                (
+                    descriptor.root_session_id.clone(),
+                    descriptor.session_file.clone(),
+                )
+            };
             let _ = self.events.send((
                 ClientRouting::AttachedSession {
-                    active_session_id: previous,
+                    active_session_id: current.clone(),
                 },
-                event,
+                json!({
+                    "type": "session_binding",
+                    "previousActiveSessionId": selector,
+                    "activeSessionId": current,
+                    "sessionId": session_id,
+                    "sessionFile": session_file,
+                }),
             ));
         }
+        current
     }
 
     /// The current resident a superseded selector rebinds to (the
@@ -3155,26 +3211,9 @@ impl Supervisor {
                         // the current resident delivers it exactly once.
                         match self.binding_target(&selector).await {
                             Some(resident) => {
-                                let current = resident.worker_id.clone();
-                                self.log_line(&format!(
-                                    "rebinding stale session id {selector} -> {current}"
-                                ));
-                                self.note_daemon_event("session_rebound", None);
-                                // The connection keeps exactly its prior
-                                // attached-ness, retargeted: a client
-                                // attached to the superseded id receives
-                                // the session's events through the current
-                                // id; an unattached command stays
-                                // unattached.
-                                let mut attached = attached.lock().unwrap();
-                                if attached.iter().any(|id| id == &selector) {
-                                    attached.retain(|id| id != &selector);
-                                    if !attached.iter().any(|id| id == &current) {
-                                        attached.push(current.clone());
-                                    }
-                                }
-                                drop(attached);
-                                rebound_to = Some(current);
+                                rebound_to = Some(
+                                    self.rebind_connection(&selector, &resident, attached).await,
+                                );
                                 resident
                             }
                             None => {

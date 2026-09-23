@@ -43,15 +43,17 @@ impl SessionBindingTable {
         Self::default()
     }
 
-    /// Record one binding. Returns the superseded previous active id when
-    /// the session file was already bound to a different worker - the
-    /// old->new binding event's trigger.
+    /// Record one binding. Returns every superseded active id (all older
+    /// ids of the session, sorted) with the new binding when the session
+    /// file was already bound to a different worker - the old->new binding
+    /// events' trigger. All older ids repoint at the new binding, so a
+    /// client holding any of them converges on the current identity.
     pub(crate) fn record(
         &self,
         active_session_id: &str,
         session_id: Option<&str>,
         session_file: Option<&str>,
-    ) -> Option<(String, Arc<SessionBinding>)> {
+    ) -> Option<(Vec<String>, Arc<SessionBinding>)> {
         if active_session_id.is_empty() {
             return None;
         }
@@ -65,23 +67,33 @@ impl SessionBindingTable {
         let mut by_active_id = self.locked(&self.by_active_id);
         let mut by_session_file = self.locked(&self.by_session_file);
         by_active_id.insert(active_session_id.to_string(), Arc::clone(&binding));
-        // The supersede result pairs the OLD id with the NEW binding: the
-        // caller's supersede event tells old-id holders where to rebind.
-        let superseded = binding
+        // Every id still holding an older binding for this session file is
+        // superseded - not just the immediately previous one, so a client
+        // that missed an intermediate supersede still converges.
+        let mut superseded_ids: Vec<String> = binding
             .session_file
             .as_deref()
-            .and_then(|file| by_session_file.get(file))
-            .filter(|previous| previous.active_session_id != binding.active_session_id)
-            .map(|previous| (previous.active_session_id.clone(), Arc::clone(&binding)));
+            .map(|file| {
+                by_active_id
+                    .iter()
+                    .filter(|(_, bound)| {
+                        bound.session_file.as_deref() == Some(file)
+                            && bound.active_session_id != binding.active_session_id
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        superseded_ids.sort();
         if let Some(file) = binding.session_file.as_deref() {
             by_session_file.insert(file.to_string(), Arc::clone(&binding));
         }
-        // The superseded id keeps addressing the session through the new
+        // The superseded ids keep addressing the session through the new
         // binding: `by_active_id[old] = new`.
-        if let Some((previous_active, _)) = superseded.as_ref() {
-            by_active_id.insert(previous_active.clone(), Arc::clone(&binding));
+        for previous in &superseded_ids {
+            by_active_id.insert(previous.clone(), Arc::clone(&binding));
         }
-        superseded
+        (!superseded_ids.is_empty()).then_some((superseded_ids, binding))
     }
 
     /// The binding one active id addresses (the latest binding for its
@@ -138,7 +150,7 @@ mod tests {
         let superseded = table
             .record("worker-2", Some("sess-uuid"), Some("/tmp/sess.jsonl"))
             .expect("supersede reported");
-        assert_eq!(superseded.0, "worker-1");
+        assert_eq!(superseded.0, vec!["worker-1".to_string()]);
         // The pair carries the NEW binding - what the supersede event
         // advertises as the rebind target.
         assert_eq!(superseded.1.active_session_id, "worker-2");
@@ -153,6 +165,36 @@ mod tests {
                 .expect("new id")
                 .active_session_id,
             "worker-2"
+        );
+    }
+
+    #[test]
+    fn a_second_supersede_repoints_every_older_id() {
+        let table = SessionBindingTable::new();
+        table.record("worker-1", Some("sess-uuid"), Some("/tmp/sess.jsonl"));
+        table.record("worker-2", Some("sess-uuid"), Some("/tmp/sess.jsonl"));
+        let superseded = table
+            .record("worker-3", Some("sess-uuid"), Some("/tmp/sess.jsonl"))
+            .expect("supersede reported");
+        // BOTH older ids are reported (sorted) - each gets its own
+        // supersede event - and both converge on the current binding.
+        assert_eq!(
+            superseded.0,
+            vec!["worker-1".to_string(), "worker-2".to_string()]
+        );
+        assert_eq!(
+            table
+                .binding_for("worker-1")
+                .expect("oldest id")
+                .active_session_id,
+            "worker-3"
+        );
+        assert_eq!(
+            table
+                .binding_for("worker-2")
+                .expect("middle id")
+                .active_session_id,
+            "worker-3"
         );
     }
 
