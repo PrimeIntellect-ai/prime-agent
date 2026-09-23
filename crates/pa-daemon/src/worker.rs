@@ -5035,8 +5035,7 @@ pub(crate) fn withdraw_bash_completion_notice(
     core: &Arc<Mutex<SessionCore>>,
     notice: crate::engine::BashConsumedNotice,
 ) {
-    let mut removed = false;
-    {
+    let removed = {
         let mut core_guard = core.lock().unwrap();
         let before = core_guard.steering.len() + core_guard.follow_up.len();
         core_guard
@@ -5045,8 +5044,8 @@ pub(crate) fn withdraw_bash_completion_notice(
         core_guard
             .follow_up
             .retain(|item| !is_bash_completion_notice_for(item, &notice));
-        removed = before != core_guard.steering.len() + core_guard.follow_up.len();
-    }
+        before != core_guard.steering.len() + core_guard.follow_up.len()
+    };
     if removed {
         // The withdrawal refreshes the verdict (and the snapshot) so a
         // consumed notice cannot keep busy=true promising a revive the
