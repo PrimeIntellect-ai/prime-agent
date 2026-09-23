@@ -229,6 +229,8 @@ mod tests {
         std::env::set_current_dir(previous).unwrap();
         written.unwrap();
         read.unwrap();
-        assert!(relative.join("settings.json").exists());
+        // Assert through the temp cwd: the relative path itself only
+        // resolves from inside the chdir window.
+        assert!(cwd.path().join(&relative).join("settings.json").exists());
     }
 }

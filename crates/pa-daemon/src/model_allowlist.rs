@@ -147,8 +147,8 @@ mod tests {
         assert_eq!(refusal.selector, "zai/glm-5.3");
     }
 
-    #[test]
-    fn refusal_telemetry_honors_the_opt_out() {
+    #[tokio::test]
+    async fn refusal_telemetry_honors_the_opt_out() {
         let dir = tempfile::tempdir().expect("tempdir");
         let disabled =
             ModelRefusalTelemetry::new(dir.path().to_path_buf(), dir.path().to_path_buf(), true);
