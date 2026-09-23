@@ -19,6 +19,18 @@
 //! The decision logic is pure and clock-free; the caller owns the actual
 //! sleep/attempt cycle and the model switch (the session loop re-binds the
 //! agent's model, thinking level, and session-log row).
+//!
+//! Divergences from TS (operator ruling 2026-09-23, documented per the #289
+//! precedent): (1) the whole episode is capped at
+//! [`MAX_TOTAL_PROVIDER_RETRIES`] retries (TS has no failover chain at all;
+//! its provider-wait loop's 30-attempt class is the "30 retries" the
+//! operator ruled too many — this port's chain gives up inside the
+//! operator's 5-8 band, anchored like TS's own wait `maxParks: 8`);
+//! (2) the default per-provider budget is the TS quick-retry `maxRetries`
+//! (3), down from 5; (3) the retry waits carry ±20% jitter
+//! (TS `providerRetryDelay` has none) so a fleet of retried sessions
+//! spreads off the same exponential-ladder ticks; the jittered value is
+//! both waited and reported, keeping the countdown honest.
 
 use std::future::Future;
 
@@ -29,9 +41,9 @@ use pa_types::ai::Model;
 use super::auto_retry::{run_turn_with_auto_retry, AutoRetryEvent, RetryStartReason};
 use super::provider_retry::{
     is_agent_lifecycle_failure, is_context_overflow_failure, is_faux_provider_queue_exhausted,
-    is_permanent_provider_failure_kind, is_unsupported_tool_failure, provider_retry_delay,
-    provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
-    provider_stream_failure_status, ProviderRetryDelay, ProviderRetryPolicy,
+    is_permanent_provider_failure_kind, is_unsupported_tool_failure, jittered_delay_ms,
+    provider_retry_delay, provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
+    provider_stream_failure_status, retry_jitter_rand01, ProviderRetryDelay, ProviderRetryPolicy,
 };
 
 /// The provider-failover policy: per-provider retry budget and backoff
@@ -55,14 +67,25 @@ pub struct ProviderFailoverPolicy {
     pub max_delay_ms: u64,
 }
 
-/// Default failover schedule: 5 retries per provider, 1s doubling backoff
-/// capped at 30s, before switching to the next provider serving the model.
+/// Default failover schedule: 3 retries per provider (the TS quick-retry
+/// `maxRetries` default), 1s doubling backoff capped at 30s, before switching
+/// to the next provider serving the model. (SANCTIONED DIVERGENCE, operator
+/// ruling 2026-09-23 "30 retries is a lot for provider failures": this was 5,
+/// which walked a multi-provider chain into ~30 attempts.)
 pub const DEFAULT_PROVIDER_FAILOVER_POLICY: ProviderFailoverPolicy = ProviderFailoverPolicy {
     enabled: true,
-    max_retries: 5,
+    max_retries: 3,
     base_delay_ms: 1000,
     max_delay_ms: 30000,
 };
+
+/// The whole-episode retry ceiling (SANCTIONED DIVERGENCE, operator ruling
+/// 2026-09-23): the per-provider budget alone let a chain of N candidate
+/// providers stack 5xN retries (the observed "Retry failed after 30
+/// attempts"). The operator's standard band tops at 8 — the same anchor as
+/// TS's own provider-wait `maxParks: 8` — so the chain gives up after 8
+/// retries no matter how many candidates it could walk.
+pub const MAX_TOTAL_PROVIDER_RETRIES: u32 = 8;
 
 /// The per-provider retry policy the failover loop derives from the
 /// failover schedule plus the TS server-requested-wait cap.
@@ -202,6 +225,23 @@ where
         }
         total_retries += 1;
         retries_on_provider += 1;
+        // The whole-episode ceiling binds first (the operator's 5-8 band):
+        // a long candidate chain gives up here instead of stacking one
+        // per-provider budget after another into the ~30 attempts the
+        // operator ruled too many.
+        if total_retries > MAX_TOTAL_PROVIDER_RETRIES {
+            if switched {
+                let _ = restore().await?;
+            }
+            emit(AutoRetryEvent::End {
+                success: false,
+                attempt: total_retries - 1,
+                final_error: Some(final_error_of(&message)),
+                restored_model: None,
+            })
+            .await?;
+            return Ok(message);
+        }
         if retries_on_provider > failover.max_retries {
             // This provider's budget is spent: walk to the next provider
             // serving the same model, or surface the failure.
@@ -242,7 +282,13 @@ where
             quick_policy.max_retry_delay_ms,
         );
         let delay_ms = match delay {
-            ProviderRetryDelay::Wait { delay_ms } => delay_ms,
+            // Jittered (SANCTIONED DIVERGENCE, operator ruling 2026-09-23):
+            // the jittered value is both waited and reported, so the
+            // interactive countdown stays honest while retried sessions
+            // spread off the same ladder ticks.
+            ProviderRetryDelay::Wait { delay_ms } => {
+                jittered_delay_ms(delay_ms, retry_jitter_rand01())
+            }
             ProviderRetryDelay::ExceedsCap { retry_after_ms } => {
                 if switched {
                     let _ = restore().await?;
@@ -536,44 +582,121 @@ mod tests {
         assert_eq!(harness.attempts, 4);
         assert_eq!(harness.switches, vec!["backup-a/glm-5.3"]);
         assert_eq!(harness.restores, vec![Some("primary/glm-5.3".to_string())]);
-        // Two quick waits on the primary, then the immediate backup
+        // Two quick waits on the primary (jittered around the 5ms/10ms
+        // ladder steps: [4, 7] and [8, 14]), then the immediate backup
         // re-issue (no wait between the switch and the next attempt).
-        assert_eq!(harness.waits, vec![5, 10]);
+        assert_eq!(harness.waits.len(), 2, "waits: {:?}", harness.waits);
+        assert!(
+            (4..=7).contains(&harness.waits[0]) && (8..=14).contains(&harness.waits[1]),
+            "jittered waits {:?} outside the [4,7]/[8,14] bands",
+            harness.waits
+        );
         // The progression: two quick starts, the backup switch, the
-        // restored-success end.
+        // restored-success end. The quick-start delays carry the same
+        // jittered values the loop waited.
+        let delays: Vec<u64> = harness
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                AutoRetryEvent::Start {
+                    delay_ms,
+                    reason: RetryStartReason::Quick,
+                    ..
+                } => Some(*delay_ms),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            harness.events,
-            vec![
+            delays, harness.waits,
+            "reported == waited: {:?}",
+            harness.events
+        );
+        let shape_matches = matches!(
+            harness.events.as_slice(),
+            [
                 AutoRetryEvent::Start {
                     attempt: 1,
                     max_attempts: 2,
-                    delay_ms: 5,
-                    error_message: "primary down 1".to_string(),
+                    error_message: error_one,
                     reason: RetryStartReason::Quick,
+                    ..
                 },
                 AutoRetryEvent::Start {
                     attempt: 2,
                     max_attempts: 2,
-                    delay_ms: 10,
-                    error_message: "primary down 2".to_string(),
+                    error_message: error_two,
                     reason: RetryStartReason::Quick,
+                    ..
                 },
                 AutoRetryEvent::Start {
                     attempt: 3,
                     max_attempts: 2,
                     delay_ms: 0,
-                    error_message: "primary down 3".to_string(),
+                    error_message: error_three,
                     reason: RetryStartReason::Backup {
-                        backup_model: "backup-a/glm-5.3".to_string()
+                        backup_model: switched_model,
                     },
                 },
                 AutoRetryEvent::End {
                     success: true,
                     attempt: 3,
                     final_error: None,
-                    restored_model: Some("primary/glm-5.3".to_string()),
+                    restored_model,
                 },
-            ]
+            ] if error_one == "primary down 1"
+                && error_two == "primary down 2"
+                && error_three == "primary down 3"
+                && switched_model == "backup-a/glm-5.3"
+                && restored_model.as_deref() == Some("primary/glm-5.3")
+        );
+        assert!(shape_matches, "events: {:?}", harness.events);
+    }
+
+    /// The whole-episode ceiling (operator ruling 2026-09-23: "30 retries
+    /// is a lot for provider failures"): a long candidate chain never
+    /// stacks one per-provider budget after another — the episode gives up
+    /// at [`MAX_TOTAL_PROVIDER_RETRIES`] retries, inside the operator's
+    /// 5-8 band, instead of walking every candidate to exhaustion.
+    #[tokio::test]
+    async fn a_long_candidate_chain_gives_up_at_the_episode_cap() {
+        // Six backup candidates: without the cap the walk would consume
+        // (1 + candidates) * (1 + per-provider budget) attempts (28 with
+        // the old 5/provider default, the ~30 the operator ruled out).
+        let candidates: Vec<Model> = (1..=6)
+            .map(|index| model(&format!("backup-{index}")))
+            .collect();
+        let script: Vec<AssistantMessage> = (0..32)
+            .map(|index| error_message(Some("server_error"), Some(500), &format!("down {index}")))
+            .collect();
+        let harness = drive(&fast_failover(), &candidates, script).await;
+        // 1 initial attempt + MAX_TOTAL_PROVIDER_RETRIES retries: the cap
+        // binds before the chain ever reaches its later candidates.
+        assert_eq!(harness.attempts, 1 + MAX_TOTAL_PROVIDER_RETRIES as usize);
+        // The walk switched once per spent provider budget inside the cap:
+        // with the 2-retry budget, providers spend at retries 3 and 6.
+        assert_eq!(
+            harness.switches.len(),
+            2,
+            "switches inside the cap: {:?}",
+            harness.switches
+        );
+        let end = harness.events.last().expect("end event");
+        assert_eq!(
+            end,
+            &AutoRetryEvent::End {
+                success: false,
+                attempt: MAX_TOTAL_PROVIDER_RETRIES,
+                final_error: Some("down 8".to_string()),
+                restored_model: None,
+            }
+        );
+        assert!(
+            harness.events.iter().all(|event| !matches!(
+                event,
+                AutoRetryEvent::Start { attempt, .. } if *attempt > MAX_TOTAL_PROVIDER_RETRIES
+            )),
+            "no attempt exceeds the episode cap: {:?}",
+            harness.events
         );
     }
 
@@ -597,11 +720,14 @@ mod tests {
             vec![Some("primary/glm-5.3".to_string()); 1]
         );
         let end = harness.events.last().expect("end event");
+        // The whole-episode ceiling (8 retries, the operator's 5-8 band)
+        // ends the chain after the 9th attempt instead of walking every
+        // candidate's budget.
         assert_eq!(
             end,
             &AutoRetryEvent::End {
                 success: false,
-                attempt: 9,
+                attempt: MAX_TOTAL_PROVIDER_RETRIES,
                 final_error: Some("down 8".to_string()),
                 restored_model: None,
             }
@@ -667,7 +793,17 @@ mod tests {
         let harness = drive(&disabled, &candidates, script).await;
         assert_eq!(harness.attempts, 4);
         assert!(harness.switches.is_empty());
-        assert_eq!(harness.waits, vec![2000, 4000, 8000]);
+        // Jittered around the 2s/4s/8s ladder (±20% with rounding
+        // headroom: [1600, 2800], [3200, 5600], [6400, 11200]).
+        let band = |base: u64| (base * 4 / 5, base * 7 / 5);
+        for (wait, base) in harness.waits.iter().zip([2000u64, 4000, 8000]) {
+            let (low, high) = band(base);
+            assert!(
+                (low..=high).contains(wait),
+                "jittered wait {wait} outside [{low}, {high}]: {:?}",
+                harness.waits
+            );
+        }
         let end = harness.events.last().expect("end event");
         assert_eq!(
             end,
@@ -687,7 +823,15 @@ mod tests {
         let harness = drive(&fast_failover(), &[], script).await;
         assert_eq!(harness.attempts, 4);
         assert!(harness.switches.is_empty());
-        assert_eq!(harness.waits, vec![2000, 4000, 8000]);
+        let band = |base: u64| (base * 4 / 5, base * 7 / 5);
+        for (wait, base) in harness.waits.iter().zip([2000u64, 4000, 8000]) {
+            let (low, high) = band(base);
+            assert!(
+                (low..=high).contains(wait),
+                "jittered wait {wait} outside [{low}, {high}]: {:?}",
+                harness.waits
+            );
+        }
         assert_eq!(harness.events.len(), 4);
     }
 
