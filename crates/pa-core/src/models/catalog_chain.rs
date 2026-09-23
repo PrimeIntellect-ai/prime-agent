@@ -40,7 +40,7 @@ pub fn catalog_for(models_json_path: Option<&Path>) -> Arc<ModelCatalog> {
     let key = models_json_path.map(models_dir);
     let mut shared = shared().lock().unwrap();
     Arc::clone(
-        &shared
+        shared
             .entry(key.clone())
             .or_insert_with(move || Arc::new(ModelCatalog::new(key))),
     )

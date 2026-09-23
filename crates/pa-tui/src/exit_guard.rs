@@ -245,6 +245,7 @@ fn spawn_watchdog(state: Arc<GuardState>) {
 /// deliberate, not a crash).
 fn force_quit() -> ! {
     restore_terminal_best_effort();
+    eprintln!("Prime Agent: shutdown stalled; forced exit.");
     std::process::exit(0)
 }
 
@@ -258,7 +259,12 @@ fn force_quit() -> ! {
 /// is the tty corruption the user carries into the shell — mouse tracking
 /// leaks raw `[<...M` reports into every later click, and a kitty
 /// push left on spews CSI-u sequences on every key press.
-fn restore_terminal_best_effort() {
+///
+/// `pub(crate)` because a failed agents-view handoff releases the pane
+/// through the same path (TS `returnToAgentsView`'s `finally`): the chat's
+/// teardown left the terminal in TUI state for a view that never mounts,
+/// and no other writer remains to hand it back.
+pub(crate) fn restore_terminal_best_effort() {
     use std::io::Write;
     let mut out = std::io::stdout();
     // The terminal is being released for process exit: no probe may arm a
@@ -279,10 +285,20 @@ fn restore_terminal_best_effort() {
     // leaving paste mode on would hand the shell stray markers.
     let _ = crate::enhanced_keys::disable(&mut out);
     let _ = crossterm::terminal::disable_raw_mode();
+    // `disable_raw_mode` restores crossterm's first-saved "original"
+    // termios and swallows errors: a poisoned start (a killed previous
+    // run left the tty raw, so the saved original is itself raw) or a
+    // failed write still leaves the shell raw — the live report's
+    // stuck-until-`stty sane` state. Verify the mode and repair it
+    // directly (the `stty sane` reconstruction behind the platform wall).
+    if pa_types::platform::terminal::ensure_cooked_tty()
+        == pa_types::platform::terminal::TtyCooked::Repaired
+    {
+        eprintln!("Prime Agent: repaired a raw terminal left by a previous run.");
+    }
     let _ = crossterm::execute!(out, crossterm::terminal::LeaveAlternateScreen);
     let _ = crossterm::execute!(out, crossterm::cursor::Show);
     let _ = out.flush();
-    eprintln!("Prime Agent: shutdown stalled; forced exit.");
 }
 
 #[cfg(test)]

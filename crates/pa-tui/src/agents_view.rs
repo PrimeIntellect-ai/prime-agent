@@ -1471,14 +1471,22 @@ impl Renderer {
 }
 
 /// Run the agents view until the user exits or opens a session.
-pub async fn run_agents_view(
-    options: AgentsViewOptions,
-    ui: AgentsViewUiMode,
+/// Open the roster connection and pull the first snapshot (TS
+/// `AgentsViewRosterStore` connect plus the `roster_subscribe`
+/// round-trip). The flow's parked connection comes first (TS
+/// `persistentState.rosterClient` staying connected across the loop); a
+/// fresh run connects its own, and a parked connection that died (daemon
+/// update) reconnects once. The roster snapshot precedes streaming
+/// pushes; updates that race the snapshot apply on top (idempotent by
+/// agent id, TS roster-store). Errors leave any opened connection closed.
+async fn open_roster_link(
+    options: &AgentsViewOptions,
     link: Option<AgentsViewLink>,
-) -> Result<AgentsViewRun> {
-    crossterm::style::force_color_output(true);
-    // The flow's parked connection first (TS `persistentState.rosterClient`
-    // staying connected across the loop); a fresh run connects its own.
+) -> Result<(
+    DaemonClient,
+    mpsc::UnboundedReceiver<DaemonClientEvent>,
+    Vec<Value>,
+)> {
     let (mut client, mut events) = match link {
         Some(AgentsViewLink { client, events }) => (client, events),
         None => {
@@ -1488,16 +1496,6 @@ pub async fn run_agents_view(
             (link.client, link.events)
         }
     };
-
-    // The double-Ctrl+C force-quit guard: same contract as the session
-    // loop (see `interactive::run_interactive`).
-    let exit_guard = crate::exit_guard::ExitGuard::new();
-    let mut mode = AgentsViewMode::new(options.clone());
-    mode.exit_guard = exit_guard.clone();
-
-    // The roster snapshot precedes streaming pushes; updates that race the
-    // snapshot apply on top (idempotent by agent id, TS roster-store). A
-    // parked connection that died (daemon update) reconnects once here.
     let roster_subscribe = || DaemonCommand::RosterSubscribe {
         id: None,
         rest: Default::default(),
@@ -1520,13 +1518,46 @@ pub async fn run_agents_view(
             snapshot.error.unwrap_or_default()
         );
     }
-    mode.roster = snapshot
+    let roster = snapshot
         .data
         .as_ref()
         .and_then(|data| data.get("roster"))
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    Ok((client, events, roster))
+}
+
+pub async fn run_agents_view(
+    options: AgentsViewOptions,
+    ui: AgentsViewUiMode,
+    link: Option<AgentsViewLink>,
+) -> Result<AgentsViewRun> {
+    crossterm::style::force_color_output(true);
+    // The connection and its first snapshot precede every surface state:
+    // this pane was handed over already in TUI state (raw mode on, the
+    // alternate screen up, the cursor hidden — the chat's teardown
+    // preserves them for this view), so a failure here must hand the
+    // terminal back before the error escapes (TS `returnToAgentsView`'s
+    // `finally` runs the same release on a failed handoff); nothing below
+    // runs to do it.
+    let (client, mut events, roster) = match open_roster_link(&options, link).await {
+        Ok(open) => open,
+        Err(error) => {
+            if matches!(ui, AgentsViewUiMode::Terminal) {
+                crate::exit_guard::restore_terminal_best_effort();
+            }
+            return Err(error);
+        }
+    };
+
+    // The double-Ctrl+C force-quit guard: same contract as the session
+    // loop (see `interactive::run_interactive`).
+    let exit_guard = crate::exit_guard::ExitGuard::new();
+    let mut mode = AgentsViewMode::new(options.clone());
+    mode.exit_guard = exit_guard.clone();
+
+    mode.roster = roster;
     mode.rebuild_rows();
 
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiInput>();
@@ -1646,8 +1677,13 @@ pub async fn run_agents_view(
 
     // The view decided to leave: arm the force-quit deadline so the
     // teardown below (terminal restore, roster unsubscribe over a possibly
-    // dead daemon) is best-effort and cannot hold the process open.
-    if matches!(renderer, Renderer::Terminal(_)) {
+    // dead daemon) is best-effort and cannot hold the process open. A
+    // selection (or a new session) is a view switch, not an exit: the
+    // process keeps running and TS has no exit deadline on this path —
+    // its teardown may take its full drain second while the app simply
+    // waits, so the deadline covers only the leaves that end this process.
+    let handing_off = mode.opened.is_some() || mode.new_session;
+    if matches!(renderer, Renderer::Terminal(_)) && !handing_off {
         exit_guard.arm_for_exit();
     }
     // A selection hands the pane to the chat it opened (TS `result.type !== "exit"`);
