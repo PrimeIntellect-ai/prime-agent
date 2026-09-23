@@ -48,6 +48,31 @@ impl Drop for Daemon {
 // The timeout panic path cannot wait on the child; the test process exits
 // immediately afterwards, reaping it.
 #[allow(clippy::zombie_processes)]
+/// The parent worker's real authentication token from its worker descriptor
+/// (`daemon-workers/<instance>/<active-session-id>.json`): the family
+/// roster (`list_agent_peers`) is worker-token gated, so the family view
+/// needs the live token the supervisor issued the parent.
+fn parent_worker_token(agent_dir: &Path, active_session_id: &str) -> String {
+    let instances = std::fs::read_dir(agent_dir.join("daemon-workers")).expect("daemon-workers");
+    for instance in instances.flatten() {
+        let descriptor_path = instance.path().join(format!("{active_session_id}.json"));
+        let Ok(content) = std::fs::read_to_string(&descriptor_path) else {
+            continue;
+        };
+        let Ok(descriptor) = serde_json::from_str::<Value>(&content) else {
+            continue;
+        };
+        if let Some(token) = descriptor
+            .get("authenticationToken")
+            .and_then(Value::as_str)
+            .filter(|token| !token.is_empty())
+        {
+            return token.to_string();
+        }
+    }
+    panic!("parent worker descriptor not found for {active_session_id}");
+}
+
 fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Daemon {
     let binary = env!("CARGO_BIN_EXE_pa-daemon");
     let log_file = std::fs::File::create(socket.with_extension("daemon.log")).expect("log file");
@@ -436,21 +461,32 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         "sessionName": "parent",
         "runtimeKind": "top-level",
     });
+    let children = Arc::new(children);
+    // The send-path controller has no worker token: the direct peer path
+    // is refused and the supervisor-routed send (the TS remote path)
+    // delivers. The family view reads the supervisor roster, which IS
+    // worker-token gated (`list_agent_peers`), so it runs on the parent's
+    // real token from its worker descriptor.
     let controller = Arc::new(LinkAgentMessageController::new(
         Arc::clone(&link),
         parent_active_session_id.clone(),
-        // The test has no worker token: the direct peer path is refused
-        // and the supervisor-routed send (the TS remote path) delivers.
         "no-worker-token".to_string(),
-        Arc::new(std::sync::Mutex::new(Some(own_summary))),
-        Some(Arc::new(children)),
+        Arc::new(std::sync::Mutex::new(Some(own_summary.clone()))),
+        Some(Arc::clone(&children)),
     ));
+    let family_controller = LinkAgentMessageController::new(
+        Arc::clone(&link),
+        parent_active_session_id.clone(),
+        parent_worker_token(&agent_dir, &parent_active_session_id),
+        Arc::new(std::sync::Mutex::new(Some(own_summary))),
+        Some(children),
+    );
     let mut handlers = HostRequestHandlers::default();
     register_agent_message_host_handlers(Arc::clone(&controller) as Arc<_>, &mut handlers);
 
     // The family view lists the child (by every identifier form) and no
     // phantom sibling for it.
-    let family = controller.family().await.expect("family");
+    let family = family_controller.family().await.expect("family");
     let child_members: Vec<_> = family
         .iter()
         .filter(|member| member.relationship == AgentFamilyRelationship::Child)
