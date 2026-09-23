@@ -30,6 +30,11 @@ for (const name of ["tui", "ai", "agent", "coding-agent"]) {
 	});
 }
 
+execFileSync("node", ["scripts/catalog-assets.mjs", "copy-source", "--out", "dist"], {
+	cwd: packageDir,
+	stdio: "inherit",
+});
+
 const buildId = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
 const outputRoot = join(packageDir, "binaries");
 mkdirSync(outputRoot, { recursive: true });

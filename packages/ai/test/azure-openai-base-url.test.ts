@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getModel } from "../src/models.js";
 import { streamAzureOpenAIResponses } from "../src/providers/azure-openai-responses.js";
 import type { Context } from "../src/types.js";
+import { getFixtureModel } from "./fixture-models.js";
 
 interface CapturedAzureClientOptions {
 	apiKey: string;
@@ -57,7 +57,7 @@ afterEach(() => {
 });
 
 async function streamOnce() {
-	return streamAzureOpenAIResponses(getModel("azure-openai-responses", "gpt-4o-mini"), context, {
+	return streamAzureOpenAIResponses(getFixtureModel("azure-openai-responses", "gpt-4o-mini"), context, {
 		apiKey: "test-api-key",
 	}).result();
 }

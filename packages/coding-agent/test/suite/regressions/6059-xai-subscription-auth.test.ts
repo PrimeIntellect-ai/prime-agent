@@ -4,7 +4,6 @@ import {
 	type ApiStreamSimpleFunction,
 	fauxAssistantMessage,
 	getApiProvider,
-	getModel,
 	type Model,
 	registerApiProvider,
 } from "@earendil-works/pi-ai";
@@ -18,6 +17,20 @@ import { SessionManager } from "../../../src/core/session-manager.js";
 import { InProcessAgentConnection } from "../../../src/modes/agent-connection/in-process-agent-connection.js";
 import { createTestResourceLoader } from "../../utilities.js";
 import { createHarness, type Harness } from "../harness.js";
+
+const grok45 = {
+	id: "grok-4.5",
+	name: "Grok 4.5",
+	api: "openai-completions",
+	provider: "xai",
+	baseUrl: "https://api.x.ai/v1",
+	reasoning: true,
+	thinkingLevelMap: { off: null, minimal: null },
+	input: ["text", "image"],
+	cost: { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 },
+	contextWindow: 500000,
+	maxTokens: 500000,
+} satisfies Model<"openai-completions">;
 
 describe("ENG-6059 xAI subscription dispatch", () => {
 	const harnesses: Harness[] = [];
@@ -55,7 +68,7 @@ describe("ENG-6059 xAI subscription dispatch", () => {
 		const path = join(harness.tempDir, "auth.json");
 		const registry = ModelRegistry.inMemory(AuthStorage.create(path));
 		const model = {
-			...getModel("xai", "grok-4.5"),
+			...grok45,
 			baseUrl: "https://caller.invalid/v2",
 			headers: { "X-Caller": "kept" },
 		};

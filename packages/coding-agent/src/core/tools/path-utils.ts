@@ -1,12 +1,9 @@
 import { accessSync, constants } from "node:fs";
-import * as os from "node:os";
-import { isAbsolute, posix, resolve as resolvePath, win32 } from "node:path";
+import { isAbsolute, resolve as resolvePath } from "node:path";
+import { expandTildePath } from "../../config.js";
+import { normalizeUnicodeSpaces } from "../../utils/paths.js";
 
-const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 const NARROW_NO_BREAK_SPACE = "\u202F";
-function normalizeUnicodeSpaces(str: string): string {
-	return str.replace(UNICODE_SPACES, " ");
-}
 
 function tryMacOSScreenshotPath(filePath: string): string {
 	return filePath.replace(/ (AM|PM)\./gi, `${NARROW_NO_BREAK_SPACE}$1.`);
@@ -37,14 +34,7 @@ function normalizeAtPrefix(filePath: string): string {
 }
 
 export function expandPath(filePath: string, platform: NodeJS.Platform = process.platform): string {
-	const normalized = normalizeUnicodeSpaces(normalizeAtPrefix(filePath));
-	if (normalized === "~") {
-		return os.homedir();
-	}
-	if (normalized.startsWith("~/") || (platform === "win32" && normalized.startsWith("~\\"))) {
-		return (platform === "win32" ? win32 : posix).join(os.homedir(), normalized.slice(2));
-	}
-	return normalized;
+	return expandTildePath(normalizeUnicodeSpaces(normalizeAtPrefix(filePath)), platform);
 }
 
 /**

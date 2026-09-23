@@ -44,6 +44,14 @@
 - Regressions go in the existing suite for the module that broke, with the issue number in the test name. Never create one file per issue. One test file per source module; repeated cases belong in an `it.each` table.
 - Deleting code deletes its tests. A flaky test is made deterministic or deleted, never skipped or retried.
 
+
+## Catalog Assets
+
+- Bundled model and MCP catalog snapshots are generated files and must not be committed.
+- Before running catalog-dependent tests in a fresh checkout, generate them once with `npm run catalog:assets -- --catalog-dir /path/to/prime-agent-catalog`.
+- If you do not have a local checkout, use `GITHUB_TOKEN` or `PRIME_CATALOG_REPO_TOKEN` and run `npm run catalog:assets`.
+- For pack-smoke work without catalog access, generate the small fixture with `npm run catalog:assets -- --fixture`; do not use fixture assets for release validation.
+
 ## Daemon Protocol Changes
 
 - Classify every daemon command, event, and response-shape change as backward-compatible, capability-gated, or incompatible.

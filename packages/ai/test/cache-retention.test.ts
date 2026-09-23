@@ -1,9 +1,10 @@
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { getModel, getModels } from "../src/models.js";
+import { getModels } from "../src/models.js";
 import { complete, completeSimple, stream } from "../src/stream.js";
 import type { Api, AssistantMessage, Context, Model, SimpleStreamOptions } from "../src/types.js";
+import { getFixtureModel } from "./fixture-models.js";
 
 describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 	const originalEnv = process.env.PI_CACHE_RETENTION;
@@ -29,7 +30,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 		it.skipIf(!process.env.ANTHROPIC_API_KEY)(
 			"should use default cache TTL (no ttl field) when PI_CACHE_RETENTION is not set",
 			async () => {
-				const model = getModel("anthropic", "claude-haiku-4-5");
+				const model = getFixtureModel<"anthropic-messages">("anthropic", "claude-haiku-4-5")!;
 				let capturedPayload: any = null;
 
 				const s = stream(model, context, {
@@ -49,7 +50,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 
 		it.skipIf(!process.env.ANTHROPIC_API_KEY)("should use 1h cache TTL when PI_CACHE_RETENTION=long", async () => {
 			process.env.PI_CACHE_RETENTION = "long";
-			const model = getModel("anthropic", "claude-haiku-4-5");
+			const model = getFixtureModel<"anthropic-messages">("anthropic", "claude-haiku-4-5")!;
 			let capturedPayload: any = null;
 
 			const s = stream(model, context, {
@@ -69,7 +70,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 		it("should add ttl for non-api.anthropic.com baseUrl by default", async () => {
 			process.env.PI_CACHE_RETENTION = "long";
 
-			const baseModel = getModel("anthropic", "claude-haiku-4-5");
+			const baseModel = getFixtureModel<"anthropic-messages">("anthropic", "claude-haiku-4-5")!;
 			const proxyModel = {
 				...baseModel,
 				baseUrl: "https://my-proxy.example.com/v1",
@@ -99,7 +100,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 		});
 
 		it("should omit ttl when supportsLongCacheRetention is false", async () => {
-			const baseModel = getModel("anthropic", "claude-haiku-4-5");
+			const baseModel = getFixtureModel<"anthropic-messages">("anthropic", "claude-haiku-4-5")!;
 			const proxyModel = {
 				...baseModel,
 				baseUrl: "https://my-proxy.example.com/v1",
@@ -130,7 +131,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 		});
 
 		it("should omit cache_control when cacheRetention is none", async () => {
-			const baseModel = getModel("anthropic", "claude-haiku-4-5");
+			const baseModel = getFixtureModel<"anthropic-messages">("anthropic", "claude-haiku-4-5")!;
 			let capturedPayload: any = null;
 
 			const { streamAnthropic } = await import("../src/providers/anthropic.js");
@@ -156,7 +157,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 		});
 
 		it("should add cache_control to string user messages", async () => {
-			const baseModel = getModel("anthropic", "claude-haiku-4-5");
+			const baseModel = getFixtureModel<"anthropic-messages">("anthropic", "claude-haiku-4-5")!;
 			let capturedPayload: any = null;
 
 			const { streamAnthropic } = await import("../src/providers/anthropic.js");
@@ -184,7 +185,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 		});
 
 		it("should set 1h cache TTL when cacheRetention is long", async () => {
-			const baseModel = getModel("anthropic", "claude-haiku-4-5");
+			const baseModel = getFixtureModel<"anthropic-messages">("anthropic", "claude-haiku-4-5")!;
 			let capturedPayload: any = null;
 
 			const { streamAnthropic } = await import("../src/providers/anthropic.js");
@@ -214,7 +215,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 		it.skipIf(!process.env.OPENAI_API_KEY)(
 			"should not set prompt_cache_retention when PI_CACHE_RETENTION is not set",
 			async () => {
-				const model = getModel("openai", "gpt-4o-mini");
+				const model = getFixtureModel<"openai-responses">("openai", "gpt-4o-mini")!;
 				let capturedPayload: any = null;
 
 				const s = stream(model, context, {
@@ -235,7 +236,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 			"should set prompt_cache_retention to 24h when PI_CACHE_RETENTION=long",
 			async () => {
 				process.env.PI_CACHE_RETENTION = "long";
-				const model = getModel("openai", "gpt-4o-mini");
+				const model = getFixtureModel<"openai-responses">("openai", "gpt-4o-mini")!;
 				let capturedPayload: any = null;
 
 				const s = stream(model, context, {
@@ -255,7 +256,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 		it("should set prompt_cache_retention for non-api.openai.com baseUrl by default", async () => {
 			process.env.PI_CACHE_RETENTION = "long";
 
-			const baseModel = getModel("openai", "gpt-4o-mini");
+			const baseModel = getFixtureModel<"openai-responses">("openai", "gpt-4o-mini")!;
 			const proxyModel = {
 				...baseModel,
 				baseUrl: "https://my-proxy.example.com/v1",
@@ -286,9 +287,9 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 
 		it("should omit prompt_cache_retention when supportsLongCacheRetention is false", async () => {
 			const model = {
-				...getModel("openai", "gpt-4o-mini"),
+				...getFixtureModel<"openai-responses">("openai", "gpt-4o-mini")!,
 				compat: { supportsLongCacheRetention: false },
-			};
+			} as Model<"openai-responses">;
 			let capturedPayload: any = null;
 
 			const { streamOpenAIResponses } = await import("../src/providers/openai-responses.js");
@@ -315,7 +316,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 		});
 
 		it("should omit prompt_cache_key when cacheRetention is none", async () => {
-			const model = getModel("openai", "gpt-4o-mini");
+			const model = getFixtureModel<"openai-responses">("openai", "gpt-4o-mini")!;
 			let capturedPayload: any = null;
 
 			const { streamOpenAIResponses } = await import("../src/providers/openai-responses.js");
@@ -343,7 +344,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 		});
 
 		it("should set prompt_cache_retention when cacheRetention is long", async () => {
-			const model = getModel("openai", "gpt-4o-mini");
+			const model = getFixtureModel<"openai-responses">("openai", "gpt-4o-mini")!;
 			let capturedPayload: any = null;
 
 			const { streamOpenAIResponses } = await import("../src/providers/openai-responses.js");
@@ -438,7 +439,7 @@ describe("Cache Retention (PI_CACHE_RETENTION)", () => {
 			},
 		])("should shape direct OpenAI prompt cache fields for $name", async ({ options, env, key, retention }) => {
 			if (env) process.env.PI_CACHE_RETENTION = env;
-			const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini");
+			const { compat: _compat, ...baseModel } = getFixtureModel<"openai-responses">("openai", "gpt-4o-mini")!;
 			const model = { ...baseModel, api: "openai-completions" } as Model<"openai-completions">;
 
 			const payload = await capturePayload(model, options);

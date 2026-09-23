@@ -108,7 +108,7 @@ describe("Agent", () => {
 	});
 
 	it("should create an agent instance with custom initial state", () => {
-		const customModel = getModel("openai", "gpt-4o-mini");
+		const customModel = getModel("openai", "gpt-4");
 		const agent = new Agent({
 			initialState: {
 				systemPrompt: "You are a helpful assistant.",
@@ -460,7 +460,7 @@ describe("Agent", () => {
 		const getSteeringMessages = vi.fn(async () => [queuedMessage]);
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [] };
 		const config: AgentLoopConfig = {
-			model: getModel("openai", "gpt-4o-mini"),
+			model: getModel("openai", "gpt-4"),
 			convertToLlm: () => [],
 			getSteeringMessages,
 		};
@@ -483,7 +483,7 @@ describe("Agent", () => {
 		controller.abort();
 		const context: AgentContext = { systemPrompt: "", messages: [], tools: [] };
 		const config: AgentLoopConfig = {
-			model: getModel("openai", "gpt-4o-mini"),
+			model: getModel("openai", "gpt-4"),
 			convertToLlm: () => [],
 		};
 

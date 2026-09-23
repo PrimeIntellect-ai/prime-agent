@@ -24,6 +24,8 @@ export interface DaemonSocketClient {
 	catchupRetryTimer?: NodeJS.Timeout;
 	backpressured?: boolean;
 	rosterSubscribed?: boolean;
+	/** Client has used a scheduled-job command and receives heartbeats_changed pushes. */
+	tracksHeartbeats?: boolean;
 	/** A push hit backpressure; one full-roster resync goes out on drain. */
 	rosterResyncPending?: boolean;
 	authenticated?: boolean;

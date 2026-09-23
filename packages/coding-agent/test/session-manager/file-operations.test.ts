@@ -818,8 +818,8 @@ describe("readSessionInfo incremental scans", () => {
 		])("counts %s from its header", async (_case, body, messageCount, allMessagesText) => {
 			expect(await scan(body)).toMatchObject({ messageCount, allMessagesText });
 		});
-		it("drops a damaged session whose first entry is a tool result", async () => {
-			expect(await scan(tool())).toBeNull();
+		it("drops a damaged session whose first entry is a tool result, even when a header follows", async () => {
+			expect(await scan(line(msg("t1", null, "toolResult", "x")) + line(header))).toBeNull();
 			expect(await SessionManager.listAll(undefined, tempDir)).toEqual([]);
 		});
 	});

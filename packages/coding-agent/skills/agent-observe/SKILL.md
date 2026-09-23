@@ -31,7 +31,8 @@ if child is not None:
 - `await agent_observe.list_agents()` returns `current` and `agents`, the full
   nuclear family: parent, siblings, and direct children, active or not. Each
   agent carries `sessionId`, optional `sessionName`, `relationship`
-  (`parent`/`sibling`/`child`), `status`, `isSessionActive`, and the counts and
+  (`parent`/`sibling`/`child`), `status` (`running`/`idle`/`inactive`), the live
+  `activity` of a resident session, `isSessionActive`, and the counts and
   message previews known for it: `latestMessage` for a live session,
   `firstMessage` for an inactive child. A member with no live session has
   no `activeSessionId` and no live detail; address it with `agent_message.send`

@@ -14,6 +14,7 @@ import type {
 	ToolResultMessage,
 	Usage,
 } from "../src/types.js";
+import { getFixtureModel } from "./fixture-models.js";
 import { getZaiTestModel } from "./zai-test-model.js";
 
 const mockState = vi.hoisted(() => ({
@@ -23,12 +24,16 @@ const mockState = vi.hoisted(() => ({
 		| Array<null | {
 				id?: string;
 				model?: string;
+				service_tier?: string;
 				choices?: Array<{ delta: Record<string, unknown>; finish_reason: string | null; usage?: unknown }>;
 				usage?: {
 					prompt_tokens: number;
 					completion_tokens: number;
 					prompt_tokens_details: { cached_tokens: number; cache_write_tokens?: number };
 					completion_tokens_details: { reasoning_tokens: number };
+					cost?: number;
+					is_byok?: boolean;
+					cost_details?: { upstream_inference_cost?: number };
 				};
 		  }>
 		| undefined,
@@ -89,7 +94,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("forwards toolChoice from simple options to payload", async () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 		const tools: Tool[] = [
 			{
@@ -130,7 +135,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("omits strict when compat disables strict mode", async () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
 		const model = {
 			...baseModel,
 			api: "openai-completions",
@@ -175,7 +180,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("keeps normal reasoning_effort for groq models without compat mapping", async () => {
-		const model = getModel("groq", "openai/gpt-oss-20b")!;
+		const model = getFixtureModel<"openai-completions">("groq", "openai/gpt-oss-20b")!;
 		let payload: unknown;
 
 		await streamSimple(
@@ -412,7 +417,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 		const response = await streamSimple(
 			model,
@@ -499,7 +504,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 		const tool: Tool = {
 			name: "read",
@@ -646,7 +651,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 		const tools: Tool[] = [
 			{
@@ -801,7 +806,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 		const first = await streamSimple(
 			model,
@@ -856,7 +861,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 		const first = await streamSimple(
 			model,
@@ -918,7 +923,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 		const first = await streamSimple(
 			model,
@@ -965,7 +970,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 		const response = await streamSimple(
 			model,
@@ -1004,7 +1009,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 		const response = await streamSimple(
 			model,
@@ -1049,7 +1054,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 		const response = await streamSimple(
 			model,
@@ -1072,7 +1077,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("uses OpenRouter reasoning object instead of reasoning_effort", async () => {
-		const baseModel = getModel("openrouter", "deepseek/deepseek-r1")!;
+		const baseModel = getFixtureModel<"openai-completions">("openrouter", "deepseek/deepseek-r1")!;
 		const model = { ...baseModel, compat: { ...baseModel.compat, supportsReasoningEffort: true } };
 		let payload: unknown;
 
@@ -1105,7 +1110,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("preserves the OpenRouter model default when reasoning is unspecified", async () => {
-		const model = getModel("openrouter", "deepseek/deepseek-r1")!;
+		const model = getFixtureModel<"openai-completions">("openrouter", "deepseek/deepseek-r1")!;
 		let payload: unknown;
 
 		await streamSimple(
@@ -1148,7 +1153,10 @@ describe("openai-completions tool_choice", () => {
 	it("sends no thinking parameter to Prime Inference GLM routes but keeps the z.ai toggle", async () => {
 		const context = { messages: [{ role: "user" as const, content: "Hi", timestamp: Date.now() }] };
 		const payloads = new Map<string, Record<string, unknown>>();
-		for (const model of [getModel("prime-inference", "z-ai/glm-5.3")!, getModel("zai", "glm-5.3")!]) {
+		for (const model of [
+			getModel("prime-inference", "z-ai/glm-5.3")!,
+			getFixtureModel<"openai-completions">("zai", "glm-5.3")!,
+		]) {
 			await streamSimple(model, context, {
 				apiKey: "test",
 				reasoning: "high",
@@ -1165,7 +1173,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("serializes explicit off only for models that allow disabling reasoning", async () => {
-		const baseModel = getModel("openrouter", "deepseek/deepseek-r1")!;
+		const baseModel = getFixtureModel<"openai-completions">("openrouter", "deepseek/deepseek-r1")!;
 		const effortCompat = { ...baseModel.compat, supportsReasoningEffort: true };
 		const optionalModel = { ...baseModel, compat: effortCompat, thinkingLevelMap: { high: "high" } };
 		const mandatoryModel = {
@@ -1204,7 +1212,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("uses enabled toggles when an OpenRouter model has no effort selector", async () => {
-		const baseModel = getModel("openrouter", "deepseek/deepseek-r1")!;
+		const baseModel = getFixtureModel<"openai-completions">("openrouter", "deepseek/deepseek-r1")!;
 		const model = {
 			...baseModel,
 			thinkingLevelMap: {
@@ -1249,12 +1257,12 @@ const emptyUsage: Usage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-const cloudflareGatewayCompatModel: Model<"openai-completions"> = {
-	...getModel("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.6"),
+const cloudflareGatewayCompatModel = {
+	...getFixtureModel<"openai-completions">("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.6")!,
 	provider: "cloudflare-ai-gateway",
 	baseUrl: CLOUDFLARE_AI_GATEWAY_COMPAT_BASE_URL,
 	id: "workers-ai/@cf/moonshotai/kimi-k2.6",
-};
+} as Model<"openai-completions">;
 
 describe("openai-completions tools payload", () => {
 	beforeEach(() => {
@@ -1266,13 +1274,14 @@ describe("openai-completions tools payload", () => {
 	afterEach(() => {
 		delete process.env.CLOUDFLARE_ACCOUNT_ID;
 		delete process.env.CLOUDFLARE_GATEWAY_ID;
+		delete process.env.PRIME_TEAM_ID;
 	});
 
 	it.each([
 		{ name: "an empty array", tools: [] as Tool[] },
 		{ name: "undefined", tools: undefined },
 	])("omits the tools field when context.tools is $name", async ({ tools }) => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 
 		await streamSimple(
@@ -1285,7 +1294,7 @@ describe("openai-completions tools payload", () => {
 	});
 
 	it("still emits tools: [] when the conversation has tool history", async () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
 		const model = { ...baseModel, api: "openai-completions" } as const;
 		const now = Date.now();
 
@@ -1361,7 +1370,7 @@ describe("openai-completions tools payload", () => {
 		process.env.CLOUDFLARE_GATEWAY_ID = "gateway-id";
 
 		await streamSimple(
-			getModel("cloudflare-ai-gateway", "gpt-5.1")!,
+			getFixtureModel<"openai-responses">("cloudflare-ai-gateway", "gpt-5.1")!,
 			{ messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
 			{ apiKey: "cf-token", headers: { Authorization: "Bearer upstream-token" } },
 		).result();
@@ -1369,6 +1378,12 @@ describe("openai-completions tools payload", () => {
 		const clientOptions = mockState.lastClientOptions as { defaultHeaders?: Record<string, unknown> };
 		expect(clientOptions.defaultHeaders?.Authorization).toBe("Bearer upstream-token");
 		expect(clientOptions.defaultHeaders?.["cf-aig-authorization"]).toBe("Bearer cf-token");
+	});
+	it("adds no Prime Inference team header the caller did not pass", async () => {
+		process.env.PRIME_TEAM_ID = "cli-profile-team";
+		const context = { messages: [{ role: "user" as const, content: "hi", timestamp: 1 }] };
+		await streamSimple(getModel("prime-inference", "openai/gpt-5")!, context, { apiKey: "k" }).result();
+		expect(mockState.lastClientOptions).not.toHaveProperty(["defaultHeaders", "X-Prime-Team-ID"]);
 	});
 });
 
@@ -1441,7 +1456,7 @@ describe("openai-completions tool-result content", () => {
 	};
 
 	function imageModel(): Model<"openai-completions"> {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini");
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
 		return { ...baseModel, api: "openai-completions", input: ["text", "image"] };
 	}
 
@@ -1508,6 +1523,108 @@ describe("openai-completions tool-result content", () => {
 		const messages = convertMessages(model, buildContext(model, [toolResult]), compat);
 
 		expect(messages.find((message) => message.role === "tool")?.content).toBe("");
+	});
+});
+
+describe("openai-completions service tier", () => {
+	function serviceTierModel(provider: string): Model<"openai-completions"> {
+		const { compat: _compat, ...base } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
+		return {
+			...base,
+			api: "openai-completions",
+			id: "anthropic/claude-opus-5",
+			provider,
+			baseUrl: "https://openrouter.ai/api/v1",
+			cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+		};
+	}
+
+	it.each([
+		["openrouter", "flex"],
+		["openai", "flex"],
+		["prime-inference", undefined],
+	])("forwards a requested tier only for openai and openrouter: $0", async (provider, forwarded) => {
+		await streamSimple(
+			serviceTierModel(provider),
+			{ messages: [{ role: "user", content: "Hi", timestamp: Date.now() }] },
+			{ apiKey: "test", serviceTier: "flex" },
+		).result();
+
+		expect((mockState.lastParams as { service_tier?: string }).service_tier).toBe(forwarded);
+	});
+
+	it.each([
+		{
+			name: "uses OpenRouter's reported cost, already priced by the serving tier",
+			provider: "openrouter",
+			requestedTier: "priority",
+			responseServiceTier: "priority",
+			reported: { cost: 0.0009 },
+			expectedTotal: 0.0009,
+		},
+		{
+			name: "records BYOK spend from the upstream bill plus OpenRouter's fee",
+			provider: "openrouter",
+			requestedTier: undefined,
+			responseServiceTier: undefined,
+			reported: { cost: 0.95, is_byok: true, cost_details: { upstream_inference_cost: 19 } },
+			expectedTotal: 19.95,
+		},
+		{
+			name: "keeps catalog rates when OpenRouter reports a cost of 0",
+			provider: "openrouter",
+			requestedTier: undefined,
+			responseServiceTier: undefined,
+			reported: { cost: 0 },
+			expectedTotal: 0.00015,
+		},
+		{
+			name: "keeps unmultiplied catalog rates for a gateway tier echo without reported cost",
+			provider: "openrouter",
+			requestedTier: "priority",
+			responseServiceTier: "priority",
+			reported: undefined,
+			expectedTotal: 0.00015,
+		},
+		{
+			name: "multiplies direct OpenAI usage by the tier OpenAI echoes as served",
+			provider: "openai",
+			requestedTier: "flex",
+			responseServiceTier: "flex",
+			reported: undefined,
+			expectedTotal: 0.000075,
+		},
+		{
+			name: "never multiplies from the requested tier when no served tier is echoed",
+			provider: "openai",
+			requestedTier: "flex",
+			responseServiceTier: undefined,
+			reported: undefined,
+			expectedTotal: 0.00015,
+		},
+	] as const)("$name", async ({ provider, requestedTier, responseServiceTier, reported, expectedTotal }) => {
+		mockState.chunks = [
+			{
+				id: "chatcmpl-1",
+				service_tier: responseServiceTier,
+				choices: [{ delta: {}, finish_reason: "stop" }],
+				usage: {
+					prompt_tokens: 100,
+					completion_tokens: 50,
+					prompt_tokens_details: { cached_tokens: 0 },
+					completion_tokens_details: { reasoning_tokens: 0 },
+					...reported,
+				},
+			},
+		];
+
+		const response = await streamSimple(
+			serviceTierModel(provider),
+			{ messages: [{ role: "user", content: "Hi", timestamp: Date.now() }] },
+			{ apiKey: "test", serviceTier: requestedTier },
+		).result();
+
+		expect(response.usage.cost.total).toBeCloseTo(expectedTotal, 10);
 	});
 });
 

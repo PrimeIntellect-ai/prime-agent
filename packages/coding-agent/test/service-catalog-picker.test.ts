@@ -745,6 +745,19 @@ describe("ENG-6108 service catalog picker chain", () => {
 		);
 	});
 
+	/**
+	 * The background model-catalog refresh (provider catalog + default-model
+	 * pointer) legitimately fetches the public catalog repo in fresh-HOME
+	 * environments and fails closed when this suite's fetch stub throws. Those
+	 * calls are not MCP login/verifier traffic: assert no NON-catalog fetch ran.
+	 */
+	function expectNoMcpNetwork(): void {
+		const nonCatalog = vi
+			.mocked(fetch)
+			.mock.calls.filter((call) => !String(call[0]).includes("prime-agent-catalog/main/"));
+		expect(nonCatalog).toHaveLength(0);
+	}
+
 	afterEach(() => {
 		while (harnesses.length) harnesses.pop()?.cleanup();
 		while (localCatalogDirs.length) rmSync(localCatalogDirs.pop()!, { recursive: true, force: true });
@@ -1217,7 +1230,7 @@ describe("ENG-6108 service catalog picker chain", () => {
 		expect(f.authFlow).not.toHaveBeenCalled();
 		expect(f.reserve).not.toHaveBeenCalled();
 		expect(f.claim).not.toHaveBeenCalled();
-		expect(fetch).not.toHaveBeenCalled();
+		expectNoMcpNetwork();
 	});
 
 	// Settings-only guidance surfaces (no mutation, no OAuth, status line as the outcome) are pinned at the ACTION seam
@@ -1316,6 +1329,8 @@ describe("ENG-6108 service catalog picker chain", () => {
 				});
 				await f.store.flush();
 			}
+			await Promise.resolve();
+			vi.mocked(fetch).mockClear();
 			const done = f.mode.showServiceCatalogPicker("http-proof");
 			const catalog = f.picker();
 			expect(stripAnsi(catalog.render(100).join("\n"))).toContain("Enter manage saved account");
@@ -1345,7 +1360,7 @@ describe("ENG-6108 service catalog picker chain", () => {
 			expect(f.authFlow).not.toHaveBeenCalled();
 			expect(f.reserve).not.toHaveBeenCalled();
 			expect(f.claim).not.toHaveBeenCalled();
-			expect(fetch).not.toHaveBeenCalled();
+			expectNoMcpNetwork();
 		},
 	);
 
@@ -1379,7 +1394,7 @@ describe("ENG-6108 service catalog picker chain", () => {
 		expect(f.reload).not.toHaveBeenCalled();
 		expect(f.reserve).not.toHaveBeenCalled();
 		expect(f.claim).not.toHaveBeenCalled();
-		expect(fetch).not.toHaveBeenCalled();
+		expectNoMcpNetwork();
 		expect(f.store.get("http-proof")?.status).toBe("pending");
 	});
 

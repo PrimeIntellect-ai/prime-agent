@@ -8,16 +8,16 @@ import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	EventStream,
-	getModel,
 	type ImageContent,
 } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
-import type { QueuedMessageMutation } from "../src/core/session-action-store.js";
+import type { QueuedMessageMutation, SessionActionSnapshot } from "../src/core/session-action-store.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { getCodingAgentFixtureModel } from "./fixture-models.js";
 import { createTestResourceLoader } from "./utilities.js";
 
 class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -63,7 +63,7 @@ describe("AgentSession queue mutation", () => {
 	});
 
 	function createSession() {
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const model = getCodingAgentFixtureModel("anthropic", "claude-sonnet-4-5");
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: "Test", tools: [] },
@@ -291,5 +291,18 @@ describe("AgentSession queue mutation", () => {
 		expect(recovered?.wake).toBe("on_lower_boundary");
 		await session.abort();
 		await running.catch(() => {});
+	});
+
+	it("skips session_action_update when a replace leaves the queue unchanged", async () => {
+		createSession();
+		const { running } = await blockSession();
+		await session.steer("s1");
+		const updates: SessionActionSnapshot[] = [];
+		session.subscribe((event) => event.type === "session_action_update" && updates.push(event.actions));
+		expect(mutate("steering", 0, "s1", { type: "replace", text: "s1", lane: "steering" })).toBe("applied");
+		expect(updates).toEqual([]);
+		mutate("steering", 0, "s1", { type: "replace", text: "s1 edited", lane: "steering" });
+		expect(updates).toMatchObject([{ steering: ["s1 edited"] }]);
+		await Promise.all([session.abort(), running.catch(() => {})]);
 	});
 });

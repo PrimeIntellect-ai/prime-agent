@@ -393,11 +393,11 @@ export type AgentEvent =
 	| { type: "agent_end"; messages: AgentMessage[] }
 	/** One assistant response and its resulting tool calls. */
 	| { type: "turn_start" }
-	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }
+	| { type: "turn_end"; message: AssistantMessage; toolResults: ToolResultMessage[] }
 	/** Lifecycle events for user, assistant, and tool-result messages. */
 	| { type: "message_start"; message: AgentMessage }
 	/** Only emitted for assistant messages during streaming. */
-	| { type: "message_update"; message: AgentMessage; assistantMessageEvent: AssistantMessageEvent }
+	| { type: "message_update"; message: AssistantMessage; assistantMessageEvent: AssistantMessageEvent }
 	| { type: "message_end"; message: AgentMessage }
 	/** Tool execution events; parallel calls may end in completion rather than source order. */
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any }

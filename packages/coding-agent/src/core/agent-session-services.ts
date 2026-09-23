@@ -98,6 +98,12 @@ export interface AgentSessionServices {
 	resourceLoader: ResourceLoader;
 	mcpManager: McpManager;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
+	/**
+	 * True only when this services object created its own McpManager (not an
+	 * injected one). Consumers may reuse an injected services object across
+	 * sessions; only the owner disposes the manager.
+	 */
+	ownsMcpManager: boolean;
 }
 
 function applyExtensionFlagValues(
@@ -161,13 +167,14 @@ export async function createAgentSessionServices(
 
 	// MCP integrations: registers OAuth providers and gates the built-in
 	// integration skills by whether the user is logged in (enable-by-login).
-	const mcpManager =
-		options.mcpManager ??
-		new McpManager({
-			authStorage,
-			getUserServers: () => settingsManager.getGlobalMcpServers(),
-			getCatalogSources: () => settingsManager.getMcpCatalogSources(),
-		});
+	const ownedMcpManager = options.mcpManager
+		? undefined
+		: new McpManager({
+				authStorage,
+				getUserServers: () => settingsManager.getGlobalMcpServers(),
+				getCatalogSources: () => settingsManager.getMcpCatalogSources(),
+			});
+	const mcpManager = options.mcpManager ?? ownedMcpManager!;
 	// refresh() resets the OAuth registry to built-ins; re-add user MCP providers too.
 	modelRegistry.setOnOAuthProvidersReset(() => mcpManager.registerAllProviders());
 
@@ -234,6 +241,7 @@ export async function createAgentSessionServices(
 		resourceLoader,
 		mcpManager,
 		diagnostics,
+		ownsMcpManager: mcpManager === ownedMcpManager,
 	};
 }
 
@@ -285,6 +293,9 @@ export async function createAgentSessionFromServices(
 		serializedRefine: options.serializedRefine,
 		initialGoal: options.initialGoal,
 	});
+	if (options.services.ownsMcpManager) {
+		result.session.registerDisposeCallback(() => options.services.mcpManager.dispose());
+	}
 	if (result.session.rlmDepth === 0 && !options.telemetryDisabled) {
 		installAgentTelemetry(result.session, {
 			agentDir: options.services.agentDir,

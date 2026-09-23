@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getModel } from "../src/models.js";
 import { type BedrockOptions, streamBedrock } from "../src/providers/amazon-bedrock.js";
 import type { Context, Model } from "../src/types.js";
+import { getFixtureModel } from "./fixture-models.js";
 
 const bedrockMock = vi.hoisted(() => ({
 	constructorCalls: [] as Array<Record<string, unknown>>,
@@ -92,7 +92,10 @@ async function capturePayload(
 
 describe("Bedrock thinking payload", () => {
 	it("uses adaptive thinking for Claude Opus 4.7 when reasoning is enabled", async () => {
-		const baseModel = getModel("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1");
+		const baseModel = getFixtureModel<"bedrock-converse-stream">(
+			"amazon-bedrock",
+			"global.anthropic.claude-opus-4-6-v1",
+		)!;
 		const model: Model<"bedrock-converse-stream"> = {
 			...baseModel,
 			id: "global.anthropic.claude-opus-4-7-v1",
@@ -107,7 +110,7 @@ describe("Bedrock thinking payload", () => {
 	});
 
 	it("maps xhigh reasoning to effort=xhigh for Claude Opus 4.7", async () => {
-		const model = getModel("amazon-bedrock", "global.anthropic.claude-opus-4-7");
+		const model = getFixtureModel<"bedrock-converse-stream">("amazon-bedrock", "global.anthropic.claude-opus-4-7")!;
 
 		const payload = await capturePayload(model, { reasoning: "xhigh" });
 
@@ -117,7 +120,10 @@ describe("Bedrock thinking payload", () => {
 	});
 
 	it("clamps xhigh reasoning to effort=max for Claude Opus 4.6 (no native xhigh)", async () => {
-		const model = getModel("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1");
+		const model = getFixtureModel<"bedrock-converse-stream">(
+			"amazon-bedrock",
+			"global.anthropic.claude-opus-4-6-v1",
+		)!;
 
 		const payload = await capturePayload(model, { reasoning: "xhigh" });
 
@@ -125,7 +131,10 @@ describe("Bedrock thinking payload", () => {
 	});
 
 	it("maps max reasoning to effort=max for Claude Opus 4.6 (adaptive)", async () => {
-		const model = getModel("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1");
+		const model = getFixtureModel<"bedrock-converse-stream">(
+			"amazon-bedrock",
+			"global.anthropic.claude-opus-4-6-v1",
+		)!;
 
 		const payload = await capturePayload(model, { reasoning: "max" });
 
@@ -135,7 +144,7 @@ describe("Bedrock thinking payload", () => {
 	});
 
 	it("uses adaptive thinking with effort for Claude Fable 5", async () => {
-		const model = getModel("amazon-bedrock", "global.anthropic.claude-fable-5");
+		const model = getFixtureModel<"bedrock-converse-stream">("amazon-bedrock", "global.anthropic.claude-fable-5")!;
 
 		const payload = await capturePayload(model, { reasoning: "xhigh" });
 
@@ -144,7 +153,7 @@ describe("Bedrock thinking payload", () => {
 	});
 
 	it("drops temperature for Claude Fable 5 (sampling params are rejected)", async () => {
-		const model = getModel("amazon-bedrock", "global.anthropic.claude-fable-5");
+		const model = getFixtureModel<"bedrock-converse-stream">("amazon-bedrock", "global.anthropic.claude-fable-5")!;
 
 		const payload = await capturePayload(model, { reasoning: "high", temperature: 0.5 });
 
@@ -152,7 +161,10 @@ describe("Bedrock thinking payload", () => {
 	});
 
 	it("omits display for GovCloud model ids on non-adaptive Claude thinking", async () => {
-		const baseModel = getModel("amazon-bedrock", "us.anthropic.claude-sonnet-4-5-20250929-v1:0");
+		const baseModel = getFixtureModel<"bedrock-converse-stream">(
+			"amazon-bedrock",
+			"us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+		)!;
 		const model: Model<"bedrock-converse-stream"> = {
 			...baseModel,
 			id: "us-gov.anthropic.claude-sonnet-4-5-20250929-v1:0",
@@ -166,7 +178,10 @@ describe("Bedrock thinking payload", () => {
 	});
 
 	it("omits display for GovCloud regions on adaptive Claude thinking", async () => {
-		const baseModel = getModel("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1");
+		const baseModel = getFixtureModel<"bedrock-converse-stream">(
+			"amazon-bedrock",
+			"global.anthropic.claude-opus-4-6-v1",
+		)!;
 		const model: Model<"bedrock-converse-stream"> = {
 			...baseModel,
 			id: "global.anthropic.claude-opus-4-7-v1",
@@ -183,7 +198,10 @@ describe("Bedrock thinking payload", () => {
 
 describe("Application inference profile support", () => {
 	it("uses adaptive thinking when model.name contains the model name but ARN does not", async () => {
-		const baseModel = getModel("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1");
+		const baseModel = getFixtureModel<"bedrock-converse-stream">(
+			"amazon-bedrock",
+			"global.anthropic.claude-opus-4-6-v1",
+		)!;
 		const model: Model<"bedrock-converse-stream"> = {
 			...baseModel,
 			id: "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/my-profile",
@@ -197,7 +215,10 @@ describe("Application inference profile support", () => {
 	});
 
 	it("injects cache points when model.name identifies a supported Claude model", async () => {
-		const baseModel = getModel("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1");
+		const baseModel = getFixtureModel<"bedrock-converse-stream">(
+			"amazon-bedrock",
+			"global.anthropic.claude-opus-4-6-v1",
+		)!;
 		const model: Model<"bedrock-converse-stream"> = {
 			...baseModel,
 			id: "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/my-profile",
@@ -233,7 +254,10 @@ describe("Application inference profile support", () => {
 	});
 
 	it("falls back to fixed-budget thinking for non-adaptive Claude via model.name", async () => {
-		const baseModel = getModel("amazon-bedrock", "us.anthropic.claude-sonnet-4-5-20250929-v1:0");
+		const baseModel = getFixtureModel<"bedrock-converse-stream">(
+			"amazon-bedrock",
+			"us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+		)!;
 		const model: Model<"bedrock-converse-stream"> = {
 			...baseModel,
 			id: "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/my-profile",
@@ -268,9 +292,10 @@ describe("Bedrock endpoint resolution", () => {
 	});
 
 	it("assigns eu-central-1 runtime URLs to built-in EU inference profiles", () => {
-		expect(getModel("amazon-bedrock", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0").baseUrl).toBe(
-			"https://bedrock-runtime.eu-central-1.amazonaws.com",
-		);
+		expect(
+			getFixtureModel<"bedrock-converse-stream">("amazon-bedrock", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0")!
+				.baseUrl,
+		).toBe("https://bedrock-runtime.eu-central-1.amazonaws.com");
 	});
 
 	it.each([
@@ -300,7 +325,7 @@ describe("Bedrock endpoint resolution", () => {
 		},
 	])("$name", async ({ env, modelId, baseUrl, endpoint, region }) => {
 		if (env) process.env.AWS_REGION = env;
-		const baseModel = getModel("amazon-bedrock", modelId);
+		const baseModel = getFixtureModel<"bedrock-converse-stream">("amazon-bedrock", modelId)!;
 		const model: Model<"bedrock-converse-stream"> = baseUrl ? { ...baseModel, baseUrl } : baseModel;
 
 		await streamBedrock(model, makeContext(), { cacheRetention: "none" }).result();

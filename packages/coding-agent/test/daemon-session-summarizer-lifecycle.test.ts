@@ -8,6 +8,19 @@ import { DaemonSessionSummarizer } from "../src/modes/daemon/daemon-session-summ
 // SETTLE_DEBOUNCE_MS in the module).
 const SETTLE_MS = 2000;
 
+const openAiMini = {
+	id: "gpt-4o-mini",
+	name: "GPT-4o mini",
+	api: "openai-responses",
+	provider: "openai",
+	baseUrl: "https://api.openai.com/v1",
+	reasoning: false,
+	input: ["text", "image"],
+	cost: { input: 0.15, output: 0.6, cacheRead: 0.075, cacheWrite: 0 },
+	contextWindow: 128000,
+	maxTokens: 16384,
+} satisfies ai.Model<"openai-responses">;
+
 function makeState(
 	opts: { working?: boolean; messages?: number; kind?: "top-level" | "subagent"; persisted?: unknown } = {},
 ): ActiveSessionState {
@@ -49,7 +62,7 @@ describe("DaemonSessionSummarizer lifecycle", () => {
 		{ enabled: true, maxRetries: 0 },
 	])("honors session retry settings %j on a transient summary failure", async (retry) => {
 		vi.useFakeTimers();
-		const model = ai.getModel("openai", "gpt-4o-mini");
+		const model = openAiMini;
 		const complete = vi.spyOn(ai, "completeSimple").mockResolvedValue({
 			role: "assistant",
 			content: [],

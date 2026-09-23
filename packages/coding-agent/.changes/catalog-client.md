@@ -1,0 +1,1 @@
+- Added bundled model and MCP catalog snapshots with hourly background refresh and last-good disk caches.

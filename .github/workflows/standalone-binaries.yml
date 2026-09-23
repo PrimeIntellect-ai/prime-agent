@@ -72,6 +72,19 @@ jobs:
         working-directory: source
         run: npm ci
 
+      - name: Checkout catalog assets
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: PrimeIntellect-ai/prime-agent-catalog
+          ref: main
+          token: ${{ secrets.PRIME_CATALOG_REPO_TOKEN || github.token }}
+          path: prime-agent-catalog
+          persist-credentials: false
+
+      - name: Generate catalog assets
+        working-directory: source
+        run: npm run catalog:assets -- --catalog-dir ../prime-agent-catalog
+
       - name: Compile standalone application
         working-directory: source/packages/coding-agent
         run: npm run build:binary -- --platform ${{ matrix.platform }}

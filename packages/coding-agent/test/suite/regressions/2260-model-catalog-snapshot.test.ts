@@ -1,15 +1,28 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { getModel } from "@earendil-works/pi-ai";
+import type { Model } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import { DaemonAgentConnection } from "../../../src/modes/agent-connection/daemon-agent-connection.js";
 import type { AgentConnectionState } from "../../../src/modes/agent-connection/types.js";
 import type { DaemonClientMessageListener, DaemonTransportClient } from "../../../src/modes/daemon/daemon-client.js";
 import type { DaemonCommand } from "../../../src/modes/daemon/daemon-protocol.js";
 
+const model = {
+	id: "grok-4.5",
+	name: "Grok 4.5",
+	api: "openai-completions",
+	provider: "xai",
+	baseUrl: "https://api.x.ai/v1",
+	reasoning: true,
+	thinkingLevelMap: { off: null, minimal: null },
+	input: ["text", "image"],
+	cost: { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 },
+	contextWindow: 500000,
+	maxTokens: 500000,
+} satisfies Model<"openai-completions">;
+
 async function createConnection(modelCatalog = true, deferSessionEvents = false) {
 	const messages: AgentMessage[] = [{ role: "user", content: "saved transcript", timestamp: 1 }];
 	const updatedMessages: AgentMessage[] = [{ role: "user", content: "updated transcript", timestamp: 2 }];
-	const model = getModel("xai", "grok-4.5");
 	const state = { sessionId: "session", model, thinkingLevel: "high", serviceTier: "default" } as AgentConnectionState;
 	const refreshedState = { ...state, model: { ...model, api: "openai-responses" }, thinkingLevel: "low" };
 	let listener: DaemonClientMessageListener | undefined;

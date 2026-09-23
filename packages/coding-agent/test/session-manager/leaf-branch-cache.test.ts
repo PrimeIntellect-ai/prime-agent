@@ -112,24 +112,7 @@ describe("SessionManager leaf branch cache", () => {
 		expectChainMatches(session, [firstId, secondId, thirdId, fourthId, fifthId]);
 	});
 
-	it("drops the cached branch when a failed append is rolled back", () => {
-		const session = persistedSession();
-		const firstId = session.appendMessage(userMsg("one"));
-		expect(ids(session)).toEqual([firstId]); // populates the cache
-
-		vi.spyOn(session, "_persist").mockImplementationOnce(() => {
-			throw new Error("disk full");
-		});
-		expect(() => session.appendCustomMessageEntryWithRollback("note", "unsaved", false)).toThrow("disk full");
-
-		expect(session.getLeafId()).toBe(firstId);
-		expectChainMatches(session, [firstId]);
-		// The next append starts from the rolled-back leaf and stays coherent.
-		const secondId = session.appendCustomMessageEntry("note", "saved", false);
-		expectChainMatches(session, [firstId, secondId]);
-	});
-
-	it("never leaves a rolled-back append in a branch array a caller already holds", () => {
+	it("rolls a failed append back out of a held branch array and recovers on the next append and reload", () => {
 		const session = persistedSession();
 		const firstId = session.appendMessage(userMsg("one"));
 		const held = session.getBranch(); // the live cached array
@@ -154,5 +137,11 @@ describe("SessionManager leaf branch cache", () => {
 
 		expect(heldAgain.map((entry) => entry.id)).toEqual([firstId]);
 		expectChainMatches(session, [firstId]);
+
+		// The next append starts from the rolled-back leaf and stays coherent (its assistant entry also writes the file).
+		const secondId = session.appendMessage(assistantMsg("two"));
+		expectChainMatches(session, [firstId, secondId]);
+		session.setSessionFile(session.getSessionFile()!); // same path, same leaf id, fresh entry objects
+		expectChainMatches(session, [firstId, secondId]); // the served objects are the reloaded ones
 	});
 });

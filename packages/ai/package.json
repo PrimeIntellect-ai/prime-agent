@@ -69,7 +69,8 @@
 		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"dev:tsc": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
 		"test": "vitest --run",
-		"prepublishOnly": "npm run clean && npm run build"
+		"prepublishOnly": "npm run clean && npm run build",
+		"catalog:export": "npx tsx scripts/generate-models.ts --catalog-out"
 	},
 	"dependencies": {
 		"@anthropic-ai/sdk": "^0.91.1",
@@ -77,11 +78,11 @@
 		"@google/genai": "^1.40.0",
 		"@mistralai/mistralai": "^2.2.0",
 		"@modelcontextprotocol/sdk": "^1.30.0",
-		"typebox": "^1.3.9",
 		"chalk": "^5.6.2",
 		"openai": "6.47.0",
 		"partial-json": "^0.1.7",
 		"proxy-agent": "^6.5.0",
+		"typebox": "^1.3.9",
 		"undici": "^7.29.0",
 		"zod-to-json-schema": "^3.24.6"
 	},
@@ -108,6 +109,7 @@
 	"devDependencies": {
 		"@types/node": "^24.3.0",
 		"canvas": "^3.2.0",
-		"vitest": "^4.1.10"
+		"vitest": "^4.1.10",
+		"yaml": "^2.9.0"
 	}
 }

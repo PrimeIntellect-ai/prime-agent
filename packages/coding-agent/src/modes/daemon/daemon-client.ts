@@ -18,6 +18,7 @@ import {
 	type DaemonServerCapability,
 	getDaemonCommandCompatibilities,
 	isDaemonMutatingCommand,
+	isDaemonResponse,
 	meetsDaemonCommandCompatibility,
 } from "./daemon-protocol.js";
 import type { DaemonWorkerCommand, DaemonWorkerCommandBody } from "./daemon-worker-protocol.js";
@@ -216,37 +217,16 @@ export class DaemonClient {
 		this.socket = socket;
 		this.detachReader = attachJsonlLineReader(socket, (line) => this.handleLine(line));
 
-		await new Promise<void>((resolve, reject) => {
-			const timeout = setTimeout(() => {
-				cleanup();
-				this.clearSocketReference(socket);
-				socket.destroy();
-				reject(
-					new Error(
-						`Timed out after ${timeoutMs}ms connecting to the Prime Agent daemon. ${daemonEndpointDetails(this.socketPath)}`,
-					),
-				);
-			}, timeoutMs);
-			const cleanup = () => {
-				clearTimeout(timeout);
-				socket.off("connect", onConnect);
-				socket.off("error", onError);
-			};
-			const onConnect = () => {
-				cleanup();
-				resolve();
-			};
-			const onError = (error: Error) => {
-				cleanup();
-				this.clearSocketReference(socket);
-				reject(
-					new Error(
-						`Failed to connect to the Prime Agent daemon: ${error.message}. ${daemonEndpointDetails(this.socketPath)}`,
-					),
-				);
-			};
-			socket.once("connect", onConnect);
-			socket.once("error", onError);
+		await awaitSocketConnect(socket, timeoutMs, {
+			onFailure: () => this.clearSocketReference(socket),
+			timeoutError: () =>
+				new Error(
+					`Timed out after ${timeoutMs}ms connecting to the Prime Agent daemon. ${daemonEndpointDetails(this.socketPath)}`,
+				),
+			connectError: (error) =>
+				new Error(
+					`Failed to connect to the Prime Agent daemon: ${error.message}. ${daemonEndpointDetails(this.socketPath)}`,
+				),
 		});
 
 		socket.on("error", (error) =>
@@ -657,22 +637,51 @@ function isDaemonClosing(value: unknown): value is Extract<DaemonOutbound, { typ
 	return candidate.type === "daemon_closing" && (candidate.reason === "shutdown" || candidate.reason === "update");
 }
 
+/**
+ * `onFailure` drops the caller's socket reference, so a failed connect never leaves the client
+ * holding a socket it never connected.
+ */
+export function awaitSocketConnect(
+	socket: Socket,
+	timeoutMs: number,
+	handlers: {
+		onFailure: () => void;
+		timeoutError: () => Error;
+		connectError: (error: Error) => Error;
+	},
+): Promise<void> {
+	return new Promise<void>((resolve, reject) => {
+		const timeout = setTimeout(() => {
+			cleanup();
+			handlers.onFailure();
+			socket.destroy();
+			reject(handlers.timeoutError());
+		}, timeoutMs);
+		const cleanup = () => {
+			clearTimeout(timeout);
+			socket.off("connect", onConnect);
+			socket.off("error", onError);
+		};
+		const onConnect = () => {
+			cleanup();
+			resolve();
+		};
+		const onError = (error: Error) => {
+			cleanup();
+			handlers.onFailure();
+			reject(handlers.connectError(error));
+		};
+		socket.once("connect", onConnect);
+		socket.once("error", onError);
+	});
+}
+
 function isDaemonHello(value: unknown): value is DaemonHello {
 	if (!value || typeof value !== "object") {
 		return false;
 	}
 	const candidate = value as { type?: unknown; protocol?: unknown };
 	return candidate.type === "daemon_hello" && typeof candidate.protocol === "object" && candidate.protocol !== null;
-}
-
-function isDaemonResponse(value: unknown): value is DaemonResponse {
-	if (!value || typeof value !== "object") {
-		return false;
-	}
-	const candidate = value as { type?: unknown; success?: unknown; command?: unknown };
-	return (
-		candidate.type === "response" && typeof candidate.success === "boolean" && typeof candidate.command === "string"
-	);
 }
 
 function isDaemonRequestProgress(value: unknown): value is DaemonRequestProgress {

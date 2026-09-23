@@ -1,4 +1,4 @@
-import { getModel, getModels } from "@earendil-works/pi-ai";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage, type OAuthCredential } from "../src/core/auth-storage.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
@@ -10,6 +10,34 @@ const oauth = (): OAuthCredential => ({
 	expires: Date.now() + 60_000,
 });
 
+const grok45 = {
+	id: "grok-4.5",
+	name: "Grok 4.5",
+	api: "openai-completions",
+	provider: "xai",
+	baseUrl: "https://api.x.ai/v1",
+	reasoning: true,
+	thinkingLevelMap: { off: null, minimal: null },
+	input: ["text", "image"],
+	cost: { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 },
+	contextWindow: 500000,
+	maxTokens: 500000,
+} satisfies Model<"openai-completions">;
+
+const grok46 = {
+	id: "grok-4.6",
+	name: "Grok 4.6",
+	api: "openai-completions",
+	provider: "xai",
+	baseUrl: "https://api.x.ai/v1",
+	reasoning: true,
+	thinkingLevelMap: { off: null, minimal: null, xhigh: "xhigh" },
+	input: ["text", "image"],
+	cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+	contextWindow: 500000,
+	maxTokens: 500000,
+} satisfies Model<"openai-completions">;
+
 describe("xAI credential source and request model", () => {
 	let storage: AuthStorage;
 	let registry: ModelRegistry;
@@ -17,6 +45,12 @@ describe("xAI credential source and request model", () => {
 		vi.stubEnv("XAI_API_KEY", "environment-key");
 		storage = AuthStorage.inMemory();
 		registry = ModelRegistry.inMemory(storage);
+		registry.registerProvider("xai", {
+			api: "openai-completions",
+			baseUrl: "https://api.x.ai/v1",
+			apiKey: "XAI_API_KEY",
+			models: [grok45, grok46],
+		});
 	});
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -45,12 +79,12 @@ describe("xAI credential source and request model", () => {
 		vi.stubEnv("XAI_API_KEY", "");
 		await expectRoute("config-key", "openai-completions");
 		expect(original).toEqual(snapshot);
-		expect(getModel("xai", "grok-4.5").api).toBe("openai-completions");
+		expect(grok45.api).toBe("openai-completions");
 	});
 
 	test("validates final Authorization case-insensitively only for subscription credentials", async () => {
 		storage.set("xai", oauth());
-		const model = { ...getModel("xai", "grok-4.5"), headers: { Authorization: "custom-secret" } };
+		const model = { ...grok45, headers: { Authorization: "custom-secret" } } as Model<Api>;
 		const rejected = await registry.getApiKeyAndHeaders(model);
 		expect(rejected).toMatchObject({ ok: false, error: expect.stringContaining("Remove the header") });
 		expect(JSON.stringify(rejected)).not.toContain("custom-secret");
@@ -69,16 +103,16 @@ describe("xAI credential source and request model", () => {
 	});
 
 	test("keeps all configured xAI tool models selectable for subscription and API-key auth", async () => {
-		const models = getModels("xai");
+		const models = [grok45, grok46];
 		const customModel = {
-			...getModel("xai", "grok-4.6"),
+			...grok46,
 			id: "custom-grok",
 			baseUrl: "https://example.invalid/custom",
 			input: ["text"] as ["text"],
 			contextWindow: 1234,
 			maxTokens: 512,
 			thinkingLevelMap: { off: null, minimal: null, low: "low", medium: "medium", high: "high" },
-		};
+		} as Model<Api>;
 		const ids = models.map((model) => model.id);
 		for (const credential of [oauth(), { type: "api_key" as const, key: "api-key" }]) {
 			storage.set("xai", credential);

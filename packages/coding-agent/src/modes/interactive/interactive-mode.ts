@@ -11,6 +11,7 @@ import {
 	type Model,
 	type ServiceTier,
 	supportsFastMode,
+	supportsServiceTier,
 	type ToolCall,
 } from "@earendil-works/pi-ai";
 import { BUILTIN_MCP_CATALOG } from "@earendil-works/pi-ai/mcp";
@@ -63,6 +64,7 @@ import {
 	getAgentTracesLogPath,
 	getDebugLogPath,
 	getLogsDir,
+	getMcpCacheDir,
 	getShareViewerUrl,
 	SELF_UPDATE_INTERACTIVE_CHILD_ENV,
 	SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE,
@@ -348,6 +350,9 @@ interface PendingToolCallRenderInput {
 const HEARTBEAT_LEGACY_PROMPT_MIN_TOLERANCE_MS = 15_000;
 const HEARTBEAT_LEGACY_PROMPT_MAX_TOLERANCE_MS = 120_000;
 const MODEL_CATALOG_REFRESH_TTL_MS = 60_000;
+// Status-driven top bar cost refreshes rebuild the full context tree; agent_end
+// and attach/reconnect refresh unthrottled for per-turn and per-attach convergence.
+const TOP_BAR_COST_REFRESH_MIN_INTERVAL_MS = 1_000;
 function isLabeledQueuedPreview(message: string): boolean {
 	return (
 		message.startsWith(`${HEARTBEAT_PROMPT_PREVIEW_LABEL}: `) ||
@@ -357,13 +362,13 @@ function isLabeledQueuedPreview(message: string): boolean {
 	);
 }
 
-export function formatQueuedMessagePreview(message: string, label: "Steering" | "Follow-up"): string {
+export function formatQueuedMessagePreview(message: string, label: "Steering" | "Follow-up" | "Starting"): string {
 	return isLabeledQueuedPreview(message) ? message : `${label}: ${message}`;
 }
 
 export function styleQueuedMessagePreview(
 	message: string,
-	label: "Steering" | "Follow-up",
+	label: "Steering" | "Follow-up" | "Starting",
 	isRecognizedSlashCommand: (name: string) => boolean,
 ): string {
 	const preview = formatQueuedMessagePreview(message, label);
@@ -686,6 +691,16 @@ const THINKING_LEVEL_DESCRIPTIONS: Record<ThinkingLevel, string> = {
 	high: "Deep reasoning",
 	xhigh: "Very deep reasoning",
 	max: "Maximum reasoning",
+};
+
+const SERVICE_TIER_CHOICES = ["default", "flex", "priority", "auto"] as const satisfies ServiceTier[];
+type ServiceTierChoice = (typeof SERVICE_TIER_CHOICES)[number];
+
+const SERVICE_TIER_DESCRIPTIONS: Record<ServiceTierChoice, string> = {
+	default: "Standard processing",
+	flex: "Cheaper, slower, may hit capacity limits",
+	priority: "Faster, more expensive (fast mode)",
+	auto: "Provider picks the tier",
 };
 
 const HEARTBEAT_ARGUMENT_COMPLETIONS: AutocompleteItem[] = [
@@ -1305,7 +1320,7 @@ export class InteractiveMode {
 	// renders await it so they never interleave with a half-built transcript.
 	private initialRenderPromise: Promise<void> | undefined = undefined;
 	private sessionEventGeneration = 0;
-	private fastModeToggleQueue: Promise<void> = Promise.resolve();
+	private serviceTierChangeQueue: Promise<void> = Promise.resolve();
 
 	private pendingTools = new Map<string, ToolExecutionComponent>();
 	private ipythonToolComponents = new Map<string, ToolExecutionComponent>();
@@ -1425,7 +1440,7 @@ export class InteractiveMode {
 	/** Cached session spend (USD) for the top bar, keyed to the session it was fetched for. */
 	private topBarCost: { sessionId?: string; total?: number } = {};
 	/** Stale-discard state for top bar cost refreshes (mirrors contextUsageRefresh). */
-	private topBarCostRefresh = { generation: 0, lastSuccessGeneration: 0 };
+	private topBarCostRefresh = { generation: 0, lastSuccessGeneration: 0, lastRefreshAt: 0 };
 
 	private builtInHeader: Component | undefined = undefined;
 
@@ -1691,6 +1706,12 @@ export class InteractiveMode {
 			}
 		}
 
+		const tierCommand = slashCommands.find((command) => command.name === "tier");
+		if (tierCommand) {
+			tierCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
+				this.getServiceTierCompletions(prefix);
+		}
+
 		const heartbeatCommand = slashCommands.find((command) => command.name === "heartbeat");
 		if (heartbeatCommand) {
 			heartbeatCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null =>
@@ -1862,6 +1883,13 @@ export class InteractiveMode {
 		await this.updateAvailableProviderCount();
 	}
 
+	/** Leading-edge throttled refresh for status-driven call sites; direct refreshes stamp the window too. */
+	private refreshTopBarCostThrottled(): void {
+		const refresh = this.topBarCostRefresh ?? { lastRefreshAt: 0 };
+		if (Date.now() - refresh.lastRefreshAt < TOP_BAR_COST_REFRESH_MIN_INTERVAL_MS) return;
+		this.refreshTopBarCost();
+	}
+
 	/**
 	 * Refresh the top bar's cached session spend from the context tree.
 	 * Results for a replaced session, or superseded by a newer successful
@@ -1871,8 +1899,9 @@ export class InteractiveMode {
 		// Partial-mode test harnesses skip the constructor, so the field
 		// initializer may be absent there; the refresh is cosmetic and must
 		// never crash a real flow on any `this`.
-		this.topBarCostRefresh ??= { generation: 0, lastSuccessGeneration: 0 };
+		this.topBarCostRefresh ??= { generation: 0, lastSuccessGeneration: 0, lastRefreshAt: 0 };
 		const refresh = this.topBarCostRefresh;
+		refresh.lastRefreshAt = Date.now();
 		const generation = ++refresh.generation;
 		const connection = this.agentConnection;
 		const sessionId = this.connectionState?.sessionId;
@@ -5227,6 +5256,11 @@ export class InteractiveMode {
 					}
 					return;
 				}
+				if (commandName === "tier") {
+					this.editor.setText("");
+					this.handleTierCommand(commandArgs);
+					return;
+				}
 				if (commandName === "export") {
 					await this.handleExportCommand(canonicalCommandText);
 					this.editor.setText("");
@@ -5793,7 +5827,7 @@ export class InteractiveMode {
 					this.sessionRecap = event.recap;
 					this.patchConnectionState({ recap: event.recap });
 					this.renderRecap();
-					this.refreshTopBarCost();
+					this.refreshTopBarCostThrottled();
 				} else if (event.type === "side_question_event") {
 					this.handleSideQuestionEvent(event.event);
 				} else if (event.type === "extension_ui_request") {
@@ -6042,7 +6076,7 @@ export class InteractiveMode {
 
 			case "session_info_changed":
 				this.updateTerminalTitle();
-				this.refreshTopBarCost();
+				this.refreshTopBarCostThrottled();
 				this.footer.invalidate();
 				this.ui.requestRender();
 				break;
@@ -6759,8 +6793,11 @@ export class InteractiveMode {
 			const modelId = model.id.startsWith(providerPrefix) ? model.id.slice(providerPrefix.length) : model.id;
 			const effort = model.reasoning ? this.connectionState?.thinkingLevel : undefined;
 			parts.push(effort ? `${modelId}:${effort.toLowerCase()}` : modelId);
-			if (this.connectionState?.serviceTier === "priority") {
+			const serviceTier = this.connectionState?.serviceTier;
+			if (serviceTier === "priority") {
 				parts.push("fast");
+			} else if (serviceTier && serviceTier !== "default") {
+				parts.push(serviceTier);
 			}
 		}
 		const usage = this.getConnectionContextUsage();
@@ -8210,9 +8247,18 @@ export class InteractiveMode {
 		// their own container below the execution indicator and recap.
 		this.queuedMessagesContainer.clear();
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
+		const active = this.connectionState?.sessionActions.active;
+		// A queued turn leaves its lane once the pump selects it; its own pre-turn compaction can hold it here for minutes.
+		const startingTurn = active?.kind === "turn" && active.phase === "preparing" ? active.label : undefined;
 		const hasQueuedMessages = steeringMessages.length > 0 || followUpMessages.length > 0;
-		if (hasQueuedMessages) {
+		if (hasQueuedMessages || startingTurn !== undefined) {
 			this.queuedMessagesContainer.addChild(new Spacer(1));
+			if (startingTurn !== undefined) {
+				const text = styleQueuedMessagePreview(startingTurn, "Starting", (name) =>
+					this.isRecognizedSlashCommand(name),
+				);
+				this.queuedMessagesContainer.addChild(new TruncatedText(text, 1, 0));
+			}
 			for (const message of steeringMessages) {
 				const text = styleQueuedMessagePreview(message, "Steering", (name) => this.isRecognizedSlashCommand(name));
 				this.queuedMessagesContainer.addChild(new TruncatedText(text, 1, 0));
@@ -8221,6 +8267,8 @@ export class InteractiveMode {
 				const text = styleQueuedMessagePreview(message, "Follow-up", (name) => this.isRecognizedSlashCommand(name));
 				this.queuedMessagesContainer.addChild(new TruncatedText(text, 1, 0));
 			}
+		}
+		if (hasQueuedMessages) {
 			const dequeueHint = this.getAppKeyDisplay("app.message.navigateOlder");
 			const hintText = theme.fg("dim", `╰─ ${dequeueHint} to browse and edit queued messages`);
 			this.queuedMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
@@ -8278,6 +8326,7 @@ export class InteractiveMode {
 					steeringMode: state.steeringMode,
 					followUpMode: state.followUpMode,
 					transport: this.settingsManager.getTransport(),
+					defaultServiceTier: this.settingsManager.getDefaultServiceTier() ?? "default",
 					thinkingLevel: state.thinkingLevel,
 					availableThinkingLevels: state.availableThinkingLevels,
 					currentTheme: this.settingsManager.getTheme() || "prime",
@@ -8337,6 +8386,13 @@ export class InteractiveMode {
 						void this.agentConnection.setFollowUpMode(mode).catch((error) => {
 							this.showError(error instanceof Error ? error.message : String(error));
 						});
+					},
+					onDefaultServiceTierChange: (serviceTier) => {
+						this.settingsManager.setDefaultServiceTier(serviceTier);
+						this.enqueueServiceTierChange(
+							() => serviceTier,
+							(applied) => `Default service tier: ${serviceTier} (session: ${applied ?? "default"})`,
+						);
 					},
 					onTransportChange: (transport) => {
 						void this.agentConnection.setTransport(transport).catch((error) => {
@@ -8740,25 +8796,83 @@ export class InteractiveMode {
 	}
 
 	private handleFastCommand(): void {
-		const unavailableMessage =
-			"Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT or OpenAI API key authentication";
+		const unavailableMessage = "Current model does not support fast mode (priority tier)";
 		if (!this.currentModelSupportsFastMode()) {
 			this.showStatus(unavailableMessage);
 			return;
 		}
+		this.enqueueServiceTierChange(
+			() => {
+				if (!this.currentModelSupportsFastMode()) {
+					this.showStatus(unavailableMessage);
+					return undefined;
+				}
+				return this.connectionState?.serviceTier === "priority" ? "default" : "priority";
+			},
+			(serviceTier) => `Fast mode: ${serviceTier === "priority" ? "on" : "off"}`,
+		);
+	}
+
+	private getAvailableServiceTiers(): ServiceTierChoice[] {
+		const model = this.getCurrentModel();
+		return SERVICE_TIER_CHOICES.filter(
+			(tier) => tier === "default" || (model !== undefined && supportsServiceTier(model, tier)),
+		);
+	}
+
+	private getServiceTierCompletions(prefix: string): AutocompleteItem[] | null {
+		const tiers = this.getAvailableServiceTiers();
+		const current = this.connectionState?.serviceTier ?? "default";
+		const term = prefix.trim().toLowerCase();
+		const matches = term ? tiers.filter((tier) => tier.startsWith(term)) : tiers;
+		if (matches.length === 0) return null;
+		return matches.map((tier) => ({
+			value: tier,
+			label: tier,
+			description:
+				tier === current ? `${SERVICE_TIER_DESCRIPTIONS[tier]} (current)` : SERVICE_TIER_DESCRIPTIONS[tier],
+		}));
+	}
+
+	private handleTierCommand(arg: string): void {
+		const tiers = this.getAvailableServiceTiers();
+		const requested = arg.trim().toLowerCase();
+		if (!requested) {
+			const current = this.connectionState?.serviceTier ?? "default";
+			this.showStatus(`Service tier: ${current} (available: ${tiers.join(", ")})`);
+			return;
+		}
+		if (!tiers.includes(requested as ServiceTierChoice)) {
+			this.showError(
+				`Service tier '${requested}' is not available for the current model. Available: ${tiers.join(", ")}`,
+			);
+			return;
+		}
+		this.enqueueServiceTierChange(
+			() => requested as ServiceTier,
+			(serviceTier) => `Service tier: ${serviceTier ?? "default"}`,
+		);
+	}
+
+	/**
+	 * Serializes tier changes (/fast, /tier, settings row) through one queue so
+	 * rapid commands apply in order against the same session.
+	 */
+	private enqueueServiceTierChange(
+		computeTier: () => ServiceTier | undefined,
+		formatStatus: (serviceTier: ServiceTier) => string,
+	): void {
 		const connection = this.agentConnection;
 		const sessionId = this.connectionState?.sessionId;
-		this.fastModeToggleQueue = this.fastModeToggleQueue
+		this.serviceTierChangeQueue = this.serviceTierChangeQueue
 			.then(async () => {
 				if (this.agentConnection !== connection || this.connectionState?.sessionId !== sessionId) {
 					return;
 				}
-				if (!this.currentModelSupportsFastMode()) {
-					this.showStatus(unavailableMessage);
+				const serviceTier = computeTier();
+				if (serviceTier === undefined) {
 					return;
 				}
-				const enabled = this.connectionState?.serviceTier === "priority";
-				const serviceTier: ServiceTier = enabled ? "default" : "priority";
 				await connection.setServiceTier(serviceTier);
 				if (this.agentConnection !== connection || this.connectionState?.sessionId !== sessionId) {
 					return;
@@ -8774,7 +8888,7 @@ export class InteractiveMode {
 				this.patchConnectionState({ serviceTier: state.serviceTier });
 				this.footer.invalidate();
 				this.subagentSummaryLine.invalidate();
-				this.showStatus(`Fast mode: ${state.serviceTier === "priority" ? "on" : "off"}`);
+				this.showStatus(formatStatus(state.serviceTier));
 			})
 			.catch((error) => {
 				this.showError(error instanceof Error ? error.message : String(error));
@@ -9755,6 +9869,7 @@ export class InteractiveMode {
 		const resolution = resolveServiceCatalogWithDiagnostics(
 			this.settingsManager.getMcpCatalogSources(),
 			this.getMcpConnectionStore().records(),
+			path.join(getMcpCacheDir(), "mcp-service-catalog.v2.json"),
 		);
 		const views = buildPluginViews({
 			services: resolution.descriptors,
@@ -9776,6 +9891,7 @@ export class InteractiveMode {
 		return resolveServiceCatalogWithDiagnostics(
 			this.settingsManager.getMcpCatalogSources(),
 			this.getMcpConnectionStore().records(),
+			path.join(getMcpCacheDir(), "mcp-service-catalog.v2.json"),
 		).descriptors;
 	}
 

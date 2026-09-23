@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { OAuthAuthInfo } from "@earendil-works/pi-ai";
+import { fetchWithTimeout, isRecord, numberField, readResponseMessage, stringEnv, stringField } from "./prime-http.js";
 
 export const PRIME_INFERENCE_PROVIDER_ID = "prime-inference";
 export const PRIME_INFERENCE_PROVIDER_NAME = "Prime Inference";
@@ -87,25 +88,6 @@ function normalizeBaseUrl(value: string | undefined): string {
 
 function normalizeUrl(value: string | undefined, fallback: string): string {
 	return (value || fallback).trim().replace(/\/+$/, "");
-}
-
-function stringField(data: Record<string, unknown>, key: string): string | undefined {
-	const value = data[key];
-	return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function stringEnv(name: string): string | undefined {
-	const value = process.env[name];
-	return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function numberField(data: Record<string, unknown>, key: string): number | undefined {
-	const value = data[key];
-	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function readPrimeCliConfigData(configPath: string): Record<string, unknown> {
@@ -200,60 +182,18 @@ function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
 	});
 }
 
-async function fetchWithTimeout(
+function fetchPrimeAuth(
 	fetchFn: typeof fetch,
 	url: string | URL,
 	init: RequestInit,
 	timeoutMs: number,
 	signal?: AbortSignal,
 ): Promise<Response> {
-	throwIfCancelled(signal);
-
-	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), timeoutMs);
-	const onAbort = () => controller.abort();
-	signal?.addEventListener("abort", onAbort, { once: true });
-
-	try {
-		return await fetchFn(url, { ...init, signal: controller.signal });
-	} catch (error) {
-		if (signal?.aborted) {
-			throw new Error("Login cancelled");
-		}
-		if (controller.signal.aborted) {
-			throw new Error("Prime Inference request timed out");
-		}
-		throw error;
-	} finally {
-		clearTimeout(timeout);
-		signal?.removeEventListener("abort", onAbort);
-	}
-}
-
-async function readResponseMessage(response: Response): Promise<string> {
-	const text = await response.text().catch(() => "");
-	if (!text.trim()) {
-		return response.statusText || "Unknown error";
-	}
-
-	try {
-		const parsed = JSON.parse(text) as unknown;
-		if (isRecord(parsed)) {
-			const error = parsed.error;
-			if (isRecord(error)) {
-				const message = stringField(error, "message");
-				if (message) return message;
-			}
-			const detail = stringField(parsed, "detail");
-			if (detail) return detail;
-			const message = stringField(parsed, "message");
-			if (message) return message;
-		}
-	} catch {
-		// Fall back to raw text.
-	}
-
-	return text.trim();
+	return fetchWithTimeout(fetchFn, url, init, timeoutMs, {
+		timeoutError: new Error("Prime Inference request timed out"),
+		cancelledError: new Error("Login cancelled"),
+		signal,
+	});
 }
 
 async function readJsonObject(response: Response, context: string): Promise<Record<string, unknown>> {
@@ -316,7 +256,7 @@ export async function fetchPrimeTeams(
 		const url = new URL(`${normalizeBaseUrl(baseUrl)}/api/v1/user/teams`);
 		url.searchParams.set("offset", String(offset));
 		url.searchParams.set("limit", String(limit));
-		const response = await fetchWithTimeout(
+		const response = await fetchPrimeAuth(
 			fetchFn,
 			url,
 			{
@@ -392,7 +332,7 @@ async function generatePrimeChallenge(
 	timeoutMs: number,
 	signal?: AbortSignal,
 ): Promise<PrimeChallengeResponse> {
-	const response = await fetchWithTimeout(
+	const response = await fetchPrimeAuth(
 		fetchFn,
 		`${config.baseUrl}/api/v1/auth_challenge/generate`,
 		{
@@ -432,7 +372,7 @@ async function pollPrimeChallengeResult(
 
 		const statusUrl = new URL(`${config.baseUrl}/api/v1/auth_challenge/status`);
 		statusUrl.searchParams.set("challenge", challenge.challenge);
-		const response = await fetchWithTimeout(
+		const response = await fetchPrimeAuth(
 			fetchFn,
 			statusUrl,
 			{
@@ -493,7 +433,7 @@ async function checkPrimeScopeAccess(
 	const fetchFn = options.fetchFn ?? fetch;
 	const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 	const url = `${normalizeBaseUrl(baseUrl)}/api/v1/user/whoami`;
-	const response = await fetchWithTimeout(
+	const response = await fetchPrimeAuth(
 		fetchFn,
 		url,
 		{

@@ -15,11 +15,12 @@ from worker import TRANSPORT_BENCHES, stop_transport_processes, transport, trans
 class TransportTests(unittest.TestCase):
     def test_records_each_bench_result_and_failure_with_explicit_timeouts(self):
         side = Side(sha="a" * 40)
-        script, metric, timeout = TRANSPORT_BENCHES[0]
-        failure = subprocess.CalledProcessError(1, "node", output="frame-decode-bench failed: exploded\n")
-        run_as = Mock(
-            side_effect=['RESULT {"value": 1.5}\n', failure, subprocess.TimeoutExpired("node", timeout)]
-        )
+        failure = subprocess.CalledProcessError(1, "node", output="bench failed: exploded\n")
+        # Every trial drives the full two-bench transport phase: both benches
+        # succeed, then both fail, then both time out.
+        result = 'RESULT {"value": 1.5}\n'
+        timeouts = [subprocess.TimeoutExpired("node", timeout) for _, _, timeout in TRANSPORT_BENCHES]
+        run_as = Mock(side_effect=[result, result, failure, failure, *timeouts])
         with tempfile.TemporaryDirectory() as directory:
             with (
                 patch("worker.run_as", run_as),
@@ -29,8 +30,7 @@ class TransportTests(unittest.TestCase):
                 for trial in range(3):
                     transport(side, trial)
             saved = sorted(path.name for path in Path(directory).glob("*.output"))
-        self.assertEqual(
-            run_as.call_args,
+        expected_calls = [
             call(
                 "builder",
                 [
@@ -42,12 +42,18 @@ class TransportTests(unittest.TestCase):
                 Path("/home/builder/source"),
                 timeout=timeout,
                 merge_output=True,
-            ),
+            )
+            for script, _metric, timeout in TRANSPORT_BENCHES
+        ]
+        self.assertEqual(run_as.call_args_list, expected_calls * 3)
+        for _script, metric, _timeout in TRANSPORT_BENCHES:
+            self.assertEqual(side.metrics[metric][0], Observation(trial=0, value=1.5))
+            self.assertIn("exploded", side.metrics[metric][1].error)
+            self.assertIn("timed out", side.metrics[metric][2].error)
+        self.assertEqual(
+            saved,
+            sorted(f"{metric}-{trial}.output" for trial in (0, 1) for _s, metric, _t in TRANSPORT_BENCHES),
         )
-        self.assertEqual(side.metrics[metric][0], Observation(trial=0, value=1.5))
-        self.assertIn("exploded", side.metrics[metric][1].error)
-        self.assertIn("timed out", side.metrics[metric][2].error)
-        self.assertEqual(saved, [f"{metric}-0.output", f"{metric}-1.output"])
         self.assertEqual({name for _, name, _ in TRANSPORT_BENCHES}, set(PHASE_METRICS["transport"]))
         self.assertTrue(all(limit > 0 for _, _, limit in TRANSPORT_BENCHES))
 

@@ -1,0 +1,1 @@
+- Added daemon incident notices to the agents view: recent worker crashes, command-timeout bursts, and update restarts surface as a dismissible status line pointing at `prime-agent incident`.

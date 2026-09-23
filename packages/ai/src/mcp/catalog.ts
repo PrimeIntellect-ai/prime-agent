@@ -1,26 +1,15 @@
-// The MCP service catalog. `catalog.json` beside this file is the single public
-// source of truth; it is generated deterministically by
-// `packages/ai/scripts/import-mcp-catalog.ts` from the pinned upstream fixtures
-// in `packages/ai/mcp-catalog/` and must not be hand-edited per entry.
-// `catalog.data.generated.ts` is the build-shipped mirror of that JSON
-// (regenerated together with it) so the runtime works under the repo's Node16
-// module target without JSON import attributes.
+// Tiny built-in MCP fallback plus schema validation for remote service catalogs.
+// The full catalog is fetched by the host from PrimeIntellect-ai/prime-agent-catalog
+// and cached on user devices. This package keeps only legacy built-ins that must
+// be available offline and whose ids stay reserved.
 
 import { getOAuthProvider, registerOAuthProvider } from "../utils/oauth/index.js";
-import { CATALOG_DATA } from "./catalog.data.generated.js";
 import { createMcpOAuthProvider, type McpOAuthConfig } from "./oauth.js";
 import { isLiteralPrivateOrLoopbackHost } from "./url-checks.js";
 
 export interface McpServiceProvenance {
-	/** Upstream catalog the definition came from, `prime` for curated data, or `user` for local sources. */
-	source: "openai-plugins" | "claude-plugins-official" | "prime" | "user";
-	repository?: string;
-	commit?: string;
-	path?: string;
-	/** Pinned raw URL of the upstream config this entry was derived from. */
-	url?: string;
-	license?: string;
-	note?: string;
+	/** `prime` for curated data, or `user` for local sources. */
+	source: "prime" | "user";
 }
 
 export type McpServiceSetupFieldKind = "env-var" | "url" | "client-id" | "client-secret" | "bearer-token" | "api-key";
@@ -81,64 +70,12 @@ export type McpSetupRequirement =
 	| "unsupported-transport"
 	| "local-runtime";
 
-/**
- * A documented alternative auth path with its own per-path readiness. Never
- * replaces the primary path — recorded so consumers can show honest options
- * (e.g. MongoDB interactive is prime-restricted, but a dedicated service
- * account is a user-setup alternative; Airtable OAuth via DCR, PAT bearer as
- * an api-key alternative).
- */
-export interface McpServiceAuthAlternative {
-	kind: "oauth" | "api-key" | "bearer-token" | "service-account";
-	readiness: McpReadiness;
-	/** Human-readable basis for this path (provider docs / evidence), not a gate. */
-	note?: string;
-	/** Research or provider-doc anchor backing this path. */
-	sourceUrl?: string;
-}
-
-/**
- * OBSERVATIONAL metadata evidence captured by the read-only public audit
- * (public unauthenticated GETs only). Never a live credential authority and
- * never a Connect gate: a successful metadata GET is never proof live OAuth
- * works. Omitted fields mean "not advertised" or "not captured" — never
- * "unsupported" (the engine applies protocol defaults for omitted lists).
- */
-export interface McpServiceAuthMetadata {
-	/** Whether a public authorization-server metadata document was captured for the endpoint. */
-	status: "available" | "unavailable" | "not-audited";
-	authorizationServer?: string;
-	resource?: string;
-	/** code_challenge_methods_supported advertises S256; absent = list omitted (engine still sends S256). */
-	pkceS256?: boolean;
-	/** registration_endpoint advertised (RFC 7591 dynamic client registration). */
-	dynamicClientRegistration?: boolean;
-	/** client_id_metadata_document_supported advertised (CIMD; alone it is NOT oauth-readiness). */
-	clientIdMetadataDocument?: boolean;
-	/** scopes_supported from the protected-resource document — login-relevant list (reviewed/config > PRM > omit). */
-	protectedResourceScopes?: string[];
-	/** scopes_supported from the authorization-server document — observational only; NEVER fed to the requested scopes. */
-	authorizationServerScopes?: string[];
-	/** token_endpoint_auth_methods_supported; absent = omitted (engine applies spec defaults). */
-	tokenAuthMethods?: string[];
-	/** Evidence capture locations (probe + well-known documents). */
-	sourceUrls: string[];
-	/** ISO timestamp of the read-only public metadata capture. */
-	fetchedAt: string;
-	/** Free-form honesty note (e.g. audience mismatch, provider-side block). */
-	note?: string;
-}
-
 export interface McpServiceAuth {
 	strategy: "oauth" | "api_key" | "none" | "unknown";
 	/** How an OAuth client is obtained; `unknown` means discovery is attempted at connect. */
 	clientRegistration: "dynamic" | "pre-registered" | "unknown";
 	/** Reviewed upstream scope hints only; never auto-requested, and empty in the first snapshot. */
 	reviewedScopes?: string[];
-	/** Documented alternative auth paths, each with per-path readiness. */
-	alternatives?: McpServiceAuthAlternative[];
-	/** Observational public-metadata evidence from the read-only audit (never a gate). */
-	metadata?: McpServiceAuthMetadata;
 }
 
 export type McpServiceTransport =
@@ -194,7 +131,6 @@ export interface McpServiceEntry {
 /** Shape of the generated catalog.json file. */
 export interface CatalogFileShape {
 	version: number;
-	sources: { source: string; repository: string; commit: string }[];
 	counts: Record<string, number>;
 	entries: McpServiceEntry[];
 }
@@ -216,12 +152,22 @@ const SETUP_REQUIREMENTS = new Set([
 	"local-runtime",
 ]);
 const SETUP_FIELD_KINDS = new Set(["env-var", "url", "client-id", "client-secret", "bearer-token", "api-key"]);
-const AUTH_ALTERNATIVE_KINDS = new Set(["oauth", "api-key", "bearer-token", "service-account"]);
-const AUTH_METADATA_STATUSES = new Set(["available", "unavailable", "not-audited"]);
-const PROVENANCE_SOURCES = new Set(["openai-plugins", "claude-plugins-official", "prime", "user"]);
+const PROVENANCE_SOURCES = new Set(["prime", "user"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function rejectUnknownKeys(
+	entryId: string,
+	label: string,
+	value: Record<string, unknown>,
+	allowed: ReadonlySet<string>,
+): void {
+	const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+	if (unknown.length > 0) {
+		fail(entryId, `${label} has unsupported keys: ${unknown.sort().join(", ")}`);
+	}
 }
 
 /** Bounded echo of an entry id in errors: never reprint untrusted long/secret-ish input. */
@@ -281,77 +227,30 @@ function requireSetupFields(entryId: string, value: unknown): McpServiceSetupFie
 	});
 }
 
-function requireAuthAlternatives(entryId: string, value: unknown): McpServiceAuthAlternative[] {
-	if (!Array.isArray(value)) return fail(entryId, "auth.alternatives must be an array");
-	return value.map((alternative) => {
-		if (!isRecord(alternative)) return fail(entryId, "auth.alternatives entries must be objects");
-		if (typeof alternative.kind !== "string" || !AUTH_ALTERNATIVE_KINDS.has(alternative.kind)) {
-			return fail(entryId, `auth.alternatives[].kind must be one of ${[...AUTH_ALTERNATIVE_KINDS].join(", ")}`);
-		}
-		if (typeof alternative.readiness !== "string" || !READINESS_STATES.has(alternative.readiness)) {
-			return fail(entryId, `auth.alternatives[].readiness must be one of ${[...READINESS_STATES].join(", ")}`);
-		}
-		return {
-			kind: alternative.kind as McpServiceAuthAlternative["kind"],
-			readiness: alternative.readiness as McpReadiness,
-			...(typeof alternative.note === "string" ? { note: alternative.note } : {}),
-			...(typeof alternative.sourceUrl === "string" ? { sourceUrl: alternative.sourceUrl } : {}),
-		};
-	});
-}
-
-function requireAuthMetadata(entryId: string, value: unknown): McpServiceAuthMetadata {
-	if (!isRecord(value)) return fail(entryId, "auth.metadata must be an object");
-	if (typeof value.status !== "string" || !AUTH_METADATA_STATUSES.has(value.status)) {
-		fail(entryId, `auth.metadata.status must be one of ${[...AUTH_METADATA_STATUSES].join(", ")}`);
-	}
-	const stringArray = (path: string, input: unknown): string[] | undefined =>
-		Array.isArray(input) ? input.map((item) => requireString(entryId, path, item)) : undefined;
-	if (value.sourceUrls !== undefined && !Array.isArray(value.sourceUrls)) {
-		fail(entryId, "auth.metadata.sourceUrls must be an array");
-	}
-	const booleanOrUndefined = (path: string, input: unknown): boolean | undefined => {
-		if (input === undefined) return undefined;
-		if (typeof input !== "boolean") fail(entryId, `auth.metadata.${path} must be a boolean`);
-		return input;
-	};
-	const protectedResourceScopes = stringArray(
-		"auth.metadata.protectedResourceScopes[]",
-		value.protectedResourceScopes,
-	);
-	const authorizationServerScopes = stringArray(
-		"auth.metadata.authorizationServerScopes[]",
-		value.authorizationServerScopes,
-	);
-	const tokenAuthMethods = stringArray("auth.metadata.tokenAuthMethods[]", value.tokenAuthMethods);
-	if (value.sourceUrls === undefined || !Array.isArray(value.sourceUrls) || value.sourceUrls.length === 0) {
-		fail(entryId, "auth.metadata.sourceUrls must be a non-empty array");
-	}
-	if (typeof value.fetchedAt !== "string" || value.fetchedAt.length === 0) {
-		fail(entryId, "auth.metadata.fetchedAt must be a non-empty string");
-	}
-	const pkceS256 = booleanOrUndefined("pkceS256", value.pkceS256);
-	const dynamicClientRegistration = booleanOrUndefined("dynamicClientRegistration", value.dynamicClientRegistration);
-	const clientIdMetadataDocument = booleanOrUndefined("clientIdMetadataDocument", value.clientIdMetadataDocument);
-	return {
-		status: value.status as McpServiceAuthMetadata["status"],
-		...(typeof value.authorizationServer === "string" ? { authorizationServer: value.authorizationServer } : {}),
-		...(typeof value.resource === "string" ? { resource: value.resource } : {}),
-		...(pkceS256 !== undefined ? { pkceS256 } : {}),
-		...(dynamicClientRegistration !== undefined ? { dynamicClientRegistration } : {}),
-		...(clientIdMetadataDocument !== undefined ? { clientIdMetadataDocument } : {}),
-		// Absent lists stay undefined — "not advertised / not captured", never "empty".
-		...(protectedResourceScopes ? { protectedResourceScopes } : {}),
-		...(authorizationServerScopes ? { authorizationServerScopes } : {}),
-		...(tokenAuthMethods ? { tokenAuthMethods } : {}),
-		sourceUrls: (value.sourceUrls as unknown[]).map((url) =>
-			requireString(entryId, "auth.metadata.sourceUrls[]", url),
-		),
-		fetchedAt: value.fetchedAt,
-		...(typeof value.note === "string" ? { note: value.note } : {}),
-	};
-}
-
+const CATALOG_KEYS = new Set(["version", "counts", "entries"]);
+const ENTRY_KEYS = new Set([
+	"server",
+	"service",
+	"label",
+	"url",
+	"description",
+	"category",
+	"aliases",
+	"publisher",
+	"transport",
+	"auth",
+	"setup",
+	"verification",
+	"legacyBuiltin",
+	"oauth",
+	"provenance",
+	"homepage",
+	"docsUrl",
+	"privacyUrl",
+	"supportUrl",
+]);
+const AUTH_KEYS = new Set(["strategy", "clientRegistration", "reviewedScopes"]);
+const PROVENANCE_KEYS = new Set(["source"]);
 /**
  * Structural validation for one catalog entry. Also usable for user-authored
  * local service entries so local sources validate against the same contract.
@@ -361,6 +260,7 @@ export function validateMcpServiceEntry(entry: unknown): McpServiceEntry {
 		throw new Error(`catalog entry must be an object, got ${typeof entry}`);
 	}
 	const entryId = typeof entry.server === "string" ? entry.server : "<unknown>";
+	rejectUnknownKeys(entryId, "entry", entry, ENTRY_KEYS);
 	const server = requireString(entryId, "server", entry.server);
 	if (!SERVER_ID_PATTERN.test(server)) {
 		fail(entryId, `server id must match ${SERVER_ID_PATTERN}`);
@@ -434,6 +334,7 @@ export function validateMcpServiceEntry(entry: unknown): McpServiceEntry {
 	}
 
 	if (!isRecord(entry.auth)) fail(entryId, "auth must be an object");
+	rejectUnknownKeys(entryId, "auth", entry.auth, AUTH_KEYS);
 	const strategy = entry.auth.strategy;
 	if (typeof strategy !== "string" || !AUTH_STRATEGIES.has(strategy)) {
 		fail(entryId, `auth.strategy must be one of ${[...AUTH_STRATEGIES].join(", ")}`);
@@ -447,15 +348,10 @@ export function validateMcpServiceEntry(entry: unknown): McpServiceEntry {
 	const reviewedScopes = Array.isArray(entry.auth.reviewedScopes)
 		? entry.auth.reviewedScopes.map((scope) => requireString(entryId, "auth.reviewedScopes[]", scope))
 		: undefined;
-	const alternatives =
-		entry.auth.alternatives === undefined ? undefined : requireAuthAlternatives(entryId, entry.auth.alternatives);
-	const metadata = entry.auth.metadata === undefined ? undefined : requireAuthMetadata(entryId, entry.auth.metadata);
 	const auth: McpServiceAuth = {
 		strategy: strategyTyped,
 		clientRegistration: clientRegistrationTyped,
 		...(reviewedScopes ? { reviewedScopes } : {}),
-		...(alternatives ? { alternatives } : {}),
-		...(metadata ? { metadata } : {}),
 	};
 
 	if (!isRecord(entry.setup)) fail(entryId, "setup must be an object");
@@ -537,7 +433,11 @@ export function validateMcpServiceEntry(entry: unknown): McpServiceEntry {
 		fail(entryId, "provenance must be a non-empty array");
 	}
 	const provenance = entry.provenance.map((prov) => {
-		if (!isRecord(prov) || !PROVENANCE_SOURCES.has(prov.source as string)) {
+		if (!isRecord(prov)) {
+			fail(entryId, "provenance entries must be objects");
+		}
+		rejectUnknownKeys(entryId, "provenance", prov, PROVENANCE_KEYS);
+		if (!PROVENANCE_SOURCES.has(prov.source as string)) {
 			fail(entryId, `provenance.source must be one of ${[...PROVENANCE_SOURCES].join(", ")}`);
 		}
 		return prov as unknown as McpServiceProvenance;
@@ -568,10 +468,13 @@ export function validateMcpServiceEntry(entry: unknown): McpServiceEntry {
 
 const SUPPORTED_CATALOG_VERSIONS = new Set([1, 2]);
 
-function parseCatalog(data: CatalogFileShape): CatalogFileShape {
-	// Version 2 adds optional readiness/requirement/field-kind/alternatives/
-	// metadata-evidence fields (additive: every new field is optional).
-	if (!SUPPORTED_CATALOG_VERSIONS.has(data.version)) {
+function parseCatalog(data: unknown): CatalogFileShape {
+	if (!isRecord(data)) {
+		throw new Error("catalog must be an object");
+	}
+	// Version 2 keeps only working client data in the public plugin payload.
+	rejectUnknownKeys("<catalog>", "catalog", data, CATALOG_KEYS);
+	if (typeof data.version !== "number" || !SUPPORTED_CATALOG_VERSIONS.has(data.version)) {
 		throw new Error(`catalog has unsupported version ${String(data.version)}`);
 	}
 	if (!Array.isArray(data.entries)) {
@@ -597,10 +500,103 @@ function parseCatalog(data: CatalogFileShape): CatalogFileShape {
 		Object.freeze(entry.oauth);
 		Object.freeze(entry);
 	}
-	return { ...data, entries };
+	return {
+		version: data.version,
+		counts: isRecord(data.counts) ? (data.counts as Record<string, number>) : {},
+		entries,
+	};
 }
 
-const CATALOG = parseCatalog(CATALOG_DATA);
+/** Parse and validate an MCP service catalog file. Remote/local callers fail closed on errors. */
+export function parseMcpServiceCatalogFile(data: unknown): CatalogFileShape {
+	return parseCatalog(data);
+}
+
+const FALLBACK_CATALOG_DATA = {
+	version: 2,
+	counts: {
+		entries: 2,
+	},
+	entries: [
+		{
+			server: "linear",
+			service: "linear",
+			label: "Linear",
+			url: "https://mcp.linear.app/mcp",
+			description:
+				"Search, create and update Linear issues, projects, and initiatives. Draft PRDs, write updates, analyze customer requests, and keep plans up to date — all from within ChatGPT",
+			category: "Productivity",
+			aliases: ["linear-app"],
+			publisher: "Linear",
+			transport: {
+				type: "http",
+				url: "https://mcp.linear.app/mcp",
+			},
+			auth: {
+				strategy: "oauth",
+				clientRegistration: "dynamic",
+			},
+			setup: {
+				status: "ready",
+				readiness: "oauth-ready",
+			},
+			verification: {
+				status: "metadata-reviewed",
+			},
+			legacyBuiltin: true,
+			provenance: [
+				{
+					source: "prime",
+				},
+			],
+			homepage: "https://linear.app/",
+			privacyUrl: "https://linear.app/privacy",
+			supportUrl: "https://linear.app/contact",
+			oauth: {
+				kind: "oauth",
+			},
+		},
+		{
+			server: "notion",
+			service: "notion",
+			label: "Notion",
+			url: "https://mcp.notion.com/mcp",
+			description:
+				"Notion workflows for implementation planning, research synthesis, meeting preparation, and knowledge capture.",
+			category: "Productivity",
+			aliases: ["notion-workspace"],
+			publisher: "Notion",
+			transport: {
+				type: "http",
+				url: "https://mcp.notion.com/mcp",
+			},
+			auth: {
+				strategy: "oauth",
+				clientRegistration: "dynamic",
+			},
+			setup: {
+				status: "ready",
+				readiness: "oauth-ready",
+			},
+			verification: {
+				status: "metadata-reviewed",
+			},
+			legacyBuiltin: true,
+			provenance: [
+				{
+					source: "prime",
+				},
+			],
+			homepage: "https://www.notion.so/",
+			privacyUrl: "https://www.notion.com/help/privacy",
+			oauth: {
+				kind: "oauth",
+			},
+		},
+	],
+} satisfies CatalogFileShape;
+
+const CATALOG = parseCatalog(FALLBACK_CATALOG_DATA);
 
 /** The full imported service catalog, sorted by server id. */
 export const SERVICE_CATALOG: readonly McpServiceEntry[] = CATALOG.entries;

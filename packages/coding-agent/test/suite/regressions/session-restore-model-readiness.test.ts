@@ -11,7 +11,7 @@ import { SessionManager } from "../../../src/core/session-manager.js";
 
 const SAVED_PROVIDER = "prime-inference";
 /** A public Prime Inference model that exists only in the (delayed) live catalog. */
-const CATALOG_ONLY_MODEL_ID = "openai/gpt-6-astra-canary";
+const CATALOG_ONLY_MODEL_ID = "test/catalog-only-restore-canary";
 const FALLBACK_MODEL_ID = "z-ai/glm-5.3";
 
 function sleep(ms: number): Promise<void> {
@@ -51,9 +51,13 @@ function catalogPayloadWithCanary(): unknown {
 function stubDelayedCatalogFetch(delayMs: number): void {
 	vi.stubGlobal(
 		"fetch",
-		vi.fn(async () => {
-			await sleep(delayMs);
-			return new Response(JSON.stringify(catalogPayloadWithCanary()), { status: 200 });
+		vi.fn(async (input: string | URL | Request) => {
+			const url = input instanceof Request ? input.url : input.toString();
+			if (url === "https://api.pinference.ai/api/v1/models") {
+				await sleep(delayMs);
+				return new Response(JSON.stringify(catalogPayloadWithCanary()), { status: 200 });
+			}
+			return new Response(JSON.stringify({ schemaVersion: 1, models: [] }), { status: 200 });
 		}),
 	);
 }
