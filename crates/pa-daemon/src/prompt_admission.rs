@@ -122,6 +122,11 @@ impl PromptAdmissionTable {
             .admissions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // An occupied destination stays intact: overwriting would lose a
+        // concurrent prompt's record and cancel/route the wrong prompt.
+        if admissions.contains_key(to) {
+            return;
+        }
         if let Some(admission) = admissions.remove(from) {
             admissions.insert(to.to_string(), admission);
         }
@@ -655,6 +660,20 @@ mod tests {
         table.remove(&new_key);
         table.rekey(&new_key, &old_key);
         assert!(table.with(&old_key, |_| ()).is_none());
+    }
+
+    #[test]
+    fn rekey_never_overwrites_an_occupied_destination() {
+        let table = PromptAdmissionTable::default();
+        table.register("stale-id", "adm-1").expect("register");
+        table.register("current-id", "adm-1").expect("register");
+        let from = prompt_admission_key("stale-id", "adm-1");
+        let to = prompt_admission_key("current-id", "adm-1");
+        table.rekey(&from, &to);
+        // Both records survive: the occupied destination stays, the
+        // source stays where it was.
+        assert!(table.with(&from, |_| ()).is_some());
+        assert!(table.with(&to, |_| ()).is_some());
     }
 
     #[test]

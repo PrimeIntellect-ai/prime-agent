@@ -1267,17 +1267,23 @@ impl Supervisor {
             let descriptor = resident.descriptor.lock().await;
             create_command_payload(&descriptor.create_command)
         };
+        let mut child = child;
         let response = match self
             .route_command(&resident, "create", create_payload, LONG_ROUTE_TIMEOUT_MS)
             .await
         {
             Ok(response) => response,
             Err(error) => {
+                // The connected child dies with the failed create: an
+                // unmanaged survivor would keep the session file while a
+                // retry mints a second worker over it.
+                let _ = child.start_kill();
                 self.registry.remove(&worker_id).await;
                 return Err(error);
             }
         };
         if !response.success {
+            let _ = child.start_kill();
             let _ = std::fs::remove_file(&descriptor_path);
             self.registry.remove(&worker_id).await;
             return Err(anyhow!(
