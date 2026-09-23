@@ -109,14 +109,14 @@ describe("Prime Inference model catalog", () => {
 			entry: () => effortEntry("z-ai/glm-5.3"),
 			thinkingFormat: undefined,
 			supportsReasoningEffort: true,
-			map: { off: null, low: "low", high: "high", max: "max", medium: null },
+			map: { off: null, minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" },
 		},
 		{
 			name: "toggle route",
 			entry: () => toggleEntry("z-ai/glm-4.7"),
 			thinkingFormat: "openrouter",
 			supportsReasoningEffort: false,
-			map: { high: "high" },
+			map: { minimal: null, low: null, medium: null, high: "high", xhigh: null, max: null },
 		},
 		{
 			name: "effort route without declared efforts keeps the template map",
@@ -151,7 +151,7 @@ describe("Prime Inference model catalog", () => {
 		const [live] = buildPrimeInferenceModels([stale], [liveEntry], { minimumModels: 0 }) ?? [];
 		expect(live?.compat?.thinkingFormat).toBe(expected.thinkingFormat);
 		expect(live?.compat?.supportsReasoningEffort).toBe(expected.supportsReasoningEffort);
-		if (expected.map) expect(live?.thinkingLevelMap).toMatchObject(expected.map);
+		if (expected.map) expect(live?.thinkingLevelMap).toEqual(expected.map);
 		else expect(live?.thinkingLevelMap).toBeUndefined();
 	});
 

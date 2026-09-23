@@ -174,6 +174,12 @@ describe("getPrimeInferenceReasoningControls", () => {
 		expect(
 			getPrimeInferenceReasoningControls({ supportedParameters: ["reasoning"], reasoningEfforts: ["high"] }),
 		).toEqual(toggleControls);
+		// An effort route that declares reasoning_effort but no supported efforts
+		// gets no map (and no format): the values are unknown, so callers fall
+		// back to their bounded bundled template map instead of a guessed toggle.
+		expect(getPrimeInferenceReasoningControls({ supportedParameters: ["reasoning", "reasoning_effort"] })).toEqual({
+			supportsReasoningEffort: true,
+		});
 		expect(getPrimeInferenceReasoningControls({ supportedParameters: ["max_tokens"] })).toEqual({
 			supportsReasoningEffort: false,
 		});

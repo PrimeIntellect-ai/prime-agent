@@ -78,8 +78,11 @@ export function getPrimeInferenceReasoningControls(
 		for (const level of REASONING_EFFORT_LEVELS) {
 			thinkingLevelMap[level] = entry.reasoningEfforts.includes(level) ? level : null;
 		}
-	} else if (includes.has("reasoning")) {
-		// The route can only toggle reasoning on or off; expose a single generic level.
+	} else if (includes.has("reasoning") && !supportsReasoningEffort) {
+		// The route can only toggle reasoning on or off; expose a single generic
+		// level. A route that declares reasoning_effort but no supported efforts
+		// deliberately gets no map here: the values are unknown, so callers fall
+		// back to their bounded bundled template map instead of a guessed toggle.
 		thinkingLevelMap = {
 			...(mandatory ? { off: null } : {}),
 			minimal: null,
