@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use futures::future::join_all;
 use pa_types::daemon::{
     DaemonCommand, DaemonErrorInfo, DaemonOutbound, DaemonWorkerDescriptor, DaemonWorkerLifecycle,
@@ -72,6 +72,26 @@ const WORKER_CONNECT_BACKOFF_MS: u64 = 25;
 #[cfg(not(unix))]
 const WORKER_CONNECT_BACKOFF_MS: u64 = 2_000;
 pub(crate) const ROUTE_TIMEOUT_MS: u64 = 30_000;
+/// The route failure for a worker whose command channel is gone (never
+/// connected, or the writer pump broke on a dead socket): the request did
+/// not leave the supervisor, so the replacement-aware route may retry it
+/// against the next connection without risking a duplicate landing.
+pub(crate) const WORKER_NOT_CONNECTED: &str = "Session worker is not connected";
+
+/// Resolve a pending request whose frame provably never reached the worker
+/// (a failed frame write, or a request still queued when the writer pump
+/// ended) with the not-connected failure: `route_command` surfaces it as
+/// the unambiguous retryable error, never as an ambiguous timeout.
+async fn fail_unsent_request(resident: &Arc<ResidentWorker>, request_id: &str) {
+    if let Some(reply) = resident.pending.lock().await.remove(request_id) {
+        let _ = reply.send(response_failure(
+            Some(request_id),
+            "route",
+            WORKER_NOT_CONNECTED,
+            None,
+        ));
+    }
+}
 pub(crate) const LONG_ROUTE_TIMEOUT_MS: u64 = 600_000;
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 /// A crash-path child that lived at least this long proved health: its death
@@ -407,8 +427,16 @@ impl Supervisor {
         let pid = descriptor.pid;
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, path);
         let result = if alive {
-            self.connect_worker(&resident, worker_connect_deadline())
-                .await
+            let adopted = self
+                .connect_worker(&resident, worker_connect_deadline())
+                .await;
+            if adopted.is_ok() {
+                // The adopted worker's session already exists (its create
+                // ran before the supervisor restart): routed client
+                // commands may reach it immediately.
+                resident.note_session_ready();
+            }
+            adopted
         } else {
             // Dead worker: relaunch from the durable create command. The
             // worker rehydrates the session store, restoring history and
@@ -521,6 +549,9 @@ impl Supervisor {
                 descriptor.last_failure_at = Some(util::now_iso());
                 let _ = persist_worker(&resident.descriptor_path, &descriptor);
                 drop(descriptor);
+                // The give-up is final: routes waiting out this worker's
+                // replacement must fail fast instead of parking.
+                resident.note_retired();
                 self.registry.remove(&resident.worker_id).await;
                 self.registry.forget(&resident.worker_id).await;
                 self.remove_roster_worker(&resident.worker_id);
@@ -579,6 +610,10 @@ impl Supervisor {
         if self.is_stopping(resident) {
             return Err(anyhow!("supervisor is shutting down"));
         }
+        // The replacement's create replay is pending: routed client
+        // commands must wait for the replayed session (the replacement-
+        // aware route gates on this until the replay answers).
+        resident.note_session_replaying();
         let deadline = worker_connect_deadline();
         let child = self.spawn_worker_process(resident, deadline).await?;
         if let Err(error) = self.connect_worker(resident, deadline).await {
@@ -631,6 +666,10 @@ impl Supervisor {
         // The persisted failure count stays: the give-up cap and any
         // adoption decision read the real history, not a relaunch-blanked one.
         let _ = persist_worker(&resident.descriptor_path, &descriptor);
+        drop(descriptor);
+        // The replayed create restored the session: routed client commands
+        // may run against this worker again.
+        resident.note_session_ready();
         Ok(child)
     }
 
@@ -731,8 +770,16 @@ impl Supervisor {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<WorkerRequest>();
         resident.pending.lock().await.clear();
         let events = self.events.clone();
+        // The connection epoch ties both pumps to this connection: only they
+        // may retire it, and a superseded connection ending late cannot.
+        let connection_epoch = resident.note_connection_live();
 
-        // Writer pump: send command frames.
+        // Writer pump: send command frames. It holds only a weak resident
+        // reference: a strong one would keep `cmd_tx` (inside the resident)
+        // alive and park this pump forever, leaking the worker socket after
+        // the resident is dropped (the pump exits via `recv() == None` when
+        // the last sender drops).
+        let writer_resident = Arc::downgrade(resident);
         tokio::spawn(async move {
             while let Some(request) = cmd_rx.recv().await {
                 let header = json!({
@@ -755,8 +802,24 @@ impl Supervisor {
                     );
                 }
                 if written.is_err() {
+                    // The frame never fully reached the worker (a dead or
+                    // mid-replacement socket): resolve the request with the
+                    // unambiguous not-connected failure so a
+                    // replacement-aware route may safely retry it.
+                    if let Some(resident) = writer_resident.upgrade() {
+                        fail_unsent_request(&resident, &request.request_id).await;
+                    }
                     break;
                 }
+            }
+            // Requests still queued when the pump ends were never written:
+            // provably unsent, so they carry the same retryable failure.
+            cmd_rx.close();
+            if let Some(resident) = writer_resident.upgrade() {
+                while let Ok(request) = cmd_rx.try_recv() {
+                    fail_unsent_request(&resident, &request.request_id).await;
+                }
+                resident.note_connection_lost(connection_epoch);
             }
         });
         // Reader: route responses to pending requests, forward session events.
@@ -851,6 +914,7 @@ impl Supervisor {
                         let _ = events.send((ClientRouting::Broadcast, payload));
                     }
                 }
+                reader_resident.note_connection_lost(connection_epoch);
             });
         }
         *resident.cmd_tx.lock().await = Some(cmd_tx);
@@ -916,9 +980,7 @@ impl Supervisor {
     ) -> Result<DaemonResponse> {
         let cmd_tx = {
             let guard = resident.cmd_tx.lock().await;
-            guard
-                .clone()
-                .ok_or_else(|| anyhow!("Session worker is not connected"))?
+            guard.clone().ok_or_else(|| anyhow!(WORKER_NOT_CONNECTED))?
         };
         let (reply_tx, reply_rx) = oneshot::channel();
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -933,11 +995,96 @@ impl Supervisor {
                 command_type: command_type.to_string(),
                 payload,
             })
-            .map_err(|_| anyhow!("Session worker is not connected"))?;
+            .map_err(|_| anyhow!(WORKER_NOT_CONNECTED))?;
         match tokio::time::timeout(Duration::from_millis(timeout_ms), reply_rx).await {
+            // The writer pump resolves provably-unsent requests with the
+            // not-connected failure: surface it as the retryable route
+            // error instead of a worker response.
+            Ok(Ok(response))
+                if !response.success && response.error.as_deref() == Some(WORKER_NOT_CONNECTED) =>
+            {
+                Err(anyhow!(WORKER_NOT_CONNECTED))
+            }
             Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => Err(anyhow!("Session worker dropped the request")),
             Err(_) => Err(anyhow!("Session worker timed out")),
+        }
+    }
+
+    /// Route one client-facing command to a resident worker, waiting out an
+    /// in-flight worker replacement (crash backoff, relaunch, create
+    /// replay) inside the caller's own timeout budget instead of failing
+    /// into the dead window: a child's detached task prompt that fires while
+    /// its worker is being replaced must land exactly once, never bounce
+    /// off a dead socket and never overtake the replayed session into
+    /// existence. The wait ends only once the replacement's create replay
+    /// completed; a send that fails with the unambiguous not-connected
+    /// error (the request never left the supervisor) is retried against the
+    /// next connection, while ambiguous failures (timeouts, dropped
+    /// replies) are returned as-is so a possibly-processed command is
+    /// never duplicated.
+    pub(crate) async fn route_command_ready(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        command_type: &str,
+        payload: Value,
+        timeout_ms: u64,
+    ) -> Result<DaemonResponse> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            self.await_route_ready(resident, deadline).await?;
+            let remaining_ms = deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .as_millis() as u64;
+            match self
+                .route_command(resident, command_type, payload.clone(), remaining_ms)
+                .await
+            {
+                // The socket died between the liveness check and the send
+                // (or the writer pump broke on an earlier request): the
+                // command never reached a worker, so waiting for the
+                // replacement and sending again cannot duplicate it.
+                Err(error) if error.to_string() == WORKER_NOT_CONNECTED => {
+                    if tokio::time::Instant::now() >= deadline
+                        || resident.route_state().retired
+                        || self.is_stopping(resident)
+                    {
+                        return Err(error);
+                    }
+                }
+                other => return other,
+            }
+        }
+    }
+
+    /// Wait until the resident is route-ready (a live connection whose
+    /// session create completed), bailing fast on retired/stopping workers
+    /// and on the deadline otherwise.
+    async fn await_route_ready(
+        &self,
+        resident: &Arc<ResidentWorker>,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        let mut state = resident.route_state_watcher();
+        loop {
+            let current = *state.borrow_and_update();
+            if current.connected && current.session_ready {
+                return Ok(());
+            }
+            if current.retired || self.is_stopping(resident) {
+                bail!(WORKER_NOT_CONNECTED);
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                bail!("Session worker timed out");
+            }
+            // Sleep until the route state moves or the deadline passes.
+            match tokio::time::timeout_at(deadline, state.changed()).await {
+                Ok(Ok(())) => continue,
+                // The resident (and its watch sender) was dropped entirely.
+                Ok(Err(_)) => bail!(WORKER_NOT_CONNECTED),
+                Err(_) => bail!("Session worker timed out"),
+            }
         }
     }
 
@@ -1151,9 +1298,10 @@ impl Supervisor {
         // it; a create without it would admit a child the roster can
         // never find again). `no_session` creates are in-memory by
         // design and stay exempt.
-        let create_summary = response.data.clone().unwrap_or_else(|| {
-            json!({ "id": resident.worker_id.clone() })
-        });
+        let create_summary = response
+            .data
+            .clone()
+            .unwrap_or_else(|| json!({ "id": resident.worker_id.clone() }));
         if *no_session != Some(true) {
             let has_session_file = create_summary
                 .get("sessionFile")
@@ -1191,6 +1339,10 @@ impl Supervisor {
             }
             persist_worker(&descriptor_path, &descriptor)?;
         }
+        // The create completed with a validated session identity: client
+        // commands may now be routed to this worker (the replacement-aware
+        // route gates on this, so nothing overtakes the session's create).
+        resident.note_session_ready();
         let pid = child.id().unwrap_or(0);
         self.spawn_monitor(Arc::clone(&resident), Some(child), pid as u64);
         Ok((resident, create_summary))
@@ -2479,6 +2631,9 @@ impl Supervisor {
         );
         self.connect_worker(&resident, worker_connect_deadline())
             .await?;
+        // The self-registered worker's session already exists: routed
+        // client commands may reach it immediately.
+        resident.note_session_ready();
         self.registry.insert(Arc::clone(&resident)).await;
         self.spawn_monitor(Arc::clone(&resident), None, registration.pid);
         self.refresh_roster_entry(&resident).await;
@@ -2894,7 +3049,10 @@ impl Supervisor {
         // worker replacement (a rebooting worker mid-replay answers
         // without the session file yet) and would tear down a healthy
         // child on a stale miss.
-        if let Err(error) = self.record_rlm_child_admission(command, &create_summary).await {
+        if let Err(error) = self
+            .record_rlm_child_admission(command, &create_summary)
+            .await
+        {
             // Never leave an admitted-but-unrecorded child running: the
             // ledger is the only topology store.
             let _ = self.stop_worker(&resident).await;
@@ -3204,8 +3362,13 @@ impl Supervisor {
                 )
             }
         };
+        // Client-facing routes wait out an in-flight worker replacement
+        // inside the command's own budget: a command aimed at a worker that
+        // crashed and is being relaunched (crash backoff, relaunch, create
+        // replay) must not be lost to the dead window, and must never
+        // overtake the replayed session into existence.
         let response = self
-            .route_command(&resident, worker_command, payload, timeout)
+            .route_command_ready(&resident, worker_command, payload, timeout)
             .await;
         match response {
             Ok(mut response) => {
@@ -3324,6 +3487,9 @@ impl Supervisor {
 
     pub(crate) async fn stop_worker(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
         resident.intentional_stop.store(true, Ordering::SeqCst);
+        // The stop is intentional: routes waiting out a replacement must
+        // fail fast instead of parking on this worker.
+        resident.note_retired();
         let _ = self
             .route_command(resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
             .await;
@@ -3343,6 +3509,7 @@ impl Supervisor {
         self.shutting_down.store(true, Ordering::SeqCst);
         for resident in self.registry.list().await {
             resident.intentional_stop.store(true, Ordering::SeqCst);
+            resident.note_retired();
             let _ = self
                 .route_command(&resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
                 .await;
