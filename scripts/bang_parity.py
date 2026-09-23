@@ -438,12 +438,25 @@ def run_states(binary, sandbox, shared_cwd, script_path):
         frames["truncation"] = vp.capture(session)
 
         # Cancel mid-run: the clear key aborts the held run, the card
-        # marks itself (cancelled).
+        # marks itself (cancelled). The guard case above already left a
+        # cancelled sleep-5 card in the transcript, so the probe must find
+        # the marker BELOW this run's header, never the earlier card's.
         vp.tmux("send-keys", "-t", session, "!sleep 30", "Enter")
         vp.wait_for(session, "$ sleep 30", timeout=30)
         time.sleep(0.5)
         vp.tmux("send-keys", "-t", session, "C-c")
-        vp.wait_for(session, "(cancelled)", timeout=30)
+        deadline = time.time() + 30
+        cancelled_below_header = False
+        while time.time() < deadline:
+            rows = visible_text(vp.capture(session, escape=False)).split("\n")
+            header = [i for i, line in enumerate(rows) if "$ sleep 30" in line]
+            marker = [i for i, line in enumerate(rows) if "(cancelled)" in line]
+            if header and marker and min(marker) > max(header):
+                cancelled_below_header = True
+                break
+            time.sleep(0.3)
+        if not cancelled_below_header:
+            print(f"  [{binary}] the sleep-30 run never marked itself (cancelled)")
         # The exit hint arms on the interrupt and expires after two
         # seconds; settle past it before capturing.
         time.sleep(2.5)
@@ -582,13 +595,21 @@ def main():
                 failures.append(f"{binary}-truncation-tail")
                 print(f"FAIL {binary} truncation: the tail never rendered")
 
-            cancelled_text = visible_text(frames["cancelled"])
-            if f"$ {CANCEL_COMMAND}" not in cancelled_text:
+            cancelled_rows = visible_text(frames["cancelled"]).split("\n")
+            cancelled_header = [
+                i for i, line in enumerate(cancelled_rows) if f"$ {CANCEL_COMMAND}" in line
+            ]
+            cancelled_marker = [
+                i for i, line in enumerate(cancelled_rows) if "(cancelled)" in line
+            ]
+            if not cancelled_header:
                 failures.append(f"{binary}-cancelled-header")
                 print(f"FAIL {binary} cancelled: no `$ {CANCEL_COMMAND}` header")
-            if "(cancelled)" not in cancelled_text:
+            # The earlier guard case's cancelled card stays in the
+            # transcript, so only a marker below THIS run's header counts.
+            if not (cancelled_header and cancelled_marker and min(cancelled_marker) > max(cancelled_header)):
                 failures.append(f"{binary}-cancelled-marker")
-                print(f"FAIL {binary} cancelled: the marker never rendered")
+                print(f"FAIL {binary} cancelled: the marker never rendered on the run's card")
 
             pane_text = visible_text(frames["pane_bash"])
             if f"$ {PANE_COMMAND}" not in pane_text:
@@ -667,6 +688,7 @@ def main():
                 report = os.path.join(out_dir, f"diff-{name}.txt")
                 with open(report, "w") as f:
                     f.write(vp.diff_lines(ts_norm, rust_norm))
+                failures.append(f"{state}-frame-diff")
                 print(f"DIFF {name} (renderer deviation, see {report})")
         for state, frames in (
             ("ts", ts_frames),
