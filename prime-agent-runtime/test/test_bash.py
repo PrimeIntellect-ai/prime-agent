@@ -86,6 +86,18 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(tail), 0)
         self.assertLessEqual(len(json.dumps({"tail": tail})), 16_384)
 
+    async def test_activity_tail_keeps_the_newest_output_under_the_cap(self):
+        # Escaped output shrinks from the oldest end: the newest line is
+        # always the surviving one.
+        handle = bash("python3 -c 'print("\\u0000" * 20000); print("LASTLINE")'")
+        await handle
+        from rlm.bash import activity_request
+
+        activity_id = handle._activity_id
+        tail = activity_request("tail", activity_id, 200)["tail"]
+        self.assertTrue(tail.endswith("LASTLINE"), tail[-60:])
+        self.assertLessEqual(len(json.dumps({"tail": tail})), 16_384)
+
     async def test_await_returns_result(self):
         result = await bash("echo hi")
         self.assertEqual(result.exit_code, 0)

@@ -1259,7 +1259,8 @@ def activity_request(action: str, activity_id: str | None = None, lines: int = 5
         # overflow; each pass removes at least a sixth of it.
         while len(json.dumps(payload)) > 16_384:
             excess = len(json.dumps(payload)) - 16_384
-            payload = payload[: max(0, len(payload) - excess // 6 - 1)]
+            keep = max(1, len(payload) - excess // 6 - 1)
+            payload = payload[-keep:]
         return {"activityId": activity_id, "tail": payload}
     if action == "kill":
         if handle._reaped:
