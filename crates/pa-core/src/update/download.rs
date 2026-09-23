@@ -448,7 +448,7 @@ fn finish_staging(
 /// release name.
 fn release_tree_digest(dir: &Path) -> Result<String> {
     let mut entries: Vec<(Vec<u8>, PathBuf)> = Vec::new();
-    collect_payload_entries(dir, &mut Vec::new(), &mut entries)?;
+    collect_payload_entries(dir, &[], &mut entries)?;
     entries.sort_by(|left, right| left.0.cmp(&right.0));
     let mut digest = Sha256::new();
     for (relative, path) in &entries {

@@ -914,7 +914,7 @@ fn print_mode_fork_copies_the_session_into_a_new_file() {
     assert_eq!(after.len(), 2, "fork creates a new session file");
     let fork = after
         .iter()
-        .find(|path| path != source)
+        .find(|path| path.as_path() != source.as_path())
         .expect("the fork file");
     let source_entries = read_entries(source);
     assert!(
@@ -947,7 +947,7 @@ fn print_mode_fork_copies_the_session_into_a_new_file() {
 #[test]
 fn print_mode_fork_imports_a_global_session_into_this_cwd() {
     let home = isolated_home();
-    let project = home.join("other-project");
+    let project = home.path().join("other-project");
     std::fs::create_dir_all(&project).expect("project dir");
     let script = serde_json::json!({ "responses": ["global answer"] });
     let (stdout, _, code) = run_in_home(home.path(), &["-p", "origin"], &script);
@@ -993,7 +993,7 @@ fn print_mode_fork_imports_a_global_session_into_this_cwd() {
     assert_eq!(after.len(), 2);
     let fork = after
         .iter()
-        .find(|path| path != &files[0])
+        .find(|path| path.as_path() != files[0].as_path())
         .expect("the fork file");
     let fork_entries = read_entries(fork);
     assert_eq!(
@@ -1022,7 +1022,7 @@ fn print_mode_fork_rejects_empty_sources_and_conflicting_flags() {
     let home = isolated_home();
     // An empty session file, addressed by path (TS forkFrom's empty
     // source error).
-    let sessions = home.join(".prime/agent/sessions");
+    let sessions = home.path().join(".prime/agent/sessions");
     std::fs::create_dir_all(&sessions).expect("sessions dir");
     let empty = sessions.join("empty-session.jsonl");
     std::fs::write(&empty, "").expect("empty session");

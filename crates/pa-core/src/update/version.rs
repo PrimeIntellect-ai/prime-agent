@@ -238,10 +238,10 @@ pub fn is_release_update_candidate(
     // path, where the `0.10.0-rust-<sha>` dogfood trains installed an
     // obsolete build) — an explicit switch to another channel is operator
     // intent and the channel-switch branch below evaluates it.
-    if channel.is_none() || channel == Some(resolve_update_channel(current_version, None)) {
-        if same_base_opaque_build_tag(candidate_version, current_version) {
-            return false;
-        }
+    if (channel.is_none() || channel == Some(resolve_update_channel(current_version, None)))
+        && same_base_opaque_build_tag(candidate_version, current_version)
+    {
+        return false;
     }
     if is_newer_package_version(candidate_version, current_version) {
         return true;
