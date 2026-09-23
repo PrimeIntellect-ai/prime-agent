@@ -87,6 +87,11 @@ pub struct AgentView {
     /// while set, the dim browse header renders above the editor.
     pub queue_selected: Option<crate::queued::QueueSelectionItem>,
     pub chat: Vec<ChatEntry>,
+    /// In-flight bash cards held ABOVE the execution indicator while the
+    /// agent streams (TS `pendingMessagesContainer` +
+    /// `pendingBashComponents`): a `bash_start` during an active turn
+    /// mounts here and flushes into the transcript when the turn ends.
+    pub pending_bash: Vec<crate::bash_card::BashExecutionCard>,
     pub detail: Detail,
     pub working: Option<WorkingState>,
     /// A compaction run in flight (TS `autoCompactionLoader`): replaces the
@@ -225,6 +230,7 @@ impl AgentView {
             queued: crate::queued::QueuedMessages::default(),
             queue_selected: None,
             chat: Vec::new(),
+            pending_bash: Vec::new(),
             detail: Detail::Overview,
             working: None,
             compaction: None,
@@ -417,7 +423,14 @@ impl AgentView {
             self.sparse_note_append();
             return;
         }
-        self.chat.push(item_to_entry(item));
+        // TS `bash_start`/`addMessageToChat` suppress the component's
+        // leading spacer only against an agent-message row.
+        let mut entry = item_to_entry(item);
+        if let ChatEntry::BashExecution(card) = &mut entry {
+            card.suppress_leading_space =
+                matches!(self.chat.last(), Some(ChatEntry::AgentMessage(_)));
+        }
+        self.chat.push(entry);
         self.entry_layout.push([None, None, None]);
         self.sparse_note_append();
     }
@@ -432,6 +445,9 @@ impl AgentView {
         self.entry_layout.clear();
         self.entry_heights.clear();
         self.md_caches.borrow_mut().clear();
+        // A rebuilt transcript has no pending hold (TS
+        // `resetCurrentSessionRenderState` clears `pendingBashComponents`).
+        self.pending_bash.clear();
     }
 
     /// Prepare an in-place mutation of one entry: capture its current
@@ -768,6 +784,27 @@ impl AgentView {
                 ));
                 rows
             }
+            ChatEntry::BashExecution(card) => {
+                // TS `BashExecutionComponent` mounts with `Spacer(1)`
+                // unless it follows an agent-message component
+                // (`suppressLeadingSpace`, decided at mount time).
+                let mut rows: Vec<Line> = Vec::new();
+                if !card.suppress_leading_space {
+                    rows.push(Vec::new());
+                }
+                // TS `keyText("tui.select.cancel")`: every key of the
+                // binding joins the hint ("Esc/Ctrl+C").
+                let cancel_hint = self.editor.keybindings().key_text("tui.select.cancel");
+                rows.extend(crate::bash_card::render_bash_execution(
+                    card,
+                    self.pulse_frame,
+                    self.detail.tool_output_expanded(),
+                    &cancel_hint,
+                    &self.theme,
+                    width,
+                ));
+                rows
+            }
             ChatEntry::AgentMessage(row) => crate::custom_message::render::render_agent_message(
                 row,
                 self.detail,
@@ -936,7 +973,10 @@ impl AgentView {
         };
         let bg = self.theme.bg_style(ThemeBg::ToolPanelBg);
         let padding_x = 2usize;
-        let prompt_width = str_width("> ");
+        // The overlay anchors against the live prompt prefix (TS
+        // `getRenderMetrics`'s `promptPrefixWidth`, the `!`/`!!` prompts
+        // included).
+        let prompt_width = str_width(self.editor.bash_prompt_prefix().unwrap_or("> "));
         let content_width = width.saturating_sub(padding_x * 2).max(1);
         let input_width = content_width.saturating_sub(prompt_width).max(1);
         let mut rows: Vec<Line> = Vec::new();
@@ -966,7 +1006,12 @@ impl AgentView {
         let border = self.theme.fg_style(ThemeColor::BorderMuted);
         let padding_x = 2usize;
         let content_width = width.saturating_sub(padding_x * 2).max(1);
-        let prompt = "> ";
+        // TS `getPromptPrefix` + `getRenderMetrics`: a bang first line
+        // swaps the `> ` for the `! `/`!! ` prompt (styled through the
+        // editor border color, `formatPromptPrefix`), which also narrows
+        // the input width.
+        let bash_prompt = self.editor.bash_prompt_prefix();
+        let prompt = bash_prompt.unwrap_or("> ");
         let prompt_width = str_width(prompt);
         let input_width = content_width.saturating_sub(prompt_width).max(1);
         let layout_width = input_width;
@@ -1025,10 +1070,12 @@ impl AgentView {
         let mut cursor: Option<(usize, usize)> = None;
         for (index, line) in visible.iter().enumerate() {
             let mut row: Line = vec![Span::styled(" ".to_string(), bg)];
-            // The `> ` prompt prefix renders plain on the surface background
-            // (TS `formatPromptPrefix` styles only `!` bash prompts).
+            // The `> ` prompt prefix renders plain on the surface
+            // background; the `!` bash prompts render through the editor
+            // border color (TS `formatPromptPrefix`).
             if index == 0 {
-                row.push(Span::styled(prompt.to_string(), bg));
+                let style = if bash_prompt.is_some() { border } else { bg };
+                row.push(Span::styled(prompt.to_string(), style));
             } else {
                 row.push(Span::styled(" ".repeat(prompt_width), bg));
             }
@@ -1070,7 +1117,7 @@ impl AgentView {
             }
             if let Some(position) = cursor_pos {
                 let head = split_at_chars(text, position).0;
-                cursor = Some((index + 1, str_width(head) + 4));
+                cursor = Some((index + 1, str_width(head) + prompt_width + 2));
             }
             row.push(Span::styled(
                 " ".repeat(input_width.saturating_sub(used)),
@@ -1245,18 +1292,7 @@ impl AgentView {
         rows.push(vec![Span::raw(String::new())]);
         // TS `keyHint("tui.select.cancel", "cancel")`: every key of the
         // binding, first letter capitalized, then the description.
-        let keys = self.editor.keybindings().get_keys("tui.select.cancel");
-        let key_text: Vec<String> = keys
-            .iter()
-            .map(|key| {
-                let mut characters = key.chars();
-                match characters.next() {
-                    Some(first) => first.to_uppercase().collect::<String>() + characters.as_str(),
-                    None => String::new(),
-                }
-            })
-            .collect();
-        let key_text = key_text.join("/");
+        let key_text = self.editor.keybindings().key_text("tui.select.cancel");
         let mut hint: Line = vec![Span::styled(" ".to_string(), Style::default())];
         hint.push(Span::styled(key_text, dim));
         hint.push(Span::styled(" cancel".to_string(), muted));
@@ -1502,14 +1538,22 @@ fn item_to_entry(item: TranscriptItem) -> ChatEntry {
             ..Default::default()
         })),
         TranscriptItem::BashExecution {
-            command, exit_code, ..
-        } => ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
-            id: String::new(),
-            name: "bash".to_string(),
-            args: serde_json::json!({ "command": command, "exitCode": exit_code }),
-            started: true,
-            ..Default::default()
-        })),
+            command,
+            output,
+            exit_code,
+            cancelled,
+            truncated,
+            full_output_path,
+            excluded,
+        } => {
+            // TS `addMessageToChat`'s `bashExecution` case: the same
+            // component the live events render, completed over the
+            // recorded output.
+            let mut card = crate::bash_card::BashExecutionCard::settled(&command, excluded);
+            card.append_output(&output);
+            card.set_complete(exit_code, cancelled, truncated, full_output_path);
+            ChatEntry::BashExecution(Box::new(card))
+        }
         TranscriptItem::AgentStatus { summary, .. } => ChatEntry::Status {
             text: summary,
             kind: crate::chat::StatusKind::Info,
@@ -1542,6 +1586,44 @@ mod tests {
     /// the shared `format_key_text`, so the row shows `Alt+\u{2191}` on
     /// Linux/Windows hosts and `Option+\u{2191}` on macOS (TS
     /// `formatKeyPart`'s darwin branch).
+    /// The `!`/`!!` prompt (TS `getBashPromptInfo` + `formatPromptPrefix`):
+    /// the typed prefix hides behind the styled `! `/`!! ` prompt, later
+    /// lines keep the prompt column, and the prompt carries the editor
+    /// border color.
+    #[test]
+    fn bang_prompt_renders_in_place_of_the_typed_prefix() {
+        let mut v = view();
+        v.editor.set_text("!echo hi");
+        let frame = v.render_dock(80);
+        let joined = frame.iter().map(text_of).collect::<Vec<_>>().join("\n");
+        assert!(
+            joined.contains("!  echo hi"),
+            "the prompt swallows the typed prefix:\n{joined}"
+        );
+        assert!(
+            !joined.contains("> echo hi"),
+            "the default prompt does not render for a bang line:\n{joined}"
+        );
+        let border = v.theme.fg_style(ThemeColor::BorderMuted);
+        let prompt_row = frame
+            .iter()
+            .find(|line| text_of(line).contains("!  echo hi"))
+            .expect("the prompt row");
+        assert!(
+            prompt_row.iter().any(|span| span.style == border),
+            "the bang prompt renders through the editor border color"
+        );
+
+        let mut v = view();
+        v.editor.set_text("!!echo quiet");
+        let frame = v.render_dock(80);
+        let joined = frame.iter().map(text_of).collect::<Vec<_>>().join("\n");
+        assert!(
+            joined.contains("!!  echo quiet"),
+            "the !! prompt hides its typed prefix:\n{joined}"
+        );
+    }
+
     #[test]
     fn hint_rows_carry_the_platform_alt_label() {
         let mut v = view();

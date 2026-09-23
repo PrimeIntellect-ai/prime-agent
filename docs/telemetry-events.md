@@ -371,6 +371,16 @@ carrying the command or its output).
 | `excluded` | boolean | the `!!` variant: the run stays out of the session context |
 | `side_conversation` | boolean | the run executed inside a side-question pane (transient, pane-rendered) |
 
+### `tui bash bang executed`
+
+A dispatched bang run settled (adoption settle signal for the bash-mode
+surface; primitives only — never the command, its output, or its spill path).
+
+| property | type | notes |
+|---|---|---|
+| `duration_bucket` | string | `lt_5s` / `5_to_30s` / `30s_plus` / `unknown` (unknown when the client never observed the run's start) |
+| `exit_class` | string | `zero` / `nonzero` / `cancelled` / `failed` (spawn failure) / `unknown` |
+
 ## Planned events (seams not yet in the product)
 
 Planned events stay in this catalog as schema v1 placeholders until

@@ -45,6 +45,10 @@ pub enum TranscriptItem {
         command: String,
         output: String,
         exit_code: Option<i64>,
+        cancelled: bool,
+        truncated: bool,
+        full_output_path: Option<String>,
+        excluded: bool,
     },
     AgentStatus {
         summary: String,
@@ -248,6 +252,10 @@ fn message_to_items(message: &AgentMessage) -> Vec<TranscriptItem> {
             command: b.command.clone(),
             output: b.output.clone(),
             exit_code: b.exit_code,
+            cancelled: b.cancelled,
+            truncated: b.truncated,
+            full_output_path: b.full_output_path.clone(),
+            excluded: b.exclude_from_context.unwrap_or(false),
         }],
         // Custom/branch/compaction messages carry UI-specific payloads; the
         // standard agent view skips non-displayed ones.

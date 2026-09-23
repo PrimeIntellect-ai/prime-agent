@@ -177,6 +177,23 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
         })
     }
 
+    fn bash_bang_executed(
+        &self,
+        duration_bucket: &'static str,
+        exit_class: &'static str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            let mut properties = pa_telemetry::base_properties("interactive");
+            properties.set("duration_bucket", serde_json::Value::from(duration_bucket));
+            properties.set("exit_class", serde_json::Value::from(exit_class));
+            client.track("tui bash bang executed", properties);
+            let _ = client.shutdown().await;
+        })
+    }
+
     fn prompt_stash(
         &self,
         action: &'static str,

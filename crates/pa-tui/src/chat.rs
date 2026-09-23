@@ -101,6 +101,11 @@ pub enum ChatEntry {
     SkillInvocation(Box<crate::custom_message::SkillInvocationRow>),
     /// One injected prompt row (TS `InjectedPromptMessageComponent`).
     InjectedPrompt(Box<crate::custom_message::InjectedPromptRow>),
+    /// One `!`/`!!` bash run (TS `BashExecutionComponent`): the bordered
+    /// card the live `bash_start`/`bash_output`/`bash_end` events, the
+    /// replayed `bashExecution` row, and the pending-while-streaming hold
+    /// all render through.
+    BashExecution(Box<crate::bash_card::BashExecutionCard>),
     /// One background-shell completion row (TS `ShellCompletionComponent`).
     ShellCompletion(Box<crate::custom_message::ShellCompletionRow>),
     /// One refinement outcome row (TS `RefinementOutcomeMessageComponent`).

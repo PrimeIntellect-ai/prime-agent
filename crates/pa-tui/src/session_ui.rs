@@ -354,8 +354,15 @@ pub(crate) struct SessionUi {
     /// and the raw output the streamed chunks accumulated for its fold.
     user_bash_running: bool,
     user_bash_card: Option<String>,
-    user_bash_output: String,
+    /// When the mounted run started (the settle telemetry's duration
+    /// bucket).
+    user_bash_started_at: Option<std::time::Instant>,
     user_bash_counter: u64,
+    /// The attached snapshot's bash slot state (TS
+    /// `applyConnectionStateSnapshot` patches `isBashRunning`): consumed
+    /// by the next transcript rebuild — a same-session resync runs the
+    /// `renderResyncedSession` bashFinished edge off it.
+    resync_bash: Option<ResyncBash>,
     /// An in-flight side-conversation bash run (TS `sideQuestionBash`):
     /// its pane-mounted identity plus whether the run seeds follow-up
     /// side questions (the `!`, not the `!!`, variant).
@@ -386,6 +393,32 @@ pub(crate) struct SessionUi {
     /// Texts copied out by finished selections this run (headless runs
     /// have no terminal to write OSC 52 to; the verifier reads these).
     pub(crate) copies: Vec<String>,
+}
+
+/// Why one transcript rebuild runs (TS: a session rebind renders through
+/// `renderCurrentSessionState`, a same-session resync through
+/// `renderResyncedSession` — the bash slot survives only the resync).
+pub(crate) enum RebuildKind {
+    /// A new session took the view's place (`/new`, `/switch`, startup):
+    /// the previous session's held cards die with its transcript.
+    Rebind,
+    /// The same session re-attached after an update restart (§10): the
+    /// held cards stay mounted and the `bashFinished` edge settles a run
+    /// that ended behind the dead link.
+    Resync,
+}
+
+/// The attached snapshot's bash slot state, captured by `attach_session`
+/// while the client's pre-attach belief is still readable.
+#[derive(Debug, Clone, Copy)]
+struct ResyncBash {
+    /// The client's running flag before the attach patched it.
+    was_running: bool,
+    /// The snapshot state's `isBashRunning`.
+    snap_running: bool,
+    /// The snapshot state's `isStreaming` (the flush gate uses it alone,
+    /// TS `renderResyncedSession`).
+    snap_streaming: bool,
 }
 
 /// One in-flight side-conversation bash run (TS `sideQuestionBash`): the
@@ -514,8 +547,9 @@ impl SessionUi {
             escape_repeat_until: None,
             user_bash_running: false,
             user_bash_card: None,
-            user_bash_output: String::new(),
+            user_bash_started_at: None,
             user_bash_counter: 0,
+            resync_bash: None,
             side_bash: None,
             side_bash_discarded: None,
             side_bash_counter: 0,
@@ -567,7 +601,7 @@ impl SessionUi {
         // Flush the attach snapshot BEFORE the banner lands: `rebuild_view`
         // replaces the transcript from the snapshot, so the banner must come
         // after it to survive the rebuild (§10.5's visible end state).
-        self.rebuild_view(view);
+        self.rebuild_view(view, RebuildKind::Resync);
         match complete {
             Some(false) => view.push_entry(crate::chat::ChatEntry::Status {
                 text: "Reconnected — the daemon is finishing its restore; queued work resumes when the session comes up.".to_string(),
@@ -642,6 +676,26 @@ impl SessionUi {
         };
         let data = attached;
         let attach = attach_data_from_response(&data)?;
+        // The bash slot follows the attached session's live state (TS
+        // `applyConnectionStateSnapshot` patches `isBashRunning`): the
+        // captured state drives the next rebuild's resync edge. The
+        // mounted card id survives the patch (TS keeps
+        // `activeBashComponent` tracked) — the rebuild's kind decides
+        // its fate.
+        let state = attach.snapshot.get("state");
+        let resync_bash = ResyncBash {
+            was_running: self.user_bash_running,
+            snap_running: state
+                .and_then(|state| state.get("isBashRunning"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            snap_streaming: state
+                .and_then(|state| state.get("isStreaming"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        };
+        self.user_bash_running = resync_bash.snap_running;
+        self.resync_bash = Some(resync_bash);
         let reconstructed = reconstruct(&attach);
         self.active_session_id = attach.active_session_id;
         self.session_id = reconstructed.session_id;
@@ -837,7 +891,15 @@ impl SessionUi {
 
     /// Fold the pending snapshot into the view (fresh transcript, footer
     /// labels). Called after attach and after every session switch.
-    pub(crate) fn rebuild_view(&mut self, view: &mut AgentView) {
+    pub(crate) fn rebuild_view(&mut self, view: &mut AgentView, kind: RebuildKind) {
+        let resync_bash = self.resync_bash.take();
+        // The held cards' fate diverges by rebuild: a rebind drops them
+        // with the old transcript (TS `resetCurrentSessionRenderState`), a
+        // resync keeps them mounted above the indicator (TS
+        // `renderResyncedSession` re-attaches `pendingBashComponents`).
+        let held_bash = matches!(kind, RebuildKind::Resync)
+            .then(|| std::mem::take(&mut view.pending_bash))
+            .unwrap_or_default();
         view.clear_chat();
         // The rebuilt transcript invalidates the tracked status row.
         self.last_status_index = None;
@@ -864,6 +926,60 @@ impl SessionUi {
         self.goal_view.reset_row_tracking();
         self.sync_goal_tray(view);
         self.sync_heartbeat_tray(view);
+        view.pending_bash = held_bash;
+        // The rebuild decides the mounted card's fate: a rebind drops it
+        // with the old transcript (TS `resetCurrentSessionRenderState`
+        // settles it cancelled and clears the hold — invisible after the
+        // clear), a resync runs the `renderResyncedSession` bashFinished
+        // edge: a run that ended behind the dead link settles its card
+        // with an unknown exit, flushes the hold when no turn is live,
+        // and releases the pane's side run (its bash_end never arrives —
+        // a transient run is not in the snapshot).
+        match kind {
+            RebuildKind::Rebind => {
+                self.user_bash_card = None;
+                self.user_bash_started_at = None;
+            }
+            RebuildKind::Resync => {
+                if let Some(resync) = resync_bash {
+                    let bash_finished = resync.was_running && !resync.snap_running;
+                    if bash_finished {
+                        if let Some(card_id) = self.user_bash_card.take() {
+                            if let Some(index) = view.chat.iter().position(|entry| {
+                                matches!(entry, ChatEntry::BashExecution(card) if card.id == card_id)
+                            }) {
+                                if let Some(ChatEntry::BashExecution(card)) =
+                                    view.chat.get_mut(index)
+                                {
+                                    card.set_complete(None, false, false, None);
+                                }
+                                view.mark_entry_stale(index);
+                            } else if let Some(card) = view
+                                .pending_bash
+                                .iter_mut()
+                                .find(|card| card.id == card_id)
+                            {
+                                card.set_complete(None, false, false, None);
+                            }
+                            self.user_bash_started_at = None;
+                            // TS flushes inside the active-component branch:
+                            // a side run (no mounted card) never flushes.
+                            if !resync.snap_streaming {
+                                self.flush_pending_bash(view);
+                            }
+                        }
+                        if self.side_bash.take().is_some() {
+                            if let Some(pane) = view.side_pane.as_mut() {
+                                if let Some(bash) = pane.bash.as_mut() {
+                                    bash.running = false;
+                                }
+                            }
+                        }
+                        self.side_bash_discarded = None;
+                    }
+                }
+            }
+        }
         // The rebuilt chat follows the session's live state: an attached
         // turn that survived the re-attach keeps its loader (TS
         // `renderResyncedSession`), and no stale loader survives a rebuild.
@@ -1807,6 +1923,10 @@ impl SessionUi {
         behavior: SubmitBehavior,
         view: &mut AgentView,
     ) -> Result<()> {
+        // A new prompt settles the held bash cards into the transcript
+        // first (TS `onSubmit` flushes `pendingBashComponents` before the
+        // prompt travels).
+        self.flush_pending_bash(view);
         if let Some(error) = self.reconnection_failed.clone() {
             // The re-attach window expired (TS terminal close): the session
             // connection is closed, so nothing dispatches. The error row
@@ -2054,7 +2174,7 @@ impl SessionUi {
             "new" => {
                 let id = create_session(&self.client, &self.create_options(), None).await?;
                 self.attach_session(&id).await?;
-                self.rebuild_view(view);
+                self.rebuild_view(view, RebuildKind::Rebind);
                 self.note(&format!("started session {id}"), view);
             }
             // TS `/quit` shuts the client down; this build's exit detaches
@@ -4493,7 +4613,7 @@ impl SessionUi {
         self.stash_draft_for_switch(view);
         match self.attach_session(&id).await {
             Ok(()) => {
-                self.rebuild_view(view);
+                self.rebuild_view(view, RebuildKind::Rebind);
                 self.note(&format!("switched to session {id}"), view);
                 // The switched-to session's own restore head (if one was
                 // stashed earlier) lands after the switch note, so the
@@ -4524,6 +4644,16 @@ impl SessionUi {
     /// shutdown).
     fn clear_ctrl_c_hint(&mut self) {
         self.ctrl_c_hint_until = None;
+    }
+
+    /// The armed hint's expiry instant while its window is still open
+    /// (the render loop arms its deadline there so the expired hint
+    /// repaints away, TS `showCtrlCExitHint`'s setTimeout +
+    /// requestRender; without it the stale tray row survives until the
+    /// next unrelated event).
+    pub(crate) fn ctrl_c_hint_expiry(&self) -> Option<std::time::Instant> {
+        self.ctrl_c_hint_until
+            .filter(|until| std::time::Instant::now() < *until)
     }
 
     /// The tray override label while the exit hint is armed (TS
@@ -6294,6 +6424,10 @@ impl SessionUi {
                 view.working = None;
                 view.working_since = None;
                 view.retry = None;
+                // The turn settled: the bash cards held above the
+                // indicator stream into the transcript (TS `turn_end`
+                // flushes `pendingBashComponents`).
+                self.flush_pending_bash(view);
                 // A provider failure already surfaced through the failed
                 // assistant message and/or the retry-exhausted banner; the
                 // turn result error is only a silent-failure backstop.
@@ -6424,11 +6558,11 @@ impl SessionUi {
             }
             TurnUpdate::BashStart {
                 command,
-                exclude_from_context: _,
+                exclude_from_context,
                 transient,
                 run_id,
             } => {
-                self.apply_bash_start(command, transient, run_id, view);
+                self.apply_bash_start(command, exclude_from_context, transient, run_id, view);
             }
             TurnUpdate::BashOutput { chunk } => {
                 self.apply_bash_output(&chunk, view);
@@ -6492,9 +6626,11 @@ impl SessionUi {
     /// run renders only in its owning client's pane, an own side run
     /// mounts its row in the pane, and a main-thread run mounts the usual
     /// bash transcript card.
+    #[allow(clippy::too_many_arguments)]
     fn apply_bash_start(
         &mut self,
         command: String,
+        exclude_from_context: bool,
         transient: bool,
         run_id: Option<String>,
         view: &mut AgentView,
@@ -6525,32 +6661,37 @@ impl SessionUi {
             // The same component as the main thread, mounted inside the
             // pane (TS `sideQuestionComponent.addBash`).
             if let Some(pane) = view.side_pane.as_mut() {
-                pane.bash = Some(crate::side_question::PaneBash::new_running(&command));
+                pane.bash = Some(crate::side_question::PaneBash::new_running(
+                    &command,
+                    exclude_from_context,
+                ));
             }
             self.user_bash_card = None;
-            self.user_bash_output.clear();
+            self.user_bash_started_at = None;
             return;
         }
-        // The main-thread card (the same bash transcript item a replayed
-        // `bashExecution` row renders).
+        // The main-thread card (the same component a replayed
+        // `bashExecution` row renders). While the agent streams it holds
+        // above the execution indicator (TS `pendingMessagesContainer`),
+        // flushed into the transcript when the turn settles.
         self.user_bash_counter += 1;
         let id = format!("user-bash-{}", self.user_bash_counter);
-        view.push_entry(ChatEntry::Tool(Box::new(crate::tool_card::ToolCallCard {
-            id: id.clone(),
-            name: "bash".to_string(),
-            args: serde_json::json!({ "command": command }),
-            started: true,
-            started_at: Some(std::time::Instant::now()),
-            ..Default::default()
-        })));
+        let mut card =
+            crate::bash_card::BashExecutionCard::new_running(&id, &command, exclude_from_context);
+        card.suppress_leading_space = matches!(view.chat.last(), Some(ChatEntry::AgentMessage(_)));
+        if self.turn_active {
+            view.pending_bash.push(card);
+        } else {
+            view.push_entry(ChatEntry::BashExecution(Box::new(card)));
+        }
         self.user_bash_card = Some(id);
-        self.user_bash_output.clear();
+        self.user_bash_started_at = Some(std::time::Instant::now());
     }
 
     /// `bash_output` (TS the `bash_output` case): one streamed chunk
     /// appends to the active surface — the pane's row for a side run, the
-    /// transcript card's partial result otherwise. Discarded runs
-    /// swallow their chunks.
+    /// mounted card's output otherwise. Discarded runs swallow their
+    /// chunks.
     fn apply_bash_output(&mut self, chunk: &str, view: &mut AgentView) {
         if self.side_bash_discarded.is_some() {
             return;
@@ -6564,8 +6705,18 @@ impl SessionUi {
         let Some(card_id) = self.user_bash_card.clone() else {
             return;
         };
-        self.user_bash_output.push_str(chunk);
-        self.fold_bash_result(&card_id, self.user_bash_output.clone(), false, true, view);
+        if let Some(card) = view.pending_bash.iter_mut().find(|card| card.id == card_id) {
+            card.append_output(chunk);
+        } else if let Some(index) = view
+            .chat
+            .iter()
+            .position(|entry| matches!(entry, ChatEntry::BashExecution(card) if card.id == card_id))
+        {
+            if let Some(ChatEntry::BashExecution(card)) = view.chat.get_mut(index) {
+                card.append_output(chunk);
+            }
+            view.mark_entry_stale(index);
+        }
     }
 
     /// `bash_end` (TS the `bash_end` case): the settled run patches the
@@ -6632,43 +6783,50 @@ impl SessionUi {
                 }
             }
         }
-        // The main-thread transcript card settles (an error status when
-        // the run failed or exited non-zero, TS `setComplete`/
-        // `setFailed`).
+        // The mounted card settles (an error status when the run failed
+        // or exited non-zero, TS `setComplete`/`setFailed`), wherever the
+        // run mounted — the pending hold keeps its place until the turn
+        // flushes (TS `bash_end` does not flush the pending container).
+        let started_at = self.user_bash_started_at.take();
         if let Some(card_id) = self.user_bash_card.take() {
-            let failed = error_message.is_some() || exit_code.is_some_and(|code| code != 0);
-            self.fold_bash_result(&card_id, self.user_bash_output.clone(), failed, false, view);
-            let card_index = view
-                .chat
-                .iter()
-                .position(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == card_id));
-            if let Some(index) = card_index {
+            let mut settled = false;
+            if let Some(index) = view.chat.iter().position(
+                |entry| matches!(entry, ChatEntry::BashExecution(card) if card.id == card_id),
+            ) {
                 view.prepare_entry_mutation(index);
-                if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
-                    card.ended_at = Some(std::time::Instant::now());
-                    card.result_partial = false;
-                    let mut details = serde_json::json!({
-                        "cancelled": cancelled,
-                        "truncated": truncated,
-                    });
-                    if let Some(code) = exit_code {
-                        details["exitCode"] = serde_json::json!(code);
+                if let Some(ChatEntry::BashExecution(card)) = view.chat.get_mut(index) {
+                    match &error_message {
+                        Some(message) => card.set_failed(message),
+                        None => card.set_complete(
+                            exit_code,
+                            cancelled,
+                            truncated,
+                            full_output_path.clone(),
+                        ),
                     }
-                    if let Some(path) = &full_output_path {
-                        details["fullOutputPath"] = serde_json::json!(path);
+                }
+                view.mark_entry_stale(index);
+                settled = true;
+            }
+            if !settled {
+                if let Some(card) = view.pending_bash.iter_mut().find(|card| card.id == card_id) {
+                    match &error_message {
+                        Some(message) => card.set_failed(message),
+                        None => card.set_complete(
+                            exit_code,
+                            cancelled,
+                            truncated,
+                            full_output_path.clone(),
+                        ),
                     }
-                    if let Some(message) = &error_message {
-                        details["errorMessage"] = serde_json::json!(message);
-                    }
-                    if truncated {
-                        details["truncation"] = serde_json::json!({ "truncated": true });
-                    }
-                    if let Some(result) = card.result.as_mut() {
-                        result.details = details;
-                    }
-                    view.mark_entry_stale(index);
                 }
             }
+            self.track_bash_bang_executed(
+                started_at,
+                exit_code,
+                cancelled,
+                error_message.as_deref(),
+            );
         } else if let Some(message) = error_message {
             // Transient failures surface in the owning client's pane,
             // not here (TS `showError`: the `⚠ Error:` row).
@@ -6678,33 +6836,57 @@ impl SessionUi {
         }
     }
 
-    /// Fold the user-bash output onto the mounted transcript card: the
-    /// accumulated text as a (partial or final) result frame.
-    fn fold_bash_result(
-        &self,
-        card_id: &str,
-        output: String,
-        is_error: bool,
-        partial: bool,
-        view: &mut AgentView,
-    ) {
-        let result = ToolResultView {
-            content: vec![serde_json::json!({ "type": "text", "text": output })],
-            details: serde_json::Value::Null,
-            is_error,
-        };
-        let card_index = view
-            .chat
-            .iter()
-            .position(|entry| matches!(entry, ChatEntry::Tool(card) if card.id == card_id));
-        if let Some(index) = card_index {
-            view.prepare_entry_mutation(index);
-            if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
-                card.result = Some(result);
-                card.result_partial = partial;
-                view.mark_entry_stale(index);
-            }
+    /// `flushPendingBashComponents` (TS `turn_end`, the next user prompt,
+    /// and the resync's bash-finished path): the in-flight bash cards
+    /// held above the indicator while the turn streamed settle into the
+    /// transcript.
+    fn flush_pending_bash(&mut self, view: &mut AgentView) {
+        let pending = std::mem::take(&mut view.pending_bash);
+        for card in pending {
+            view.push_entry(ChatEntry::BashExecution(Box::new(card)));
         }
+    }
+
+    /// `tui bash bang executed` (event `bash_bang_executed`, the lane's
+    /// settle adoption telemetry): a duration bucket and an exit-code
+    /// class, primitives only — never the command or any output.
+    fn track_bash_bang_executed(
+        &self,
+        started_at: Option<std::time::Instant>,
+        exit_code: Option<i64>,
+        cancelled: bool,
+        error_message: Option<&str>,
+    ) {
+        let Some(telemetry) = self.telemetry.clone() else {
+            return;
+        };
+        let duration_bucket = match started_at {
+            Some(start) => {
+                let secs = start.elapsed().as_secs();
+                match secs {
+                    0..=4 => "lt_5s",
+                    5..=29 => "5_to_30s",
+                    _ => "30s_plus",
+                }
+            }
+            None => "unknown",
+        };
+        let exit_class = if cancelled {
+            "cancelled"
+        } else if error_message.is_some() {
+            "failed"
+        } else {
+            match exit_code {
+                Some(code) if code != 0 => "nonzero",
+                Some(_) => "zero",
+                None => "unknown",
+            }
+        };
+        tokio::spawn(async move {
+            telemetry
+                .bash_bang_executed(duration_bucket, exit_class)
+                .await;
+        });
     }
 
     /// `abort_bash` off the UI loop (TS `interruptOrClearInput` fires

@@ -489,7 +489,7 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
     let cancelled = run.user_bash.abort_requested.load(Ordering::SeqCst);
     // The reader tasks joined, so this is the last reference; a poisoned
     // lock (a reader panicked) keeps whatever it collected.
-    let stream = match Arc::try_unwrap(stream) {
+    let mut stream = match Arc::try_unwrap(stream) {
         Ok(mutex) => mutex
             .into_inner()
             .unwrap_or_else(|poisoned| poisoned.into_inner()),
@@ -500,6 +500,13 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
     };
     let full_output = stream.chunks.join("");
     let (output, truncated) = truncate_tail(&full_output);
+    // A line-truncated run spills at settle even under the byte budget
+    // (TS bash-executor: `if (truncationResult.truncated)
+    // spill.open(outputChunks)`), so the truncation notice can always
+    // name a full-output file.
+    if truncated {
+        stream.spill.open(&stream.chunks);
+    }
     let full_output_path = stream.spill.finalize();
     BashEnd {
         output,

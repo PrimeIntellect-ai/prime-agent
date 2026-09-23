@@ -33,6 +33,10 @@ use pa_tui::interactive::{
 };
 use serde_json::{json, Value};
 
+/// The headless plan height: tall enough that the whole 20-row bash
+/// preview plus its status rows stay inside the rendered window.
+const TALL_PLAN_HEIGHT: u16 = 64;
+
 /// How long the mock holds a bash run open before settling it (the
 /// already-running guard's window).
 const LONG_RUN_END_DELAY_MS: u64 = 600;
@@ -45,6 +49,22 @@ struct MockSupervisor {
     side_question_requests: Arc<Mutex<Vec<Value>>>,
     /// Hold each bash run's `bash_end` for this long (0 settles at once).
     end_delay_ms: u64,
+    /// The chunks one bash run streams (default one `hi` line).
+    bash_chunks: Vec<String>,
+    /// The `bash_end` payload (None: the clean exit-0 default).
+    bash_end: Option<Value>,
+    /// Stream a model turn around a `prompt` request and hold it open
+    /// for `turn_end_delay_ms` (the pending-bash mount's window).
+    turn_end_delay_ms: u64,
+    /// After the bang run's chunks stream, close the link with a
+    /// `daemon_closing` update frame instead of `bash_end` (§10): the
+    /// client must reattach and the resync settles the never-ended run.
+    update_restart_after_bash: bool,
+    /// §10.1: set when the update restart closes the link. The old
+    /// daemon stops emitting with the socket close, so a turn still in
+    /// flight there (the delayed `turn_end` thread) never lands its
+    /// end on the wire.
+    link_closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MockSupervisor {
@@ -54,198 +74,338 @@ impl MockSupervisor {
             bash_requests: Arc::new(Mutex::new(Vec::new())),
             side_question_requests: Arc::new(Mutex::new(Vec::new())),
             end_delay_ms: 0,
+            bash_chunks: vec!["hi\n".to_string()],
+            bash_end: None,
+            turn_end_delay_ms: 0,
+            update_restart_after_bash: false,
+            link_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
-    /// Serve one connection: attach a session, answer requests, and emit
-    /// the user-bash events the daemon's slot streams.
+    /// Serve connections until the client stops coming back (bounded, so
+    /// the join at the end of a plan always finishes): attach a session,
+    /// answer requests, and emit the user-bash events the daemon's
+    /// user-bash slot streams. The second connection carries the §10.3
+    /// `updateResume` hello a successor supervisor reports.
     fn serve(self) {
-        let (stream, _) = self.listener.accept().expect("accept");
-        let write_stream = stream.try_clone().expect("clone mock socket");
-        let mut writer = write_stream;
-        let mut reader = BufReader::new(stream);
-
-        let hello = json!({
-            "type": "daemon_hello",
-            "protocol": { "name": "prime-agent.daemon", "version": 7 },
-            "serverCapabilities": [],
-            "clientId": "mock",
-        });
-        write_json(&mut writer, &hello);
-
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
-                continue;
+        self.listener
+            .set_nonblocking(true)
+            .expect("nonblocking mock listener");
+        // A reconnecting client dials again about a second after the
+        // closing frame (the §10.2 backoff stretches on a loaded box), so
+        // the wait right after that connection closes runs long; once its
+        // plan ends the client stops coming back and the short idle
+        // window ends the serve, so the harness join always returns.
+        let reconnect_window = std::time::Duration::from_secs(20);
+        let idle_window = std::time::Duration::from_millis(1500);
+        for connection in 0..5 {
+            // connection 1 is the reconnect dial (the one the §10 closing
+            // frame promises); every other gap is a plan teardown.
+            let window = if connection == 1 && self.update_restart_after_bash {
+                reconnect_window
+            } else {
+                idle_window
             };
-            let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
-            let command = envelope.get("command").cloned().unwrap_or(Value::Null);
-            let command_type = command
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            match command_type.as_str() {
-                "create" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "create",
-                            "success": true,
-                            "data": {
-                                "activeSessionId": "s1",
-                                "id": "s1",
-                                "sessionId": "sess-1",
-                                "sessionFile": "/tmp/sess-1.jsonl",
-                            },
-                        }),
-                    );
-                }
-                "attach" => {
-                    write_json(&mut writer, &attach_data(id));
-                }
-                "get_session_stats" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "get_session_stats",
-                            "success": true,
-                            "data": {
-                                "contextUsage": { "tokens": 1200, "contextWindow": 200000 },
-                                "cost": 0.01,
-                            },
-                        }),
-                    );
-                }
-                "prompt" => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "prompt",
-                            "success": true,
-                        }),
-                    );
-                }
-                "start_side_question" => {
-                    self.side_question_requests
-                        .lock()
-                        .unwrap()
-                        .push(command.clone());
-                    let side_question_id = command
-                        .get("sideQuestionId")
-                        .and_then(Value::as_str)
-                        .unwrap_or("sq-1")
-                        .to_string();
-                    let question = command
-                        .get("question")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "start_side_question",
-                            "success": true,
-                            "data": {},
-                        }),
-                    );
-                    write_json(
-                        &mut writer,
-                        &side_question_event(&side_question_id, &question, "running", ""),
-                    );
-                    write_json(
-                        &mut writer,
-                        &side_question_event(&side_question_id, &question, "complete", "four"),
-                    );
-                }
-                "execute_bash" => {
-                    let command_text = command
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string();
-                    let run_id = command
-                        .get("runId")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                    let excluded = command
-                        .get("excludeFromContext")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    self.bash_requests.lock().unwrap().push(command.clone());
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": "execute_bash",
-                            "success": true,
-                            "data": {},
-                        }),
-                    );
-                    let mut start = json!({
-                        "type": "bash_start",
-                        "command": command_text,
-                        "excludeFromContext": excluded,
-                    });
-                    if let Some(run_id) = &run_id {
-                        start["runId"] = json!(run_id);
-                        start["transient"] = json!(true);
-                    }
-                    write_session_event(&mut writer, &start);
-                    write_session_event(
-                        &mut writer,
-                        &json!({ "type": "bash_output", "chunk": "hi\n" }),
-                    );
-                    let end = json!({
-                        "type": "bash_end",
-                        "exitCode": 0,
-                        "cancelled": false,
-                        "truncated": false,
-                    });
-                    let end = match &run_id {
-                        Some(run_id) => {
-                            let mut end = end;
-                            end["runId"] = json!(run_id);
-                            end["transient"] = json!(true);
-                            end
+            let idle_until = std::time::Instant::now() + window;
+            let (stream, _) = loop {
+                match self.listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if std::time::Instant::now() >= idle_until {
+                            return;
                         }
-                        None => end,
-                    };
-                    if self.end_delay_ms == 0 {
-                        write_session_event(&mut writer, &end);
-                    } else {
-                        let mut delayed = writer.try_clone().expect("clone delayed writer");
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(self.end_delay_ms));
-                            write_session_event(&mut delayed, &end);
-                        });
+                        std::thread::sleep(std::time::Duration::from_millis(10));
                     }
+                    Err(_) => return,
                 }
-                _ => {
-                    write_json(
-                        &mut writer,
-                        &json!({
-                            "type": "response",
-                            "id": id,
-                            "command": command_type,
-                            "success": true,
-                            "data": {},
-                        }),
-                    );
+            };
+            let write_stream = stream.try_clone().expect("clone mock socket");
+            let mut writer = write_stream;
+            let mut reader = BufReader::new(stream);
+
+            let mut hello = json!({
+                "type": "daemon_hello",
+                "protocol": { "name": "prime-agent.daemon", "version": 7 },
+                "serverCapabilities": [],
+                "clientId": "mock",
+            });
+            if connection > 0 {
+                hello["updateResume"] = json!({ "complete": true, "updateId": "update-1" });
+            }
+            write_json(&mut writer, &hello);
+
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+                let Ok(envelope) = serde_json::from_str::<Value>(line.trim()) else {
+                    continue;
+                };
+                let id = envelope.get("id").and_then(Value::as_str).unwrap_or("");
+                let command = envelope.get("command").cloned().unwrap_or(Value::Null);
+                let command_type = command
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                match command_type.as_str() {
+                    "create" => {
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "create",
+                                "success": true,
+                                "data": {
+                                    "activeSessionId": "s1",
+                                    "id": "s1",
+                                    "sessionId": "sess-1",
+                                    "sessionFile": "/tmp/sess-1.jsonl",
+                                },
+                            }),
+                        );
+                    }
+                    "attach" => {
+                        write_json(&mut writer, &attach_data(id));
+                    }
+                    "get_session_stats" => {
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "get_session_stats",
+                                "success": true,
+                                "data": {
+                                    "contextUsage": { "tokens": 1200, "contextWindow": 200000 },
+                                    "cost": 0.01,
+                                },
+                            }),
+                        );
+                    }
+                    "prompt" => {
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "prompt",
+                                "success": true,
+                            }),
+                        );
+                        if self.turn_end_delay_ms > 0 {
+                            // One open model turn the client streams while its
+                            // bash run mounts: the assistant message stays
+                            // open until the delayed end settles it.
+                            let question = command
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string();
+                            write_session_event(&mut writer, &json!({ "type": "turn_start" }));
+                            write_session_event(
+                                &mut writer,
+                                &json!({
+                                    "type": "message_start",
+                                    "message": { "role": "user", "content": question },
+                                }),
+                            );
+                            write_session_event(
+                                &mut writer,
+                                &json!({
+                                    "type": "message_start",
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": [{ "type": "text", "text": "" }],
+                                    },
+                                    "assistantMessageEvent": { "type": "start" },
+                                }),
+                            );
+                            write_session_event(
+                                &mut writer,
+                                &json!({
+                                    "type": "message_update",
+                                    "message": {
+                                        "role": "assistant",
+                                        "content": [
+                                            { "type": "text", "text": "Let me run the long check." },
+                                        ],
+                                    },
+                                    "assistantMessageEvent": {
+                                        "type": "text_delta",
+                                        "delta": "Let me run the long check.",
+                                    },
+                                }),
+                            );
+                            let mut delayed = writer.try_clone().expect("clone delayed writer");
+                            let delay = self.turn_end_delay_ms;
+                            let link_closed = self.link_closed.clone();
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(delay));
+                                if link_closed.load(std::sync::atomic::Ordering::SeqCst) {
+                                    return;
+                                }
+                                write_session_event(
+                                    &mut delayed,
+                                    &json!({
+                                        "type": "message_end",
+                                        "message": {
+                                            "role": "assistant",
+                                            "stopReason": "stop",
+                                            "content": [
+                                                { "type": "text", "text": "Let me run the long check." },
+                                            ],
+                                        },
+                                    }),
+                                );
+                                write_session_event(&mut delayed, &json!({ "type": "turn_end" }));
+                            });
+                        }
+                    }
+                    "start_side_question" => {
+                        self.side_question_requests
+                            .lock()
+                            .unwrap()
+                            .push(command.clone());
+                        let side_question_id = command
+                            .get("sideQuestionId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("sq-1")
+                            .to_string();
+                        let question = command
+                            .get("question")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "start_side_question",
+                                "success": true,
+                                "data": {},
+                            }),
+                        );
+                        write_json(
+                            &mut writer,
+                            &side_question_event(&side_question_id, &question, "running", ""),
+                        );
+                        write_json(
+                            &mut writer,
+                            &side_question_event(&side_question_id, &question, "complete", "four"),
+                        );
+                    }
+                    "execute_bash" => {
+                        let command_text = command
+                            .get("command")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string();
+                        let run_id = command
+                            .get("runId")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        let excluded = command
+                            .get("excludeFromContext")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        self.bash_requests.lock().unwrap().push(command.clone());
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "execute_bash",
+                                "success": true,
+                                "data": {},
+                            }),
+                        );
+                        let mut start = json!({
+                            "type": "bash_start",
+                            "command": command_text,
+                            "excludeFromContext": excluded,
+                        });
+                        if let Some(run_id) = &run_id {
+                            start["runId"] = json!(run_id);
+                            start["transient"] = json!(true);
+                        }
+                        write_session_event(&mut writer, &start);
+                        for chunk in &self.bash_chunks {
+                            write_session_event(
+                                &mut writer,
+                                &json!({ "type": "bash_output", "chunk": chunk }),
+                            );
+                        }
+                        if self.update_restart_after_bash {
+                            // The update restart kills the link before the
+                            // run settles (§10.1): no bash_end arrives on
+                            // this link; the successor supervisor reattaches
+                            // the client instead. The socket close stops
+                            // every other in-flight write on this link too
+                            // (the still-open turn's delayed end below).
+                            self.link_closed
+                                .store(true, std::sync::atomic::Ordering::SeqCst);
+                            write_json(
+                                &mut writer,
+                                &json!({
+                                    "type": "daemon_closing",
+                                    "reason": "update",
+                                    "payload": {
+                                        "resume": true,
+                                        "updateId": "update-1",
+                                        "estSeconds": 1,
+                                        "sessions": [
+                                            { "sessionId": "s1", "name": "bash session" },
+                                        ],
+                                    },
+                                }),
+                            );
+                            break;
+                        }
+                        let end = self.bash_end.clone().unwrap_or(json!({
+                            "type": "bash_end",
+                            "exitCode": 0,
+                            "cancelled": false,
+                            "truncated": false,
+                        }));
+                        let end = match &run_id {
+                            Some(run_id) => {
+                                let mut end = end;
+                                end["runId"] = json!(run_id);
+                                end["transient"] = json!(true);
+                                end
+                            }
+                            None => end,
+                        };
+                        if self.end_delay_ms == 0 {
+                            write_session_event(&mut writer, &end);
+                        } else {
+                            let mut delayed = writer.try_clone().expect("clone delayed writer");
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(
+                                    self.end_delay_ms,
+                                ));
+                                write_session_event(&mut delayed, &end);
+                            });
+                        }
+                    }
+                    _ => {
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": command_type,
+                                "success": true,
+                                "data": {},
+                            }),
+                        );
+                    }
                 }
             }
         }
@@ -365,13 +525,24 @@ struct RunOutcome {
 /// Run the headless plan against a fresh mock supervisor. `end_delay_ms`
 /// holds each bash run open before its `bash_end` (the guard's window).
 fn run_plan(steps: Vec<HeadlessStep>, end_delay_ms: u64) -> RunOutcome {
+    run_plan_with(steps, |supervisor| {
+        supervisor.end_delay_ms = end_delay_ms;
+    })
+}
+
+/// Run the headless plan against a configured mock supervisor (the
+/// chunked-output, cancelled, and streaming-turn scenarios).
+fn run_plan_with(
+    steps: Vec<HeadlessStep>,
+    configure: impl FnOnce(&mut MockSupervisor),
+) -> RunOutcome {
     // The ambient TMUX variable adds a startup notice to the transcript;
     // scrub it so the run is the same inside tmux and out.
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
     let mut supervisor = MockSupervisor::bind(&socket);
-    supervisor.end_delay_ms = end_delay_ms;
+    configure(&mut supervisor);
     let bash_requests = Arc::clone(&supervisor.bash_requests);
     let side_question_requests = Arc::clone(&supervisor.side_question_requests);
     let handle = std::thread::spawn(move || supervisor.serve());
@@ -383,7 +554,7 @@ fn run_plan(steps: Vec<HeadlessStep>, end_delay_ms: u64) -> RunOutcome {
     let plan = HeadlessPlan {
         steps,
         width: 100,
-        height: 40,
+        height: TALL_PLAN_HEIGHT,
     };
     let outcome = runtime
         .block_on(run_interactive(options(socket), UiMode::Headless(plan)))
@@ -417,9 +588,11 @@ fn bang_runs_the_command_and_mounts_the_bash_card() {
         "the ! card's command row rendered:\n{all}"
     );
     assert!(all.contains("hi"), "the streamed output rendered:\n{all}");
+    // The BashExecutionComponent renders no status row for a clean
+    // exit-0 run (only cancelled/error runs mark themselves).
     assert!(
-        all.contains("bash \u{b7} done") || all.contains("bash · done"),
-        "the settled card shows done:\n{all}"
+        !all.contains("bash \u{b7} done") && !all.contains("bash · done"),
+        "the settled card renders no generic tool-card done row:\n{all}"
     );
     assert!(
         all.contains("$ echo quiet"),
@@ -466,6 +639,10 @@ fn the_running_guard_blocks_and_a_bare_bang_is_inert() {
     ];
     let run = run_plan(steps, LONG_RUN_END_DELAY_MS);
     let all = run.frames.join("\n");
+    assert!(
+        all.contains("Running... ("),
+        "the held-open card owns the loader row with its cancel hint:\n{all}"
+    );
     assert!(
         all.contains("A bash command is already running. Press"),
         "the guard row rendered:\n{all}"
@@ -532,5 +709,179 @@ fn a_side_conversation_bash_run_mounts_in_the_pane_and_seeds_follow_ups() {
     assert!(
         seeded,
         "the bash run seeded the follow-up's previousTurns:\n{turns:?}"
+    );
+}
+/// A `!` run during a streaming turn mounts above the execution
+/// indicator (TS `pendingMessagesContainer`) and flushes into the
+/// transcript when the turn ends (TS `flushPendingBashComponents`): the
+/// card sits ABOVE the assistant's open message while pending and BELOW
+/// it once flushed.
+#[test]
+fn a_bang_during_a_streaming_turn_holds_then_flushes() {
+    let steps = vec![
+        HeadlessStep::Submit("run a turn".to_string()),
+        HeadlessStep::WaitMs(400),
+        HeadlessStep::Submit("!echo mid".to_string()),
+        HeadlessStep::WaitMs(400),
+        HeadlessStep::WaitMs(1000),
+    ];
+    let run = run_plan_with(steps, |supervisor| {
+        supervisor.turn_end_delay_ms = 1200;
+    });
+    let both: Vec<&String> = run
+        .frames
+        .iter()
+        .filter(|frame| {
+            frame.contains("Let me run the long check.") && frame.contains("$ echo mid")
+        })
+        .collect();
+    assert!(
+        both.len() >= 2,
+        "the run rendered frames in both the pending and flushed regimes:\n{}",
+        run.frames.join("\n=====\n")
+    );
+    let row_of = |frame: &str, needle: &str| {
+        frame
+            .lines()
+            .position(|line| line.contains(needle))
+            .expect("the needle's row")
+    };
+    let pending = both[0];
+    assert!(
+        row_of(pending, "Let me run the long check.") < row_of(pending, "$ echo mid")
+            && row_of(pending, "$ echo mid")
+                < pending
+                    .lines()
+                    .position(|line| line.contains("Writing"))
+                    .expect("the working loader row"),
+        "while the turn streams the card holds above the execution indicator:\n{pending}"
+    );
+    let flushed = both[both.len() - 1];
+    assert!(
+        !flushed.contains("Writing"),
+        "the flush frame is post-turn:\n{flushed}"
+    );
+    assert!(
+        flushed.matches("$ echo mid").count() == 1,
+        "the flushed card renders exactly once (not duplicated):\n{flushed}"
+    );
+    assert!(
+        row_of(flushed, "Let me run the long check.") < row_of(flushed, "$ echo mid"),
+        "after the turn ends the card sits in the transcript:\n{flushed}"
+    );
+}
+
+/// A long run renders the 20-line tail preview (TS
+/// `truncateToVisualLines` + the hidden logical count) and the truncation
+/// notice names the spill file.
+#[test]
+fn a_long_truncated_run_previews_the_tail_and_names_the_spill_file() {
+    let steps = vec![
+        HeadlessStep::Submit("!seq 40".to_string()),
+        HeadlessStep::WaitMs(500),
+    ];
+    let run = run_plan_with(steps, |supervisor| {
+        supervisor.bash_chunks = (1..=40).map(|n| format!("line-{n}\n")).collect();
+        supervisor.bash_end = Some(json!({
+            "type": "bash_end",
+            "exitCode": 0,
+            "cancelled": false,
+            "truncated": true,
+            "fullOutputPath": "/tmp/bang-spill.log",
+        }));
+    });
+    // The settled frame (the last one that shows the run) carries the
+    // preview: the tail visible, the older half hidden — streaming
+    // frames legitimately show the partial output as it arrives.
+    let settled = run
+        .frames
+        .iter()
+        .rev()
+        .find(|frame| frame.contains("line-40"))
+        .expect("the settled preview frame");
+    assert!(settled.contains("line-40"), "the tail rendered:\n{settled}");
+    assert!(
+        settled.contains(" line-22")
+            && !settled.contains(" line-21")
+            && !settled.contains(" line-20"),
+        "the preview shows exactly the last twenty visual lines:\n{settled}"
+    );
+    assert!(
+        settled.contains("... 21 more lines"),
+        "the hidden logical count names the cut (the trailing newline is\n its own line, TS parity):\n{settled}"
+    );
+    assert!(
+        settled.contains("Output truncated. Full output: /tmp/bang-spill.log"),
+        "the truncation notice names the spill file:\n{settled}"
+    );
+}
+
+/// A cancelled run marks itself `(cancelled)` (TS `setComplete`'s
+/// cancelled status outranks the exit code).
+#[test]
+fn a_cancelled_run_marks_the_card_cancelled() {
+    let steps = vec![
+        HeadlessStep::Submit("!sleep 5".to_string()),
+        HeadlessStep::WaitMs(500),
+    ];
+    let run = run_plan_with(steps, |supervisor| {
+        supervisor.bash_end = Some(json!({
+            "type": "bash_end",
+            "cancelled": true,
+            "truncated": false,
+        }));
+    });
+    let all = run.frames.join("\n");
+    assert!(
+        all.contains("(cancelled)"),
+        "the cancelled marker rendered:\n{all}"
+    );
+    assert!(
+        all.contains("$ sleep 5"),
+        "the card keeps its command row:\n{all}"
+    );
+}
+
+/// A bang run cut short by an update restart (§10): the link dies before
+/// `bash_end`, the client reattaches, and the resync's `bashFinished`
+/// edge settles the held card with an unknown exit and flushes it into
+/// the rebuilt transcript (TS `renderResyncedSession` — no fake
+/// `(cancelled)` marker, the hold released when no turn is streaming).
+#[test]
+fn an_update_restart_settles_the_held_bang_card_on_reattach() {
+    let steps = vec![
+        HeadlessStep::Submit("run a turn".to_string()),
+        HeadlessStep::WaitMs(300),
+        HeadlessStep::Submit("!echo mid".to_string()),
+        HeadlessStep::WaitMs(600),
+        HeadlessStep::WaitMs(2600),
+    ];
+    let run = run_plan_with(steps, |supervisor| {
+        supervisor.turn_end_delay_ms = 1200;
+        supervisor.update_restart_after_bash = true;
+    });
+    let all = run.frames.join("\n");
+    assert!(
+        all.contains("Reconnected to Prime Agent"),
+        "the reattach banner landed:\n{all}"
+    );
+    let settled = run
+        .frames
+        .iter()
+        .rev()
+        .find(|frame| frame.contains("$ echo mid"))
+        .expect("the reattached transcript kept the held card")
+        .clone();
+    assert!(
+        !settled.contains("Running..."),
+        "the held card settled on reattach:\n{settled}"
+    );
+    assert!(
+        !settled.contains("(cancelled)") && !settled.contains("(exit "),
+        "a run with no observed end renders no status marker:\n{settled}"
+    );
+    assert!(
+        settled.contains("mid"),
+        "the streamed output survived the resync:\n{settled}"
     );
 }

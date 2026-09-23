@@ -16,7 +16,8 @@ impl Editor {
 
     pub(crate) fn move_to_line_start(&mut self) {
         self.last_action = None;
-        self.set_cursor_col(0);
+        // Home lands after the hidden bang prefix (TS `moveToLineStart`).
+        self.set_cursor_col(self.line_start_col(self.cursor_line));
     }
 
     pub(crate) fn move_to_line_end(&mut self) {
@@ -28,7 +29,11 @@ impl Editor {
     pub(crate) fn move_word_backwards(&mut self) {
         self.last_action = None;
         let current_line = self.lines[self.cursor_line].clone();
-        if self.cursor_col == 0 {
+        // The hidden bang prefix floors the word skip (TS
+        // `moveWordBackwards` at or before the line start jumps to the
+        // previous line's end).
+        let line_start = self.line_start_col(self.cursor_line);
+        if self.cursor_col <= line_start {
             if self.cursor_line > 0 {
                 self.cursor_line -= 1;
                 let prev_len = self.lines[self.cursor_line].chars().count();
@@ -75,7 +80,7 @@ impl Editor {
                 }
             }
         }
-        self.set_cursor_col(new_col);
+        self.set_cursor_col(new_col.max(line_start));
     }
 
     pub(crate) fn move_word_forwards(&mut self) {
@@ -164,24 +169,28 @@ impl Editor {
     pub fn build_visual_line_map(&self, width: usize) -> Vec<VisualLine> {
         let mut visual_lines = Vec::new();
         for (i, line) in self.lines.iter().enumerate() {
-            let line_vis_width = str_width(line);
-            if line.is_empty() {
+            // The hidden bang prefix on line 0 offsets the visual map
+            // (TS `buildVisualLineMap` slices the display line first).
+            let hidden = self.line_start_col(i);
+            let display = char_suffix(line, hidden);
+            let line_vis_width = str_width(&display);
+            if display.is_empty() {
                 visual_lines.push(VisualLine {
                     logical_line: i,
-                    start_col: 0,
+                    start_col: hidden,
                     length: 0,
                 });
             } else if line_vis_width <= width {
                 visual_lines.push(VisualLine {
                     logical_line: i,
-                    start_col: 0,
-                    length: line.chars().count(),
+                    start_col: hidden,
+                    length: display.chars().count(),
                 });
             } else {
-                for chunk in word_wrap_line(line, width, Some(self.segment(line))) {
+                for chunk in word_wrap_line(&display, width, Some(self.segment(&display))) {
                     visual_lines.push(VisualLine {
                         logical_line: i,
-                        start_col: chunk.start_index,
+                        start_col: hidden + chunk.start_index,
                         length: chunk.end_index - chunk.start_index,
                     });
                 }
@@ -340,14 +349,19 @@ impl Editor {
                     self.preferred_visual_col =
                         Some(self.cursor_col.saturating_sub(current_vl.start_col));
                 }
-            } else if self.cursor_col > 0 {
+            } else if self.cursor_col > self.line_start_col(self.cursor_line) {
                 let before = char_prefix(&current_line, self.cursor_col);
                 let back = self
                     .segment(&before)
                     .last()
                     .map(|g| g.segment.chars().count())
                     .unwrap_or(1);
-                self.set_cursor_col(self.cursor_col.saturating_sub(back));
+                // The hidden bang prefix floors the move (TS
+                // `moveCursorHorizontally` clamps at the line start).
+                self.set_cursor_col(
+                    (self.cursor_col.saturating_sub(back))
+                        .max(self.line_start_col(self.cursor_line)),
+                );
             } else if self.cursor_line > 0 {
                 self.cursor_line -= 1;
                 let prev_len = self.lines[self.cursor_line].chars().count();

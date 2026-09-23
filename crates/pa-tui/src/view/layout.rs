@@ -88,6 +88,9 @@ impl AgentView {
                 crate::tool_card::panel_status(card),
                 crate::tool_card::PanelStatus::Queued | crate::tool_card::PanelStatus::Running
             ),
+            // A running bash card animates (the loader spinner frames);
+            // a settled one caches like the other spacing-driven rows.
+            ChatEntry::BashExecution(card) => !card.running,
         }
     }
 
@@ -130,6 +133,10 @@ impl AgentView {
             ChatEntry::AgentMessage(_) | ChatEntry::ShellCompletion(_) | ChatEntry::Tool(_) => {
                 self.conversation_leading(index, self.detail.tool_output_expanded())
             }
+            // The bash card's own mount rule (TS `Spacer(1)` unless the
+            // chat's last child is an agent message, captured on the card
+            // when it mounted).
+            ChatEntry::BashExecution(card) => !card.suppress_leading_space,
             ChatEntry::Assistant(_) => preceded_by_tool_activity,
             ChatEntry::Status { .. }
             | ChatEntry::SlashCommandResult { .. }
@@ -233,6 +240,26 @@ impl AgentView {
             ));
             tail.push(Vec::new());
         }
+        // In-flight bash output for the current turn renders ABOVE the
+        // execution indicator (TS `pendingMessagesContainer` sits between
+        // the shortcut guide and the status area) and flushes into the
+        // transcript when the turn settles.
+        if !self.pending_bash.is_empty() {
+            // TS `keyText("tui.select.cancel")`: every key of the
+            // binding joins the hint ("Esc/Ctrl+C").
+            let cancel_hint = self.editor.keybindings().key_text("tui.select.cancel");
+            for card in &self.pending_bash {
+                tail.push(Vec::new());
+                tail.extend(crate::bash_card::render_bash_execution(
+                    card,
+                    self.pulse_frame,
+                    self.detail.tool_output_expanded(),
+                    &cancel_hint,
+                    &self.theme,
+                    width,
+                ));
+            }
+        }
         // While the provider retry loop waits, its countdown loader owns
         // the status area (TS `stopWorkingLoader` + `retryLoader`); a
         // compaction run owns it next (TS `startCompactionLoader`); the
@@ -270,7 +297,13 @@ impl AgentView {
         // row precedes the component's own leading blank.
         if let Some(pane) = &self.side_pane {
             tail.push(Vec::new());
-            tail.extend(pane.render(&self.theme, width));
+            tail.extend(pane.render(
+                &self.theme,
+                self.pulse_frame,
+                self.detail.tool_output_expanded(),
+                &self.editor.keybindings().key_text("tui.select.cancel"),
+                width,
+            ));
         }
         tail
     }

@@ -8,7 +8,11 @@ impl Editor {
         self.history_index = -1;
         self.last_action = None;
         let line = self.lines[self.cursor_line].clone();
-        if self.cursor_col > 0 {
+        // The hidden bang prefix protects the line's head (TS
+        // `handleBackspace`): deleting at the prefix end clears the whole
+        // line (the bang prefix included) instead of joining lines.
+        let line_start = self.line_start_col(self.cursor_line);
+        if self.cursor_col > line_start {
             self.push_undo_snapshot();
             let before_cursor = char_prefix(&line, self.cursor_col);
             let graphemes = self.segment(&before_cursor);
@@ -20,6 +24,10 @@ impl Editor {
             let before = char_prefix(&before, before.chars().count() - last_len);
             self.lines[self.cursor_line] = format!("{}{}", before, after);
             self.set_cursor_col(self.cursor_col.saturating_sub(last_len));
+        } else if line_start > 0 && line.chars().count() == line_start {
+            self.push_undo_snapshot();
+            self.lines[self.cursor_line] = String::new();
+            self.set_cursor_col(0);
         } else if self.cursor_line > 0 {
             self.push_undo_snapshot();
             let current_line = self.lines[self.cursor_line].clone();
@@ -64,17 +72,22 @@ impl Editor {
     pub(crate) fn delete_to_start_of_line(&mut self) {
         self.history_index = -1;
         let current_line = self.lines[self.cursor_line].clone();
-        if self.cursor_col > 0 {
+        // The kill starts after the hidden bang prefix (TS
+        // `deleteToStartOfLine` kills from the line start, prefix kept).
+        let line_start = self.line_start_col(self.cursor_line);
+        if self.cursor_col > line_start {
             self.push_undo_snapshot();
-            let (deleted, rest) = split_at_char(&current_line, self.cursor_col);
+            let deleted = char_suffix(&char_prefix(&current_line, self.cursor_col), line_start);
             self.kill_ring.push(
                 &deleted,
                 true,
                 self.last_action.as_ref() == Some(&LastAction::Kill),
             );
             self.last_action = Some(LastAction::Kill);
-            self.lines[self.cursor_line] = rest;
-            self.set_cursor_col(0);
+            let before = char_prefix(&current_line, line_start);
+            let after = char_suffix(&current_line, self.cursor_col);
+            self.lines[self.cursor_line] = format!("{}{}", before, after);
+            self.set_cursor_col(line_start);
         } else if self.cursor_line > 0 {
             self.push_undo_snapshot();
             self.kill_ring.push(

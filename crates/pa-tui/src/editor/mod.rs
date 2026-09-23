@@ -281,6 +281,31 @@ impl Editor {
         (self.cursor_line, self.cursor_col)
     }
 
+    /// The prompt prefix the first line renders in place of its leading
+    /// `!`/`!!` (TS `CustomEditor.getPromptPrefix`): `! ` / `!! ` when the
+    /// first line opens a bang command, `None` for the default `> `.
+    pub fn bash_prompt_prefix(&self) -> Option<&'static str> {
+        self.lines
+            .first()
+            .and_then(|line| crate::bash_bang::bash_prompt_info(line))
+            .map(|(prefix, _)| prefix)
+    }
+
+    /// The hidden text prefix length of one line (TS
+    /// `getHiddenTextPrefixLength`): the bang prefix the prompt renders
+    /// in place of on line 0, zero everywhere else. The cursor cannot
+    /// move into it and edits treat it as the line's start.
+    pub fn line_start_col(&self, line_index: usize) -> usize {
+        if line_index != 0 {
+            return 0;
+        }
+        self.lines
+            .first()
+            .and_then(|line| crate::bash_bang::bash_prompt_info(line))
+            .map(|(_, hidden)| hidden)
+            .unwrap_or(0)
+    }
+
     /// The cursor sits at the end of the last logical line (TS
     /// `CustomEditor.isCursorAtEnd`): the position from which the
     /// move-below-prompt hook can hand the focus to the surface below the
@@ -727,5 +752,58 @@ mod tests {
         e.handle_input("\\");
         e.handle_input("enter");
         assert_eq!(e.get_lines(), vec!["a", ""]);
+    }
+
+    /// The hidden bang prefix (TS `getHiddenTextPrefixLength`): the prompt
+    /// renders it in place, Home lands after it, and the cursor cannot
+    /// step or word-skip into it.
+    #[test]
+    fn the_bang_prefix_is_hidden_and_protected() {
+        let mut e = ed();
+        e.set_text("!echo hi");
+        assert_eq!(e.bash_prompt_prefix(), Some("! "));
+        assert_eq!(e.line_start_col(0), 1);
+        assert_eq!(e.line_start_col(1), 0, "later lines have no prefix");
+        e.handle_input("home");
+        assert_eq!(e.get_cursor(), (0, 1), "Home lands after the prefix");
+        e.handle_input("left");
+        assert_eq!(e.get_cursor(), (0, 1), "left cannot cross into the prefix");
+        e.handle_input("right");
+        e.handle_input("alt+b");
+        assert_eq!(e.get_cursor(), (0, 1), "word-back stops at the prefix");
+        e.handle_input("ctrl+u");
+        assert_eq!(
+            e.get_text(),
+            "!echo hi",
+            "kill-to-start keeps the prefix and the text behind the cursor"
+        );
+    }
+
+    /// Backspacing the line down to its bare prefix clears the prompt (TS
+    /// `handleBackspace`'s `lineStartCol` branch): the bang prefix
+    /// included, so the editor returns to the plain `> ` prompt.
+    #[test]
+    fn backspacing_the_bare_prefix_clears_the_prompt() {
+        let mut e = ed();
+        e.set_text("!x");
+        e.handle_input("backspace");
+        assert_eq!(e.get_text(), "!", "the body deleted, the prefix kept");
+        assert_eq!(e.get_cursor(), (0, 1));
+        e.handle_input("backspace");
+        assert_eq!(e.get_text(), "", "backspacing the bare prefix clears it");
+        assert_eq!(e.bash_prompt_prefix(), None);
+    }
+
+    /// The `!!` prefix hides two characters and the prompt width grows to
+    /// three (the layout wraps the display line, not the raw one).
+    #[test]
+    fn the_double_bang_prefix_hides_two_characters() {
+        let mut e = ed();
+        e.set_text("!!echo hi");
+        assert_eq!(e.bash_prompt_prefix(), Some("!! "));
+        assert_eq!(e.line_start_col(0), 2);
+        let layout = e.layout_text(20);
+        assert_eq!(layout[0].text, "echo hi", "the raw prefix stays hidden");
+        assert_eq!(layout[0].source_start, 2);
     }
 }

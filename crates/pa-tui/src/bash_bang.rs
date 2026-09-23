@@ -29,6 +29,25 @@ pub enum BashBang {
     Run(BashShortcut),
 }
 
+/// TS `getBashPromptInfo` (custom-editor.ts): the prompt prefix the
+/// editor renders in place of a leading `!`/`!!`, and how many
+/// characters of the typed line stay hidden behind it (the leading
+/// whitespace plus the prefix, one wider when the user typed its
+/// trailing space).
+pub fn bash_prompt_info(line: &str) -> Option<(&'static str, usize)> {
+    let trimmed = line.trim_start();
+    let leading = line.chars().count() - trimmed.chars().count();
+    if trimmed.starts_with("!!") {
+        let hidden = leading + if trimmed.starts_with("!! ") { 3 } else { 2 };
+        Some(("!! ", hidden))
+    } else if trimmed.starts_with('!') {
+        let hidden = leading + if trimmed.starts_with("! ") { 2 } else { 1 };
+        Some(("! ", hidden))
+    } else {
+        None
+    }
+}
+
 /// Parse a submitted text through the bash shortcut (TS `text.startsWith("!")`
 /// ladder). `None` for submissions that do not start with `!`.
 pub fn parse_bash_bang(text: &str) -> Option<BashBang> {
@@ -175,6 +194,21 @@ mod tests {
             "````\n```x\n````"
         );
         assert_eq!(bash_output_to_text("", None, false, None), "(no output)");
+    }
+
+    /// `bash_prompt_info` (TS `getBashPromptInfo`): `!!` outranks `!`,
+    /// leading whitespace counts toward the hidden prefix, and a typed
+    /// trailing space makes the prefix one wider.
+    #[test]
+    fn bash_prompt_info_matches_the_ts_ladder() {
+        assert_eq!(bash_prompt_info("!echo hi"), Some(("! ", 1)));
+        assert_eq!(bash_prompt_info("!!echo hi"), Some(("!! ", 2)));
+        assert_eq!(bash_prompt_info("! echo hi"), Some(("! ", 2)));
+        assert_eq!(bash_prompt_info("!! echo hi"), Some(("!! ", 3)));
+        assert_eq!(bash_prompt_info("  !echo"), Some(("! ", 3)));
+        assert_eq!(bash_prompt_info("!"), Some(("! ", 1)));
+        assert_eq!(bash_prompt_info("echo hi"), None);
+        assert_eq!(bash_prompt_info(""), None);
     }
 
     /// Tail truncation keeps the last lines within the byte budget.

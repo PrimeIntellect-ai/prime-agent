@@ -1,5 +1,6 @@
 //! Editor layout for rendering: layout lines, scroll window, cursor position.
 
+use super::text_utils::char_suffix;
 use super::*;
 use crate::width::str_width;
 
@@ -19,39 +20,46 @@ impl Editor {
         }
         for (i, line) in self.lines.iter().enumerate() {
             let is_current = i == self.cursor_line;
-            let line_vis_width = str_width(line);
-            if line.is_empty() {
+            // The hidden bang prefix on line 0 renders as the prompt
+            // prefix: the display line starts after it (TS `layoutText`
+            // slices `line.slice(hiddenPrefixLength)` first).
+            let hidden = self.line_start_col(i);
+            let display = char_suffix(line, hidden);
+            let line_vis_width = str_width(&display);
+            if display.is_empty() {
                 layout_lines.push(LayoutLine {
                     text: String::new(),
                     has_cursor: is_current,
                     cursor_pos: 0,
                     source_line: i,
-                    source_start: 0,
+                    source_start: hidden,
                 });
                 continue;
             }
             if line_vis_width <= content_width {
                 if is_current {
                     layout_lines.push(LayoutLine {
-                        text: line.clone(),
+                        text: display,
                         has_cursor: true,
-                        cursor_pos: self.cursor_col.min(line.chars().count()),
+                        cursor_pos: self.cursor_col.saturating_sub(hidden),
                         source_line: i,
-                        source_start: 0,
+                        source_start: hidden,
                     });
                 } else {
                     layout_lines.push(LayoutLine {
-                        text: line.clone(),
+                        text: display,
                         has_cursor: false,
                         cursor_pos: 0,
                         source_line: i,
-                        source_start: 0,
+                        source_start: hidden,
                     });
                 }
             } else {
-                let chunks = word_wrap_line(line, content_width, Some(self.segment(line)));
+                let chunks = word_wrap_line(&display, content_width, Some(self.segment(&display)));
                 for (chunk_index, chunk) in chunks.iter().enumerate() {
-                    let cursor_pos = self.cursor_col;
+                    // Cursor positions are display-relative (TS
+                    // `cursorPos - hiddenPrefixLength` floors at 0).
+                    let cursor_pos = self.cursor_col.saturating_sub(hidden);
                     let is_last = chunk_index == chunks.len() - 1;
                     let (has_cursor, adjusted) = if is_current {
                         if is_last {
@@ -73,7 +81,7 @@ impl Editor {
                         has_cursor,
                         cursor_pos: adjusted,
                         source_line: i,
-                        source_start: chunk.start_index,
+                        source_start: hidden + chunk.start_index,
                     });
                 }
             }

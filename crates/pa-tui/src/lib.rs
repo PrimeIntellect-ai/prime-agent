@@ -13,6 +13,7 @@ pub mod app;
 pub mod autocomplete;
 mod autolink;
 pub mod bash_bang;
+pub mod bash_card;
 pub mod chat;
 pub mod chat_slash;
 pub mod chrome;

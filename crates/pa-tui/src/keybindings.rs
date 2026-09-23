@@ -795,6 +795,12 @@ impl KeybindingsManager {
         self.get_keys(keybinding).into_iter().next()
     }
 
+    /// TS `keyText(keybinding)`: every key of the binding formatted and
+    /// joined with "/" ("Esc/Ctrl+C"); an unbound id renders empty.
+    pub fn key_text(&self, keybinding: &str) -> String {
+        format_key_text(&self.get_keys(keybinding).join("/"))
+    }
+
     pub fn get_definition(&self, keybinding: &str) -> Option<&KeybindingDefinition> {
         self.definitions.get(keybinding)
     }

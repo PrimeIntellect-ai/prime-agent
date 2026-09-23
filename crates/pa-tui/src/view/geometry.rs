@@ -92,6 +92,22 @@ impl AgentView {
                         self.show_images,
                     )
             }
+            ChatEntry::BashExecution(card) => {
+                // The card render is bounded (a 20-visual-line preview
+                // plus its chrome), so the exact count reuses the render
+                // instead of duplicating the wrap/preview/status logic.
+                let cancel_hint = self.editor.keybindings().key_text("tui.select.cancel");
+                usize::from(!card.suppress_leading_space)
+                    + crate::bash_card::render_bash_execution(
+                        card,
+                        self.pulse_frame,
+                        self.detail.tool_output_expanded(),
+                        &cancel_hint,
+                        &self.theme,
+                        width,
+                    )
+                    .len()
+            }
             ChatEntry::SkillInvocation(row) => {
                 crate::custom_message::skill_invocation::count_skill_invocation(
                     row,
