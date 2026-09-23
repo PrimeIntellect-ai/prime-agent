@@ -1425,13 +1425,19 @@ shape is exactly the re-adoption window).
 
 ### The scheduled-fire arm: the cron scheduler's timer death (live evidence)
 
-The controller's live capture (2026-09-23T20:30Z): the governance
-session's `*/2` follow-up heartbeat (`bac7ba7a`) rows as ACTIVE in both
-registries (kernel `rlm_heartbeat.list` and daemon `cron_list`) with
-`nextRunAt` frozen at its 17:46 creation value and `runCount` 0 — the
-worker's scheduler never claimed it, across the 19:10-19:12 supervisor
-restart that re-adopted the (still-live) worker, and the session only
-woke on external nudges. Two structural death vectors in
+Two live captures. (1) 2026-09-23T20:30Z: the governance session's
+`*/2` follow-up heartbeat (`bac7ba7a`) rows as ACTIVE in both registries
+(kernel `rlm_heartbeat.list` and daemon `cron_list`) with `nextRunAt`
+frozen at its 17:46 creation value and `runCount` 0 — the worker's
+scheduler never claimed it, across the 19:10-19:12 supervisor restart
+that re-adopted the (still-live) worker, and the session only woke on
+external nudges. (2) 2026-09-23T21:00Z: the operator's RECREATED beat
+(`8c991e0e`, fresh registration ~20:44Z on the same live worker) is
+equally frozen — `nextRun` 20:38Z passed, `runs: 0`, `lastRun: None`:
+a fresh registration's mutation wake cannot revive the dead machinery,
+so the death is in the worker's scheduler itself (the wedged-flag
+vector fits a fresh wake's spawn + silent no-op passes), not the old
+job's row. Two structural death vectors in
 `pa-core/src/cron/scheduler.rs`, both hardened:
 
 - **The timer task died on the empty store** (`next_active_run_at() ==
