@@ -75,12 +75,19 @@ FOLLOW_PASTE = [f"follow paste line {i:02d} aabb" for i in range(12)]
 BURST_PASTE = ["bursthorse-one first", "bursthorse-two second", "bursthorse-three third"]
 PAUSED_PASTE = [f"paused paste line {i:02d} ccdd" for i in range(12)]
 
+# A large-context scripted model: the resumed 19MB corpus (~640k tokens)
+# would overflow a 128k window and TS fires context-overflow recovery whose
+# summarization requests eat the queued scripted responses (the Rust
+# engine's marker-matched queues survive it; the shared TS harness
+# extension cannot script through TS's recovery). The paste contract is
+# mid-stream input latency, not the overflow path — both sides run the
+# identical large-context scenario.
 FAUX_SCRIPT = {
     "engine": "faux",
     "modelId": "faux-1",
     "modelName": "Faux Model",
     "reasoning": False,
-    "contextWindow": 128000,
+    "contextWindow": 10000000,
     "tokensPerSecond": 30,
     "responses": [
         {"content": [{"type": "text", "text": STREAM_TEXT}]},
