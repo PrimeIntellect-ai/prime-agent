@@ -771,6 +771,10 @@ mod tests {
         assert_eq!(fallback.id, "internal/glm-5.9-turbo");
         // Inherited the private template's compat (max_tokens field).
         assert!(fallback.compat.is_some());
+        // Inherited the private template's ZERO pricing: an unknown
+        // internal id must never bill the public provider default's rate.
+        assert_eq!(fallback.cost.input.0, 0.0);
+        assert_eq!(fallback.cost.output.0, 0.0);
     }
 
     #[test]

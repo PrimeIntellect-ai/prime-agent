@@ -15,9 +15,21 @@ use crate::session_store::{SessionEntry, SessionFile};
 /// Compute the `get_session_stats` response data for one session file.
 /// `context_window` is the engine model's context window; `None` (or zero)
 /// omits `contextUsage`, matching TS sessions without a model.
+///
+/// The token/cost totals walk the gap-bridged branch
+/// ([`SessionFile::branch_bridged`]): they are deliberately cumulative
+/// ("what the session spent"), so a ghost-parent gap (one lost append)
+/// must not zero them out. `contextUsage` keeps the strict branch — the
+/// context estimate mirrors what the model actually sees.
 pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value {
     let branch = store.branch();
+    let bridged = store.branch_bridged();
     let messages: Vec<&Value> = branch
+        .iter()
+        .filter(|entry| entry.type_ == "message")
+        .filter_map(|entry| entry.fields.get("message"))
+        .collect();
+    let durable_messages: Vec<&Value> = bridged
         .iter()
         .filter(|entry| entry.type_ == "message")
         .filter_map(|entry| entry.fields.get("message"))
@@ -31,7 +43,7 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
     let mut cache_read = 0u64;
     let mut cache_write = 0u64;
     let mut cost = 0.0f64;
-    for message in &messages {
+    for message in &durable_messages {
         match message.get("role").and_then(Value::as_str) {
             Some("user") => user_messages += 1,
             Some("assistant") => {
@@ -72,7 +84,7 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
         "assistantMessages": assistant_messages,
         "toolCalls": tool_calls,
         "toolResults": tool_results,
-        "totalMessages": messages.len(),
+        "totalMessages": durable_messages.len(),
         "tokens": {
             "input": input,
             "output": output,
@@ -256,6 +268,56 @@ mod tests {
                 }))
             }),
         )
+    }
+
+    /// A ghost-parent gap (one lost append) must not zero the token
+    /// totals: the usage accounting bridges the gap, while the context
+    /// estimate stays on the strict branch (the model-facing truth).
+    #[test]
+    fn ghost_gap_does_not_zero_the_token_totals() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ghosted.jsonl");
+        let assistant = json!({
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "spent" }],
+            "usage": {
+                "input": 10, "output": 5, "cacheRead": 100, "cacheWrite": 0,
+                "totalTokens": 115,
+                "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0 },
+            },
+        })
+        .to_string();
+        let lines = [
+            json!({"type": "session", "version": 3, "id": "s1", "timestamp": "2026-09-22T00:00:00.000Z", "cwd": "/tmp"}).to_string(),
+            json!({"type": "message", "id": "e1", "parentId": null, "timestamp": "2026-09-22T00:00:01.000Z", "message": {"role": "user", "content": "hi"}}).to_string(),
+            json!({"type": "message", "id": "e2", "parentId": "e1", "timestamp": "2026-09-22T00:00:02.000Z", "message": serde_json::from_str::<serde_json::Value>(&assistant).unwrap()}).to_string(),
+            json!({"type": "message", "id": "e3", "parentId": "8b5f0d21", "timestamp": "2026-09-22T00:00:03.000Z", "message": {"role": "user", "content": "after the gap"}}).to_string(),
+        ];
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        let store = SessionFile::open(&path).unwrap();
+        assert_eq!(
+            store.branch().len(),
+            1,
+            "the strict walk truncates at the ghost"
+        );
+        let stats = session_stats(&store, Some(1000));
+        assert_eq!(
+            stats["tokens"]["input"],
+            json!(10),
+            "the pre-gap usage counts"
+        );
+        assert_eq!(stats["tokens"]["output"], json!(5));
+        assert_eq!(stats["tokens"]["cacheRead"], json!(100));
+        assert_eq!(stats["tokens"]["total"], json!(115));
+        assert_eq!(stats["assistantMessages"], json!(1));
+        assert_eq!(stats["userMessages"], json!(2));
+        // The context estimate anchors on the strict branch only: the gap
+        // entry's user message estimates, the pre-gap assistant does not.
+        assert_eq!(
+            stats["contextUsage"]["tokens"],
+            json!(4),
+            "13 chars, ceil/4"
+        );
     }
 
     #[test]

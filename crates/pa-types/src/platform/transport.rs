@@ -11,6 +11,11 @@ use std::path::Path;
 use std::pin::Pin;
 
 use anyhow::Result;
+// `Context` is used by the linux `O_PATH` re-anchoring and the Windows
+// pipe-name error only; a bare import is an unused-import on every other
+// platform.
+#[cfg(any(target_os = "linux", windows))]
+use anyhow::Context;
 
 /// A full-duplex stream between a client and a daemon endpoint.
 ///
@@ -115,7 +120,6 @@ impl UnixSocketAddress {
     /// Re-anchor a too-long path through `/proc/self/fd/<dir fd>/<file name>`.
     #[cfg(target_os = "linux")]
     fn through_dir_fd(path: &Path) -> Result<(std::path::PathBuf, std::fs::File)> {
-        use anyhow::Context;
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::OpenOptionsExt;
         // `O_PATH` (Linux `asm-generic`): an fd that references the directory
