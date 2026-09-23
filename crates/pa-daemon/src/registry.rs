@@ -432,7 +432,7 @@ impl SessionRegistry {
     }
 }
 
-fn selector_matches(candidate: &str, suffix: &str) -> bool {
+pub(crate) fn selector_matches(candidate: &str, suffix: &str) -> bool {
     let normalize = |value: &str| -> String { value.replace('-', "").to_lowercase() };
     let candidate = normalize(candidate);
     let suffix = normalize(suffix);

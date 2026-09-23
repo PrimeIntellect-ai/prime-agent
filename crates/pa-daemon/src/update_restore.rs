@@ -57,6 +57,10 @@ const RESTORE_ATTACH_WAIT_MS: u64 = 120_000;
 struct RestoreTarget {
     active_session_id: String,
     session_file: String,
+    /// The row's session name: `SessionRegistry::resolve` accepts name
+    /// selectors, so the restore queue must own them too (the waiter
+    /// settles by the same row the registry will resolve once it is up).
+    name: Option<String>,
     /// Set the moment the pass finishes this row (or the adoption pass
     /// brings the worker up): the per-target waiters wake immediately
     /// instead of queueing behind the rest of the recovery.
@@ -78,6 +82,10 @@ pub(crate) struct RestoreProgress {
 #[derive(Debug, Default)]
 struct RestoreInner {
     done: bool,
+    /// Bumped on every row settle: the per-row waiters' budget re-arms
+    /// while the pass keeps making progress, so a large capped recovery
+    /// cannot starve a healthy late row's waiter out of its queue.
+    settled_generation: u64,
     targets: BTreeMap<String, RestoreTarget>,
     counts: UpdateStatusCounts,
     failures: Vec<UpdateStatusFailure>,
@@ -124,6 +132,7 @@ impl RestoreProgress {
                 RestoreTarget {
                     active_session_id: row.active_session_id.clone(),
                     session_file: row.session_file.clone(),
+                    name: row.name.clone(),
                     settled: false,
                     failure: None,
                 },
@@ -143,10 +152,12 @@ impl RestoreProgress {
             let Some(target) = restore_target_mut(&mut state.targets, selector) else {
                 return;
             };
-            if !target.settled {
-                target.settled = true;
-                target.failure = failure;
+            if target.settled {
+                return;
             }
+            target.settled = true;
+            target.failure = failure;
+            state.settled_generation += 1;
         }
         self.notify.notify_waiters();
     }
@@ -171,6 +182,7 @@ impl RestoreProgress {
                     .get(target.session_file.as_str())
                     .map(|message| message.to_string());
             }
+            state.settled_generation += 1;
             state.failures = failures;
         }
         self.notify.notify_waiters();
@@ -187,8 +199,11 @@ impl RestoreProgress {
             .map(|message| (target.session_file.clone(), message.clone()))
     }
 
-    /// Whether an in-flight pass owns the selector (a roster row: durable
-    /// id, transient active id, or session-file stem).
+    /// Whether an in-flight pass owns the selector: any roster row the
+    /// registry-shaped selector resolves to (durable id, transient active
+    /// id, session-file stem or its normalized suffix, session name), so
+    /// a command that will resolve once the row is up queues behind that
+    /// row instead of failing fast.
     fn owns_target(&self, selector: &str) -> bool {
         let state = self.state.lock().unwrap();
         !state.done && restore_target(&state.targets, selector).is_some()
@@ -197,25 +212,40 @@ impl RestoreProgress {
     /// Wait for one target's settle outcome, not the whole pass (spec
     /// §10.4: the attach queues server-side and streams "once the session
     /// comes up" — a slow recovery of unrelated sessions must not hold
-    /// this request). The §10.4 deadline still bounds the queue: a pass
-    /// wedged on one slow row cannot hold a client longer than the
-    /// global budget.
+    /// this request). The §10.4 deadline bounds the queue's quiet time:
+    /// every settle progress re-arms it, so a large capped adoption holds
+    /// its waiters only while rows keep coming up, while a pass wedged
+    /// with no progress for the budget cannot hold a client longer.
     async fn wait_for_settle_target(&self, selector: &str) {
-        let deadline = tokio::time::Instant::now()
-            + std::time::Duration::from_millis(RESTORE_ATTACH_WAIT_MS.max(1));
+        let quiet = std::time::Duration::from_millis(RESTORE_ATTACH_WAIT_MS.max(1));
+        let (mut last_generation, mut deadline) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.settled_generation,
+                tokio::time::Instant::now() + quiet,
+            )
+        };
         loop {
             // Register interest before re-checking: a settle that runs
             // between the check and the registration must still wake us.
             let notified = self.notify.notified();
-            let settled = {
+            let (settled, generation) = {
                 let state = self.state.lock().unwrap();
-                state.done
-                    || restore_target(&state.targets, selector).is_none_or(|target| target.settled)
+                (
+                    state.done
+                        || restore_target(&state.targets, selector)
+                            .is_none_or(|target| target.settled),
+                    state.settled_generation,
+                )
             };
             if settled {
                 // This row settled (or the whole pass did): the caller
                 // re-resolves.
                 return;
+            }
+            if generation != last_generation {
+                last_generation = generation;
+                deadline = tokio::time::Instant::now() + quiet;
             }
             if tokio::time::Instant::now() >= deadline {
                 return;
@@ -228,9 +258,12 @@ impl RestoreProgress {
     }
 }
 
-/// Whether one target answers the selector: by transient active id or
-/// session-file stem (the durable id is the map key, checked by the
-/// callers).
+/// Whether one target answers the registry-shaped selector (the durable id
+/// is the map key, checked first by the key resolver): the transient
+/// active id, the session-file stem (both exact or a normalized suffix,
+/// `SessionRegistry`'s `selector_matches`), or the session name (exact) —
+/// the same shapes `SessionRegistry::resolve` accepts, so a command the
+/// registry will resolve once the row is up queues behind that row now.
 fn matches_selector(target: &RestoreTarget, selector: &str) -> bool {
     if target.active_session_id == selector {
         return true;
@@ -239,34 +272,48 @@ fn matches_selector(target: &RestoreTarget, selector: &str) -> bool {
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
         .unwrap_or_default();
-    !stem.is_empty() && stem == selector
+    if crate::registry::selector_matches(&target.active_session_id, selector)
+        || (!stem.is_empty() && crate::registry::selector_matches(&stem, selector))
+    {
+        return true;
+    }
+    target
+        .name
+        .as_deref()
+        .is_some_and(|name| !name.is_empty() && name == selector)
 }
 
-/// The roster row a selector addresses: by durable id, transient active id,
-/// or session-file stem (the same selectors `SessionRegistry::resolve`
-/// accepts).
+/// The map key a selector addresses: the exact durable id, or the key of
+/// the single row the registry-shaped selector matches — an ambiguous
+/// suffix or name matches nothing, the same way the registry errors an
+/// ambiguous selector instead of picking one row to serve it.
+fn restore_target_key(targets: &BTreeMap<String, RestoreTarget>, selector: &str) -> Option<String> {
+    if targets.contains_key(selector) {
+        return Some(selector.to_string());
+    }
+    let mut matches = targets
+        .iter()
+        .filter(|(_, target)| matches_selector(target, selector));
+    let (key, _) = matches.next()?;
+    matches.next().is_none().then(|| key.clone())
+}
+
+/// The roster row a selector addresses: any selector shape the registry
+/// accepts, resolved to exactly one row.
 fn restore_target<'a>(
     targets: &'a BTreeMap<String, RestoreTarget>,
     selector: &str,
 ) -> Option<&'a RestoreTarget> {
-    targets
-        .values()
-        .find(|target| matches_selector(target, selector))
-        .or_else(|| targets.get(selector))
+    restore_target_key(targets, selector).and_then(|key| targets.get(&key))
 }
 
-/// The mutable counterpart of [`restore_target`]: resolve the key with an
-/// immutable scan first, then re-borrow mutably.
+/// The mutable counterpart of [`restore_target`]: resolve the key, then
+/// borrow it mutably.
 fn restore_target_mut<'a>(
     targets: &'a mut BTreeMap<String, RestoreTarget>,
     selector: &str,
 ) -> Option<&'a mut RestoreTarget> {
-    let key = targets
-        .iter()
-        .find(|(_, target)| matches_selector(target, selector))
-        .map(|(key, _)| key.clone())
-        .unwrap_or_else(|| selector.to_string());
-    targets.get_mut(&key)
+    restore_target_key(targets, selector).and_then(|key| targets.get_mut(&key))
 }
 
 // ---------------------------------------------------------------------------
@@ -644,6 +691,7 @@ mod tests {
                     "session_id": "a-1",
                     "active_session_id": "active-a",
                     "session_file": "/sessions/a-1.jsonl",
+                    "name": "alpha",
                     "kind": "top-level",
                     "rlm_depth": 0,
                     "cwd": "/w",
@@ -746,6 +794,66 @@ mod tests {
         }
         assert!(progress.settled_failure("a-1").is_none());
         assert!(progress.settled_failure("unknown-id").is_none());
+    }
+
+    #[test]
+    fn registry_shaped_selectors_own_their_row_and_ambiguous_ones_own_nothing() {
+        let progress = RestoreProgress::new();
+        progress.begin(Some(&two_row_roster()));
+        // Every selector shape SessionRegistry::resolve accepts owns the
+        // row: durable id, transient active id, session-file stem, the
+        // session name, and normalized suffixes of either id shape.
+        for selector in [
+            "a-1", "active-a", "a-1", "alpha", "ve-a", "IVEA", "b-2", "urable-b",
+        ] {
+            assert!(progress.owns_target(selector), "owns {selector}");
+        }
+        assert!(!progress.owns_target("unknown"));
+        assert!(!progress.owns_target(""));
+
+        // An ambiguous selector owns nothing: like the registry, the
+        // queue refuses to pick one of several matching rows.
+        let mut roster = two_row_roster();
+        roster.sessions[1].active_session_id = "xx-active-a".to_string();
+        let ambiguous = RestoreProgress::new();
+        ambiguous.begin(Some(&roster));
+        assert!(!ambiguous.owns_target("active-a"));
+        ambiguous.settle_target("active-a", Some("never lands".to_string()));
+        assert!(ambiguous.settled_failure("active-a").is_none());
+        // The rows settle by their own selectors all the same.
+        ambiguous.settle_target("alpha", None);
+        assert!(ambiguous.settled_failure("alpha").is_none());
+        assert!(ambiguous.hello_resume().update_id.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn settle_progress_rearms_a_waiters_quiet_budget_past_the_first_deadline() {
+        let progress = std::sync::Arc::new(RestoreProgress::new());
+        progress.begin(Some(&two_row_roster()));
+        let waiter = |progress: &std::sync::Arc<RestoreProgress>, selector: &str| {
+            let progress = std::sync::Arc::clone(progress);
+            let selector = selector.to_string();
+            tokio::spawn(async move { progress.wait_for_settle_target(&selector).await })
+        };
+        let mut queued_a = waiter(&progress, "a-1");
+        let tick = std::time::Duration::from_millis(1);
+        assert!(tokio::time::timeout(tick, &mut queued_a).await.is_err());
+        // Quiet for 110s (the budget is 120s), then one unrelated settle:
+        // the pass is healthy and making progress, so the waiter's budget
+        // re-arms instead of expiring on the original absolute deadline.
+        tokio::time::advance(std::time::Duration::from_secs(110)).await;
+        progress.settle_target("b-2", None);
+        // Past the original absolute deadline: only the re-arm keeps the
+        // waiter queued.
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        assert!(
+            tokio::time::timeout(tick, &mut queued_a).await.is_err(),
+            "the waiter expired on the original deadline instead of the re-armed one"
+        );
+        // Its own row settles well past that deadline: the waiter wakes.
+        tokio::time::advance(std::time::Duration::from_secs(40)).await;
+        progress.settle_target("alpha", None);
+        assert!(tokio::time::timeout(tick, queued_a).await.is_ok());
     }
 
     #[test]

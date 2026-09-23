@@ -2625,7 +2625,18 @@ impl Supervisor {
             descriptor.lifecycle = DaemonWorkerLifecycle::Ready;
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
         }
+        let durable_session_id = registration.session_id.clone();
         let record = self.registry.record_registration(registration).await;
+        // A restore pass that owns this session's roster row can settle it
+        // now (spec §10.4): the live worker serves the row's waiters
+        // without queueing behind the rest of the recovery. Covers the
+        // self-registration that beats the descriptor scan (the adoption
+        // early return) and `adopt_registered_worker` alike; a no-op when
+        // no pass owns the row. The settle lands after the registration is
+        // recorded, so a woken waiter's re-resolve cannot miss it.
+        if let Some(session_id) = durable_session_id {
+            self.restore.settle_target(&session_id, None);
+        }
         let verb = if record.epoch > 1 {
             "re-registered"
         } else {
