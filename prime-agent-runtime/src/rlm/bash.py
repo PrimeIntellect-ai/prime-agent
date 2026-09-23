@@ -1118,8 +1118,16 @@ def _process_start_id(pid: int) -> str | None:
         # macOS has no /proc; /bin/ps is always present there, so use the
         # absolute path (bare `ps` stays only as the exotic-POSIX last resort).
         ps = "/bin/ps" if sys.platform == "darwin" else "ps"
+        # `lstart` renders in the subprocess timezone and locale, so pin both
+        # for a durable identity (TS getPsProcessStartId; the Rust host reads
+        # the same pinned values - an unpinned match would drift on non-UTC
+        # hosts and the identity comparison would never agree).
         out = subprocess.run(
-            [ps, "-p", str(pid), "-o", "lstart="], capture_output=True, text=True, timeout=5
+            [ps, "-p", str(pid), "-o", "lstart="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={**os.environ, "LC_ALL": "C", "LC_TIME": "C", "LANG": "C", "TZ": "UTC"},
         ).stdout.strip()
         return f"ps:{out}" if out else None
     except (OSError, subprocess.SubprocessError):
@@ -1139,9 +1147,6 @@ def _record_journal(pid: int, active: bool) -> bool:
         owner_pid = int(owner)
     except ValueError:
         return False
-    # TS parity (core/orphan-process-journal.ts): a missing start-id is an
-    # identity-free record - valid, and still safely reaped on POSIX (the
-    # host's group-scoped kill is best-effort for identity-free records).
     start_id = _process_start_id(pid) if active else None
     record: dict[str, Any] = {
         "version": 1,

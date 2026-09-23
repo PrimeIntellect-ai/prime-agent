@@ -36,7 +36,7 @@ pub fn process_start_id(pid: u32) -> Option<String> {
 /// durable identity. Formatted `ps:<lstart>` - the exact value the TS
 /// product records on macOS and BSD.
 #[cfg(unix)]
-pub fn ps_process_start_id(pid: u32) -> Option<String> {
+fn ps_process_start_id(pid: u32) -> Option<String> {
     let output = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "lstart="])
         .env("LC_ALL", "C")
