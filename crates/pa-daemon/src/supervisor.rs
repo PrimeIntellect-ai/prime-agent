@@ -1763,14 +1763,12 @@ impl Supervisor {
                 "Session cannot be both no-session and session-pathed"
             ));
         }
-        // `continueRecent` is refused outright (a sanctioned divergence
-        // from the TS worker, which resolves it to the newest saved session
-        // for the cwd): a create that asks the daemon to pick a session
-        // blindly can reopen an arbitrary one on a shared session dir —
-        // including a session whose context and scheduled jobs resurrect on
-        // the worker. The client owns the choice: the interactive
-        // `--continue` resolves its candidate and shows it in the agents
-        // view, and an explicit `sessionPath` opens exactly what was named.
+        // `continueRecent` is refused: a create must name its session
+        // (`sessionPath`) or open one through the agents view. The daemon
+        // never picks a session blindly — a shared session dir can hold any
+        // session, and reopening one revives its context and scheduled jobs
+        // (a sanctioned divergence from the TS worker's continueRecent
+        // arm, which resolves the newest saved session for the cwd).
         if *continue_recent == Some(true) {
             return Err(anyhow!(
                 "continueRecent is not supported: pass sessionPath to reopen a session, or open one through the agents view"

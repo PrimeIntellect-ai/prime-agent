@@ -7992,10 +7992,9 @@ async fn create_session(
         .request_ok(DaemonCommand::Create {
             id: None,
             session_path,
-            // `continueRecent` stays absent (TS wire shape): a create never
-            // asks the daemon to pick a session blindly — the CLI's
-            // `--continue` resolves its candidate and shows it in the
-            // agents view, and the supervisor refuses the field outright.
+            // A create names its session (`sessionPath`) or opens one
+            // through the agents view; `continueRecent` stays absent
+            // (TS wire shape — the supervisor refuses it).
             continue_recent: None,
             no_session: options.no_session.then_some(true),
             name: None,
