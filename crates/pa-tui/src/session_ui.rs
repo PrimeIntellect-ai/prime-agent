@@ -96,6 +96,10 @@ pub(crate) type ReloadNote = Result<(), String>;
 /// outcome from touching another session after `/switch` or `/new`.
 pub(crate) struct CompactionAbortNote {
     pub(crate) active_session_id: String,
+    /// The loader generation the abort addressed: an outcome applies only
+    /// to the exact `compaction_start` that was on screen when the abort
+    /// was sent — a newer run's loader is never cleared by a stale one.
+    pub(crate) compaction_generation: u64,
     pub(crate) outcome: Result<(), String>,
 }
 
@@ -5532,7 +5536,7 @@ impl SessionUi {
     /// supervision's UI recovery): the daemon's own `compaction_end`
     /// normally clears it, but an abort that could not even reach the
     /// daemon must not leave the UI waiting on an end that never comes.
-    fn abort_compaction(&self) {
+    fn abort_compaction(&self, compaction_generation: u64) {
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
         let abort_notes = self.compaction_abort_notes.clone();
@@ -5550,6 +5554,7 @@ impl SessionUi {
             if let Err(error) = result {
                 let _ = abort_notes.send(CompactionAbortNote {
                     active_session_id,
+                    compaction_generation,
                     outcome: Err(format!("{error:#}")),
                 });
             }
@@ -5560,13 +5565,16 @@ impl SessionUi {
     /// surfaces as a transcript row and the compaction loader clears —
     /// the local recovery when the abort never reached the daemon. An
     /// outcome from a session this UI no longer shows (`/switch`, `/new`
-    /// mid-request) touches nothing.
+    /// mid-request), or addressed to a loader a newer `compaction_start`
+    /// has since replaced, touches nothing.
     pub(crate) fn apply_compaction_abort_outcome(
         &mut self,
         note: CompactionAbortNote,
         view: &mut AgentView,
     ) {
-        if note.active_session_id != self.active_session_id {
+        if note.active_session_id != self.active_session_id
+            || note.compaction_generation != view.compaction_generation
+        {
             return;
         }
         if let Err(error) = note.outcome {
@@ -5939,7 +5947,7 @@ impl SessionUi {
                 // the interrupt cancels the compaction run only — the agent
                 // is not streaming, so no turn abort goes out, exactly like
                 // the TS interrupt key.
-                self.abort_compaction();
+                self.abort_compaction(view.compaction_generation);
             } else if self.turn_active {
                 self.abort_turn();
                 self.note("aborting the current turn", view);
@@ -6594,8 +6602,11 @@ impl SessionUi {
                 custom_instructions,
             } => {
                 // TS `startCompactionLoader`: the compaction loader fully
-                // replaces the working loader for the run's duration.
+                // replaces the working loader for the run's duration. The
+                // generation bump retires every in-flight abort outcome
+                // that addressed an earlier run's loader.
                 view.working = None;
+                view.compaction_generation += 1;
                 view.compaction = Some(CompactionState {
                     reason: CompactionReason::parse(&reason),
                     custom_instructions,

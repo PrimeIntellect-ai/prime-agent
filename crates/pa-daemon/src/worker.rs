@@ -2092,6 +2092,16 @@ impl Worker {
         // declaration, and the rebuilt transcript already holding the
         // exact row means this replay appends nothing.
         let interrupted_compaction = crate::compaction::interrupted_compaction_disclosure(payload);
+        // The disclosure row's landing state for this replay: `true` when
+        // the rebuilt transcript now holds the exact row (persisted here,
+        // or already present from an earlier crash-replay), `false` when
+        // the persist failed — the create reply carries it so the
+        // supervisor consumes the terminal record only once the
+        // disclosure is durable; a failed persist keeps it pending for
+        // the next replacement to retry. `None` (no disclosure requested)
+        // adds no key: client-facing create replies stay byte-identical
+        // to the TS shape.
+        let mut interrupted_compaction_persisted = interrupted_compaction.is_some();
         // The core lock stays inside this block: everything after it may
         // await (the schedule-catalog bind), and a std MutexGuard must
         // never ride an await point.
@@ -2109,11 +2119,16 @@ impl Worker {
                             && entry.timestamp == disclosure.declared_at
                     });
                     if !already_disclosed {
-                        let _ = store.persist_entry_at(
-                            "custom_message",
-                            disclosure.row.clone(),
-                            &disclosure.declared_at,
-                        );
+                        if store
+                            .persist_entry_at(
+                                "custom_message",
+                                disclosure.row.clone(),
+                                &disclosure.declared_at,
+                            )
+                            .is_err()
+                        {
+                            interrupted_compaction_persisted = false;
+                        }
                     }
                 }
             }
@@ -2210,11 +2225,12 @@ impl Worker {
             let _ = registry.refresh_available_models().await;
         });
         self.work_notify.notify_one();
-        response_success(
-            None,
-            "create",
-            Some(serde_json::to_value(&summary).unwrap_or(Value::Null)),
-        )
+        let mut data = serde_json::to_value(&summary).unwrap_or(Value::Null);
+        if interrupted_compaction.is_some() {
+            data["interruptedCompactionPersisted"] =
+                serde_json::json!(interrupted_compaction_persisted);
+        }
+        response_success(None, "create", Some(data))
     }
 
     pub(crate) fn summary_locked(&self, core: &SessionCore) -> SessionSummary {

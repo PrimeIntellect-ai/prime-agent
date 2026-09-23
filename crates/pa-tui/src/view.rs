@@ -97,6 +97,11 @@ pub struct AgentView {
     /// A compaction run in flight (TS `autoCompactionLoader`): replaces the
     /// working loader from `compaction_start` to `compaction_end`.
     pub compaction: Option<CompactionState>,
+    /// The compaction loader's generation: bumped on every
+    /// `compaction_start`, so a backgrounded abort outcome addresses the
+    /// exact loader it was sent for — a late failure for a settled run
+    /// never clears a newer run's loader.
+    pub compaction_generation: u64,
     /// Animation frame for spinners and the working icon.
     pub pulse_frame: usize,
     /// When the current working loader started (elapsed label).
@@ -234,6 +239,7 @@ impl AgentView {
             detail: Detail::Overview,
             working: None,
             compaction: None,
+            compaction_generation: 0,
             pulse_frame: 0,
             working_since: None,
             retry: None,
