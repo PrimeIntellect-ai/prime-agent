@@ -16,6 +16,9 @@ States (same inputs on both binaries):
   budget, the `Output truncated. Full output: <spill>` notice;
 - `cancelled`: a `!sleep 30` run aborted mid-flight marks itself
   `(cancelled)`;
+- `exit_hint`: an idle first Ctrl+C paints the exit hint at once (TS
+  `showCtrlCExitHint` requestRender's on the key) — captured inside the
+  two-second window;
 - `pane_bash`: a `!` run inside the open `/btw` side pane mounts in the
   pane (transient, pane-owned);
 - `guard`: a `!sleep 5` run is held open, then a second `!echo second`
@@ -27,12 +30,14 @@ States (same inputs on both binaries):
   `excludeFromContext` (output joins the model context), `!!` recorded
   with it, and the bare/`!echo second` submissions recorded nothing.
 
-The Rust side renders the run through the reused bash tool card (the
-deliberate reuse this lane chose), not the TS BashExecutionComponent
-border box, so the frames are expected to differ in styling; the check
-pins the visible facts (the `$ command` row, the streamed output, the
-guard sentence, the persisted context flags) and prints the full frame
-diff per state as the parity-diff evidence.
+The Rust side renders the run through the ported BashExecutionComponent
+(the bordered `$ cmd` card), so the per-state frames compare
+byte-for-byte after the run-variant normalization (tokens, durations,
+spill hex, sandbox roots) and the SGR-carryover materialization; the
+behavioral needles (the `$ command` row, the streamed output, the guard
+sentence, the exit hint, the persisted context flags) must also hold on
+both sides, and the check prints the full frame diff per state as the
+parity-diff evidence.
 
 tmux rules: default socket only (`env -u TMUX`), bang-* session names,
 no kill-server; sessions are killed individually at the end.
@@ -97,9 +102,12 @@ def ts_release_binary():
     releases = os.path.expanduser("~/.local/share/prime-agent/releases")
     rust = ts_identity.default_rust_binary()
     candidates = sorted(
-        entry
-        for entry in os.listdir(releases)
-        if os.path.isdir(os.path.join(releases, entry, "prime-agent-runtime"))
+        (
+            entry
+            for entry in os.listdir(releases)
+            if os.path.isdir(os.path.join(releases, entry, "prime-agent-runtime"))
+        ),
+        reverse=True,
     )
     for entry in candidates:
         binary = os.path.join(releases, entry, "prime-agent")
@@ -441,6 +449,16 @@ def run_states(binary, sandbox, shared_cwd, script_path):
         time.sleep(2.5)
         frames["cancelled"] = vp.capture(session)
 
+        # The idle first press paints the exit hint AT ONCE (TS
+        # `showCtrlCExitHint` requestRender's on the key; the paint must
+        # carry the freshly armed tray row, not the pre-key tray). The
+        # capture sits inside the two-second window.
+        vp.tmux("send-keys", "-t", session, "C-c")
+        time.sleep(0.3)
+        frames["exit_hint"] = vp.capture(session)
+        # Let the hint expire before any later key lands.
+        time.sleep(2.5)
+
         # Bang inside the side pane: the /btw pane mounts, and the run
         # renders inside it (transient, pane-owned).
         vp.tmux("send-keys", "-t", session, "/btw what is 2+2", "Enter")
@@ -580,6 +598,11 @@ def main():
                 failures.append(f"{binary}-pane-bash-output")
                 print(f"FAIL {binary} pane_bash: the pane run's output never rendered")
 
+            exit_hint_text = visible_text(frames["exit_hint"])
+            if "Press Ctrl+C again to exit" not in exit_hint_text:
+                failures.append(f"{binary}-exit-hint")
+                print(f"FAIL {binary} exit_hint: the first press never painted the hint")
+
         # The persisted context flags: `!` joins the context, `!!` does not,
         # and the guarded/bare submissions recorded nothing.
         for binary, frames in (("ts", ts_frames), ("rust", rust_frames)):
@@ -632,6 +655,7 @@ def main():
             "long_output",
             "truncation",
             "cancelled",
+            "exit_hint",
             "pane_bash",
         ):
             ts_norm = bang_normalize(ts_frames[state], base)
@@ -658,6 +682,7 @@ def main():
                     "long_output",
                     "truncation",
                     "cancelled",
+                    "exit_hint",
                     "pane_bash",
                 ):
                     f.write(f"\n===== {key} =====\n{frames[key]}\n")

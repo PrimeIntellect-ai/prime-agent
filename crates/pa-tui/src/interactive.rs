@@ -1016,6 +1016,14 @@ pub async fn run_interactive(
                 // delays the switch.
                 if let Some(renderer) = renderer.is_terminal_mut() {
                     if !session.open_agents_view && session.pending_selection.is_none() {
+                        // The inline paint must reflect tray state the
+                        // handled key just armed (the Ctrl+C exit hint:
+                        // TS `showCtrlCExitHint` requestRender's on the
+                        // key). The loop's refresh below the select only
+                        // reaches the frame gate, and the inline paint
+                        // clears `dirty` — an idle terminal would
+                        // otherwise never show the armed hint.
+                        view.chrome.tray_override = session.tray_override();
                         crate::app::draw(renderer, &mut view)?;
                         // The frame scheduler's bookkeeping follows the
                         // inline paint: the 16ms gate below now measures its

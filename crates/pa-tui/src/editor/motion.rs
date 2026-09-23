@@ -200,9 +200,17 @@ impl Editor {
     }
 
     fn find_visual_line_at(&self, visual_lines: &[VisualLine], line: usize, col: usize) -> usize {
+        // A cursor column inside the hidden bang prefix (a backward
+        // `jump_to_char` onto the `!` lands there) maps to the logical
+        // line's first visual segment instead of falling through to the
+        // whole map's last (TS `findVisualLineAt`'s hidden-prefix arm).
+        let hidden = self.line_start_col(line);
         for (i, vl) in visual_lines.iter().enumerate() {
             if vl.logical_line != line {
                 continue;
+            }
+            if hidden > 0 && col < hidden && vl.start_col == hidden {
+                return i;
             }
             let offset = col as isize - vl.start_col as isize;
             let is_last_segment =
@@ -400,6 +408,40 @@ mod tests {
 
     fn ed() -> Editor {
         Editor::new()
+    }
+
+    /// A backward jump onto the hidden bang prefix lands the cursor before
+    /// the prefix (TS `jumpToChar` assigns the raw index); the visual-line
+    /// lookup maps that column to the logical line's FIRST visual segment
+    /// (TS `findVisualLineAt`'s hidden-prefix arm), never to the whole
+    /// map's last visual line, and vertical motion consumes the mapped
+    /// line.
+    #[test]
+    fn a_backward_jump_onto_the_bang_prefix_stays_on_the_first_visual_line() {
+        let mut e = ed();
+        e.set_text("!echo hi\nsecond line");
+        e.move_to_line_end();
+        e.handle_input("ctrl+alt+]");
+        e.handle_input("!");
+        assert_eq!(
+            e.get_cursor(),
+            (0, 0),
+            "the backward jump landed on the hidden prefix"
+        );
+        assert!(
+            e.is_on_first_visual_line(),
+            "a pre-prefix cursor maps to the first visual line"
+        );
+        assert!(
+            !e.is_on_last_visual_line(),
+            "a pre-prefix cursor never maps to the map's last visual line"
+        );
+        e.handle_input("down");
+        assert_eq!(
+            e.get_cursor().0,
+            1,
+            "vertical motion from the pre-prefix column moves to the next line"
+        );
     }
 
     #[test]

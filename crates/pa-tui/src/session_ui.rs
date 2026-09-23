@@ -6696,10 +6696,18 @@ impl SessionUi {
         if self.side_bash_discarded.is_some() {
             return;
         }
+        // The pane route only while its row is the active run: the bash
+        // slot is single-flight, so a still-running pane row owns every
+        // chunk, but a settled row from an earlier side run must not
+        // swallow a later main-thread run's output (`bash_output` carries
+        // no run identity; TS routes by the active component, so a stale
+        // pane row never receives the next run's chunks).
         if let Some(pane) = view.side_pane.as_mut() {
             if let Some(bash) = pane.bash.as_mut() {
-                bash.output.push_str(chunk);
-                return;
+                if bash.running {
+                    bash.output.push_str(chunk);
+                    return;
+                }
             }
         }
         let Some(card_id) = self.user_bash_card.clone() else {
@@ -6712,6 +6720,11 @@ impl SessionUi {
             .iter()
             .position(|entry| matches!(entry, ChatEntry::BashExecution(card) if card.id == card_id))
         {
+            // The streamed card grows inside the transcript: capture the
+            // pre-append height so the tail-anchored sparse window folds
+            // the growth into its bookkeeping (the `prepare` +
+            // `mark_stale` pair every other growing entry uses).
+            view.prepare_entry_mutation(index);
             if let Some(ChatEntry::BashExecution(card)) = view.chat.get_mut(index) {
                 card.append_output(chunk);
             }

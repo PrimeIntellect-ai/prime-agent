@@ -60,6 +60,11 @@ struct MockSupervisor {
     /// `daemon_closing` update frame instead of `bash_end` (§10): the
     /// client must reattach and the resync settles the never-ended run.
     update_restart_after_bash: bool,
+    /// After a side run settles, replay another client's main-thread `!`
+    /// run (broadcast `bash_start`/`bash_output`/`bash_end`, no runId):
+    /// the pane keeps its settled row while the transcript mounts the
+    /// foreign card.
+    foreign_main_run_after_side_run: bool,
     /// §10.1: set when the update restart closes the link. The old
     /// daemon stops emitting with the socket close, so a turn still in
     /// flight there (the delayed `turn_end` thread) never lands its
@@ -78,6 +83,7 @@ impl MockSupervisor {
             bash_end: None,
             turn_end_delay_ms: 0,
             update_restart_after_bash: false,
+            foreign_main_run_after_side_run: false,
             link_closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
@@ -382,6 +388,36 @@ impl MockSupervisor {
                             }
                             None => end,
                         };
+                        if self.foreign_main_run_after_side_run && run_id.is_some() {
+                            // The pane's run settled; another client's
+                            // main-thread `!` run now claims the slot and
+                            // the wire broadcasts it here.
+                            let mut delayed = writer.try_clone().expect("clone delayed writer");
+                            std::thread::spawn(move || {
+                                std::thread::sleep(std::time::Duration::from_millis(250));
+                                write_session_event(
+                                    &mut delayed,
+                                    &json!({
+                                        "type": "bash_start",
+                                        "command": "echo main",
+                                        "excludeFromContext": false,
+                                    }),
+                                );
+                                write_session_event(
+                                    &mut delayed,
+                                    &json!({ "type": "bash_output", "chunk": "main-out\n" }),
+                                );
+                                write_session_event(
+                                    &mut delayed,
+                                    &json!({
+                                        "type": "bash_end",
+                                        "exitCode": 0,
+                                        "cancelled": false,
+                                        "truncated": false,
+                                    }),
+                                );
+                            });
+                        }
                         if self.end_delay_ms == 0 {
                             write_session_event(&mut writer, &end);
                         } else {
@@ -711,6 +747,63 @@ fn a_side_conversation_bash_run_mounts_in_the_pane_and_seeds_follow_ups() {
         "the bash run seeded the follow-up's previousTurns:\n{turns:?}"
     );
 }
+/// The pane keeps its settled bash row after its side run ends, but the
+/// row never receives a LATER run's output: `bash_output` carries no run
+/// identity on the wire, so routing follows the active run (TS appends to
+/// `activeBashComponent`, and a settled side component is never active).
+/// A main-thread `!` run that starts while the pane holds a stale row
+/// streams into its own transcript card.
+#[test]
+fn a_main_run_after_a_settled_pane_run_owns_its_output() {
+    let steps = vec![
+        HeadlessStep::Submit("/btw what is 2+2".to_string()),
+        HeadlessStep::WaitMs(250),
+        HeadlessStep::Submit("!echo pane".to_string()),
+        HeadlessStep::WaitMs(1000),
+    ];
+    let run = run_plan_with(steps, |supervisor| {
+        supervisor.foreign_main_run_after_side_run = true;
+    });
+    let all = run.frames.join("\n");
+    assert_eq!(
+        run.bash_requests.len(),
+        1,
+        "only the pane's own run dispatched; the foreign run arrived on the wire:\n{all}"
+    );
+    assert!(
+        all.contains("$ echo main"),
+        "the foreign main run mounted its transcript card:\n{all}"
+    );
+    assert!(
+        all.contains("main-out"),
+        "the foreign run's output rendered:\n{all}"
+    );
+    // The streamed output belongs to the transcript card: its rows sit
+    // inside the card (the `$ echo main` header row and its output rows
+    // are adjacent), never appended to the pane's settled row.
+    let with_output = run
+        .frames
+        .iter()
+        .find(|frame| frame.contains("$ echo main") && frame.contains("main-out"))
+        .expect("a frame with the foreign card and its output");
+    let row_of = |needle: &str| -> usize {
+        with_output
+            .lines()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("the {needle:?} row: {with_output}"))
+    };
+    let header_row = row_of("$ echo main");
+    let output_row = row_of("main-out");
+    assert!(
+        output_row > header_row && output_row - header_row <= 3,
+        "the output renders inside the foreign card, not the pane's stale row:\n{with_output}"
+    );
+    assert!(
+        !all.contains("himain-out"),
+        "the pane's settled row did not absorb the foreign chunks:\n{all}"
+    );
+}
+
 /// A `!` run during a streaming turn mounts above the execution
 /// indicator (TS `pendingMessagesContainer`) and flushes into the
 /// transcript when the turn ends (TS `flushPendingBashComponents`): the
