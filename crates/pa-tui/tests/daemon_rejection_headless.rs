@@ -519,6 +519,48 @@ fn dead_connection_on_prompt_still_exits_the_run() {
     );
 }
 
+/// A slash-prefixed follow-up keeps the follow-up lane (TS `onSubmit`
+/// passes its captured `streamingBehavior` to the fallthrough prompt, so
+/// alt+enter on unknown slash text parks on the follow-up lane, not the
+/// steering lane — Bugbot's lost-lane finding on the submit-ladder reroute).
+#[test]
+fn slash_fallthrough_follow_up_keeps_the_follow_up_lane() {
+    let steps = vec![
+        HeadlessStep::Type("first turn".to_string()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::WaitMs(200),
+        HeadlessStep::Type("/qqzz-not-a-command".to_string()),
+        HeadlessStep::Key(alt_enter()),
+        HeadlessStep::WaitMs(400),
+    ];
+    let run = run_plan_with(steps, |supervisor| {
+        supervisor.hold_turn_ms = HOLD_TURN_OPEN_MS;
+    })
+    .expect("interactive run");
+    assert_eq!(run.prompt_requests.len(), 2, "both prompts dispatched");
+    let lane = |index: usize| {
+        run.prompt_requests[index]
+            .get("streamingBehavior")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    // Enter stays the steer lane; the alt+enter slash fallthrough rides
+    // the follow-up lane to the daemon.
+    assert_eq!(lane(0).as_deref(), Some("steer"));
+    assert_eq!(
+        lane(1).as_deref(),
+        Some("followUp"),
+        "the slash fallthrough keeps the submit's follow-up lane: {lane1:?}",
+        lane1 = lane(1)
+    );
+    assert_eq!(
+        run.prompt_requests[1]
+            .get("message")
+            .and_then(Value::as_str),
+        Some("/qqzz-not-a-command")
+    );
+}
+
 /// Opening a saved session whose create the daemon refuses — "session
 /// worker create failed: Session is already active in <id>", another
 /// instance holding the session file — must not exit the client (Kevin's

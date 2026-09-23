@@ -1801,7 +1801,7 @@ impl SessionUi {
             return Ok(());
         }
         if text.starts_with('/') {
-            return self.handle_slash(text, view).await;
+            return self.handle_slash(text, behavior, view).await;
         }
         // TS `clearShortcutGuide`: every prompt submission dismisses the
         // `?` quick-shortcut guide (slash commands keep it).
@@ -2408,7 +2408,18 @@ impl SessionUi {
     /// commands (`compact`/`refine`/`goal`/`autonomous`) forward to the
     /// session, and unknown commands get the TS suggestion error — anything
     /// without a suggestion passes through as a prompt.
-    async fn handle_slash(&mut self, text: &str, view: &mut AgentView) -> Result<()> {
+    ///
+    /// `behavior` is TS `onSubmit`'s captured `streamingBehavior`: the
+    /// submit lane that carried the text (alt+enter = followUp), passed
+    /// through to every fallthrough prompt — TS sends the fallthrough with
+    /// the submit's own lane, so a slash-prefixed follow-up keeps parking
+    /// on the follow-up lane (Bugbot's lost-lane finding).
+    async fn handle_slash(
+        &mut self,
+        text: &str,
+        behavior: SubmitBehavior,
+        view: &mut AgentView,
+    ) -> Result<()> {
         let registry = SlashCommandRegistry::builtin();
         let (name, args) = pa_types::slash_commands::parse_slash_command(text)
             .unwrap_or_else(|| (String::new(), String::new()));
@@ -2446,7 +2457,7 @@ impl SessionUi {
             // bails out before fuzzy matching). Close typos get the exact TS
             // error; everything else passes through to the model.
             if name.chars().count() > 64 {
-                return self.send_prompt(text, SubmitBehavior::Steer, view).await;
+                return self.send_prompt(text, behavior, view).await;
             }
             let candidates = registry.suggestion_candidates();
             return match pa_types::slash_commands::find_slash_command_suggestion(&name, &candidates)
@@ -2458,7 +2469,7 @@ impl SessionUi {
                     );
                     Ok(())
                 }
-                None => self.send_prompt(text, SubmitBehavior::Steer, view).await,
+                None => self.send_prompt(text, behavior, view).await,
             };
         };
 
@@ -2466,9 +2477,7 @@ impl SessionUi {
             .get(resolved.name)
             .expect("resolved name is builtin");
         match command.execution {
-            SlashCommandExecution::Session => {
-                self.send_prompt(text, SubmitBehavior::Steer, view).await
-            }
+            SlashCommandExecution::Session => self.send_prompt(text, behavior, view).await,
             SlashCommandExecution::Client => {
                 self.dispatch_client_command(&resolved, text, view).await
             }
