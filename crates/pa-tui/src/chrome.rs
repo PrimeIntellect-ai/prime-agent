@@ -534,8 +534,17 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
         (ActivityGroup::Subagents, subagents),
         (ActivityGroup::Heartbeats, heartbeats),
         // Only live bash runs count in the dock's indicator (operator
-        // scoping); the panel keeps the dimmed finished rows.
-        (ActivityGroup::Bash, format!("▸ {} bash", dock.bash_running)),
+        // scoping); the panel keeps the dimmed finished rows. The dock
+        // segment is a UI label only: the tool name stays `bash` (Kevin
+        // directive, 2026-09-23 — the dock says "shell(s)").
+        (
+            ActivityGroup::Bash,
+            format!(
+                "▸ {} shell{}",
+                dock.bash_running,
+                if dock.bash_running == 1 { "" } else { "s" }
+            ),
+        ),
     ];
     let mut line = vec![Span::raw(" ")];
     for (index, (group, text)) in groups.iter().enumerate() {
@@ -613,7 +622,7 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             text,
-            " ◆ 95 subagents · 2 running  ·  ◷ 3 heartbeats · 1 paused  ·  ▸ 1 bash  ·  goal 18k/40k"
+            " ◆ 95 subagents · 2 running  ·  ◷ 3 heartbeats · 1 paused  ·  ▸ 1 shell  ·  goal 18k/40k"
         );
         // A running count of zero still renders: a long idle roster must
         // read as quiet, not as uniformly busy.
@@ -630,7 +639,7 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             text,
-            " ◆ 2 subagents · 0 running  ·  ◷ 1 heartbeat  ·  ▸ 0 bash"
+            " ◆ 2 subagents · 0 running  ·  ◷ 1 heartbeat  ·  ▸ 0 shells"
         );
         // Finished-only bash rows keep the dock mounted (the panel's
         // dimmed history stays reachable) while the indicator reads
@@ -644,7 +653,7 @@ mod tests {
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
-        assert!(text.contains("▸ 0 bash"));
+        assert!(text.contains("▸ 0 shells"));
         assert!(render_activity_dock(&ActivityDock::default(), &theme, 100).is_none());
     }
 
