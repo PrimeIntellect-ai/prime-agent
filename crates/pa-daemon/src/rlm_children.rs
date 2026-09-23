@@ -326,7 +326,11 @@ impl SupervisorChildSessions {
     /// The parent identity's model selector — the source an inherited
     /// spawn resolves; the engine keeps it in step with every live model
     /// change (the session build stamps it, a switch follows it).
-    pub fn parent_model(&self) -> Option<String> {
+    /// Test-only read: production spawn resolution reads the identity
+    /// field directly; this accessor exists so the switch-propagation
+    /// regression test can assert the registry's state.
+    #[cfg(test)]
+    pub(crate) fn parent_model(&self) -> Option<String> {
         self.inner
             .identity
             .lock()
