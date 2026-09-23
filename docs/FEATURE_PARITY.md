@@ -70,7 +70,11 @@ index model, and the editor-wrap-unicode lane verified the full
 wrap/width/marker surface against TS goldens and replayed the panic repro
 as a regression test, `cjk_wider_than_editor_does_not_panic`): the audit's
 `word_wrap_line` panic (`byte index is not a char boundary` on any
-non-ASCII prompt wider than the editor) is gone.
+non-ASCII prompt wider than the editor) is gone. The same crash class
+covers the TS `wordWrapLine` RangeError (a lone grapheme wider than the
+viewport recurses on the identical input until the stack dies) — the Rust
+port renders it as one oversized chunk instead
+(`oversized_lone_grapheme_wraps_without_recursion`).
 
 Notable systemic findings:
 - 30+ registered client commands fall through to "not available in this client yet"
@@ -401,7 +405,7 @@ Method: every TS file in `packages/tui/src` read in full; each behavior located 
 | components/editor.ts:251 | `Editor` state: lines/cursor, multi-line | crates/pa-tui/src/editor/mod.rs:61 | MATCHES | — |
 | components/editor.ts:456 | History navigation (up/down, 100 cap, dedupe, first-visual-line rules) | crates/pa-tui/src/editor/mod.rs:327 (`navigate_history`) + crates/pa-tui/src/editor/input.rs:178 | MATCHES | — |
 | components/editor.ts:938 | `layoutText`/word-wrap layout with cursor placement per chunk | crates/pa-tui/src/editor/layout.rs:8 | MATCHES | — |
-| components/editor.ts:119 | `wordWrapLine` (wrap opportunities, backtrack, atomic re-wrap) | crates/pa-tui/src/editor/wrap.rs — char-scalar `Segment.index` + byte-slice tables; wrap opportunities, backtrack, atomic re-wrap byte-exact vs TS on the CJK/emoji/ZWJ/combining-mark corpus + a 153-case ASCII replay golden (tests/fixtures/ascii-wrap-golden.json) | MATCHES | — |
+| components/editor.ts:119 | `wordWrapLine` (wrap opportunities, backtrack, atomic re-wrap) | crates/pa-tui/src/editor/wrap.rs — char-scalar `Segment.index` + byte-slice tables; wrap opportunities, backtrack, atomic re-wrap byte-exact vs TS on the CJK/emoji/ZWJ/combining-mark corpus + a 153-case ASCII replay golden (tests/fixtures/ascii-wrap-golden.json); a lone grapheme wider than max_width renders as one oversized chunk — TS recurses on the identical input and throws RangeError (stack overflow) there, so this is a hardening, not a divergence (`oversized_lone_grapheme_wraps_without_recursion`) | MATCHES | — |
 | components/editor.ts:44 | `segmentWithMarkers` (atomic paste/image markers by valid id) | crates/pa-tui/src/editor/wrap.rs — char-space marker spans; the scan matches the strict PASTE/IMAGE_MARKER_REGEX grammars (`parse_paste_marker`/`parse_image_marker`) and advances one char on a miss (`[[paste #1]]` keeps the inner marker); goldens vs the TS regexes | MATCHES | — |
 | components/editor.ts:1207 | `handlePaste` (large-paste markers >10 lines/>1000 chars, ctrl CSI-u decode, path space) | crates/pa-tui/src/editor/mod.rs:475 (marker logic + `decode_paste_ctrl_sequences` in text_utils.rs) | MATCHES | — |
 | components/editor.ts:1320 | Backspace (grapheme delete, line merge) | crates/pa-tui/src/editor/text_ops.rs:7 | MATCHES | — |
@@ -421,7 +425,7 @@ Method: every TS file in `packages/tui/src` read in full; each behavior located 
 | components/select-list.ts:189 | Metadata item: argumentHint + sourceTag columns | crates/pa-tui/src/autocomplete.rs:449 (`render_item` handles argumentHint; **sourceTag not rendered**) | PARTIAL | autocomplete-fd (new) |
 | components/select-list.ts:60 | `setFilter` (prefix filter, reset selection) | MISSING (dropdown re-filters via provider per keystroke; menu-panel pickers keep own filter) | PARTIAL | autocomplete-fd (new) |
 | components/settings-list.ts:34 | `SettingsList` (label/value rows, cycle, submenu, search) | crates/pa-tui/src/config_selector.rs (config selector surface; no generic submenu component) | PARTIAL | model-fix |
-| components/input.ts:18 | `Input` single-line model: kill ring, undo, word motion, CSI-u paste | crates/pa-tui/src/search_input.rs — grapheme-step cursor/deletion/word motion (kill ring + undo unchanged; positions char-scalar at grapheme boundaries) | MATCHES | — |
+| components/input.ts:18 | `Input` single-line model: kill ring, undo, word motion, CSI-u paste | crates/pa-tui/src/search_input.rs — grapheme-step cursor/deletion/word motion (kill ring + undo unchanged; positions char-scalar at grapheme boundaries); word-back walks the standalone-segmented before-cursor slice like TS `moveWordBackwards` — the run starts at the grapheme ending at the cursor, and mid-cluster cursor states match TS's slice segmentation (incl. the orphaned-mark backspace, which behaves identically in TS) | MATCHES | — |
 | components/input.ts:255 | `Input.render` (`> ` prompt, horizontal scroll) | crates/pa-tui/src/search_input.rs (cursor/column used by picker render; no own `> ` prefix render) | PARTIAL | model-fix |
 | components/box.ts:16 | `Box` (padding + bg + child cache) | MISSING (panel chrome hand-rolled per surface; no generic Box component) | MISSING | panel-nav |
 | components/loader.ts:15 | `Loader` (braille frames, 80ms interval, setIndicator) | crates/pa-tui/src/chat.rs:212 (`LOADER_FRAMES` + view pulse; 50ms loop tick) | PARTIAL | — |

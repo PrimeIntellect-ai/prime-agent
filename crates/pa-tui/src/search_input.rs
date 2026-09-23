@@ -300,30 +300,38 @@ impl SearchInput {
             .collect();
     }
 
-    /// Word-boundary walk (TS `moveWordBackwards`): grapheme by grapheme,
-    /// trailing whitespace first, then a punctuation or word run.
+    /// Word-boundary walk (TS `moveWordBackwards`): pop the trailing
+    /// whitespace graphemes of the before-cursor slice, then the
+    /// punctuation or word run in front of them. The slice is segmented
+    /// standalone, exactly like the TS original, so the run starts at the
+    /// grapheme that ends at the cursor and a mid-cluster cursor
+    /// classifies the partial cluster the same way TS does.
     fn move_word_backward(&mut self) {
-        let ends = self.grapheme_ends();
-        // The index of the grapheme the cursor sits after.
-        let mut idx = ends.partition_point(|e| *e < self.cursor);
-        while idx > 0 && self.grapheme_is_ws(idx - 1) {
-            idx -= 1;
-        }
-        if idx == 0 {
+        if self.cursor == 0 {
             return;
         }
-        let punctuation_run = self.grapheme_is_punct(idx - 1);
-        while idx > 0 {
+        use unicode_segmentation::UnicodeSegmentation;
+        let before: String = self.chars()[..self.cursor].iter().collect();
+        let mut graphemes: Vec<&str> = before.graphemes(true).collect();
+        while graphemes.last().is_some_and(|g| g.chars().any(is_ws)) {
+            let g = graphemes.pop().expect("last checked Some");
+            self.cursor -= g.chars().count();
+        }
+        let Some(last) = graphemes.last().copied() else {
+            return;
+        };
+        let punctuation_run = last.chars().any(is_punct);
+        while let Some(g) = graphemes.last().copied() {
             if punctuation_run {
-                if !self.grapheme_is_punct(idx - 1) {
+                if !g.chars().any(is_punct) {
                     break;
                 }
-            } else if self.grapheme_is_ws(idx - 1) || self.grapheme_is_punct(idx - 1) {
+            } else if g.chars().any(is_ws) || g.chars().any(is_punct) {
                 break;
             }
-            idx -= 1;
+            graphemes.pop();
+            self.cursor -= g.chars().count();
         }
-        self.cursor = if idx == 0 { 0 } else { ends[idx - 1] };
     }
 
     /// Word-boundary walk forward (TS `moveWordForwards`), grapheme by
@@ -624,5 +632,66 @@ mod tests {
         // The killed text is one kill-ring entry (the whole cluster run).
         input.handle_key("ctrl+y", &kb());
         assert_eq!(input.value(), "cafe\u{301} done");
+    }
+
+    // Review repro (PR #2600, Cursor Bugbot + Macroscope): word-back must
+    // classify the grapheme the cursor sits after. TS `moveWordBackwards`
+    // pops runs from the end of the standalone-segmented before-cursor
+    // slice; from the end of "abc!" it stops before the punctuation run
+    // (column 3), never at 0, and Ctrl-W kills only "!".
+    #[test]
+    fn word_back_classifies_the_grapheme_at_the_cursor() {
+        let mut input = typed("abc!");
+        input.handle_key("ctrl+left", &kb());
+        assert_eq!(input.cursor(), 3);
+        input.handle_key("ctrl+left", &kb());
+        assert_eq!(input.cursor(), 0);
+
+        // A punctuation run is one word class: both "!" go at once.
+        let mut bangs = typed("abc!!");
+        bangs.handle_key("ctrl+w", &kb());
+        assert_eq!(bangs.value(), "abc");
+        assert_eq!(bangs.cursor(), 3);
+        bangs.handle_key("ctrl+w", &kb());
+        assert_eq!(bangs.value(), "");
+        assert_eq!(bangs.cursor(), 0);
+
+        // The whitespace run before a word is skipped only up to the word.
+        let mut spaced = typed("   x");
+        spaced.handle_key("ctrl+left", &kb());
+        assert_eq!(spaced.cursor(), 3);
+
+        // A wide ZWJ family cluster is one grapheme of the word run.
+        let mut emoji = typed("ab\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}");
+        emoji.handle_key("ctrl+left", &kb());
+        assert_eq!(emoji.cursor(), 0);
+    }
+
+    // A mid-cluster cursor walks the before-cursor slice exactly like TS
+    // (standalone segmentation). Pasting a lone combining mark, moving
+    // Home, and typing "e" leaves the cursor inside the "e\u{301}" cluster:
+    // backspace deletes the standalone "e" and orphans the mark in BOTH
+    // implementations (TS `handleBackspace` segments value[..cursor]), and
+    // word-back walks the "e" word run to the start. The (value, cursor)
+    // pairs are pinned against the TS binary via the real input.ts class.
+    #[test]
+    fn mid_cluster_cursor_walks_the_before_cursor_slice() {
+        let mut input = SearchInput::new();
+        input.paste("\u{301}");
+        input.handle_key("home", &kb());
+        input.handle_key("e", &kb());
+        assert_eq!(input.value(), "e\u{301}");
+        assert_eq!(input.cursor(), 1);
+        input.handle_key("backspace", &kb());
+        assert_eq!(input.value(), "\u{301}");
+        assert_eq!(input.cursor(), 0);
+
+        let mut word = SearchInput::new();
+        word.paste("\u{301}");
+        word.handle_key("home", &kb());
+        word.handle_key("e", &kb());
+        word.handle_key("ctrl+w", &kb());
+        assert_eq!(word.value(), "\u{301}");
+        assert_eq!(word.cursor(), 0);
     }
 }

@@ -304,7 +304,19 @@ pub fn word_wrap_line(
 
         if g_width > max_width {
             // Atomic segment wider than the viewport: visual-only re-wrap.
-            let sub_chunks = word_wrap_line(grapheme, max_width, None);
+            // A lone grapheme cannot be segmented further — the TS original
+            // recurses on the identical input and dies with a RangeError
+            // (stack overflow) there — so it renders as one oversized
+            // chunk instead of recursing forever.
+            let sub_chunks = if graphemes(grapheme).len() == 1 {
+                vec![TextChunk {
+                    text: grapheme.to_string(),
+                    start_index: 0,
+                    end_index: grapheme.chars().count(),
+                }]
+            } else {
+                word_wrap_line(grapheme, max_width, None)
+            };
             let mut sub_byte = byte_index;
             for sc in &sub_chunks[..sub_chunks.len() - 1] {
                 chunks.push(TextChunk {
@@ -376,6 +388,72 @@ mod tests {
         for c in &chunks {
             assert!(str_width(&c.text) <= 10, "chunk too wide: {:?}", c.text);
         }
+    }
+
+    // Review repro (PR #2600, Macroscope): a lone grapheme wider than
+    // max_width recursed on its own input forever — the TS original dies
+    // with a RangeError (stack overflow) on the same call. It renders as
+    // one oversized chunk instead; multi-grapheme atomic segments keep
+    // the TS grapheme-granular re-wrap (verified against the TS binary).
+    #[test]
+    fn oversized_lone_grapheme_wraps_without_recursion() {
+        let chunks = word_wrap_line("你", 1, None);
+        assert_eq!(
+            chunks,
+            vec![TextChunk {
+                text: "你".into(),
+                start_index: 0,
+                end_index: 1
+            }]
+        );
+        // Mixed line: each segment gets its own (oversized) chunk.
+        let mixed = word_wrap_line("a你b", 1, None);
+        assert_eq!(
+            mixed,
+            vec![
+                TextChunk {
+                    text: "a".into(),
+                    start_index: 0,
+                    end_index: 1
+                },
+                TextChunk {
+                    text: "你".into(),
+                    start_index: 1,
+                    end_index: 2
+                },
+                TextChunk {
+                    text: "b".into(),
+                    start_index: 2,
+                    end_index: 3
+                },
+            ]
+        );
+        // A multi-grapheme atomic segment still re-wraps at grapheme
+        // granularity (the TS recursion path, pinned to the binary).
+        let marker = "[image #12]";
+        let chunks = word_wrap_line(
+            marker,
+            8,
+            Some(vec![Segment {
+                segment: marker.to_string(),
+                index: 0,
+            }]),
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                TextChunk {
+                    text: "[image ".into(),
+                    start_index: 0,
+                    end_index: 7
+                },
+                TextChunk {
+                    text: "#12]".into(),
+                    start_index: 7,
+                    end_index: 11
+                },
+            ]
+        );
     }
 
     fn assert_wraps_back_to_source(line: &str, max_width: usize) -> Vec<TextChunk> {
