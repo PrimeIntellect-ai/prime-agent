@@ -12069,6 +12069,7 @@ export class AgentSession {
 		return {
 			id: childId,
 			prompt: subagent.label ?? "",
+			label: rlmChildLabel(subagent.label ?? ""),
 			sessionName: subagent.session_name,
 			sessionDir: subagent.session_dir,
 			model: retained?.session.model ?? this.model ?? UNKNOWN_RLM_CHILD_MODEL,
