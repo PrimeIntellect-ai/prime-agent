@@ -36,6 +36,7 @@ pub(crate) mod session_export;
 /// The runtime boundary: everything a mode-runner crate implements to plug
 /// into the `prime-agent` binary, plus the entry point that drives it.
 pub use mode::{AppMode, MissingSubsystem, RunOptions, Runtime, UnavailableRuntime};
+pub(crate) mod piped_stdin;
 pub(crate) mod print_autonomous;
 pub(crate) mod print_boundary;
 pub(crate) mod print_goal;
@@ -137,10 +138,10 @@ fn main_impl(args: Vec<String>, runtime: &dyn mode::Runtime) -> Result<i32, Stri
 
     if matches!(
         parsed.mode,
-        Some(args::Mode::Rpc) | Some(args::Mode::Daemon)
+        Some(args::Mode::Rpc) | Some(args::Mode::Daemon) | Some(args::Mode::Acp)
     ) && !parsed.file_args.is_empty()
     {
-        return Err("@file arguments are not supported in RPC or daemon mode".to_string());
+        return Err("@file arguments are not supported in RPC, daemon, or ACP mode".to_string());
     }
 
     // Daemon worker processes start with the worker role env var set (TS
@@ -223,14 +224,17 @@ fn main_impl(args: Vec<String>, runtime: &dyn mode::Runtime) -> Result<i32, Stri
         .or_else(|| pa_core::settings::SettingsManager::create(&cwd, &agent_dir).get_session_dir());
 
     let mut cli_messages = parsed.messages.clone();
-    // TS `readPipedStdin`: a piped (non-terminal) stdin joins the initial
-    // prompt; a terminal stdin is never read.
-    let stdin_content = if std::io::stdin().is_terminal() {
+    // TS main's startup branches read piped stdin for every mode but the
+    // stdio-protocol ones (rpc/acp/daemon keep stdin for the transport),
+    // with the idle window so an open, silent pipe cannot hang the boot.
+    let stdin_content = if matches!(app_mode, AppMode::Rpc | AppMode::Acp | AppMode::Daemon) {
         None
     } else {
-        let mut buffer = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer).ok();
-        Some(buffer).filter(|content| !content.is_empty())
+        piped_stdin::read_piped_stdin(piped_stdin::resolve_stdin_idle_timeout_ms(
+            std::env::var(piped_stdin::STDIN_IDLE_TIMEOUT_MS_ENV)
+                .ok()
+                .as_deref(),
+        ))
     };
     // TS `prepareInitialMessage`: `@file` arguments expand into text and
     // image attachments for the initial prompt; the file blocks ride

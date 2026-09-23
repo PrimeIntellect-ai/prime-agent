@@ -74,13 +74,14 @@ pub fn process_file_arguments(
                     .text
                     .push_str(&format!("<file name=\"{resolved}\"></file>\n"));
             }
-            // Not an image: embed the UTF-8 content in a file block.
+            // Not an image: embed the content in a file block. Node's
+            // utf-8 read decodes invalid sequences lossily (U+FFFD), so
+            // binary non-image files embed instead of failing the run.
             Ok(None) => {
-                let content = std::fs::read_to_string(&absolute_path).map_err(|error| {
-                    FileProcessingError {
-                        message: format!("Error: Could not read file {resolved}: {error}"),
-                    }
+                let bytes = std::fs::read(&absolute_path).map_err(|error| FileProcessingError {
+                    message: format!("Error: Could not read file {resolved}: {error}"),
                 })?;
+                let content = String::from_utf8_lossy(&bytes);
                 processed
                     .text
                     .push_str(&format!("<file name=\"{resolved}\">\n{content}\n</file>\n"));
@@ -186,6 +187,18 @@ mod tests {
         assert!(processed
             .text
             .contains("[Image omitted: could not be resized below the inline image size limit.]"));
+    }
+
+    #[test]
+    fn non_utf8_files_embed_lossily() {
+        let (_guard, dir) = temp_dir();
+        let file = dir.join("blob.bin");
+        std::fs::write(&file, [0xff, 0xfe, b'x']).expect("write fixture");
+        let processed = process_file_arguments(&[file.to_string_lossy().to_string()], &dir, true)
+            .expect("process");
+        assert!(processed.text.contains('x'));
+        assert!(processed.text.contains('\u{fffd}'));
+        assert_eq!(processed.images, Vec::new());
     }
 
     #[test]
