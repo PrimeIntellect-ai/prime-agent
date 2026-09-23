@@ -253,13 +253,14 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
             .expect("agents view run")
             .outcome;
 
-    // Collapsed: the parent row and its `1 subagent` summary row, with the
-    // child (and the grandchild under it) reachable only through the
-    // summary row.
+    // Collapsed: the parent row and its `2 subagents` summary row — the
+    // label aggregates the whole descendant tree (the child and the
+    // grandchild under it, Kevin's dogfood ask), with both reachable only
+    // through the summary row.
     let collapsed = first_frame_of(&view.frames, "orchestrator chat");
     assert!(
-        collapsed.contains("\u{25b8} 1 subagent"),
-        "the collapsed parent shows its summary row:\n{collapsed}"
+        collapsed.contains("\u{25b8} 2 subagents"),
+        "the collapsed parent shows its tree-aggregated summary row:\n{collapsed}"
     );
     assert!(
         !collapsed.contains("worker alpha"),
@@ -271,8 +272,8 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // row keeps the grandchild hidden until the child expands too.
     let expanded = first_frame_of(&view.frames, "worker alpha");
     assert!(
-        expanded.contains("\u{25be} 1 subagent"),
-        "the expanded summary row flips its marker:\n{expanded}"
+        expanded.contains("\u{25be} 2 subagents"),
+        "the expanded summary row keeps the tree aggregate and flips its marker:\n{expanded}"
     );
     assert!(
         !expanded.contains("nested alpha child"),

@@ -566,8 +566,6 @@ struct BaseRow {
     recursive_cost: f64,
     descendant_count: usize,
     running_subagent_count: usize,
-    /// Direct nested children under this row (TS `children.length`).
-    direct_children: usize,
     record: usize,
 }
 
@@ -669,7 +667,6 @@ pub fn build_rows(
             recursive_cost: rollup.cost,
             descendant_count: rollup.descendant_count,
             running_subagent_count: 0,
-            direct_children: 0,
             summary,
             record: position,
         });
@@ -730,16 +727,13 @@ pub fn build_rows(
         let mut running = 0;
         let mut descendants = 0;
         let mut descendants_cost = 0.0;
-        let mut direct = 0;
         for child in children_by_parent.get(index).into_iter().flatten() {
             running += (base[*child].section == Section::Running) as usize
                 + base[*child].running_subagent_count;
             descendants += 1 + base[*child].descendant_count;
             descendants_cost += base[*child].recursive_cost;
-            direct += 1;
         }
         base[*index].running_subagent_count = running;
-        base[*index].direct_children = direct;
         // Rollups follow the unfiltered hierarchy; the per-pass walk is the
         // fallback when the caller passed none (TS `rollup ?? descendants`).
         if !rollups.contains_key(&base[*index].identity) {
@@ -833,10 +827,13 @@ fn agents_row(row: &BaseRow, depth: usize, parent_identity: Option<&str>) -> Age
 }
 
 /// The `N subagents` summary row under one agent (TS
-/// `createSubagentSummaryRow`): finished subagents stay reachable through
-/// it even when nothing is running anymore.
+/// `createSubagentSummaryRow`, with Kevin's dogfood divergence: the count
+/// aggregates the whole descendant tree — the row under a parent that runs
+/// one child which itself runs grandchildren shows every descendant, not
+/// just the direct-children list): finished subagents stay reachable
+/// through it even when nothing is running anymore.
 fn subagent_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsViewRow {
-    let total = parent.direct_children;
+    let total = parent.descendant_count;
     let running = parent.running_subagent_count;
     let title = if running > 0 {
         format!(
@@ -1153,6 +1150,46 @@ mod tests {
         assert_eq!(rows[4].kind, RowKind::Subagent);
         assert_eq!(rows[4].depth, 2);
         assert_eq!(rows[4].title, "grandchild");
+    }
+
+    #[test]
+    fn idle_descendants_aggregate_into_the_summary_row() {
+        let mut grandchild = child_summary("gc", "c", "grandchild");
+        grandchild["rlmChildId"] = json!("child-gc");
+        let roster = vec![
+            roster_entry("p", "idle", parent_summary("p")),
+            roster_entry("c", "idle", child_summary("c", "p", "worker one")),
+            roster_entry("gc", "idle", grandchild),
+        ];
+        // Kevin's dogfood ask: the `N subagents` row under a parent counts
+        // every descendant of the subtree, not just its direct children —
+        // one child that itself runs a grandchild reads `2 subagents`
+        // (TS shows the direct-children list here; this divergence is the
+        // explicit product ask).
+        let rows = rows_for(&roster, None, &[]);
+        assert_eq!(rows[1].title, "2 subagents");
+        // The child's own summary row keeps the same walk: one grandchild.
+        let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
+        let child_summary_row = rows
+            .iter()
+            .find(|row| row.kind == RowKind::SubagentSummary && row.depth == 2)
+            .expect("child summary row");
+        assert_eq!(child_summary_row.title, "1 subagent");
+    }
+
+    #[test]
+    fn running_descendants_aggregate_into_the_summary_row() {
+        let mut grandchild = child_summary("gc", "c", "grandchild");
+        grandchild["rlmChildId"] = json!("child-gc");
+        let roster = vec![
+            roster_entry("p", "idle", parent_summary("p")),
+            roster_entry("c", "running", child_summary("c", "p", "worker one")),
+            roster_entry("gc", "running", grandchild),
+        ];
+        // A busy subtree runs at any depth: the running label counts the
+        // child and its grandchild (TS parity for the running branch).
+        let rows = rows_for(&roster, None, &[]);
+        assert_eq!(rows[1].title, "2 subagents running");
     }
 
     #[test]
