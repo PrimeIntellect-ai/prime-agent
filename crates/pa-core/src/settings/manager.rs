@@ -33,6 +33,12 @@ pub struct SettingsManager {
     merged: Settings,
     runtime_overrides: Settings,
     errors: Vec<SettingsError>,
+    /// The raw global document (the parsed JSON before the lenient field
+    /// load). The daemon model allowlist distinguishes an ABSENT
+    /// `allowedModels` key (unrestricted) from a PRESENT-but-malformed one
+    /// (the security gate fails closed) — the typed `Settings` drops both
+    /// to `None`, so the raw value is the only witness.
+    global_raw: Option<serde_json::Value>,
     /// Load failures per scope; a scope whose file failed to parse is never
     /// written back (the TS `save` guard against clobbering bad settings).
     global_load_error: Option<String>,
@@ -43,10 +49,10 @@ impl SettingsManager {
     /// Load global + project settings from a storage backend.
     pub fn from_storage(storage: Arc<dyn SettingsStorage>) -> Self {
         let mut errors = Vec::new();
-        let global = load_scope(storage.as_ref(), SettingsScope::Global, &mut errors);
-        let project = load_scope(storage.as_ref(), SettingsScope::Project, &mut errors);
-        let (global, global_load_error) = global;
-        let (project, project_load_error) = project;
+        let (global, global_raw, global_load_error) =
+            load_scope(storage.as_ref(), SettingsScope::Global, &mut errors);
+        let (project, _, project_load_error) =
+            load_scope(storage.as_ref(), SettingsScope::Project, &mut errors);
         let merged = deep_merge(&global, &project);
         Self {
             storage,
@@ -54,6 +60,7 @@ impl SettingsManager {
             project,
             merged,
             runtime_overrides: Settings::default(),
+            global_raw,
             errors,
             global_load_error,
             project_load_error,
@@ -95,6 +102,13 @@ impl SettingsManager {
         &self.global
     }
 
+    /// The raw global document (post-migration, pre-lenient-load value);
+    /// `None` when the scope has no document or it failed to parse (the
+    /// load error covers the latter).
+    pub fn global_raw(&self) -> Option<&serde_json::Value> {
+        self.global_raw.as_ref()
+    }
+
     pub fn project_settings(&self) -> &Settings {
         &self.project
     }
@@ -112,12 +126,13 @@ impl SettingsManager {
     /// Reload both scopes from storage.
     pub fn reload(&mut self) -> Result<()> {
         let mut errors = std::mem::take(&mut self.errors);
-        let (global, global_load_error) =
+        let (global, global_raw, global_load_error) =
             load_scope(self.storage.as_ref(), SettingsScope::Global, &mut errors);
-        let (project, project_load_error) =
+        let (project, _, project_load_error) =
             load_scope(self.storage.as_ref(), SettingsScope::Project, &mut errors);
         self.global = global;
         self.project = project;
+        self.global_raw = global_raw;
         self.global_load_error = global_load_error;
         self.project_load_error = project_load_error;
         self.errors = errors;
@@ -760,11 +775,17 @@ fn strings(array: &[serde_json::Value]) -> Vec<String> {
         .collect()
 }
 
+/// One loaded scope: the leniently-parsed settings, the migrated raw
+/// document (the value before the lenient field load — the only witness
+/// for a PRESENT-but-malformed known field, which the lenient load drops),
+/// and the load error (`Some` when the scope's document exists but could
+/// not be read or parsed).
+#[allow(clippy::type_complexity)]
 fn load_scope(
     storage: &dyn SettingsStorage,
     scope: SettingsScope,
     errors: &mut Vec<SettingsError>,
-) -> (Settings, Option<String>) {
+) -> (Settings, Option<serde_json::Value>, Option<String>) {
     let mut content: Option<String> = None;
     let mut load_error: Option<String> = None;
     let result = storage.with_lock(scope, &mut |current| {
@@ -776,10 +797,10 @@ fn load_scope(
             scope,
             message: error.to_string(),
         });
-        return (Settings::default(), Some(error.to_string()));
+        return (Settings::default(), None, Some(error.to_string()));
     }
     let Some(content) = content else {
-        return (Settings::default(), None);
+        return (Settings::default(), None, None);
     };
     let value: serde_json::Value = match serde_json::from_str(&content) {
         Ok(value) => value,
@@ -793,7 +814,7 @@ fn load_scope(
             scope,
             message: message.clone(),
         });
-        return (Settings::default(), Some(message));
+        return (Settings::default(), None, Some(message));
     }
     // Migrate the raw document, then load leniently.
     let migrated = match value {
@@ -803,7 +824,7 @@ fn load_scope(
         }
         other => other,
     };
-    (from_value_lenient(&migrated), None)
+    (from_value_lenient(&migrated), Some(migrated), None)
 }
 
 #[cfg(test)]

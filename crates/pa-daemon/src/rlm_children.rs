@@ -1204,7 +1204,14 @@ fn custom_message_text(message: &pa_types::session::CustomMessage) -> Option<Str
 /// enforced (the parent's cwd scopes the settings read): a refusal fails
 /// the spawn/create_session loudly with the typed error and emits the
 /// `model refused` adoption event through the worker's shared client.
-fn resolve_child_model_allowlisted(
+/// Resolve the child model with the daemon `allowedModels` allowlist
+/// enforced (the parent's cwd scopes the settings read), refusing a model
+/// outside the allowlist loudly with the typed error and emitting the
+/// `model refused` adoption event through the worker's shared client. The
+/// settings read (a synchronous file lock under `with_lock`) runs on the
+/// blocking pool, so a contended settings lock never stalls this async
+/// spawn path's Tokio worker.
+async fn resolve_child_model_allowlisted(
     this: &SupervisorChildSessionsInner,
     reference: Option<&str>,
     surface: &'static str,
@@ -1212,13 +1219,19 @@ fn resolve_child_model_allowlisted(
 ) -> Result<String> {
     let identity = this.identity.lock().expect("identity lock").clone();
     let cwd = identity.cwd.clone().unwrap_or_else(|| "/".to_string());
-    let allowlist = crate::model_allowlist::load(Path::new(&cwd), &this.agent_dir);
+    let load_cwd = cwd.clone();
+    let agent_dir = this.agent_dir.clone();
+    let allowlist = tokio::task::spawn_blocking(move || {
+        crate::model_allowlist::load(Path::new(&load_cwd), &agent_dir)
+    })
+    .await
+    .context("the allowlist load task join failed")?;
     match resolve_child_model(
         &this.agent_dir,
         reference,
         identity.model.as_deref(),
         target,
-        Some(&allowlist),
+        &allowlist,
     ) {
         Ok(model) => Ok(model),
         Err(error) => {
@@ -1257,7 +1270,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 request.model.as_deref(),
                 "spawn",
                 "subagent",
-            )?;
+            )
+            .await?;
             assert_thinking_supported(&this.agent_dir, request.thinking.as_deref(), &model)?;
             let thinking = request.thinking.as_deref().or(identity.thinking.as_deref());
             let child_dir = this.child_session_dir(&child_id, &identity)?;
@@ -1386,7 +1400,8 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 request.model.as_deref(),
                 "create_session",
                 "top-level session",
-            )?;
+            )
+            .await?;
             assert_thinking_supported(&this.agent_dir, request.thinking.as_deref(), &model)?;
             // A depth-0 resident session is created exactly like a client
             // `create`: the shared sessions dir and the requested cwd

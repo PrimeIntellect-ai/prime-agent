@@ -49,7 +49,7 @@ impl Worker {
         };
         let allowlist =
             crate::model_allowlist::load(std::path::Path::new(&cwd), &self.config.agent_dir);
-        if let Err(refusal) = crate::model_allowlist::assert_allowed(Some(&allowlist), &selector) {
+        if let Err(refusal) = crate::model_allowlist::assert_allowed(&allowlist, &selector) {
             if let Some(agent_engine) = &self.agent_engine {
                 agent_engine.note_model_refused("set_model", &selector);
             }

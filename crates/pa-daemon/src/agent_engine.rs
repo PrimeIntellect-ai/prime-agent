@@ -1047,8 +1047,6 @@ impl AgentSessionEngine {
 <<<<<<< HEAD
         if let Err(refusal) = crate::model_allowlist::assert_allowed(&allowlist, &selector) {
             if let Some(refusal) = refusal.downcast_ref::<pa_core::models::ModelAllowlistRefusal>() {
-=======
-        if let Err(refusal) = crate::model_allowlist::assert_allowed(Some(&allowlist), &selector) {
             if let Some(refusal) = refusal.downcast_ref::<pa_core::models::ModelAllowlistRefusal>()
             {
 >>>>>>> 11040b22c (fix(pa-daemon): the model allowlist fails closed on unreadable settings (Macroscope #2585))
@@ -1960,7 +1958,7 @@ impl SessionEngine for AgentSessionEngine {
         {
             let selector = format!("{provider}/{model}");
             let allowlist = crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir);
-            if crate::model_allowlist::assert_allowed(Some(&allowlist), &selector).is_err() {
+            if crate::model_allowlist::assert_allowed(&allowlist, &selector).is_err() {
                 return false;
             }
         }

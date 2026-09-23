@@ -39,7 +39,28 @@ pub(crate) fn load(cwd: &Path, agent_dir: &Path) -> DaemonAllowlist {
     }
     match settings.get_allowed_models() {
         Some(patterns) => DaemonAllowlist::Allowed(patterns),
-        None => DaemonAllowlist::Unrestricted,
+        None => {
+            // A PRESENT-but-malformed `allowedModels` (the lenient load
+            // drops wrong-typed known fields to unset) fails closed: the
+            // restriction was requested, so an unreadable shape is never an
+            // unrestricted gate. Explicit `null` stays unset (TS parity).
+            let malformed =
+                settings
+                    .global_raw()
+                    .is_some_and(|raw| match raw.get("allowedModels") {
+                        None | Some(serde_json::Value::Null) => false,
+                        Some(value) => value
+                            .as_array()
+                            .is_none_or(|items| items.iter().any(|item| item.as_str().is_none())),
+                    });
+            if malformed {
+                DaemonAllowlist::Unreadable(
+                    "allowedModels is present but is not an array of strings".to_string(),
+                )
+            } else {
+                DaemonAllowlist::Unrestricted
+            }
+        }
     }
 }
 
@@ -47,10 +68,10 @@ pub(crate) fn load(cwd: &Path, agent_dir: &Path) -> DaemonAllowlist {
 /// (and when no allowlist is configured), the loud typed refusal for an
 /// off-allowlist model, and a fail-closed error when the configured
 /// policy could not be read.
-pub(crate) fn assert_allowed(allowlist: Option<&DaemonAllowlist>, selector: &str) -> Result<()> {
+pub(crate) fn assert_allowed(allowlist: &DaemonAllowlist, selector: &str) -> Result<()> {
     match allowlist {
-        None | Some(DaemonAllowlist::Unrestricted) => Ok(()),
-        Some(DaemonAllowlist::Allowed(patterns)) => {
+        DaemonAllowlist::Unrestricted => Ok(()),
+        DaemonAllowlist::Allowed(patterns) => {
             if pa_core::models::model_allowed(selector, patterns) {
                 Ok(())
             } else {
@@ -60,8 +81,8 @@ pub(crate) fn assert_allowed(allowlist: Option<&DaemonAllowlist>, selector: &str
                 .into())
             }
         }
-        Some(DaemonAllowlist::Unreadable(error)) => Err(anyhow::anyhow!(
-            "The daemon model allowlist could not be read (settings load failed: {error}); \
+        DaemonAllowlist::Unreadable(error) => Err(anyhow::anyhow!(
+            "The daemon model allowlist could not be read ({error}); \
              refusing to resolve model \"{selector}\" — the daemon fails closed instead of \
              bypassing the configured allowedModels policy. Fix settings.json and retry."
         )),
@@ -194,13 +215,12 @@ mod tests {
     #[test]
     fn assert_allowed_passes_without_an_allowlist_and_types_the_refusal() {
         // No allowlist: everything passes (TS parity).
-        assert_allowed(None, "anything/model").unwrap();
-        assert_allowed(Some(&DaemonAllowlist::Unrestricted), "anything/model").unwrap();
+        assert_allowed(&DaemonAllowlist::Unrestricted, "anything/model").unwrap();
         // Allowed by the allowlist.
         let allow = DaemonAllowlist::Allowed(vec!["prime-inference/*".to_string()]);
-        assert_allowed(Some(&allow), "prime-inference/internal/glm-5.3-fast").unwrap();
+        assert_allowed(&allow, "prime-inference/internal/glm-5.3-fast").unwrap();
         // Refused: the typed error downcasts for the telemetry seam.
-        let error = assert_allowed(Some(&allow), "zai/glm-5.3").expect_err("refused");
+        let error = assert_allowed(&allow, "zai/glm-5.3").expect_err("refused");
         let refusal = error
             .downcast_ref::<ModelAllowlistRefusal>()
             .expect("typed refusal");
@@ -219,8 +239,7 @@ mod tests {
         let state = load(dir.path(), &agent_dir);
         assert!(matches!(state, DaemonAllowlist::Unreadable(_)));
         // The gate refuses a would-be-allowed model while unreadable...
-        let error =
-            assert_allowed(Some(&state), "prime-inference/mock-1").expect_err("fail closed");
+        let error = assert_allowed(&state, "prime-inference/mock-1").expect_err("fail closed");
         let message = error.to_string();
         assert!(message.contains("could not be read"), "{message}");
         assert!(message.contains("fails closed"), "{message}");
@@ -232,6 +251,50 @@ mod tests {
         std::fs::remove_file(agent_dir.join("settings.json")).unwrap();
         let state = load(dir.path(), &agent_dir);
         assert!(matches!(state, DaemonAllowlist::Unrestricted));
+    }
+
+    /// A PRESENT-but-malformed `allowedModels` (a wrong-typed known field,
+    /// which the lenient settings load drops to unset) fails closed instead
+    /// of silently unrestricted; an explicit `null` stays unset (TS parity).
+    #[test]
+    fn a_malformed_allowed_models_value_fails_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            r#"{"allowedModels": "prime-inference/*"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            load(dir.path(), &agent_dir),
+            DaemonAllowlist::Unreadable(_)
+        ));
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            r#"{"allowedModels": ["prime-inference/*", 42]}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            load(dir.path(), &agent_dir),
+            DaemonAllowlist::Unreadable(_)
+        ));
+        // Explicit null behaves as unset, and a valid empty list stays
+        // unrestricted (the documented trim rule).
+        std::fs::write(
+            agent_dir.join("settings.json"),
+            r#"{"allowedModels": null}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            load(dir.path(), &agent_dir),
+            DaemonAllowlist::Unrestricted
+        ));
+        std::fs::write(agent_dir.join("settings.json"), r#"{"allowedModels": []}"#).unwrap();
+        assert!(matches!(
+            load(dir.path(), &agent_dir),
+            DaemonAllowlist::Unrestricted
+        ));
     }
 
     #[tokio::test]
