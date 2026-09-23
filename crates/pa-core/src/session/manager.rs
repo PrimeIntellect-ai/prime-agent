@@ -1942,7 +1942,7 @@ mod tests {
         let dir = tmp.path().join("sessions");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("torn.jsonl");
-        let content = "{\"type\":\"session\",\"id\":\"torn-head\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}\n{\"type\":\"custom\",\"customType\":\"kept\",\"data\":{},\"id\":\"keep1\",\"parentId\":null,\"timestamp\":\"2024-01-01T00:00:00.000Z\"}\n{\"type\":\"custo";
+        let content = "{\"type\":\"session\",\"version\":3,\"id\":\"torn-head\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}\n{\"type\":\"custom\",\"customType\":\"kept\",\"data\":{},\"id\":\"keep1\",\"parentId\":null,\"timestamp\":\"2024-01-01T00:00:00.000Z\"}\n{\"type\":\"custo";
         std::fs::write(&file, content).unwrap();
         let target_dir = tmp.path().join("fork-sessions");
         let forked = SessionManager::fork_from(&file, tmp.path(), &target_dir)
@@ -1967,7 +1967,7 @@ mod tests {
         // A hand-written source: a valid header, two git_state rows that
         // parent at each other, and a surviving custom row under one of them.
         let file = dir.join("cyclic.jsonl");
-        let header = "{\"type\":\"session\",\"id\":\"cyc-head\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}";
+        let header = "{\"type\":\"session\",\"version\":3,\"id\":\"cyc-head\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}";
         let git_a = "{\"type\":\"git_state\",\"git\":{},\"id\":\"cyc01\",\"parentId\":\"cyc02\",\"timestamp\":\"2024-01-01T00:00:00.000Z\"}";
         let git_b = "{\"type\":\"git_state\",\"git\":{},\"id\":\"cyc02\",\"parentId\":\"cyc01\",\"timestamp\":\"2024-01-01T00:00:00.000Z\"}";
         let custom = "{\"type\":\"custom\",\"customType\":\"survivor\",\"data\":{},\"id\":\"cyc03\",\"parentId\":\"cyc01\",\"timestamp\":\"2024-01-01T00:00:00.000Z\"}";
