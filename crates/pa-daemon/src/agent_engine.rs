@@ -109,7 +109,7 @@ pub(crate) struct GoalRuntimeHandles {
 
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
-    pub(crate) runtime: tokio::runtime::Runtime,
+    pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
     pub(crate) config: AgentEngineConfig,
     /// The session-scoped ACP MCP store (TS `session._mcpManager`): shared
     /// with the core engine's prompt gating, so admitted servers are one
@@ -287,9 +287,7 @@ pub struct AgentSessionEngine {
 
 impl AgentSessionEngine {
     pub fn new(config: AgentEngineConfig) -> anyhow::Result<Self> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?;
+        let runtime = crate::async_safe_runtime::AsyncSafeRuntime::new_multi_thread()?;
         let session_file = std::sync::Mutex::new(config.session_file.clone());
         // Process-level fallback: the create config, else the worker env
         // pair. A create command with explicit wire flags overrides both.
