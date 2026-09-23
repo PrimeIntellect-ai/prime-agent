@@ -3814,20 +3814,22 @@ impl Supervisor {
         }
         // TS daemon-supervisor.ts: only a `client_owned`-lifecycle create
         // is client-owned (`ownerClientId = command.lifecycle ===
-        // "client_owned" ? clientId : undefined`). Every RLM child spawn
+        // "client_owned" ? clientId : undefined`); unspecified and
+        // `Resident` lifecycles are unowned. Every RLM child spawn
         // declares `Resident`, so a spawned child never inherits the
         // spawning client's ownership: passivation deletes an owned
         // worker's rows, and a stopped child under a surviving root must
-        // passivate instead (the walk e2e asserts the seeded passive row
-        // survives the kill). Other creates keep the port's existing
-        // owner marking.
+        // passivate instead (the walk e2e asserts the passive row
+        // survives the kill). A `None`-lifecycle create being owner-
+        // marked would hide its live session from every other client
+        // (`assertWorkerAccessibleToClient`), so it stays unowned too.
         let create_lifecycle = match command {
             DaemonCommand::Create { lifecycle, .. } => *lifecycle,
             _ => None,
         };
         let owner_client_id = match create_lifecycle {
-            Some(DaemonSessionLifecycle::Resident) => None,
-            _ => Some(client_id),
+            Some(DaemonSessionLifecycle::ClientOwned) => Some(client_id),
+            _ => None,
         };
         let (resident, create_summary) = self.launch_worker(command, owner_client_id).await?;
         // The launch registered its worker (the registry insert precedes
