@@ -253,9 +253,7 @@ impl WindowedSessionStore {
                         | "agent_status"
                         | "git_state"
                         | "child_usage_attributed"
-                ) || (meta.kind == "custom"
-                    && meta.custom_type.as_deref()
-                        == Some(crate::session_engine::refine::REFINEMENT_AUDIT_CUSTOM_TYPE)))
+                ))
             {
                 metadata_entries.push(
                     String::from_utf8(line.clone())
@@ -415,14 +413,6 @@ impl WindowedSessionStore {
                         .is_some_and(|id| retained_ids.contains(id)) =>
                 {
                     latest.insert(format!("attribution:{}", value["targetId"]), index);
-                }
-                // Every refinement audit stays: refinement_history() is a
-                // complete list, not a latest-wins setting.
-                "custom"
-                    if value["customType"].as_str()
-                        == Some(crate::session_engine::refine::REFINEMENT_AUDIT_CUSTOM_TYPE) =>
-                {
-                    keep.insert(index);
                 }
                 _ => {}
             }
