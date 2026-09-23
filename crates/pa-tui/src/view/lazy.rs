@@ -69,15 +69,17 @@ impl AgentView {
 
     /// Fold a chat append or entry growth of `delta` rows at entry
     /// `index` into the sparse window's bookkeeping (TS keeps `scrollTop`
-    /// while content appends: a paused window stays on its rows, and the
-    /// scroll room below it grows with the content). A Tail-anchored
-    /// window keeps its mapping when the growth sits at or below its
-    /// first visible entry: the anchor distance moves with the growth and
-    /// the tail-relative selection endpoints move with it; growth ABOVE
-    /// the window leaves every row's distance-from-the-end unchanged, so
-    /// nothing moves. A Top-anchored window (absolute rows) never moves;
-    /// only the scroll bound grows. Without a sparse window (exact
-    /// geometry) the next frame's layout pass recomputes everything.
+    /// while content changes: a paused window stays on its absolute row,
+    /// and the scroll room below it grows with the content). A paused
+    /// Tail-anchored window keeps that absolute row wherever the growth
+    /// lands: the anchor distance grows by `delta`, the tail-relative
+    /// selection endpoints move with growth at or below them, and a
+    /// walked cursor above the growth re-walks the shifted rows through
+    /// `pending`. A Top-anchored window (absolute rows) never moves;
+    /// only the scroll bound grows. A following window re-derives from
+    /// the end, so its distance stays zero. Without a sparse window
+    /// (exact geometry) the next frame's layout pass recomputes
+    /// everything.
     pub(super) fn sparse_tail_delta(&mut self, delta: isize, index: usize) {
         if delta == 0 {
             return;
@@ -97,13 +99,18 @@ impl AgentView {
                     Some((section, _)) => index + 1 < section,
                     None => index + 1 < self.chat.len(),
                 };
-                if above {
-                    return;
-                }
                 if !self.following {
                     window.anchor = Anchor::Tail((distance as isize + delta).max(0) as usize);
+                    // The cursor still points at the content it was
+                    // placed on; growth above the window shifted that
+                    // content down, so the window start re-walks to it.
+                    if above && window.cursor.is_some() {
+                        window.pending = window.pending.saturating_sub(delta);
+                    }
                 }
-                self.shift_tail_selection_points(delta);
+                if !above {
+                    self.shift_tail_selection_points(delta);
+                }
             }
         }
         self.sparse_window = Some(window);
@@ -224,10 +231,12 @@ impl AgentView {
         width: usize,
         height: usize,
     ) -> (Vec<Line>, usize) {
-        // Paused detail/width changes preserve the reference's absolute row
-        // offset, not the previously visible entry.
+        // A paused width change preserves the reference's absolute row
+        // offset; a paused detail change keeps the walked cursor (the
+        // window re-renders its entries under the new detail without
+        // measuring the transcript around it).
         if self.sparse_window.is_some_and(|window| {
-            !self.following && (window.detail != self.detail || window.width != width
+            !self.following && (window.width != width
                 || matches!(window.anchor, Anchor::Tail(distance) if height > self.window_rows.saturating_add(distance)))
         }) {
             self.resolve_sparse_geometry();

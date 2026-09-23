@@ -105,7 +105,7 @@ fn cold_tail_detail_cycles_and_nearby_scroll_are_bounded_for_100k_entries() {
 }
 
 #[test]
-fn sparse_frames_match_full_geometry_at_tail_top_scroll_and_paused_toggle() {
+fn sparse_frames_match_full_geometry_at_tail_top_and_scroll() {
     let mut sparse = view();
     let mut full = view();
     full.sparse_enabled = false;
@@ -142,14 +142,107 @@ fn sparse_frames_match_full_geometry_at_tail_top_scroll_and_paused_toggle() {
             "delta {delta}"
         );
     }
-    sparse.detail = Detail::Overview;
-    full.detail = Detail::Overview;
-    full.resolve_sparse_geometry();
-    full.sparse_enabled = false;
-    assert_eq!(sparse.render_frame(37, 24), full.render_frame(37, 24));
     sparse.scroll_to_top();
     full.scroll_to_top();
     full.sparse_window = None;
+    full.resolve_sparse_geometry();
+    full.sparse_enabled = false;
+    assert_eq!(sparse.render_frame(37, 24), full.render_frame(37, 24));
+}
+
+#[test]
+fn paused_detail_toggle_revisits_only_the_window_for_100k_entries() {
+    let mut view = view();
+    for index in 0..100_000 {
+        view.push_entry(ChatEntry::Status {
+            text: format!("row {index}"),
+            kind: StatusKind::Info,
+        });
+    }
+    view.render_frame(80, 24);
+    view.scroll_by(-100);
+    view.render_frame(80, 24);
+    ENTRY_VISITS.with(|count| count.set(0));
+    view.detail = Detail::All;
+    view.render_frame(80, 24);
+    // Zero off-window visits: the paused toggle re-renders the walked
+    // window under the new detail without measuring the transcript
+    // around it.
+    assert!(ENTRY_VISITS.with(std::cell::Cell::get) < 40);
+}
+
+#[test]
+fn paused_detail_round_trip_restores_the_window_without_a_walk() {
+    let mut view = view();
+    for index in 0..200 {
+        view.push_entry(ChatEntry::Assistant(Box::new(AssistantMessage {
+            blocks: vec![
+                MessageBlock::Text(format!("message {index} body {}", "words ".repeat(8))),
+                MessageBlock::Thinking("thought\nthought\nthought".into()),
+            ],
+            has_tool_calls: false,
+            streaming: false,
+            error: None,
+            aborted: false,
+        })));
+    }
+    view.render_frame(37, 24);
+    view.scroll_by(-60);
+    view.render_frame(37, 24);
+    let overview = view.render_frame(37, 24);
+    ENTRY_VISITS.with(|count| count.set(0));
+    view.detail = Detail::All;
+    let expanded = view.render_frame(37, 24);
+    view.detail = Detail::Overview;
+    assert_eq!(view.render_frame(37, 24), overview);
+    // The detail round trip re-rendered the walked window twice without
+    // visiting the transcript around it.
+    assert!(ENTRY_VISITS.with(std::cell::Cell::get) < 80);
+    assert_ne!(expanded, overview);
+}
+
+#[test]
+fn paused_offscreen_growth_matches_the_full_rebuild() {
+    let mut sparse = view();
+    let mut full = view();
+    full.sparse_enabled = false;
+    for index in 0..400 {
+        let entry = ChatEntry::Assistant(Box::new(AssistantMessage {
+            blocks: vec![
+                MessageBlock::Text(format!("message {index} {}", "word ".repeat(index % 9))),
+                MessageBlock::Thinking("thought\nthought".into()),
+            ],
+            has_tool_calls: false,
+            streaming: false,
+            error: None,
+            aborted: false,
+        }));
+        sparse.push_entry(entry.clone());
+        full.push_entry(entry);
+    }
+    sparse.render_frame(37, 24);
+    full.render_frame(37, 24);
+    sparse.scroll_by(-120);
+    full.resolve_sparse_geometry();
+    full.sparse_enabled = false;
+    full.scroll_by(-120);
+    full.resolve_sparse_geometry();
+    full.sparse_enabled = false;
+    assert_eq!(sparse.render_frame(37, 24), full.render_frame(37, 24));
+    // Grow an entry far above the paused window: the full rebuild keeps
+    // the absolute scroll start, so the sparse window must keep it too.
+    sparse.prepare_entry_mutation(3);
+    let before = sparse.count_entry_rows(3, 37);
+    for view in [&mut sparse, &mut full] {
+        if let ChatEntry::Assistant(message) = &mut view.chat[3] {
+            message
+                .blocks
+                .push(MessageBlock::Text("grown words\nmore words".into()));
+        }
+    }
+    assert_ne!(sparse.count_entry_rows(3, 37), before);
+    sparse.mark_entry_stale(3);
+    full.mark_entry_stale(3);
     full.resolve_sparse_geometry();
     full.sparse_enabled = false;
     assert_eq!(sparse.render_frame(37, 24), full.render_frame(37, 24));

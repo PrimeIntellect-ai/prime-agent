@@ -4,6 +4,8 @@ use crate::chat::ChatEntry;
 
 impl AgentView {
     pub(super) fn count_entry_rows(&self, index: usize, width: usize) -> usize {
+        #[cfg(test)]
+        super::layout::ENTRY_VISITS.with(|count| count.set(count.get() + 1));
         let entry = &self.chat[index];
         let preceded_by_tool = index > 0 && matches!(self.chat[index - 1], ChatEntry::Tool(_));
         let spacing = self.entry_spacing(index, entry, index == 0, preceded_by_tool);
