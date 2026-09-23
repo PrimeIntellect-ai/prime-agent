@@ -174,10 +174,11 @@ mod resume_settings_tests {
                     .window
                     .is_some());
             }
-            if mode == 0 {
-                let killed = worker.dispatch("kill", &json!({})).await;
-                assert!(killed.success, "{killed:?}");
-            }
+            // The worker's core is Arc-shared with its handler seams, so an
+            // in-process drop never releases the store; `kill` is the real
+            // teardown (a production worker exits its process).
+            let killed = worker.dispatch("kill", &json!({})).await;
+            assert!(killed.success, "{killed:?}");
             drop(worker);
             let released =
                 crate::lease::acquire_runtime_session_lease(&path, &dir.path().join("agent"))

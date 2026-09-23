@@ -457,12 +457,15 @@ impl AgentSession {
         );
         {
             let mut session = self.session.lock().await;
-            session.append_custom_message(
+            let (_, write_error) = session.append_custom_message_retained(
                 &row.custom_type,
                 row.content.clone(),
                 row.display,
                 row.details.clone(),
-            )?;
+            );
+            if let Some(error) = write_error {
+                eprintln!("pa-core: compaction outcome row not persisted: {error}");
+            }
         }
         // TS pushes the row onto `agent.state.messages` after the append:
         // the live context owns the disclosure; the loop's converter filters

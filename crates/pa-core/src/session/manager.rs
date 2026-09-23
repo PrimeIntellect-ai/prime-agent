@@ -1235,6 +1235,43 @@ impl SessionManager {
         Ok(id)
     }
 
+    /// Append a best-effort disclosure row: a failed disk write keeps the
+    /// entry indexed (the TS `_unpersistedOutcomes` guarantee — context
+    /// rebuilds must not drop the disclosure; the gap-bridged usage walk
+    /// tolerates the missing line on reload). The write error surfaces for
+    /// logging only.
+    pub fn append_custom_message_retained(
+        &mut self,
+        custom_type: &str,
+        content: pa_types::ai::UserContent,
+        display: bool,
+        details: Option<serde_json::Value>,
+    ) -> (String, Option<std::io::Error>) {
+        let base = self.next_base();
+        let id = base.id.clone().unwrap_or_default();
+        self.file_entries.push(FileEntry::CustomMessage {
+            payload: pa_types::session::CustomMessageEntry {
+                custom_type: custom_type.to_string(),
+                content,
+                details,
+                display,
+                rest: Default::default(),
+            },
+            base,
+        });
+        let index = self.file_entries.len() - 1;
+        let write_error = self.persist_entry(index).err();
+        let entry = self.file_entries[index].clone();
+        if let Some(window) = &mut self.window {
+            window.append_entry(entry.clone());
+        }
+        if let Some(id) = entry.id().map(str::to_string) {
+            self.by_id.insert(id.clone(), index);
+            self.leaf_id = Some(id);
+        }
+        (id, write_error)
+    }
+
     /// Fold child usage into the target assistant message and record the
     /// attribution entry.
     pub fn append_child_usage_attribution(
