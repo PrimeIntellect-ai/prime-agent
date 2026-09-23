@@ -61,6 +61,11 @@ struct RestoreTarget {
     /// selectors, so the restore queue must own them too (the waiter
     /// settles by the same row the registry will resolve once it is up).
     name: Option<String>,
+    /// The row needs the TS-parity continuation treatment (§10.5):
+    /// an early settle (adoption or a live re-registration) must not
+    /// wake this row's waiters ahead of the pass routing the
+    /// restart-continuation prompt - the pass settles it right before.
+    needs_continuation: bool,
     /// Set the moment the pass finishes this row (or the adoption pass
     /// brings the worker up): the per-target waiters wake immediately
     /// instead of queueing behind the rest of the recovery.
@@ -133,6 +138,7 @@ impl RestoreProgress {
                     active_session_id: row.active_session_id.clone(),
                     session_file: row.session_file.clone(),
                     name: row.name.clone(),
+                    needs_continuation: row.should_resume && row.in_flight.streaming,
                     settled: false,
                     failure: None,
                 },
@@ -157,6 +163,27 @@ impl RestoreProgress {
             }
             target.settled = true;
             target.failure = failure;
+            state.settled_generation += 1;
+        }
+        self.notify.notify_waiters();
+    }
+
+    /// Settle a row an adoption or a live (re-)registration brought up,
+    /// not the restore pass itself. A row still pending its TS-parity
+    /// continuation treatment (§10.5) stays queued: the pass settles it
+    /// right before it routes the restart-continuation prompt, so a woken
+    /// client's prompt cannot land ahead of the required continuation.
+    /// Idempotent; a no-op for a selector no in-flight pass owns.
+    pub(crate) fn settle_adopted(&self, selector: &str) {
+        {
+            let mut state = self.state.lock().unwrap();
+            let Some(target) = restore_target_mut(&mut state.targets, selector) else {
+                return;
+            };
+            if target.needs_continuation || target.settled {
+                return;
+            }
+            target.settled = true;
             state.settled_generation += 1;
         }
         self.notify.notify_waiters();
@@ -824,6 +851,34 @@ mod tests {
         ambiguous.settle_target("alpha", None);
         assert!(ambiguous.settled_failure("alpha").is_none());
         assert!(ambiguous.hello_resume().update_id.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_adoption_settle_skips_a_row_pending_its_continuation() {
+        let mut roster = two_row_roster();
+        roster.sessions[0].should_resume = true;
+        roster.sessions[0].in_flight.streaming = true;
+        let progress = std::sync::Arc::new(RestoreProgress::new());
+        progress.begin(Some(&roster));
+        let waiter = |progress: &std::sync::Arc<RestoreProgress>, selector: &str| {
+            let progress = std::sync::Arc::clone(progress);
+            let selector = selector.to_string();
+            tokio::spawn(async move { progress.wait_for_settle_target(&selector).await })
+        };
+        let tick = std::time::Duration::from_millis(1);
+        let mut queued_a = waiter(&progress, "a-1");
+        let queued_b = waiter(&progress, "durable-b");
+        // The adoption settles skip the continuation row but settle the
+        // ordinary one: only the ordinary row's waiter wakes.
+        progress.settle_adopted("a-1");
+        progress.settle_adopted("durable-b");
+        assert!(tokio::time::timeout(tick, queued_b).await.is_ok());
+        assert!(tokio::time::timeout(tick, &mut queued_a).await.is_err());
+        // The pass's own settle is unconditional: it wakes the
+        // continuation row's waiters the moment the pass reaches it,
+        // right before it routes the restart-continuation prompt.
+        progress.settle_target("a-1", None);
+        assert!(tokio::time::timeout(tick, queued_a).await.is_ok());
     }
 
     #[tokio::test(start_paused = true)]

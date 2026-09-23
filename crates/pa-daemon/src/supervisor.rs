@@ -492,13 +492,15 @@ impl Supervisor {
                 // A restore pass that owns this session's roster row can
                 // settle it now (spec §10.4): the per-target waiters attach
                 // to the live worker instead of queueing behind the rest
-                // of the recovery. No pass, no roster row: a no-op.
+                // of the recovery — unless the row still needs its
+                // continuation prompt (§10.5): those waiters wake only
+                // when the pass routes it. No pass, no roster row: a no-op.
                 if let Some(session_file) = resident.descriptor.lock().await.session_file.clone() {
                     if let Some(stem) = Path::new(&session_file)
                         .file_stem()
                         .map(|stem| stem.to_string_lossy().to_string())
                     {
-                        self.restore.settle_target(&stem, None);
+                        self.restore.settle_adopted(&stem);
                     }
                 }
                 self.log_line(&format!(
@@ -2632,10 +2634,12 @@ impl Supervisor {
         // without queueing behind the rest of the recovery. Covers the
         // self-registration that beats the descriptor scan (the adoption
         // early return) and `adopt_registered_worker` alike; a no-op when
-        // no pass owns the row. The settle lands after the registration is
-        // recorded, so a woken waiter's re-resolve cannot miss it.
+        // no pass owns the row, and never wakes a row still pending its
+        // §10.5 continuation prompt. The settle lands after the
+        // registration is recorded, so a woken waiter's re-resolve cannot
+        // miss it.
         if let Some(session_id) = durable_session_id {
-            self.restore.settle_target(&session_id, None);
+            self.restore.settle_adopted(&session_id);
         }
         let verb = if record.epoch > 1 {
             "re-registered"
