@@ -110,6 +110,11 @@ pub struct SessionSummary {
     pub task_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<Value>,
+    /// TS `modelFallbackMessage`: why a revived session's saved model fell
+    /// back (the restore missed after the catalog-readiness window). A
+    /// model fallback is never silent — the summary publishes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_fallback_message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -11,7 +11,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use pa_core::auth::{AuthStorage, NoOAuth};
-use pa_core::models::{install_catalog, startup_refresh, ModelRegistry};
+use pa_core::models::{
+    find_session_model_with_readiness_wait, install_catalog, startup_refresh, ModelRegistry,
+    SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS,
+};
 use pa_models::ModelCatalog;
 use serde_json::{json, Value};
 
@@ -430,4 +433,119 @@ async fn the_picker_available_list_shows_a_fetched_entry_once_its_provider_auth_
         .get_available()
         .iter()
         .any(|model| model.id == LAYER_A_PROBE_ID));
+
+/// The session-model restore (the revival race this crate's catalog wiring
+/// must cover): a saved private model missing from the cold registry
+/// (no disk caches yet) restores through the readiness window while the
+/// catalog fetch is still in flight. TS `findSessionModelWithReadinessWait`
+/// — the sdk.ts session boot gives the daemon restart's fetch a bounded
+/// window before the lookup is allowed to fail.
+#[tokio::test]
+async fn session_model_restore_waits_out_a_slow_catalog_fetch() {
+    let agent_dir = tempfile::tempdir().unwrap();
+    let bundled_dir = tempfile::tempdir().unwrap();
+    let pi = pi_payload("z-ai/glm-5.3", 7.0);
+    let layer_a = json!({ "schemaVersion": 1, "models": [
+        layer_a_entry(LAYER_A_PROBE_ID, 1.25),
+    ]})
+    .to_string();
+    let slow = std::time::Duration::from_millis(300);
+    let server = common::MockServer::start_scripted(vec![
+        common::Scripted::Delayed(common::ok_json(layer_a, None), slow),
+        common::Scripted::Delayed(common::ok_json(pi.clone(), None), slow),
+        common::Scripted::Delayed(common::ok_json(pi, None), slow),
+    ])
+    .await;
+    install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
+
+    // The fresh worker's registry: file auth, cold disk caches — the saved
+    // private model is nowhere in the compiled fallback.
+    let mut registry = ModelRegistry::create(
+        prime_auth("test-key", "team-1"),
+        agent_dir.path().join("models.json"),
+    );
+    let restored = find_session_model_with_readiness_wait(
+        &mut registry,
+        "prime-inference",
+        "internal/glm-5.3-fast",
+        SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS,
+    )
+    .await
+    .expect("the slow fetch lands inside the readiness window");
+    assert_eq!(restored.provider, "prime-inference");
+    assert_eq!(restored.id, "internal/glm-5.3-fast");
+    assert!(registry.has_configured_auth(&restored));
+}
+
+/// The restore is bounded: a catalog fetch that never settles cannot hold a
+/// revived session's boot hostage — the lookup fails after the window and
+/// the caller falls back (and must say so, never silently).
+#[tokio::test]
+async fn session_model_restore_is_bounded_when_the_fetch_never_lands() {
+    let agent_dir = tempfile::tempdir().unwrap();
+    let bundled_dir = tempfile::tempdir().unwrap();
+    let server = common::MockServer::start_scripted(vec![common::Scripted::Hang]).await;
+    install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
+
+    let mut registry = ModelRegistry::create(
+        prime_auth("test-key", "team-1"),
+        agent_dir.path().join("models.json"),
+    );
+    let started = std::time::Instant::now();
+    let restored = find_session_model_with_readiness_wait(
+        &mut registry,
+        "prime-inference",
+        "internal/glm-5.3-fast",
+        200,
+    )
+    .await;
+    assert!(restored.is_none(), "the held fetch never lands");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "the bounded window is the ceiling, not the fetch timeout"
+    );
+}
+
+/// The fast path: a registered, auth-configured model restores with no
+/// refresh at all (TS `findRestorable`'s sync lookup — no network).
+#[tokio::test]
+async fn session_model_restore_fast_path_never_fetches() {
+    let agent_dir = tempfile::tempdir().unwrap();
+    let bundled_dir = tempfile::tempdir().unwrap();
+    let pi = pi_payload("z-ai/glm-5.3", 7.0);
+    let layer_a = json!({ "schemaVersion": 1, "models": [
+        layer_a_entry(LAYER_A_PROBE_ID, 1.25),
+    ]})
+    .to_string();
+    let server = common::MockServer::start(vec![
+        common::ok_json(layer_a, None),
+        common::ok_json(pi.clone(), None),
+        common::ok_json(pi, None),
+    ])
+    .await;
+    install_mock_catalog(agent_dir.path(), bundled_dir.path(), &server);
+
+    let mut registry = ModelRegistry::create(
+        prime_auth("test-key", "team-1"),
+        agent_dir.path().join("models.json"),
+    );
+    registry.refresh_available_models().await;
+    let requests_after_warmup = server.recorded_requests().len();
+
+    // A zero readiness window: any refresh would fail instantly (the queue
+    // drained) — only the sync fast path can answer.
+    let restored = find_session_model_with_readiness_wait(
+        &mut registry,
+        "prime-inference",
+        "internal/glm-5.3-fast",
+        0,
+    )
+    .await
+    .expect("the registered model restores without a fetch");
+    assert_eq!(restored.id, "internal/glm-5.3-fast");
+    assert_eq!(
+        server.recorded_requests().len(),
+        requests_after_warmup,
+        "the fast path never fetches"
+    );
 }

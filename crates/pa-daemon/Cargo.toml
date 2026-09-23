@@ -29,6 +29,10 @@ tempfile = "3"
 # surface goes through pa-core).
 pa-models = { path = "../pa-models" }
 url = "2"
+# Test-only: `ModelCatalog::with_urls` + the compiled offline Prime
+# Inference entries build the loopback catalog the session-model restore
+# tests script (the pa-core tests/common pattern, in-crate).
+pa-models = { path = "../pa-models" }
 # `test-util` (tokio time pause) is test-only: the mutation-drain latch test
 # drives real timeouts through the paused clock.
 tokio = { workspace = true, features = ["test-util"] }

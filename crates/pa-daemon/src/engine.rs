@@ -428,6 +428,29 @@ pub trait SessionEngine: Send + Sync {
         let _ = path;
     }
 
+    /// TS `createAgentSession`'s restored-from-session step: a session
+    /// being revived (scheduled wake, update restore, worker relaunch)
+    /// restores the model its file pins before the startup chain, giving
+    /// the daemon boot's in-flight catalog fetch a bounded readiness
+    /// window — without it a revived session silently lands on the
+    /// startup-chain default instead of the model it was running on. The
+    /// worker calls this at create, before the create-config selection;
+    /// explicit flags win, a miss records the fallback (never silent).
+    /// Engines without a persisted model context do nothing.
+    fn restore_session_model(
+        &self,
+        _session_path: &std::path::Path,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(std::future::ready(()))
+    }
+
+    /// TS `modelFallbackMessage`: the on-the-record reason a revived
+    /// session's model fell back (the summary publishes it — a model
+    /// fallback must never be silent). `None` while no restore missed.
+    fn model_fallback_message(&self) -> Option<String> {
+        None
+    }
+
     /// Adopt the explicit model selection carried by the session's create
     /// config. Explicit CLI flags must be authoritative end-to-end: the
     /// selection reached the worker over the wire, so model resolution must

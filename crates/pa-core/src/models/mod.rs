@@ -18,6 +18,7 @@ pub(crate) mod prime_inference_catalog;
 pub(crate) mod private_auth;
 pub(crate) mod registry;
 pub(crate) mod resolver;
+pub(crate) mod session_restore;
 
 pub use custom::{
     apply_model_override, load_custom_models, merge_compat, parse_models_config,
@@ -36,4 +37,7 @@ pub use resolver::{
     find_initial_model, find_preferred_default_model, resolve_cli_model,
     resolve_model_scope_from_models, InitialModelOptions, ResolveCliModelResult, ScopedModel,
     PRIME_INFERENCE_DEFAULT_MODEL_ID,
+};
+pub use session_restore::{
+    find_session_model_with_readiness_wait, SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS,
 };

@@ -1806,6 +1806,22 @@ impl Worker {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let name = payload.get("name").and_then(Value::as_str);
+        // TS createAgentSession's restored-from-session step: a revived
+        // session (an existing session file — scheduled wake, update
+        // restore, worker relaunch) restores the model its file pins
+        // before the startup chain. The bounded readiness wait covers the
+        // daemon boot's catalog fetch, so the revived session keeps the
+        // model it was running on instead of silently landing on the
+        // featured default while the catalog settles. Runs before the
+        // create-config selection: explicit wire flags win (the restore is
+        // a no-op when one is already set).
+        if !no_session {
+            if let Some(path) = &session_path {
+                if path.exists() {
+                    self.engine.restore_session_model(path).await;
+                }
+            }
+        }
         // Explicit model flags from the create config are authoritative for
         // this session (TS runtime-config propagation): the engine rebinds
         // its selection instead of falling back to a process-wide model.
@@ -2401,6 +2417,7 @@ impl Worker {
             // TS roster summaries carry it; a not-yet-resolved engine
             // reports none).
             model: self.engine.model_metadata(),
+            model_fallback_message: self.engine.model_fallback_message(),
             runtime_kind: Some(core.runtime_kind.clone()),
             unfinished_action_count: Some(0),
         }
@@ -4490,6 +4507,7 @@ impl TurnRunner {
                     .effective_thinking_level()
                     .unwrap_or_else(|| "default".to_string()),
                 self.engine.model_metadata(),
+                self.engine.model_fallback_message(),
             )
         };
         let summary = serde_json::to_value(&summary).unwrap_or(serde_json::Value::Null);
@@ -5180,6 +5198,7 @@ fn session_summary(
     core: &SessionCore,
     thinking_level: &str,
     model: Option<Value>,
+    model_fallback_message: Option<String>,
 ) -> SessionSummary {
     let store = core.store.as_ref();
     let streaming = core.busy;
@@ -5284,6 +5303,7 @@ fn session_summary(
         summary: None,
         task_state: None,
         model,
+        model_fallback_message,
         runtime_kind: Some(core.runtime_kind.clone()),
         unfinished_action_count: Some(0),
     }
@@ -5818,11 +5838,11 @@ mod tests {
     #[test]
     fn summary_lifecycle_is_message_based() {
         let empty = SessionCore::test_core(None, "/tmp".to_string());
-        assert_eq!(session_summary(&empty, "default", None).lifecycle, "draft");
+        assert_eq!(session_summary(&empty, "default", None, None).lifecycle, "draft");
         let mut subagent = SessionCore::test_core(None, "/tmp".to_string());
         subagent.runtime_kind = "subagent".to_string();
         assert_eq!(
-            session_summary(&subagent, "default", None).lifecycle,
+            session_summary(&subagent, "default", None, None).lifecycle,
             "live"
         );
         // The busy-flip roster delta fires before the store flushes the
@@ -5830,7 +5850,7 @@ mod tests {
         // reads the runtime's in-memory messages, which already hold it).
         let mut busy = SessionCore::test_core(None, "/tmp".to_string());
         busy.busy = true;
-        assert_eq!(session_summary(&busy, "default", None).lifecycle, "live");
+        assert_eq!(session_summary(&busy, "default", None, None).lifecycle, "live");
         let dir = std::env::temp_dir().join(format!("pa-worker-lc-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
@@ -5844,7 +5864,7 @@ mod tests {
         session.rewrite().unwrap();
         let with_message = SessionCore::test_core(Some(session), "/tmp".to_string());
         assert_eq!(
-            session_summary(&with_message, "default", None).lifecycle,
+            session_summary(&with_message, "default", None, None).lifecycle,
             "live"
         );
         let _ = std::fs::remove_dir_all(&dir);
