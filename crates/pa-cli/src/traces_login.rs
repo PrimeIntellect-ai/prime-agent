@@ -258,6 +258,7 @@ async fn read_terminal_line() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rsa::pkcs8::DecodePublicKey;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};

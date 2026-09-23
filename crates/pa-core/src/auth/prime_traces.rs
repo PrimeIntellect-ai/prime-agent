@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use base64::Engine as _;
+use rsa::pkcs8::EncodePublicKey;
 use serde_json::{json, Value};
 
 use super::prime_inference::{
@@ -332,6 +333,7 @@ pub async fn login_prime_agent_traces(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rsa::pkcs8::DecodePublicKey;
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
