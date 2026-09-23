@@ -42,9 +42,6 @@ pub enum SessionSelection {
     New,
     /// Attach an existing live session by active session id.
     Attach(String),
-    /// Create with `continueRecent`: the supervisor picks the most recent
-    /// saved session for the cwd.
-    ContinueRecent,
     /// Create with `sessionPath`: reopen a saved session file (`--resume`).
     Resume(PathBuf),
 }

@@ -90,7 +90,7 @@ impl Request {
 }
 
 /// One parsed event frame.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Ready {
         protocol: i64,
@@ -148,8 +148,23 @@ impl Event {
 /// runtime mints uuid hex ids and echoes the host's uuids); silently dropping
 /// an id-less one would leave the awaiting request unsettled forever.
 pub fn parse_event(line: &str) -> Result<Event, String> {
-    let value: Value = serde_json::from_str(line)
+    let mut value: Value = serde_json::from_str(line)
         .map_err(|_| format!("unparseable protocol line: {}", clip(line)))?;
+    // `display` and `host_request` carry bulk `data` payloads (attachments,
+    // agent messages); move the field out of the parsed map instead of
+    // deep-cloning it out of `value` below. Other kinds and non-object lines
+    // keep `Null`, and a missing field parses exactly as before.
+    let data = match value.as_object_mut() {
+        Some(map)
+            if matches!(
+                map.get("event").and_then(Value::as_str),
+                Some("display") | Some("host_request")
+            ) =>
+        {
+            map.remove("data").unwrap_or(Value::Null)
+        }
+        _ => Value::Null,
+    };
     let obj = value
         .as_object()
         .ok_or_else(|| format!("non-object protocol line: {}", clip(line)))?;
@@ -192,18 +207,11 @@ pub fn parse_event(line: &str) -> Result<Event, String> {
                 .to_string();
             Ok(Event::Result { id, text })
         }
-        "display" => {
-            let id = id("id");
-            let data = obj.get("data").cloned().unwrap_or(Value::Null);
-            Ok(Event::Display { id, data })
-        }
+        "display" => Ok(Event::Display { id: id("id"), data }),
         "host_request" => {
             let rid =
                 id("id").ok_or_else(|| format!("host_request frame without id: {}", clip(line)))?;
-            Ok(Event::HostRequest {
-                id: rid,
-                data: obj.get("data").cloned().unwrap_or(Value::Null),
-            })
+            Ok(Event::HostRequest { id: rid, data })
         }
         "error" => Ok(Event::Error {
             id: id("id"),
@@ -318,5 +326,293 @@ mod tests {
         })});
         assert!(late_sent_agent_message(Some("cell1"), &data).is_some());
         assert!(late_sent_agent_message(None, &data).is_none());
+    }
+
+    #[test]
+    fn parses_every_event_kind_verbatim() {
+        assert_eq!(
+            parse_event(r#"{"event":"ready","protocol":3,"python":"3.13.11"}"#).unwrap(),
+            Event::Ready { protocol: 3 }
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"ready"}"#).unwrap(),
+            Event::Ready { protocol: -1 }
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"stdout","id":"c1","text":"out"}"#).unwrap(),
+            Event::Stdout {
+                id: Some("c1".into()),
+                text: "out".into()
+            }
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"stdout","id":null,"text":"raw 🌸"}"#).unwrap(),
+            Event::Stdout {
+                id: None,
+                text: "raw 🌸".into()
+            }
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"stderr","text":"err"}"#).unwrap(),
+            Event::Stderr {
+                id: None,
+                text: "err".into()
+            }
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"stderr","id":"c1","text":null}"#).unwrap(),
+            Event::Stderr {
+                id: Some("c1".into()),
+                text: String::new()
+            }
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"result","id":"c1","text":"42"}"#).unwrap(),
+            Event::Result {
+                id: "c1".into(),
+                text: "42".into()
+            }
+        );
+        assert_eq!(
+            parse_event(
+                r#"{"event":"error","id":"c1","ename":"KeyboardInterrupt","evalue":"in cell","traceback":["a","b"]}"#
+            )
+            .unwrap(),
+            Event::Error {
+                id: Some("c1".into()),
+                ename: "KeyboardInterrupt".into(),
+                evalue: "in cell".into(),
+                traceback: vec!["a".into(), "b".into()],
+            }
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"error"}"#).unwrap(),
+            Event::Error {
+                id: None,
+                ename: "Error".into(),
+                evalue: String::new(),
+                traceback: Vec::new(),
+            }
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"done","id":"c1","status":"ok","saved":["x"],"bytes":12}"#)
+                .unwrap(),
+            Event::Done {
+                id: "c1".into(),
+                fields: json!({"event":"done","id":"c1","status":"ok","saved":["x"],"bytes":12}),
+            }
+        );
+        // Only display/host_request move `data` out; a done frame keeps it in fields.
+        assert_eq!(
+            parse_event(r#"{"event":"done","id":"c1","status":"ok","data":{"keep":1}}"#).unwrap(),
+            Event::Done {
+                id: "c1".into(),
+                fields: json!({"event":"done","id":"c1","status":"ok","data":{"keep":1}}),
+            }
+        );
+    }
+
+    #[test]
+    fn display_and_host_request_data_move_verbatim() {
+        // Every `data` shape parses to the same event the deep-clone produced:
+        // missing, null, scalar, array, number, object.
+        assert_eq!(
+            parse_event(r#"{"event":"display","id":"c1"}"#).unwrap(),
+            Event::Display {
+                id: Some("c1".into()),
+                data: Value::Null
+            }
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"display","id":"c1","data":null}"#).unwrap(),
+            Event::Display {
+                id: Some("c1".into()),
+                data: Value::Null
+            }
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"display","id":null,"data":"scalar"}"#).unwrap(),
+            Event::Display {
+                id: None,
+                data: json!("scalar")
+            }
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"display","id":null,"data":[1,2,3]}"#).unwrap(),
+            Event::Display {
+                id: None,
+                data: json!([1, 2, 3])
+            }
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"display","id":null,"data":123}"#).unwrap(),
+            Event::Display {
+                id: None,
+                data: json!(123)
+            }
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"host_request","id":"hr1"}"#).unwrap(),
+            Event::HostRequest {
+                id: "hr1".into(),
+                data: Value::Null
+            }
+        );
+        assert_eq!(
+            parse_event(
+                r#"{"event":"host_request","id":"hr1","data":{"reason":"agent_message.send"}}"#
+            )
+            .unwrap(),
+            Event::HostRequest {
+                id: "hr1".into(),
+                data: json!({"reason": "agent_message.send"}),
+            }
+        );
+    }
+
+    #[test]
+    fn moved_data_serializes_byte_identically() {
+        // The payload is moved out of the parsed map, not rebuilt; key order
+        // (serde_json preserve_order, matching the TS byte stream) survives.
+        let event = parse_event(
+            r#"{"event":"display","id":"c1","data":{"application/vnd.prime-agent.attachment+json":{"name":"a.png","data":"aGk="}}}"#,
+        )
+        .unwrap();
+        let Event::Display { data, .. } = &event else {
+            panic!("display frame parsed to {event:?}");
+        };
+        assert_eq!(
+            serde_json::to_string(data).unwrap(),
+            r#"{"application/vnd.prime-agent.attachment+json":{"name":"a.png","data":"aGk="}}"#
+        );
+        let event = parse_event(
+            r#"{"event":"host_request","id":"hr1","data":{"reason":"agent_message.send","target":{"activeSessionId":"a","sessionId":"s"}}}"#,
+        )
+        .unwrap();
+        let Event::HostRequest { data, .. } = &event else {
+            panic!("host_request frame parsed to {event:?}");
+        };
+        assert_eq!(
+            serde_json::to_string(data).unwrap(),
+            r#"{"reason":"agent_message.send","target":{"activeSessionId":"a","sessionId":"s"}}"#
+        );
+    }
+
+    #[test]
+    fn invalid_frames_report_exact_reasons() {
+        assert_eq!(
+            parse_event("not json").unwrap_err(),
+            "unparseable protocol line: not json"
+        );
+        assert_eq!(
+            parse_event("[1,2,3]").unwrap_err(),
+            "non-object protocol line: [1,2,3]"
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"mystery"}"#).unwrap_err(),
+            r#"unknown protocol event: {"event":"mystery"}"#
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"result"}"#).unwrap_err(),
+            r#"result frame without id: {"event":"result"}"#
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"host_request","data":{}}"#).unwrap_err(),
+            r#"host_request frame without id: {"event":"host_request","data":{}}"#
+        );
+        assert_eq!(
+            parse_event(r#"{"event":"done","status":"ok"}"#).unwrap_err(),
+            r#"done frame without id: {"event":"done","status":"ok"}"#
+        );
+    }
+
+    /// TS wire parity (`packages/coding-agent/src/core/kernel/repl-manager.ts`,
+    /// `invalidProtocolFrameReason`): `done` and `host_request` are the only
+    /// kinds the TS manager rejects for id shape, and both products reject the
+    /// same corpus of id-less frames below. Rust keeps its pre-existing
+    /// stricter rule for `result` ids (the runtime always sends one).
+    #[test]
+    fn id_requirements_match_the_ts_manager() {
+        // Rejected by both: done/host_request without a string id.
+        assert!(parse_event(r#"{"event":"done","status":"ok"}"#).is_err());
+        assert!(parse_event(r#"{"event":"host_request","data":{}}"#).is_err());
+        assert!(parse_event(r#"{"event":"host_request","id":null,"data":{}}"#).is_err());
+        // Accepted by both: display with a null id (user threads emit id null)
+        // and no-id stream kinds.
+        assert!(parse_event(r#"{"event":"display","id":null,"data":{}}"#).is_ok());
+        assert!(parse_event(r#"{"event":"stdout","text":"x"}"#).is_ok());
+        assert!(parse_event(r#"{"event":"error","evalue":"x"}"#).is_ok());
+    }
+
+    /// Timed fixture for the bulk `data` payloads of `display`/`host_request`
+    /// frames at 1 KiB / 1 MiB / 10 MiB. Run with
+    /// `cargo test -p pa-core --release -- kernel::protocol --ignored --nocapture`.
+    #[test]
+    #[ignore = "timing fixture; run with --release --ignored --nocapture"]
+    fn parse_event_data_frame_timing() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        fn display_frame(data_bytes: usize) -> String {
+            json!({
+                "event": "display",
+                "id": "cell-1",
+                "data": {
+                    crate::kernel::shared::ATTACHMENT_DISPLAY_MIME: {
+                        "name": "bench.png",
+                        "data": "A".repeat(data_bytes),
+                    }
+                }
+            })
+            .to_string()
+        }
+
+        fn host_request_frame(entries: usize) -> String {
+            json!({
+                "event": "host_request",
+                "id": "hr-1",
+                "data": {
+                    "reason": "bench",
+                    "items": (0..entries)
+                        .map(|i| json!({ "name": format!("entry-{i}"), "text": "x".repeat(48), "n": i }))
+                        .collect::<Vec<_>>(),
+                }
+            })
+            .to_string()
+        }
+
+        for (target, label, iters) in [
+            (1024_usize, "1 KiB", 200_000_u32),
+            (1024 * 1024, "1 MiB", 2_000),
+            (10 * 1024 * 1024, "10 MiB", 200),
+        ] {
+            let display = display_frame(target.saturating_sub(120));
+            let host = host_request_frame(((target - 60) / 85).max(1));
+            for (kind, frame) in [
+                ("display", display.as_str()),
+                ("host_request", host.as_str()),
+            ] {
+                assert_eq!(
+                    parse_event(frame).expect("valid fixture frame").kind(),
+                    kind
+                );
+                for _ in 0..(iters / 20).max(1) {
+                    let _ = black_box(parse_event(black_box(frame)));
+                }
+                let start = Instant::now();
+                for _ in 0..iters {
+                    let _ = black_box(parse_event(black_box(frame)));
+                }
+                let elapsed = start.elapsed();
+                let per_frame = elapsed / iters;
+                let throughput =
+                    frame.len() as f64 * iters as f64 / elapsed.as_secs_f64() / (1024.0 * 1024.0);
+                println!(
+                    "{label} {kind:>12} frame={frame_len:>9} bytes iters={iters:>6} per-frame={per_frame_us:>12.1} µs throughput={throughput:8.1} MiB/s",
+                    frame_len = frame.len(),
+                    per_frame_us = per_frame.as_secs_f64() * 1e6,
+                );
+            }
+        }
     }
 }

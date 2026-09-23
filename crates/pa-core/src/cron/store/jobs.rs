@@ -242,6 +242,44 @@ impl AgentCronJobStore {
         updated
     }
 
+    /// Push a job's next run later, never earlier (the scheduler's
+    /// consecutive-failure backoff). `until_ms` is an epoch-ms deadline; an
+    /// already-later `nextRunAt` wins, and non-active jobs are untouched.
+    ///
+    /// Runs under the store's state locks (the `mutate_states` path, like
+    /// `record_dispatch_result`): a cancel that lands between the failure
+    /// and this defer must stay cancelled, so the active-status check and
+    /// the write are one atomic state mutation — a read-modify-write over
+    /// the merged jobs would race a concurrent cancel and could write a
+    /// stale active copy back over it.
+    pub fn defer_next_run(&self, id: &str, until_ms: u64) -> Option<AgentCronJob> {
+        let until_iso = iso_from_millis(until_ms);
+        let mut updated = None;
+        self.mutate_states(|state| {
+            state.jobs = state
+                .jobs
+                .clone()
+                .into_iter()
+                .map(|mut job| {
+                    if job.id != id || job.status != JobStatus::Active {
+                        return job;
+                    }
+                    if let Some(current) = job.next_run_at.as_deref().and_then(parse_iso_millis) {
+                        if current >= until_ms {
+                            return job;
+                        }
+                    }
+                    job.next_run_at = Some(until_iso.clone());
+                    job.updated_at = iso_from_millis(now_millis());
+                    updated = Some(job.clone());
+                    job
+                })
+                .collect();
+            Vec::new()
+        });
+        updated
+    }
+
     pub fn due(&self, now: u64) -> Vec<AgentCronJob> {
         self.read_jobs()
             .into_iter()
@@ -478,5 +516,40 @@ mod tests {
         // Skip rolls nextRunAt and stamps lastSkippedAt.
         store.record_skip_result(&job.id, now + 60_000).unwrap();
         assert!(store.list().iter().any(|job| job.last_skipped_at.is_some()));
+    }
+
+    #[test]
+    fn defer_next_run_pushes_only_later() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = AgentCronJobStore::new(dir.path().join("jobs.json"));
+        let now = 1_700_000_000_000;
+        let job = store.create(&input("tick", "every 10m", now)).unwrap();
+        let scheduled_next = now + 600_000;
+        // A deadline before the schedule does not pull the run earlier.
+        assert!(store.defer_next_run(&job.id, now + 60_000).is_none());
+        let current = store.list().pop().expect("job kept");
+        assert_eq!(
+            crate::cron::parse_iso_millis(current.next_run_at.as_deref().unwrap()),
+            Some(scheduled_next)
+        );
+        // A deadline after the schedule defers the run to it.
+        let deferred = now + 900_000;
+        let updated = store.defer_next_run(&job.id, deferred).expect("deferred");
+        assert_eq!(
+            crate::cron::parse_iso_millis(updated.next_run_at.as_deref().unwrap()),
+            Some(deferred)
+        );
+        // An already-later nextRunAt wins over an earlier deadline.
+        assert!(store.defer_next_run(&job.id, now + 120_000).is_none());
+        let current = store.list().pop().expect("job kept");
+        assert_eq!(
+            crate::cron::parse_iso_millis(current.next_run_at.as_deref().unwrap()),
+            Some(deferred)
+        );
+        // Cancelled jobs are never deferred. Cancel with a fresh clock:
+        // the jobs file merges on `updatedAt` freshness (last writer with
+        // the newer stamp wins), so a stale stamp would lose the cancel.
+        store.cancel(&job.id, now_millis()).unwrap();
+        assert!(store.defer_next_run(&job.id, now + 2_000_000).is_none());
     }
 }
