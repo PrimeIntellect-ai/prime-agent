@@ -1267,6 +1267,12 @@ FRESH session (a parity bug both directions: no resume, no error).
   session, or open one through the agents view`): no client can ask the
   daemon to pick a session blindly. A plain create (no field) is
   unaffected. The wire field stays (TS shape); only the semantics change.
+- The continue launch defers to an explicit `--resume` selector and to
+  `--no-session` (the TS flag order), and the agents view's open action
+  waits out the entry anchor while the anchored candidate row still
+  streams in (Enter cannot confirm the rebuild's default row — on a
+  continue launch that can be an unrelated live session). A scoped view
+  never lists its anchor, so its never-resolving wait never blocks opens.
 - `SessionSelection::ContinueRecent` is removed from pa-tui: the typed
   form of the blind resume had exactly one producer (the CLI flag) and
   one consumer (the daemon), and both are gone. Print mode's `-c` is
