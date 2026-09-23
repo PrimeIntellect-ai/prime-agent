@@ -557,13 +557,13 @@ mod tests {
         }
     }
 
-    enum Byok {
+    enum ByokBilling {
         NotByok,
-        WithoutUpstreamBill,
-        UpstreamBill(f64),
+        FeeOnly,
+        WithUpstreamBill(f64),
     }
 
-    fn raw_usage(cost: f64, byok: Byok) -> Value {
+    fn raw_usage(cost: f64, byok: ByokBilling) -> Value {
         let mut raw = json!({
             "prompt_tokens": 50_000,
             "completion_tokens": 50_000,
@@ -571,9 +571,9 @@ mod tests {
             "cost": cost,
         });
         match byok {
-            Byok::NotByok => {}
-            Byok::WithoutUpstreamBill => raw["is_byok"] = json!(true),
-            Byok::UpstreamBill(upstream) => {
+            ByokBilling::NotByok => {}
+            ByokBilling::FeeOnly => raw["is_byok"] = json!(true),
+            ByokBilling::WithUpstreamBill(upstream) => {
                 raw["is_byok"] = json!(true);
                 raw["cost_details"] = json!({ "upstream_inference_cost": upstream });
             }
@@ -586,7 +586,7 @@ mod tests {
         let model = model("openrouter", 0.5, 0.5);
         // A cost of 0 can mean not-billed-via-credits (:free endpoints)
         // rather than free, so the catalog estimate stays.
-        let usage = parse_chunk_usage(&raw_usage(0.0, Byok::NotByok), &model, None);
+        let usage = parse_chunk_usage(&raw_usage(0.0, ByokBilling::NotByok), &model, None);
         assert!((usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
     }
 
@@ -595,8 +595,19 @@ mod tests {
         let model = model("openrouter", 0.5, 0.5);
         // BYOK credits are only OpenRouter's fee; without the upstream bill
         // the real spend is unknown, so the catalog estimate stays.
-        let usage = parse_chunk_usage(&raw_usage(0.003, Byok::WithoutUpstreamBill), &model, None);
+        let usage = parse_chunk_usage(&raw_usage(0.003, ByokBilling::FeeOnly), &model, None);
         assert!((usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn openrouter_byok_upstream_cost_replaces_catalog_estimate() {
+        let model = model("openrouter", 0.5, 0.5);
+        // Credits charged by OpenRouter plus the upstream provider's bill.
+        let usage =
+            parse_chunk_usage(&raw_usage(0.003, ByokBilling::WithUpstreamBill(0.2)), &model, None);
+        assert!((usage.cost.input.as_f64() - 0.1015).abs() < 1e-9);
+        assert!((usage.cost.output.as_f64() - 0.1015).abs() < 1e-9);
+        assert!((usage.cost.total.as_f64() - 0.203).abs() < 1e-9);
     }
 
     #[test]
@@ -613,7 +624,7 @@ mod tests {
     #[test]
     fn non_openrouter_provider_ignores_reported_cost() {
         let model = model("zai", 0.5, 0.5);
-        let usage = parse_chunk_usage(&raw_usage(0.07, Byok::NotByok), &model, None);
+        let usage = parse_chunk_usage(&raw_usage(0.07, ByokBilling::NotByok), &model, None);
         assert!((usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
     }
 }

@@ -828,11 +828,8 @@ mod tests {
     #[tokio::test]
     async fn openrouter_reported_cost_scales_catalog_estimate() {
         let model = completions_model("anthropic/claude-fable-5", "openrouter", 0.5, 0.5);
-        let message = stream_final_message(
-            model,
-            openrouter_sse(",\"cost\":0.07,\"is_byok\":false"),
-        )
-        .await;
+        let message =
+            stream_final_message(model, openrouter_sse(",\"cost\":0.07,\"is_byok\":false")).await;
         assert!((message.usage.cost.input.as_f64() - 0.035).abs() < 1e-9);
         assert!((message.usage.cost.output.as_f64() - 0.035).abs() < 1e-9);
         assert!((message.usage.cost.total.as_f64() - 0.07).abs() < 1e-9);
