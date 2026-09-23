@@ -279,6 +279,11 @@ pub struct McpManager {
     /// The resolved service catalog (the SAME resolution feeds integrations
     /// and the `/mcp` view).
     service_catalog: service_catalog::McpCatalogResolution,
+    /// Whether the last resolution had a validated remote catalog snapshot
+    /// in hand (the fetch lane's last-good cache or the packaged bundle):
+    /// the pinned-definition hint claims a service left the catalog, so it
+    /// renders only when a snapshot can prove that.
+    catalog_available: bool,
     connection_store: std::sync::Arc<std::sync::Mutex<connection_store::McpConnectionStore>>,
     acp_servers: std::sync::Arc<std::sync::Mutex<HashMap<String, AcpMcpServerConfig>>>,
     acp_owner_id: std::sync::Mutex<Option<String>>,
@@ -334,6 +339,7 @@ impl McpManager {
             usage_report: None,
             integrations: HashMap::new(),
             service_catalog: Default::default(),
+            catalog_available: false,
             connection_store,
             acp_servers: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             acp_owner_id: std::sync::Mutex::new(None),

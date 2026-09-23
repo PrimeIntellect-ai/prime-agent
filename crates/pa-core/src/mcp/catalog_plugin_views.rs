@@ -20,6 +20,17 @@ use super::connection_store::McpConnectionRecord;
 use super::service_catalog::{DescriptorTransport, McpServiceDescriptor};
 use super::McpServerConfig;
 
+/// The pinned-definition hint (TS `service-catalog.ts:1081,1102`): shown
+/// when a connection record outlives its catalog entry. The claim "the
+/// catalog source is unavailable" is honest only when a validated remote
+/// catalog snapshot is in hand — TS always has one (the compiled catalog
+/// in the deployed release, the fetch lane's last-good cache or the
+/// packaged bundle on main), so it never claims absence it cannot prove;
+/// without a snapshot the pin keeps the connection manageable but makes
+/// no source-unavailable claim.
+pub(crate) const PINNED_FROM_RECORD_HINT: &str =
+    "This service's catalog source is unavailable; its connection keeps the pinned definition.";
+
 /// One card for the service-catalog view (TS `McpPluginView`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +83,13 @@ pub struct BuildViewsInputs<'a> {
     pub user_servers: Option<&'a HashMap<String, McpServerConfig>>,
     pub credentials: &'a SnapshotCredentials,
     pub records: &'a HashMap<String, McpConnectionRecord>,
+    /// A validated remote catalog snapshot is in hand (the fetch lane's
+    /// last-good cache or the packaged bundle): the pinned-definition hint
+    /// claims the service left the catalog, so it renders only when a
+    /// snapshot can PROVE that. Without one (the fetch never ran, failed,
+    /// or the bundle is missing) the pin keeps the connection manageable
+    /// but stays silent.
+    pub catalog_available: bool,
 }
 
 fn not_connected_catalog_view(service: &McpServiceDescriptor) -> McpPluginView {
@@ -135,6 +153,7 @@ fn base_catalog_service_view(
     service: &McpServiceDescriptor,
     credentials: &SnapshotCredentials,
     records: &HashMap<String, McpConnectionRecord>,
+    catalog_available: bool,
 ) -> McpPluginView {
     if !matches!(service.transport, DescriptorTransport::Http { .. }) {
         return not_connected_catalog_view(service);
@@ -142,11 +161,8 @@ fn base_catalog_service_view(
     let accounts = account_states_for(service, credentials, records);
     if accounts.is_empty() {
         let mut view = not_connected_catalog_view(service);
-        if service.pinned_from_record {
-            view.setup_hint = Some(
-                "This service's catalog source is unavailable; its connection keeps the pinned definition."
-                    .to_string(),
-            );
+        if service.pinned_from_record && catalog_available {
+            view.setup_hint = Some(PINNED_FROM_RECORD_HINT.to_string());
         }
         return view;
     }
@@ -188,11 +204,8 @@ fn base_catalog_service_view(
                 .find(|account| account.status == McpConnectionStatus::NotConnected)
                 .and_then(|account| account.setup_hint.clone())
         });
-    let setup_hint = if service.pinned_from_record {
-        Some(
-            "This service's catalog source is unavailable; its connection keeps the pinned definition."
-                .to_string(),
-        )
+    let setup_hint = if service.pinned_from_record && catalog_available {
+        Some(PINNED_FROM_RECORD_HINT.to_string())
     } else {
         error_hint
     };
@@ -253,8 +266,9 @@ fn catalog_service_view(
     credentials: &SnapshotCredentials,
     records: &HashMap<String, McpConnectionRecord>,
     reserved_config: Option<&McpServerConfig>,
+    catalog_available: bool,
 ) -> McpPluginView {
-    let mut view = base_catalog_service_view(service, credentials, records);
+    let mut view = base_catalog_service_view(service, credentials, records, catalog_available);
     let ownership = reserved_mcp_ownership(Some(service), reserved_config);
     match ownership {
         ReservedOwnership::Canonical => view,
@@ -436,6 +450,7 @@ pub fn build_plugin_views(inputs: &BuildViewsInputs<'_>) -> Vec<McpPluginView> {
             inputs.credentials,
             inputs.records,
             inputs.user_servers.and_then(|m| m.get(&service.service_id)),
+            inputs.catalog_available,
         ));
     }
     views.extend(user_views.into_values());

@@ -63,10 +63,12 @@ impl McpManager {
             }
         }
         let remote = self.remote_source.as_ref().and_then(|source| source());
+        let catalog_available = remote.is_some();
         let remote_entries = remote.map(|catalog| catalog.entries);
         let records = self.connection_store.lock().unwrap().records();
         self.service_catalog =
             resolve_mcp_service_catalog(&sources, remote_entries.as_deref(), &records);
+        self.catalog_available = catalog_available;
     }
 
     /// The resolved descriptors (host integration + view surfaces).
@@ -115,6 +117,7 @@ impl McpManager {
             user_servers: Some(&user_servers),
             credentials: &credentials,
             records: &records,
+            catalog_available: self.catalog_available,
         })
     }
 
