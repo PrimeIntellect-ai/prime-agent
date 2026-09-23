@@ -499,8 +499,11 @@ impl ActivityPanel {
                 // The rendered heading plus the bounded tail lines.
                 .map(|(_, tail)| 1 + tail.len().min(MAX_TAIL_LINES))
                 .unwrap_or(0);
+        // No forced minimum: a viewport with no room for the detail block
+        // renders zero detail rows rather than clipping the hint and the
+        // border (the block yields to the frame and at least one list
+        // row, which the layout reserves first).
         full.min(self.viewport_rows.saturating_sub(RESERVED_ROWS + 2))
-            .max(1)
     }
 }
 
