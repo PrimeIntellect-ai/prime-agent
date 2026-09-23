@@ -756,14 +756,43 @@ fn wave_b9_prompt_admission_wire_shapes() {
 
 /// Wave b9: the owned-session lifecycle - promote clears the ownership
 /// (the session summary answers), complete stops the owned worker, and
-/// an owner mismatch answers the TS error.
+/// an owner mismatch answers the TS error. A plain create is unowned
+/// (TS: only a `client_owned`-lifecycle create marks ownership), so the
+/// owned lifecycle drives from the test's own `client_owned` create.
 #[test]
 fn wave_b9_owned_session_lifecycle_wire_shapes() {
     let _serial = serial_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    let (_daemon, mut client, session_id, socket) = scripted_session(dir.path(), &agent_dir);
+    let socket = dir.join("daemon.sock");
+    let _daemon = spawn_daemon(&socket, &agent_dir);
+    let (mut client, _hello) = Client::connect(&socket);
+    let script_path = dir.join("script.json");
+    std::fs::write(
+        &script_path,
+        json!({ "responses": [ { "text": "ack", "delayMs": 10 } ] }).to_string(),
+    )
+    .expect("write script");
+    client.send_command(
+        "create-1",
+        json!({
+            "type": "create",
+            "lifecycle": "client_owned",
+            "config": {
+                "cwd": dir.to_string_lossy(),
+                "sessionDir": agent_dir.join("sessions").to_string_lossy(),
+                "script": script_path.to_string_lossy(),
+            },
+        }),
+    );
+    let created = client.read_response("create-1");
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let session_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("session id")
+        .to_string();
 
     // Promote: the ownership clears and the summary answers.
     client.send_command(
