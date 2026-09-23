@@ -2644,7 +2644,7 @@ impl SessionUi {
             // prefills its search field like TS's initial search.
             "plugins" => {
                 self.track_command_used("plugins");
-                self.open_mcp_view(view).await?;
+                self.open_mcp_view("/plugins", view).await?;
                 let search = resolved.args.trim();
                 if !search.is_empty() {
                     if let Some(mcp) = view.mcp_view.as_mut() {
@@ -4626,7 +4626,7 @@ impl SessionUi {
     ) -> Result<()> {
         self.track_command_used("mcp");
         if resolved.args.trim().is_empty() {
-            return self.open_mcp_view(view).await;
+            return self.open_mcp_view("/mcp", view).await;
         }
         let Some(auth) = self.client_auth.clone() else {
             self.note("/mcp is not available in this client yet", view);
@@ -4641,7 +4641,9 @@ impl SessionUi {
     /// `get_mcp_connections` roster. The request carries the kernel's tool
     /// listing (it opens each connected generic server, bounded), so it
     /// gets the wider deadline.
-    async fn open_mcp_view(&mut self, view: &mut AgentView) -> Result<()> {
+    /// `command` names the entry the user ran (`/mcp` or `/plugins`), so a
+    /// failed roster load reports the command that failed.
+    async fn open_mcp_view(&mut self, command: &str, view: &mut AgentView) -> Result<()> {
         let data = match self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS * 4),
@@ -4655,7 +4657,7 @@ impl SessionUi {
         {
             Ok(data) => data,
             Err(error) => {
-                self.note(&format!("/mcp failed: {error:#}"), view);
+                self.note(&format!("{command} failed: {error:#}"), view);
                 return Ok(());
             }
         };
