@@ -65,7 +65,7 @@ QUEUE_FAUX_SCRIPT = {
     "modelName": "Faux Model",
     "reasoning": False,
     "contextWindow": 128000,
-    "tokensPerSecond": 6,
+    "tokensPerSecond": 3,
     "responses": [
         # The token-user-row turn answers quickly so the transcript state
         # settles; the queue turns follow (the first of them streams
@@ -77,7 +77,7 @@ QUEUE_FAUX_SCRIPT = {
                     "type": "text",
                     # Long enough that the streaming-hint state AND the
                     # parked strip both fit inside the turn at the faux's
-                    # 6 tokens/second (the hint capture + clear, then the
+                    # 3 tokens/second (the hint capture + clear, then the
                     # two parked prompts, all before the settle).
                     "text": "The first turn streams slowly and keeps going for a good long while, "
                     "certainly long enough that the streaming follow-up hint can be captured over "
@@ -204,6 +204,51 @@ def exact_rows_styled(frame, text):
     ]
 
 
+def styled_segment(line, text):
+    """The ANSI bytes of `line` that render exactly `text` (the styled
+    segment), so a row that carries side-varying content past the segment
+    (the tray row's context label: token counts differ per side) still
+    compares byte-exact over the segment under test."""
+    import re as _re
+
+    plain = strip_ansi(line)
+    start = plain.find(text)
+    if start < 0:
+        return None
+    end = start + len(text)
+    out = []
+    plain_pos = 0
+    i = 0
+    while i < len(line):
+        if line[i] == "\x1b":
+            # An escape strictly inside the segment (a color change mid-
+            # segment) belongs to it; the one AT the segment's end starts
+            # the next span (the context label) and must stay out.
+            if start <= plain_pos < end:
+                out.append(line[i])
+            match = _re.match(r"\x1b\[[0-9;]*[A-Za-z]", line[i:])
+            i += match.end() if match else 1
+            continue
+        if start <= plain_pos < end:
+            out.append(line[i])
+        plain_pos += 1
+        i += 1
+    return "".join(out)
+
+
+def tray_segment_rows(frame, text):
+    """The styled tray segments (rows containing `text`) for byte-exact
+    compare: the hint row's own bytes, never the context label beside it."""
+    frame = normalize_sgr_boundaries(frame)
+    segments = []
+    for line in frame.split("\n"):
+        if text in strip_ansi(line):
+            segment = styled_segment(line, text)
+            if segment is not None:
+                segments.append(segment)
+    return segments
+
+
 def prepare_queue_sandbox(base):
     """The visual_parity fixture with the queue-specific faux script."""
     shared_cwd, script_path, sandboxes = vp.prepare_sandbox(base)
@@ -328,17 +373,26 @@ def run_queue_session(binary, sandbox, shared_cwd, script_path, size, out_dir, p
         raise
     time.sleep(0.3)
     frames["h_streaming_hint"] = vp.capture(session)
-    vp.tmux("send-keys", "-t", session, "Escape")
-    time.sleep(0.4)
-    vp.tmux("send-keys", "-t", session, "Escape")
+    # Clear the draft with backspaces: the escape-repeat pair is the TS
+    # streaming-turn surface (the double press aborts the turn and opens
+    # the session tree mid-run), never a plain input clear.
+    for _ in range(len(HINT_DRAFT) + 2):
+        vp.tmux("send-keys", "-t", session, "BSpace")
+    wait_plain(session, HINT_DRAFT, gone=True, timeout=15)
     wait_plain(session, STREAMING_HINT_ROW, gone=True, timeout=15)
 
     vp.tmux("send-keys", "-t", session, STEERING_PROMPT)
     vp.tmux("send-keys", "-t", session, "Enter")
     vp.tmux("send-keys", "-t", session, FOLLOW_UP_PROMPT)
     vp.tmux("send-keys", "-t", session, "M-Enter")
-    vp.wait_for(session, HINT_ROW, timeout=30)
-    vp.wait_for(session, STEERING_ROW, timeout=15)
+    try:
+        vp.wait_for(session, HINT_ROW, timeout=30)
+        vp.wait_for(session, STEERING_ROW, timeout=15)
+    except TimeoutError:
+        os.makedirs(out_dir, exist_ok=True)
+        with open(os.path.join(out_dir, f"{binary}-strip-miss-plain.txt"), "w") as f:
+            f.write(vp.capture(session, escape=False))
+        raise
     vp.wait_for(session, FOLLOW_UP_ROW, timeout=15)
     time.sleep(0.3)
     frames["q_queue_strip"] = vp.capture(session)
@@ -595,15 +649,16 @@ def main():
                     editor_rows_styled(rust_frames[state]),
                 )
             )
-        # The streaming follow-up hint row compares ANSI byte-exact: the
-        # tray override label (muted key + description, TS
-        # `getTrayOverrideLabel` -> `renderInfoLine`) is the surface under
-        # test.
+        # The streaming follow-up hint row compares ANSI byte-exact over
+        # the hint segment (the tray override label — muted key +
+        # description, TS `getTrayOverrideLabel` -> `renderInfoLine`);
+        # the row's right side (the context label) carries per-side token
+        # counts and is not the surface under test.
         failures.append(
             compare(
                 f"h_streaming_hint-{args.size}",
-                exact_rows_styled(ts_frames["h_streaming_hint"], STREAMING_HINT_ROW),
-                exact_rows_styled(rust_frames["h_streaming_hint"], STREAMING_HINT_ROW),
+                tray_segment_rows(ts_frames["h_streaming_hint"], STREAMING_HINT_ROW),
+                tray_segment_rows(rust_frames["h_streaming_hint"], STREAMING_HINT_ROW),
             )
         )
         # The browse header and drained strip keep the plain-row compare.
