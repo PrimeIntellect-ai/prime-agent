@@ -221,6 +221,17 @@ fn mutate_lane(
             lane.swap(index, target as usize);
         }
         "replace" => {
+            // TS `mutateQueuedMessage` rejects the edit before its replace
+            // arms when the turn's primary delivery record is not a plain
+            // user message — an injected custom row (`payload.customMessage`,
+            // e.g. a parked heartbeat prompt) or an accepted agent message.
+            // Editing only `message` would leave the turn still delivering
+            // and persisting the old injected row, so the parked heartbeat
+            // (and every other injected component) answers `rejected`
+            // instead of reporting `applied` while delivering stale content.
+            if item.custom_message.is_some() || item.agent_message.is_some() {
+                return "rejected";
+            }
             let Some(text) = mutation.get("text").and_then(Value::as_str) else {
                 return "rejected";
             };
@@ -332,6 +343,78 @@ mod tests {
         let queue = worker.dispatch("get_queue", &json!({})).await;
         let data = queue.data.expect("queue data");
         assert_eq!(data["steering"][0], "edited while parked");
+    }
+
+    /// TS `mutateQueuedMessage` rejects the replace on an injected row
+    /// (the turn's primary delivery record is not a plain user message):
+    /// a parked heartbeat (labeled preview + injected custom row + queue
+    /// key) answers `rejected`, so an edit can never report `applied`
+    /// while the turn would still deliver and persist the old injected
+    /// content. Delete still applies (TS allows delete/move on every
+    /// queued row).
+    #[tokio::test]
+    async fn an_injected_heartbeat_row_rejects_replace_but_deletes() {
+        let worker = created_worker().await;
+        {
+            let mut core = worker.core.lock().unwrap();
+            core.steering.push_back(crate::worker::QueuedItem {
+                message: "[heartbeat: every 10m run#0]\n\nnudge the mission".to_string(),
+                preview: Some(
+                    "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission"
+                        .to_string(),
+                ),
+                custom_message: Some(json!({
+                    "role": "custom",
+                    "customType": "heartbeat_prompt",
+                    "content": "[heartbeat: every 10m run#0]\n\nnudge the mission",
+                    "display": true,
+                    "details": { "jobId": "hb-1" },
+                })),
+                agent_message: None,
+                queue_key: Some("heartbeat:hb-1".to_string()),
+                admission_id: None,
+                images: Vec::new(),
+                done: None,
+                queue_visible: true,
+            });
+        }
+        let expected = "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission";
+        let replace = worker
+            .dispatch(
+                "mutate_queued_message",
+                &json!({
+                    "lane": "steering",
+                    "index": 0,
+                    "expectedText": expected,
+                    "mutation": { "type": "replace", "text": "edited while parked" },
+                }),
+            )
+            .await;
+        assert!(replace.success, "mutate failed: {replace:?}");
+        assert_eq!(replace.data.expect("replace data")["status"], "rejected");
+        // The row is untouched: the parked heartbeat keeps its injected
+        // delivery and its labeled preview.
+        {
+            let core = worker.core.lock().unwrap();
+            let item = core.steering.front().expect("the parked row");
+            assert!(item.custom_message.is_some());
+            assert!(item.preview.is_some());
+        }
+        // Delete applies: the injected row leaves the lane.
+        let delete = worker
+            .dispatch(
+                "mutate_queued_message",
+                &json!({
+                    "lane": "steering",
+                    "index": 0,
+                    "expectedText": expected,
+                    "mutation": { "type": "delete" },
+                }),
+            )
+            .await;
+        assert!(delete.success, "delete failed: {delete:?}");
+        assert_eq!(delete.data.expect("delete data")["status"], "applied");
+        assert_eq!(lane_texts(&worker, Lane::Steering), Vec::<String>::new());
     }
 
     /// Wire shape: every outcome answers `success` with `{ status }`; the

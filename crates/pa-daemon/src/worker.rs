@@ -3779,10 +3779,13 @@ fn append_creation_prefix(
     }
 }
 
-/// The pending queue lanes of a session (journal persistence payload).
+/// The pending queue lanes of a session (journal persistence payload):
+/// the full parked rows — message text, labeled preview, injected custom
+/// row, queue key, and visibility — so crash/respawn recovery restores a
+/// queued heartbeat as the heartbeat component, not a plain prompt.
 pub(crate) struct QueueLanes {
-    pub(crate) steering: Vec<String>,
-    pub(crate) follow_up: Vec<String>,
+    pub(crate) steering: Vec<crate::journal::WorkerQueueItemRecord>,
+    pub(crate) follow_up: Vec<crate::journal::WorkerQueueItemRecord>,
 }
 
 /// Read the pending lanes off a locked core.
@@ -3815,17 +3818,20 @@ fn parse_custom_message(value: Option<&Value>) -> Result<Option<Value>, String> 
 }
 
 pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
+    fn items(lane: &VecDeque<QueuedItem>) -> Vec<crate::journal::WorkerQueueItemRecord> {
+        lane.iter()
+            .map(|item| crate::journal::WorkerQueueItemRecord {
+                message: item.message.clone(),
+                preview: item.preview.clone(),
+                custom_message: item.custom_message.clone(),
+                queue_key: item.queue_key.clone(),
+                queue_visible: item.queue_visible,
+            })
+            .collect()
+    }
     QueueLanes {
-        steering: core
-            .steering
-            .iter()
-            .map(|item| item.message.clone())
-            .collect(),
-        follow_up: core
-            .follow_up
-            .iter()
-            .map(|item| item.message.clone())
-            .collect(),
+        steering: items(&core.steering),
+        follow_up: items(&core.follow_up),
     }
 }
 
@@ -3837,22 +3843,27 @@ fn restore_queue_snapshot(
 ) -> (VecDeque<QueuedItem>, VecDeque<QueuedItem>) {
     let mut steering = VecDeque::new();
     let mut follow_up = VecDeque::new();
-    fn pending(lanes: Vec<String>) -> VecDeque<QueuedItem> {
+    fn pending(lanes: Vec<crate::journal::WorkerQueueItemRecord>) -> VecDeque<QueuedItem> {
         // Images on a queued prompt do not survive the worker restart:
-        // the recovery journal stores the message lanes as text (the TS
-        // command-recovery journal keeps the same text-only shape).
+        // the recovery journal stores the delivery rows without the
+        // process-local attachments (the TS command-recovery journal
+        // keeps the same text-only shape for its lanes). Everything the
+        // turn needs to deliver identically — the labeled preview, the
+        // injected custom row, the queue key, the visibility flag —
+        // rides the item record, so a restored queued heartbeat still
+        // runs and persists as the `heartbeat_prompt` component.
         lanes
             .into_iter()
-            .map(|message| QueuedItem {
-                preview: None,
-                message,
-                custom_message: None,
+            .map(|record| QueuedItem {
+                preview: record.preview,
+                message: record.message,
+                custom_message: record.custom_message,
                 agent_message: None,
-                queue_key: None,
+                queue_key: record.queue_key,
                 admission_id: None,
                 images: Vec::new(),
                 done: None,
-                queue_visible: true,
+                queue_visible: record.queue_visible,
             })
             .collect()
     }
@@ -6605,21 +6616,53 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let journal_path = dir.join("recovery.jsonl");
         let mut journal = WorkerRecoveryJournal::open(&journal_path).unwrap();
+        // A parked heartbeat rides the journal with its full delivery row
+        // (labeled preview, injected custom row, queue key), so a respawned
+        // worker restores the heartbeat component instead of a plain user
+        // message.
+        let heartbeat = crate::journal::WorkerQueueItemRecord {
+            message: "[heartbeat: every 10m run#0]\n\nnudge the mission".to_string(),
+            preview: Some(
+                "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission"
+                    .to_string(),
+            ),
+            custom_message: Some(json!({
+                "role": "custom",
+                "customType": "heartbeat_prompt",
+                "content": "[heartbeat: every 10m run#0]\n\nnudge the mission",
+                "display": true,
+                "details": { "jobId": "hb-1" },
+            })),
+            queue_key: Some("heartbeat:hb-1".to_string()),
+            queue_visible: true,
+        };
+        let plain = crate::journal::WorkerQueueItemRecord {
+            message: "follow-me".to_string(),
+            preview: None,
+            custom_message: None,
+            queue_key: None,
+            queue_visible: true,
+        };
         journal
             .record_queue_snapshot(
                 "session-a",
-                &["steer-me".to_string()],
-                &["follow-me".to_string()],
+                std::slice::from_ref(&heartbeat),
+                std::slice::from_ref(&plain),
             )
             .unwrap();
         // A reopen (respawned worker) reads the latest snapshot per session.
         let reloaded = WorkerRecoveryJournal::open(&journal_path).unwrap();
         let (steering, follow_up) = restore_queue_snapshot(&reloaded, "session-a");
         assert_eq!(steering.len(), 1);
-        assert_eq!(steering[0].message, "steer-me");
+        assert_eq!(steering[0].message, heartbeat.message);
+        assert_eq!(steering[0].preview, heartbeat.preview);
+        assert_eq!(steering[0].custom_message, heartbeat.custom_message);
+        assert_eq!(steering[0].queue_key, heartbeat.queue_key);
+        assert!(steering[0].queue_visible);
         assert_eq!(follow_up.len(), 1);
         assert_eq!(follow_up[0].message, "follow-me");
-        // Compaction (triggered by an all-idle record) keeps the snapshot.
+        // Compaction (triggered by an all-idle record) keeps the snapshot
+        // with its full rows.
         let mut compacting = WorkerRecoveryJournal::open(&journal_path).unwrap();
         compacting
             .record("session-a", "s1", None, false, "idle")
@@ -6627,6 +6670,32 @@ mod tests {
         let compacted = WorkerRecoveryJournal::open(&journal_path).unwrap();
         let (steering, _) = restore_queue_snapshot(&compacted, "session-a");
         assert_eq!(steering.len(), 1);
+        assert_eq!(steering[0].custom_message, heartbeat.custom_message);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A version-1 queue snapshot (the pre-item text lanes a prior binary
+    /// wrote) still restores as plain rows.
+    #[test]
+    fn a_version_one_queue_snapshot_restores_as_plain_rows() {
+        let dir = std::env::temp_dir().join(format!("pa-worker-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let journal_path = dir.join("recovery.jsonl");
+        std::fs::write(
+            &journal_path,
+            "{\"version\":1,\"type\":\"queue_snapshot\",\"active_session_id\":\"session-b\",\"steering\":[\"steer-me\"],\"follow_up\":[\"follow-me\"],\"recorded_at\":\"2026-09-22T00:00:00.000Z\"}\n",
+        )
+        .unwrap();
+        let journal = WorkerRecoveryJournal::open(&journal_path).unwrap();
+        let (steering, follow_up) = restore_queue_snapshot(&journal, "session-b");
+        assert_eq!(steering.len(), 1);
+        assert_eq!(steering[0].message, "steer-me");
+        assert_eq!(steering[0].preview, None);
+        assert_eq!(steering[0].custom_message, None);
+        assert_eq!(steering[0].queue_key, None);
+        assert!(steering[0].queue_visible);
+        assert_eq!(follow_up.len(), 1);
+        assert_eq!(follow_up[0].message, "follow-me");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -153,7 +153,16 @@ impl Worker {
                 let lane_follow_up =
                     action.get("delivery").and_then(Value::as_str) != Some("next_turn_boundary");
                 let item = crate::worker::QueuedItem {
-                    preview: None,
+                    // TS `restoreSessionActions` restores the labeled
+                    // preview with the payload (`...(recovered.payload.preview
+                    // ? { preview: recovered.payload.preview } : {})`), so
+                    // a restored heartbeat keeps its `Heartbeat prompt:`
+                    // queue row instead of falling back to the lane-labeled
+                    // raw text.
+                    preview: payload
+                        .get("preview")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                     message: payload
                         .get("text")
                         .and_then(Value::as_str)
@@ -161,7 +170,15 @@ impl Worker {
                         .to_string(),
                     custom_message: payload.get("customMessage").cloned(),
                     agent_message: None,
-                    queue_key: None,
+                    // TS `restoreSessionActions` restores the action's
+                    // queue key (`...(recovered.queueKey ? { queueKey:
+                    // recovered.queueKey } : {})`), so a restored
+                    // heartbeat keeps its `heartbeat:<id>` replace-
+                    // instead-of-stack addressing.
+                    queue_key: action
+                        .get("queueKey")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                     admission_id: None,
                     images: crate::worker::parse_prompt_images(payload),
                     done: None,
@@ -574,6 +591,95 @@ mod tests {
             expected_error.error.as_deref(),
             Some("Unsupported session action recovery format version: 2")
         );
+    }
+
+    /// A restored action keeps its labeled preview (TS
+    /// `restoreSessionActions` restores `payload.preview`), so a restored
+    /// queued heartbeat still reads `Heartbeat prompt: <text>` in the
+    /// queue strip and still delivers as the `heartbeat_prompt` component.
+    #[tokio::test]
+    async fn restore_actions_restores_the_labeled_preview() {
+        let worker = created_worker().await;
+        let content = "[heartbeat: every 10m run#0]\n\nnudge the mission";
+        let response = worker
+            .dispatch(
+                "restore_actions",
+                &json!({
+                    "activeSessionId": "custom-session",
+                    "snapshot": {
+                        "formatVersion": 1,
+                        "actions": [
+                            {
+                                "id": "hb-1",
+                                "source": "user",
+                                "delivery": "next_turn_boundary",
+                                "wake": "wake",
+                                "queueKey": "heartbeat:hb-1",
+                                "payload": {
+                                    "kind": "turn",
+                                    "text": content,
+                                    "preview": format!(
+                                        "{}: {content}",
+                                        pa_core::session_engine::messages::HEARTBEAT_PROMPT_PREVIEW_LABEL
+                                    ),
+                                    "records": [
+                                        {
+                                            "id": "hb-1-r1",
+                                            "role": "primary",
+                                            "message": {
+                                                "role": "custom",
+                                                "customType": "heartbeat_prompt",
+                                                "content": content,
+                                                "display": true,
+                                            },
+                                            "ownerActionId": "hb-1",
+                                        },
+                                    ],
+                                    "customMessage": {
+                                        "role": "custom",
+                                        "customType": "heartbeat_prompt",
+                                        "content": content,
+                                        "display": true,
+                                    },
+                                    "executionPolicy": { "preparation": {} },
+                                    "queueVisible": true,
+                                    "acceptedAgentMessage": false,
+                                    "acceptedBeforeCompletion": false,
+                                },
+                            },
+                        ],
+                    },
+                }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        assert_eq!(response.data, Some(json!({ "restored": 1 })));
+        // The queue strip serves the labeled preview (TS
+        // `queuedAgentMessagePreview`), not the lane-labeled raw text.
+        let queue = worker.dispatch("get_queue", &json!({})).await;
+        let data = queue.data.expect("queue data");
+        assert_eq!(
+            data["steering"][0],
+            format!(
+                "{}: {content}",
+                pa_core::session_engine::messages::HEARTBEAT_PROMPT_PREVIEW_LABEL
+            )
+        );
+        // The injected custom row rides the restored item.
+        {
+            let core = worker.core.lock().unwrap();
+            let item = core.steering.front().expect("the restored row");
+            assert_eq!(
+                item.custom_message
+                    .as_ref()
+                    .and_then(|row| row.get("customType")),
+                Some(&json!("heartbeat_prompt"))
+            );
+            // The queue key rides the restored row (TS restores
+            // `recovered.queueKey`), so a later fire replaces it instead
+            // of stacking.
+            assert_eq!(item.queue_key.as_deref(), Some("heartbeat:hb-1"));
+        }
     }
 
     /// `refine` on a session without refinement support answers the
