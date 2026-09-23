@@ -3496,6 +3496,13 @@ impl SessionUi {
         let mut args = vec!["update".to_string()];
         args.extend(plan.flags.clone());
         let child_result = update.0.run_cli_child(args).await;
+        // TS skips the relaunch when the interactive child exits with the
+        // not-attempted code (75): a declined confirmation or a no-change
+        // skip keeps the running client as-is, so the session is not torn
+        // down and restarted for nothing.
+        if matches!(child_result, Ok(75)) {
+            return Ok(());
+        }
         match child_result {
             Err(error) => {
                 eprintln!("Update failed: {error}");
