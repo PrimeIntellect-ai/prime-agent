@@ -147,7 +147,9 @@ impl Inner {
             }
 
             let mut stdout = std::mem::take(&mut buffers.stdout);
+            buffers.stdout_chars = 0;
             let mut stderr = std::mem::take(&mut buffers.stderr);
+            buffers.stderr_chars = 0;
             let mut result = buffers.result.take();
             let mut status = buffers.status;
             if buffers.stdout_truncated {
@@ -187,6 +189,7 @@ impl Inner {
             }
 
             let mut background_output = std::mem::take(&mut buffers.background_output);
+            buffers.background_output_chars = 0;
             if buffers.background_output_truncated {
                 background_output.push_str(&format!(
                     "\n[... background output truncated at {} chars ...]",

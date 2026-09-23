@@ -154,6 +154,7 @@ impl Inner {
             g.background_bash_handles.clear();
             // Stale pre-teardown background output must not surface after a restart.
             g.pending_background_output.clear();
+            g.pending_background_output_chars = 0;
             g.pending_background_output_truncated = false;
         }
         self.reject_active_execution("Kernel has been shut down");

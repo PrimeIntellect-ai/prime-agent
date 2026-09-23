@@ -195,6 +195,7 @@ impl Inner {
                 buffers.stderr.push_str(&format!(
                     "attachment dropped: exceeds {MAX_ATTACHMENT_DATA_CHARS} base64 chars"
                 ));
+                buffers.stderr_chars = buffers.stderr.chars().count();
                 buffers.status = ExecuteStatus::Error;
             }
             Some(Ok(attachment)) => buffers.attachments.push(attachment),
@@ -253,5 +254,24 @@ impl Inner {
             text,
             MAX_BACKGROUND_OUTPUT_CHARS,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn teardown_resets_pending_background_count() {
+        let manager = ReplKernelManager::new(KernelManagerOptions::default());
+        manager
+            .inner
+            .append_background_output(&"é".repeat(MAX_BACKGROUND_OUTPUT_CHARS));
+        manager.inner.cleanup_resources(Signal::Term);
+        manager.inner.append_background_output("new🍁");
+        let pending = lock(&manager.inner.guarded);
+        assert_eq!(pending.pending_background_output, "new🍁");
+        assert_eq!(pending.pending_background_output_chars, 4);
+        assert!(!pending.pending_background_output_truncated);
     }
 }
