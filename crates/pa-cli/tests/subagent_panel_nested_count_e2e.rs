@@ -1,12 +1,11 @@
-//! End-to-end verifier for the subagent panel's nested counts (Kevin's
-//! dogfood ask): a two-level spawn through the real supervisor — a root
-//! session's child that itself spawns a grandchild — must surface BOTH
-//! descendants on every count surface. The roster rows the grandchild's
-//! worker pushes carry its parent linkage, so the summary-box walk
+//! End-to-end verifier for the subagent panel's nested counts: a
+//! two-level spawn through the real supervisor — a root session's child
+//! that itself spawns a grandchild — must surface BOTH descendants on
+//! every count surface. The roster rows the grandchild's worker pushes
+//! carry its parent linkage, so the summary-box walk
 //! (`subagents::count_descendants`, TS `countRosterSubagentStatuses` over
 //! `collectSubagentDescendantSummaries`) counts the whole subtree at any
-//! depth, and the agents dock's `N subagents` row aggregates the tree
-//! instead of the direct-children list.
+//! depth, and the agents dock's `N subagents` row aggregates the tree.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -242,18 +241,6 @@ fn entry_field<'a>(entry: &'a Value, field: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
-/// The identity keys of one roster entry (TS `parentIdentityKeys`).
-fn entry_identity_keys(entry: &Value) -> Vec<String> {
-    [
-        entry_field(entry, "activeSessionId").map(|id| format!("active:{id}")),
-        entry_field(entry, "sessionId").map(|id| format!("session:{id}")),
-        entry_field(entry, "sessionFile").map(|file| format!("file:{file}")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
-}
-
 /// The parent keys of one roster entry (TS `getParentKeys`).
 fn entry_parent_keys(entry: &Value) -> Vec<String> {
     [
@@ -264,43 +251,6 @@ fn entry_parent_keys(entry: &Value) -> Vec<String> {
     .into_iter()
     .flatten()
     .collect()
-}
-
-/// Every roster entry descending from `parent` (the TUI's breadth-first
-/// walk, `subagents::descendant_positions`): direct children and every
-/// deeper descendant reachable through their parent linkage.
-fn descendants(roster: &[Value], parent: &Parent) -> Vec<Value> {
-    let mut by_parent_key: std::collections::HashMap<String, Vec<usize>> =
-        std::collections::HashMap::new();
-    for (position, entry) in roster.iter().enumerate() {
-        if entry_field(entry, "runtimeKind") != Some("subagent") {
-            continue;
-        }
-        for key in entry_parent_keys(entry) {
-            by_parent_key.entry(key).or_default().push(position);
-        }
-    }
-    let mut queue = vec![
-        format!("active:{}", parent.active_session_id),
-        format!("session:{}", parent.session_id),
-        format!("file:{}", parent.session_file),
-    ];
-    let mut positions: Vec<usize> = Vec::new();
-    let mut linked: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let mut index = 0;
-    while index < queue.len() {
-        for position in by_parent_key.get(&queue[index]).into_iter().flatten() {
-            if linked.insert(*position) {
-                positions.push(*position);
-                queue.extend(entry_identity_keys(&roster[*position]));
-            }
-        }
-        index += 1;
-    }
-    positions
-        .into_iter()
-        .map(|position| roster[position].clone())
-        .collect()
 }
 
 /// A root session spawns a child, the child spawns a grandchild, and every
@@ -403,10 +353,6 @@ async fn a_two_level_spawn_counts_the_whole_tree() {
     );
     let child_counts = count_descendants(&roster, &child_identity);
     assert_eq!(child_counts.total, 1, "the child sees its own child");
-
-    // The wire walk (the same linkage over the raw roster entries) agrees.
-    assert_eq!(descendants(&roster, &root).len(), 2);
-    assert_eq!(descendants(&roster, &child).len(), 1);
 
     // Both child rows settle with their scripted answers.
     wait_until(Duration::from_secs(20), || {

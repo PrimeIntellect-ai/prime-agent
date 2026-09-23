@@ -255,8 +255,8 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
 
     // Collapsed: the parent row and its `2 subagents` summary row — the
     // label aggregates the whole descendant tree (the child and the
-    // grandchild under it, Kevin's dogfood ask), with both reachable only
-    // through the summary row.
+    // grandchild under it), with both reachable only through the summary
+    // row.
     let collapsed = first_frame_of(&view.frames, "orchestrator chat");
     assert!(
         collapsed.contains("\u{25b8} 2 subagents"),

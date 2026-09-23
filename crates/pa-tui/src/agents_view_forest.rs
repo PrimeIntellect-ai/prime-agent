@@ -827,11 +827,11 @@ fn agents_row(row: &BaseRow, depth: usize, parent_identity: Option<&str>) -> Age
 }
 
 /// The `N subagents` summary row under one agent (TS
-/// `createSubagentSummaryRow`, with Kevin's dogfood divergence: the count
-/// aggregates the whole descendant tree — the row under a parent that runs
-/// one child which itself runs grandchildren shows every descendant, not
-/// just the direct-children list): finished subagents stay reachable
-/// through it even when nothing is running anymore.
+/// `createSubagentSummaryRow`, with the deliberate divergence that the
+/// count aggregates the whole descendant tree rather than the
+/// direct-children list): the running label counts the recursively
+/// running rows, and finished subagents stay reachable through the row
+/// even when nothing is running anymore.
 fn subagent_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsViewRow {
     let total = parent.descendant_count;
     let running = parent.running_subagent_count;
@@ -1161,11 +1161,9 @@ mod tests {
             roster_entry("c", "idle", child_summary("c", "p", "worker one")),
             roster_entry("gc", "idle", grandchild),
         ];
-        // Kevin's dogfood ask: the `N subagents` row under a parent counts
-        // every descendant of the subtree, not just its direct children —
-        // one child that itself runs a grandchild reads `2 subagents`
-        // (TS shows the direct-children list here; this divergence is the
-        // explicit product ask).
+        // The `N subagents` row under a parent aggregates every
+        // descendant of the subtree, not just its direct children: one
+        // child that itself runs a grandchild reads `2 subagents`.
         let rows = rows_for(&roster, None, &[]);
         assert_eq!(rows[1].title, "2 subagents");
         // The child's own summary row keeps the same walk: one grandchild.
