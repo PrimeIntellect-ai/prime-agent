@@ -83,7 +83,10 @@ def locate_plain(pane_text, needle):
 
 def corpus_path(run_dir: Path) -> Path:
     """Write (or reuse) the large drag corpus under `run_dir`."""
-    path = run_dir / f"drag-corpus-{TURNS}.jsonl"
+    # v2: assistant records carry a full provider usage block — the TS
+    # resume path reads usage without a guard (`usage.input`), so a corpus
+    # without usage crashes the TS binary on --resume (seen on 0.9.5).
+    path = run_dir / f"drag-corpus-{TURNS}-v2.jsonl"
     if path.exists():
         return path
     header = {
@@ -95,6 +98,14 @@ def corpus_path(run_dir: Path) -> Path:
         "rlmDepth": 0,
     }
     body = ("corpus payload line with stable width. " * (BODY_KB * 1024 // 41)).strip()
+    usage = {
+        "input": 4096,
+        "output": 2048,
+        "cacheRead": 0,
+        "cacheWrite": 0,
+        "totalTokens": 6144,
+        "cost": {"input": 0.01, "output": 0.02, "cacheRead": 0, "cacheWrite": 0, "total": 0.03},
+    }
     lines = [json.dumps(header)]
     parent = None
     counter = 0
@@ -109,16 +120,20 @@ def corpus_path(run_dir: Path) -> Path:
             ("user", f"please do task number {turn}"),
             ("assistant", NEEDLE if turn == TURNS - 1 else f"answer {turn}: {body}"),
         ):
+            message = {
+                "role": role,
+                "content": [{"type": "text", "text": text}],
+                "timestamp": T0 + turn,
+            }
+            if role == "assistant":
+                message["stopReason"] = "stop"
+                message["usage"] = usage
             record = {
                 "type": "message",
                 "id": next_id(),
                 "parentId": parent,
                 "timestamp": "2026-09-16T18:40:%02d.%03dZ" % (turn % 60, counter % 1000),
-                "message": {
-                    "role": role,
-                    "content": [{"type": "text", "text": text}],
-                    "timestamp": T0 + turn,
-                },
+                "message": message,
             }
             lines.append(json.dumps(record))
             parent = record["id"]
