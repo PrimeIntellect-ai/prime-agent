@@ -451,11 +451,19 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
         // session exits back into the view until the user exits it. TS gates
         // the explicit `agents` request on completed onboarding (a fresh
         // install shows the first-run notice first); bare `--resume` opens
-        // the view regardless.
+        // the view regardless. `--continue` joins them when a candidate
+        // session exists: the view opens preselected on the newest saved
+        // session for the cwd (the notice names it) so the user confirms
+        // what continues instead of a blind newest-resume.
+        let continue_view = continue_recent_view(options, tui_options.onboarding.is_some());
         let agents_view = options.session.resume_bare
-            || (options.agents_view_requested && tui_options.onboarding.is_none());
+            || (options.agents_view_requested && tui_options.onboarding.is_none())
+            || continue_view.is_some();
         if agents_view {
-            run_agents_view_flow(tui_options, None, None).await
+            let (anchor, notice) = continue_view
+                .map(|view| (Some(view.session_id), Some(view.notice)))
+                .unwrap_or((None, None));
+            run_agents_view_flow(tui_options, anchor, notice).await
         } else {
             let outcome =
                 pa_tui::interactive::run_interactive(tui_options.clone(), UiMode::Terminal).await?;
@@ -796,6 +804,10 @@ fn build_tui_options(
 
 /// Map the CLI session flags onto the TUI session selection (the TS order:
 /// explicit `--resume` selector, then `--continue`, then a fresh session).
+/// `--continue` never maps to a resume: the continue-recent launch resolves
+/// the newest saved session for the cwd itself and surfaces it through the
+/// agents view (see [`continue_recent_view`]); without a candidate (or with
+/// onboarding pending) the direct run opens a fresh session.
 fn session_selection(
     session: &crate::mode::SessionOptions,
     session_dir: &Option<PathBuf>,
@@ -805,10 +817,55 @@ fn session_selection(
         let dir = session_dir.as_deref().unwrap_or(&default_dir);
         return Ok(resolve_resume_selector(selector, dir));
     }
-    if session.continue_recent {
-        return Ok(SessionSelection::ContinueRecent);
-    }
     Ok(SessionSelection::New)
+}
+
+/// The `--continue` launch's agents-view target: the newest saved session
+/// for the cwd (the candidate TS `SessionManager.continueRecent` silently
+/// reopens) plus the status-line notice that names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContinueRecentView {
+    /// The candidate's session id: the view preselects (anchors on) its row.
+    session_id: String,
+    notice: String,
+}
+
+/// Resolve the `--continue` launch into an agents-view opening. The launch
+/// never blind-resumes the newest session: on a shared session dir that
+/// could be any session (an orchestrator's), and reopening it would revive
+/// its context and scheduled jobs without the user ever naming it
+/// (TS `SessionManager.continueRecent` reopens silently — a sanctioned
+/// divergence: this build shows the candidate preselected in the agents
+/// view instead, and the user confirms what continues). `None` falls
+/// through to the direct fresh-session run: not a `--continue` launch, a
+/// pending onboarding (the first-run notice owns the startup, like the
+/// explicit `agents` request), or no saved session for the cwd — the same
+/// fallback TS `continueRecent` takes when the scan finds nothing.
+fn continue_recent_view(
+    options: &RunOptions,
+    onboarding_pending: bool,
+) -> Option<ContinueRecentView> {
+    if !options.session.continue_recent || onboarding_pending {
+        return None;
+    }
+    let session_dir = options
+        .session
+        .session_dir
+        .clone()
+        .unwrap_or_else(|| options.config.agent_dir.join("sessions"));
+    let cwd = options.config.cwd.clone();
+    let path = pa_core::session::discovery::find_most_recent_session_for_cwd(&session_dir, &cwd)?;
+    let header = pa_core::session::manager::read_session_header(&path)?;
+    if header.id.is_empty() {
+        return None;
+    }
+    Some(ContinueRecentView {
+        session_id: header.id.clone(),
+        notice: format!(
+            "Most recent session for this directory: {} — Enter continues it, or pick another session.",
+            header.id
+        ),
+    })
 }
 
 /// `--resume <selector>`: an existing session file path, a `<id>.jsonl` under
@@ -1013,10 +1070,13 @@ mod tests {
             session_selection(&session, &Some(session_dir.clone())).unwrap(),
             SessionSelection::New
         );
+        // `--continue` never maps to a resume: the continue-recent launch
+        // resolves its candidate through the agents view (see
+        // `continue_recent_view`) or falls through to a fresh session.
         session.continue_recent = true;
         assert_eq!(
             session_selection(&session, &Some(session_dir.clone())).unwrap(),
-            SessionSelection::ContinueRecent
+            SessionSelection::New
         );
         session.continue_recent = false;
         session.resume = Some("a1b2c3".to_string());
@@ -1040,6 +1100,147 @@ mod tests {
         assert_eq!(
             session_selection(&session, &Some(session_dir)).unwrap(),
             SessionSelection::Resume(file)
+        );
+    }
+
+    fn run_options_for_continue(dir: &std::path::Path) -> RunOptions {
+        use crate::mode::{AppMode, RuntimeConfig};
+        RunOptions {
+            app_mode: AppMode::Interactive,
+            config: RuntimeConfig {
+                cwd: dir.to_path_buf(),
+                agent_dir: dir.join("agent"),
+                ..Default::default()
+            },
+            session: Default::default(),
+            messages: Vec::new(),
+            file_args: Vec::new(),
+            daemon_socket: None,
+            list_models: None,
+            initial_message: None,
+            verbose: false,
+            offline: false,
+            agents_view_requested: false,
+            attach_agent: None,
+        }
+    }
+
+    /// A saved session file the cwd-scoped scans resolve: the same shape
+    /// `SessionFile::create` writes (header with id + cwd).
+    fn seed_saved_session(
+        session_dir: &std::path::Path,
+        id: &str,
+        cwd: &std::path::Path,
+    ) -> std::path::PathBuf {
+        use std::io::Write;
+        std::fs::create_dir_all(session_dir).expect("sessions dir");
+        let path = session_dir.join(format!("{id}.jsonl"));
+        let mut file = std::fs::File::create(&path).expect("create session file");
+        let header = serde_json::json!({
+            "type": "session", "id": id,
+            "cwd": cwd.display().to_string(),
+            "timestamp": "2024-01-01T00:00:00.000Z", "version": 3,
+        });
+        writeln!(file, "{header}").expect("write header");
+        path
+    }
+
+    /// `--continue` surfaces the newest saved session for the cwd as the
+    /// preselected agents-view target, never as a direct resume.
+    #[test]
+    fn continue_recent_targets_the_newest_saved_session_for_the_cwd() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        let session_dir = agent_dir.join("sessions");
+        seed_saved_session(&session_dir, "old0000000000000000000000000001", dir.path());
+        // The newest file: written last, matching cwd.
+        let candidate =
+            seed_saved_session(&session_dir, "newest00000000000000000000000001", dir.path());
+        // A session from another cwd must never be the candidate.
+        let other_cwd = tempfile::TempDir::new().expect("other cwd");
+        seed_saved_session(
+            &session_dir,
+            "foreign0000000000000000000000001",
+            other_cwd.path(),
+        );
+
+        // Same mtime granularity as the write: nudge the candidate forward.
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let handle = std::fs::File::options()
+            .append(true)
+            .open(&candidate)
+            .expect("open candidate");
+        handle.set_modified(future).expect("nudge mtime");
+
+        let mut options = run_options_for_continue(dir.path());
+        options.session.continue_recent = true;
+        options.session.session_dir = Some(session_dir.clone());
+        let view = continue_recent_view(&options, false).expect("candidate resolves");
+        assert_eq!(
+            view.session_id, "newest00000000000000000000000001",
+            "the newest saved session for the cwd is the preselected row"
+        );
+        assert!(
+            view.notice.contains("newest00000000000000000000000001"),
+            "the notice names the candidate: {}",
+            view.notice
+        );
+        assert!(
+            candidate.exists(),
+            "resolution only reads the candidate file"
+        );
+    }
+
+    /// Without a saved session for the cwd, `--continue` falls through to the
+    /// fresh-session run (TS `continueRecent`'s own fallback).
+    #[test]
+    fn continue_recent_without_a_candidate_opens_a_fresh_session() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        let session_dir = agent_dir.join("sessions");
+        // Only a foreign-cwd session exists: no candidate for this cwd.
+        let other_cwd = tempfile::TempDir::new().expect("other cwd");
+        seed_saved_session(
+            &session_dir,
+            "foreign0000000000000000000000001",
+            other_cwd.path(),
+        );
+
+        let mut options = run_options_for_continue(dir.path());
+        options.session.continue_recent = true;
+        options.session.session_dir = Some(session_dir);
+        assert!(
+            continue_recent_view(&options, false).is_none(),
+            "no candidate: the launch opens a fresh session, not the view"
+        );
+    }
+
+    /// A pending onboarding keeps the startup (the first-run notice owns the
+    /// launch), and a non-continue launch never opens the view.
+    #[test]
+    fn continue_recent_view_gates_on_onboarding_and_the_flag() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        let session_dir = agent_dir.join("sessions");
+        seed_saved_session(&session_dir, "newest00000000000000000000000001", dir.path());
+
+        let mut options = run_options_for_continue(dir.path());
+        options.session.session_dir = Some(session_dir);
+        assert!(
+            continue_recent_view(&options, false).is_none(),
+            "a non-continue launch never opens the agents view through this path"
+        );
+        options.session.continue_recent = true;
+        assert!(
+            continue_recent_view(&options, true).is_none(),
+            "a pending onboarding keeps the first-run startup"
+        );
+        assert!(
+            continue_recent_view(&options, false).is_some(),
+            "a completed onboarding opens the view preselected on the candidate"
         );
     }
 

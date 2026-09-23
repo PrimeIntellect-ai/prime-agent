@@ -1238,3 +1238,51 @@ allowlist.
   `track_model_refused` telemetry seam.
 - `pa-daemon`: `model_allowlist` (the enforcement helpers + the worker's
   lazy refusal-telemetry client), with the three seams above.
+
+
+## The continue-recent launch safety — `--continue` never blind-resumes (lane continue-recent-safety, 2026-09-23)
+
+The P6 trap: a continue-recent launch resolves "the newest session for the
+cwd" and reopens it silently. On a shared session dir that can be *any*
+session — including a fleet orchestrator's, whose context and scheduled
+jobs then resurrect on the reopened worker. The TS reference does exactly
+that (`SessionManager.continueRecent`, session-manager.ts:2709 → the
+daemon worker's `continueRecent` arm, daemon-mode.ts:2005), and the Rust
+port's wire had drifted the other way: the supervisor only
+existence-checked the candidate (`No recent session found`) and the worker
+ignored `continueRecent` entirely, so `--continue` silently started a
+FRESH session (a parity bug both directions: no resume, no error).
+
+### The design (sanctioned divergence)
+
+- The interactive `--continue` resolves the candidate **client-side**
+  (`pa-core` `find_most_recent_session_for_cwd`) and opens the **agents
+  view preselected on it** — the status line names the session, and the
+  user confirms what continues (or picks another / creates fresh). A
+  launch with no candidate falls through to a fresh session (TS
+  `continueRecent`'s own fallback; the old bogus `No recent session found
+  for <cwd>` error is gone).
+- The daemon refuses `continueRecent: true` outright
+  (`continueRecent is not supported: pass sessionPath to reopen a
+  session, or open one through the agents view`): no client can ask the
+  daemon to pick a session blindly. A plain create (no field) is
+  unaffected. The wire field stays (TS shape); only the semantics change.
+- `SessionSelection::ContinueRecent` is removed from pa-tui: the typed
+  form of the blind resume had exactly one producer (the CLI flag) and
+  one consumer (the daemon), and both are gone. Print mode's `-c` is
+  unchanged: it resolves client-side like TS print mode (in-process, no
+  daemon-side resurrection).
+
+### Evidence
+
+- `pa-cli` unit tests: the flag mapping (`continue` → fresh), the
+  candidate resolution (newest for the cwd; foreign cwd and empty dir
+  excluded), and the onboarding/flag gates.
+- `interactive_daemon_e2e::tui_bare_launch_opens_a_fresh_session_when_a_newer_saved_one_exists_for_the_cwd`:
+  the bare launch pins fresh — the seeded saved session stays
+  byte-identical, a new file is created.
+- `agents_view_anchor_e2e::continue_recent_view_preselects_the_candidate_and_renders_the_notice`:
+  the view renders the notice and Enter opens the preselected candidate,
+  not the first-listed row.
+- `supervisor_e2e::create_with_continue_recent_is_refused`: the wire
+  refusal + the plain-create pass-through.

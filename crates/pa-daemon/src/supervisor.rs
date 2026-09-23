@@ -41,7 +41,7 @@ use crate::protocol::{
     DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
 };
 use crate::registry::{ResidentWorker, SessionRegistry, WorkerRegistration, WorkerRequest};
-use crate::session_store::{find_most_recent_session_for_cwd, list_sessions};
+use crate::session_store::list_sessions;
 use crate::snapshot_stream::{attach_client_capabilities, stream_attach, wants_chunked};
 use crate::update_prepare::{
     marker_expires_at_iso, update_gate_refuses, write_prepared_artifacts, AbortOutcome,
@@ -1763,15 +1763,18 @@ impl Supervisor {
                 "Session cannot be both no-session and session-pathed"
             ));
         }
-        let session_dir_path = match session_dir.as_deref() {
-            Some(dir) => paths::expand_tilde(dir)?,
-            None => paths::sessions_dir(&self.options.agent_dir)?,
-        };
+        // `continueRecent` is refused outright (a sanctioned divergence
+        // from the TS worker, which resolves it to the newest saved session
+        // for the cwd): a create that asks the daemon to pick a session
+        // blindly can reopen an arbitrary one on a shared session dir —
+        // including a session whose context and scheduled jobs resurrect on
+        // the worker. The client owns the choice: the interactive
+        // `--continue` resolves its candidate and shows it in the agents
+        // view, and an explicit `sessionPath` opens exactly what was named.
         if *continue_recent == Some(true) {
-            let recent = find_most_recent_session_for_cwd(&session_dir_path, &cwd_value);
-            if recent.is_none() {
-                return Err(anyhow!("No recent session found for {}", cwd_value));
-            }
+            return Err(anyhow!(
+                "continueRecent is not supported: pass sessionPath to reopen a session, or open one through the agents view"
+            ));
         }
         let worker_id = util::new_display_id();
         let worker_socket = socket::worker_socket_path(&self.options.socket_path, &worker_id);

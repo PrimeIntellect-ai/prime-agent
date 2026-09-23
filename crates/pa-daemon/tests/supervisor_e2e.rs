@@ -2054,3 +2054,85 @@ fn create_path_duplicate_name_fails_with_current_ts_string() {
     );
     assert_eq!(empty["error"], "Session name cannot be empty");
 }
+
+/// The continue-recent safety contract at the daemon wire: a create that
+/// asks the daemon to pick the session blindly (`continueRecent: true`) is
+/// refused outright (a sanctioned divergence — the TS worker resolves it to
+/// the newest saved session for the cwd, which on a shared session dir can
+/// be any session, including one whose context and scheduled jobs resurrect
+/// on the reopened worker). A create without the field still succeeds, so
+/// the refusal only pins the blind-resume form.
+#[test]
+fn create_with_continue_recent_is_refused() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let _daemon = spawn_daemon(&socket, &agent_dir);
+    let (mut client, hello) = Client::connect(&socket);
+    assert_eq!(hello["type"], "daemon_hello");
+
+    // A saved session for the cwd exists, so a blind continue-recent would
+    // have a candidate: the refusal is the contract, not the empty-dir
+    // error it replaces ("No recent session found for <cwd>").
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("sessions dir");
+    let cwd = dir.path().display().to_string();
+    let saved = session_dir.join("saved00000000000000000000000001.jsonl");
+    std::fs::write(
+        &saved,
+        format!(
+            concat!(
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"saved00000000000000000000000001\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"{cwd}\"}}\n"
+            ),
+            cwd = cwd,
+        ),
+    )
+    .expect("write saved session");
+
+    client.send_command(
+        "c1",
+        serde_json::json!({
+            "type": "create",
+            "continueRecent": true,
+            "config": {
+                "cwd": cwd,
+                "sessionDir": session_dir.display().to_string(),
+            },
+        }),
+    );
+    let refused = client.read_response("c1");
+    assert_eq!(
+        refused["success"], false,
+        "the blind continue-recent create succeeded: {refused}"
+    );
+    assert_eq!(refused["command"], "create");
+    assert_eq!(
+        refused["error"],
+        "continueRecent is not supported: pass sessionPath to reopen a session, or open one through the agents view"
+    );
+
+    // The plain create without the field still opens a fresh session: the
+    // refusal never widened into a general create gate.
+    client.send_command(
+        "c2",
+        serde_json::json!({
+            "type": "create",
+            "config": {
+                "cwd": cwd,
+                "sessionDir": session_dir.display().to_string(),
+            },
+        }),
+    );
+    let created = client.read_response("c2");
+    assert_eq!(created["success"], true, "plain create failed: {created}");
+    let session_id = created["data"]["id"]
+        .as_str()
+        .or_else(|| created["data"]["sessionId"].as_str())
+        .expect("session id in create response")
+        .to_string();
+    assert_ne!(
+        session_id, "saved00000000000000000000000001",
+        "the plain create opened a fresh session, not the saved one"
+    );
+}

@@ -103,6 +103,9 @@ pub struct RuntimeConfig {
 /// Session selection options that stay client-side.
 #[derive(Debug, Clone, Default)]
 pub struct SessionOptions {
+    /// `--continue`/`-c`: the launch surfaces the newest saved session for
+    /// the cwd through the agents view (preselected, never a blind reopen)
+    /// and falls back to a fresh session without a candidate.
     pub continue_recent: bool,
     pub resume_bare: bool,
     pub resume: Option<String>,
