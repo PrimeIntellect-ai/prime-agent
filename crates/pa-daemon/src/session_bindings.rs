@@ -87,13 +87,16 @@ impl SessionBindingTable {
         // Every id still holding an older binding for this same durable
         // session is superseded - not just the immediately previous one,
         // so a client that missed an intermediate supersede still
-        // converges. The session id must match too: only the same
-        // session's ids may repoint at the new binding.
+        // converges. The session id must match too, and it must be
+        // present: only the same session's ids may repoint at the new
+        // binding, and a session id that never resolved (a boot
+        // registration racing the create) identifies nothing.
         let file = binding.session_file.as_deref().expect("file-backed");
         let mut superseded_ids: Vec<String> = by_active_id
             .iter()
             .filter(|(_, bound)| {
                 bound.session_file.as_deref() == Some(file)
+                    && bound.session_id.is_some()
                     && bound.session_id == binding.session_id
                     && bound.active_session_id != binding.active_session_id
             })
@@ -330,7 +333,9 @@ mod tests {
     fn an_identity_less_record_never_supersedes() {
         // A boot registration racing the create carries no session id: it
         // supersedes nothing (the identity cannot match), and the
-        // create-completion record does.
+        // create-completion record does. Two identity-less records over
+        // the same file never match each other either: `None` identifies
+        // no durable session.
         let table = SessionBindingTable::new();
         table.record("worker-1", Some("sess-a"), Some("/tmp/sess.jsonl"));
         assert!(table
@@ -348,6 +353,27 @@ mod tests {
             .record("worker-2", Some("sess-a"), Some("/tmp/sess.jsonl"))
             .expect("supersede at create completion");
         assert_eq!(superseded.0, vec!["worker-1".to_string()]);
+    }
+
+    #[test]
+    fn two_identity_less_records_never_supersede_each_other() {
+        let table = SessionBindingTable::new();
+        table.record("worker-1", None, Some("/tmp/sess.jsonl"));
+        table.record("worker-2", None, Some("/tmp/sess.jsonl"));
+        assert_eq!(
+            table
+                .binding_for("worker-1")
+                .expect("kept")
+                .active_session_id,
+            "worker-1"
+        );
+        assert_eq!(
+            table
+                .binding_for("worker-2")
+                .expect("kept")
+                .active_session_id,
+            "worker-2"
+        );
     }
 
     #[test]

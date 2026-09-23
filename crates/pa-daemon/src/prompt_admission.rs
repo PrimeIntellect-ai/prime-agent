@@ -278,12 +278,7 @@ impl Supervisor {
                         match self.binding_target(active_session_id).await {
                             Some(resident) => {
                                 let current = self
-                                    .rebind_connection(
-                                        active_session_id,
-                                        &resident,
-                                        attached,
-                                        crate::supervisor::RebindSubscription::Retarget,
-                                    )
+                                    .rebind_connection(active_session_id, &resident, attached)
                                     .await;
                                 // The admission follows the rebind: a
                                 // cancellation by the advertised current id
