@@ -162,6 +162,7 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
         all_messages_text,
         agent_status,
         usage: usage_scan.summary(),
+        deleted_descendant_usage: None,
     })
 }
 

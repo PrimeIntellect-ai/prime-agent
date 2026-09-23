@@ -168,13 +168,18 @@ pub(crate) fn ledger_rename_by_child_path(
 /// TS `tombstoneSavedSessionDelete`: tombstone every ledger edge at the
 /// deleted path unless the session is positively top-level (a known
 /// top-level summary, or a readable session info with no parent and
-/// depth 0).
+/// depth 0). The tombstone carries the deleted session's captured own
+/// usage: the transcript dies right after this (the trash/unlink), so
+/// the spend must ride the tombstone - without the snapshot the
+/// deleted-descendant bucket reads a removed path and bills zero (the
+/// Rust-side instance of TS #2506's Macroscope race). Returns how many
+/// edges received the usage snapshot.
 pub(crate) fn tombstone_saved_session_delete(
     agent_dir: &Path,
     sessions_dir: &Path,
     session_path: &str,
     known_runtime_kind: Option<&str>,
-) {
+) -> usize {
     let deleted_info = read_session_info(Path::new(session_path));
     let known_child = known_runtime_kind == Some("subagent")
         || deleted_info
@@ -183,13 +188,25 @@ pub(crate) fn tombstone_saved_session_delete(
     let positively_top_level =
         !known_child && (known_runtime_kind.is_some() || deleted_info.is_some());
     if positively_top_level {
-        return;
+        return 0;
     }
+    // Captured while the file is still alive (this runs before the
+    // trash/unlink); absent usage (no billable work) tombstones bare.
+    let captured_usage = crate::session_usage::read_own_usage_summary(Path::new(session_path));
     let ledger = crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, sessions_dir, |_| {});
-    if let Err(error) =
-        ledger.tombstone_child_path(session_path, crate::rlm_ledger::RlmLedgerDeleteReason::User)
-    {
-        eprintln!("failed to append RLM ledger delete tombstone: {error:#}");
+    match ledger.tombstone_child_path_with_usage(
+        session_path,
+        crate::rlm_ledger::RlmLedgerDeleteReason::User,
+        captured_usage.as_ref(),
+    ) {
+        Ok(edges) => edges
+            .iter()
+            .filter(|edge| captured_usage.is_some() && edge.deleted.is_some())
+            .count(),
+        Err(error) => {
+            eprintln!("failed to append RLM ledger delete tombstone: {error:#}");
+            0
+        }
     }
 }
 
@@ -564,7 +581,7 @@ impl Supervisor {
             );
         }
         let sessions_dir = self.sessions_dir_path();
-        tombstone_saved_session_delete(
+        let captured = tombstone_saved_session_delete(
             &self.options.agent_dir,
             sessions_dir.as_deref().unwrap_or(&self.options.agent_dir),
             session_path,
@@ -573,6 +590,9 @@ impl Supervisor {
                 .and_then(|entry| entry.summary.get("runtimeKind"))
                 .and_then(Value::as_str),
         );
+        if captured > 0 {
+            self.note_deleted_child_usage_captured("saved_delete", captured);
+        }
         let result = delete_session_file(Path::new(session_path));
         let removed = result.get("ok").and_then(Value::as_bool) == Some(true);
         if removed {
@@ -819,7 +839,12 @@ impl Worker {
         }
         let sessions_dir = crate::paths::sessions_dir(&self.config.agent_dir)
             .unwrap_or_else(|_| self.config.agent_dir.join("sessions"));
-        tombstone_saved_session_delete(&self.config.agent_dir, &sessions_dir, session_path, None);
+        let _captured = tombstone_saved_session_delete(
+            &self.config.agent_dir,
+            &sessions_dir,
+            session_path,
+            None,
+        );
         // TS `delete_saved_session`: the hook runs between the file's
         // removal and the artifact partition's removal — the durable job
         // cancel (belt: the partition removal is the load-bearing delete,

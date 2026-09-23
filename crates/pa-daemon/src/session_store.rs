@@ -941,6 +941,14 @@ pub struct SessionInfo {
     /// block (`session_usage::UsageScan`; the child's own row carries the
     /// child spend). `None` when the session recorded no billable work.
     pub usage: Option<crate::session_usage::SessionUsageSummary>,
+    /// TS `SessionInfo.deletedDescendantUsage`: the recursive spend of
+    /// ledger-tombstoned descendants, attached by the catalog's listing
+    /// arm from the spawn ledger's deleted-descendant bucket (one read
+    /// per list, keyed by canonical parent path — TS
+    /// `withPassiveRlmDescendantInfos`). The agents-view recursive cost
+    /// rollup bills it to this row's own cost. Never set by the file
+    /// scan: it is ledger-derived, not transcript-derived.
+    pub deleted_descendant_usage: Option<crate::session_usage::SessionUsageSummary>,
 }
 
 /// TS `SESSION_LIST_SEARCH_TEXT_MAX_CHARS`: the transcript search-text cap.
@@ -1240,6 +1248,7 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
         all_messages_text,
         agent_status,
         usage,
+        deleted_descendant_usage: None,
     };
     // A concurrent append/replacement must never certify stale metadata.
     // The legacy no-timestamp fallback is now(), not a durable file value.

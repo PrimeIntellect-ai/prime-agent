@@ -217,7 +217,7 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
     );
     assert_eq!(
         hello["schemaId"].as_str().map(|v| v.to_string()),
-        Some("protocol-7-schema-29-a5c9d20f8b13".to_string())
+        Some("protocol-7-schema-30-8e4b17c2a9f5".to_string())
     );
     assert!(hello["supervisorOwnerToken"].is_string());
     assert!(hello["supervisorProcessStartId"]

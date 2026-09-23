@@ -363,6 +363,7 @@ mod tests {
             depth,
             name: name.to_string(),
             deleted: None,
+            deleted_usage: None,
         }
     }
 
