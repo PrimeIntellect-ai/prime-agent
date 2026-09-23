@@ -172,12 +172,15 @@ fn fold_child_usage_attributions(entries: &mut [SessionEntry]) {
         folds.push((*row, aggregate.clone()));
     }
     for (row, aggregate) in folds {
-        if let Some(usage) = entries[row]
-            .fields
-            .get_mut("message")
-            .and_then(|message| message.get_mut("usage"))
-        {
-            *usage = aggregate;
+        // TS assigns `target.message.usage = cloneUsage(aggregate)` —
+        // assignment, not merge: a row that never carried a `usage` field
+        // still gets the aggregate inserted (an assistant row without
+        // usage exists in foreign or synthetic files), and a row that
+        // carried one is overwritten. Insert-through, exactly like TS.
+        if let Some(message) = entries[row].fields.get_mut("message") {
+            if let Some(object) = message.as_object_mut() {
+                object.insert("usage".to_string(), aggregate);
+            }
         }
     }
 }
@@ -397,12 +400,13 @@ impl SessionFile {
         let Some(aggregate) = entry.fields.get("aggregateUsage") else {
             return;
         };
-        if let Some(usage) = self.entries[row]
-            .fields
-            .get_mut("message")
-            .and_then(|message| message.get_mut("usage"))
-        {
-            *usage = aggregate.clone();
+        // TS assigns `target.message.usage = cloneUsage(aggregate)`:
+        // insert the aggregate even when the row never carried a `usage`
+        // field (the same insert-through as the end-of-load fold).
+        if let Some(message) = self.entries[row].fields.get_mut("message") {
+            if let Some(object) = message.as_object_mut() {
+                object.insert("usage".to_string(), aggregate.clone());
+            }
         }
     }
 
