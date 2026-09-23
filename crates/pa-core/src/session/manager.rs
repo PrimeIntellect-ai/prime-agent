@@ -355,7 +355,7 @@ fn forked_branch_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
                     },
                 );
             }
-            serde_json::from_value(value).unwrap_or_else(|_| entry)
+            serde_json::from_value(value).unwrap_or(entry)
         })
         .collect()
 }
@@ -1886,7 +1886,7 @@ mod tests {
         assert_eq!(header.cwd, target_cwd.display().to_string());
         assert_eq!(
             header.parent_session.as_deref(),
-            Some(source_file.display().to_string())
+            Some(source_file.display().to_string().as_str())
         );
         assert_eq!(header.rlm_depth, source.get_header().unwrap().rlm_depth);
 
@@ -1942,7 +1942,7 @@ mod tests {
         let dir = tmp.path().join("sessions");
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("torn.jsonl");
-        let content = "{\"type\":\"session\",\"id\":\"torn-head\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}\n{\"type\":\"custom\",\"customType\":\"kept\",\"data\":{},\"id\":\"keep1\",\"parentId\":null,\"timestamp\":\"2024-01-01T00:00:00.000Z\"}\n{\"type\":\"custo";
+        let content = "{\"type\":\"session\",\"version\":3,\"id\":\"torn-head\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}\n{\"type\":\"custom\",\"customType\":\"kept\",\"data\":{},\"id\":\"keep1\",\"parentId\":null,\"timestamp\":\"2024-01-01T00:00:00.000Z\"}\n{\"type\":\"custo";
         std::fs::write(&file, content).unwrap();
         let target_dir = tmp.path().join("fork-sessions");
         let forked = SessionManager::fork_from(&file, tmp.path(), &target_dir)
@@ -1967,7 +1967,7 @@ mod tests {
         // A hand-written source: a valid header, two git_state rows that
         // parent at each other, and a surviving custom row under one of them.
         let file = dir.join("cyclic.jsonl");
-        let header = "{\"type\":\"session\",\"id\":\"cyc-head\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}";
+        let header = "{\"type\":\"session\",\"version\":3,\"id\":\"cyc-head\",\"timestamp\":\"2024-01-01T00:00:00.000Z\",\"cwd\":\"/tmp\"}";
         let git_a = "{\"type\":\"git_state\",\"git\":{},\"id\":\"cyc01\",\"parentId\":\"cyc02\",\"timestamp\":\"2024-01-01T00:00:00.000Z\"}";
         let git_b = "{\"type\":\"git_state\",\"git\":{},\"id\":\"cyc02\",\"parentId\":\"cyc01\",\"timestamp\":\"2024-01-01T00:00:00.000Z\"}";
         let custom = "{\"type\":\"custom\",\"customType\":\"survivor\",\"data\":{},\"id\":\"cyc03\",\"parentId\":\"cyc01\",\"timestamp\":\"2024-01-01T00:00:00.000Z\"}";
@@ -2003,8 +2003,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let empty = tmp.path().join("empty.jsonl");
         std::fs::write(&empty, "").unwrap();
-        let error =
-            SessionManager::fork_from(&empty, tmp.path(), tmp.path().join("sessions")).unwrap_err();
+        let error = SessionManager::fork_from(&empty, tmp.path(), &tmp.path().join("sessions"))
+            .err()
+            .expect("fork rejects an empty source");
         assert_eq!(
             error,
             format!(
@@ -2015,13 +2016,13 @@ mod tests {
         let headerless = tmp.path().join("headerless.jsonl");
         std::fs::write(
             &headerless,
-            format!(
-                "{{\"type\":\"message\",\"message\":{{\"role\":\"user\",\"content\":[],\"timestamp\":0}},\"id\":\"aaaa1\",\"parentId\":null}}\n"
-            ),
+            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[],\"timestamp\":0},\"id\":\"aaaa1\",\"parentId\":null}\n",
         )
         .unwrap();
-        let error = SessionManager::fork_from(&headerless, tmp.path(), tmp.path().join("sessions"))
-            .unwrap_err();
+        let error =
+            SessionManager::fork_from(&headerless, tmp.path(), &tmp.path().join("sessions"))
+                .err()
+                .expect("fork rejects a headerless source");
         assert_eq!(
             error,
             format!(
@@ -2031,8 +2032,9 @@ mod tests {
             "the loader finalizes a headerless file to zero entries"
         );
         let missing = tmp.path().join("absent.jsonl");
-        let error = SessionManager::fork_from(&missing, tmp.path(), tmp.path().join("sessions"))
-            .unwrap_err();
+        let error = SessionManager::fork_from(&missing, tmp.path(), &tmp.path().join("sessions"))
+            .err()
+            .expect("fork rejects a missing source");
         assert!(error.starts_with("Cannot fork: source session file is empty or invalid:"));
     }
 }

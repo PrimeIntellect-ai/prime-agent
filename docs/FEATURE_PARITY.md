@@ -212,11 +212,11 @@ Other smaller proposed lanes (not in the top 3): **extension-renderers** (render
 | TS (file:line) | Feature (short) | Rust (file:line) or MISSING | Status | Lane |
 |---|---|---|---|---|
 | packages/coding-agent/src/modes/interactive/components/onboarding-exit.ts:13 | exit keys while onboarding owns the pane (app.clear/app.exit) | crates/pa-tui/src/onboarding.rs:95 + interactive.rs:360 | MATCHES |  |
-| packages/coding-agent/src/modes/interactive/components/onboarding-highlight.ts:41 | washed selected-row background (lift 0.08 toward text, truecolor/256) | crates/pa-tui/src/onboarding.rs:368-397 | PARTIAL |  |
+| packages/coding-agent/src/modes/interactive/components/onboarding-highlight.ts:41 | washed selected-row background (lift 0.08 toward text, truecolor/256) | crates/pa-tui/src/onboarding.rs:521-561 + theme.rs:187-201,394 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/components/prime-onboarding-splash.ts:63 | splash: brand mark + animated lab field + welcome line | crates/pa-tui/src/onboarding.rs:117-254 + interactive.rs:335-398 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/components/prime-onboarding-splash.ts:217 | login action row "> Log in with Prime Intellect" + description paragraphs | MISSING | MISSING |  |
 | packages/coding-agent/src/modes/interactive/components/prime-onboarding-splash.ts:103 | panel stack: nested flow panels with heading override, immediate mode | MISSING | MISSING |  |
-| packages/coding-agent/src/modes/interactive/components/onboarding-choice.ts:40 | choice panel: prompt/description/note, up/down/enter/esc, detail subtitle | crates/pa-tui/src/onboarding.rs:88-113,258-312 | PARTIAL |  |
+| packages/coding-agent/src/modes/interactive/components/onboarding-choice.ts:40 | choice panel: prompt/description/note, up/down/enter/esc, detail subtitle | crates/pa-tui/src/onboarding.rs:26-47,128-152,296-501 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/components/onboarding-picker.ts:36 | searchable provider picker w/ pinned Continue row, connected ✓, scroll viewport | MISSING | MISSING |  |
 | packages/coding-agent/src/modes/interactive/components/modal-back.ts:38 | shouldTreatAsBack: left-arrow closes dialogs when the search cursor is at col 0 | crates/pa-tui/src/model_picker/mod.rs:605-609 | PARTIAL |  |
 | packages/coding-agent/src/modes/interactive/components/countdown-timer.ts:17 | per-second countdown with tick/expire callbacks | crates/pa-tui/src/chat.rs:486-533 (RetryState.seconds_left) | MATCHES |  |
@@ -288,8 +288,6 @@ Other smaller proposed lanes (not in the top 3): **extension-renderers** (render
 | packages/coding-agent/src/modes/interactive/components/mermaid.ts:52 | mermaid code blocks rendered as Unicode diagrams (off/final/streaming) | MISSING | MISSING | mermaid-render |
 
 #### Partial notes
-- packages/coding-agent/src/modes/interactive/components/onboarding-highlight.ts:41 — Rust always blends against the default canvas (16,16,16)/(255,255,255); TS uses the theme's parseable `background` color as the canvas (onboarding.rs:368-397).
-- packages/coding-agent/src/modes/interactive/components/onboarding-choice.ts:40 — Rust implements only the trace-question instance; no `detail` (@identifier) subtitle, no selectedIndex/rowWidth options (onboarding.rs:258-312).
 - packages/coding-agent/src/modes/interactive/components/modal-back.ts:38 — back-guard implemented in the model picker only; the login-dialog and heartbeat-manager uses are missing with those components (model_picker/mod.rs:605-609).
 - packages/coding-agent/src/modes/interactive/components/dynamic-border.ts:16 — TS paints the rule with theme `border`; Rust's config selector paints it `accent` — identical in the prime theme, diverges in dark/light where border ≠ accent (config_selector.rs:443).
 - packages/coding-agent/src/modes/interactive/components/prompt-context-line.ts:22 — Rust renders only the right-aligned detail label; the left "Recap: …" (live compaction recap) half never renders (chrome.rs:337-359).

@@ -158,7 +158,13 @@ pub async fn run_update_command(options: &UpdateCommandOptions) -> Result<i32> {
             release(&agent_dir, &socket_path.to_string_lossy())?;
             track_update_completed(writer.current()).await;
             println!("{reason}");
-            return Ok(0);
+            // TS `setSelfUpdateNoChangeExitCode`: an interactive child
+            // reports no-change with the not-attempted code so the client
+            // keeps running instead of relaunching an unchanged binary.
+            let interactive_child =
+                std::env::var(crate::public_command::SELF_UPDATE_INTERACTIVE_CHILD_ENV).as_deref()
+                    == Ok("1");
+            return Ok(if interactive_child { 75 } else { 0 });
         }
         Err(error) => {
             // A planning failure aborts before any state that could wedge:

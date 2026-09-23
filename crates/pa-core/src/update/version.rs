@@ -165,6 +165,24 @@ impl UpdateChannel {
             Self::Nightly => "beta.json",
         }
     }
+
+    /// The channel's wire name (the TS `UpdateChannel` string values).
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::Stable => "stable",
+            Self::Nightly => "nightly",
+        }
+    }
+
+    /// Parse the wire name; an unknown value reads as unset (a preferred
+    /// channel then infers from the running version).
+    pub fn from_wire(wire: &str) -> Option<Self> {
+        match wire {
+            "stable" => Some(Self::Stable),
+            "nightly" => Some(Self::Nightly),
+            _ => None,
+        }
+    }
 }
 
 /// Whether a version carries a prerelease tag (`0.10.0-rust-64f66e3d`,
@@ -238,10 +256,10 @@ pub fn is_release_update_candidate(
     // path, where the `0.10.0-rust-<sha>` dogfood trains installed an
     // obsolete build) — an explicit switch to another channel is operator
     // intent and the channel-switch branch below evaluates it.
-    if channel.is_none() || channel == Some(resolve_update_channel(current_version, None)) {
-        if same_base_opaque_build_tag(candidate_version, current_version) {
-            return false;
-        }
+    if (channel.is_none() || channel == Some(resolve_update_channel(current_version, None)))
+        && same_base_opaque_build_tag(candidate_version, current_version)
+    {
+        return false;
     }
     if is_newer_package_version(candidate_version, current_version) {
         return true;

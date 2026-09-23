@@ -974,7 +974,7 @@ impl SessionUi {
         // not a live activity (the tray's TS label still covers the
         // paused and budget-limited states).
         let goal_tokens = (goal.status == pa_types::goal::GoalStatus::Active)
-            .then(|| (goal.tokens_used, goal.token_budget));
+            .then_some((goal.tokens_used, goal.token_budget));
         // The dock's bash indicator counts only runs actively running
         // right now (operator scoping): finished runs stay as dimmed rows
         // inside the panel, never in the indicator. The feed itself is the
@@ -2708,6 +2708,82 @@ impl SessionUi {
                 self.track_command_used("traces");
                 self.handle_traces_command(resolved, view).await?;
             }
+            // `/nightly [on|off|status]` (TS `interactive-mode.ts`
+            // 5455-5484): status resolves the effective channel,
+            // off/stable pins the settings channel to stable, and on (or
+            // bare) hands a `--self --nightly` update to the same parked
+            // plan `/update` builds (the update command owns the nightly
+            // warning, the channel switch, and the relaunch).
+            "nightly" => {
+                self.track_command_used("nightly");
+                let arg = resolved.args.trim().to_lowercase();
+                if arg == "status" {
+                    // The effective channel resolves through the
+                    // client-settings seam (pa-tui cannot reach the
+                    // update flow's resolver); a surface without the
+                    // seam never claims a channel.
+                    let Some(settings) = &self.client_settings else {
+                        self.note("/nightly is not available in this client yet", view);
+                        return Ok(());
+                    };
+                    let preferred = settings.update_channel();
+                    let channel = settings.effective_update_channel(&view.chrome.version);
+                    let source = if preferred.is_some() {
+                        "set in settings"
+                    } else {
+                        "inferred from the running version"
+                    };
+                    self.note(
+                        &format!(
+                            "Updates follow the {channel} channel ({source}). v{} installed.",
+                            view.chrome.version
+                        ),
+                        view,
+                    );
+                    return Ok(());
+                }
+                if arg == "off" || arg == "stable" {
+                    // The pin persists through the client-settings seam; a
+                    // surface without the seam never claims the pin (TS
+                    // always has a settings manager, so the gate is this
+                    // client's honesty guard).
+                    let Some(settings) = &self.client_settings else {
+                        self.note("/nightly is not available in this client yet", view);
+                        return Ok(());
+                    };
+                    if let Err(error) = settings.set_update_channel("stable") {
+                        self.error_row(&format!("{error:#}"), view);
+                        return Ok(());
+                    }
+                    self.note(
+                        "Updates now follow the stable channel. Run /update to install the latest stable release.",
+                        view,
+                    );
+                    return Ok(());
+                }
+                if !arg.is_empty() && arg != "on" {
+                    self.error_row("Usage: /nightly [on|off|status]", view);
+                    return Ok(());
+                }
+                // TS guards on compacting/streaming/bash: `turn_active`
+                // carries the streaming and compaction arms, and the
+                // user-bash slot (`!` runs) is its own state — a relaunch
+                // mid-run would interrupt either.
+                if self.turn_active || self.user_bash_running {
+                    self.note_as(
+                        "Wait for the current work to finish before updating.",
+                        StatusKind::Warning,
+                        view,
+                    );
+                    return Ok(());
+                }
+                let plan = crate::update_command::parse_update_args(&[
+                    "--self".to_string(),
+                    "--nightly".to_string(),
+                ]);
+                view.editor.set_text("");
+                self.pending_update = Some(plan);
+            }
             // `/update [source|--self|--extensions|--extension <source>
             // |--force|--rollback|--nightly|--stable]` (TS
             // `handleUpdateCommand`): the busy guard, then the child
@@ -3467,6 +3543,13 @@ impl SessionUi {
         let mut args = vec!["update".to_string()];
         args.extend(plan.flags.clone());
         let child_result = update.0.run_cli_child(args).await;
+        // TS skips the relaunch when the interactive child exits with the
+        // not-attempted code (75): a declined confirmation or a no-change
+        // skip keeps the running client as-is, so the session is not torn
+        // down and restarted for nothing.
+        if matches!(child_result, Ok(75)) {
+            return Ok(());
+        }
         match child_result {
             Err(error) => {
                 eprintln!("Update failed: {error}");
@@ -5769,8 +5852,8 @@ impl SessionUi {
     fn scope_heartbeats(&self, heartbeats: Vec<HeartbeatEntry>) -> Vec<HeartbeatEntry> {
         scope_heartbeats(
             heartbeats,
-            (!self.active_session_id.is_empty()).then(|| self.active_session_id.as_str()),
-            (!self.session_id.is_empty()).then(|| self.session_id.as_str()),
+            (!self.active_session_id.is_empty()).then_some(self.active_session_id.as_str()),
+            (!self.session_id.is_empty()).then_some(self.session_id.as_str()),
             &[],
         )
     }
@@ -8440,10 +8523,11 @@ mod loader_token_tests {
     /// `speedStats`); it only reads once a positive-span sample exists.
     #[test]
     fn speed_stats_average_rate_sums_tokens_over_spans() {
-        let mut stats = SpeedStats::default();
-        stats.tokens = 300;
-        stats.duration_ms = 1500;
-        stats.samples = 1;
+        let mut stats = SpeedStats {
+            tokens: 300,
+            duration_ms: 1500,
+            samples: 1,
+        };
         assert_eq!(stats.average_rate(), 200.0);
         stats.tokens += 100;
         stats.duration_ms += 500;

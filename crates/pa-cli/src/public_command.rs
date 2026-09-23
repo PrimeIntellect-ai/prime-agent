@@ -4,6 +4,8 @@ use crate::daemon_discovery;
 use std::collections::HashSet;
 
 use crate::args::{parse_args, INTERNAL_RUNTIME_COMMAND_MARKER};
+use std::io::IsTerminal as _;
+
 use crate::command_registry::{
     find_command_suggestion, format_command_help, format_top_level_help, get_child_command_specs,
     get_command_spec, is_help_command_request, public_command_names, REMOVED_COMMAND_NAMES,
@@ -121,11 +123,6 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
     }
     if !public.contains(command) {
         return continue_with(args.clone());
-    }
-    if command == "update" && std::env::var(SELF_UPDATE_INTERACTIVE_CHILD_ENV).as_deref() == Ok("1")
-    {
-        handle_package_command(&args);
-        return handled();
     }
     if command == "update"
         && args
@@ -639,10 +636,65 @@ fn run_update(args: &[String]) -> PublicCommandResult {
     let Some(options) = parse_update_options(args) else {
         return handled_failed();
     };
+    // TS package-manager-cli's update case: the persisted `updateChannel`
+    // setting (`/nightly off`) is the default the update follows
+    // (`options.channel ?? persistedChannel`), an explicit nightly switch
+    // warns and confirms, and a completed run persists the explicit
+    // switch (`commitChannel`).
+    let agent_dir = crate::config::get_agent_dir();
+    let persisted_wire = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            pa_core::settings::SettingsManager::create(&cwd, &agent_dir).get_update_channel()
+        })
+        .map(|channel| {
+            match channel {
+                pa_core::settings::UpdateChannel::Stable => "stable",
+                pa_core::settings::UpdateChannel::Nightly => "nightly",
+            }
+            .to_string()
+        });
+    if options.channel == Some(pa_core::update::version::UpdateChannel::Nightly)
+        && persisted_wire.as_deref() != Some("nightly")
+    {
+        println!(
+            "Nightly releases are unreleased Prime Agent builds. They can be broken, and a broken update can leave Prime Agent unusable until you roll back or reinstall."
+        );
+        // TS `setSelfUpdateAbortedExitCode`: the interactive child's
+        // marker changes the abort code (75 vs 1) so the TUI's update
+        // run can tell an aborted switch from a real failure.
+        let abort_code = if std::env::var(SELF_UPDATE_INTERACTIVE_CHILD_ENV).as_deref() == Ok("1") {
+            75
+        } else {
+            1
+        };
+        if !options.force {
+            if !std::io::stdin().is_terminal() {
+                eprintln!(
+                    "Switching to the nightly channel needs confirmation. Re-run with --force to proceed."
+                );
+                return handled_with_exit(abort_code);
+            }
+            if !crate::daemon_discovery::stop::prompt_yes_no(
+                "Switching to the nightly channel and continue with the update?",
+            ) {
+                println!("Update cancelled. Nothing was changed.");
+                return handled_with_exit(abort_code);
+            }
+        }
+    }
+    // The effective channel: an explicit flag wins, else the persisted
+    // one, else the running version infers it.
+    let channel = options.channel.or_else(|| {
+        persisted_wire
+            .as_deref()
+            .and_then(pa_core::update::version::UpdateChannel::from_wire)
+    });
+
     let command_options = crate::update_flow::update_command::UpdateCommandOptions {
         force: options.force,
         rollback: options.rollback,
-        channel: options.channel,
+        channel,
         archive: options.archive,
         source: options.source,
     };
@@ -661,13 +713,40 @@ fn run_update(args: &[String]) -> PublicCommandResult {
     match runtime.block_on(crate::update_flow::update_command::run_update_command(
         &command_options,
     )) {
-        Ok(code) => PublicCommandResult {
-            handled: true,
-            args: vec![],
-            explicit_agents_view: false,
-            attach_agent: None,
-            exit_code: Some(code),
-        },
+        Ok(code) => {
+            // TS `commitChannel`: a completed run persists an explicit
+            // switch (Complete and Skipped alike — a channel pin applies
+            // even when no newer release was needed) and reports it. The
+            // not-attempted exit (75) reaches here only as the child-mode
+            // no-change skip: a declined confirmation returns earlier and
+            // never runs the update flow.
+            let flag_wire = options
+                .channel
+                .map(pa_core::update::version::UpdateChannel::wire_name);
+            if (code == 0 || code == 75)
+                && flag_wire.is_some()
+                && flag_wire != persisted_wire.as_deref()
+            {
+                let wire = flag_wire.unwrap_or_default();
+                if let Ok(cwd) = std::env::current_dir() {
+                    let settings_channel = match wire {
+                        "nightly" => pa_core::settings::UpdateChannel::Nightly,
+                        _ => pa_core::settings::UpdateChannel::Stable,
+                    };
+                    let mut settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
+                    if settings.set_update_channel(settings_channel).is_ok() {
+                        println!("Updates now follow the {wire} channel.");
+                    }
+                }
+            }
+            PublicCommandResult {
+                handled: true,
+                args: vec![],
+                explicit_agents_view: false,
+                attach_agent: None,
+                exit_code: Some(code),
+            }
+        }
         Err(error) => fail(format!("{error:#}"), None),
     }
 }
