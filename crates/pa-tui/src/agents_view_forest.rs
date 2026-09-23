@@ -107,11 +107,15 @@ pub(crate) fn session_status_label(summary: &Value) -> String {
 /// The model column text: the bare model id plus `:level` when a thinking
 /// level is active ("off" reads as noise and stays bare).
 pub(crate) fn session_model(summary: &Value) -> String {
+    // Live workers publish the model object with `id` (the engine's
+    // `model_metadata`); seeded roster rows and saved-session rows carry
+    // `modelId` (the persisted selector). Both read as the full model id.
     let Some(id) = get_str(summary, "model").or_else(|| {
         summary
             .get("model")
-            .and_then(|model| model.get("id"))
+            .and_then(|model| model.get("id").or_else(|| model.get("modelId")))
             .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
     }) else {
         return "-".to_string();
     };
@@ -1075,6 +1079,38 @@ mod tests {
         let rollups = compute_rollups(&records);
         let expanded: HashSet<String> = expanded.iter().map(|id| id.to_string()).collect();
         build_rows(&records, scope, &expanded, &rollups, None)
+    }
+
+    /// The Model column reads every wire shape of the model selector: a
+    /// bare string, a live worker's `model.id`, and a seeded or
+    /// saved-session row's `model.modelId` — always the full
+    /// `model:thinking` string, never a truncated `provider/` blob.
+    #[test]
+    fn session_model_reads_every_wire_shape() {
+        let bare = json!({"model": "internal/glm-5.3-fast", "thinkingLevel": "high"});
+        assert_eq!(session_model(&bare), "glm-5.3-fast:high");
+        let live = json!({
+            "model": {"id": "internal/glm-5.3-fast", "name": "GLM", "provider": "prime-inference"},
+            "thinkingLevel": "high",
+        });
+        assert_eq!(session_model(&live), "glm-5.3-fast:high");
+        let seeded = json!({
+            "model": {"provider": "prime-inference", "modelId": "internal/glm-5.3-fast"},
+            "thinkingLevel": "high",
+        });
+        assert_eq!(session_model(&seeded), "glm-5.3-fast:high");
+        // "off" reads as noise: the bare model id, no suffix.
+        let off = json!({
+            "model": {"id": "internal/glm-5.3-fast"},
+            "thinkingLevel": "off",
+        });
+        assert_eq!(session_model(&off), "glm-5.3-fast");
+        assert_eq!(session_model(&json!({})), "-");
+        assert_eq!(
+            session_model(&json!({"model": {"provider": "p"}, "thinkingLevel": "high"})),
+            "-",
+            "an empty id stays empty — never a `p/`-style blob"
+        );
     }
 
     #[test]
