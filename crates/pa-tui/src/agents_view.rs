@@ -157,6 +157,11 @@ pub struct AgentsViewOutcome {
 /// TS `WORKING_ICON_INTERVAL_MS`: the running-row icon frame cadence.
 const PULSE_INTERVAL_MS: u64 = 250;
 
+/// The transient status hint while the entry anchor still waits on its
+/// row (see [`AgentsViewMode::open_selected`]); dropped once the anchor
+/// lands.
+const ANCHOR_LOADING_HINT: &str = "Still loading sessions — press ↓ or ↑ to pick a session now.";
+
 enum UiInput {
     Key(String),
     Resize,
@@ -467,6 +472,12 @@ impl AgentsViewMode {
             }) {
                 self.selected = index;
                 self.anchor_selection_pending = false;
+                // The loading hint belongs to the wait alone: the anchor
+                // landing drops it so the status line returns to the
+                // flow's own notice instead of a stale loading message.
+                if self.status.as_deref() == Some(ANCHOR_LOADING_HINT) {
+                    self.status = None;
+                }
             }
         }
         self.rows = rows;
@@ -560,8 +571,7 @@ impl AgentsViewMode {
     /// is excluded), so its wait never resolves — it keeps the open.
     fn open_selected(&mut self) {
         if self.anchor_selection_pending && self.options.scope.is_none() {
-            self.status =
-                Some("Still loading sessions — press ↓ or ↑ to pick a session now.".to_string());
+            self.status = Some(ANCHOR_LOADING_HINT.to_string());
             return;
         }
         let Some(row) = self.rows.get(self.selected).cloned() else {
@@ -2003,6 +2013,10 @@ mod tests {
             .push(roster_entry("s2", "idle", parent_summary("s2")));
         mode.rebuild_rows();
         assert!(!mode.anchor_selection_pending);
+        assert!(
+            mode.status.is_none(),
+            "the anchor landing drops the loading hint"
+        );
         mode.handle_key("enter");
         let opened = mode.opened.expect("the anchored row opens");
         assert_eq!(
