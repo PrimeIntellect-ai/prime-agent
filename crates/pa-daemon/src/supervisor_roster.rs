@@ -613,7 +613,11 @@ mod tests {
         let mut pulled = summary("off");
         pulled["rosterDeltaSequence"] = serde_json::json!(4);
         pulled["workerInstanceId"] = serde_json::json!("i1");
-        let resident = supervisor.registry.get("seq-worker").await.expect("resident");
+        let resident = supervisor
+            .registry
+            .get("seq-worker")
+            .await
+            .expect("resident");
         let pull = supervisor
             .write_roster_summary_for_resident(&resident, &pulled)
             .await;
