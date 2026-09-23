@@ -198,6 +198,9 @@ struct ChildRecord {
     /// the live watcher observes this delivery's turn too (re-arms at
     /// its settle) instead of a second watcher stacking behind it.
     usage_rearm: bool,
+    /// Serializes usage emissions for this child (read, cursor advance,
+    /// and sink delivery) without holding the record lock across them.
+    emit_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ChildRecord {
@@ -489,6 +492,7 @@ impl SupervisorChildSessions {
                 attributed_rows: 0,
                 usage_watch_live: false,
                 usage_rearm: false,
+                emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             })));
     }
 
@@ -1080,23 +1084,29 @@ impl SupervisorChildSessionsInner {
         let Some(sink) = sink else {
             return;
         };
-        // The read, the cursor advance, AND the sink delivery hold one
-        // record lock: two observers (the run watcher and a follow-up
-        // arm) can overlap for a retained child, and an interleaved
-        // re-read would double-bill — while an interleaved DELIVERY would
-        // break the durable rows' cumulative aggregate chain (the reader
-        // fold keeps the last row's aggregate, so the second observer's
-        // rows would silently drop out of the folded row). The whole
-        // emission serializes per child.
-        let mut record_guard = record.lock().await;
-        let Some(session_file) = record_guard
-            .session_file
-            .clone()
-            .filter(|path| !path.is_empty())
-        else {
+        // One emission at a time per child — an interleaved re-read would
+        // double-bill, and an interleaved DELIVERY would break the durable
+        // rows' cumulative aggregate chain (the reader fold keeps the last
+        // row's aggregate, so the second observer's rows would silently
+        // drop out of the folded row). The emission lock spans the whole
+        // flow; the record lock itself only ever frames short snapshots,
+        // so the watcher polls and close paths never wait behind a big
+        // file read.
+        let emit_guard = record.lock().await.emit_lock.clone().lock().await;
+        let (rlm_child_id, session_file, from) = {
+            let record_guard = record.lock().await;
+            (
+                record_guard.rlm_child_id.clone(),
+                record_guard
+                    .session_file
+                    .clone()
+                    .filter(|path| !path.is_empty()),
+                record_guard.attributed_rows,
+            )
+        };
+        let Some(session_file) = session_file else {
             return;
         };
-        let from = record_guard.attributed_rows;
         // The open+parse is a blocking read of a file that can reach tens
         // of megabytes: run it on the blocking pool, never the async
         // worker (a slow file read must not stall unrelated tasks on the
@@ -1112,16 +1122,33 @@ impl SupervisorChildSessionsInner {
             return;
         };
         let (batches, next) = crate::rlm_child_usage::child_usage_batches(store.entries(), from);
-        record_guard.attributed_rows = next;
+        {
+            let mut record_guard = record.lock().await;
+            record_guard.attributed_rows = next;
+        }
         if batches.is_empty() {
             return;
         }
-        let rlm_child_id = record_guard.rlm_child_id.clone();
         sink.record(RlmChildUsageReport {
             rlm_child_id,
             batches,
         })
         .await;
+        drop(emit_guard);
+    }
+
+    /// Drop one child's attribution registration after its final
+    /// observation (the close and delete paths call this once their last
+    /// cursor walk completed — TS keeps a child's subscription alive only
+    /// while the child lives, so sequential children must not accumulate
+    /// registrations in the producer).
+    async fn forget_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) {
+        let sink = self.usage_sink.lock().expect("usage sink lock").clone();
+        let Some(sink) = sink else {
+            return;
+        };
+        let rlm_child_id = record.lock().await.rlm_child_id.clone();
+        sink.forget(&rlm_child_id).await;
     }
 
     /// Start the follow-up usage watcher for a settled child that is busy
@@ -1272,14 +1299,22 @@ impl SupervisorChildSessionsInner {
             // The tail: a delivery that arrived while this watcher was
             // live re-arms it for another turn (the flag was set instead
             // of a second watcher); otherwise the observation retires.
+            // The flag read, its clear, and the live-flag clear happen in
+            // ONE record-lock section: an arm racing the tail either
+            // sees the live flag still set (its re-arm request is
+            // consumed here and this watcher loops) or sees it already
+            // clear (it spawns a fresh watcher) — the decision can never
+            // strand a re-arm request behind a retired watcher.
             let rearm = {
                 let mut record = record.lock().await;
                 let rearm = record.usage_rearm;
                 record.usage_rearm = false;
+                if !rearm {
+                    record.usage_watch_live = false;
+                }
                 rearm
             };
             if !rearm {
-                record.lock().await.usage_watch_live = false;
                 return;
             }
         }
@@ -1414,12 +1449,18 @@ impl SupervisorChildSessionsInner {
                 if unknown_session(&error).is_some() {
                     // Already gone: TS `closeSessionOnce`'s `sessions.has`
                     // check turns a missing child into a no-op success.
+                    // The dead worker's file is frozen — the pre-kill walk
+                    // covered its rows; the registration drops with it.
+                    self.forget_child_usage(record).await;
                     self.children
                         .lock()
                         .await
                         .retain(|candidate| !Arc::ptr_eq(candidate, record));
                     continue;
                 }
+                // A failed close keeps the child tracked so the caller
+                // can retry (its registration stays — it can still
+                // observe).
                 close_error.get_or_insert(error);
                 continue;
             }
@@ -1428,8 +1469,11 @@ impl SupervisorChildSessionsInner {
             // kill aborted the in-flight one): the post-kill walk is the
             // last observation — nothing observes the child after the
             // kill. The cursor keeps the second walk free of
-            // double-billing.
+            // double-billing, and the registration drops with the child
+            // (TS keeps a child's subscription alive only while the child
+            // lives).
             self.emit_child_usage(record).await;
+            self.forget_child_usage(record).await;
             self.children
                 .lock()
                 .await
@@ -1646,6 +1690,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 attributed_rows: 0,
                 usage_watch_live: false,
                 usage_rearm: false,
+                emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             };
             let record = Arc::new(Mutex::new(record));
             this.children.lock().await.push(Arc::clone(&record));
@@ -1834,6 +1879,10 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // watcher reads the file again. The cursor keeps the second
             // walk free of double-billing.
             this.emit_child_usage(&record).await;
+            // The final observation landed: the registration drops (TS
+            // keeps a child's subscription alive only while the child
+            // lives).
+            this.forget_child_usage(&record).await;
             // The watcher owns an Arc to this record; deleting the roster
             // row alone cannot stop its polling loop.
             record.lock().await.closed_by_parent = true;
@@ -2359,6 +2408,7 @@ mod usage_emit_tests {
             attributed_rows: 0,
             usage_watch_live: false,
             usage_rearm: false,
+            emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
         }))
     }
 

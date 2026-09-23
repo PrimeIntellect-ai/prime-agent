@@ -78,11 +78,21 @@ pub struct RlmChildUsageAttributions {
     /// observation order (the TS single event queue's guarantee).
     bases: tokio::sync::Mutex<HashMap<String, Usage>>,
     /// TS `parentAssistantForUsage`: the parent assistant row each child
-    /// attributes to, captured at spawn.
+    /// attributes to, captured at spawn. Dropped when the child's final
+    /// observation lands ([`Self::forget_child`]) — TS keeps the
+    /// per-child subscription alive only while the child lives, and a
+    /// session that runs sequential children must not accumulate their
+    /// registrations.
     children: std::sync::Mutex<HashMap<String, String>>,
     /// The `rlm child usage attributed` adoption event's handle (`None`
     /// in sessions without telemetry — subagents never double-report).
     telemetry: std::sync::Mutex<Option<std::sync::Arc<super::telemetry::SessionTelemetry>>>,
+    /// The producer a rebuild handed observation over to: an in-flight
+    /// emission that cloned the retired sink still delivers through this
+    /// producer, and the report forwards to the successor — the
+    /// successor's adopted bases then carry the late batch's aggregate
+    /// onward, so a post-rebuild chain never silently drops it.
+    forward: std::sync::Mutex<Option<std::sync::Arc<RlmChildUsageAttributions>>>,
 }
 
 impl RlmChildUsageAttributions {
@@ -92,6 +102,7 @@ impl RlmChildUsageAttributions {
             bases: tokio::sync::Mutex::new(HashMap::new()),
             children: std::sync::Mutex::new(HashMap::new()),
             telemetry: std::sync::Mutex::new(None),
+            forward: std::sync::Mutex::new(None),
         }
     }
 
@@ -133,6 +144,16 @@ impl RlmChildUsageAttributions {
     /// dropped — TS swallows the same failure so attribution bookkeeping
     /// never breaks the observing path.
     pub async fn record_child_usage(&self, report: RlmChildUsageReport) {
+        // A rebuild handed observation over: an in-flight emission (one
+        // that cloned the sink before the swap) forwards here, and the
+        // successor carries the batch on its adopted base — otherwise
+        // the successor's later aggregates would compute from a base
+        // that predates this late batch and the folded row would drop
+        // it.
+        if let Some(forward) = self.forward.lock().expect("rlm usage forward lock").clone() {
+            forward.record_child_usage(report).await;
+            return;
+        }
         let Some(target_id) = self
             .children
             .lock()
@@ -197,7 +218,7 @@ impl RlmChildUsageAttributions {
     /// drops the adopted registrations at the durable append (the same
     /// recoverable "no durable target" failure every unregistered report
     /// takes).
-    pub async fn adopt_registrations(&self, retired: &Self) {
+    pub async fn adopt_registrations(self: &std::sync::Arc<Self>, retired: &Self) {
         {
             let retired_children = retired.children.lock().expect("rlm usage children lock");
             let mut children = self.children.lock().expect("rlm usage children lock");
@@ -212,6 +233,25 @@ impl RlmChildUsageAttributions {
         for (target_id, base) in retired_bases.iter() {
             bases.entry(target_id.clone()).or_insert_with(|| *base);
         }
+        // The handoff: reports still in flight on the retired sink land on
+        // the adopted chain — the forward is set after the bases copy, so
+        // every batch attributed before the swap is already carried by
+        // the adopted base, and a late one forwards onto it.
+        *retired.forward.lock().expect("rlm usage forward lock") =
+            Some(std::sync::Arc::clone(self));
+    }
+
+    /// Drop one child's registration: the child's final observation
+    /// landed (it closed or was deleted — its last rows already
+    /// emitted). TS keeps the per-child subscription alive only while
+    /// the child lives; a session running sequential children must not
+    /// accumulate their registrations. The aggregate base stays (TS's
+    /// `_rlmDurableParentUsage` entry lives with the assistant row).
+    pub fn forget_child(&self, rlm_child_id: &str) {
+        self.children
+            .lock()
+            .expect("rlm usage children lock")
+            .remove(rlm_child_id);
     }
 }
 
@@ -237,6 +277,13 @@ pub trait RlmChildUsageSink: Send + Sync {
     fn record(
         &self,
         report: RlmChildUsageReport,
+    ) -> std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = ()> + Send + '_>>;
+
+    /// The child's final observation landed (it closed or was deleted):
+    /// drop its registration so sequential children do not accumulate.
+    fn forget(
+        &self,
+        rlm_child_id: &str,
     ) -> std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = ()> + Send + '_>>;
 }
 
@@ -403,8 +450,8 @@ mod tests {
     async fn rebuild_adoption_continues_the_aggregate_chain() {
         let raw_parent = usage_block(1_000, 0, 0, 0, 4_096, 0.0);
         let (_tmp, manager) = manager_with_assistant(raw_parent).await;
-        let retired = RlmChildUsageAttributions::new(manager.clone());
-        let fresh = RlmChildUsageAttributions::new(manager.clone());
+        let retired = std::sync::Arc::new(RlmChildUsageAttributions::new(manager.clone()));
+        let fresh = std::sync::Arc::new(RlmChildUsageAttributions::new(manager.clone()));
         retired.register_spawn("sub-rebuild1").await;
         retired
             .record_child_usage(RlmChildUsageReport {
@@ -439,14 +486,36 @@ mod tests {
         assert_eq!(attributed[1]["origin"], "agent_message");
         assert_eq!(attributed[1]["aggregateUsage"]["input"], 1_017);
         assert_eq!(attributed[1]["aggregateUsage"]["totalTokens"], 4_096);
-        // The un-adopted producer drops the same child's report.
-        let orphan = RlmChildUsageAttributions::new(manager.clone());
-        orphan
+        // The retired producer now FORWARDS (the rebuild handoff): an
+        // in-flight emission that cloned the retired sink still lands on
+        // the adopted chain — the late batch's aggregate continues the
+        // base (1,017 + 1 over the parent's 1,000).
+        retired
             .record_child_usage(RlmChildUsageReport {
                 rlm_child_id: "sub-rebuild1".to_string(),
                 batches: vec![(
                     ChildUsageOrigin::DirectUser,
                     usage_block(1, 1, 0, 0, 2, 0.0),
+                )],
+            })
+            .await;
+        let rows_late = file_rows(&manager).await;
+        let attributed_late: Vec<&serde_json::Value> = rows_late
+            .iter()
+            .filter(|row| row["type"] == "child_usage_attributed")
+            .collect();
+        assert_eq!(attributed_late.len(), 3, "the forwarded report attributed");
+        assert_eq!(attributed_late[2]["aggregateUsage"]["input"], 1_018);
+        // The final observation landed: forget_child drops the
+        // registration (a sequential child's successor never accumulates
+        // its predecessor's entries).
+        fresh.forget_child("sub-rebuild1");
+        fresh
+            .record_child_usage(RlmChildUsageReport {
+                rlm_child_id: "sub-rebuild1".to_string(),
+                batches: vec![(
+                    ChildUsageOrigin::DirectUser,
+                    usage_block(4, 4, 0, 0, 8, 0.0),
                 )],
             })
             .await;
@@ -456,8 +525,8 @@ mod tests {
                 .iter()
                 .filter(|row| row["type"] == "child_usage_attributed")
                 .count(),
-            2,
-            "the un-adopted producer drops the report"
+            3,
+            "the forgotten child's report drops"
         );
     }
 

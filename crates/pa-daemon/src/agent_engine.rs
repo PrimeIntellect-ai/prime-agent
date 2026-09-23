@@ -142,6 +142,17 @@ impl pa_core::session_engine::rlm_usage::RlmChildUsageSink for ProducerUsageSink
             producer.record_child_usage(report).await;
         })
     }
+
+    fn forget(
+        &self,
+        rlm_child_id: &str,
+    ) -> std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        let producer = std::sync::Arc::clone(&self.0);
+        let rlm_child_id = rlm_child_id.to_string();
+        Box::pin(async move {
+            producer.forget_child(&rlm_child_id);
+        })
+    }
 }
 
 /// A [`SessionEngine`] running real agent turns.
