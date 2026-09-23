@@ -96,7 +96,11 @@ pub fn overlay_toasts(
     width: usize,
     style: Style,
 ) {
-    for (offset, text) in toasts.iter().enumerate() {
+    // A window shorter than the stack keeps the NEWEST toasts: the latest
+    // acknowledgment is the one the user just triggered, so it never hides.
+    let capacity = end.saturating_sub(start);
+    let skip = toasts.len().saturating_sub(capacity);
+    for (offset, text) in toasts.iter().skip(skip).enumerate() {
         if start + offset >= end {
             break;
         }
@@ -201,18 +205,25 @@ mod tests {
         assert!(frame[1].iter().any(|span| span.content.contains("two")));
     }
 
-    /// The end bound keeps the overlay inside the transcript window: a
-    /// toast that would land on the dock's first row is omitted instead
-    /// (a short transcript never lets the stack spill into the editor).
+    /// The end bound keeps the overlay inside the transcript window, and a
+    /// window shorter than the stack keeps the NEWEST toasts: the third
+    /// toast never lands on the dock's first row, and the latest
+    /// acknowledgment is the one that stays visible.
     #[test]
-    fn the_end_bound_never_spills_into_the_dock() {
+    fn the_end_bound_keps_the_newest_inside_the_window() {
         let mut frame = vec![vec![Span::raw("row")]; 4];
         let toasts = vec!["one".to_string(), "two".to_string(), "three".to_string()];
-        // Transcript window: rows 1..3 (end 3); the third toast would be
-        // row 3 — the dock's first row — so only two overlay.
+        // Transcript window: rows 1..3 (end 3); the window holds two
+        // toasts, so the NEWEST two overlay and the dock row stays
+        // untouched.
         overlay_toasts(&mut frame, 1, 3, &toasts, 10, Style::default());
-        assert!(frame[1].iter().any(|span| span.content.contains("one")));
-        assert!(frame[2].iter().any(|span| span.content.contains("two")));
+        assert!(
+            !frame[1].iter().any(|span| span.content.contains("one")),
+            "the oldest toast drops: {:?}",
+            frame[1]
+        );
+        assert!(frame[1].iter().any(|span| span.content.contains("two")));
+        assert!(frame[2].iter().any(|span| span.content.contains("three")));
         assert!(
             !frame[3].iter().any(|span| span.content.contains("three")),
             "the dock row stays untouched: {:?}",
