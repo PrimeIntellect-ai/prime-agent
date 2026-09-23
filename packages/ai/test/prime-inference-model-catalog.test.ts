@@ -180,6 +180,37 @@ describe("getPrimeInferenceReasoningControls", () => {
 		expect(getPrimeInferenceReasoningControls({ supportedParameters: ["reasoning", "reasoning_effort"] })).toEqual({
 			supportsReasoningEffort: true,
 		});
+		// enable_thinking routes take the ZAI toggle: mandatory routes must hide
+		// off (the serializer would otherwise disable reasoning), and a route that
+		// also declares reasoning_effort must keep the effort arm so the selected
+		// level is actually sent.
+		expect(
+			getPrimeInferenceReasoningControls({ supportedParameters: ["enable_thinking"], reasoningMandatory: true }),
+		).toEqual({ supportsReasoningEffort: false, thinkingFormat: "zai", thinkingLevelMap: { off: null } });
+		expect(getPrimeInferenceReasoningControls({ supportedParameters: ["enable_thinking"] })).toEqual({
+			supportsReasoningEffort: false,
+			thinkingFormat: "zai",
+		});
+		expect(
+			getPrimeInferenceReasoningControls({
+				supportedParameters: ["enable_thinking", "reasoning_effort"],
+				reasoningEfforts: ["high"],
+			}),
+		).toEqual({
+			supportsReasoningEffort: true,
+			thinkingLevelMap: {
+				off: "none",
+				minimal: null,
+				low: null,
+				medium: null,
+				high: "high",
+				xhigh: null,
+				max: null,
+			},
+		});
+		expect(
+			getPrimeInferenceReasoningControls({ supportedParameters: ["enable_thinking", "reasoning_effort"] }),
+		).toEqual({ supportsReasoningEffort: true });
 		expect(getPrimeInferenceReasoningControls({ supportedParameters: ["max_tokens"] })).toEqual({
 			supportsReasoningEffort: false,
 		});

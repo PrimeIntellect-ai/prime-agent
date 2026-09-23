@@ -92,12 +92,22 @@ export function getPrimeInferenceReasoningControls(
 			xhigh: null,
 			max: null,
 		};
+	} else if (includes.has("enable_thinking")) {
+		// The ZAI toggle serializes every non-off level as enable_thinking: true,
+		// so a mandatory route must hide off — selecting it would emit
+		// enable_thinking: false, which the catalog declares unsupported.
+		thinkingLevelMap = mandatory ? { off: null } : undefined;
 	}
-	const thinkingFormat = includes.has("enable_thinking")
-		? "zai"
-		: includes.has("reasoning") && !supportsReasoningEffort
-			? "openrouter"
-			: undefined;
+	// An effort route takes the default arm so the selected level is sent as
+	// reasoning_effort; enable_thinking only claims the ZAI toggle when the
+	// route declares no effort selector.
+	const thinkingFormat = supportsReasoningEffort
+		? undefined
+		: includes.has("enable_thinking")
+			? "zai"
+			: includes.has("reasoning")
+				? "openrouter"
+				: undefined;
 	return {
 		supportsReasoningEffort,
 		...(thinkingFormat ? { thinkingFormat } : {}),
