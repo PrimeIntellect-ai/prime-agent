@@ -46,10 +46,6 @@ enum MockRejection {
 }
 
 impl FailingMock {
-    fn start(failures: usize, answer: &'static str) -> FailingMock {
-        Self::start_with_rejection(failures, answer, MockRejection::ServerError)
-    }
-
     fn start_with_rejection(
         failures: usize,
         answer: &'static str,
