@@ -23,11 +23,11 @@ windows-cross:
 	cargo check --workspace --target x86_64-pc-windows-gnu --all-targets
 	cargo clippy --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
-# Lints the staged workflow files (see ci/workflows/README.md for why they are
-# not under .github/ yet).
+# Lints the live + staged workflow files (see ci/workflows/README.md for
+# why part of the set is still staged).
 actionlint:
 	@command -v actionlint >/dev/null 2>&1 || { echo "actionlint not installed (see rhysd/actionlint releases)"; exit 1; }
-	actionlint ci/workflows/ci.yml ci/workflows/release.yml ci/workflows/continuous.yml ci/workflows/benchmark.yml
+	actionlint .github/workflows/ci.yml .github/workflows/continuous.yml .github/workflows/release.yml ci/workflows/ci.yml ci/workflows/benchmark.yml
 
 # Perf wave + regression gate (benchmark.yml job, the local mirror): runs the
 # TS binary and a fresh release build side by side in a fresh Prime sandbox

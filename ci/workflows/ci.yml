@@ -1,11 +1,23 @@
-# CI gates for the prime-agent Rust rewrite.
+# CI workflows staged for later promotion: the Windows-readiness gates and
+# the supply-chain deny check.
 #
-# This workflow is byte-final but staged at ci/workflows/ (not .github/workflows/)
-# because the dev box's GitHub token has no `workflow` scope; see
-# ci/workflows/README.md for the promotion step. It is INERT until then. The same
-# gates run locally via:
-#   make check   (fmt + clippy + test)
-#   make deny    (cargo-deny advisories + licenses)
+# fmt + clippy-test were promoted to .github/workflows/ci.yml (the tip gates
+# on every push to main/rust plus PR gating; see ci/workflows/README.md) —
+# this file is no longer byte-final for those jobs. What remains here is
+# deliberately NOT promoted yet:
+#
+#   windows-cross — the cfg-hygiene cross-target gate, the local mirror of
+#   `make windows-cross` (docs/windows-readiness.md). Promote into the live
+#   ci.yml once it is validated green at the rust tip.
+#
+#   windows — the real windows-latest runner (portable + Windows-only
+#   tests). Promote together with windows-readiness; the release workflow's
+#   Windows target ships when the platform trait impls land (release.yml).
+#
+#   deny — cargo-deny advisories + licenses, the local mirror of `make deny`.
+#   Deliberately not a merge gate yet: the advisory DB drifts daily, so an
+#   unattended red here would block every PR for reasons unrelated to the
+#   PR. Promote when the owner takes that policy decision.
 #
 # PR and push builds are strictly read-only: `contents: read` and
 # persist-credentials: false. No secrets, no publish capability.
@@ -32,35 +44,6 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  fmt:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
-        with:
-          toolchain: "1.98.1"
-          components: rustfmt
-      - run: cargo fmt --all --check
-
-  clippy-test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
-        with:
-          toolchain: "1.98.1"
-          components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      # The lockfile is committed; a dirty worktree here means Cargo.toml
-      # changed without its lockfile in the same PR.
-      - run: cargo build --locked --workspace
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-
   # Windows-readiness gates (docs/windows-readiness.md): the cfg-hygiene
   # verifier the win-audit lane established, now at the stronger -D warnings
   # level, plus the real Windows runner the platform units target. The cross
