@@ -634,18 +634,20 @@ mod tests {
                     delay_ms: 0,
                     error_message: error_three,
                     reason: RetryStartReason::Backup {
-                        backup_model: "backup-a/glm-5.3"
+                        backup_model: switched_model,
                     },
                 },
                 AutoRetryEvent::End {
                     success: true,
                     attempt: 3,
                     final_error: None,
-                    restored_model: Some("primary/glm-5.3"),
+                    restored_model,
                 },
             ] if error_one == "primary down 1"
                 && error_two == "primary down 2"
                 && error_three == "primary down 3"
+                && switched_model == "backup-a/glm-5.3"
+                && restored_model.as_deref() == Some("primary/glm-5.3")
         );
         assert!(shape_matches, "events: {:?}", harness.events);
     }
