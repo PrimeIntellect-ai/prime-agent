@@ -325,7 +325,15 @@ impl Supervisor {
             .session_file
             .as_deref()?
             .to_string();
-        self.registry.find_by_session_file(&session_file).await
+        let resident = self.registry.find_by_session_file(&session_file).await?;
+        // Only a connected resident rebinds: a worker mid-teardown or one
+        // left by a failed launch would answer `Session worker is not
+        // connected` instead of the unknown-session failure the client can
+        // act on.
+        if resident.cmd_tx.lock().await.is_none() {
+            return None;
+        }
+        Some(resident)
     }
 
     /// Bind the client socket, adopt or relaunch persisted workers, serve.
@@ -1238,22 +1246,40 @@ impl Supervisor {
         // identity in the registry (registration races the create replay).
         self.registry.insert(Arc::clone(&resident)).await;
         let deadline = worker_connect_deadline();
-        let child = self.spawn_worker_process(&resident, deadline).await?;
+        // A failed launch never leaves its half-registered resident behind:
+        // a later stale-id rebind (or resolve) must not select a worker
+        // that cannot route.
+        let child = match self.spawn_worker_process(&resident, deadline).await {
+            Ok(child) => child,
+            Err(error) => {
+                self.registry.remove(&worker_id).await;
+                return Err(error);
+            }
+        };
         if let Err(error) = self.connect_worker(&resident, deadline).await {
             // Never leave a spawned-but-unwired worker process behind.
             let mut child = child;
             let _ = child.start_kill();
+            self.registry.remove(&worker_id).await;
             return Err(error);
         }
         let create_payload = {
             let descriptor = resident.descriptor.lock().await;
             create_command_payload(&descriptor.create_command)
         };
-        let response = self
+        let response = match self
             .route_command(&resident, "create", create_payload, LONG_ROUTE_TIMEOUT_MS)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                self.registry.remove(&worker_id).await;
+                return Err(error);
+            }
+        };
         if !response.success {
             let _ = std::fs::remove_file(&descriptor_path);
+            self.registry.remove(&worker_id).await;
             return Err(anyhow!(
                 "session worker create failed: {}",
                 response.error.unwrap_or_default()
@@ -3327,10 +3353,16 @@ impl Supervisor {
         };
         // A rebind retargets the routed frame: the worker reads the session
         // selector the payload carries, and the superseded id is not one it
-        // knows.
+        // knows. A rebound reattach routes as the worker's attach - the
+        // worker has no reattach arm; the reattach semantics (detach-mark
+        // clearing, replacement snapshot purpose) live supervisor-side.
+        let mut worker_command = worker_command;
         if let Some(current) = &rebound_to {
             if let Some(object) = payload.as_object_mut() {
                 object.insert("activeSessionId".to_string(), json!(current));
+            }
+            if worker_command == "reattach" {
+                worker_command = "attach";
             }
         }
         let response = self
@@ -3341,6 +3373,11 @@ impl Supervisor {
                 // Worker replies carry no client request id; clients match
                 // responses by the id they sent, so stamp it back here.
                 response.id = Some(command_id.clone());
+                // A rebound reattach routed as the worker's attach still
+                // answers as the command the client sent.
+                if rebound_to.is_some() && type_name == "reattach" {
+                    response.command = type_name.clone();
+                }
                 if let DaemonCommand::Attach {
                     capabilities,
                     supports_extension_ui,

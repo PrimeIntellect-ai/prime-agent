@@ -127,6 +127,24 @@ impl PromptAdmissionTable {
         }
     }
 
+    /// The single admission whose key carries this admission id, when
+    /// exactly one does (the stale-id cancel's last resort: after repeated
+    /// replacements the session half of the key is unknowable, but a
+    /// connection's admission id is its own idempotency key).
+    fn sole_key_for_admission_id(&self, admission_id: &str) -> Option<String> {
+        if admission_id.is_empty() {
+            return None;
+        }
+        let suffix = format!("\u{0}{admission_id}");
+        let admissions = self
+            .admissions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut keys = admissions.keys().filter(|key| key.ends_with(&suffix));
+        let first = keys.next()?.clone();
+        keys.next().is_none().then_some(first)
+    }
+
     fn remove(&self, key: &str) {
         self.admissions
             .lock()
@@ -340,18 +358,29 @@ impl Supervisor {
         let mut key = prompt_admission_key(active_session_id, admission_id);
         if connection.prompt_admissions.with(&key, |_| ()).is_none() {
             // The stale-active-id rebind: a rebound prompt's admission
-            // moved under the session's current id, so a cancel still
-            // addressed by the superseded id follows it through the
-            // binding table.
-            if let Some(binding) = self.session_bindings.binding_for(active_session_id) {
-                let rebound = prompt_admission_key(&binding.active_session_id, admission_id);
+            // moved under the session's current resident id (the same
+            // source the rebind seam re-keyed with), so a cancel still
+            // addressed by the superseded id follows it there. A resident
+            // replaced again mid-flight leaves no resolvable session half;
+            // the admission id alone settles it when it is unambiguous.
+            let mut rebound = None;
+            if let Some(resident) = self.binding_target(active_session_id).await {
+                let candidate = prompt_admission_key(&resident.worker_id, admission_id);
                 if connection
                     .prompt_admissions
-                    .with(&rebound, |_| ())
+                    .with(&candidate, |_| ())
                     .is_some()
                 {
-                    key = rebound;
+                    rebound = Some(candidate);
                 }
+            }
+            if rebound.is_none() {
+                rebound = connection
+                    .prompt_admissions
+                    .sole_key_for_admission_id(admission_id);
+            }
+            if let Some(rebound) = rebound {
+                key = rebound;
             }
         }
         // A waiting admission with no worker yet cancels outright (the TS
@@ -626,5 +655,20 @@ mod tests {
         table.remove(&new_key);
         table.rekey(&new_key, &old_key);
         assert!(table.with(&old_key, |_| ()).is_none());
+    }
+
+    #[test]
+    fn sole_admission_id_match_resolves_but_ambiguity_stays_unknown() {
+        let table = PromptAdmissionTable::default();
+        table.register("sess-a", "adm-1").expect("register");
+        assert_eq!(
+            table.sole_key_for_admission_id("adm-1"),
+            Some(prompt_admission_key("sess-a", "adm-1"))
+        );
+        // The same admission id under a second session is ambiguous: no
+        // last-resort match.
+        table.register("sess-b", "adm-1").expect("register");
+        assert_eq!(table.sole_key_for_admission_id("adm-1"), None);
+        assert_eq!(table.sole_key_for_admission_id(""), None);
     }
 }
