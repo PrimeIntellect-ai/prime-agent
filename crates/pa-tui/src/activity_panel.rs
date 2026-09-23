@@ -447,8 +447,7 @@ fn subagent_rows(sources: &ActivityPanelSources<'_>) -> Vec<ActivityPanelRow> {
                 })
                 .unwrap_or_else(|| {
                     summary_str(&summary, "activeSessionId")
-                        .filter(|id| id.len() >= 8)
-                        .map(|id| id[..8].to_string())
+                        .map(|id| id.chars().take(8).collect::<String>())
                         .or_else(|| summary_str(&summary, "sessionId").map(str::to_string))
                         .unwrap_or_else(|| "subagent".to_string())
                 });
@@ -977,6 +976,36 @@ mod tests {
                 "every row fits the width"
             );
         }
+    }
+
+    #[test]
+    fn multibyte_ids_never_panic_in_the_label_fallback() {
+        // A roster id with multibyte characters has a byte length that no
+        // longer licenses byte slicing: the fallback truncates by chars.
+        let roster = vec![json!({
+            "agentId": "a1",
+            "status": "running",
+            "summary": {
+                "runtimeKind": "subagent",
+                "lifecycle": "live",
+                "parentActiveSessionId": "root",
+                "activeSessionId": "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"
+            }
+        })];
+        let goal = goal(false);
+        let heartbeats = Vec::new();
+        let bash = json!({"activities": []});
+        let identity = identity();
+        let src = sources(&identity, &roster, &goal, &heartbeats, &bash);
+        let panel = ActivityPanel::new(&src, None, 16);
+        let row = panel.selected_row().expect("one row");
+        assert_eq!(
+            row.label,
+            "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"
+        );
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        let kb = KeybindingsManager::new();
+        let _ = panel.render(&theme, 60, &kb);
     }
 
     #[test]

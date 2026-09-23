@@ -116,7 +116,7 @@ pub(crate) struct HeartbeatsUpdate {
 
 pub(crate) struct ActivityUpdates {
     pub heartbeats: mpsc::UnboundedSender<HeartbeatsUpdate>,
-    pub bash: mpsc::UnboundedSender<Value>,
+    pub bash: mpsc::UnboundedSender<(String, Value)>,
 }
 
 /// A landed `get_model_catalog` refresh: the full catalog and the providers
@@ -318,7 +318,7 @@ pub(crate) struct SessionUi {
     heartbeat_catalog: Vec<HeartbeatEntry>,
     /// The current Python bash() registry snapshot from the owning kernel.
     bash_activities: Value,
-    bash_updates: mpsc::UnboundedSender<Value>,
+    bash_updates: mpsc::UnboundedSender<(String, Value)>,
     /// The subagent summary line holds keyboard focus.
     subagents_focused: bool,
     activity_group: crate::chrome::ActivityGroup,
@@ -791,6 +791,11 @@ impl SessionUi {
         // refreshes the catalog on every chat open).
         self.heartbeat_catalog.clear();
         self.spawn_heartbeat_refresh();
+        // The bash registry is kernel-owned and session-scoped: the previous
+        // session's rows are not this one's (the next poll refills).
+        self.bash_activities = serde_json::json!({"activities": []});
+        self.activity_group = crate::chrome::ActivityGroup::Subagents;
+        self.spawn_bash_activity_refresh();
         self.pending_model = reconstructed.model_id;
         self.last_assistant_text = reconstructed
             .chat
@@ -911,10 +916,25 @@ impl SessionUi {
             selected: self.activity_group,
             focused: self.subagents_focused,
         };
-        if !dock.visible() {
-            self.subagents_focused = false;
+        // A focused selection must stay actionable: when its feed empties
+        // (or never had rows), move to the first selectable group; with
+        // nothing selectable the dock stays a read-only indicator and
+        // releases the focus.
+        if self.subagents_focused && !self.activity_selectable(self.activity_group) {
+            self.activity_group = [
+                crate::chrome::ActivityGroup::Subagents,
+                crate::chrome::ActivityGroup::Heartbeats,
+                crate::chrome::ActivityGroup::Bash,
+            ]
+            .into_iter()
+            .find(|group| self.activity_selectable(*group))
+            .unwrap_or(crate::chrome::ActivityGroup::Subagents);
+            if !self.activity_selectable(self.activity_group) {
+                self.subagents_focused = false;
+            }
         }
         view.chrome.activity = dock.visible().then_some(crate::chrome::ActivityDock {
+            selected: self.activity_group,
             focused: self.subagents_focused,
             ..dock
         });
@@ -5097,6 +5117,7 @@ impl SessionUi {
         }
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
+        let active_session_id_for_update = active_session_id.clone();
         let tx = self.bash_updates.clone();
         tokio::spawn(async move {
             if let Ok(data) = client
@@ -5107,13 +5128,20 @@ impl SessionUi {
                 })
                 .await
             {
-                let _ = tx.send(data);
+                let _ = tx.send((active_session_id_for_update, data));
             }
         });
     }
 
-    pub(crate) fn apply_bash_activity(&mut self, data: Value, view: &mut AgentView) {
-        if self.bash_activities == data {
+    /// A late poll from the previous session must not repaint the dock of
+    /// the newly attached one: the update carries the session it asked
+    /// about, and only that session's response lands.
+    pub(crate) fn apply_bash_activity(
+        &mut self,
+        (session, data): (String, Value),
+        view: &mut AgentView,
+    ) {
+        if session != self.active_session_id || self.bash_activities == data {
             return;
         }
         self.bash_activities = data;

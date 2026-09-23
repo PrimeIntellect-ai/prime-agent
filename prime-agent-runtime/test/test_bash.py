@@ -52,7 +52,10 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
 
         activity_id = handle._activity_id
         rows = activity_request("list")["activities"]
-        self.assertEqual(next(row for row in rows if row["id"] == activity_id)["pid"], handle.pid)
+        listed = next(row for row in rows if row["id"] == activity_id)
+        self.assertEqual(listed["pid"], handle.pid)
+        self.assertIsNone(listed["exitCode"])
+        self.assertIn("T", listed["startedAt"])
         for _ in range(100):
             if "second" in activity_request("tail", activity_id, 1)["tail"]:
                 break
@@ -60,6 +63,11 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(activity_request("tail", activity_id, 1)["tail"], "second")
         self.assertEqual(activity_request("kill", activity_id)["killed"], True)
         await handle
+        finished = next(
+            row for row in activity_request("list")["activities"] if row["id"] == activity_id
+        )
+        self.assertEqual(finished["status"], "finished")
+        self.assertIsInstance(finished["exitCode"], int)
         with self.assertRaises(KeyError):
             activity_request("kill", "not-a-handle")
         with self.assertRaises(ValueError):

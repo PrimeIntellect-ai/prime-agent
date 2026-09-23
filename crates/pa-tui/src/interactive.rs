@@ -650,7 +650,7 @@ pub async fn run_interactive(
     // open view.
     let (heartbeats_tx, mut heartbeats_rx) =
         mpsc::unbounded_channel::<crate::session_ui::HeartbeatsUpdate>();
-    let (bash_tx, mut bash_rx) = mpsc::unbounded_channel::<Value>();
+    let (bash_tx, mut bash_rx) = mpsc::unbounded_channel::<(String, Value)>();
     // The double-Ctrl+C force-quit guard: the terminal reader observes the
     // pair even while this loop is wedged in a daemon request, and a plain
     // std-thread watchdog enforces the exit deadline without the runtime.

@@ -265,6 +265,7 @@ class BashHandle:
         # Serializes kill/reap so a pid fallback can never outlive the process handle.
         self._kill_lock = threading.Lock()
         self._started = time.monotonic()
+        self._started_at = datetime.now(timezone.utc).isoformat()
         # POSIX: own process group so kill() signals the whole pipeline; Windows
         # contains the tree in a kill-on-close job object.
         self._status_read = -1
@@ -1239,8 +1240,10 @@ def activity_request(action: str, activity_id: str | None = None, lines: int = 5
                 "id": key,
                 "command": handle.command,
                 "pid": handle._pid,
+                "startedAt": handle._started_at,
                 "durationMs": int((handle._result.duration if handle._result else time.monotonic() - handle._started) * 1000),
                 "status": "finished" if handle._reaped else "running",
+                "exitCode": handle._result.exit_code if handle._result else None,
             }
             for key, handle in handles
         ]}
