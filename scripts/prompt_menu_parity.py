@@ -419,6 +419,11 @@ def main():
         "--skip-base", action="store_true", help="verify only the branch build"
     )
     args = parser.parse_args()
+    # The sandbox paths (the faux script, the daemon sockets) leak into the
+    # child environment and resolve against the tmux pane's cwd, not this
+    # process's — a relative --out would point the launched binary at
+    # ./sandbox/cwd/sandbox/... Normalize once, here.
+    args.out = os.path.abspath(args.out)
     os.makedirs(args.out, exist_ok=True)
 
     base = os.path.join(args.out, "sandbox")
