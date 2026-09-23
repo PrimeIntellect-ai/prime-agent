@@ -89,6 +89,7 @@ import {
 	resolveHeartbeatStreamingBehavior,
 	shouldDeferHeartbeatCronJob,
 } from "../../core/cron-jobs.js";
+import { SESSION_RENAMED_CUSTOM_TYPE } from "../../core/messages.js";
 import { ORPHAN_PROCESS_JOURNAL_ENV } from "../../core/orphan-process-journal.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
 import { providerRetryPolicy } from "../../core/provider-retry.js";
@@ -3492,7 +3493,7 @@ export class AgentDaemon {
 			listAgents: () => this.createAgentMessageListResult(requireCurrentState()),
 			family: () => this.createAgentFamily(requireCurrentState()),
 			assertSessionNameAvailable: (input) => this.assertFamilySessionNameAvailable(input),
-			setSessionName: (name) => this.setStateSessionNameViaSupervisor(requireCurrentState(), name),
+			setSessionName: (name, target) => this.renameAgentFamilySession(requireCurrentState(), name, target),
 			sendAgentMessage: (input) =>
 				this.sendAgentSessionMessage({
 					targetSelector: input.target,
@@ -5433,7 +5434,7 @@ export class AgentDaemon {
 				if (!name) {
 					throw new Error("Session name cannot be empty");
 				}
-				await this.setStateSessionNameForCommand(state, name);
+				await this.setStateSessionNameForCommand(state, name, command.renamedBy);
 				return success(command.id, "set_session_name");
 			}
 
@@ -6116,10 +6117,36 @@ export class AgentDaemon {
 		}
 	}
 
-	private async setStateSessionNameViaSupervisor(state: ActiveSessionState, name: string): Promise<void> {
+	/** Kernel rename scope: the current session or one direct child, by id or child handle only. */
+	private async renameAgentFamilySession(fromState: ActiveSessionState, name: string, target?: string): Promise<void> {
+		const targetState =
+			target === undefined ? fromState : await this.getOrHydrateAuthorizedAgentFamilyTarget(fromState, target);
+		const session = targetState.runtime.session;
+		if (
+			target !== undefined &&
+			target !== session.sessionId &&
+			target !== targetState.activeSessionId &&
+			target !== targetState.runtime.metadata.rlmChildId
+		) {
+			throw new Error(
+				`rlm.rename session_id "${target}" must be the full session id or a child handle, not a session name or id suffix`,
+			);
+		}
+		const renamedBy = targetState === fromState ? undefined : this.agentMessageRelationship(fromState, targetState);
+		if (targetState !== fromState && renamedBy !== "parent") {
+			throw new Error("rlm.rename can only rename the current session or one of its direct children");
+		}
+		await this.setStateSessionNameViaSupervisor(targetState, name, renamedBy);
+	}
+
+	private async setStateSessionNameViaSupervisor(
+		state: ActiveSessionState,
+		name: string,
+		renamedBy?: AgentFamilyRelationship,
+	): Promise<void> {
 		const link = this.supervisorLink();
 		if (!this.options.worker || !link) {
-			return this.setStateSessionName(state, name);
+			return this.setStateSessionName(state, name, renamedBy);
 		}
 		const response = await link.request(
 			{
@@ -6127,22 +6154,52 @@ export class AgentDaemon {
 				activeSessionId: state.activeSessionId,
 				name,
 				workerToken: this.options.worker.authenticationToken,
+				...(renamedBy ? { renamedBy } : {}),
 			},
 			30_000,
 		);
 		if (!response.success) throw deserializeDaemonError(response);
 	}
 
-	private setStateSessionNameForCommand(state: ActiveSessionState, name: string): Promise<void> {
-		return this.options.worker ? this.applyStateSessionName(state, name) : this.setStateSessionName(state, name);
+	private setStateSessionNameForCommand(
+		state: ActiveSessionState,
+		name: string,
+		renamedBy?: AgentFamilyRelationship,
+	): Promise<void> {
+		return this.options.worker
+			? this.applyStateSessionName(state, name, renamedBy)
+			: this.setStateSessionName(state, name, renamedBy);
 	}
 
-	private async applyStateSessionName(state: ActiveSessionState, name: string): Promise<void> {
-		state.runtime.session.setSessionName(name);
+	private async applyStateSessionName(
+		state: ActiveSessionState,
+		name: string,
+		renamedBy?: AgentFamilyRelationship,
+	): Promise<void> {
+		const session = state.runtime.session;
+		const previous = session.sessionName;
+		session.setSessionName(name);
 		await this.appendRlmLedgerRenameForState(state, name);
+		if (previous !== undefined && previous !== name) {
+			void session
+				.sendCustomMessage({
+					customType: SESSION_RENAMED_CUSTOM_TYPE,
+					content: `Session renamed \`${previous}\` -> \`${name}\`${renamedBy ? ` by ${renamedBy}` : ""}`,
+					display: true,
+				})
+				.catch((error) => {
+					this.log(
+						`failed to deliver session rename notice: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				});
+		}
 	}
 
-	private async setStateSessionName(state: ActiveSessionState, name: string): Promise<void> {
+	private async setStateSessionName(
+		state: ActiveSessionState,
+		name: string,
+		renamedBy?: AgentFamilyRelationship,
+	): Promise<void> {
 		const normalizedName = name.trim();
 		if (!normalizedName) {
 			throw new Error("Session name cannot be empty");
@@ -6164,7 +6221,7 @@ export class AgentDaemon {
 			},
 			async () => {
 				await this.assertStateSessionNameAvailable(state, normalizedName);
-				await this.applyStateSessionName(state, normalizedName);
+				await this.applyStateSessionName(state, normalizedName, renamedBy);
 			},
 		);
 	}

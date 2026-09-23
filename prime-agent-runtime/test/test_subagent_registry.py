@@ -237,6 +237,27 @@ class RlmSubagentRegistryTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "target must be RLMSpawnHandle, RLMSubagent, or str"):
             asyncio.run(rlm_module.delete_subagent(123))
 
+    def test_rename_dispatches_self_and_child_selectors(self) -> None:
+        handle = rlm_module.RLMSpawnHandle(
+            rlm_child_id="sub-a1b2c3d4",
+            name="api-reviewer",
+            session_dir=Path("/tmp/parent/sub-a1b2c3d4"),
+            model="deepseek/deepseek-v4-flash",
+        )
+        for target, expected_selector in ((None, None), (handle, handle.rlm_child_id), ("  session-child  ", "session-child")):
+            host_request = AsyncMock(return_value={"name": "bench-runner"})
+            with patch.object(rlm_module, "host_request", host_request):
+                self.assertEqual(asyncio.run(rlm_module.rlm.rename("bench-runner", session_id=target)), "bench-runner")
+            expected = {"name": "bench-runner"}
+            if expected_selector is not None:
+                expected["session_id"] = expected_selector
+            host_request.assert_awaited_once_with("rlm.rename", expected)
+
+        with self.assertRaisesRegex(TypeError, "session_id must be"):
+            asyncio.run(rlm_module.rename("bench-runner", session_id=123))
+        with self.assertRaisesRegex(TypeError, "new_name must be str"):
+            asyncio.run(rlm_module.rename(5))
+
     def test_rejects_invalid_registry_payload(self) -> None:
         host_request = AsyncMock(return_value={"subagents": [{"status": "completed"}]})
 

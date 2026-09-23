@@ -1556,6 +1556,56 @@ describe("AgentSession rlm recursion", () => {
 		expect(await root.listRlmSubagents()).toEqual({ subagents: [] });
 	});
 
+	it("rlm.rename validates like spawn and forwards the selector to the daemon controller", async () => {
+		const setSessionName = vi.fn();
+		const root = createSession({
+			agentMessageController: {
+				listAgents: () => ({ agents: [] }),
+				sendAgentMessage: async () => {
+					throw new Error("unexpected send");
+				},
+				setSessionName,
+			},
+		});
+		const rename = hostHandler(root, "rlm.rename");
+
+		await expect(rename({ name: "  bench-runner ", session_id: "sub-1" })).resolves.toEqual({
+			name: "bench-runner",
+		});
+		expect(setSessionName).toHaveBeenCalledWith("bench-runner", "sub-1");
+		await expect(rename({ name: "x".repeat(65) })).rejects.toThrow(/at most 64/);
+		await expect(rename({ name: "all" })).rejects.toThrow(/Broadcast/);
+		await expect(rename({})).rejects.toThrow(/must be a string/);
+	});
+
+	it("does not resolve a renamed child by its spawn-time name", async () => {
+		const child = createSession({ depth: 1 });
+		child.setSessionName("bench-runner");
+		const childEntry = { id: child.sessionId, name: "bench-runner", depth: 1, status: "running" as const };
+		const family = async () => [{ relationship: "child" as const, entry: childEntry }];
+		const root = createSession({
+			agentMessageController: { listAgents: () => ({ agents: [] }), family, sendAgentMessage: vi.fn() },
+		});
+		const run: InspectableRlmRun = {
+			id: "sub-1",
+			prompt: "task",
+			sessionName: "worker-2",
+			sessionDir: join(tempDir, "sub-1"),
+			abort: () => {},
+			status: "running",
+			settled: false,
+			publication: { promise: Promise.resolve(), resolve() {}, reject() {} },
+			session: child,
+			progressNotes: [],
+		};
+		(root as unknown as InspectableRlmSession)._activeRlmChildRuns.set(run.id, run);
+		await expect(
+			hostHandler(root, "agent_message.send")({ message: "x", receiver_role: "child", receiver_name: "worker-2" }),
+		).rejects.toThrow(/No child matches/);
+		await expect(root.collectRlmChildren(["worker-2"], 0)).rejects.toThrow(/No direct RLM child matches/);
+		expect((await root.collectRlmChildren(["bench-runner"], 0)).results[0]).toMatchObject({ rlm_child_id: "sub-1" });
+	});
+
 	it("lists passive daemon children using their nonresident registry outcomes", async () => {
 		const deleteRlmSubagentRuntime = vi.fn(async () => {});
 		const root = createSession({

@@ -27,6 +27,7 @@ import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session
 import { installAgentTraceUpload } from "../src/core/agent-traces.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { type AgentCronJob, AgentCronJobStore } from "../src/core/cron-jobs.js";
+import { SESSION_RENAMED_CUSTOM_TYPE } from "../src/core/messages.js";
 import { PRIME_AGENT_TRACES_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import type { CreateRlmSubagentRuntimeOptions, SubagentRuntimeHost } from "../src/core/rlm-runtime.js";
 import { canonicalSessionPath } from "../src/core/session-lease.js";
@@ -910,6 +911,49 @@ describe("daemon mode helpers", () => {
 		).resolves.toMatchObject({ target: { activeSessionId: familyHelper.state.activeSessionId } });
 		expect(familyHelper.acceptAgentMessagePrompt).toHaveBeenCalledOnce();
 		expect(unrelatedHelper.acceptAgentMessagePrompt).not.toHaveBeenCalled();
+	});
+
+	it("renames a direct child by session id and notifies the renamed session", async () => {
+		const daemon = new AgentDaemon("/tmp/prime-agent-family-rename.sock", {
+			defaultSessionConfig: { agentDir: "/tmp", cwd: "/tmp" },
+			createRuntime: vi.fn(),
+		});
+		const observer = makeAgentFamilyState("observer", "observer");
+		const familyHelper = makeAgentFamilyState("family-helper", "helper", observer.state);
+		const otherChild = makeAgentFamilyState("other-child", "other", observer.state);
+		const internals = daemon as unknown as {
+			sessions: Map<string, ActiveSessionState>;
+			createAgentMessageController(
+				getCurrentState: () => ActiveSessionState | undefined,
+			): AgentSessionMessageController;
+		};
+		for (const fixture of [observer, familyHelper, otherChild]) {
+			internals.sessions.set(fixture.state.activeSessionId, fixture.state);
+		}
+		const rename = (state: ActiveSessionState, name: string, target?: string) =>
+			internals.createAgentMessageController(() => state).setSessionName?.(name, target);
+
+		await expect(rename(observer.state, "x", "helper")).rejects.toThrow(/not a session name/);
+		await expect(rename(familyHelper.state, "x", "session-other-child")).rejects.toThrow(/direct children/);
+		await expect(rename(observer.state, "other", "session-family-helper")).rejects.toThrow(/is unavailable/);
+
+		await rename(observer.state, "bench-runner", "session-family-helper");
+		expect(familyHelper.state.runtime.session.setSessionName).toHaveBeenCalledWith("bench-runner");
+		expect(familyHelper.state.runtime.session.sendCustomMessage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				customType: SESSION_RENAMED_CUSTOM_TYPE,
+				content: "Session renamed `helper` -> `bench-runner` by parent",
+				display: true,
+			}),
+		);
+		await expect(
+			internals
+				.createAgentMessageController(() => observer.state)
+				.sendAgentMessage({
+					target: "helper",
+					message: "report progress",
+				}),
+		).rejects.toThrow("Unknown active session: helper");
 	});
 
 	it("rejects agent messages when direct delivery preflight fails", async () => {
@@ -3398,6 +3442,30 @@ function makeAgentFamilyState(
 		},
 	);
 	const parentSessionId = parent?.runtime.session.sessionId;
+	const session = {
+		sessionId: `session-${activeSessionId}`,
+		sessionName,
+		runtimeKind: parent ? "subagent" : "top-level",
+		rlmDepth: parent ? (parent.runtime.session.rlmDepth ?? 0) + 1 : 0,
+		isStreaming: false,
+		isCompacting: false,
+		isBashRunning: false,
+		isRetrying: false,
+		isSessionActive: false,
+		hasAcceptedPromptInFlight: false,
+		unfinishedActionCount: 0,
+		messages: [],
+		state: { pendingToolCalls: new Set(), streamingMessage: undefined },
+		sessionManager: {
+			getCwd: () => "/tmp",
+			getHeader: () => ({ created: new Date(0).toISOString() }),
+		},
+		hasRunningRlmChildren: () => false,
+		getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
+		acceptAgentMessagePrompt,
+		setSessionName: vi.fn((name: string) => (session.sessionName = name)),
+		sendCustomMessage: vi.fn(async () => {}),
+	};
 	state.runtime = {
 		...state.runtime,
 		cwd: "/tmp",
@@ -3407,28 +3475,7 @@ function makeAgentFamilyState(
 			createdAt: 1,
 			...(parent ? { parentActiveSessionId: parent.activeSessionId, parentSessionId } : {}),
 		},
-		session: {
-			sessionId: `session-${activeSessionId}`,
-			sessionName,
-			runtimeKind: parent ? "subagent" : "top-level",
-			rlmDepth: parent ? (parent.runtime.session.rlmDepth ?? 0) + 1 : 0,
-			isStreaming: false,
-			isCompacting: false,
-			isBashRunning: false,
-			isRetrying: false,
-			isSessionActive: false,
-			hasAcceptedPromptInFlight: false,
-			unfinishedActionCount: 0,
-			messages: [],
-			state: { pendingToolCalls: new Set(), streamingMessage: undefined },
-			sessionManager: {
-				getCwd: () => "/tmp",
-				getHeader: () => ({ created: new Date(0).toISOString() }),
-			},
-			hasRunningRlmChildren: () => false,
-			getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
-			acceptAgentMessagePrompt,
-		},
+		session,
 	} as never;
 	return { state, acceptAgentMessagePrompt };
 }

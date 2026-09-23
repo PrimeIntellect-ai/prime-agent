@@ -1,6 +1,7 @@
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent, ServiceTier, TextContent, Transport } from "@earendil-works/pi-ai";
 import type {
+	AgentFamilyRelationship,
 	AgentSessionMessageDeliveryMode,
 	AgentSessionMessageReceipt,
 	AgentSessionMessageSafetyStatus,
@@ -666,7 +667,14 @@ export type DaemonCommand =
 	| { id?: string; type: "import_jsonl"; activeSessionId: string; inputPath: string; cwdOverride?: string }
 	| { id?: string; type: "export_html"; activeSessionId: string; outputPath?: string }
 	| { id?: string; type: "export_jsonl"; activeSessionId: string; outputPath?: string }
-	| { id?: string; type: "set_session_name"; activeSessionId: string; name: string; workerToken?: string }
+	| {
+			id?: string;
+			type: "set_session_name";
+			activeSessionId: string;
+			name: string;
+			workerToken?: string;
+			renamedBy?: AgentFamilyRelationship;
+	  }
 	| { id?: string; type: "get_rlm_max_depth_status"; activeSessionId: string }
 	| { id?: string; type: "set_rlm_max_depth"; activeSessionId: string; maxDepth: number; global?: boolean }
 	| { id?: string; type: "rename_saved_session"; activeSessionId?: string; sessionPath: string; name: string }

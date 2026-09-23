@@ -274,6 +274,7 @@ import {
 	createRlmFindModelsHostHandler,
 	createRlmListSubagentsHostHandler,
 	createRlmProgressNoteHostHandler,
+	createRlmRenameHostHandler,
 	createRlmRunHostHandler,
 	findRlmModelMatches,
 	findUniqueRlmShortFormModelMatch,
@@ -10621,13 +10622,7 @@ export class AgentSession {
 				appendEntry: (customType, data) => {
 					this.sessionManager.appendCustomEntry(customType, data);
 				},
-				setSessionName: async (name) => {
-					if (this._agentMessageController?.setSessionName) {
-						await this._agentMessageController.setSessionName(name);
-						return;
-					}
-					this.setSessionName(name);
-				},
+				setSessionName: (name) => this._setSessionNameViaController(name),
 				getSessionName: () => {
 					return this.sessionManager.getSessionName();
 				},
@@ -10981,6 +10976,7 @@ export class AgentSession {
 			),
 			"rlm.progress.note": createRlmProgressNoteHostHandler((message) => this.noteRlmProgress(message)),
 			"rlm.delete_subagent": createRlmDeleteSubagentHostHandler((target) => this.deleteRlmSubagent(target)),
+			"rlm.rename": createRlmRenameHostHandler((name, target) => this.renameRlmSession(name, target)),
 			"model.info": async () => ({
 				id: this.model?.id ?? null,
 				provider: this.model?.provider ?? null,
@@ -11390,7 +11386,7 @@ export class AgentSession {
 			(candidate) =>
 				(candidate.status === "queued" || candidate.status === "running" || candidate.status === "done") &&
 				!candidate.detachedDeletion &&
-				(candidate.id === selector || candidate.sessionName === selector),
+				(candidate.id === selector || (candidate.session?.sessionName ?? candidate.sessionName) === selector),
 		);
 		if (!run) return undefined;
 		await run.publication.promise;
@@ -11706,7 +11702,7 @@ export class AgentSession {
 		const session = run.session ?? this._rlmChildSessions.get(run.id)?.session;
 		return (
 			run.id === target ||
-			run.sessionName === target ||
+			(!session && run.sessionName === target) ||
 			session?.sessionId === target ||
 			session?.sessionName === target
 		);
@@ -11881,6 +11877,26 @@ export class AgentSession {
 		}
 		const subagent = directMatches[0] ?? (await this._resolveDirectRlmSubagent(target));
 		return this._trackRlmSubagentDeletion(subagent, () => this._deleteResolvedRlmSubagent(subagent));
+	}
+
+	/** Kernel entry for `rlm.rename`: the daemon controller owns validation and sibling checks. */
+	async renameRlmSession(name: string, target?: string): Promise<{ name: string }> {
+		if (target !== undefined) {
+			await this._awaitPendingRlmChildPublication(target);
+		}
+		await this._setSessionNameViaController(name, target);
+		return { name };
+	}
+
+	private async _setSessionNameViaController(name: string, target?: string): Promise<void> {
+		if (this._agentMessageController?.setSessionName) {
+			await this._agentMessageController.setSessionName(name, target);
+			return;
+		}
+		if (target !== undefined) {
+			throw new Error("rlm.rename with session_id requires a daemon-backed session");
+		}
+		this.setSessionName(name);
 	}
 
 	private async _trackRlmSubagentDeletion(

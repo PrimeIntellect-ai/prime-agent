@@ -1,5 +1,6 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Api, Model, ServiceTier } from "@earendil-works/pi-ai";
+import { assertDirectAgentMessageTarget } from "./agent-messages.js";
 import type { AgentSession, RlmChildAgentStatus } from "./agent-session.js";
 import type { ToolDefinition } from "./extensions/index.js";
 import type { HostRequestHandler } from "./kernel/index.js";
@@ -127,6 +128,7 @@ interface AsyncBashConsumedRequest {
 type AsyncBashConsumedHandler = (request: AsyncBashConsumedRequest) => void | Promise<void>;
 export type RlmListSubagentsHandler = () => RlmListSubagentsResult | Promise<RlmListSubagentsResult>;
 export type RlmDeleteSubagentHandler = (target: string) => Promise<RlmDeleteSubagentResult>;
+export type RlmRenameHandler = (name: string, sessionId: string | undefined) => Promise<{ name: string }>;
 export type RlmFindModelsHandler = (query: string, limit: number) => RlmFindModelsResult | Promise<RlmFindModelsResult>;
 
 const RLM_SUBAGENT_SESSION_NAME_MAX_LENGTH = 64;
@@ -376,6 +378,25 @@ export function createRlmDeleteSubagentHostHandler(handler: RlmDeleteSubagentHan
 		}
 		const { subagent, outcome } = await handler(payload.target.trim());
 		return outcome === undefined ? { subagent } : { subagent, outcome };
+	};
+}
+
+/** Rename the current session or one of its direct children through the daemon. */
+export function createRlmRenameHostHandler(handler: RlmRenameHandler): HostRequestHandler {
+	return async (payload) => {
+		const name = normalizeRequestedRlmSubagentSessionName(payload.name, "rlm.rename");
+		if (name === undefined) {
+			throw new Error("rlm.rename name must be a string");
+		}
+		assertDirectAgentMessageTarget(name);
+		const rawSessionId = payload.session_id;
+		if (rawSessionId === undefined || rawSessionId === null) {
+			return handler(name, undefined);
+		}
+		if (typeof rawSessionId !== "string" || !rawSessionId.trim()) {
+			throw new Error("rlm.rename session_id must be a non-empty string");
+		}
+		return handler(name, rawSessionId.trim());
 	};
 }
 

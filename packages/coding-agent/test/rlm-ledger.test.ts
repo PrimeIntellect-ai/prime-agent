@@ -564,6 +564,7 @@ function makeRuntimeSession(
 		getActiveToolNames: vi.fn(() => []),
 		getContextUsage: vi.fn(() => undefined),
 		setSessionName: vi.fn((name: string) => sessionManager.appendSessionInfo(name)),
+		sendCustomMessage: vi.fn(async () => {}),
 		dispose: vi.fn(),
 		disposeAsync: vi.fn(async () => {}),
 		abort: vi.fn(async () => {}),

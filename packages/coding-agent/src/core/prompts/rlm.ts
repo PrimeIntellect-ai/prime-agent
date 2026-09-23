@@ -186,6 +186,9 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		parts.push(
 			"Spawn independent children in separate calls and end your turn instead of awaiting completion. Multiple replies may arrive over multiple turns. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed.",
 		);
+		parts.push(
+			"Rename a direct child with `await rlm.rename('bench-runner', session_id=handle)` (spawn handle, `list_subagents()` row, or session id; never the child's name); omit `session_id` to rename your own session. Names must be unique among siblings, and the renamed session sees a transcript line for the change.",
+		);
 	}
 
 	if (hasIpython) {

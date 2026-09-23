@@ -170,7 +170,12 @@ export interface AgentSessionMessageController {
 	family?(): AgentFamilyMember[] | Promise<AgentFamilyMember[]>;
 	awaitPendingChildPublication?(selector: string): Promise<string | undefined>;
 	assertSessionNameAvailable?(input: AgentSessionNameAvailabilityInput): void | Promise<void>;
-	setSessionName?(name: string): void | Promise<void>;
+	/**
+	 * Rename the current session, or a direct child when `target` is its session
+	 * id, active id, or rlm child id (never a session name). A target requires a
+	 * daemon-backed controller; names are validated and checked for sibling uniqueness there.
+	 */
+	setSessionName?(name: string, target?: string): void | Promise<void>;
 	sendAgentMessage(input: AgentSessionMessageSendInput): Promise<AgentSessionMessageReceipt>;
 }
 
