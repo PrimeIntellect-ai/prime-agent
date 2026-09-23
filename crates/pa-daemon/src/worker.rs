@@ -7871,16 +7871,23 @@ mod tests {
                 "only the visible plain-user rows armed: {armed:?}"
             );
         }
-        // A lane with nothing armable arms nothing.
+        // A lane with nothing armable arms nothing new — the armed state
+        // itself persists (TS's armed set survives until a pump selection
+        // consumes or disarms it; a later abort with an empty lane runs
+        // the plain `requestAbort` arm and touches nothing).
         worker.core.lock().unwrap().steering.clear();
         assert!(
             !worker.arm_forced_all_steering(),
             "an empty lane arms nothing"
         );
-        assert!(
-            !worker.core.lock().unwrap().forced_all_steering,
-            "still disarmed"
-        );
+        {
+            let core = worker.core.lock().unwrap();
+            assert!(core.forced_all_steering, "the armed state persists");
+            assert!(
+                core.steering.iter().all(|item| !item.forced_batch),
+                "no item carries the armed flag"
+            );
+        }
     }
 }
 
@@ -8313,8 +8320,12 @@ mod turn_stream_tests {
     /// its own turn — one reply each, delivered in order.
     #[tokio::test]
     async fn one_at_a_time_delivers_each_queued_steer_as_its_own_turn() {
+        // The burst harness has no session store, so the scripted engine
+        // serves its first response for EVERY turn (prompt_index stays
+        // 0): the turns are discriminated by the agent_start count and
+        // the user-row order, not the reply text.
         let engine: Arc<dyn SessionEngine> = Arc::new(
-            ScriptedEngine::from_value(json!({ "responses": ["reply one", "reply two"] }))
+            ScriptedEngine::from_value(json!({ "responses": ["settled reply"] }))
                 .unwrap_or_default(),
         );
         let runner = burst_runner(Arc::clone(&engine));
@@ -8343,9 +8354,9 @@ mod turn_stream_tests {
             rows,
             vec![
                 ("user".to_string(), "steer one".to_string()),
-                ("assistant".to_string(), "reply one".to_string()),
+                ("assistant".to_string(), "settled reply".to_string()),
                 ("user".to_string(), "steer two".to_string()),
-                ("assistant".to_string(), "reply two".to_string()),
+                ("assistant".to_string(), "settled reply".to_string()),
             ],
             "one-at-a-time delivers in order, one turn each: {rows:?}"
         );
@@ -8357,11 +8368,10 @@ mod turn_stream_tests {
     /// the arm stays out of the batch and delivers next.
     #[tokio::test]
     async fn forced_batch_delivers_the_armed_prefix_as_one_turn() {
+        // (The burst harness serves the first scripted response for every
+        // turn — see one_at_a_time above.)
         let engine: Arc<dyn SessionEngine> = Arc::new(
-            ScriptedEngine::from_value(json!({
-                "responses": ["forced batch reply", "late steer reply"]
-            }))
-            .unwrap_or_default(),
+            ScriptedEngine::from_value(json!({ "responses": ["batch reply"] })).unwrap_or_default(),
         );
         let runner = burst_runner(Arc::clone(&engine));
         {
@@ -8401,9 +8411,9 @@ mod turn_stream_tests {
             vec![
                 ("user".to_string(), "armed one".to_string()),
                 ("user".to_string(), "armed two".to_string()),
-                ("assistant".to_string(), "forced batch reply".to_string()),
+                ("assistant".to_string(), "batch reply".to_string()),
                 ("user".to_string(), "late steer".to_string()),
-                ("assistant".to_string(), "late steer reply".to_string()),
+                ("assistant".to_string(), "batch reply".to_string()),
             ],
             "the armed prefix batched; the late steer never joined: {rows:?}"
         );
@@ -8414,11 +8424,10 @@ mod turn_stream_tests {
     /// row deliver as separate turns even under "all".
     #[tokio::test]
     async fn mode_all_never_batches_across_policy_classes() {
+        // (The burst harness serves the first scripted response for every
+        // turn — see one_at_a_time above.)
         let engine: Arc<dyn SessionEngine> = Arc::new(
-            ScriptedEngine::from_value(json!({
-                "responses": ["steer reply", "heartbeat reply"]
-            }))
-            .unwrap_or_default(),
+            ScriptedEngine::from_value(json!({ "responses": ["lane reply"] })).unwrap_or_default(),
         );
         let runner = burst_runner(Arc::clone(&engine));
         {
@@ -8447,9 +8456,9 @@ mod turn_stream_tests {
             rows,
             vec![
                 ("user".to_string(), "client steer".to_string()),
-                ("assistant".to_string(), "steer reply".to_string()),
+                ("assistant".to_string(), "lane reply".to_string()),
                 ("user".to_string(), "nudge the mission".to_string()),
-                ("assistant".to_string(), "heartbeat reply".to_string()),
+                ("assistant".to_string(), "lane reply".to_string()),
             ],
             "each policy class delivered its own turn: {rows:?}"
         );
