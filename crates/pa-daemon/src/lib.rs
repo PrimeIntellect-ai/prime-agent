@@ -21,6 +21,7 @@ pub mod compaction;
 mod compaction_outcome;
 pub(crate) mod compaction_supervision;
 pub(crate) mod context_tree_children;
+pub(crate) mod create_reuse;
 pub mod descriptor;
 pub mod engine;
 pub mod framing;

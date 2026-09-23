@@ -41,7 +41,7 @@ use crate::protocol::{
     DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
 };
 use crate::registry::{ResidentWorker, SessionRegistry, WorkerRegistration, WorkerRequest};
-use crate::session_store::{find_most_recent_session_for_cwd, list_sessions};
+use crate::session_store::list_sessions;
 use crate::snapshot_stream::{attach_client_capabilities, stream_attach, wants_chunked};
 use crate::update_prepare::{
     marker_expires_at_iso, update_gate_refuses, write_prepared_artifacts, AbortOutcome,
@@ -128,6 +128,13 @@ pub struct Supervisor {
     /// holding a superseded id resolves to the session's current
     /// resident instead of `Unknown active session`.
     pub(crate) session_bindings: crate::session_bindings::SessionBindingTable,
+    /// Per-session-file single-flight for opens (TS `openingWorkers`):
+    /// one open at a time per file, so a concurrent create reuses (or
+    /// waits out) the first one's worker instead of launching over it
+    /// and losing the runtime session lease. Owned by the create-reuse
+    /// seam (`create_reuse.rs`).
+    pub(crate) opening_files:
+        std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Daemon-lifecycle telemetry (`daemon event` schema v1), resolved at
     /// run start (None = opted out); never blocks supervision paths.
     telemetry: std::sync::Mutex<Option<pa_telemetry::TelemetryClient>>,
@@ -247,6 +254,7 @@ impl Supervisor {
             options,
             descriptor_dir,
             session_bindings: crate::session_bindings::SessionBindingTable::new(),
+            opening_files: std::sync::Mutex::new(std::collections::HashMap::new()),
             telemetry: std::sync::Mutex::new(None),
             registry: SessionRegistry::new(),
             events,
@@ -1763,15 +1771,16 @@ impl Supervisor {
                 "Session cannot be both no-session and session-pathed"
             ));
         }
-        let session_dir_path = match session_dir.as_deref() {
-            Some(dir) => paths::expand_tilde(dir)?,
-            None => paths::sessions_dir(&self.options.agent_dir)?,
-        };
+        // `continueRecent` is refused: a create must name its session
+        // (`sessionPath`) or open one through the agents view. The daemon
+        // never picks a session blindly — a shared session dir can hold any
+        // session, and reopening one revives its context and scheduled jobs
+        // (a sanctioned divergence from the TS worker's continueRecent
+        // arm, which resolves the newest saved session for the cwd).
         if *continue_recent == Some(true) {
-            let recent = find_most_recent_session_for_cwd(&session_dir_path, &cwd_value);
-            if recent.is_none() {
-                return Err(anyhow!("No recent session found for {}", cwd_value));
-            }
+            return Err(anyhow!(
+                "continueRecent is not supported: pass sessionPath to reopen a session, or open one through the agents view"
+            ));
         }
         let worker_id = util::new_display_id();
         let worker_socket = socket::worker_socket_path(&self.options.socket_path, &worker_id);
@@ -3729,7 +3738,27 @@ impl Supervisor {
         {
             self.assert_session_name_available(name).await?;
         }
+        // The per-file open single-flight (TS `openingWorkers`): one
+        // create at a time per session file. A concurrent open waits
+        // behind this one and then reuses the worker it launched — both
+        // reaching the launch would race the runtime session lease.
+        let _opening_guard = self.opening_guard(command).await?;
+        // TS `createOrReuseWorker`'s reuse seam: an open of a session file
+        // a live worker already serves answers the LIVE binding (the
+        // client attaches next) instead of launching a second worker over
+        // the same file — a launch the runtime session lease would reject
+        // with `Session is already active`. `None` keeps the launch path.
+        if let Some(summary) = self
+            .reuse_live_worker_for_create(command, &client_id)
+            .await?
+        {
+            return Ok(summary);
+        }
         let (resident, create_summary) = self.launch_worker(command, Some(client_id)).await?;
+        // The launch registered its worker (the registry insert precedes
+        // the spawn): the single-flight releases here so a concurrent
+        // open's classification finds the freshly-launched resident.
+        drop(_opening_guard);
         // Spawn admission is the moment the supervisor knows the child's
         // edge firsthand. The ledger is the only topology store, so the
         // append's outcome is load-bearing: admission fails if the spawn

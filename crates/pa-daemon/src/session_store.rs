@@ -15,6 +15,9 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
+#[path = "session_store_info_tests.rs"]
+mod info_tests;
+#[cfg(test)]
 #[path = "session_store_window_tests.rs"]
 mod window_tests;
 
@@ -908,7 +911,7 @@ fn normalize_state_status(status: &str) -> String {
 
 /// Port of `readSessionInfo`'s fold (single pass, no resume cache): the durable
 /// metadata the daemon list surfaces for one session file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
     pub path: PathBuf,
     pub id: String,
@@ -954,8 +957,112 @@ fn append_capped_search_text(current: &mut String, text: &str) {
     current.extend(text.chars().take(remaining));
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SessionInfoGeneration {
+    len: u64,
+    dev: u64,
+    ino: u64,
+    mtime: i64,
+    mtime_ns: i64,
+    ctime: i64,
+    ctime_ns: i64,
+}
+
+impl SessionInfoGeneration {
+    #[cfg(unix)]
+    fn from_metadata(meta: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            len: meta.len(),
+            dev: meta.dev(),
+            ino: meta.ino(),
+            mtime: meta.mtime(),
+            mtime_ns: meta.mtime_nsec(),
+            ctime: meta.ctime(),
+            ctime_ns: meta.ctime_nsec(),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn from_metadata(meta: &fs::Metadata) -> Self {
+        Self {
+            len: meta.len(),
+            dev: 0,
+            ino: 0,
+            mtime: 0,
+            mtime_ns: 0,
+            ctime: 0,
+            ctime_ns: 0,
+        }
+    }
+}
+
+fn session_info_cache(
+) -> &'static std::sync::Mutex<HashMap<PathBuf, (SessionInfoGeneration, SessionInfo)>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<PathBuf, (SessionInfoGeneration, SessionInfo)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// The listing fold only needs message metadata after the search corpus is full.
+/// Unknown fields (especially large assistant content) are skipped by serde.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionInfoMessage {
+    #[serde(default)]
+    role: Option<Value>,
+    #[serde(default)]
+    provider: Option<Value>,
+    #[serde(default)]
+    model: Option<Value>,
+    #[serde(default)]
+    timestamp: Option<Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionInfoEntry {
+    #[serde(rename = "type")]
+    type_: String,
+    #[serde(rename = "id")]
+    _id: String,
+    #[serde(rename = "timestamp")]
+    _timestamp: String,
+    #[serde(default, rename = "parentId")]
+    _parent_id: Option<String>,
+    #[serde(default)]
+    name: Option<Value>,
+    #[serde(default)]
+    state: Option<Value>,
+    #[serde(default)]
+    provider: Option<Value>,
+    #[serde(default)]
+    model_id: Option<Value>,
+    #[serde(default)]
+    thinking_level: Option<Value>,
+    #[serde(default)]
+    status: Option<Value>,
+    #[serde(default)]
+    message: Option<SessionInfoMessage>,
+}
+
 pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
-    let content = fs::read_to_string(path).ok()?;
+    let file = fs::File::open(path).ok()?;
+    let generation = SessionInfoGeneration::from_metadata(&file.metadata().ok()?);
+    if cfg!(unix)
+        && fs::metadata(path)
+            .ok()
+            .is_some_and(|meta| SessionInfoGeneration::from_metadata(&meta) == generation)
+    {
+        if let Ok(cache) = session_info_cache().lock() {
+            if let Some((cached_generation, info)) = cache.get(path) {
+                if *cached_generation == generation {
+                    return Some(info.clone());
+                }
+            }
+        }
+    }
     let mut header: Option<SessionHeader> = None;
     let mut name = None;
     let mut state = None;
@@ -966,12 +1073,18 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
     let mut all_messages_text = String::new();
     let mut agent_status: Option<Value> = None;
     let mut last_activity_ms: Option<u64> = None;
-    for line in content.lines() {
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line).ok()? == 0 {
+            break;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let Ok(entry) = serde_json::from_str::<SessionEntry>(trimmed) else {
+        let Ok(entry) = serde_json::from_str::<SessionInfoEntry>(trimmed) else {
             continue;
         };
         match entry.type_.as_str() {
@@ -981,17 +1094,17 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
             }
             "session_info" => {
                 name = entry
-                    .fields
-                    .get("name")
+                    .name
+                    .as_ref()
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|n| !n.is_empty())
-                    .map(str::to_string)
+                    .map(str::to_string);
             }
             "session_state" => {
                 if let Some(status) = entry
-                    .fields
-                    .get("state")
+                    .state
+                    .as_ref()
                     .and_then(|s| s.get("status"))
                     .and_then(Value::as_str)
                 {
@@ -1000,16 +1113,14 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
             }
             "model_change" => {
                 model = Some((
-                    entry.fields.get("provider")?.as_str()?.to_string(),
-                    entry.fields.get("modelId")?.as_str()?.to_string(),
+                    entry.provider.as_ref()?.as_str()?.to_string(),
+                    entry.model_id.as_ref()?.as_str()?.to_string(),
                 ));
             }
-            // The last persisted level wins, like `model_change`: a later
-            // `set_thinking_level` overwrites the creation prefix.
             "thinking_level_change" => {
                 if let Some(level) = entry
-                    .fields
-                    .get("thinkingLevel")
+                    .thinking_level
+                    .as_ref()
                     .and_then(Value::as_str)
                     .map(str::trim)
                     .filter(|level| !level.is_empty())
@@ -1017,39 +1128,46 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
                     thinking_level = Some(level.to_string());
                 }
             }
-            // Keep the latest recap/verdict (TS `agent_status` fold): the
-            // `summary` text is part of the agents-view search corpus.
-            "agent_status" => {
-                agent_status = entry.fields.get("status").cloned();
-            }
+            "agent_status" => agent_status = entry.status,
             "message" => {
                 message_count += 1;
-                if let Some(message) = entry.fields.get("message") {
-                    let role = message_role(message);
+                if let Some(message) = entry.message {
+                    let role = message.role.as_ref().and_then(Value::as_str);
                     if role == Some("assistant") {
                         if let (Some(provider), Some(model_id)) = (
-                            message.get("provider").and_then(Value::as_str),
-                            message.get("model").and_then(Value::as_str),
+                            message.provider.as_ref().and_then(Value::as_str),
+                            message.model.as_ref().and_then(Value::as_str),
                         ) {
                             model = Some((provider.to_string(), model_id.to_string()));
                         }
                     }
                     if matches!(role, Some("user" | "assistant")) {
-                        if let Some(timestamp) = message.get("timestamp").and_then(Value::as_u64) {
+                        if let Some(timestamp) = message.timestamp.as_ref().and_then(Value::as_u64)
+                        {
                             last_activity_ms = Some(last_activity_ms.unwrap_or(0).max(timestamp));
                         }
                     }
-                    if role == Some("user") && first_message.is_empty() {
-                        let text = message_text(message);
-                        if !text.is_empty() {
-                            first_message = text;
+                    if (role == Some("user") && first_message.is_empty())
+                        || (matches!(role, Some("user" | "assistant"))
+                            && all_messages_text.chars().count()
+                                < SESSION_LIST_SEARCH_TEXT_MAX_CHARS)
+                    {
+                        if let Ok(full) = serde_json::from_str::<SessionEntry>(trimmed) {
+                            if let Some(message) = full.fields.get("message") {
+                                if role == Some("user") && first_message.is_empty() {
+                                    let text = message_text(message);
+                                    if !text.is_empty() {
+                                        first_message = text;
+                                    }
+                                }
+                                if matches!(role, Some("user" | "assistant")) {
+                                    append_capped_search_text(
+                                        &mut all_messages_text,
+                                        &message_text(message),
+                                    );
+                                }
+                            }
                         }
-                    }
-                    // TS `allMessagesText`: user and assistant text
-                    // content feeds the full-transcript search.
-                    if matches!(role, Some("user" | "assistant")) {
-                        let text = message_text(message);
-                        append_capped_search_text(&mut all_messages_text, &text);
                     }
                 }
             }
@@ -1068,7 +1186,7 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
                 .unwrap_or(0),
         )
     };
-    Some(SessionInfo {
+    let info = SessionInfo {
         path: path.to_path_buf(),
         id: header.id,
         cwd: header.cwd,
@@ -1088,7 +1206,28 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
         },
         all_messages_text,
         agent_status,
-    })
+    };
+    // A concurrent append/replacement must never certify stale metadata.
+    // The legacy no-timestamp fallback is now(), not a durable file value.
+    if cfg!(unix)
+        && modified_ms > 0
+        && reader
+            .get_ref()
+            .metadata()
+            .ok()
+            .is_some_and(|meta| SessionInfoGeneration::from_metadata(&meta) == generation)
+        && fs::metadata(path)
+            .ok()
+            .is_some_and(|meta| SessionInfoGeneration::from_metadata(&meta) == generation)
+    {
+        if let Ok(mut cache) = session_info_cache().lock() {
+            if cache.len() > 512 {
+                cache.clear();
+            }
+            cache.insert(path.to_path_buf(), (generation, info.clone()));
+        }
+    }
+    Some(info)
 }
 
 /// List every valid session file in a directory, most recently modified first

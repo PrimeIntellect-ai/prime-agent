@@ -157,6 +157,11 @@ pub struct AgentsViewOutcome {
 /// TS `WORKING_ICON_INTERVAL_MS`: the running-row icon frame cadence.
 const PULSE_INTERVAL_MS: u64 = 250;
 
+/// The transient status hint while the entry anchor still waits on its
+/// row (see [`AgentsViewMode::open_selected`]); dropped once the anchor
+/// lands.
+const ANCHOR_LOADING_HINT: &str = "Still loading sessions — press ↓ or ↑ to pick a session now.";
+
 enum UiInput {
     Key(String),
     Resize,
@@ -466,7 +471,7 @@ impl AgentsViewMode {
                     && row.summary.get("sessionId").and_then(Value::as_str) == Some(anchor)
             }) {
                 self.selected = index;
-                self.anchor_selection_pending = false;
+                self.end_anchor_wait();
             }
         }
         self.rows = rows;
@@ -525,6 +530,7 @@ impl AgentsViewMode {
     /// which must never override it.
     fn move_selection(&mut self, delta: isize) {
         self.anchor_selection_pending = false;
+        self.clear_anchor_loading_hint();
         let selectable: Vec<usize> = self
             .rows
             .iter()
@@ -549,7 +555,37 @@ impl AgentsViewMode {
     /// Open the selected row (TS `openSelected`): the summary row toggles
     /// its list, a nested child drills into its transcript with its
     /// ancestor chain, and a top-level agent opens its session.
+    ///
+    /// While the entry anchor still waits on its row (the saved catalog
+    /// streams in), the selection is the rebuild's default, not the
+    /// user's — opening it would confirm an arbitrary row (on a
+    /// continue-recent launch that can be an unrelated live session). The
+    /// open waits instead: the anchor lands the selection once its row
+    /// appears, and any direction key cancels the wait for an explicit
+    /// manual pick. A scoped view never lists its anchor (the scope root
+    /// is excluded), so its wait never resolves — it keeps the open.
+    /// End the entry anchor's wait (the anchor row landed).
+    fn end_anchor_wait(&mut self) {
+        self.anchor_selection_pending = false;
+        self.clear_anchor_loading_hint();
+    }
+
+    /// The loading hint belongs to the wait alone: ending the wait by
+    /// either arm (the anchor landing or the user's first move) drops it
+    /// so the status line returns to the flow's own notice — the error
+    /// catalog-failure message included — instead of a stale loading
+    /// message.
+    fn clear_anchor_loading_hint(&mut self) {
+        if self.status.as_deref() == Some(ANCHOR_LOADING_HINT) {
+            self.status = None;
+        }
+    }
+
     fn open_selected(&mut self) {
+        if self.anchor_selection_pending && self.options.scope.is_none() {
+            self.status = Some(ANCHOR_LOADING_HINT.to_string());
+            return;
+        }
         let Some(row) = self.rows.get(self.selected).cloned() else {
             return;
         };
@@ -1973,6 +2009,44 @@ mod tests {
         assert!(!mode.anchor_selection_pending);
     }
 
+    /// Enter during the anchor wait opens nothing (the default row is not
+    /// the user's choice); once the anchor row lands, Enter opens it.
+    #[test]
+    fn open_waits_out_the_entry_anchor() {
+        let mut mode = mode_with_anchor(
+            Some("s2"),
+            vec![roster_entry("s1", "idle", parent_summary("s1"))],
+        );
+        assert!(mode.anchor_selection_pending);
+        mode.handle_key("enter");
+        assert!(mode.opened.is_none(), "the default row did not open");
+        assert!(mode.status.is_some(), "the wait explains itself");
+        mode.roster
+            .push(roster_entry("s2", "idle", parent_summary("s2")));
+        mode.rebuild_rows();
+        assert!(!mode.anchor_selection_pending);
+        assert!(
+            mode.status.is_none(),
+            "the anchor landing drops the loading hint"
+        );
+        // The user's first move ends the wait the same way: the hint it
+        // left behind clears too.
+        mode.anchor_selection_pending = true;
+        mode.status = Some(ANCHOR_LOADING_HINT.to_string());
+        mode.handle_key("down");
+        assert!(!mode.anchor_selection_pending);
+        assert!(
+            mode.status.is_none(),
+            "the canceling move drops the loading hint as well"
+        );
+        mode.handle_key("enter");
+        let opened = mode.opened.expect("the anchored row opens");
+        assert_eq!(
+            opened.selection,
+            SessionSelection::Attach("s2-live".to_string())
+        );
+    }
+
     /// The first user move cancels the wait: the anchor never overrides an
     /// explicit selection.
     #[test]
@@ -2069,6 +2143,16 @@ mod tests {
         assert_eq!(mode.selected, 0);
         assert_eq!(mode.rows[0].summary["sessionId"], "c");
         assert!(mode.anchor_selection_pending, "the wait never resolves");
+        // The unresolved wait never blocks the scoped view's own opens:
+        // Enter opens the first listed row.
+        mode.handle_key("enter");
+        let opened = mode
+            .opened
+            .expect("the scoped view opens despite the never-resolving wait");
+        assert_eq!(
+            opened.selection,
+            SessionSelection::Attach("c-live".to_string())
+        );
     }
 
     /// TS `countRowsBySection` (the splash header counts) counts agent-kind

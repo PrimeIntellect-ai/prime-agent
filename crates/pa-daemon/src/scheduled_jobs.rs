@@ -239,10 +239,34 @@ impl AgentCronSchedulerHooks for QueueHooks {
         )
         .await
         {
-            // The turn ran (its result, whatever it was, is a run).
-            Ok(_) => Ok(None),
-            // The queued item was removed (cancel/clear) or the settle
-            // window expired: the fire did not run.
+            // The typed settle classifies the fire (never the
+            // provider-controllable error text):
+            // - a settled turn is a run; a failed turn still counts as
+            //   a run (the store bumps runCount and records lastError,
+            //   the TS recordRunResult-with-error shape) but the error
+            //   propagates to the scheduler so its failure backoff
+            //   stretches the next fire (documented deviation: TS
+            //   re-fires per schedule regardless of failures);
+            // - an aborted turn is a clean run (TS `promptHeartbeat`
+            //   resolves normally when the turn aborts): no lastError,
+            //   no backoff;
+            // - a fire withdrawn before delivery (abort cancel, a queue
+            //   edit deleting the row) skips, the TS
+            //   unrunnable-at-admission verdict: no runCount bump, no
+            //   backoff.
+            Ok(Ok(settle)) => match settle {
+                crate::worker::TurnSettle::Completed | crate::worker::TurnSettle::Aborted => {
+                    Ok(None)
+                }
+                crate::worker::TurnSettle::Withdrawn(_) => Ok(Some("skipped")),
+                crate::worker::TurnSettle::Failed(error) => Err(anyhow::anyhow!(error)),
+            },
+            // The queued item was consumed without a settle handshake
+            // (its waiter dropped — a runner that died mid-turn, or the
+            // harness's direct pop): the fire ran as far as the queue
+            // could deliver it.
+            Ok(Err(_)) => Ok(None),
+            // The settle window expired: the fire did not run.
             Err(_) => Ok(Some("skipped")),
         }
     }
@@ -1177,6 +1201,110 @@ mod tests {
         }
     }
 
+    /// The failure propagation behind the backoff (dogfood incident: a
+    /// failing heartbeat re-fired ~120x at its full cadence): a turn that
+    /// settles with a real error surfaces it to the scheduler — still a
+    /// run, with the error riding it — instead of the old unconditional
+    /// success verdict; abort- and withdrawal-shaped settles classify as
+    /// a clean run and a skip respectively.
+    #[tokio::test]
+    async fn settles_classify_ran_failed_or_skipped() {
+        let dir = std::env::temp_dir().join(format!("pa-sched-fail-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = write_active_session(&dir);
+
+        // Park one fire, settle it with `settle`, and return the verdict.
+        async fn settle_one(
+            session: &(String, std::path::PathBuf),
+            settle: crate::worker::TurnSettle,
+        ) -> anyhow::Result<Option<&'static str>> {
+            let core = Arc::new(std::sync::Mutex::new(
+                crate::worker::SessionCore::test_core(None, "/w".to_string()),
+            ));
+            let hooks = Arc::new(QueueHooks {
+                core: Arc::clone(&core),
+                work_notify: Arc::new(Notify::new()),
+                user_bash: Arc::new(crate::user_bash::UserBash::new()),
+                store: Arc::new(AgentCronJobStore::for_session_artifacts()),
+                recovery: Arc::new(std::sync::Mutex::new(None)),
+            });
+            let job = heartbeat_job("hb-1", "steer the mission", DeliveryMode::Steer, session);
+            let hooks_for_run = Arc::clone(&hooks);
+            let spawned_job = job.clone();
+            let run = tokio::spawn(async move {
+                pa_core::cron::scheduler::AgentCronSchedulerHooks::run_job(
+                    &*hooks_for_run,
+                    &spawned_job,
+                )
+                .await
+            });
+            let park_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let popped = {
+                    let mut core = core.lock().unwrap();
+                    core.steering
+                        .pop_front()
+                        .or_else(|| core.follow_up.pop_front())
+                };
+                if let Some(item) = popped {
+                    let done = item.done.expect("a fire settles through done");
+                    let _ = done.send(settle.clone());
+                    break;
+                }
+                assert!(std::time::Instant::now() < park_deadline, "never parked");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            run.await.expect("run task")
+        }
+
+        // A provider failure surfaces: the scheduler records it and backs
+        // off (the incident's 404).
+        let failure = "404 No endpoints found that support tool use.".to_string();
+        let error = settle_one(&session, crate::worker::TurnSettle::Failed(failure.clone()))
+            .await
+            .expect_err("the failed settle surfaces");
+        assert_eq!(error.to_string(), failure);
+        // A provider failure whose text happens to equal the abort wire
+        // text still fails (the typed settle never reads the text).
+        let sneaky = settle_one(
+            &session,
+            crate::worker::TurnSettle::Failed(crate::worker::ABORTED_TURN_SETTLE_ERROR.to_string()),
+        )
+        .await
+        .expect_err("provider text cannot masquerade as an abort");
+        assert_eq!(sneaky.to_string(), crate::worker::ABORTED_TURN_SETTLE_ERROR);
+        // An aborted turn is a clean run.
+        assert_eq!(
+            settle_one(&session, crate::worker::TurnSettle::Aborted)
+                .await
+                .expect("aborted turn"),
+            None
+        );
+        // A withdrawn fire (queue edit delete, abort cancel) skips.
+        assert_eq!(
+            settle_one(
+                &session,
+                crate::worker::TurnSettle::Withdrawn(
+                    crate::worker::QUEUED_PROMPT_DELETED.to_string(),
+                ),
+            )
+            .await
+            .expect("withdrawn fire"),
+            Some("skipped")
+        );
+        assert_eq!(
+            settle_one(
+                &session,
+                crate::worker::TurnSettle::Withdrawn(
+                    crate::worker::PROMPT_ABORTED_BEFORE_DELIVERY.to_string(),
+                ),
+            )
+            .await
+            .expect("abort-cancelled fire"),
+            Some("skipped")
+        );
+    }
+
     #[tokio::test]
     async fn rlm_heartbeat_mutation_hook_fires_into_the_session_queue() {
         let dir = std::env::temp_dir().join(format!("pa-hb-fire-{}", uuid::Uuid::new_v4()));
@@ -1262,7 +1390,7 @@ mod tests {
 
         // The fired prompt ran as the session's turn and persisted as the
         // injected `heartbeat_prompt` custom row (TS `promptHeartbeat`):
-        // the ♥ Heartbeat transcript component's wire shape, never a
+        // the ◷ Heartbeat transcript component's wire shape, never a
         // plain user message.
         let fired_row = {
             let core = worker

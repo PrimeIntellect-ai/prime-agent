@@ -407,8 +407,11 @@ pub fn render_assistant(
     }
     if let Some(error) = &message.error {
         out.push(spacer());
+        // TS `createErrorComponent`: an error whose text ends with the
+        // login-recovery suffix renders as one merged inline line.
+        let merged = crate::error_summary::format_inline_login_recovery_message(error);
         out.extend(crate::error_summary::render_collapsible_error(
-            error,
+            merged.as_deref().unwrap_or(error),
             None,
             detail.tool_output_expanded(),
             ThemeColor::Error,
@@ -1027,6 +1030,204 @@ mod tests {
             &mut crate::markdown::MarkdownBlockCache::default(),
         );
         assert!(rows.is_empty(), "got: {rows:?}");
+    }
+
+    /// TS `createErrorComponent` + `formatInlineLoginRecoveryMessage`: an
+    /// error whose text ends with the login-recovery suffix renders as ONE
+    /// merged inline line (`{base} · Run /login to update credentials.`),
+    /// error-colored and one-space indented like every other error row, and
+    /// identical across detail modes (a plain row, never the collapsible
+    /// component).
+    #[test]
+    fn login_recovery_error_renders_one_merged_inline_line() {
+        let theme = theme();
+        let error_style = theme.fg_style(ThemeColor::Error);
+        let message = AssistantMessage {
+            blocks: Vec::new(),
+            has_tool_calls: false,
+            streaming: false,
+            error: Some("Auth failed. \n\nRun /login to update credentials.".into()),
+            aborted: false,
+        };
+        for detail in [Detail::Overview, Detail::Details, Detail::All] {
+            let rows = render_assistant(
+                &message,
+                detail,
+                &theme,
+                "  ",
+                60,
+                false,
+                &mut crate::markdown::MarkdownBlockCache::default(),
+            );
+            assert_eq!(
+                rows,
+                vec![
+                    vec![Span::raw(crate::osc133::ZONE_START)],
+                    vec![
+                        Span::raw(crate::osc133::ZONE_END_PREFIX),
+                        Span::raw(" "),
+                        Span::styled(
+                            "Auth failed. · Run /login to update credentials.",
+                            error_style
+                        ),
+                        Span::raw(" ".repeat(11)),
+                    ],
+                ]
+            );
+        }
+    }
+
+    /// The exact daemon authentication-failure wording merges: one inline
+    /// logical line at full width, and the same single line flows across
+    /// wrapped rows when narrow (the suffix never renders as its own
+    /// blank-line block).
+    #[test]
+    fn login_recovery_merges_the_exact_daemon_error_wording() {
+        let theme = theme();
+        let error_style = theme.fg_style(ThemeColor::Error);
+        let message = AssistantMessage {
+            blocks: Vec::new(),
+            has_tool_calls: false,
+            streaming: false,
+            error: Some(
+                "Authentication failed for \"prime-inference\". Credentials may have expired or network is unavailable.\n\nRun /login to update credentials."
+                    .into(),
+            ),
+            aborted: false,
+        };
+        let merged = "Authentication failed for \"prime-inference\". Credentials may have expired or network is unavailable. · Run /login to update credentials.";
+        let rows = render_assistant(
+            &message,
+            Detail::Overview,
+            &theme,
+            "  ",
+            140,
+            false,
+            &mut crate::markdown::MarkdownBlockCache::default(),
+        );
+        assert_eq!(
+            rows,
+            vec![
+                vec![Span::raw(crate::osc133::ZONE_START)],
+                vec![
+                    Span::raw(crate::osc133::ZONE_END_PREFIX),
+                    Span::raw(" "),
+                    Span::styled(merged, error_style),
+                    Span::raw(" ".repeat(3)),
+                ],
+            ]
+        );
+
+        let rows = render_assistant(
+            &message,
+            Detail::Overview,
+            &theme,
+            "  ",
+            60,
+            false,
+            &mut crate::markdown::MarkdownBlockCache::default(),
+        );
+        let flat: Vec<String> = rows
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+                    .replace(crate::osc133::ZONE_END_PREFIX, "")
+                    .replace(crate::osc133::ZONE_START, "")
+            })
+            .collect();
+        assert_eq!(flat.len(), 4, "spacer + 3 wrapped rows: {flat:?}");
+        assert_eq!(
+            flat[1..],
+            vec![
+                format!(
+                    " Authentication failed for \"prime-inference\". Credentials{}",
+                    " ".repeat(3)
+                ),
+                " may have expired or network is unavailable. · Run /login to".to_string(),
+                format!(" update credentials.{}", " ".repeat(40)),
+            ]
+        );
+    }
+
+    /// Only an end-of-text suffix with a non-empty, single-line base merges;
+    /// every other error shape keeps the normal (collapsible) rows.
+    #[test]
+    fn login_recovery_fallthroughs_keep_the_normal_error_rows() {
+        let theme = theme();
+        let error_style = theme.fg_style(ThemeColor::Error);
+        let render = |error: &str, detail: Detail| {
+            render_assistant(
+                &AssistantMessage {
+                    blocks: Vec::new(),
+                    has_tool_calls: false,
+                    streaming: false,
+                    error: Some(error.to_string()),
+                    aborted: false,
+                },
+                detail,
+                &theme,
+                "  ",
+                60,
+                false,
+                &mut crate::markdown::MarkdownBlockCache::default(),
+            )
+        };
+        // No suffix: the raw single-line error row is unchanged (fence).
+        assert_eq!(
+            render("Auth failed.", Detail::Overview)[1],
+            vec![
+                Span::raw(crate::osc133::ZONE_END_PREFIX),
+                Span::raw(" "),
+                Span::styled("Auth failed.", error_style),
+                Span::raw(" ".repeat(47)),
+            ]
+        );
+        // Multi-line base: the collapsible path applies to the full error —
+        // the summary row while collapsed, the suffix as its own block while
+        // expanded.
+        let multi = "Auth failed\nfor provider.\n\nRun /login to update credentials.";
+        assert_eq!(
+            render(multi, Detail::Overview)[1],
+            vec![
+                Span::raw(crate::osc133::ZONE_END_PREFIX),
+                Span::raw(" "),
+                Span::styled("Auth failed ", error_style),
+                Span::raw(" ".repeat(47)),
+            ]
+        );
+        let flat: Vec<String> = render(multi, Detail::All)
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+                    .replace(crate::osc133::ZONE_END_PREFIX, "")
+                    .replace(crate::osc133::ZONE_START, "")
+            })
+            .collect();
+        assert_eq!(
+            flat,
+            vec![
+                String::new(),
+                format!(" Auth failed{}", " ".repeat(48)),
+                format!(" for provider.{}", " ".repeat(46)),
+                String::new(),
+                format!(" Run /login to update credentials.{}", " ".repeat(26)),
+            ]
+        );
+        // Suffix not at the end: no merge, the collapsed summary stands.
+        let trailing = "Auth failed.\n\nRun /login to update credentials.\nProvider degraded.";
+        assert_eq!(
+            render(trailing, Detail::Overview)[1],
+            vec![
+                Span::raw(crate::osc133::ZONE_END_PREFIX),
+                Span::raw(" "),
+                Span::styled("Auth failed. ", error_style),
+                Span::raw(" ".repeat(46)),
+            ]
+        );
     }
 
     /// TS `AssistantMessageComponent.rebuild`'s aborted arm: the aborted

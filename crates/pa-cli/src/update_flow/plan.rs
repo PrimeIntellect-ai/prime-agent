@@ -7,11 +7,13 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use pa_core::update::install::{
-    current_platform_alias, read_installation, read_rollback_installation, CURRENT_LAUNCHER,
+    current_platform_alias, read_installation, read_rollback_installation, running_release,
+    RunningRelease, CURRENT_LAUNCHER,
 };
 use pa_core::update::release::{artifact_for_platform, latest_release};
 use pa_core::update::version::{
-    is_base_version_downgrade, is_release_update_candidate, UpdateChannel,
+    has_prerelease_tag, is_base_version_downgrade, is_release_update_candidate,
+    resolve_update_channel, UpdateChannel,
 };
 
 /// The manifest fetch timeout (TS `DEFAULT_VERSION_CHECK_TIMEOUT_MS`).
@@ -27,6 +29,13 @@ pub enum UpdatePlan {
         archive_sha256: String,
         /// The base URL the manifest came from (staged as `.install-source`).
         base_url: String,
+    },
+    /// The manual/direct install (`--archive`): the payload is already
+    /// staged (scratch + fsync + atomic rename) with the version probed
+    /// from the binary; nothing is downloaded.
+    Direct {
+        version: String,
+        candidate_dir: PathBuf,
     },
     /// Boot the previous release back (the coordinator IS the previous
     /// binary; the normal FSM swaps the launcher back).
@@ -49,8 +58,23 @@ fn download_base_url(override_url: Option<&str>, install_source: &str) -> String
         .to_string()
 }
 
+/// The update baseline: the release the RUNNING binary occupies. The
+/// comparison the plan makes is against this release's version — never a
+/// launcher that can point elsewhere — and the directory's version must
+/// equal the version this binary itself reports (`--version`), so a
+/// hand-named directory (a `0.10.0-rust-<sha>` dogfood train, or a
+/// `999.0.0` directory around an older binary) is refused as a baseline:
+/// the updater never plans "from" a version its binary does not report.
+fn running_release_anchor() -> Result<RunningRelease> {
+    let executable = std::env::current_exe().context("resolve the running executable")?;
+    running_release(&executable)
+}
+
 /// Plan one update run (TS `getNativeUpdatePlan` parity: same refusals,
-/// same messages, plus the Rust flow's staging facts).
+/// same messages, plus the Rust flow's staging facts; the update baseline
+/// anchors on the running binary's release directory, stricter than TS's
+/// launcher read, so an inconsistent installation is refused before any
+/// candidate is selected).
 pub async fn plan(
     install_root: &Path,
     force: bool,
@@ -59,14 +83,17 @@ pub async fn plan(
     download_base_override: Option<&str>,
 ) -> Result<UpdatePlan> {
     let active = read_installation(install_root, CURRENT_LAUNCHER);
-    let installation = match active {
-        Ok(installation) => Some(installation),
-        Err(_) => read_installation(install_root, "previous").ok(),
-    };
-    let Some(installation) = installation else {
-        anyhow::bail!(
-            "The compiled installation is damaged. Run the published installer again to repair it."
-        );
+    let previous_installation = read_installation(install_root, "previous").ok();
+    // The active launcher's metadata wins; a damaged active link falls back
+    // to `previous` (TS `readNativeInstallation(root) ?? ...(root, "previous")`).
+    let installation = match (&active, &previous_installation) {
+        (Ok(installation), _) => installation,
+        (Err(_), Some(previous)) => previous,
+        (Err(_), None) => {
+            anyhow::bail!(
+                "The compiled installation is damaged. Run the published installer again to repair it."
+            )
+        }
     };
     let base_url = download_base_url(download_base_override, &installation.base_url);
     if rollback {
@@ -87,12 +114,41 @@ pub async fn plan(
             candidate_dir: previous.target.release_dir.clone(),
         });
     }
-    let Some(release) =
-        latest_release(installation.version(), channel, &base_url, MANIFEST_TIMEOUT)
-            .await
-            .with_context(|| {
-                "Could not resolve a compiled release. The installed version was kept."
-            })?
+    // The baseline anchor: the running binary's release. The active
+    // launcher must name the same release — a launcher pointing at a
+    // different release than the running binary is an inconsistent
+    // installation (the direct-link dogfood layout), and planning from it
+    // is how an obsolete train got selected over newer code.
+    let running = running_release_anchor().map_err(|error| {
+        anyhow!("This binary does not run from a managed release directory: {error:#}. Update from a binary installed by the Prime Agent installer.")
+    })?;
+    // The directory's version and the binary's own report must agree
+    // (`--version` prints `config::version()`): a release directory named
+    // around a binary it does not contain is an inconsistent installation.
+    let reported = crate::config::version();
+    if running.version != reported {
+        anyhow::bail!(
+            "The installation is inconsistent: the release directory reports {} while this binary reports {reported}. Reinstall with the published installer.",
+            running.version
+        );
+    }
+    if let Ok(active_installation) = &active {
+        if active_installation.target.release_dir != running.release_dir {
+            anyhow::bail!(
+                "The installation is inconsistent: the active launcher points at {} while this binary runs from {}. Repair the launcher before updating.",
+                active_installation.target.release_dir.display(),
+                running.release_dir.display()
+            );
+        }
+    }
+    let Some(release) = latest_release(
+        running.version.as_str(),
+        channel,
+        &base_url,
+        MANIFEST_TIMEOUT,
+    )
+    .await
+    .with_context(|| "Could not resolve a compiled release. The installed version was kept.")?
     else {
         return Ok(UpdatePlan::Skipped {
             reason: "Could not resolve a compiled release; the installed version was kept."
@@ -107,20 +163,33 @@ pub async fn plan(
                 .to_string(),
         });
     }
-    if is_base_version_downgrade(&release.version, installation.version()) {
+    // A tagged build is a train that was never promoted: the stable
+    // channel publishes untagged releases, and installing a tagged version
+    // over newer code is the obsolete-train incident (`--force` overrides).
+    let effective_channel =
+        channel.unwrap_or_else(|| resolve_update_channel(running.version.as_str(), None));
+    if !force && effective_channel == UpdateChannel::Stable && has_prerelease_tag(&release.version)
+    {
         return Ok(UpdatePlan::Skipped {
             reason: format!(
-                "The channel's current release {} is older than the installed {}; the installed version was kept.",
-                release.version,
-                installation.version()
+                "The stable channel published a pre-release build ({}); the installed version was kept.",
+                release.version
             ),
         });
     }
-    if !force && !is_release_update_candidate(&release.version, installation.version(), channel) {
+    if is_base_version_downgrade(&release.version, running.version.as_str()) {
+        return Ok(UpdatePlan::Skipped {
+            reason: format!(
+                "The channel's current release {} is older than the installed {}; the installed version was kept.",
+                release.version, running.version
+            ),
+        });
+    }
+    if !force && !is_release_update_candidate(&release.version, running.version.as_str(), channel) {
         return Ok(UpdatePlan::Skipped {
             reason: format!(
                 "No update candidate: the installed version {} is current.",
-                installation.version()
+                running.version
             ),
         });
     }
