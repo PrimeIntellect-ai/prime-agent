@@ -276,15 +276,28 @@ impl TerminalCompactionJournal {
     /// state on disk). A failed durable write does not lose the
     /// declaration: the record stays retryable in memory for the next
     /// replacement replay, which retries it at the point the record is
-    /// needed.
+    /// needed. A manual declaration never displaces a pending record —
+    /// a manual run replays no durable row (the create replay persists
+    /// nothing for it), so letting it overwrite would trade the wedged
+    /// auto run's still-unconsumed disclosure for an inert record (the
+    /// empty-slot fallback after a supervisor restart is exactly that
+    /// case); a successful write also retires any retryable
+    /// predecessor, which the newest declaration supersedes.
     pub(crate) fn declare(&mut self, record: TerminalCompactionRecord) -> Result<()> {
+        if record.reason == "manual"
+            && (self.latest.contains_key(&record.active_session_id)
+                || self.retryable.contains_key(&record.active_session_id))
+        {
+            return Ok(());
+        }
+        let session = record.active_session_id.clone();
         let durable = crate::journal::append_record(&self.path, &serde_json::to_value(&record)?);
         if let Err(error) = durable {
-            self.retryable
-                .insert(record.active_session_id.clone(), record);
+            self.retryable.insert(session, record);
             return Err(error);
         }
-        self.latest.insert(record.active_session_id.clone(), record);
+        self.latest.insert(session.clone(), record);
+        self.retryable.remove(&session);
         Ok(())
     }
 
@@ -842,6 +855,71 @@ mod tests {
             let mut reopened = TerminalCompactionJournal::open(&path).unwrap();
             assert_eq!(reopened.pending("session-b").unwrap(), None);
         }
+    }
+
+    /// A manual declaration never displaces a pending record: the
+    /// empty-slot fallback after a supervisor restart must not trade
+    /// the wedged auto run's still-unconsumed disclosure (its record is
+    /// the only one the replay persists a row for) for an inert manual
+    /// one — not on the durable row, not on the retryable slot — while a
+    /// fresh auto declaration supersedes a retryable predecessor.
+    #[test]
+    fn a_manual_declaration_never_displaces_a_pending_record() {
+        let dir = std::env::temp_dir().join(format!("pa-comp-sup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("compaction-supervision.jsonl");
+        let record = |reason: &str| TerminalCompactionRecord {
+            version: 1,
+            r#type: TERMINAL_COMPACTION_RECORD_TYPE.to_string(),
+            active_session_id: "session-a".to_string(),
+            session_file: Some("/sessions/a.jsonl".to_string()),
+            reason: reason.to_string(),
+            declared_at: "2026-09-23T00:00:00Z".to_string(),
+        };
+
+        // Durable displacement: the manual fallback declaration after a
+        // supervisor restart leaves the auto record pending.
+        let mut journal = TerminalCompactionJournal::open(&path).unwrap();
+        journal.declare(record("threshold")).unwrap();
+        journal.declare(record("manual")).unwrap();
+        assert_eq!(
+            journal.pending("session-a").unwrap().expect("kept").reason,
+            "threshold"
+        );
+        // The manual record is not on disk either.
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("\"threshold\""));
+        assert!(!on_disk.contains("\"manual\""));
+
+        // Retryable displacement: a failed auto write keeps its slot
+        // against a manual declaration, and a fresh auto declaration
+        // retires the retryable predecessor once it lands.
+        let path2 = dir.join("compaction-supervision-2.jsonl");
+        let mut failing = TerminalCompactionJournal::open(&path2).unwrap();
+        std::fs::create_dir_all(&path2).unwrap();
+        assert!(failing.declare(record("threshold")).is_err());
+        failing.declare(record("manual")).unwrap();
+        assert!(
+            failing.pending("session-a").is_err(),
+            "the threshold retry still fails"
+        );
+        std::fs::remove_dir(&path2).unwrap();
+        let pending = failing.pending("session-a").unwrap().expect("retried");
+        assert_eq!(
+            pending.reason, "threshold",
+            "the manual record never landed"
+        );
+        failing.declare(record("overflow")).unwrap();
+        assert_eq!(
+            failing
+                .pending("session-a")
+                .unwrap()
+                .expect("overflow record")
+                .reason,
+            "overflow",
+            "a fresh auto declaration supersedes the retryable predecessor"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A declaration whose durable write failed is not lost: it stays
