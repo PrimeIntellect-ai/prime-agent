@@ -88,7 +88,7 @@ impl ModelRegistry {
 
     /// The Prime Inference credentials for the credentialed catalog layer
     /// (the TS `refreshPrimeInferenceModels` headers: Bearer + team).
-    pub fn prime_credentials(&mut self) -> Option<pa_models::PrimeCredentials> {
+    fn prime_credentials(&mut self) -> Option<pa_models::PrimeCredentials> {
         let api_key = self.auth.get_api_key(PRIME_INFERENCE_PROVIDER_ID)?;
         let team_id = self
             .auth

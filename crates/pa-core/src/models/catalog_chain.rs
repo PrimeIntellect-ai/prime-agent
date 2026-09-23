@@ -1,13 +1,13 @@
 //! The process-shared live catalog chain: one [`ModelCatalog`] per models
-//! dir, shared by every registry the process constructs.
+//! dir, shared by every registry the process constructs (the worker's
+//! create path, the model switcher, the RLM surface).
 //!
 //! TS parity: the TS daemon hosts its sessions in one process and each
 //! session's `ModelRegistry` privately owns a catalog layer per session;
 //! the Rust daemon runs one worker process per session, so the disk
 //! caches are the cross-process state and one chain instance per process
-//! serves every registry that process creates (the worker's create path,
-//! the model switcher, the RLM surface). The supervisor keeps the disk
-//! caches warm (startup + hourly refresh, piece 3 of the wiring).
+//! serves every registry that process creates. The supervisor keeps the
+//! disk caches warm (the forced startup refresh plus the hourly loop).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

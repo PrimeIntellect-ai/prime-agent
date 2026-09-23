@@ -291,7 +291,7 @@ pub fn build_prime_inference_models_with_minimum(
 /// Fetch the live catalog (5s timeout, 2 MiB cap). `base_url` is the API
 /// base (production: [`PRIME_INFERENCE_BASE_URL`]; tests pass a local
 /// server through the shared catalog's seam).
-pub async fn fetch_prime_inference_model_catalog(
+pub(crate) async fn fetch_prime_inference_model_catalog(
     base_url: &str,
     headers: Option<&HashMap<String, String>>,
     timeout_ms: u64,
