@@ -82,14 +82,17 @@ pub async fn plan(
     download_base_override: Option<&str>,
 ) -> Result<UpdatePlan> {
     let active = read_installation(install_root, CURRENT_LAUNCHER);
-    let installation = match active {
-        Ok(installation) => Some(installation),
-        Err(_) => read_installation(install_root, "previous").ok(),
-    };
-    let Some(installation) = installation else {
-        anyhow::bail!(
-            "The compiled installation is damaged. Run the published installer again to repair it."
-        );
+    let previous_installation = read_installation(install_root, "previous").ok();
+    // The active launcher's metadata wins; a damaged active link falls back
+    // to `previous` (TS `readNativeInstallation(root) ?? ...(root, "previous")`).
+    let installation = match (&active, &previous_installation) {
+        (Ok(installation), _) => installation,
+        (Err(_), Some(previous)) => previous,
+        (Err(_), None) => {
+            anyhow::bail!(
+                "The compiled installation is damaged. Run the published installer again to repair it."
+            )
+        }
     };
     let base_url = download_base_url(download_base_override, &installation.base_url);
     if rollback {
