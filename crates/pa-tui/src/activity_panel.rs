@@ -1070,7 +1070,14 @@ mod tests {
                 }
             }),
         ];
-        let identity = identity();
+        // The fixture's rows link through every parent key of this
+        // session (live, persisted, and file), so the identity carries
+        // all three.
+        let identity = SessionIdentity::new(
+            Some("root-live".to_string()),
+            Some("root-session".to_string()),
+            Some("/sessions/root.jsonl".to_string()),
+        );
         let goal = goal(false);
         let heartbeats = Vec::new();
         let bash = json!({"activities": []});
