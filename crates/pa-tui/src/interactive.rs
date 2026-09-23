@@ -1431,7 +1431,15 @@ pub async fn run_interactive(
     // cleanup step below is best-effort (stats fetch, detach, telemetry,
     // the exit flush). A wedged shutdown path cannot hold the process
     // open past it; the healthy path always finishes well inside.
-    if renderer.is_terminal() {
+    // A handoff (agents-back, a `/resume` selection) is a view switch,
+    // not an exit: the process keeps running, and TS `returnToAgentsView`
+    // has no exit deadline — its `teardownSessionUi` drain may take its
+    // full second while the app simply waits. Arming here turned a busy
+    // box's slow switch into a mid-teardown process kill ("shutdown
+    // stalled; forced exit.", the live report), so the deadline covers
+    // only the leaves that end this process.
+    let handing_off = session.open_agents_view || session.pending_selection.is_some();
+    if renderer.is_terminal() && !handing_off {
         exit_guard.arm_for_exit();
     }
     // TS `returnToAgentsView` -> `stashDraftForAgentsView` + the
