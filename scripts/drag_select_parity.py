@@ -294,18 +294,28 @@ def main():
             )
         (run_dir / "after-follow.txt").write_text(raw)
 
-        # Sweep 2: paused mid-history — wheel up a few screens, then drag.
+        # Sweep 2: paused mid-history — wheel up a few screens, then drag
+        # a visible transcript row (the corpus is far taller than a dozen
+        # screens, so the pane shows some mid-history turn's rows, not the
+        # transcript head; the needle leaving the pane proves the pause).
         for _ in range(12):
             send_mouse(session, wheel_up(5))
         time.sleep(0.5)
         plain = capture(session, escape=False)
-        paused = locate_plain(plain, "answer 0:")
-        if paused is None:
+        pane_rows = plain.split("\n")
+        anchor = next(
+            (
+                (index, line.find("answer "))
+                for index, line in enumerate(pane_rows)
+                if "answer " in line
+            ),
+            None,
+        )
+        if anchor is None or NEEDLE in plain:
             raise AssertionError("the wheel-up never paused into history")
         (run_dir / "before-paused.txt").write_text(capture(session))
-        row, col = paused
-        needle_row_text = plain.split("\n")[row]
-        paused_needle = "answer 0:"
+        row, col = anchor
+        needle_row_text = pane_rows[row]
         paused_steps = sweep(
             session, run_dir, "paused", row, col, needle_row_text.strip()
         )
