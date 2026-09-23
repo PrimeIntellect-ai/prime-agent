@@ -52,9 +52,7 @@ pub fn resolve_child_model(
     allowlist: Option<&[String]>,
 ) -> Result<String> {
     let model = resolve_child_model_unchecked(agent_dir, reference, parent_model, target)?;
-    if let Err(refusal) = crate::model_allowlist::assert_allowed(allowlist, &model) {
-        return Err(refusal);
-    }
+    crate::model_allowlist::assert_allowed(allowlist, &model)?;
     Ok(model)
 }
 
