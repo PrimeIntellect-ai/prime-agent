@@ -586,6 +586,11 @@ impl Worker {
             Ok(prepared) => prepared,
             Err(response) => return response,
         };
+        // One replacement at a time: the fork's teardown, swap, restore,
+        // and rebuild share the replacement gate with the other
+        // whole-session replacements (a fork racing a `switch_session`
+        // interleaves the same way two switches do).
+        let _replacement_gate = self.replacement_gate.lock().await;
         if let Err(error) = self.teardown_for_replacement().await {
             return response_failure(None, "fork", &format!("{error:#}"), None);
         }

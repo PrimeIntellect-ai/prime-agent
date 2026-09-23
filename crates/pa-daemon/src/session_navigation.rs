@@ -380,6 +380,11 @@ impl Worker {
             // (the TS `releaseUncommittedLease` fallthrough).
             Err(response) => return response,
         };
+        // One replacement at a time: the teardown, the swap, the restore,
+        // and the rebuild below are one serialized critical section, so a
+        // concurrent replacement command never interleaves at the
+        // restore's awaits against this command's session.
+        let _replacement_gate = self.replacement_gate.lock().await;
         // TS `teardownForReplacement` rethrows: a failed retire (the
         // session's own kernel dispose, or a child close) fails the
         // replacement command with the old runtime already torn down.

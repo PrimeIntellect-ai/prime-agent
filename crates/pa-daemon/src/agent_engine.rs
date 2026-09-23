@@ -885,6 +885,14 @@ impl AgentSessionEngine {
     /// chain; a restore that still misses after the window records the
     /// fallback (`model_fallback_message`, never silent).
     async fn restore_session_model_at(&self, session_path: &std::path::Path) {
+        // An unpersisted session (an in-memory fork or a no-session
+        // worker's replacement) has no file to read: TS restores its
+        // branch context, whose `model_change` row is the live branch's
+        // own — the model the session already runs on — so the
+        // runtime-config reset must not run with nothing to restore.
+        if session_path.as_os_str().is_empty() {
+            return;
+        }
         self.reset_selection_to_spawn_fallback();
         if self.current_selection().model.is_some() {
             return;
@@ -7078,6 +7086,49 @@ pub(crate) mod tests {
             "the moved-to session's own file pin wins over the previous session's switch"
         );
         assert!(engine.model_fallback_message().is_none());
+    }
+
+    /// An unpersisted session (an in-memory fork, a no-session worker's
+    /// replacement) has no file to restore from: the runtime-config reset
+    /// must not run with nothing to restore — the live selection keeps
+    /// the model the session runs on (TS restores the in-memory branch's
+    /// own context).
+    #[tokio::test]
+    async fn an_unpersisted_session_keeps_its_live_selection() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        write_thinking_pair_models_json(&agent_dir, "http://127.0.0.1:9");
+        let engine = std::sync::Arc::new(restore_test_engine(dir.path(), None, None));
+        engine.configure_create_model(EngineModelSelection {
+            provider: Some("battery".to_string()),
+            model: Some("mock-plain".to_string()),
+            api_key: None,
+            thinking: None,
+        });
+        // A mid-session /model switch on the live session (the worker
+        // runs the engine's synchronous switch on the blocking pool).
+        let switched_engine = std::sync::Arc::clone(&engine);
+        let switched = tokio::task::spawn_blocking(move || {
+            switched_engine.switch_model(EngineModelSelection {
+                provider: Some("battery".to_string()),
+                model: Some("mock-reason".to_string()),
+                api_key: None,
+                thinking: None,
+            })
+        })
+        .await
+        .expect("blocking switch");
+        assert!(switched);
+
+        // The in-memory fork's replacement restore: an empty path is a
+        // no-op — the switch survives (never reset to the runtime config).
+        engine.restore_session_model(std::path::Path::new("")).await;
+        let resolved = engine.resolve_registry_model().expect("live selection");
+        assert_eq!(
+            (resolved.provider.as_str(), resolved.id.as_str()),
+            ("battery", "mock-reason"),
+            "the live selection survives an unpersisted replacement"
+        );
     }
 
     /// A compacted session restores the model its post-compaction
