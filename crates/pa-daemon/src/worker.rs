@@ -6620,16 +6620,18 @@ mod tests {
         // (labeled preview, injected custom row, queue key), so a respawned
         // worker restores the heartbeat component instead of a plain user
         // message.
+        let content = "[heartbeat: every 10m run#0]\n\nnudge the mission";
+        let labeled_preview = format!(
+            "{}: {content}",
+            pa_core::session_engine::messages::HEARTBEAT_PROMPT_PREVIEW_LABEL
+        );
         let heartbeat = crate::journal::WorkerQueueItemRecord {
-            message: "[heartbeat: every 10m run#0]\n\nnudge the mission".to_string(),
-            preview: Some(
-                "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission"
-                    .to_string(),
-            ),
+            message: content.to_string(),
+            preview: Some(labeled_preview),
             custom_message: Some(json!({
                 "role": "custom",
                 "customType": "heartbeat_prompt",
-                "content": "[heartbeat: every 10m run#0]\n\nnudge the mission",
+                "content": content,
                 "display": true,
                 "details": { "jobId": "hb-1" },
             })),
