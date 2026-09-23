@@ -2438,7 +2438,11 @@ impl Worker {
 
     /// Agent-to-agent message delivery, routed by the supervisor's
     /// `send_message` arm: render the `[agent-message from ...]` prompt and
-    /// queue it on the requested lane. Answers with the delivery receipt
+    /// queue it on the requested lane, carrying the `agent_message`
+    /// custom row on the queued item (TS `acceptAgentSessionMessage` ->
+    /// `acceptAgentMessagePrompt` with `customMessage`): the turn renders
+    /// the collapsed agent-message card while the model still runs on the
+    /// rendered prompt. Answers with the delivery receipt
     /// (`createAgentSessionMessageReceipt` shape): `queued` when a turn is
     /// running (`queueIfBusy` semantics), `delivered` when the prompt
     /// becomes the next run.
@@ -2509,7 +2513,7 @@ impl Worker {
         } else {
             Lane::Steering
         };
-        let (id, summary, queued, snapshot, lanes, active_session_id) = {
+        let (id, queued, snapshot, lanes, active_session_id, target) = {
             let mut core = self.core.lock().unwrap();
             let pending = core.steering.len() + core.follow_up.len();
             if let Err(error) =
@@ -2522,6 +2526,42 @@ impl Worker {
                 return response_failure(None, "worker_deliver_message", &error.to_string(), None);
             }
             let id = pa_core::session_engine::agent_messaging::create_agent_session_message_id();
+            let queued = core.busy;
+            let summary = self.summary_locked(&core);
+            // The receiving session's endpoint (TS
+            // `createAgentSessionMessageEndpoint`): the receipt's `target`
+            // and the delivered row's `details.target` share the one shape.
+            let mut target = json!({
+                "activeSessionId": summary.active_session_id.clone().unwrap_or_default(),
+                "sessionId": summary.session_id,
+                "runtimeKind": summary
+                    .runtime_kind
+                    .clone()
+                    .unwrap_or_else(|| "top-level".to_string()),
+            });
+            if let Some(name) = summary.session_name.clone().filter(|name| !name.is_empty()) {
+                target["sessionName"] = json!(name);
+            }
+            // The receiving side's custom row (TS
+            // `acceptAgentSessionMessage` -> `createAgentSessionMessage`,
+            // riding `acceptAgentMessagePrompt`'s `customMessage`): the
+            // queued turn carries the `agent_message` row so the
+            // transcript renders the collapsed card instead of a plain
+            // user row, while the row's `content` IS the rendered prompt -
+            // the model context stays byte-identical to the
+            // plain-prompt delivery.
+            let custom_message =
+                pa_core::session_engine::agent_messaging::create_agent_session_message_row(
+                    &pa_core::session_engine::agent_messaging::AgentSessionMessageRowPayload {
+                        id: &id,
+                        prompt: &prompt,
+                        message,
+                        from: &sender,
+                        from_relationship,
+                        target: &target,
+                        timestamp: crate::util::now_ms(),
+                    },
+                );
             match lane {
                 Lane::Steering => &mut core.steering,
                 Lane::FollowUp => &mut core.follow_up,
@@ -2529,7 +2569,7 @@ impl Worker {
             .push_back(QueuedItem {
                 preview: None,
                 message: prompt,
-                custom_message: None,
+                custom_message: Some(custom_message),
                 // The agent-message marker: `agent_messages_clear` /
                 // `agent_messages_pause` remove exactly these items.
                 agent_message: Some(message.to_string()),
@@ -2539,27 +2579,14 @@ impl Worker {
                 done: None,
                 queue_visible: true,
             });
-            let queued = core.busy;
-            let summary = self.summary_locked(&core);
             let snapshot = self.snapshot_locked(&core);
             let lanes = queue_lanes(&core);
             let active_session_id = core.active_session_id.clone();
-            (id, summary, queued, snapshot, lanes, active_session_id)
+            (id, queued, snapshot, lanes, active_session_id, target)
         };
         self.persist_queue_snapshot(&active_session_id, &lanes);
         let _ = self.emit_action_update(&snapshot);
         self.work_notify.notify_one();
-        let mut target = json!({
-            "activeSessionId": summary.active_session_id.clone().unwrap_or_default(),
-            "sessionId": summary.session_id,
-            "runtimeKind": summary
-                .runtime_kind
-                .clone()
-                .unwrap_or_else(|| "top-level".to_string()),
-        });
-        if let Some(name) = summary.session_name.clone().filter(|name| !name.is_empty()) {
-            target["sessionName"] = json!(name);
-        }
         let timestamp = crate::util::now_iso();
         let mut receipt = json!({
             "id": id,
@@ -5198,6 +5225,64 @@ mod agent_message_tests {
         assert!(queue_texts(&worker.core, Lane::FollowUp).is_empty());
     }
 
+    /// The queued delivery carries the `agent_message` custom row (TS
+    /// `acceptAgentSessionMessage` rides `acceptAgentMessagePrompt`'s
+    /// `customMessage`): the row's content is the rendered prompt, the
+    /// details carry the identity the collapsed card reads, and the
+    /// agent-message marker still targets `agent_messages_clear`/`pause`.
+    #[tokio::test]
+    async fn deliver_message_carries_the_agent_message_custom_row() {
+        let worker = created_worker().await;
+        let response = worker
+            .dispatch(
+                "worker_deliver_message",
+                &json!({
+                    "targetActiveSessionId": "target-session",
+                    "message": "the research is done",
+                    "sender": {
+                        "activeSessionId": "source-session",
+                        "sessionId": "source-file",
+                        "sessionName": "research-lane",
+                        "runtimeKind": "subagent",
+                    },
+                }),
+            )
+            .await;
+        assert!(response.success, "deliver failed: {response:?}");
+        let data = response.data.expect("receipt data");
+        let prompt = "[agent-message from child:research-lane]\n\nthe research is done";
+        let (custom, message, agent_message) = {
+            let core = worker.core.lock().unwrap();
+            let item = core.steering.front().expect("the delivery queued");
+            (
+                item.custom_message
+                    .clone()
+                    .expect("the agent_message row rides the delivery"),
+                item.message.clone(),
+                item.agent_message.clone(),
+            )
+        };
+        assert_eq!(custom["role"], "custom");
+        assert_eq!(custom["customType"], "agent_message");
+        assert_eq!(custom["content"], prompt);
+        assert_eq!(custom["display"], true);
+        assert_eq!(custom["details"]["id"], data["id"]);
+        assert_eq!(custom["details"]["message"], "the research is done");
+        assert_eq!(
+            custom["details"]["from"]["activeSessionId"],
+            "source-session"
+        );
+        assert_eq!(custom["details"]["fromRelationship"], "child");
+        assert_eq!(
+            custom["details"]["target"]["activeSessionId"],
+            "target-session"
+        );
+        // The turn still runs on the rendered prompt, and the marker the
+        // clear/pause arms read is untouched.
+        assert_eq!(message, prompt);
+        assert_eq!(agent_message.as_deref(), Some("the research is done"));
+    }
+
     /// An explicit `follow_up` delivery mode queues behind current work
     /// instead of steering, and a subagent sender renders the relationship.
     #[tokio::test]
@@ -7142,6 +7227,98 @@ mod turn_stream_tests {
         // (the scripted engine carries the reply as a plain string).
         assert_eq!(events[ends[1]]["message"]["role"], "assistant");
         assert_eq!(events[ends[1]]["message"]["content"], "notice acknowledged");
+    }
+
+    /// A delivered agent message (the `worker_deliver_message` arm) runs
+    /// as its `agent_message` custom row: the accepted-row frames carry
+    /// the custom pair the collapsed card decodes from, no plain user row
+    /// reaches the wire, and the model turn still runs on the rendered
+    /// prompt.
+    #[tokio::test]
+    async fn a_delivered_agent_message_turn_emits_the_custom_row() {
+        let dir = std::env::temp_dir().join(format!("pa-worker-amw-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = WorkerConfig {
+            socket_path: dir.join("worker.sock"),
+            supervisor_socket_path: PathBuf::new(),
+            token: "token".to_string(),
+            worker_instance_id: String::new(),
+            active_session_id: "target-session".to_string(),
+            agent_dir: dir.join("agent"),
+            recovery_journal_path: dir.join("recovery.jsonl"),
+            telemetry_disabled: None,
+            script: Some(json!({ "responses": ["ack"] })),
+        };
+        let worker = Arc::new(Worker::new(config, None));
+        let created = worker
+            .dispatch(
+                "create",
+                &json!({ "noSession": true, "cwd": "/tmp", "name": "target" }),
+            )
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+        // A busy session parks the delivery on the steering lane, so the
+        // queued item is exactly what the served runner would pop.
+        worker.core.lock().unwrap().busy = true;
+        let delivered = worker
+            .dispatch(
+                "worker_deliver_message",
+                &json!({
+                    "targetActiveSessionId": "target-session",
+                    "message": "the research is done",
+                    "sender": {
+                        "activeSessionId": "source-session",
+                        "sessionName": "research-lane",
+                        "runtimeKind": "subagent",
+                    },
+                }),
+            )
+            .await;
+        assert!(delivered.success, "deliver failed: {delivered:?}");
+        let item = worker
+            .core
+            .lock()
+            .unwrap()
+            .steering
+            .pop_front()
+            .expect("the delivery parked on the steering lane");
+        let engine: Arc<dyn SessionEngine> = Arc::new(
+            ScriptedEngine::from_value(json!({ "responses": ["ack"] })).unwrap_or_default(),
+        );
+        let runner = burst_runner(Arc::clone(&engine));
+        let mut subscription = runner.events.subscribe();
+        runner.run_turn(engine, item).await;
+        let mut events = Vec::new();
+        while let Ok(frame) = subscription.try_recv() {
+            if frame.outbound_type == "session_event" {
+                if let Ok(outbound) = serde_json::from_slice::<Value>(&frame.payload) {
+                    events.push(outbound["event"].clone());
+                }
+            }
+        }
+        // The accepted row is the agent_message custom pair - the
+        // collapsed card's wire form - and no user row rides the turn.
+        let starts = positions_of(&events, "message_start");
+        assert_eq!(
+            starts.len(),
+            1,
+            "only the custom row opens a start: {events:?}"
+        );
+        assert_eq!(events[starts[0]]["message"]["role"], "custom");
+        assert_eq!(events[starts[0]]["message"]["customType"], "agent_message");
+        assert_eq!(
+            events[starts[0]]["message"]["content"],
+            "[agent-message from child:research-lane]\n\nthe research is done"
+        );
+        let user_rows = events.iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("message_start")
+                && event["message"]["role"] == "user"
+        });
+        assert!(!user_rows, "the delivered turn must not emit a user row");
+        // The model turn ran on the rendered prompt and settled the reply.
+        let ends = positions_of(&events, "message_end");
+        assert_eq!(ends.len(), 2, "the custom row and the reply settle");
+        assert_eq!(events[ends[1]]["message"]["role"], "assistant");
     }
 
     /// A settled turn's wire `agent_end` (TS parity): the engine's per-run

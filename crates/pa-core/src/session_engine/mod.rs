@@ -1271,6 +1271,76 @@ mod tests {
         );
     }
 
+    /// A delivered agent message's custom row produces the byte-identical
+    /// provider context to the plain-prompt delivery (TS
+    /// `acceptAgentMessagePrompt`: the custom message replaces the turn's
+    /// user row while its prompt content still runs the model). The
+    /// comparison covers the whole request - system prompt, tools, and
+    /// every message row - with only the per-run timestamps normalized.
+    #[tokio::test]
+    async fn an_agent_message_custom_row_matches_the_plain_prompt_context() {
+        let prompt = "[agent-message from child:research-lane]\n\nthe research is done";
+
+        // The plain delivery: the prompt text as the accepted user row.
+        let plain_provider = Arc::new(ScriptedProvider::new(test_model()));
+        plain_provider.push_text_turn("ack");
+        let (plain_session, _plain_tmp) = digest_session(Arc::clone(&plain_provider)).await;
+        plain_session
+            .prompt(prompt, PromptOptions::default())
+            .await
+            .unwrap();
+        plain_session.agent().wait_for_idle().await;
+
+        // The delivered shape: the `agent_message` custom row whose content
+        // is the same prompt (TS `createAgentSessionMessage`).
+        let row_provider = Arc::new(ScriptedProvider::new(test_model()));
+        row_provider.push_text_turn("ack");
+        let (row_session, _row_tmp) = digest_session(Arc::clone(&row_provider)).await;
+        let row = pa_types::session::CustomMessage {
+            custom_type: crate::session_engine::agent_messaging::AGENT_MESSAGE_CUSTOM_TYPE
+                .to_string(),
+            content: pa_types::ai::UserContent::Text(prompt.to_string()),
+            display: true,
+            details: Some(serde_json::json!({
+                "id": "agentmsg_golden",
+                "message": "the research is done",
+                "from": {
+                    "activeSessionId": "child-1",
+                    "sessionName": "research-lane",
+                },
+                "fromRelationship": "child",
+                "target": { "activeSessionId": "parent-1" },
+            })),
+            timestamp: 0,
+            rest: Default::default(),
+        };
+        row_session.prompt_injected_message(&row).await.unwrap();
+        row_session.agent().wait_for_idle().await;
+
+        let plain_calls = plain_provider.calls();
+        let row_calls = row_provider.calls();
+        assert_eq!(plain_calls.len(), 1);
+        assert_eq!(row_calls.len(), 1);
+        assert_eq!(
+            normalized_context(&plain_calls[0]),
+            normalized_context(&row_calls[0]),
+            "the agent_message row must not change the provider request"
+        );
+    }
+
+    /// The provider request with the per-run message timestamps zeroed
+    /// (each delivery mints its own runtime stamp; every other byte is
+    /// compared).
+    fn normalized_context(context: &pa_agent::stream::LlmContext) -> serde_json::Value {
+        let mut value = serde_json::to_value(context).unwrap();
+        for message in value["messages"].as_array_mut().unwrap() {
+            if let Some(timestamp) = message.get_mut("timestamp") {
+                *timestamp = serde_json::json!(0);
+            }
+        }
+        value
+    }
+
     #[tokio::test]
     async fn prompt_persists_tool_results() {
         struct EchoTool;

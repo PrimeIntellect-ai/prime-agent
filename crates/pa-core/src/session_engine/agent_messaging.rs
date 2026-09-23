@@ -247,6 +247,49 @@ pub fn create_agent_session_message_prompt(payload: &AgentMessagePromptPayload) 
     format!("[agent-message from {sender}]\n\n{}", payload.message)
 }
 
+/// The receiving side's custom-row inputs (TS
+/// `AgentSessionMessagePayload` at `createAgentSessionMessage` time).
+#[derive(Debug, Clone)]
+pub struct AgentSessionMessageRowPayload<'a> {
+    pub id: &'a str,
+    /// The rendered prompt (TS stores `createAgentSessionMessagePrompt`'s
+    /// output as the row `content`; the model context reads it).
+    pub prompt: &'a str,
+    /// The raw delivered body (TS `details.message`).
+    pub message: &'a str,
+    /// The sender endpoint (TS `details.from`).
+    pub from: &'a Value,
+    pub from_relationship: Option<AgentFamilyRelationship>,
+    /// The receiver endpoint (TS `details.target`).
+    pub target: &'a Value,
+    /// Unix timestamp in milliseconds (TS `Date.now()`).
+    pub timestamp: u64,
+}
+
+/// TS `createAgentSessionMessage`: the `role: "custom"` agent-message row
+/// the receiving session's transcript holds. `content` is the rendered
+/// prompt, so the turn's model context (the loop-boundary user-role
+/// conversion of the custom row) matches the plain-prompt delivery, while
+/// the details carry the identity the `agent_message` UI reads.
+pub fn create_agent_session_message_row(payload: &AgentSessionMessageRowPayload<'_>) -> Value {
+    let mut details = serde_json::Map::new();
+    details.insert("id".to_string(), json!(payload.id));
+    details.insert("message".to_string(), json!(payload.message));
+    details.insert("from".to_string(), payload.from.clone());
+    if let Some(relationship) = payload.from_relationship {
+        details.insert("fromRelationship".to_string(), json!(relationship.as_str()));
+    }
+    details.insert("target".to_string(), payload.target.clone());
+    json!({
+        "role": "custom",
+        "customType": AGENT_MESSAGE_CUSTOM_TYPE,
+        "content": payload.prompt,
+        "display": true,
+        "details": Value::Object(details),
+        "timestamp": payload.timestamp,
+    })
+}
+
 /// Parse the message id out of the pre-bracket-grammar transcript header.
 pub fn parse_agent_session_message_prompt_id(text: &str) -> Option<String> {
     let lines: Vec<&str> = text.split('\n').collect();
@@ -831,6 +874,57 @@ mod tests {
         assert!(parsed.starts_with("agentmsg_"));
         assert!(is_agent_session_message_prompt(&header));
         assert!(!is_agent_session_message_prompt("plain text"));
+    }
+
+    #[test]
+    fn the_custom_row_carries_the_ts_agent_message_shape() {
+        let prompt = "[agent-message from child:lane]\n\nfinished the research";
+        let from = json!({
+            "activeSessionId": "child-1",
+            "sessionId": "child-file",
+            "sessionName": "lane",
+            "runtimeKind": "subagent",
+        });
+        let target = json!({
+            "activeSessionId": "parent-1",
+            "sessionId": "parent-file",
+            "runtimeKind": "top-level",
+        });
+        let row = create_agent_session_message_row(&AgentSessionMessageRowPayload {
+            id: "agentmsg_1",
+            prompt,
+            message: "finished the research",
+            from: &from,
+            from_relationship: Some(AgentFamilyRelationship::Child),
+            target: &target,
+            timestamp: 123,
+        });
+        // TS `createAgentSessionMessage`: the custom role, the agent_message
+        // type, the prompt as the content, display on, and the identity
+        // details the `agent_message` UI reads.
+        assert_eq!(row["role"], "custom");
+        assert_eq!(row["customType"], AGENT_MESSAGE_CUSTOM_TYPE);
+        assert_eq!(row["content"], prompt);
+        assert_eq!(row["display"], true);
+        assert_eq!(row["timestamp"], 123);
+        assert_eq!(row["details"]["id"], "agentmsg_1");
+        assert_eq!(row["details"]["message"], "finished the research");
+        assert_eq!(row["details"]["from"], from);
+        assert_eq!(row["details"]["fromRelationship"], "child");
+        assert_eq!(row["details"]["target"], target);
+        // An absent relationship omits the key (TS serializes `undefined`
+        // away), not a null.
+        let plain = create_agent_session_message_row(&AgentSessionMessageRowPayload {
+            id: "agentmsg_2",
+            prompt,
+            message: "finished the research",
+            from: &Value::Null,
+            from_relationship: None,
+            target: &target,
+            timestamp: 124,
+        });
+        assert!(plain["details"].get("fromRelationship").is_none());
+        assert_eq!(plain["details"]["from"], Value::Null);
     }
 
     #[test]
