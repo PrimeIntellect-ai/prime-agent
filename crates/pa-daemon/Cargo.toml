@@ -25,6 +25,9 @@ uuid = { version = "1", features = ["v4", "v7"] }
 filetime = "0.2"
 tempfile = "3"
 url = "2"
+# The MCP catalog e2e seeds the fetch lane's snapshot envelope: the real
+# catalog url/scope constants keep the seeded cache byte-honest.
+pa-models = { path = "../pa-models" }
 # `test-util` (tokio time pause) is test-only: the mutation-drain latch test
 # drives real timeouts through the paused clock.
 tokio = { workspace = true, features = ["test-util"] }

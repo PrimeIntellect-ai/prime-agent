@@ -1326,6 +1326,7 @@ dependencies = [
  "pa-agent",
  "pa-ai",
  "pa-core",
+ "pa-models",
  "pa-telemetry",
  "pa-types",
  "regex",

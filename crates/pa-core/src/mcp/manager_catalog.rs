@@ -892,6 +892,125 @@ mod tests {
         assert!(!is_pasteable_token_service(pinned));
     }
 
+    /// The pinned-definition hint needs PROOF: a record whose service is
+    /// missing from a VALIDATED remote snapshot is genuinely gone (TS's
+    /// always-in-hand catalog proves the same absence), so the card shows
+    /// the byte-exact TS hint.
+    #[test]
+    fn pinned_hint_shows_when_a_snapshot_proves_the_service_gone() {
+        let agent_dir = tempfile::tempdir().expect("tempdir");
+        let endpoint = "https://vanished.example/mcp";
+        let mut manager = manager_with_remote(
+            agent_dir.path().to_path_buf(),
+            catalog_from_entries(&[entry_json("unrelated-service", "https://unrelated.example/mcp")]),
+        );
+        {
+            let mut store = manager.connection_store.lock().unwrap();
+            store
+                .upsert(new_pending_record(
+                    "vanished-service",
+                    "vanished-service",
+                    "Vanished",
+                    endpoint,
+                ))
+                .map_err(|_| ())
+                .unwrap();
+        }
+        manager.refresh();
+        let view = manager
+            .service_catalog_views()
+            .into_iter()
+            .find(|view| view.service_id == "vanished-service")
+            .expect("pinned row");
+        assert_eq!(
+            view.setup_hint.as_deref(),
+            Some(crate::mcp::catalog_plugin_views::PINNED_FROM_RECORD_HINT),
+        );
+    }
+
+    /// Without a validated snapshot (the fetch never ran, failed, or the
+    /// bundle is missing) a pinned record CANNOT prove its source is
+    /// unavailable — TS always has its catalog in hand and never claims
+    /// absence it cannot prove, so the card stays silent while the pin
+    /// keeps the connection manageable and never one-click connectable.
+    #[test]
+    fn pinned_hint_stays_silent_without_a_snapshot() {
+        let agent_dir = tempfile::tempdir().expect("tempdir");
+        let endpoint = "https://vanished.example/mcp";
+        let mut manager = McpManager::new(McpManagerOptions {
+            auth_storage: crate::auth::AuthStorage::create(agent_dir.path()),
+            get_user_servers: no_user_servers(),
+            begin_login: None,
+            agent_dir: Some(agent_dir.path().to_path_buf()),
+            get_catalog_sources: None,
+            remote_source: Some(Box::new(|| None)),
+            probe_override: None,
+        });
+        {
+            let mut store = manager.connection_store.lock().unwrap();
+            store
+                .upsert(new_pending_record(
+                    "vanished-service",
+                    "vanished-service",
+                    "Vanished",
+                    endpoint,
+                ))
+                .map_err(|_| ())
+                .unwrap();
+        }
+        manager.refresh();
+        let view = manager
+            .service_catalog_views()
+            .into_iter()
+            .find(|view| view.service_id == "vanished-service")
+            .expect("the pinned row stays manageable");
+        assert_ne!(
+            view.setup_hint.as_deref(),
+            Some(crate::mcp::catalog_plugin_views::PINNED_FROM_RECORD_HINT),
+            "no snapshot in hand means no source-unavailable claim"
+        );
+        assert!(!view.connectable, "a pin is never one-click connectable");
+    }
+
+    /// A snapshot that still defines the service is not a pin at all: the
+    /// record resolves against the catalog and no hint renders.
+    #[test]
+    fn pinned_hint_stays_hidden_when_the_snapshot_defines_the_service() {
+        let agent_dir = tempfile::tempdir().expect("tempdir");
+        let endpoint = "https://lives-on.example/mcp";
+        let mut manager = manager_with_remote(
+            agent_dir.path().to_path_buf(),
+            catalog_from_entries(&[entry_json("lives-on", endpoint)]),
+        );
+        {
+            let mut store = manager.connection_store.lock().unwrap();
+            store
+                .upsert(new_pending_record(
+                    "lives-on",
+                    "lives-on",
+                    "Lives On",
+                    endpoint,
+                ))
+                .map_err(|_| ())
+                .unwrap();
+        }
+        manager.refresh();
+        let resolved = manager
+            .service_descriptor("lives-on")
+            .expect("resolved from the catalog");
+        assert!(!resolved.pinned_from_record);
+        let view = manager
+            .service_catalog_views()
+            .into_iter()
+            .find(|view| view.service_id == "lives-on")
+            .expect("catalog row");
+        assert_ne!(
+            view.setup_hint.as_deref(),
+            Some(crate::mcp::catalog_plugin_views::PINNED_FROM_RECORD_HINT),
+            "a service the snapshot defines never renders the pin hint"
+        );
+    }
+
     /// A fake probe: records the (url, token) pairs it verified in a shared
     /// log the test asserts over.
     struct FakeProbe {
