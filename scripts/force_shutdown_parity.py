@@ -39,7 +39,9 @@ import termios
 
 WIDTH, HEIGHT = 120, 36
 
-CONFIRMATION_ERROR = r#"confirmation required; use "prime-agent shutdown --force --json""#
+CONFIRMATION_ERROR = (
+    "confirmation required; use \"prime-agent shutdown --force --json\""
+)
 
 
 def sandbox(base):
@@ -134,6 +136,11 @@ def scenario(binary, base, name):
     if pty_boot(binary, sb3, 10):
         code, out, err = run_cli(binary, sb3, ["shutdown", "--json"])
         results["confirm"] = {"code": code, "out": normalize(out.strip())}
+        # The confirmation refusal is a pinned invariant (TS text, same
+        # quote style): JSON without --force over a non-tty stdin must
+        # carry it, in both output modes' byte stream.
+        if CONFIRMATION_ERROR not in out:
+            results.setdefault("errors", []).append("confirmation error string missing")
     return results
 
 
