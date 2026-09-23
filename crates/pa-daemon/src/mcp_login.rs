@@ -205,7 +205,7 @@ mod tests {
 
         fn on_manual_code_input(
             &self,
-        ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>> {
+        ) -> Option<std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>> {
             None
         }
     }
