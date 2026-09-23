@@ -24,6 +24,9 @@ mod resume_settings_tests {
                 current.thinking = selection.thinking;
             }
         }
+        fn configure_create_model(&self, selection: EngineModelSelection) {
+            self.configure_model(selection);
+        }
         fn configure_service_tier(&self, tier: Option<pa_types::ai::ServiceTier>) {
             *self.tier.lock().unwrap() = tier;
         }
@@ -129,6 +132,14 @@ mod resume_settings_tests {
             );
             {
                 let selected = capture.selected.lock().unwrap();
+                // The worker's live-selection adoption carries the create
+                // flags and the saved THINKING level only: the saved MODEL
+                // restores through the engine's session-model restore
+                // (the bounded readiness window and the published
+                // fallback), never a direct selection adoption that would
+                // bypass the window — the real engine records the
+                // restored decision instead, so the capture double sees
+                // no model adoption.
                 assert_eq!(
                     (
                         selected.provider.as_deref(),
@@ -136,13 +147,9 @@ mod resume_settings_tests {
                         selected.thinking
                     ),
                     if mode == 4 {
-                        (Some("saved"), Some("inferred"), None)
+                        (None, None, None)
                     } else if mode == 3 {
-                        (
-                            Some("saved"),
-                            Some("inferred"),
-                            Some(pa_types::ai::ModelThinkingLevel::Off),
-                        )
+                        (None, None, Some(pa_types::ai::ModelThinkingLevel::Off))
                     } else if mode == 2 {
                         (
                             None,
@@ -156,11 +163,7 @@ mod resume_settings_tests {
                             Some(pa_types::ai::ModelThinkingLevel::Low),
                         )
                     } else {
-                        (
-                            Some("saved"),
-                            Some("inferred"),
-                            Some(pa_types::ai::ModelThinkingLevel::High),
-                        )
+                        (None, None, Some(pa_types::ai::ModelThinkingLevel::High))
                     }
                 );
                 assert_eq!(*capture.tier.lock().unwrap(), None);

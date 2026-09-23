@@ -451,6 +451,15 @@ pub trait SessionEngine: Send + Sync {
         None
     }
 
+    /// Merge an explicit selection over the engine's live selection (the
+    /// TS runtime-config merge semantics): explicit wire flags replace,
+    /// absent fields keep. The worker's create-time restored-settings
+    /// adoption (the session file's saved thinking level) runs through
+    /// this seam — a live merge that must NOT fold into the reset target
+    /// (the create-config seam is [`Self::configure_create_model`]).
+    /// Engines without a model (the scripted harness) ignore it.
+    fn configure_model(&self, _selection: EngineModelSelection) {}
+
     /// Adopt the explicit model selection carried by the session's create
     /// command (TS `mergeAgentSessionRuntimeConfig(defaultSessionConfig,
     /// command.config)`): the flags are authoritative end-to-end AND

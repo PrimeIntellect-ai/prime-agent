@@ -1971,17 +1971,19 @@ impl Worker {
                 match loaded {
                     Ok(mut opened) => {
                         let restored = opened.restored_settings();
-                        let has_model_override =
-                            payload.get("provider").and_then(Value::as_str).is_some()
-                                || payload.get("model").and_then(Value::as_str).is_some();
-                        let (provider, model) = if has_model_override {
-                            (None, None)
-                        } else {
-                            restored.model.unzip()
-                        };
+                        // TS createAgentSession restores the session
+                        // file's saved thinking level when the create
+                        // carries no explicit flag (sdk.ts
+                        // `hasThinkingEntry ? existingSession.thinkingLevel`).
+                        // The saved MODEL restores through the engine's
+                        // session-model restore (the bounded readiness
+                        // window, the exact-match path, the published
+                        // fallback) — never this direct adoption, which
+                        // would bypass the window the fleet-kill
+                        // forensics pinned.
                         self.engine.configure_model(EngineModelSelection {
-                            provider,
-                            model,
+                            provider: None,
+                            model: None,
                             api_key: None,
                             thinking: requested_thinking.or_else(|| {
                                 opened

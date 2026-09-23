@@ -814,43 +814,6 @@ impl AgentSessionEngine {
         self.selection.read().expect("model selection lock").clone()
     }
 
-    /// Merge an explicit selection over the current one (the TS
-    /// runtime-config merge semantics): explicit wire flags replace,
-    /// absent fields keep. The create-config adoption
-    /// ([`Self::configure_create_model`]) and the live `/model` and
-    /// `/thinking` switches ([`Self::switch_model`],
-    /// [`Self::switch_thinking_level`]) share this funnel.
-    fn configure_model(&self, selection: EngineModelSelection) {
-        {
-            let mut current = self.selection.write().expect("model selection lock");
-            if selection.provider.is_some() {
-                current.provider = selection.provider;
-            }
-            if selection.model.is_some() {
-                current.model = selection.model;
-            }
-            if selection.api_key.is_some() {
-                current.api_key = selection.api_key;
-            }
-            if selection.thinking.is_some() {
-                current.thinking = selection.thinking;
-            }
-        }
-        // Resolve the effective thinking level now (create time, before
-        // any turn): the merge above may have changed the selection, so
-        // drop the cached value and recompute. `effective_thinking` caches
-        // it, so later summary/state calls stay side-effect-free while
-        // turns run.
-        *self
-            .effective_thinking
-            .write()
-            .expect("effective thinking lock") = None;
-        let _ = self.effective_thinking();
-        // The first prompt after create builds the session against this
-        // selection, so no invalidation is needed here: configure runs at
-        // create time, before any turn.
-    }
-
     /// The TS `createAgentSession` startup chain (the no-flagged-model
     /// arm of [`Self::resolve_registry_model`]): the saved settings
     /// default, then the featured default, then the first available
@@ -1826,6 +1789,38 @@ impl SessionEngine for AgentSessionEngine {
         {
             target.service_tier = tier;
         }
+    }
+
+    fn configure_model(&self, selection: EngineModelSelection) {
+        // Merge like the TS runtime config: explicit wire flags replace the
+        // current selection; absent fields keep it.
+        {
+            let mut current = self.selection.write().expect("model selection lock");
+            if selection.provider.is_some() {
+                current.provider = selection.provider;
+            }
+            if selection.model.is_some() {
+                current.model = selection.model;
+            }
+            if selection.api_key.is_some() {
+                current.api_key = selection.api_key;
+            }
+            if selection.thinking.is_some() {
+                current.thinking = selection.thinking;
+            }
+        }
+        // Resolve the effective thinking level now (create time, before any
+        // turn): the merge above may have changed the selection, so drop the
+        // cached value and recompute. `effective_thinking` caches it, so
+        // later summary/state calls stay side-effect-free while turns run.
+        *self
+            .effective_thinking
+            .write()
+            .expect("effective thinking lock") = None;
+        let _ = self.effective_thinking();
+        // The first prompt after create builds the session against this
+        // selection, so no invalidation is needed here: configure runs at
+        // create time, before any turn.
     }
 
     fn configure_create_model(&self, selection: EngineModelSelection) {
@@ -7081,6 +7076,63 @@ pub(crate) mod tests {
         assert_eq!(
             moved.id, "internal/glm-5.3-fast",
             "the moved-to session's own file pin wins over the previous session's switch"
+        );
+        assert!(engine.model_fallback_message().is_none());
+    }
+
+    /// A compacted session restores the model its post-compaction
+    /// assistant message ran on (TS `buildSessionContext().model`: the
+    /// last `model_change` row before the compaction summary is
+    /// superseded; the surviving assistant message's provider/model is
+    /// the session's model context).
+    #[tokio::test]
+    async fn a_compacted_session_restores_its_post_compaction_model() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        write_thinking_pair_models_json(&agent_dir, "http://127.0.0.1:9");
+        let mut session = crate::session_store::SessionFile::create(
+            dir.path().to_str().unwrap_or("/tmp"),
+            None,
+            0,
+        );
+        let path = dir.path().join(crate::session_store::session_file_name(
+            session.session_id(),
+        ));
+        session.set_path(path.clone());
+        session.append_model_change("battery", "mock-reason");
+        let kept = session.append_message(serde_json::json!({
+            "role": "assistant",
+            "provider": "battery",
+            "model": "mock-plain",
+            "api": "openai-responses",
+            "content": [],
+            "stopReason": "stop",
+            "timestamp": 0u64,
+            "usage": {
+                "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+                "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 }
+            }
+        }));
+        session.append_entry(
+            "compaction",
+            serde_json::json!({
+                "summary": "summary",
+                "firstKeptEntryId": kept,
+                "tokensBefore": 100
+            }),
+        );
+        session.rewrite().unwrap();
+
+        let engine = restore_test_engine(dir.path(), None, None);
+        engine.set_session_file(path.clone());
+        engine.restore_session_model(&path).await;
+        let restored = engine
+            .resolve_registry_model()
+            .expect("restored resolution");
+        assert_eq!(
+            (restored.provider.as_str(), restored.id.as_str()),
+            ("battery", "mock-plain"),
+            "the post-compaction assistant message pins the restored model, not the superseded model_change"
         );
         assert!(engine.model_fallback_message().is_none());
     }
