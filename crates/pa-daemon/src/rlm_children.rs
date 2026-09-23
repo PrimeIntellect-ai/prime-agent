@@ -1092,7 +1092,13 @@ impl SupervisorChildSessionsInner {
         // flow; the record lock itself only ever frames short snapshots,
         // so the watcher polls and close paths never wait behind a big
         // file read.
-        let emit_guard = record.lock().await.emit_lock.clone().lock().await;
+        // Two statements on purpose: the record guard of the first drops
+        // at its statement end, BEFORE the emit lock awaits — an emitter
+        // that already holds the emit lock re-locks the record to advance
+        // the cursor, so a record guard alive across the emit-lock wait
+        // would deadlock the two.
+        let emit_lock = record.lock().await.emit_lock.clone();
+        let emit_guard = emit_lock.lock().await;
         let (rlm_child_id, session_file, from) = {
             let record_guard = record.lock().await;
             (
