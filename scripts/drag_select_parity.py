@@ -183,8 +183,15 @@ def wait_for(session, needle, timeout):
 
 
 def reversed_runs(row):
-    """The text carried by the row's reversed-video runs (the highlight)."""
-    return re.findall(r"\x1b\[7m((?:\x1b\[[0-9;]*m)*[^\x1b]*)", row)
+    """The text carried by the row's reversed-video runs (the highlight).
+
+    A reversed span may carry its own SGR sequences inside (a default-fg
+    reset before the text: `ESC[7m ESC[39m c ESC[0m`), so the run's text
+    is captured with the inner escapes stripped — a raw capture group
+    would keep them and fragment prefix checks fail against plain text.
+    """
+    runs = re.findall(r"\x1b\[7m((?:\x1b\[[0-9;]*m)*[^\x1b]*)", row)
+    return [re.sub(r"\x1b\[[0-9;]*m", "", run) for run in runs]
 
 
 def sweep(session, out_dir, label, target_row, needle_col, needle):
