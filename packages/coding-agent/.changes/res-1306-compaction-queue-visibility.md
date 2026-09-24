@@ -1,1 +1,0 @@
-- Fixed a queued prompt disappearing from the interactive queued-messages area while its own pre-turn compaction runs; it now stays visible there (as a "Starting" entry) until the turn begins.

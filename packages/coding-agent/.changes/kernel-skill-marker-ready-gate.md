@@ -1,1 +1,0 @@
-- Fixed kernel startup re-running the Python skill sync and rewriting the venv marker on every session when a skill depended on a sibling skill; such venvs now take the same zero-cost warm-start path as any other synced venv.

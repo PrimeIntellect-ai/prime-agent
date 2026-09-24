@@ -1,3 +1,0 @@
-- Attached TUI windows now recover automatically when the daemon restarts: a shutdown close polls the same socket path for the reconnect window (60s by default) and then re-attaches the session and refreshes the transcript instead of dying; if the daemon stays gone, the saved-transcript message remains.
-- Daemon update restarts now announce the update close reason on every attached window, so all windows (not just the one running /update) restore their sessions.
-- A one-line banner reports restart recoveries, and warns to restart the window when the restarted daemon is newer than this window's binary.

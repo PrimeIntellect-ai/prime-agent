@@ -1,1 +1,0 @@
-- Fixed short-lived sessions re-paying the whole Python kernel skill sync or wiping and rebuilding the venv after being killed mid-sync: the bootstrap version marker is now written atomically and persisted incrementally (base first, then after every installed skill), so the next session resumes only the remaining skills instead of starting over.
