@@ -17,8 +17,10 @@
 //! workflow's own step scripts against simulated downloads for both layout
 //! modes (the port of the TS test's per-channel triad: production-only,
 //! beta-only, both - here one target, four targets, none) and skip with a
-//! logged reason where the box has no python3, mirroring the extension-host
-//! tests' node guard.
+//! logged reason where the box's python3 is below the floor the step
+//! scripts need (python 3.12: the merge step unpacks with
+//! `extractall(filter=)`; the promote runner's ubuntu-24.04 provides it),
+//! mirroring the extension-host tests' node guard.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -101,13 +103,39 @@ fn step_position(steps: &[Step], name: &str) -> usize {
         .unwrap_or_else(|| panic!("release.yml promote is missing the step {name:?}"))
 }
 
-/// The python3 interpreter, or None when the box has none (the behavior
-/// gates skip; the step scripts are python heredocs).
-fn python3_binary() -> Option<PathBuf> {
+/// The python3 interpreter when it is at least `min_version`, or None
+/// otherwise (the behavior gates skip with a logged reason; the step
+/// scripts are python heredocs). The merge step unpacks with
+/// `tar.extractall(..., filter="data")`, a python 3.12 API - the
+/// ubuntu-24.04 promote runner provides 3.12, bookworm ships 3.11 - so
+/// the full-script gates need (3, 12) and the normalize-only zero-artifact
+/// gate accepts any python 3.
+fn python3_binary(min_version: (u8, u8)) -> Option<PathBuf> {
     let output = Command::new("python3").arg("--version").output();
-    match output {
-        Ok(status) if status.status.success() => Some(PathBuf::from("python3")),
-        _ => None,
+    let Ok(status) = output else {
+        return None;
+    };
+    if !status.status.success() {
+        return None;
+    }
+    let version = String::from_utf8_lossy(&status.stdout).trim().to_owned();
+    let digits: Vec<u8> = version
+        .split_whitespace()
+        .nth(1)
+        .map(|rest| {
+            rest.split('.')
+                .filter_map(|part| part.parse::<u8>().ok())
+                .take(2)
+                .collect()
+        })
+        .unwrap_or_default();
+    if digits.len() == 2 && (digits[0], digits[1]) >= min_version {
+        Some(PathBuf::from("python3"))
+    } else {
+        eprintln!(
+            "skipping: python3 {version} is below the {min_version:?} the promote step scripts need"
+        );
+        None
     }
 }
 
@@ -326,8 +354,7 @@ fn promote_download_layout_contract() {
 /// verify its hashes and attach a complete manifest for it.
 #[test]
 fn single_artifact_release_finds_the_downloaded_manifest() {
-    let Some(_python3) = python3_binary() else {
-        eprintln!("skipping: python3 is not available (the promote scripts are python heredocs)");
+    let Some(_python3) = python3_binary((3, 12)) else {
         return;
     };
     let steps = promote_steps();
@@ -371,8 +398,7 @@ fn single_artifact_release_finds_the_downloaded_manifest() {
 /// must carry all four binaries.
 #[test]
 fn four_target_release_finds_all_downloaded_manifests() {
-    let Some(_python3) = python3_binary() else {
-        eprintln!("skipping: python3 is not available (the promote scripts are python heredocs)");
+    let Some(_python3) = python3_binary((3, 12)) else {
         return;
     };
     let steps = promote_steps();
@@ -419,8 +445,7 @@ fn four_target_release_finds_all_downloaded_manifests() {
 /// gate - never pass hash continuity having verified zero archives.
 #[test]
 fn zero_artifacts_fail_loudly_instead_of_verifying_nothing() {
-    let Some(_python3) = python3_binary() else {
-        eprintln!("skipping: python3 is not available (the promote scripts are python heredocs)");
+    let Some(_python3) = python3_binary((3, 0)) else {
         return;
     };
     let steps = promote_steps();
