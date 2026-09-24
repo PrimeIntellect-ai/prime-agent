@@ -14,7 +14,6 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::config;
 use crate::mode::RunOptions;
-use pa_tui::client_settings::ClientSettings;
 use pa_tui::interactive::{InteractiveOptions, ModelSelection, SessionSelection, UiMode};
 
 const DAEMON_STARTUP_TIMEOUT_MS: u64 = 30_000;
