@@ -1,3 +1,7 @@
+Executing command: cat 
+/root/repo6/crates/pa-daemon/src/supervisor_roster_seed.rs
+
+stdout:
 //! The roster's seeding and hydration arms: the boot ledger seed that
 //! keeps passivated RLM children in the live roster, the create path's
 //! edge-only family seed, and the bounded background hydration that
@@ -9,7 +13,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use pa_types::daemon::agent_roster::{roster_agent_id_for_summary, AgentRosterEntry};
+use pa_types::daemon::agent_roster::{roster_agent_id_for_summary, 
+AgentRosterEntry};
 use serde_json::{json, Value};
 
 use crate::lease::canonical_session_path;
@@ -38,11 +43,13 @@ impl Supervisor {
         // The seed degrades to a log line on any failure, exactly like
         // the TS boot seed (including the unresolvable-home error the
         // ledger's sessions dir reports).
-        let (edges, parent_by_child) = match self.live_edges_and_parents().await {
+        let (edges, parent_by_child) = match self.live_edges_and_parents().await
+{
             Ok(view) => view,
             Err(error) => {
                 self.log_line(&format!(
-                    "Could not seed the agent roster from the spawn ledger: {error:#}"
+                    "Could not seed the agent roster from the spawn ledger: 
+{error:#}"
                 ));
                 return;
             }
@@ -90,9 +97,12 @@ impl Supervisor {
             // stopped, or a child whose edge a completed delete
             // tombstoned during the read, must not receive rows (the
             // delete's roster removal already settled and never
-            // revisits them).
-            if !ledger.edge_is_live(&edge.child_id, &edge.child)
-                || !family_descends_from(&parent_by_child, &parent, &self.roster_seed_roots().await)
+            // revisits them). The child's file existence is NOT
+            // revalidated: an unreadable transcript keeps the
+            // `seededCwd` fallback row (the TS contract).
+            if !ledger.edge_not_tombstoned(&edge.child_id, &edge.child)
+                || !family_descends_from(&parent_by_child, &parent, 
+&self.roster_seed_roots().await)
             {
                 continue;
             }
@@ -105,7 +115,8 @@ impl Supervisor {
             {
                 continue;
             }
-            changed.push(roster.write_seeded(candidate.summary, candidate.seeded_cwd));
+            changed.push(roster.write_seeded(candidate.summary, 
+candidate.seeded_cwd));
         }
         self.push_seeded_rows(changed);
         // Unhydrated seeded rows the guards found already rostered get
@@ -123,7 +134,8 @@ impl Supervisor {
     /// after the registry is populated instead - and its one
     /// `roster_update` publish carries the seeded rows to every client
     /// that subscribed before it finished.
-    pub(crate) fn spawn_roster_boot_seed(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+    pub(crate) fn spawn_roster_boot_seed(self: &Arc<Self>) -> 
+tokio::task::JoinHandle<()> {
         let supervisor = Arc::clone(self);
         tokio::spawn(async move {
             supervisor.seed_roster_ledger().await;
@@ -179,7 +191,8 @@ impl Supervisor {
 
     /// The seeded candidate's roster row when already present (TS
     /// `roster().has` + `hasSessionFile`): by agent id or session file.
-    fn roster_row_for_candidate(&self, candidate: &SeededRosterEntry) -> Option<AgentRosterEntry> {
+    fn roster_row_for_candidate(&self, candidate: &SeededRosterEntry) -> 
+Option<AgentRosterEntry> {
         let roster = self.roster.lock().unwrap();
         roster
             .get(&candidate.agent_id)
@@ -202,14 +215,16 @@ impl Supervisor {
         self: &Arc<Self>,
         root: &Path,
     ) -> Vec<AgentRosterEntry> {
-        let roots: HashSet<PathBuf> = HashSet::from([canonical_session_path(root)]);
+        let roots: HashSet<PathBuf> = HashSet::from();
         // The family seed degrades to nothing on a ledger failure, like
         // the boot seed degrades to its log line.
-        let (edges, parent_by_child) = match self.live_edges_and_parents().await {
+        let (edges, parent_by_child) = match self.live_edges_and_parents().await
+{
             Ok(view) => view,
             Err(error) => {
                 self.log_line(&format!(
-                    "Could not seed the agent roster from the spawn ledger: {error:#}"
+                    "Could not seed the agent roster from the spawn ledger: 
+{error:#}"
                 ));
                 return Vec::new();
             }
@@ -231,10 +246,15 @@ impl Supervisor {
                 let parent = canonical_session_path(Path::new(&edge.parent));
                 family_descends_from(&parent_by_child, &parent, &roots)
                     // The edge snapshot predates this pass by the
-                    // ledger-read await: a child deleted in that
-                    // window never seeds (its completed delete must
-                    // not be followed by a fresh row).
-                    && ledger.edge_is_live(&edge.child_id, &edge.child)
+                    // ledger-read await: a child whose delete
+                    // tombstoned in that window never seeds (its
+                    // completed delete must not be followed by a
+                    // fresh row). The child's file existence is NOT
+                    // part of the revalidation: an unreadable or
+                    // missing transcript still seeds its edge-only
+                    // row with the `seededCwd` marker (the TS
+                    // dirname-fallback contract the retry test pins).
+                    && ledger.edge_not_tombstoned(&edge.child_id, &edge.child)
             })
             .collect();
         let mut changed = Vec::new();
@@ -256,7 +276,8 @@ impl Supervisor {
                     }
                     continue;
                 }
-                changed.push(roster.write_seeded(candidate.summary, candidate.seeded_cwd));
+                changed.push(roster.write_seeded(candidate.summary, 
+candidate.seeded_cwd));
             }
         }
         self.push_seeded_rows(changed.clone());
@@ -296,7 +317,8 @@ impl Supervisor {
     /// and a delete plus re-add of the byte-identical seeded row is the
     /// same still-unhydrated row - hydrating it is this pass's own
     /// intended follow-up, not a clobber.
-    async fn hydrate_seeded_rows(self: &Arc<Self>, seeded: Vec<AgentRosterEntry>) {
+    async fn hydrate_seeded_rows(self: &Arc<Self>, seeded: 
+Vec<AgentRosterEntry>) {
         let mut changed = Vec::new();
         for entry in seeded {
             let Some(file) = entry
@@ -316,7 +338,8 @@ impl Supervisor {
             let mut summary = entry.summary.clone();
             // Hydration reads one child at a time, outside the roster
             // lock; an unreadable file keeps the marker row as-is.
-            if !hydrate_summary_display(&mut summary, PathBuf::from(file)).await {
+            if !hydrate_summary_display(&mut summary, PathBuf::from(file)).await
+{
                 continue;
             }
             {
@@ -402,7 +425,8 @@ impl SeededRosterEntry {
         });
         Self {
             agent_id: roster_agent_id_for_summary(&summary),
-            child_file: canonical_session_path(child).to_string_lossy().to_string(),
+            child_file: 
+canonical_session_path(child).to_string_lossy().to_string(),
             summary,
             seeded_cwd: true,
         }
@@ -419,7 +443,8 @@ impl SeededRosterEntry {
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_default();
-        if hydrate_summary_display(&mut self.summary, PathBuf::from(file)).await {
+        if hydrate_summary_display(&mut self.summary, PathBuf::from(file)).await
+{
             self.seeded_cwd = false;
         }
         self
@@ -479,7 +504,7 @@ pub(crate) fn family_descends_from(
     false
 }
 
-#[cfg(test)]
+#
 pub(crate) mod tests {
     use super::*;
     use crate::registry::ResidentWorker;
@@ -487,7 +512,8 @@ pub(crate) mod tests {
     use crate::supervisor::ClientRouting;
     use pa_types::daemon::agent_roster::AgentRosterStatus;
 
-    fn edge(child_id: &str, parent: &str, child: &str, depth: u32, name: &str) -> RlmLedgerEdge {
+    fn edge(child_id: &str, parent: &str, child: &str, depth: u32, name: &str) 
+-> RlmLedgerEdge {
         RlmLedgerEdge {
             child_id: child_id.to_string(),
             parent: parent.to_string(),
@@ -502,7 +528,7 @@ pub(crate) mod tests {
         paths.iter().map(|path| PathBuf::from(*path)).collect()
     }
 
-    #[test]
+    #
     fn descent_matches_at_any_parent_walk_step() {
         let edges = [
             edge("c1", "/live/root.jsonl", "/gone/c1.jsonl", 1, "w1"),
@@ -554,16 +580,22 @@ pub(crate) mod tests {
         ));
     }
 
-    #[tokio::test]
+    #
     async fn seeded_rows_shape_matches_the_ts_entry() {
-        let dir = std::env::temp_dir().join(format!("pa-seed-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("pa-seed-{}", 
+uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let child = dir.join("sub-9.jsonl");
         // The child file carries the durable display rows a live worker's
         // summary reports: the model selector and the thinking level.
         std::fs::write(
             &child,
-            "{\"type\":\"session\",\"version\":3,\"id\":\"persisted-id\",\"timestamp\":\"t\",\"cwd\":\"/tmp/project\"}\n             {\"type\":\"model_change\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"t\",\"provider\":\"p\",\"modelId\":\"m\"}\n             {\"type\":\"thinking_level_change\",\"id\":\"t1\",\"parentId\":\"m1\",\"timestamp\":\"t\",\"thinkingLevel\":\"high\"}\n",
+            "{\"type\":\"session\",\"version\":3,\"id\":\"persisted-id\",\"times
+tamp\":\"t\",\"cwd\":\"/tmp/project\"}\n             
+{\"type\":\"model_change\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"t\",\
+"provider\":\"p\",\"modelId\":\"m\"}\n             
+{\"type\":\"thinking_level_change\",\"id\":\"t1\",\"parentId\":\"m1\",\"timestam
+p\":\"t\",\"thinkingLevel\":\"high\"}\n",
         )
         .unwrap();
         let candidate = SeededRosterEntry::edge_only(&edge(
@@ -627,8 +659,10 @@ pub(crate) mod tests {
     /// A temp supervisor home: the agent dir, the default sessions dir
     /// (the ledger's dir), a root transcript, and a child transcript
     /// carrying the durable display rows the hydration reads.
-    pub(crate) async fn roster_fixture() -> (PathBuf, Arc<Supervisor>, PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("pa-roster-{}", uuid::Uuid::new_v4()));
+    pub(crate) async fn roster_fixture() -> (PathBuf, Arc<Supervisor>, PathBuf, 
+PathBuf) {
+        let dir = std::env::temp_dir().join(format!("pa-roster-{}", 
+uuid::Uuid::new_v4()));
         let agent_dir = dir.join("agent");
         let sessions_dir = agent_dir.join("sessions");
         std::fs::create_dir_all(&sessions_dir).unwrap();
@@ -653,7 +687,11 @@ pub(crate) mod tests {
         std::fs::write(
             path,
             format!(
-                "{{\"type\":\"session\",\"version\":3,\"id\":\"persisted-id\",\"timestamp\":\"t\",\"cwd\":\"{cwd}\"}}\n{{\"type\":\"model_change\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"t\",\"provider\":\"p\",\"modelId\":\"m\"}}\n{{\"type\":\"thinking_level_change\",\"id\":\"t1\",\"parentId\":\"m1\",\"timestamp\":\"t\",\"thinkingLevel\":\"high\"}}\n"
+                "{{\"type\":\"session\",\"version\":3,\"id\":\"persisted-id\",\"
+timestamp\":\"t\",\"cwd\":\"{cwd}\"}}\n{{\"type\":\"model_change\",\"id\":\"m1\"
+,\"parentId\":null,\"timestamp\":\"t\",\"provider\":\"p\",\"modelId\":\"m\"}}\n{
+{\"type\":\"thinking_level_change\",\"id\":\"t1\",\"parentId\":\"m1\",\"timestam
+p\":\"t\",\"thinkingLevel\":\"high\"}}\n"
             ),
         )
         .unwrap();
@@ -668,7 +706,8 @@ pub(crate) mod tests {
         parent: &Path,
         child: &Path,
     ) {
-        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, sessions_dir, |_| {});
+        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(agent_dir, 
+sessions_dir, |_| {});
         ledger
             .append_spawn(crate::rlm_ledger::RlmSpawnInput {
                 child_id: child_id.to_string(),
@@ -738,7 +777,8 @@ pub(crate) mod tests {
     /// A live worker's roster summary for the child (the shape a worker
     /// delta pushes): the durable display rows plus the live-runtime
     /// fields passivation must strip.
-    pub(crate) fn live_child_summary(root_file: &Path, child_file: &Path) -> Value {
+    pub(crate) fn live_child_summary(root_file: &Path, child_file: &Path) -> 
+Value {
         json!({
             "id": "persisted-id",
             "sessionId": "persisted-id",
@@ -771,13 +811,18 @@ pub(crate) mod tests {
         let mut pushes = Vec::new();
         loop {
             match events.try_recv() {
-                Ok((ClientRouting::RosterSubscribers, payload)) => pushes.push(payload),
+                Ok((ClientRouting::RosterSubscribers, payload)) => 
+pushes.push(payload),
                 Ok(_) => continue,
-                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(missed)) => {
-                    panic!("roster push subscriber lagged by {missed}; drain per push");
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => 
+break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(missed))
+=> {
+                    panic!("roster push subscriber lagged by {missed}; drain per
+push");
                 }
-                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => 
+break,
             }
         }
         pushes
@@ -794,14 +839,15 @@ pub(crate) mod tests {
             .unwrap()
             .entries()
             .into_iter()
-            .find(|entry| entry.summary.get("rlmChildId").and_then(Value::as_str) == Some(child_id))
+            .find(|entry| 
+entry.summary.get("rlmChildId").and_then(Value::as_str) == Some(child_id))
             .unwrap_or_else(|| panic!("no roster row for child {child_id}"))
     }
 
     /// The boot seed hydrates every unseeded descendant exactly once and
     /// publishes one `roster_update` for early subscribers; rows the
     /// roster already holds are skipped before any read.
-    #[tokio::test]
+    #
     async fn boot_seed_hydrates_once_and_publishes_one_update() {
         let (dir, supervisor, root_file, child_file) = roster_fixture().await;
         register_root_worker(&supervisor, "w-root", &root_file).await;
@@ -848,7 +894,7 @@ pub(crate) mod tests {
     /// A row the roster already holds never hydrates over it: the boot
     /// seed skips by agent id and session file before any transcript
     /// read, so a live worker's row survives the boot seed intact.
-    #[tokio::test]
+    #
     async fn boot_seed_skips_rows_the_roster_already_holds() {
         let (dir, supervisor, root_file, child_file) = roster_fixture().await;
         register_root_worker(&supervisor, "w-root", &root_file).await;
@@ -862,7 +908,8 @@ pub(crate) mod tests {
         );
         let mut events = supervisor.events.subscribe();
         supervisor
-            .write_roster_summary(&live_child_summary(&root_file, &child_file), Some("w-live"));
+            .write_roster_summary(&live_child_summary(&root_file, &child_file), 
+Some("w-live"));
         let _ = drain_roster_pushes(&mut events);
 
         supervisor
@@ -886,7 +933,7 @@ pub(crate) mod tests {
     /// event path (the readable child file would have hydrated the cwd
     /// otherwise) - and the bounded background hydration fills the
     /// durable display rows afterwards.
-    #[tokio::test]
+    #
     async fn family_seed_renders_edges_then_hydrates_in_the_background() {
         let (dir, supervisor, root_file, child_file) = roster_fixture().await;
         let agent_dir = dir.join("agent");
@@ -941,7 +988,7 @@ pub(crate) mod tests {
 
     /// The hydration identity gate: a newer worker write always wins - a
     /// stale snapshot's hydration never overwrites the live row.
-    #[tokio::test]
+    #
     async fn hydration_loses_to_a_newer_worker_write() {
         let (dir, supervisor, root_file, child_file) = roster_fixture().await;
         let agent_dir = dir.join("agent");
@@ -958,7 +1005,8 @@ pub(crate) mod tests {
 
         // A worker write lands between the seed and the hydration.
         supervisor
-            .write_roster_summary(&live_child_summary(&root_file, &child_file), Some("w-live"));
+            .write_roster_summary(&live_child_summary(&root_file, &child_file), 
+Some("w-live"));
         let _ = drain_roster_pushes(&mut events);
 
         // The stale snapshot's hydration pass loses the identity gate.
@@ -980,7 +1028,7 @@ pub(crate) mod tests {
     /// batch ran never publishes (subscribers apply updates
     /// idempotently by agent id - a stale snapshot would regress their
     /// view to the seeded row).
-    #[tokio::test]
+    #
     async fn stale_seeded_snapshots_never_publish() {
         let (dir, supervisor, root_file, child_file) = roster_fixture().await;
         let agent_dir = dir.join("agent");
@@ -994,7 +1042,8 @@ pub(crate) mod tests {
         // A stale seeded snapshot: the row the family seed wrote.
         let stale = {
             let mut roster = supervisor.roster.lock().unwrap();
-            let candidate = crate::supervisor_roster_seed::SeededRosterEntry::edge_only(
+            let candidate = 
+crate::supervisor_roster_seed::SeededRosterEntry::edge_only(
                 &crate::rlm_ledger::RlmLedgerEdge {
                     child_id: "sub-9".to_string(),
                     parent: root_file.to_string_lossy().to_string(),
@@ -1009,19 +1058,20 @@ pub(crate) mod tests {
         // A newer worker write replaces it and publishes the live row.
         let mut events = supervisor.events.subscribe();
         supervisor
-            .write_roster_summary(&live_child_summary(&root_file, &child_file), Some("w-live"));
+            .write_roster_summary(&live_child_summary(&root_file, &child_file), 
+Some("w-live"));
         assert_eq!(drain_roster_pushes(&mut events).len(), 1);
 
         // The stale snapshot's publish is dropped by the identity
         // filter: the roster no longer holds that row.
-        supervisor.push_seeded_rows(vec![stale]);
+        supervisor.push_seeded_rows(vec!);
         assert!(
             drain_roster_pushes(&mut events).is_empty(),
             "a stale seeded row never publishes"
         );
         // A snapshot the roster still holds verbatim publishes.
         let current = roster_row_for_child(&supervisor, "sub-9");
-        supervisor.push_seeded_rows(vec![current]);
+        supervisor.push_seeded_rows(vec!);
         assert_eq!(drain_roster_pushes(&mut events).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1032,7 +1082,7 @@ pub(crate) mod tests {
     /// registration seed, a create) offers the file one more read
     /// without republishing the row. A replaced row never loses the
     /// identity gate.
-    #[tokio::test]
+    #
     async fn an_unhydrated_seeded_row_retries_on_the_next_family_walk() {
         let (dir, supervisor, root_file, child_file) = roster_fixture().await;
         let agent_dir = dir.join("agent");
@@ -1093,7 +1143,7 @@ pub(crate) mod tests {
     /// seed publishes its passive ledger family in the background - the
     /// row lands edge-only first, then the joined hydration fills its
     /// durable display fields.
-    #[tokio::test]
+    #
     async fn the_registration_seed_publishes_a_late_worker_family() {
         let (dir, supervisor, root_file, child_file) = roster_fixture().await;
         let agent_dir = dir.join("agent");
@@ -1129,3 +1179,6 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+
+Execution time: 164.9ms
