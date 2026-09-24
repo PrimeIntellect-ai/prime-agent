@@ -385,10 +385,8 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
     // The summary's snapshot yields to any digest appended after the
     // compaction, carrying its fingerprint with it (TS #2400: the summary
     // render skips the digest block the same way).
-    let summary_yields_snapshot = compaction.is_some_and(|_| {
-        newest_digest_path_idx.is_some_and(|digest_idx| {
-            compaction_path_idx.is_some_and(|compaction_idx| digest_idx > compaction_idx)
-        })
+    let summary_yields_snapshot = newest_digest_path_idx.is_some_and(|digest_idx| {
+        compaction_path_idx.is_some_and(|compaction_idx| digest_idx > compaction_idx)
     });
 
     let mut messages: Vec<AgentMessage> = Vec::new();
