@@ -3677,11 +3677,8 @@ impl SessionUi {
                 // TS `onLoginCompleted`: re-check the Anthropic
                 // subscription warning after credentials change.
                 let current_provider = self.current_model_provider().await;
-                self.maybe_warn_anthropic_subscription_auth(
-                    current_provider.as_deref(),
-                    view,
-                )
-                .await;
+                self.maybe_warn_anthropic_subscription_auth(current_provider.as_deref(), view)
+                    .await;
             }
             AuthPanelRequest::McpSettled { note } => {
                 view.auth_panel = None;

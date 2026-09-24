@@ -172,8 +172,8 @@ use std::sync::{Arc, Mutex};
 
 use pa_tui::provider_auth::{
     AuthCategory, AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
-    ProviderAuthFuture, ProviderAuthOutcome, PRIME_INFERENCE_PROVIDER_ID, ProviderRow,
-    ProviderRowsFuture, ProviderWarningFuture,
+    ProviderAuthFuture, ProviderAuthOutcome, ProviderRow, ProviderRowsFuture,
+    ProviderWarningFuture, PRIME_INFERENCE_PROVIDER_ID,
 };
 use pa_tui::traces::{
     TraceLoginOutcome, TracePreviewInfo, TracePreviewOutcome, TraceUploadAllNote,
@@ -494,7 +494,10 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
                 ),
             }
         })
-d runner the verifier scripts: record the child args,
+    }
+}
+
+/// The update child runner the verifier scripts: record the child args,
 /// answer success. The relaunch is never exercised headlessly (it replaces
 /// the process); its scripted arm exits so a bug cannot hang the test.
 struct ScriptedUpdate {
