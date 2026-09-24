@@ -39,9 +39,8 @@ pub fn valid_assistant_usage(message: &Value) -> Option<Value> {
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
         return None;
     }
-    match message.get("stopReason").and_then(Value::as_str) {
-        Some("aborted" | "error") => return None,
-        _ => {}
+    if let Some("aborted" | "error") = message.get("stopReason").and_then(Value::as_str) {
+        return None;
     }
     message
         .get("usage")
