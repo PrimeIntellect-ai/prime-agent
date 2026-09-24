@@ -9,9 +9,12 @@ use unicode_properties::{
 };
 use unicode_width::UnicodeWidthChar;
 
+mod suffix_width;
 mod wrapping;
 #[cfg(test)]
 mod wrapping_tests;
+
+pub(crate) use suffix_width::SuffixWidth;
 
 /// Truncate to a display-width budget and pad with spaces to exactly
 /// `width` columns — grapheme-aware (multi-codepoint clusters such as

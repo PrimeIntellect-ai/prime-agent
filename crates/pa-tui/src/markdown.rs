@@ -929,16 +929,21 @@ fn wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<
             }
         }
         // break overlong words; escape sequences copy through atomically
-        // at zero width (OSC 8 sequences must never split mid-sequence)
-        let mut rest = text.clone();
+        // at zero width (OSC 8 sequences must never split mid-sequence).
+        // Rows are borrowed slices of the token and the remaining-tail gate
+        // comes from a forward atom cursor, so an unbroken multi-megabyte
+        // word costs one linear pass instead of a rescan, a suffix clone,
+        // and a width-cache key per row.
         let style = *style;
-        while str_width(&rest) + col > width {
-            let mut take = String::new();
+        let mut rest = text.as_str();
+        let mut consumed = 0usize;
+        let mut rest_w = w;
+        let mut tail = crate::width::SuffixWidth::new(text, w);
+        while rest_w + col > width {
             let mut tw = 0usize;
             let mut taken = 0usize;
             while taken < rest.len() {
                 if let Some(len) = crate::width::escape_len(&rest[taken..]) {
-                    take.push_str(&rest[taken..taken + len]);
                     taken += len;
                     continue;
                 }
@@ -947,20 +952,21 @@ fn wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<
                 if tw + cw + col > width {
                     break;
                 }
-                take.push(c);
                 tw += cw;
                 taken += c.len_utf8();
             }
-            if take.is_empty() {
+            if taken == 0 {
                 break;
             }
-            out.push(&take, style);
+            out.push(&rest[..taken], style);
             out.finish_row(/*trim*/ false);
             col = 0;
-            rest = rest[taken..].to_string();
+            consumed += taken;
+            rest = &rest[taken..];
+            rest_w = tail.remaining_from(consumed);
         }
-        col += str_width(&rest);
-        out.push(&rest, style);
+        col += rest_w;
+        out.push(rest, style);
         i += 1;
     }
     out.finish_row(/*trim*/ false);
@@ -1561,6 +1567,176 @@ mod tests {
             let w: usize = l.iter().map(|s| str_width(&s.content)).sum();
             assert!(w <= 20, "line too wide: {w}");
         }
+    }
+
+    /// The pre-fix overlong-word breaker, kept as the behavioral oracle:
+    /// it rescans the remaining tail with `str_width` and clones the tail
+    /// suffix once per emitted row. The linear rewrite must produce
+    /// byte-identical rows and counts against it.
+    fn wrap_spans_into_reference(
+        spans: &[Span],
+        width: usize,
+        out: &mut super::geometry::WrapOutput<'_>,
+    ) {
+        if width == 0 {
+            for span in spans {
+                out.push(&span.content, span.style);
+            }
+            out.finish_row(/*trim*/ false);
+            return;
+        }
+        let joined_width: usize = spans.iter().map(|s| str_width(&s.content)).sum();
+        if joined_width <= width {
+            for span in spans {
+                out.push(&span.content, span.style);
+            }
+            out.finish_row(/*trim*/ false);
+            return;
+        }
+        let mut tokens: Vec<(String, Style)> = Vec::new();
+        for span in spans {
+            let mut word = String::new();
+            for ch in span.content.chars() {
+                if ch == ' ' {
+                    if !word.is_empty() {
+                        tokens.push((std::mem::take(&mut word), span.style));
+                    }
+                    match tokens.last_mut() {
+                        Some((text, _)) if text.chars().all(|c| c == ' ') => text.push(' '),
+                        _ => tokens.push((" ".to_string(), span.style)),
+                    }
+                } else {
+                    word.push(ch);
+                }
+            }
+            if !word.is_empty() {
+                tokens.push((word, span.style));
+            }
+        }
+
+        let mut col = 0usize;
+        let mut i = 0usize;
+        while i < tokens.len() {
+            let (text, style) = &tokens[i];
+            let w = str_width(text);
+            if col + w > width && out.has_content {
+                out.finish_row(/*trim*/ true);
+                col = 0;
+                if text.trim().is_empty() {
+                    i += 1;
+                    continue;
+                }
+            }
+            let mut rest = text.clone();
+            let style = *style;
+            while str_width(&rest) + col > width {
+                let mut take = String::new();
+                let mut tw = 0usize;
+                let mut taken = 0usize;
+                while taken < rest.len() {
+                    if let Some(len) = crate::width::escape_len(&rest[taken..]) {
+                        take.push_str(&rest[taken..taken + len]);
+                        taken += len;
+                        continue;
+                    }
+                    let c = rest[taken..].chars().next().expect("char at boundary");
+                    let cw = crate::width::char_width(c);
+                    if tw + cw + col > width {
+                        break;
+                    }
+                    take.push(c);
+                    tw += cw;
+                    taken += c.len_utf8();
+                }
+                if take.is_empty() {
+                    break;
+                }
+                out.push(&take, style);
+                out.finish_row(/*trim*/ false);
+                col = 0;
+                rest = rest[taken..].to_string();
+            }
+            col += str_width(&rest);
+            out.push(&rest, style);
+            i += 1;
+        }
+        out.finish_row(/*trim*/ false);
+    }
+
+    #[test]
+    fn overlong_word_breaking_matches_the_rescanning_reference() {
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let dim = Style::default().add_modifier(Modifier::DIM);
+        let corpus: Vec<Vec<Span>> = vec![
+            vec![Span::raw("x".repeat(97))],
+            vec![Span::raw("界".repeat(40))],
+            vec![Span::raw("\u{1f469}\u{200d}\u{1f4bb}".repeat(30))],
+            vec![Span::raw("e\u{301}".repeat(50))],
+            vec![Span::raw("カ\u{ff9e}".repeat(25))],
+            vec![Span::raw("\u{1f1fa}\u{1f1f8}".repeat(20))],
+            vec![Span::raw("a\tb".repeat(30))],
+            vec![Span::raw(
+                "\u{1b}]8;;https://example.com\u{7}click\u{1b}]8;;\u{7}".repeat(8),
+            )],
+            vec![Span::raw("\u{1b}[31mred\u{1b}[0m".repeat(12))],
+            vec![Span::raw("\u{1b}[0m".repeat(5) + &"x".repeat(60))],
+            vec![Span::raw(
+                "x界\u{1f469}\u{200d}\u{1f4bb}\u{301}\t\u{1b}[1m!".repeat(20),
+            )],
+            vec![Span::raw("x".repeat(200) + " y")],
+            vec![Span::raw("a".repeat(50) + "   " + &"b".repeat(50))],
+            vec![Span::raw(format!("hi {}", "x".repeat(90)))],
+            vec![
+                Span::styled("aaaa".repeat(30), bold),
+                Span::styled("bbbb".repeat(30), dim),
+            ],
+            vec![Span::styled("xxx", bold), Span::styled("yyy", dim)],
+            vec![Span::raw("short")],
+        ];
+        for spans in corpus {
+            let label: String = spans.iter().map(|s| s.content.as_str()).collect();
+            for width in [0, 1, 2, 3, 5, 7, 13, 40, 80] {
+                let mut painted = Vec::new();
+                wrap_spans(&spans, width, Style::default(), &mut painted);
+                let mut expected = Vec::new();
+                wrap_spans_into_reference(
+                    &spans,
+                    width,
+                    &mut super::geometry::WrapOutput::render(&mut expected),
+                );
+                assert_eq!(painted, expected, "{label:?} at {width}");
+                assert_eq!(
+                    wrapped_span_count(&spans, width),
+                    expected.len(),
+                    "{label:?} at {width}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn overlong_word_wrap_stays_linear() {
+        // 1 MiB unbroken ASCII at width 32: 32_768 rows. The pre-fix loop
+        // rescanned, re-cloned, and re-cached the remaining tail once per
+        // row (gigabytes of scanning and allocation here); the linear pass
+        // reads the token once. Bounded dimensions: a single 1 MiB token,
+        // not the multi-megabyte tokens that triggered the fix.
+        const TOKEN: usize = 1024 * 1024;
+        const WIDTH: usize = 32;
+        let spans = vec![Span::raw("x".repeat(TOKEN))];
+        let started = std::time::Instant::now();
+        let rows = wrapped_span_count(&spans, WIDTH);
+        let count_elapsed = started.elapsed();
+        assert_eq!(rows, TOKEN / WIDTH);
+        let started = std::time::Instant::now();
+        let mut painted = Vec::new();
+        wrap_spans(&spans, WIDTH, Style::default(), &mut painted);
+        let render_elapsed = started.elapsed();
+        assert_eq!(painted.len(), TOKEN / WIDTH);
+        assert!(
+            count_elapsed + render_elapsed < std::time::Duration::from_secs(3),
+            "overlong-word wrap scaled superlinearly: count {count_elapsed:?}, render {render_elapsed:?}"
+        );
     }
 
     #[test]
