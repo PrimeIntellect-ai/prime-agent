@@ -14,6 +14,10 @@ pub struct CompletionItem {
     pub label: String,
     pub description: Option<String>,
     pub argument_hint: Option<String>,
+    /// The source label of a dynamic command (`#user`, `#project`, …; TS
+    /// `sourceTag`, from `getAutocompleteSourceLabel`). Rendered as a
+    /// muted trailing segment of the menu row.
+    pub source_tag: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +69,10 @@ pub trait AutocompleteProvider: Send {
     /// Replace the hidden-command set (the model-eligibility filter). A
     /// default no-op so providers without command listings keep working.
     fn set_hidden_commands(&mut self, _hidden: std::collections::HashSet<String>) {}
+    /// Replace the session's `skill:` commands (TS appends them to the
+    /// command list). A default no-op for providers without command
+    /// listings.
+    fn set_skill_commands(&mut self, _skills: Vec<SlashCommandEntry>) {}
 }
 
 /// Slash-command context (port of slash-command-context.ts): which part of
@@ -382,11 +390,18 @@ impl AutocompleteState {
         for (index, item) in self.items[start..end].iter().enumerate() {
             let index = start + index;
             let selected = index == self.selected_index;
-            let trailing = item
-                .argument_hint
-                .as_deref()
-                .map(|hint| vec![crate::menu_panel::MenuSegment::muted(hint)])
-                .unwrap_or_default();
+            // The trailing metadata (TS `renderMetadataItem`: the
+            // argument hint, then the source tag, both muted here — the
+            // menu grammar's one trailing style; TS colors the source
+            // tag with `theme.sourceTag`, which this palette folds into
+            // the muted trailing).
+            let mut trailing = Vec::new();
+            if let Some(hint) = item.argument_hint.as_deref() {
+                trailing.push(crate::menu_panel::MenuSegment::muted(hint));
+            }
+            if let Some(tag) = item.source_tag.as_deref() {
+                trailing.push(crate::menu_panel::MenuSegment::muted(tag));
+            }
             lines.push(crate::menu_panel::menu_row(
                 theme,
                 width,
@@ -495,6 +510,7 @@ impl PathCompletionProvider {
             let value = build_completion_value(&path_value, is_at_prefix, is_quoted_prefix);
             suggestions.push(CompletionItem {
                 value,
+                source_tag: None,
                 label: if is_directory {
                     format!("{name}/")
                 } else {
@@ -597,6 +613,9 @@ pub struct SlashCommandEntry {
     pub description: Option<String>,
     pub argument_hint: Option<String>,
     pub takes_argument: bool,
+    /// The source label (`#user`, `#project`, …) for dynamic commands
+    /// (TS `sourceTag`).
+    pub source_tag: Option<String>,
 }
 
 impl SlashCommandEntry {
@@ -611,11 +630,87 @@ impl SlashCommandEntry {
     }
 }
 
+/// The source label of a command row (TS `getAutocompleteSourceTag` +
+/// `getAutocompleteSourceLabel`): the scope prefix (`user`/`project`/
+/// `temporary`), with the source string itself for package-registry
+/// (`npm:…`) sources; `builtin` stays `builtin`. The TS ladder's git-URL
+/// branch is not reachable on this port's daemon wire — the skills
+/// loader only emits `local` sources — so the scope prefix is the
+/// fallback for any other source, exactly like the TS tail.
+fn autocomplete_source_tag(source_info: &serde_json::Value) -> Option<String> {
+    // TS guards the whole ladder with `if (!sourceInfo) return undefined`:
+    // an absent source info gets no tag (the row renders bare).
+    if source_info.is_null() {
+        return None;
+    }
+    let scope_prefix = match source_info.get("scope").and_then(serde_json::Value::as_str) {
+        Some("user") => "user",
+        Some("project") => "project",
+        _ => "temporary",
+    };
+    let source = source_info
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if source == "builtin" {
+        return Some("builtin".to_string());
+    }
+    if source == "auto" || source == "local" || source == "cli" {
+        return Some(scope_prefix.to_string());
+    }
+    if let Some(spec) = source.strip_prefix("npm:") {
+        return Some(format!("{scope_prefix}:npm:{spec}"));
+    }
+    Some(scope_prefix.to_string())
+}
+
+/// The `#`-prefixed label the menu row renders (TS `getAutocompleteSourceLabel`).
+fn autocomplete_source_label(source_info: &serde_json::Value) -> Option<String> {
+    autocomplete_source_tag(source_info).map(|tag| format!("#{tag}"))
+}
+
+/// The `skill:` commands of a daemon `get_commands` response (TS
+/// `createBaseAutocompleteProvider`'s skill list over
+/// `connectionCommands.filter(source === "skill")`): the name stays the
+/// wire form (`skill:<name>`), the description and the source label ride
+/// along for the menu row.
+pub fn skill_command_entries(commands: &serde_json::Value) -> Vec<SlashCommandEntry> {
+    let Some(entries) = commands
+        .get("commands")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter(|entry| entry.get("source").and_then(serde_json::Value::as_str) == Some("skill"))
+        .filter_map(|entry| {
+            let name = entry.get("name").and_then(serde_json::Value::as_str)?;
+            Some(SlashCommandEntry {
+                name: name.to_string(),
+                aliases: Vec::new(),
+                description: entry
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                argument_hint: None,
+                takes_argument: false,
+                source_tag: entry.get("sourceInfo").and_then(autocomplete_source_label),
+            })
+        })
+        .collect()
+}
+
 /// The installed provider: slash-command completion from the builtin
 /// registry (fuzzy-filtered, like the TS `CombinedAutocompleteProvider`)
 /// plus file/path completion.
 pub struct CombinedAutocompleteProvider {
     commands: Vec<SlashCommandEntry>,
+    /// The session's `skill:<name>` commands (TS
+    /// `skillCommandList`): appended after the builtins, replaced whole
+    /// on every command-catalog refresh.
+    skill_commands: Vec<SlashCommandEntry>,
     /// Commands the current model filters out of the listing (TS
     /// `getAvailableCommands` drops `/fast` when the model is not
     /// fast-mode-eligible).
@@ -635,10 +730,12 @@ impl CombinedAutocompleteProvider {
                 description: Some(command.description.to_string()),
                 argument_hint: command.argument_hint.map(str::to_string),
                 takes_argument: command.takes_argument,
+                source_tag: None,
             })
             .collect();
         Self {
             commands,
+            skill_commands: Vec::new(),
             hidden: Default::default(),
             paths: PathCompletionProvider { base },
         }
@@ -650,13 +747,23 @@ impl CombinedAutocompleteProvider {
         self.hidden = hidden;
     }
 
+    /// Replace the session's `skill:` commands (TS
+    /// `createBaseAutocompleteProvider` appends the skill list after the
+    /// builtin commands; the fetch replaces the whole list, never
+    /// merges).
+    pub fn set_skill_commands(&mut self, skills: Vec<SlashCommandEntry>) {
+        self.skill_commands = skills;
+    }
+
     /// The slash-name suggestions for a typed prefix (fuzzy filter over
-    /// `name + aliases`, registry order preserved on ties).
+    /// `name + aliases`, registry order preserved on ties; the session's
+    /// skill commands follow the builtins, TS list order).
     fn slash_suggestions(&self, prefix: &str) -> Vec<CompletionItem> {
         let query = prefix.strip_prefix('/').unwrap_or(prefix);
         let commands: Vec<&SlashCommandEntry> = self
             .commands
             .iter()
+            .chain(self.skill_commands.iter())
             .filter(|command| !self.hidden.contains(&command.name))
             .collect();
         let scored = fuzzy_filter(&commands, query, |command| command.search_text());
@@ -667,6 +774,7 @@ impl CombinedAutocompleteProvider {
                 label: command.name.clone(),
                 description: command.description.clone(),
                 argument_hint: command.argument_hint.clone(),
+                source_tag: command.source_tag.clone(),
             })
             .collect()
     }
@@ -700,6 +808,7 @@ impl CombinedAutocompleteProvider {
         let takes_argument = self
             .commands
             .iter()
+            .chain(self.skill_commands.iter())
             .find(|command| command.name == item.value)
             .is_some_and(|command| command.takes_argument);
         let has_separator_after_cursor =
@@ -728,6 +837,10 @@ impl CombinedAutocompleteProvider {
 impl AutocompleteProvider for CombinedAutocompleteProvider {
     fn set_hidden_commands(&mut self, hidden: std::collections::HashSet<String>) {
         self.hidden = hidden;
+    }
+
+    fn set_skill_commands(&mut self, skills: Vec<SlashCommandEntry>) {
+        CombinedAutocompleteProvider::set_skill_commands(self, skills);
     }
 
     fn get_suggestions(
@@ -788,10 +901,14 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
     ) -> CompletionResult {
         let is_slash = get_slash_command_context(lines, cursor_line, cursor_col)
             .is_some_and(|context| context.kind == SlashKind::Name && context.prefix == prefix);
+        // TS `applyCompletion` finds the item over its whole command list
+        // (builtins and skills share one array), so a `skill:` item applies
+        // through the slash path — the line keeps its leading `/`.
         if is_slash
             && self
                 .commands
                 .iter()
+                .chain(self.skill_commands.iter())
                 .any(|command| command.name == item.value)
         {
             return self.apply_slash_completion(lines, cursor_line, cursor_col, item, prefix);
@@ -825,6 +942,7 @@ mod tests {
             label: value.to_string(),
             description: None,
             argument_hint: None,
+            source_tag: None,
         }
     }
 
@@ -973,6 +1091,7 @@ mod tests {
                 label: format!("cmd{i}"),
                 description: Some(format!("description {i}")),
                 argument_hint: Some("[arg]".to_string()),
+                source_tag: None,
             })
             .collect();
         let state = AutocompleteState::new(
@@ -1051,5 +1170,222 @@ mod tests {
         assert_eq!(state.best_match_index("hel"), Some(0));
         assert_eq!(state.best_match_index("hello"), Some(1));
         assert_eq!(state.best_match_index("zzz"), None);
+    }
+
+    /// A `skill:` entry as the daemon `get_commands` response carries it.
+    fn skill_entry(name: &str, description: &str, scope: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": name,
+            "description": description,
+            "source": "skill",
+            "sourceInfo": {
+                "path": "/tmp/skills/web-search/SKILL.md",
+                "source": "local",
+                "scope": scope,
+                "origin": "top-level",
+                "baseDir": "/tmp/skills",
+            },
+        })
+    }
+
+    fn provider_with_skill(base: &str) -> CombinedAutocompleteProvider {
+        let mut provider = provider(base);
+        provider.set_skill_commands(vec![SlashCommandEntry {
+            name: "skill:brainstorm".to_string(),
+            aliases: Vec::new(),
+            description: Some("Brainstorm approaches".to_string()),
+            argument_hint: None,
+            takes_argument: false,
+            source_tag: Some("#project".to_string()),
+        }]);
+        provider
+    }
+
+    #[test]
+    fn skill_commands_list_after_the_builtins() {
+        // TS `createBaseAutocompleteProvider`: the skill commands follow
+        // the builtin commands in the provider's list.
+        let provider = provider_with_skill("/tmp");
+        let items = provider.slash_suggestions("/");
+        assert!(items.len() > SlashCommandRegistry::builtin().all().len());
+        assert_eq!(items.last().unwrap().value, "skill:brainstorm");
+        assert_eq!(
+            items.last().unwrap().description.as_deref(),
+            Some("Brainstorm approaches")
+        );
+        assert_eq!(
+            items.last().unwrap().source_tag.as_deref(),
+            Some("#project")
+        );
+    }
+
+    #[test]
+    fn skill_commands_suggest_for_the_typed_prefix_and_inline_references() {
+        // TS autocomplete.test.ts: a `/skill:brain` prefix suggests the
+        // skill command, and a mid-line reference suggests it too.
+        let provider = provider_with_skill("/tmp");
+        let items = provider.slash_suggestions("/skill:brain");
+        let values: Vec<&str> = items.iter().map(|item| item.value.as_str()).collect();
+        assert_eq!(values, vec!["skill:brainstorm"]);
+        let suggestions = provider
+            .get_suggestions(&["Please use /skill:brain".to_string()], 0, 23, false)
+            .expect("mid-line skill reference suggests");
+        assert_eq!(suggestions.prefix, "/skill:brain");
+        assert_eq!(
+            suggestions
+                .items
+                .iter()
+                .map(|item| item.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["skill:brainstorm"]
+        );
+    }
+
+    #[test]
+    fn skill_command_completes_without_a_trailing_separator() {
+        // TS `commandTakesArgument`: a skill command takes no argument,
+        // so completion stays on the command token.
+        let provider = provider_with_skill("/tmp");
+        let item = item("skill:brainstorm");
+        let result = provider.apply_slash_completion(
+            &["/skill:brain".to_string()],
+            0,
+            12,
+            &item,
+            "/skill:brain",
+        );
+        assert_eq!(result.lines[0], "/skill:brainstorm");
+        assert_eq!(result.cursor_col, "/skill:brainstorm".chars().count());
+    }
+
+    #[test]
+    fn skill_completions_apply_through_the_slash_path() {
+        // TS `applyCompletion` finds skill items over the whole command
+        // list, so a menu-confirmed skill keeps the leading `/` and stays
+        // a command submission (the file path would drop it).
+        let provider = provider_with_skill("/tmp");
+        let item = item("skill:brainstorm");
+        let result =
+            provider.apply_completion(&["/skill:brain".to_string()], 0, 12, &item, "/skill:brain");
+        assert_eq!(result.lines[0], "/skill:brainstorm");
+        assert_eq!(result.cursor_col, "/skill:brainstorm".chars().count());
+    }
+
+    #[test]
+    fn command_catalog_parse_keeps_skills_and_source_labels() {
+        // TS `connectionCommands.filter(source === "skill")` + the
+        // `getAutocompleteSourceLabel` ladder.
+        let response = serde_json::json!({
+            "commands": [
+                {
+                    "name": "review",
+                    "description": "Review template",
+                    "source": "prompt",
+                    "sourceInfo": { "source": "local", "scope": "project" },
+                },
+                skill_entry("skill:web-search", "Search Google", "user"),
+                {
+                    "name": "skill:packaged",
+                    "description": "From the registry",
+                    "source": "skill",
+                    "sourceInfo": { "source": "npm:@prime/skill-pack", "scope": "project" },
+                },
+                {
+                    "name": "skill:path-skill",
+                    "description": "Path-provided",
+                    "source": "skill",
+                    "sourceInfo": { "source": "local", "scope": "temporary" },
+                },
+            ]
+        });
+        let entries = skill_command_entries(&response);
+        let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["skill:web-search", "skill:packaged", "skill:path-skill"]
+        );
+        assert_eq!(entries[0].description.as_deref(), Some("Search Google"));
+        assert_eq!(entries[0].source_tag.as_deref(), Some("#user"));
+        assert_eq!(
+            entries[1].source_tag.as_deref(),
+            Some("#project:npm:@prime/skill-pack")
+        );
+        assert_eq!(entries[2].source_tag.as_deref(), Some("#temporary"));
+        // Prompt-template entries are a different surface: they stay out.
+        // A malformed or empty response yields no entries.
+        assert!(skill_command_entries(&serde_json::json!({})).is_empty());
+        assert!(skill_command_entries(&serde_json::json!({"commands": []})).is_empty());
+    }
+
+    #[test]
+    fn source_tag_ladder_matches_ts() {
+        let source_info = |source: &str, scope: Option<&str>| {
+            let mut value = serde_json::json!({ "source": source });
+            if let Some(scope) = scope {
+                value["scope"] = serde_json::json!(scope);
+            }
+            value
+        };
+        // Builtins keep their own tag; auto/local/cli take the scope
+        // prefix; an unknown scope reads temporary; an npm source appends
+        // its spec.
+        assert_eq!(
+            autocomplete_source_label(&source_info("builtin", None)).as_deref(),
+            Some("#builtin")
+        );
+        assert_eq!(
+            autocomplete_source_label(&source_info("local", Some("user"))).as_deref(),
+            Some("#user")
+        );
+        assert_eq!(
+            autocomplete_source_label(&source_info("cli", Some("project"))).as_deref(),
+            Some("#project")
+        );
+        assert_eq!(
+            autocomplete_source_label(&source_info("local", None)).as_deref(),
+            Some("#temporary")
+        );
+        assert_eq!(
+            autocomplete_source_label(&source_info("npm:@scope/pack", Some("user"))).as_deref(),
+            Some("#user:npm:@scope/pack")
+        );
+        // No sourceInfo at all: no tag.
+        assert!(autocomplete_source_label(&serde_json::Value::Null).is_none());
+    }
+
+    #[test]
+    fn render_shows_the_source_tag_as_a_trailing_segment() {
+        // TS select-list renders the sourceTag after the argument hint;
+        // the menu grammar renders both as muted trailing segments.
+        let mut described = item("skill:web-search");
+        described.description = Some("Search Google".to_string());
+        described.source_tag = Some("#user".to_string());
+        let state = AutocompleteState::new(
+            vec![described],
+            5,
+            "/skill:web".to_string(),
+            Some(SuggestionKind::SlashCommand),
+        );
+        let rendered = state.render(&theme(), 80);
+        let all: String = rendered
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            all.contains("skill:web-search"),
+            "the row names the skill: {all}"
+        );
+        assert!(
+            all.contains("#user"),
+            "the row carries the source tag: {all}"
+        );
+        assert!(
+            all.contains("Search Google"),
+            "the selected description renders: {all}"
+        );
     }
 }

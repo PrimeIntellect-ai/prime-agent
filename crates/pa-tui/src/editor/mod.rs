@@ -10,6 +10,7 @@
 //! `text_ops` (deletion/yank), `motion` (cursor movement), `input` (key
 //! dispatch), `autocomplete`, and `layout` (rendering-facing layout).
 
+use crate::autocomplete::SlashCommandEntry;
 use crate::keybindings::KeybindingsManager;
 use crate::width::is_whitespace_char;
 use std::collections::HashMap;
@@ -204,6 +205,26 @@ impl Editor {
     pub fn set_autocomplete_hidden_commands(&mut self, hidden: std::collections::HashSet<String>) {
         if let Some(provider) = self.autocomplete_provider.as_mut() {
             provider.set_hidden_commands(hidden);
+        }
+    }
+
+    /// Replace the provider's `skill:` commands (TS
+    /// `setupAutocompleteProvider` rebuilds the command list with the
+    /// session's skills; this port swaps the list on the installed
+    /// provider). The open dropdown — if any — drops, because its rows
+    /// came from the old catalog (TS `setAutocompleteProvider` cancels
+    /// too), but a PARKED request stays: the host loop materializes it
+    /// against the new provider, so a `/` typed while the catalog
+    /// refresh was still in flight still opens its menu (Cursor thread:
+    /// the swap must not eat the parked request).
+    pub fn set_autocomplete_skill_commands(&mut self, skills: Vec<SlashCommandEntry>) {
+        let was_showing = self.autocomplete.is_some();
+        self.autocomplete = None;
+        if was_showing {
+            self.emit(EditorEvent::AutocompleteToggled(false));
+        }
+        if let Some(provider) = self.autocomplete_provider.as_mut() {
+            provider.set_skill_commands(skills);
         }
     }
 
