@@ -314,7 +314,7 @@ impl PrimeLoginUi for TerminalPrimeLoginUi {
                         return TeamChoice::Team(teams[number - 2].clone());
                     }
                     // The TS selector ignores keys that select nothing.
-                    _ => continue,
+                    _ => {}
                 }
             }
         })
@@ -341,8 +341,7 @@ fn team_list_lines(teams: &[PrimeTeamCredential], current: Option<&str>) -> Vec<
         let role = team
             .role
             .as_deref()
-            .map(str::to_lowercase)
-            .unwrap_or_else(|| "member".to_string());
+            .map_or_else(|| "member".to_string(), str::to_lowercase);
         let secondary = match &team.slug {
             Some(slug) => format!("slug: {slug}, role: {role}"),
             None => format!("role: {role}"),

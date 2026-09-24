@@ -460,8 +460,7 @@ pub fn parse_args(args: &[String]) -> Args {
             "--list-models" => {
                 let has_search = args
                     .get(i + 1)
-                    .map(|next| !next.starts_with('-') && !next.starts_with('@'))
-                    .unwrap_or(false);
+                    .is_some_and(|next| !next.starts_with('-') && !next.starts_with('@'));
                 if !internal_runtime_command {
                     result.diagnostics.push(Diagnostic::error(
                         "--list-models was removed. Use \"prime-agent model list [search]\".",
@@ -550,12 +549,11 @@ fn take_required_value(
     flag: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<String> {
-    let next = match args.get(index + 1) {
-        Some(next) => next,
-        None => {
-            diagnostics.push(Diagnostic::error(format!("{flag} requires a value")));
-            return None;
-        }
+    let next = if let Some(next) = args.get(index + 1) {
+        next
+    } else {
+        diagnostics.push(Diagnostic::error(format!("{flag} requires a value")));
+        return None;
     };
     let value_may_start_with_dash = FREEFORM_VALUE_FLAGS.contains(&flag);
     let value_is_arbitrary_prompt_text = PROMPT_VALUE_FLAGS.contains(&flag);

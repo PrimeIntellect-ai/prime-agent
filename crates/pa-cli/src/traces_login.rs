@@ -258,9 +258,8 @@ async fn read_terminal_line() -> Option<String> {
         .read_line(&mut line)
         .await
     {
-        Ok(0) => None,
+        Ok(0) | Err(_) => None,
         Ok(_) => Some(line.trim().to_string()),
-        Err(_) => None,
     }
 }
 

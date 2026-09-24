@@ -77,8 +77,7 @@ fn display_name(provider_id: &str) -> String {
     BUILT_IN_PROVIDER_DISPLAY_NAMES
         .iter()
         .find(|(id, _)| *id == provider_id)
-        .map(|(_, name)| name.to_string())
-        .unwrap_or_else(|| provider_id.to_string())
+        .map_or_else(|| provider_id.to_string(), |(_, name)| name.to_string())
 }
 
 /// TS `isApiKeyLoginProvider`: the display-name map, or a provider the
@@ -510,13 +509,15 @@ fn login_blocking(
         let outcome = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map(|runtime| {
-                runtime.block_on(pa_tui::client_auth::run_mcp_auth_command(
-                    &auth,
-                    &format!("login {server}"),
-                ))
-            })
-            .unwrap_or_else(|error: std::io::Error| format!("login failed: {error}"));
+            .map_or_else(
+                |error: std::io::Error| format!("login failed: {error}"),
+                |runtime| {
+                    runtime.block_on(pa_tui::client_auth::run_mcp_auth_command(
+                        &auth,
+                        &format!("login {server}"),
+                    ))
+                },
+            );
         return if outcome.starts_with("Usage:") {
             ProviderAuthOutcome::Error(outcome)
         } else {
@@ -532,28 +533,29 @@ fn login_blocking(
         return tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
-            .map(|runtime| {
-                runtime.block_on(crate::prime_inference_login::run_prime_inference_login(
-                    crate::prime_inference_login::PrimeLoginInputs {
-                        agent_dir: &agent_dir,
-                        provider_name: &provider_row.name,
-                        config: &pa_core::auth::resolve_prime_inference_auth_config(),
-                        http: &pa_core::auth::ReqwestPrimeHttp,
-                        prime_cli_config_path: crate::prime_inference_login::prime_cli_config_path(
-                            &agent_dir,
-                        )
-                        .as_deref(),
-                        prime_team_id: std::env::var("PRIME_TEAM_ID").ok().as_deref(),
-                    },
-                    &crate::prime_inference_login::TerminalPrimeLoginUi,
-                ))
-            })
-            .unwrap_or_else(|error| {
-                ProviderAuthOutcome::Error(format!(
-                    "Failed to login to {}: {error}",
-                    provider_row.name
-                ))
-            });
+            .map_or_else(
+                |error| {
+                    ProviderAuthOutcome::Error(format!(
+                        "Failed to login to {}: {error}",
+                        provider_row.name
+                    ))
+                },
+                |runtime| {
+                    runtime.block_on(crate::prime_inference_login::run_prime_inference_login(
+                        crate::prime_inference_login::PrimeLoginInputs {
+                            agent_dir: &agent_dir,
+                            provider_name: &provider_row.name,
+                            config: &pa_core::auth::resolve_prime_inference_auth_config(),
+                            http: &pa_core::auth::ReqwestPrimeHttp,
+                            prime_cli_config_path:
+                                crate::prime_inference_login::prime_cli_config_path(&agent_dir)
+                                    .as_deref(),
+                            prime_team_id: std::env::var("PRIME_TEAM_ID").ok().as_deref(),
+                        },
+                        &crate::prime_inference_login::TerminalPrimeLoginUi,
+                    ))
+                },
+            );
     }
     if provider_row.auth_type == AuthType::Oauth {
         return ProviderAuthOutcome::Error(format!(

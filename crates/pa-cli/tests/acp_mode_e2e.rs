@@ -856,10 +856,10 @@ fn acp_daemon_attached_cancels_mid_turn() {
 /// Stop the sandboxed supervisor a test spawned (the shared-daemon
 /// product behavior leaves it running; a test owns its sandbox).
 fn shutdown_sandboxed_daemon(socket: &std::path::Path) {
+    use std::io::Write as _;
     let Ok(mut stream) = pa_types::platform::transport::connect_blocking(socket) else {
         return;
     };
-    use std::io::Write as _;
     let frame = format!(
             "{{\"type\":\"command\",\"id\":\"shutdown-test\",\"protocol\":{{\"name\":\"prime-agent.daemon\",\"version\":{}}},\"command\":{{\"type\":\"shutdown\"}}}}\n",
             pa_types::daemon::DAEMON_PROTOCOL_VERSION
@@ -1390,10 +1390,9 @@ fn acp_threshold_auto_compaction_publishes_the_compaction_meta() {
     let metas = compaction_metas(&updates);
     assert!(!metas.is_empty(), "the threshold arm ran: {updates:?}");
     assert!(
-        metas.iter().all(|meta| meta
-            .as_object()
-            .map(serde_json::Map::is_empty)
-            .unwrap_or(false)),
+        metas
+            .iter()
+            .all(|meta| meta.as_object().is_some_and(serde_json::Map::is_empty)),
         "the single-turn compaction skipped: {metas:?}"
     );
 

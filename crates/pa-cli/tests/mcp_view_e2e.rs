@@ -310,7 +310,6 @@ async fn assert_roster_with_tools(socket: &Path, dir: &Path) {
             Err(error) => {
                 last_error = format!("{error:#}");
                 tokio::time::sleep(Duration::from_secs(3)).await;
-                continue;
             }
             Ok(data) => {
                 let listed = data
