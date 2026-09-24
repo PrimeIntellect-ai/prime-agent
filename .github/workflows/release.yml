@@ -6,7 +6,11 @@ name: release
 on:
   push:
     tags:
+      # A plain tag publishes the stable channel (latest.json); a -beta*
+      # prerelease tag publishes the nightly channel (beta.json) - the two
+      # channels pa-core::update::version::UpdateChannel reads.
       - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-beta*"
 
 permissions: {}
 
@@ -38,7 +42,15 @@ jobs:
           tag_ver="${GITHUB_REF_NAME#v}"
           cargo_ver="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
           [[ "${tag_ver}" == "${cargo_ver}" ]]             || { echo "tag v${tag_ver} does not match Cargo.toml ${cargo_ver}"; exit 1; }
-          echo "tag and workspace version agree (${tag_ver})"
+          # The channel the tag publishes (pa-core::update::version
+          # resolve_update_channel parity): plain = stable (latest.json),
+          # -beta* = nightly (beta.json); any other prerelease would be a
+          # stable-channel pre-release the update flow refuses to install.
+          case "${tag_ver}" in
+            *-beta*) echo "nightly channel: the release publishes beta.json" ;;
+            *-*) echo "tag v${tag_ver} carries a prerelease other than -beta*: publish vX.Y.Z (stable) or vX.Y.Z-beta.N (nightly)" >&2; exit 1 ;;
+            *) echo "stable channel: the release publishes latest.json" ;;
+          esac
 
   build:
     needs: tag-check
@@ -183,6 +195,73 @@ jobs:
                   tar.extractall(unpacked, filter="data")
           PY
           ls -la release-out release-unpacked
+      - name: Emit the channel manifest (latest.json stable / beta.json nightly)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, re, sys
+
+          # The producer half of the update flow's channel contract (TS
+          # getLatestPiRelease parity; the reader is
+          # pa-core::update::release::latest_release): <download-base>/
+          # latest.json (stable) or beta.json (nightly), carrying the
+          # version plus artifact rows the reader keeps only when the
+          # platform is known, `file` is exactly
+          # prime-agent-<version>-<platform>.tar.gz, and `sha256` is 64
+          # lowercase hex. A row the reader would reject fails the release
+          # here - a lying manifest is worse than none. The v1 `binaries`
+          # list stays limited to the original installer platforms
+          # (manifestV1Platforms, TS parity); `binaries_v2` carries every
+          # row (the reader skips platforms it does not know).
+          tag = os.environ["RELEASE_VERSION"]
+          bare = tag[1:] if tag.startswith("v") else tag
+          prerelease = bare.split("-", 1)[1] if "-" in bare else ""
+          if prerelease:
+              if not prerelease.startswith("beta"):
+                  sys.exit(
+                      f"tag {tag}: only vX.Y.Z (stable) and vX.Y.Z-beta* "
+                      "(nightly) releases publish; the update reader treats "
+                      "any other prerelease as a stable-channel pre-release "
+                      "and refuses to install it"
+                  )
+              manifest_name = "beta.json"
+          else:
+              manifest_name = "latest.json"
+          merged = json.loads(pathlib.Path("release-out/manifest.json").read_text())
+          version = merged["version"]
+          version = version[1:] if version.startswith("v") else version
+          if version != bare:
+              sys.exit(f"merged manifest version {merged['version']} != tag {tag}")
+          known = {
+              "darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64",
+          }
+          v1_platforms = {"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"}
+          rows, seen = [], set()
+          for binary in merged["binaries"]:
+              platform, file_name, sha = binary["platform"], binary["file"], binary["sha256"]
+              if platform in known:
+                  expected = f"prime-agent-{version}-{platform}.tar.gz"
+                  if file_name != expected or re.fullmatch(r"[0-9a-f]{64}", sha) is None:
+                      sys.exit(
+                          f"the update reader rejects artifact row {binary}: "
+                          f"file must be {expected} with a 64-hex sha256"
+                      )
+                  if platform in seen:
+                      sys.exit(f"duplicate artifact row for platform {platform}")
+                  seen.add(platform)
+              rows.append(
+                  {"platform": platform, "file": file_name, "sha256": sha}
+              )
+          document = {"version": f"v{version}"}
+          v1_rows = [row for row in rows if row["platform"] in v1_platforms]
+          if v1_rows:
+              document["binaries"] = v1_rows
+          if rows:
+              document["binaries_v2"] = rows
+          out = pathlib.Path("release-out") / manifest_name
+          out.write_text(json.dumps(document, indent=2) + "\n")
+          print(f"channel manifest {out.name}: {document['version']}, {len(rows)} artifacts")
+          PY
       - name: Install syft
         uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
       - name: Generate SPDX SBOM per target (unpacked artifact tree)
@@ -209,5 +288,4 @@ jobs:
           files: |
             release-out/prime-agent-*.tar.gz
             release-out/SHA256SUMS
-            release-out/manifest.json
-            release-out/sbom-spdx-*.json
+            release-out/*.json

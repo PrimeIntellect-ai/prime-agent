@@ -50,7 +50,7 @@ the files are inert until Actions is enabled anyway.
 `continuous.yml` builds the 4-target release matrix on every push to `main`
 and republishes it to the ROLLING GitHub release tagged `continuous`:
 artifacts are overwritten per push, so the stable URLs always serve the
-latest build (`releases/download/continuous/prime-agent-<version>-<target>.tar.gz`).
+latest build (`releases/download/continuous/prime-agent-<version>-<platform>.tar.gz`).
 The publish job moves the `continuous` tag to the triggering commit, states
 "Built from <sha> — <subject>" in the release body, and stamps the commit into
 the binary: the tarball carries a `package.json` manifest and `prime-agent

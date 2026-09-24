@@ -91,6 +91,7 @@ The GitHub token on this box lacks the `workflow` scope. Therefore:
    ┌────────────────────────────────────────────────────────────────────┐
    │ tag-check (release.yml)                                             │
    │   ref is a tag; tag name == [workspace.package] version            │
+   │   prerelease (if any) starts with -beta (the publishable channels)  │
    │   clean worktree; permissions: contents: read                      │
    └───────┬────────────────────────────────────────────────────────────┘
            ▼
@@ -104,7 +105,8 @@ The GitHub token on this box lacks the `workflow` scope. Therefore:
      ./<t>/release/prime-agent --version  == tag version      (livecheck gate)
      scripts/release/assemble_artifacts.py --target <t> --version <ver>
        -> staging: prime-agent + prime-agent-runtime/ + skills/ + docs/ + LICENSE + README.md
-       -> prime-agent-<ver>-<t>.tar.gz (files at tarball root, deterministic tar)
+       -> prime-agent-<ver>-<platform>.tar.gz (files at tarball root, deterministic tar;
+          the platform alias — see §5 naming — not the target triple)
        -> per-target SHA256SUMS + manifest entry (archive sha256 + executable sha256)
      upload artifact (tarball + checksums + manifest)
            ▼
@@ -117,14 +119,20 @@ The GitHub token on this box lacks the `workflow` scope. Therefore:
      generates SPDX SBOM (syft) per tarball from the unpacked staging tree
      creates artifact attestations (actions/attest-build-provenance@v2, SLSA)
      [reserved: Apple notarization — gated on certs landing]
+     emits the channel manifest (the update flow's producer; see §5):
+       latest.json for a plain vX.Y.Z tag (stable), beta.json for a
+       -beta* prerelease tag (nightly) — byte-compatible with
+       pa-core::update::release::latest_release, hard-failing on any row
+       the reader would reject
      creates the GitHub release v<ver> and attaches:
-       prime-agent-<ver>-<t>.tar.gz (4)
+       prime-agent-<ver>-<platform>.tar.gz (4)
        SHA256SUMS (all targets), manifest.json (TS-installer-compatible)
-       sbom-spdx-<ver>-<t>.json (4), attestation artifacts
+       latest.json|beta.json (the channel manifest), sbom-spdx-<ver>-<t>.json (4)
 ```
 
 PR builds never reach the promotion stage: `ci.yml` has `contents: read` only, and the
-release workflow triggers exclusively on `v*` tags. The tag itself is the release gate;
+release workflow triggers exclusively on `vX.Y.Z` (stable) and `vX.Y.Z-beta*` (nightly)
+tags. The tag itself is the release gate;
 environment protection rules (required reviewers, tag-pattern restriction) are configured
 once by the operator in repo settings.
 
@@ -134,7 +142,7 @@ One tarball per target, files at the tarball root (TS parity — the TS installe
 future install.sh port both expect that):
 
 ```
-prime-agent-<version>-<target>.tar.gz
+prime-agent-<version>-<platform>.tar.gz
 ├── prime-agent              # the release binary (exec bit set)
 ├── models.bundled.json      # bundled catalog assets (catalog spec §3.2 layer 2:
 │                            # generated at build time, never committed; the
@@ -159,23 +167,48 @@ packer (`assemble_artifacts.py`, `package_release.py`) and the verifier
 (`verify_release.py`) share the same validation functions and hard-fail
 without validated assets.
 
-Naming: `prime-agent-<version>-<rust-target-triple>.tar.gz`, e.g.
-`prime-agent-0.1.0-aarch64-apple-darwin.tar.gz`. Target triples map 1:1 to CI and to
-Homebrew arch stanzas; `manifest.json` additionally carries the TS-style platform alias
-(`darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`) so the install.sh port can consume
-the same releases without a naming migration.
+Naming: `prime-agent-<version>-<platform>.tar.gz`, e.g. `prime-agent-0.1.0-darwin-arm64.tar.gz`
+— the TS platform alias (`darwin-arm64`, `darwin-x64`, `linux-arm64`, `linux-x64`), TS
+`assemble-release-archives.mjs` parity. The alias is not cosmetic: the update flow's channel
+manifest is the download contract, and `pa-core::update::release` keeps an artifact row only
+when `file` is exactly `prime-agent-<version>-<platform>.tar.gz`; the target triple stays in
+`manifest.json`'s `target` field (CI matrix keys, SBOM directories, Homebrew arch stanzas
+map 1:1 from the alias).
 
 Determinism: tar with fixed uid/gid 0, numeric owner, name-sorted entries, fixed mtime
 (GNU tar on Linux; bsdtar equivalents on macOS; `COPYFILE_DISABLE=1` on macOS to keep
 `._*` AppleDouble files out of the archives — same trick the TS assembler uses).
 
 Install layout after extraction (documented for the install.sh lane): the tarball extracts
-into `~/.local/share/prime-agent/releases/<version>-<target>-<archive-sha256>/` with the
+into `~/.local/share/prime-agent/releases/<version>-<platform>-<archive-sha256>/` with the
 symlink flip the TS installer performs; the shipped artifact itself never needs
 `PI_PACKAGE_DIR`.
 
 Livecheck contract: `prime-agent --version` prints the bare semver, and release assets follow
-the stable URL `https://github.com/<org>/<repo>/releases/download/v<ver>/prime-agent-<ver>-<target>.tar.gz`.
+the stable URL `https://github.com/<org>/<repo>/releases/download/v<ver>/prime-agent-<ver>-<platform>.tar.gz`.
+
+### 5a. Channel manifests (latest.json / beta.json)
+
+The update flow's read side (`pa-core::update::release::latest_release`, the TS
+`getLatestPiRelease` port) resolves its channel from the running version
+(`resolve_update_channel`: a `-beta*` prerelease is nightly, anything else is stable) and
+fetches `<download-base>/latest.json` (stable) or `<download-base>/beta.json` (nightly) from
+the release download base. The release workflow is the producer: the promote job emits
+exactly one channel manifest per tag —
+
+- a plain `vX.Y.Z` tag publishes `latest.json` (the stable channel);
+- a `vX.Y.Z-beta.N` tag publishes `beta.json` (the nightly channel); any other prerelease
+  is refused at tag-check (the read side would treat it as a stable-channel pre-release and
+  skip it);
+
+shaped as `{"version": "v<ver>", "binaries": [...], "binaries_v2": [...]}` where each row is
+`{"platform", "file", "sha256"}` and the file names are the alias-named archives above. The
+v1 `binaries` list stays limited to the original installer platforms (TS `manifestV1Platforms`
+parity); `binaries_v2` carries every row, and the reader skips platforms it does not know.
+The emission hard-fails on any row the reader would reject (wrong file name, bad sha256,
+duplicate platform) — a lying manifest is worse than none — and
+`crates/pa-core/tests/release_channel_manifest.rs` pins the producer against the exact reader
+by running the workflow's real step code over fixture trees.
 
 ## 6. Token model and publish/build separation
 
@@ -229,10 +262,10 @@ cask "prime-agent" do
          x86_64: "<sha>"
 
   on_arm do
-    url "https://github.com/kevinjosethomas/prime-agent-rs/releases/download/v#{version}/prime-agent-#{version}-aarch64-apple-darwin.tar.gz"
+    url "https://github.com/kevinjosethomas/prime-agent-rs/releases/download/v#{version}/prime-agent-#{version}-darwin-arm64.tar.gz"
   end
   on_intel do
-    url "https://github.com/kevinjosethomas/prime-agent-rs/releases/download/v#{version}/prime-agent-#{version}-x86_64-apple-darwin.tar.gz"
+    url "https://github.com/kevinjosethomas/prime-agent-rs/releases/download/v#{version}/prime-agent-#{version}-darwin-x64.tar.gz"
   end
 
   name "Prime Agent"
@@ -241,7 +274,7 @@ cask "prime-agent" do
 
   livecheck do
     url :url
-    regex(/prime-agent-v?(\d+(?:\.\d+)*)-aarch64-apple-darwin\.tar\.gz/i)
+    regex(/prime-agent-v?(\d+(?:\.\d+)*)-darwin-arm64\.tar\.gz/i)
   end
 
   binary "prime-agent"   # symlink resolves through to the caskroom dir,
