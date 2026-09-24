@@ -838,13 +838,20 @@ mod tests {
             Some(
                 ["max_tokens", "reasoning", "reasoning_effort", "tools"]
                     .iter()
+                    .copied()
                     .map(str::to_string)
                     .collect()
             )
         );
         assert_eq!(
             entries[0].reasoning_efforts,
-            Some(["low", "high", "max"].iter().map(str::to_string).collect(),)
+            Some(
+                ["low", "high", "max"]
+                    .iter()
+                    .copied()
+                    .map(str::to_string)
+                    .collect(),
+            )
         );
         assert_eq!(entries[0].reasoning_mandatory, Some(true));
     }
@@ -856,8 +863,9 @@ mod tests {
     ) -> PrimeInferenceEntry {
         PrimeInferenceEntry {
             supported_parameters: supported
-                .map(|parameters| parameters.iter().map(str::to_string).collect()),
-            reasoning_efforts: efforts.map(|levels| levels.iter().map(str::to_string).collect()),
+                .map(|parameters| parameters.iter().copied().map(str::to_string).collect()),
+            reasoning_efforts: efforts
+                .map(|levels| levels.iter().copied().map(str::to_string).collect()),
             reasoning_mandatory: mandatory,
             ..PrimeInferenceEntry::default()
         }
