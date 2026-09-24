@@ -435,10 +435,11 @@ impl AgentSession {
                 serde_json::from_value::<AgentMessage>(value).ok()
             })
             .collect();
+        let rebuilt_message_count = loop_messages.len();
         self.agent.set_messages(loop_messages).await;
         compaction_trace::trace(
             "compact.rebuilt_context",
-            serde_json::json!({ "messages": loop_messages.len() }),
+            serde_json::json!({ "messages": rebuilt_message_count }),
         );
         // TS `_performCompaction` ends with
         // `_syncKernelStateAfterCompaction()`: a kernel that survived the
@@ -455,13 +456,14 @@ impl AgentSession {
             }
             None => None,
         };
+        let notice_landed = kernel_state.is_some();
         if let CompactOutcome::Ran(run) = &mut outcome {
             run.ipython_state = kernel_state;
         }
         compaction_trace::trace(
             "compact.returned",
             serde_json::json!({
-                "notice": kernel_state.is_some(),
+                "notice": notice_landed,
             }),
         );
         Ok(outcome)
