@@ -664,7 +664,7 @@ fn receipt_from_wire(data: &Value, input: AgentMessageSendInput) -> Option<Agent
 /// durable parent edges `agent_message.send` resolves through; a
 /// `list_agents()` never spans the whole daemon, and a relationship label
 /// never claims a family edge the recorded topology does not have.
-pub struct LinkAgentObserveController {
+pub(crate) struct LinkAgentObserveController {
     link: Arc<SupervisorLink>,
     /// This worker's live active session id (the family-scope anchor).
     active_session_id: String,
@@ -677,7 +677,7 @@ pub struct LinkAgentObserveController {
 }
 
 impl LinkAgentObserveController {
-    pub fn new(
+    pub(crate) fn new(
         link: Arc<SupervisorLink>,
         active_session_id: String,
         own_summary: Arc<std::sync::Mutex<Option<Value>>>,
