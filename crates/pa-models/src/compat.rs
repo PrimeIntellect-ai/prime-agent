@@ -80,10 +80,7 @@ fn field_valid(api: &str, key: &str, value: &Value) -> bool {
         return value.is_boolean();
     }
     match key {
-        "maxTokensField" => matches!(
-            value.as_str(),
-            Some("max_completion_tokens") | Some("max_tokens")
-        ),
+        "maxTokensField" => matches!(value.as_str(), Some("max_completion_tokens" | "max_tokens")),
         "thinkingFormat" => THINKING_FORMATS.contains(&value.as_str().unwrap_or_default()),
         "cacheControlFormat" => value.as_str() == Some("anthropic"),
         "openRouterRouting" => open_router_routing_valid(value),
@@ -106,7 +103,7 @@ fn open_router_routing_valid(value: &Value) -> bool {
         "allow_fallbacks" | "require_parameters" | "zdr" | "enforce_distillable_text" => {
             value.is_boolean()
         }
-        "data_collection" => matches!(value.as_str(), Some("deny") | Some("allow")),
+        "data_collection" => matches!(value.as_str(), Some("deny" | "allow")),
         "order" | "only" | "ignore" | "quantizations" => string_list_valid(value),
         "sort" => sort_valid(value),
         "max_price" => max_price_valid(value),
