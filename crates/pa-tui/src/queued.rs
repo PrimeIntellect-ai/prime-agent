@@ -48,12 +48,6 @@ fn is_labeled_queued_preview(message: &str) -> bool {
         .any(|prefix| message.starts_with(prefix))
 }
 
-/// Whether a queued message is a human-typed prompt: the strip renders
-/// these individually (the inverse of the internal labeled set).
-fn is_human_message(message: &str) -> bool {
-    !is_labeled_queued_preview(message)
-}
-
 /// The summed count of the queued internal prompts across both lanes, or
 /// `None` when every queued message is human-typed.
 fn condensed_count(queue: &QueuedMessages) -> Option<usize> {
@@ -61,7 +55,7 @@ fn condensed_count(queue: &QueuedMessages) -> Option<usize> {
         .steering
         .iter()
         .chain(queue.follow_ups.iter())
-        .filter(|message| !is_human_message(message))
+        .filter(|message| is_labeled_queued_preview(message))
         .count();
     (count > 0).then_some(count)
 }
@@ -140,19 +134,20 @@ pub fn render_queue(
         return Vec::new();
     }
     let mut rows = vec![Vec::new()];
-    // The human-typed previews render first and individually, so what the
-    // user parked stays explicit and prioritized above the condensed row.
+    // The human-typed previews (the non-labeled messages) render first
+    // and individually, so what the user parked stays explicit and
+    // prioritized above the condensed row.
     for message in queue
         .steering
         .iter()
-        .filter(|message| is_human_message(message))
+        .filter(|message| !is_labeled_queued_preview(message))
     {
         rows.push(preview_row(theme, STEERING_LABEL, message, width));
     }
     for message in queue
         .follow_ups
         .iter()
-        .filter(|message| is_human_message(message))
+        .filter(|message| !is_labeled_queued_preview(message))
     {
         rows.push(preview_row(theme, FOLLOW_UP_LABEL, message, width));
     }
