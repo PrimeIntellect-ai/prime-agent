@@ -350,13 +350,66 @@ fn parent_reference_keys(record: &UnifiedRecord) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The `parent` record's session file, live summary first, saved catalog
+/// row second (both serve absolute paths).
+fn parent_record_file(parent: &UnifiedRecord) -> Option<&str> {
+    parent
+        .daemon
+        .as_ref()
+        .and_then(|daemon| daemon.get("sessionFile"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            parent
+                .saved
+                .as_ref()
+                .and_then(|saved| saved.get("path"))
+                .and_then(Value::as_str)
+        })
+}
+
+/// Whether `parent` sits exactly one level above `child`'s live summary:
+/// a spawned child's parent binding is depth-consistent (the parent is
+/// one level up); a fork's source binding sits at the SAME depth and is
+/// a sibling, never a parent.
+fn depth_consistent_parent(daemon: &Value, parent: &UnifiedRecord) -> bool {
+    let Some(depth) = daemon
+        .get("rlmDepth")
+        .and_then(Value::as_u64)
+        .filter(|depth| *depth > 0)
+    else {
+        return false;
+    };
+    let Some(parent_path) = daemon
+        .get("parentSessionPath")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+    else {
+        return false;
+    };
+    let parent_depth = parent
+        .daemon
+        .as_ref()
+        .and_then(|daemon| daemon.get("rlmDepth"))
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            parent
+                .saved
+                .as_ref()
+                .and_then(|saved| saved.get("rlmDepth"))
+                .and_then(Value::as_u64)
+        });
+    parent_record_file(parent) == Some(parent_path) && parent_depth == Some(depth - 1)
+}
+
 /// Whether `child` rolls up under `parent` (TS `isSubagentDescendantRecord`):
 /// agent lineage only — a branched/forked session links to its source but
 /// is a sibling chat, so it never nests or double-books totals. Resident
 /// children carry the subagent runtime kind; saved children go by depth.
+/// A live `top-level` runtime counts too when its opened file carries a
+/// spawn-consistent parent binding (the record index already links it).
 fn is_subagent_descendant(child: &UnifiedRecord, parent: &UnifiedRecord) -> bool {
     if let Some(daemon) = &child.daemon {
-        return is_subagent_summary(daemon);
+        return is_subagent_summary(daemon) || depth_consistent_parent(daemon, parent);
     }
     let child_depth = child
         .saved
@@ -635,7 +688,12 @@ pub fn build_rows(
     let mut base: Vec<BaseRow> = Vec::with_capacity(records.len());
     for (position, record) in records.iter().enumerate() {
         let summary = summary_for_record(record);
-        let kind = if is_subagent_summary(&summary) && !is_direct_scope_child(&summary) {
+        let kind = if !is_direct_scope_child(&summary)
+            && (is_subagent_summary(&summary)
+                || records
+                    .iter()
+                    .any(|parent| depth_consistent_parent(&summary, parent)))
+        {
             RowKind::Subagent
         } else {
             RowKind::Agent
@@ -1163,6 +1221,75 @@ mod tests {
         let rollups = compute_rollups(&records);
         let expanded: HashSet<String> = expanded.iter().map(ToString::to_string).collect();
         build_rows(&records, scope, &expanded, &rollups, None)
+    }
+
+    /// An opened child session nests under its parent: the live
+    /// `top-level` runtime carries the opened file's spawn-time parent
+    /// binding one level below the parent, so the view renders it as a
+    /// child row behind the parent's collapsed summary, never as a new
+    /// top-level agent.
+    #[test]
+    fn an_opened_child_nests_under_its_parent() {
+        let mut opened = parent_summary("opened");
+        opened["rlmDepth"] = json!(1);
+        opened["parentSessionPath"] = json!("/x/parent.jsonl");
+        opened["sessionName"] = json!("opened child");
+        let mut parent = parent_summary("parent");
+        parent["rlmDepth"] = json!(0);
+        let roster = vec![
+            roster_entry("parent", "idle", parent),
+            roster_entry("opened", "idle", opened),
+        ];
+        let rows = rows_for(&roster, None, &[]);
+        assert_eq!(
+            rows.iter().filter(|row| row.kind == RowKind::Agent).count(),
+            1,
+            "the parent is the only agent row: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.kind == RowKind::SubagentSummary && row.descendant_count == 1),
+            "the opened child rides the parent's aggregate: {rows:?}"
+        );
+        let rows = rows_for(&roster, None, &["file:/x/parent.jsonl"]);
+        let child = rows
+            .iter()
+            .find(|row| row.title == "opened child")
+            .expect("the expanded list renders the opened child");
+        assert_eq!(child.kind, RowKind::Subagent);
+        assert_eq!(
+            child.parent_identity.as_deref(),
+            Some("file:/x/parent.jsonl")
+        );
+    }
+
+    /// A forked session links its header to its source at the SAME depth:
+    /// the fork is a sibling chat and stays a top-level row, and the
+    /// source's aggregate never counts it.
+    #[test]
+    fn a_fork_of_a_child_stays_a_sibling_row() {
+        let mut source = parent_summary("source");
+        source["rlmDepth"] = json!(1);
+        let mut fork = parent_summary("fork");
+        fork["rlmDepth"] = json!(1);
+        fork["parentSessionPath"] = json!("/x/source.jsonl");
+        fork["sessionName"] = json!("forked chat");
+        let roster = vec![
+            roster_entry("source", "idle", source),
+            roster_entry("fork", "idle", fork),
+        ];
+        let rows = rows_for(&roster, None, &[]);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.kind == RowKind::Agent && row.title != "source name")
+                .count(),
+            1,
+            "the fork renders as its own top-level row: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::SubagentSummary),
+            "the source's aggregate never counts the fork: {rows:?}"
+        );
     }
 
     /// The Model column reads every wire shape of the model selector: a

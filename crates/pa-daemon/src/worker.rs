@@ -2560,28 +2560,15 @@ impl Worker {
             // The session's depth falls back to the opened file's header (TS
             // `config.rlmDepth ?? header.rlmDepth`): a resumed saved subagent
             // session keeps its persisted depth. The runtime kind keeps the
-            // create's runtime identity (TS `metadata.kind`) when the spawn
-            // carried one; a file opened without it derives from the
-            // header's spawn-time binding — an opened subagent stays a
-            // child row wherever it is opened from (the header's parent
-            // linkage is the truth: the open is a view action, not a
-            // re-parenting), so the live summary reports `subagent` and the
-            // roster nests it under its original parent exactly like the
-            // passive row did.
-            let header_binding = core
-                .store
-                .as_ref()
-                .map(|store| (store.rlm_depth(), store.header.parent_session.clone()));
+            // create's runtime identity (TS `metadata.kind`) — a resumed
+            // subagent file is a top-level runtime that merely carries its
+            // persisted depth, so the roster does not re-nest it under its
+            // original parent.
             let rlm_depth = rlm_depth
-                .or(header_binding.as_ref().and_then(|(depth, _)| *depth))
+                .or_else(|| core.store.as_ref().and_then(SessionFile::rlm_depth))
                 .unwrap_or(0);
             core.rlm_depth = rlm_depth;
-            core.runtime_kind = if rlm_child_id.is_some()
-                || (rlm_depth > 0
-                    && header_binding
-                        .as_ref()
-                        .is_some_and(|(_, parent)| parent.is_some()))
-            {
+            core.runtime_kind = if rlm_child_id.is_some() {
                 "subagent".to_string()
             } else {
                 "top-level".to_string()

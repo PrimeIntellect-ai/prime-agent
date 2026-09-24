@@ -361,15 +361,12 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     );
 
     // View run 2 (the flow's carried state): the drilled-in child is now
-    // a live session that STAYS a child row (the deliberate improvement
-    // over TS `metadata.kind`'s top-level default, the operator's
-    // directive): the live summary derives the runtime kind from the
-    // opened file's spawn-time header binding, so the view re-expands
-    // the parent's tree with the live child nested inside it (part of
-    // the parent's aggregate — a top-level flip would drop that count),
-    // it keeps its persisted `rlmDepth` from the session header, and its
-    // own saved descendants (the grandchild) stay behind its collapsed
-    // summary row.
+    // a live session that STAYS a child row: the live `top-level` runtime
+    // carries the opened file's spawn-time parent binding one level below
+    // the parent, so the view renders it nested inside the re-expanded
+    // parent tree (part of the parent's aggregate — a top-level flip
+    // would drop that count), with its persisted `rlmDepth` and its own
+    // saved descendants (the grandchild) behind its collapsed summary row.
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2_000 },
