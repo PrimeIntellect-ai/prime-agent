@@ -2365,15 +2365,21 @@ impl Supervisor {
                 worker_token,
                 summary,
                 removed,
+                sequence,
+                worker_instance_id,
                 ..
             } => {
                 let response = self
                     .handle_worker_roster_delta(
                         &command_id,
                         &type_name,
-                        worker_token,
-                        summary.clone(),
-                        removed.clone().unwrap_or_default(),
+                        crate::supervisor_roster::WorkerRosterDelta {
+                            worker_token: worker_token.clone(),
+                            summary: summary.clone(),
+                            removed: removed.clone().unwrap_or_default(),
+                            sequence: *sequence,
+                            worker_instance_id: worker_instance_id.clone(),
+                        },
                     )
                     .await;
                 (vec![response_line(&response)], false)
@@ -3279,6 +3285,21 @@ impl Supervisor {
             if token.as_str() != descriptor.authentication_token {
                 return fail("Session worker authentication failed");
             }
+            let previous_worker_instance_id = descriptor.worker_instance_id.clone();
+            // A REPLACEMENT registration flips the roster's stale-delta
+            // slot to the replacement BEFORE the replacement is exposed
+            // anywhere — the descriptor update below, the persisted
+            // record, the recorded registration: a predecessor's pull or
+            // frame still in flight must already meet the slot naming the
+            // replacement (its own stamp mismatches and drops), never the
+            // predecessor it carries. A same-process re-register (a
+            // dropped supervisor link, a create replay) keeps the slot
+            // untouched — the counter did not restart.
+            if previous_worker_instance_id.as_deref() != worker_instance_id.as_deref() {
+                let replacement = worker_instance_id.clone().unwrap_or_default();
+                let mut roster = self.roster.lock().unwrap();
+                roster.note_worker_generation(&resident.worker_id, &replacement);
+            }
             descriptor.pid = *pid;
             descriptor.socket_path = socket_path.clone();
             descriptor.worker_instance_id = worker_instance_id.clone();
@@ -3296,7 +3317,7 @@ impl Supervisor {
                 descriptor.session_file.as_deref(),
             );
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
-            match registration.session_id.clone() {
+            let durable_session_id = match registration.session_id.clone() {
                 Some(session_id) => Some(session_id),
                 None => descriptor
                     .session_file
@@ -3304,7 +3325,8 @@ impl Supervisor {
                     .as_deref()
                     .and_then(|file| Path::new(file).file_stem())
                     .map(|stem| stem.to_string_lossy().to_string()),
-            }
+            };
+            durable_session_id
         };
         let record = self.registry.record_registration(registration).await;
         // A restore pass that owns this session's roster row can settle it
@@ -3844,8 +3866,11 @@ impl Supervisor {
             _ => create_summary.clone(),
         };
         // The new session joins the agent roster immediately (subscribers
-        // see the roster_update before their next list).
-        self.write_roster_summary(&summary, Some(&resident.worker_id));
+        // see the roster_update before their next list) — as an
+        // authoritative pull write, so its embedded counter raises the
+        // stale-delta watermark for the resident.
+        self.write_roster_summary_for_resident(&resident, &summary)
+            .await;
         // The spawn append is a ledger-append moment: the new edge can be
         // the first time this family is live in the roster (a resumed
         // parent, a supervisor restart), so the seed runs here too - after
