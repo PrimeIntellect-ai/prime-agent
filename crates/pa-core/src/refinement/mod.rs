@@ -151,7 +151,7 @@ pub fn load_harness_state(harness_state_dir: &Path, scope: HarnessScope) -> Harn
     let mut state = empty_harness_state();
     state.schema = parsed_obj
         .get("schema")
-        .and_then(|value| value.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(1);
     for kind in REFINEMENT_KINDS {
         let kind_key = kind_from_name(kind);
@@ -224,7 +224,7 @@ pub fn merge_harness_states(
             }
         }
     }
-    merged.refinements = global_state.refinements.clone();
+    merged.refinements.clone_from(&global_state.refinements);
     if let Some(local_state) = local_state {
         merged.refinements.extend(local_state.refinements.clone());
     }
@@ -611,7 +611,7 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].scope, Some(HarnessScope::Global));
         // Session history wins on id conflicts.
-        let mut session_result = result.clone();
+        let mut session_result = result;
         session_result.summary = "session version".to_string();
         let merged = merge_refinement_history(&loaded, &[session_result]);
         assert_eq!(merged.len(), 1);

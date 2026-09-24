@@ -390,7 +390,7 @@ pub async fn fetch_prime_teams(
         }
         let total = data
             .get("total_count")
-            .and_then(|count| count.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(teams.len() as u64);
         if batch.is_empty() || teams.len() as u64 >= total {
             return Ok(teams);

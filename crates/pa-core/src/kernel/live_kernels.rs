@@ -25,7 +25,7 @@ fn registry() -> &'static Registry {
 pub(crate) fn add(inner: &std::sync::Arc<Inner>) {
     let mut entries = registry()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     entries.retain(|weak| weak.strong_count() > 0);
     if !contains(&entries, inner) {
         entries.push(Arc::downgrade(inner));
@@ -36,7 +36,7 @@ pub(crate) fn add(inner: &std::sync::Arc<Inner>) {
 pub(crate) fn remove(inner: &Inner) {
     let mut entries = registry()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     entries.retain(|weak| {
         weak.strong_count() == 0
             || !std::ptr::eq(
@@ -66,7 +66,7 @@ pub async fn shutdown_all_live_kernels() {
     let snapshots: Vec<std::sync::Arc<Inner>> = {
         let mut entries = registry()
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         entries.retain(|weak| weak.strong_count() > 0);
         entries.iter().filter_map(Weak::upgrade).collect()
     };
@@ -90,7 +90,7 @@ pub async fn shutdown_all_live_kernels() {
 pub fn live_kernel_count() -> usize {
     let mut entries = registry()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     entries.retain(|weak| weak.strong_count() > 0);
     entries.len()
 }

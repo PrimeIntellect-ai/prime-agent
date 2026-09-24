@@ -850,7 +850,7 @@ mod tests {
         McpServerConfig::Http {
             url: url.to_string(),
             headers: None,
-            bearer_token_env_var: env_var.map(|value| value.to_string()),
+            bearer_token_env_var: env_var.map(std::string::ToString::to_string),
             oauth,
             enabled: None,
             enabled_tools: None,

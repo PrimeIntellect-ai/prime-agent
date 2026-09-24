@@ -388,8 +388,8 @@ mod tests {
         )
         .unwrap();
         let resources = load_resources(ResourceLoaderOptions {
-            cwd: cwd.clone(),
-            agent_dir: agent_dir.clone(),
+            cwd: cwd,
+            agent_dir: agent_dir,
             ..Default::default()
         })
         .unwrap();

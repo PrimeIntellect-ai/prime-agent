@@ -112,7 +112,9 @@ mod tests {
         let tree = SessionTree::build(&entries);
         // Branch roots: parentless entries (excluding the header).
         assert_eq!(
-            tree.children.get(&Some("a".to_string())).map(|v| v.len()),
+            tree.children
+                .get(&Some("a".to_string()))
+                .map(std::vec::Vec::len),
             Some(2)
         );
         // Path to c: a -> c.

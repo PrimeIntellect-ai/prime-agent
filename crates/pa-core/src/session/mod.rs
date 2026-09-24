@@ -179,7 +179,7 @@ fn migrate_v1_to_v2(entries: &mut [FileEntry]) {
         ids.insert(id.clone());
         if let Some(base) = entry_base_mut(entry) {
             base.id = Some(id.clone());
-            base.parent_id = prev_id.clone();
+            base.parent_id.clone_from(&prev_id);
         }
         prev_id = Some(id);
         // Compaction firstKeptEntryIndex references an earlier entry whose id
@@ -189,7 +189,7 @@ fn migrate_v1_to_v2(entries: &mut [FileEntry]) {
                 .details
                 .as_ref()
                 .and_then(|details| details.get("firstKeptEntryIndex"))
-                .and_then(|value| value.as_u64())
+                .and_then(serde_json::Value::as_u64)
             {
                 compaction_fixes.push((position, index as usize));
             }
@@ -325,7 +325,7 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
     for &index in &path {
         match &entries[index] {
             FileEntry::ThinkingLevelChange { payload, .. } => {
-                thinking_level = payload.thinking_level.clone();
+                thinking_level.clone_from(&payload.thinking_level);
             }
             FileEntry::ServiceTierChange { payload, .. } => {
                 service_tier = payload.service_tier;
@@ -385,7 +385,7 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
             tokens_before: payload.tokens_before,
             retained_message_count: Some(retained.len() as u64),
             custom_instructions: payload.custom_instructions.clone(),
-            harness_digest: payload.harness_digest.clone(),
+            harness_digest: payload.harness_digest,
             timestamp: timestamp_to_millis(entries[compaction_index].timestamp()),
         }));
         messages.extend(retained);

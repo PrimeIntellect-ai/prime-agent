@@ -296,14 +296,9 @@ async fn run_attempts(
             AttemptOutcome::Aborted => break Ok(None),
             AttemptOutcome::Finished(turn) => match *turn {
                 None => {
-                    let error = side_agent
-                        .state()
-                        .await
-                        .error_message
-                        .clone()
-                        .unwrap_or_else(|| {
-                            "Side question produced no assistant message".to_string()
-                        });
+                    let error = side_agent.state().await.error_message.unwrap_or_else(|| {
+                        "Side question produced no assistant message".to_string()
+                    });
                     break Err(anyhow::anyhow!(error));
                 }
                 Some(message) => message,
@@ -425,7 +420,7 @@ async fn run_attempt(
     loop {
         while let Ok(text) = update_rx.try_recv() {
             if !text.is_empty() && text != *answer {
-                *answer = text.clone();
+                answer.clone_from(&text);
                 if !sink(answer) {
                     aborted = true;
                     side_agent.abort();
@@ -715,7 +710,7 @@ mod tests {
         let controller = AbortController::new();
         let signal = controller.signal();
         // The first partial answer cancels the run.
-        let sink: SideQuestionSink = Arc::new(|text| text.is_empty());
+        let sink: SideQuestionSink = Arc::new(str::is_empty);
         let result = run(&parent, "cancel me", &[], &signal, &sink).await;
         assert_eq!(result.status, SideQuestionStatus::Cancelled);
         assert_eq!(result.answer, "streaming text");

@@ -139,7 +139,7 @@ pub fn parse_prime_inference_model_catalog(
         );
         let reasoning = specs
             .get("supports_reasoning")
-            .and_then(|reasoning| reasoning.as_bool());
+            .and_then(serde_json::Value::as_bool);
         let has_specs = context_window.is_some()
             && max_tokens.is_some()
             && reasoning.is_some()

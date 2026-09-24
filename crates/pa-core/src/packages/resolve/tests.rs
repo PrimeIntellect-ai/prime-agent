@@ -39,7 +39,7 @@ impl Fixture {
         let temp_dir = root.path().to_path_buf();
         let settings = SettingsManager::create(&cwd, &agent_dir);
         let manager = PackageManager::with_options(PackageManagerOptions {
-            cwd: cwd.clone(),
+            cwd: cwd,
             agent_dir: agent_dir.clone(),
             settings,
             bundled_skills_dir: BundledSkillsDir::Disabled,
@@ -346,7 +346,7 @@ fn agents_skills_scan_stops_at_git_repo_root() {
         "nested",
     );
 
-    let mut nested_manager = Fixture::with_cwd(fixture.root, nested_cwd, fixture.agent_dir.clone());
+    let mut nested_manager = Fixture::with_cwd(fixture.root, nested_cwd, fixture.agent_dir);
     let result = nested_manager.manager.resolve().unwrap();
     assert!(result
         .skills
@@ -374,7 +374,7 @@ fn agents_skills_scan_goes_to_fs_root_without_a_repo() {
         "middle",
     );
 
-    let mut nested_manager = Fixture::with_cwd(fixture.root, nested_cwd, fixture.agent_dir.clone());
+    let mut nested_manager = Fixture::with_cwd(fixture.root, nested_cwd, fixture.agent_dir);
     let result = nested_manager.manager.resolve().unwrap();
     assert!(result
         .skills
@@ -1421,7 +1421,7 @@ fn bundled_skills_collect_with_websearch_excluded_until_enabled() {
         cwd: fixture.manager.cwd().to_path_buf(),
         agent_dir: fixture.agent_dir.clone(),
         settings: SettingsManager::create(fixture.manager.cwd(), &fixture.agent_dir),
-        bundled_skills_dir: BundledSkillsDir::Directory(bundled.clone()),
+        bundled_skills_dir: BundledSkillsDir::Directory(bundled),
         extra_builtin_skill_overrides: vec!["-other-skill/SKILL.md".to_string()],
     });
     let result = manager.resolve().unwrap();
@@ -1493,7 +1493,7 @@ fn disabled_builtin_skills_are_not_collected() {
         cwd: fixture.manager.cwd().to_path_buf(),
         agent_dir: fixture.agent_dir.clone(),
         settings,
-        bundled_skills_dir: BundledSkillsDir::Directory(bundled.clone()),
+        bundled_skills_dir: BundledSkillsDir::Directory(bundled),
         extra_builtin_skill_overrides: Vec::new(),
     });
 

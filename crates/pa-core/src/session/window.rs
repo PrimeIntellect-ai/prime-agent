@@ -336,7 +336,7 @@ impl WindowedSessionStore {
             }
             if leaf_id.is_none() {
                 leaf_id = Some(id.to_owned());
-                expected = leaf_id.clone();
+                expected.clone_from(&leaf_id);
             }
             let on_path = expected.as_deref() == Some(id);
             if on_path {
@@ -378,7 +378,7 @@ impl WindowedSessionStore {
                         }
                     }
                 }
-                expected = meta.parent_id.clone();
+                expected.clone_from(&meta.parent_id);
                 if let Some(message) = meta
                     .message
                     .as_ref()
@@ -668,7 +668,7 @@ impl WindowedSessionStore {
         self.settings.service_tier = self.snapshot.tier;
         self.settings.model.clone_from(&self.snapshot.model);
         if let Some(id) = entry.id() {
-            self.leaf_id = id.to_owned();
+            id.clone_into(&mut self.leaf_id);
         }
         self.entries.push(entry);
     }
@@ -793,7 +793,7 @@ pub(super) fn update_snapshot(snapshot: &mut Snapshot, entry: &FileEntry) {
     }
     match entry {
         FileEntry::ThinkingLevelChange { payload, .. } => {
-            snapshot.thinking = payload.thinking_level.clone();
+            snapshot.thinking.clone_from(&payload.thinking_level);
             snapshot.thinking_present = true;
         }
         FileEntry::ServiceTierChange { payload, .. } => {

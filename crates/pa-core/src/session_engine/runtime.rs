@@ -132,7 +132,7 @@ impl SessionRuntime {
             }),
         );
         let driver = self.goal_driver.clone();
-        let goal_session = session.clone();
+        let goal_session = session;
         // TS `_completeGoalFromHost` clears the queued goal contexts: a
         // continuation queued behind the completing turn (e.g. an owed
         // continuation delivered mid-turn) never runs post-completion.

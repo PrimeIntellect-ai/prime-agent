@@ -512,7 +512,7 @@ pub fn create_bash_tool_definition_with_options(
     let shell_path = options.shell_path.clone();
     let spawn_hook = options.spawn_hook.clone();
     let execute: crate::tools::tool_definition::ExecuteFn = {
-        let cwd = cwd.clone();
+        let cwd = cwd;
         Arc::new(move |_tool_call_id, params, signal, on_update| {
             let cwd = cwd.clone();
             let options = BashToolOptions {

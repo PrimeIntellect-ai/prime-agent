@@ -281,7 +281,7 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
         let mut streaks = self
             .failure_streaks
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let count = streaks.entry(job_id.to_string()).or_insert(0);
         *count = count.saturating_add(1);
         *count
@@ -293,7 +293,7 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
         let mut streaks = self
             .failure_streaks
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         streaks.remove(job_id);
     }
 }
