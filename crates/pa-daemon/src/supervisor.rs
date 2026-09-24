@@ -714,10 +714,7 @@ impl Supervisor {
     /// that starves the control plane for its whole duration. The pass
     /// reports its decisions as one `worker_adoption` event (counts only,
     /// never session payload).
-    async fn adopt_persisted_workers(
-        self: &Arc<Self>,
-        boot: AdoptionBoot,
-    ) -> tokio::task::JoinHandle<()> {
+    async fn adopt_persisted_workers(self: &Arc<Self>, boot: AdoptionBoot) {
         let descriptors = load_descriptors(&self.descriptor_dir, &self.options.socket_path);
         let adopted_live = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let revived = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -775,9 +772,9 @@ impl Supervisor {
         // roots. TS awaits its seed before adoption; the Rust daemon
         // deliberately accepts before and during adoption, so the seed
         // follows the pass and its one `roster_update` publish carries
-        // the rows to early subscribers. The handle is handed back for
-        // tests; callers detach it.
-        self.spawn_roster_boot_seed()
+        // the rows to early subscribers. Tests drain the pending-seed
+        // barrier for completion.
+        self.spawn_roster_boot_seed();
     }
 
     /// Adopt one persisted worker descriptor. Serialized against worker
@@ -5242,10 +5239,10 @@ mod tests {
 
         // Adoption adopts nothing (the descriptor dir is empty) and hands
         // back the boot seed task; the seed publishes the anchored family.
-        let seed = supervisor
+        supervisor
             .adopt_persisted_workers(AdoptionBoot::PlainStartup)
             .await;
-        seed.await.expect("boot seed task");
+        crate::supervisor_roster_seed::tests::drain_pending_seeds_for_tests(&supervisor).await;
         let row = supervisor
             .roster
             .lock()

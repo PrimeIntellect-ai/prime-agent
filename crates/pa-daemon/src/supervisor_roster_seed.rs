@@ -123,11 +123,17 @@ impl Supervisor {
     /// after the registry is populated instead - and its one
     /// `roster_update` publish carries the seeded rows to every client
     /// that subscribed before it finished.
-    pub(crate) fn spawn_roster_boot_seed(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
-        let supervisor = Arc::clone(self);
-        tokio::spawn(async move {
-            supervisor.seed_roster_ledger().await;
-        })
+    pub(crate) fn spawn_roster_boot_seed(self: &Arc<Self>) {
+        // The boot seed rides the same ordering barrier as the
+        // registration seeds: spawn + register under the lock a
+        // subscribe drains (the handle is owned by the table; callers
+        // that need completion drain it exactly like the subscribe).
+        if let Ok(mut pending) = self.pending_registration_seeds.lock() {
+            let supervisor = Arc::clone(self);
+            pending.push(tokio::spawn(async move {
+                supervisor.seed_roster_ledger().await;
+            }));
+        }
     }
 
     /// The registration seed: a worker that registers after the boot
@@ -141,21 +147,30 @@ impl Supervisor {
     /// walks the family here instead - registration answers on the
     /// client's open path, and the seed never blocks it.
     pub(crate) fn spawn_roster_registration_seed(self: &Arc<Self>, root: &Path) {
-        let supervisor = Arc::clone(self);
-        let root = root.to_path_buf();
-        let handle = tokio::spawn(async move {
-            let seeded = supervisor.seed_roster_family_edges(&root).await;
-            if !seeded.is_empty() {
-                // TS awaits its family reseed's hydration reads
-                // (`applyWorkerRosterSnapshot`'s `hydratedSeedEntry`
-                // awaits); the joined task keeps the registration seed's
-                // work bounded to its own background budget.
-                let _ = supervisor.spawn_seeded_hydration(seeded).await;
-            }
-        });
-        // A subscribe drains and awaits the in-flight seeds before its
-        // snapshot: a push must never overtake the snapshot answer.
+        // The spawn and the registration happen under the same lock a
+        // subscribe drains: a seed is either in the table a subscribe
+        // takes (and is awaited before its snapshot) or it spawns after
+        // the take (and its pushes land after the response - either way
+        // the push cannot overtake the snapshot answer). The hydration
+        // stays DETACHED inside the task: the tracked work is the
+        // lightweight seed (the ledger walk and the edge-only row
+        // writes), never the serial transcript reads - a subscribe must
+        // not block on hydration (that would reintroduce the
+        // large-session open latency this PR removes).
         if let Ok(mut pending) = self.pending_registration_seeds.lock() {
+            let supervisor = Arc::clone(self);
+            let root = root.to_path_buf();
+            let handle = tokio::spawn(async move {
+                let seeded = supervisor.seed_roster_family_edges(&root).await;
+                if !seeded.is_empty() {
+                    // The bounded background hydration reads each newly
+                    // seeded row's transcript once, detached: TS's
+                    // `applyWorkerRosterSnapshot` hydrates per edge, but
+                    // the ordering barrier only needs the rows
+                    // themselves.
+                    drop(supervisor.spawn_seeded_hydration(seeded));
+                }
+            });
             pending.push(handle);
         }
     }
@@ -523,6 +538,15 @@ pub(crate) mod tests {
         paths.iter().map(|path| PathBuf::from(*path)).collect()
     }
 
+    /// Await every in-flight seed task the way `handle_roster_subscribe`
+    /// does (the tests' completion barrier).
+    pub(crate) async fn drain_pending_seeds_for_tests(supervisor: &Supervisor) {
+        let pending = std::mem::take(&mut *supervisor.pending_registration_seeds.lock().unwrap());
+        for handle in pending {
+            handle.await.expect("seed task");
+        }
+    }
+
     #[test]
     fn descent_matches_at_any_parent_walk_step() {
         let edges = [
@@ -836,10 +860,8 @@ pub(crate) mod tests {
         );
         let mut events = supervisor.events.subscribe();
 
-        supervisor
-            .spawn_roster_boot_seed()
-            .await
-            .expect("boot seed task");
+        supervisor.spawn_roster_boot_seed();
+        drain_pending_seeds_for_tests(&supervisor).await;
         let pushes = drain_roster_pushes(&mut events);
         assert_eq!(pushes.len(), 1, "one publish: {pushes:?}");
         let row = roster_row_for_child(&supervisor, "sub-9");
@@ -886,10 +908,8 @@ pub(crate) mod tests {
             .write_roster_summary(&live_child_summary(&root_file, &child_file), Some("w-live"));
         let _ = drain_roster_pushes(&mut events);
 
-        supervisor
-            .spawn_roster_boot_seed()
-            .await
-            .expect("boot seed task");
+        supervisor.spawn_roster_boot_seed();
+        drain_pending_seeds_for_tests(&supervisor).await;
         let pushes = drain_roster_pushes(&mut events);
         assert!(pushes.is_empty(), "a present row never reseeds: {pushes:?}");
         let row = roster_row_for_child(&supervisor, "sub-9");
@@ -1138,11 +1158,19 @@ pub(crate) mod tests {
         // The subscribe drain: awaiting the in-flight seed tasks exactly
         // like handle_roster_subscribe does, so the pushes have landed
         // before the assertions read them.
-        let pending = std::mem::take(&mut *supervisor.pending_registration_seeds.lock().unwrap());
-        for handle in pending {
-            handle.await.expect("registration seed task");
+        drain_pending_seeds_for_tests(&supervisor).await;
+        // The subscribe drain lands the SEED publish; the hydration is
+        // detached inside the task, so its publish lands shortly after -
+        // a bounded retry-drain waits for it (the subscribe path itself
+        // never waits on hydration).
+        let mut pushes = drain_roster_pushes(&mut events);
+        for _ in 0..100 {
+            if pushes.len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            pushes.extend(drain_roster_pushes(&mut events));
         }
-        let pushes = drain_roster_pushes(&mut events);
         assert_eq!(
             pushes.len(),
             2,
