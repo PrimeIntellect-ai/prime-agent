@@ -57,9 +57,13 @@ pub(crate) fn markdown_rows(
         .collect()
 }
 
-/// TS `agentMessageSummaryLine` (`◆ <label> · <participant>[ · <preview>]`):
-/// the accent diamond, the muted label, then the participant (and the
-/// preview when present) joined by the dim `·` separators.
+/// TS `agentMessageSummaryLine` (`◆ <label> · <participant>[ · <preview>]`)
+/// with a SANCTIONED DIVERGENCE (Kevin directive 2026-09-24): the row's
+/// icon is the `✉` mail envelope — the a2a rows read as agent mail — where
+/// the TS binary still renders the `◆` diamond. The TS side is expected
+/// to adopt the same glyph. The accent icon, the muted label, then the
+/// participant (and the preview when present) joined by the dim `·`
+/// separators.
 pub(crate) fn agent_message_summary_line(
     direction: AgentMessageDirection,
     participant: &str,
@@ -67,7 +71,7 @@ pub(crate) fn agent_message_summary_line(
     theme: &Theme,
 ) -> Line {
     let mut line: Line = vec![
-        Span::styled("\u{25c6}".to_string(), theme.fg_style(ThemeColor::Accent)),
+        Span::styled("\u{2709}".to_string(), theme.fg_style(ThemeColor::Accent)),
         Span::raw(" "),
         Span::styled(
             direction.label().to_string(),
@@ -323,21 +327,21 @@ mod tests {
             message: "ready".to_string(),
         };
         let rows = render_agent_message(&row, Detail::Overview, &theme(), 60, true);
-        // Leading blank + the diamond summary line with the preview.
+        // Leading blank + the envelope summary line with the preview.
         assert_eq!(rows.len(), 2, "{rows:?}");
         assert!(rows[0].is_empty());
         let header = flat(&rows[1]);
         assert_eq!(
             header.trim_end(),
-            " \u{25c6} Agent message received \u{b7} from child model-probe \u{b7} ready"
+            " \u{2709} Agent message received \u{b7} from child model-probe \u{b7} ready"
         );
-        // Colors: accent diamond, muted label, dim participant, preview,
+        // Colors: accent envelope, muted label, dim participant, preview,
         // and the separators.
         let accent = theme().fg_style(ThemeColor::Accent);
         let muted = theme().fg_style(ThemeColor::Muted);
         let dim = theme().fg_style(ThemeColor::Dim);
         assert_eq!(rows[1][0], Span::styled(" ".to_string(), Style::default()));
-        assert_eq!(rows[1][1], Span::styled("\u{25c6}".to_string(), accent));
+        assert_eq!(rows[1][1], Span::styled("\u{2709}".to_string(), accent));
         assert_eq!(
             rows[1][3],
             Span::styled("Agent message received".to_string(), muted)
@@ -364,7 +368,7 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(
             flat(&rows[0]).trim_end(),
-            " \u{25c6} Agent message received \u{b7} from parent root"
+            " \u{2709} Agent message received \u{b7} from parent root"
         );
     }
 
@@ -416,7 +420,7 @@ mod tests {
             };
             let rows = render_agent_message(&row, Detail::Overview, &theme(), 80, false);
             assert!(
-                flat(&rows[0]).contains(&format!("\u{25c6} {}", direction.label())),
+                flat(&rows[0]).contains(&format!("\u{2709} {}", direction.label())),
                 "{direction:?} header: {}",
                 flat(&rows[0])
             );
