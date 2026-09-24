@@ -2812,41 +2812,6 @@ mod tests {
         );
     }
 }
-
-#[cfg(test)]
-mod chunk_selection_tests {
-    use super::chunk_selection;
-
-    /// A fully-covered line highlights to the chunk's own end (the
-    /// chunk-local length), not `chunk length - source start` — wrapped
-    /// continuations keep their highlight (Bugbot round-1 fix).
-    #[test]
-    fn wrapped_chunks_on_fully_covered_lines_highlight_to_their_end() {
-        let sel = Some(((0, 10), (2, 5)));
-        // A wrapped continuation chunk of line 1 (source cols 20..30).
-        let range = chunk_selection(sel, 1, 20, "wrapped text");
-        assert_eq!(range, Some((0, 12)), "the whole chunk highlights");
-        // The selection's ending line converts its source column.
-        let range = chunk_selection(sel, 2, 0, "abcde");
-        assert_eq!(range, Some((0, 5)));
-        // A chunk the selection ends before does not highlight.
-        let range = chunk_selection(sel, 2, 6, "fgh");
-        assert_eq!(range, None);
-        // The starting line clips at its start column: a chunk that
-        // begins exactly where the selection does is fully covered, and a
-        // chunk the selection starts AFTER stays clear.
-        let range = chunk_selection(sel, 0, 0, "01234567890123456789");
-        assert_eq!(range, Some((10, 20)));
-        let range = chunk_selection(sel, 0, 10, "0123456789");
-        assert_eq!(
-            range,
-            Some((0, 10)),
-            "the selection starts at this chunk's start"
-        );
-        let range = chunk_selection(sel, 0, 5, "01234");
-        assert_eq!(range, None, "the selection starts after this chunk ends");
-    }
-
     // ------------------------------------------------------------------
     // Condensed tool runs (the collapsed-view condensing, tool_runs.rs)
     // ------------------------------------------------------------------
@@ -3049,4 +3014,39 @@ mod chunk_selection_tests {
             "a fresh view renders the same block (the wall clock may move)"
         );
     }
+
+#[cfg(test)]
+mod chunk_selection_tests {
+    use super::chunk_selection;
+
+    /// A fully-covered line highlights to the chunk's own end (the
+    /// chunk-local length), not `chunk length - source start` — wrapped
+    /// continuations keep their highlight (Bugbot round-1 fix).
+    #[test]
+    fn wrapped_chunks_on_fully_covered_lines_highlight_to_their_end() {
+        let sel = Some(((0, 10), (2, 5)));
+        // A wrapped continuation chunk of line 1 (source cols 20..30).
+        let range = chunk_selection(sel, 1, 20, "wrapped text");
+        assert_eq!(range, Some((0, 12)), "the whole chunk highlights");
+        // The selection's ending line converts its source column.
+        let range = chunk_selection(sel, 2, 0, "abcde");
+        assert_eq!(range, Some((0, 5)));
+        // A chunk the selection ends before does not highlight.
+        let range = chunk_selection(sel, 2, 6, "fgh");
+        assert_eq!(range, None);
+        // The starting line clips at its start column: a chunk that
+        // begins exactly where the selection does is fully covered, and a
+        // chunk the selection starts AFTER stays clear.
+        let range = chunk_selection(sel, 0, 0, "01234567890123456789");
+        assert_eq!(range, Some((10, 20)));
+        let range = chunk_selection(sel, 0, 10, "0123456789");
+        assert_eq!(
+            range,
+            Some((0, 10)),
+            "the selection starts at this chunk's start"
+        );
+        let range = chunk_selection(sel, 0, 5, "01234");
+        assert_eq!(range, None, "the selection starts after this chunk ends");
+    }
+
 }

@@ -208,7 +208,7 @@ pub fn run_summary(chat: &[ChatEntry], run: ToolRun) -> RunSummary {
     let cards: Vec<&ToolCallCard> = chat[run.start..run.end]
         .iter()
         .filter_map(|entry| match entry {
-            ChatEntry::Tool(card) => Some(card),
+            ChatEntry::Tool(card) => Some(card.as_ref()),
             _ => None,
         })
         .collect();

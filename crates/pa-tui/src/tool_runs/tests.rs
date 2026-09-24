@@ -1,5 +1,7 @@
 use super::*;
-use crate::chat::{AssistantMessage, MessageBlock, ToolCallCard, ToolResultView};
+use crate::chat::{
+    working_icon_frame, AssistantMessage, MessageBlock, ToolCallCard, ToolResultView,
+};
 use crate::theme::{ColorMode, Theme};
 use crate::Line;
 
@@ -217,7 +219,7 @@ fn bash_cells_classify_as_bash() {
 
 #[test]
 fn wall_clock_prefers_the_wire_timestamps() {
-    let chat: Vec<ChatEntry> = (0..5)
+    let mut chat: Vec<ChatEntry> = (0..5)
         .map(|index| {
             let mut card = settled_card(&format!("c{index}"), "ipython");
             if let ChatEntry::Tool(card) = &mut card {
