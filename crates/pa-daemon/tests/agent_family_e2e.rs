@@ -461,32 +461,24 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         "sessionName": "parent",
         "runtimeKind": "top-level",
     });
-    let children = Arc::new(children);
-    // The send-path controller has no worker token: the direct peer path
-    // is refused and the supervisor-routed send (the TS remote path)
-    // delivers. The family view reads the supervisor roster, which IS
-    // worker-token gated (`list_agent_peers`), so it runs on the parent's
-    // real token from its worker descriptor.
+    // The controller mirrors the worker engine's own wiring: the
+    // parent's real worker token (read from its worker descriptor) drives
+    // the roster AND the peer transport - `list_agent_peers` (name/role
+    // resolution) and `get_worker_peer_transport` are both worker-token
+    // gated, so the production path is the token-carrying one.
     let controller = Arc::new(LinkAgentMessageController::new(
-        Arc::clone(&link),
-        parent_active_session_id.clone(),
-        "no-worker-token".to_string(),
-        Arc::new(std::sync::Mutex::new(Some(own_summary.clone()))),
-        Some(Arc::clone(&children)),
-    ));
-    let family_controller = LinkAgentMessageController::new(
         Arc::clone(&link),
         parent_active_session_id.clone(),
         parent_worker_token(&agent_dir, &parent_active_session_id),
         Arc::new(std::sync::Mutex::new(Some(own_summary))),
-        Some(children),
-    );
+        Some(Arc::new(children)),
+    ));
     let mut handlers = HostRequestHandlers::default();
     register_agent_message_host_handlers(Arc::clone(&controller) as Arc<_>, &mut handlers);
 
     // The family view lists the child (by every identifier form) and no
     // phantom sibling for it.
-    let family = family_controller.family().await.expect("family");
+    let family = controller.family().await.expect("family");
     let child_members: Vec<_> = family
         .iter()
         .filter(|member| member.relationship == AgentFamilyRelationship::Child)
@@ -788,10 +780,12 @@ async fn family_edges_never_cross_families_end_to_end() {
         // writes its session file; the durable artifact is the proof, so
         // wait for it (bounded) before reading.
         let kid_session_id = row.session_id.clone().expect("child persisted id");
+        // The rlm child id already carries its "sub-" prefix (spawn
+        // composes it); the artifact dir is named by the id verbatim.
         let artifact_dir = agent_dir
             .join("session-artifacts")
             .join(session)
-            .join(format!("sub-{}", handle.rlm_child_id));
+            .join(&handle.rlm_child_id);
         let expected_file = artifact_dir.join(format!("{kid_session_id}.jsonl"));
         let artifact_deadline = Instant::now() + Duration::from_secs(15);
         while !expected_file.is_file() {
@@ -804,16 +798,11 @@ async fn family_edges_never_cross_families_end_to_end() {
         }
         // The kid's own session file (the grandchild's durable parent
         // edge): the spawn's per-child artifact dir holds exactly one.
-        let kid_files: Vec<std::fs::DirEntry> = std::fs::read_dir(
-            agent_dir
-                .join("session-artifacts")
-                .join(session)
-                .join(format!("sub-{}", handle.rlm_child_id)),
-        )
-        .expect("kid artifact dir")
-        .flatten()
-        .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
-        .collect();
+        let kid_files: Vec<std::fs::DirEntry> = std::fs::read_dir(&artifact_dir)
+            .expect("kid artifact dir")
+            .flatten()
+            .filter(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("jsonl"))
+            .collect();
         assert_eq!(kid_files.len(), 1, "one kid session file: {kid_files:?}");
         kids.push((
             row.active_session_id.clone().expect("child active id"),
