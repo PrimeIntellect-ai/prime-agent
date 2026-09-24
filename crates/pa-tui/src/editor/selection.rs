@@ -58,7 +58,7 @@ impl Editor {
         let ((start_line, start_col), (end_line, end_col)) = self.selection_range()?;
         if start_line == end_line {
             let line = &self.lines[start_line];
-            return Some(char_suffix(&char_prefix(line, end_col), start_col).to_string());
+            return Some(char_suffix(&char_prefix(line, end_col), start_col));
         }
         let mut out = String::new();
         let first = char_suffix(&self.lines[start_line], start_col);
@@ -107,35 +107,35 @@ impl Editor {
     }
 
     pub(crate) fn select_word_left(&mut self) {
-        self.extend_selection(|e| e.move_word_backwards());
+        self.extend_selection(Editor::move_word_backwards);
     }
 
     pub(crate) fn select_word_right(&mut self) {
-        self.extend_selection(|e| e.move_word_forwards());
+        self.extend_selection(Editor::move_word_forwards);
     }
 
     pub(crate) fn select_line_start(&mut self) {
-        self.extend_selection(|e| e.move_to_line_start());
+        self.extend_selection(Editor::move_to_line_start);
     }
 
     pub(crate) fn select_line_end(&mut self) {
-        self.extend_selection(|e| e.move_to_line_end());
+        self.extend_selection(Editor::move_to_line_end);
     }
 
     pub(crate) fn select_doc_start(&mut self) {
-        self.extend_selection(|e| e.move_to_doc_start());
+        self.extend_selection(Editor::move_to_doc_start);
     }
 
     pub(crate) fn select_doc_end(&mut self) {
-        self.extend_selection(|e| e.move_to_doc_end());
+        self.extend_selection(Editor::move_to_doc_end);
     }
 
     pub(crate) fn select_paragraph_up(&mut self) {
-        self.extend_selection(|e| e.move_paragraph_backward());
+        self.extend_selection(Editor::move_paragraph_backward);
     }
 
     pub(crate) fn select_paragraph_down(&mut self) {
-        self.extend_selection(|e| e.move_paragraph_forward());
+        self.extend_selection(Editor::move_paragraph_forward);
     }
 
     /// Select the whole text (macOS `Cmd+A` / editors' select-all): the
