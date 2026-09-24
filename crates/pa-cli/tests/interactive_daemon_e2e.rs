@@ -2645,9 +2645,7 @@ async fn tui_side_question_pane_flow() {
             // The side question runs outside the turn state (the WaitIdle
             // barrier cannot see it), and its answer is a daemon-driven
             // stream: wait for the rendered condition (early exit) instead
-            // of a fixed wall-clock window — the fixed 3s window missed the
-            // stream whenever the suite's own parallel load starved the
-            // daemon, the within-suite flake this test pinned.
+            // of a fixed wall-clock window.
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Paris, obviously".to_string(),
                 timeout_ms: 30_000,

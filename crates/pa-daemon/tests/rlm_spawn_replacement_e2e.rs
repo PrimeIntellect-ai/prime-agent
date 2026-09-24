@@ -77,10 +77,9 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
             "15000",
         )
         // The worker-connect budget (probe + connect + auth) must survive
-        // a battery-loaded box: this test launches four workers while the
-        // whole workspace runs around them, and a 30s budget failed
-        // starved boots in full gates (the flake this suite pins). The
-        // override stays under the spawn admission's 120s link budget.
+        // parallel-load e2e runs: this test launches four workers while
+        // the whole workspace runs around them. The override stays under
+        // the spawn admission's 120s link budget.
         .env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "90000")
         .spawn()
         .expect("spawn pa-daemon supervisor");
@@ -139,9 +138,9 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        // Generous: on a battery-loaded box the supervisor process
-        // competes for CPU with the whole workspace run, and a line can
-        // lag far past an interactive box's latency.
+        // Generous: under parallel load the supervisor process competes
+        // for CPU with the whole workspace run, and a line can lag far
+        // past an interactive box's latency.
         let deadline = Instant::now() + Duration::from_secs(60);
         self.reader
             .get_mut()

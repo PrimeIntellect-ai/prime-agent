@@ -401,10 +401,9 @@ pub enum HeadlessStep {
     /// Hold until the current turn finishes (bounded by `timeout_ms`).
     WaitIdle { timeout_ms: u64 },
     /// Hold until a frame rendered after this step contains `needle`
-    /// (bounded by `timeout_ms`): the verifier's condition wait for
-    /// daemon-driven rows (side-question answers, streamed notices), which
-    /// a fixed `WaitMs` window can only approximate — and miss on a
-    /// battery-loaded box.
+    /// (bounded by `timeout_ms`): the condition wait for daemon-driven
+    /// rows (side-question answers, streamed notices), which arrive on
+    /// the event cadence rather than a known wall-clock delay.
     WaitRender { needle: String, timeout_ms: u64 },
     /// Hold until the newest frame no longer contains `needle` (bounded by
     /// `timeout_ms`): the verifier's condition wait for a surface closing
@@ -1214,46 +1213,65 @@ async fn run_interactive_surface(
                 // rows land on the loop's event/tick cadence, so this rides
                 // out any load latency instead of a fixed wall-clock
                 // window); `WaitGone` holds until the newest frame cleared
-                // it. Like the idle barrier it holds the whole queued batch
-                // behind it, and its timeout pops with a note (the note
-                // never embeds the needle: the note row renders into
-                // frames, and quoting the needle would make a timed-out
-                // wait satisfy the very condition that failed).
-                let satisfied = renderer.headless_frames().is_some_and(|frames| {
-                    if present {
-                        frames
-                            .get(wait_render_baseline..)
-                            .unwrap_or_default()
-                            .iter()
-                            .any(|frame| frame.contains(needle.as_str()))
-                    } else {
-                        !frames
-                            .last()
-                            .is_some_and(|frame| frame.contains(needle.as_str()))
-                    }
+                // it. Frames captured before the barrier reached the queue
+                // head never satisfy it — the baseline is recorded at
+                // arming and only subsequent frames count, except for the
+                // newest frame at arming time (the current state: a
+                // condition that already holds pops immediately instead of
+                // stalling on a repaint that may never come). Like the
+                // idle barrier it holds the whole queued batch behind it,
+                // and its timeout pops with a note (the note never embeds
+                // the needle: the note row renders into frames, and quoting
+                // the needle would make a timed-out wait satisfy the very
+                // condition that failed).
+                let current_state_ok = renderer.headless_frames().is_some_and(|frames| {
+                    frames
+                        .last()
+                        .is_some_and(|frame| frame.contains(needle.as_str()) == present)
                 });
-                if satisfied {
-                    wait_render_deadline = None;
-                    pending.pop_front();
-                } else if wait_render_deadline.is_none() {
-                    wait_render_baseline = renderer.headless_frames().map_or(0, <[String]>::len);
-                    wait_render_deadline = Some(Instant::now() + Duration::from_millis(timeout_ms));
-                    inputs_pending = false;
-                } else if Instant::now() > wait_render_deadline.unwrap() {
-                    wait_render_deadline = None;
-                    pending.pop_front();
-                    session.note(
-                        if present {
-                            "timed out waiting for the headless render condition"
-                        } else {
-                            "timed out waiting for the headless render to clear"
-                        },
-                        &mut view,
-                    );
+                if wait_render_deadline.is_none() {
+                    if current_state_ok {
+                        pending.pop_front();
+                    } else {
+                        wait_render_baseline =
+                            renderer.headless_frames().map_or(0, <[String]>::len);
+                        wait_render_deadline =
+                            Some(Instant::now() + Duration::from_millis(timeout_ms));
+                        inputs_pending = false;
+                    }
                 } else {
-                    // The barrier holds the batch while the render
-                    // catches up.
-                    inputs_pending = false;
+                    let satisfied = renderer.headless_frames().is_some_and(|frames| {
+                        if present {
+                            frames
+                                .get(wait_render_baseline..)
+                                .unwrap_or_default()
+                                .iter()
+                                .any(|frame| frame.contains(needle.as_str()))
+                        } else {
+                            !frames
+                                .last()
+                                .is_some_and(|frame| frame.contains(needle.as_str()))
+                        }
+                    });
+                    if satisfied {
+                        wait_render_deadline = None;
+                        pending.pop_front();
+                    } else if Instant::now() > wait_render_deadline.unwrap() {
+                        wait_render_deadline = None;
+                        pending.pop_front();
+                        session.note(
+                            if present {
+                                "timed out waiting for the headless render condition"
+                            } else {
+                                "timed out waiting for the headless render to clear"
+                            },
+                            &mut view,
+                        );
+                    } else {
+                        // The barrier holds the batch while the render
+                        // catches up.
+                        inputs_pending = false;
+                    }
                 }
             } else if let Some(input) = pending.pop_front() {
                 session.dirty = true;

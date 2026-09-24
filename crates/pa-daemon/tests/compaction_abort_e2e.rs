@@ -241,10 +241,9 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
             "15000",
         )
         // The session create launches a worker inside this same connect
-        // budget; a battery-loaded box (the whole workspace running around
-        // this test) can starve a fresh worker's boot past the 30s default,
-        // so the e2e uses the load-aware override (under the create's own
-        // link budget).
+        // budget; a parallel-load e2e run can starve a fresh worker's
+        // boot past the 30s default, so the e2e uses the load-aware
+        // override (under the create's own link budget).
         .env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "90000")
         .spawn()
         .expect("spawn pa-daemon supervisor");
@@ -296,8 +295,8 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        // Generous: a battery-loaded box can starve the supervisor
-        // process far past an interactive box's latency.
+        // Generous: parallel load can starve the supervisor process far
+        // past an interactive box's latency.
         let deadline = Instant::now() + Duration::from_secs(90);
         self.reader
             .get_mut()
@@ -348,10 +347,10 @@ impl Client {
     }
 
     /// Park broadcast events until one matches `probe` (early exit) or the
-    /// budget runs out. On a battery-loaded box (the whole workspace
-    /// running around this test) the supervisor's event forwarding can lag
-    /// many seconds behind the run itself, so fixed short drains are
-    /// flakes; the generous budget keeps the solo path fast.
+    /// budget runs out. The supervisor's event forwarding can lag seconds
+    /// behind the run itself under parallel load, so the wait observes the
+    /// event instead of a fixed short drain; the generous budget keeps
+    /// the solo path fast.
     fn wait_for_event(
         &mut self,
         budget: Duration,
@@ -517,12 +516,11 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
         crossed["success"], true,
         "crossing prompt failed: {crossed}"
     );
-    // The run's trailing frames can land well after the response on a
-    // battery-loaded box (the supervisor's event forwarding competes with
-    // the whole workspace run), so wait for the run's LAST expected event
-    // instead of a fixed short drain — the aborted `compaction_end` lands
-    // after the disclosure pair, and its arrival implies the whole
-    // sequence.
+    // The run's trailing frames can land well after the response (the
+    // supervisor's event forwarding lags under parallel load), so wait
+    // for the run's LAST expected event instead of a fixed short drain —
+    // the aborted `compaction_end` lands after the disclosure pair, and
+    // its arrival implies the whole sequence.
     client.wait_for_event(
         Duration::from_secs(60),
         "the aborted threshold compaction_end",
@@ -820,8 +818,8 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     // The forwarded `compaction_start` must reach an attached client
     // before the freeze: the client's loader is up exactly because that
     // frame flowed through the supervisor — which is also what arms the
-    // supervisor's token. The generous budget rides out a battery-loaded
-    // box's event-forwarding lag.
+    // supervisor's token. The generous budget rides out event-forwarding
+    // lag under parallel load.
     client.wait_for_event(
         Duration::from_secs(60),
         "the compaction_start broadcast",
@@ -854,8 +852,8 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     let ack_elapsed = sent_at.elapsed();
     assert_eq!(aborted["success"], true, "abort failed: {aborted}");
     // The bound proves the ack never waited on the wedged worker's route
-    // (30s), while staying generous for a battery-loaded box's scheduling
-    // lag on the supervisor's own (immediate, worker-free) answer.
+    // (30s), while staying generous for scheduling lag on the
+    // supervisor's own (immediate, worker-free) answer.
     assert!(
         ack_elapsed < Duration::from_secs(25),
         "the acknowledgment waited on the wedged worker: {ack_elapsed:?}"
