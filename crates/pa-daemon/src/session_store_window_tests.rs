@@ -145,8 +145,8 @@ fn window_preserves_transcript_metadata_and_append_then_hydrate() {
         )
     );
     assert_eq!(
-        crate::session_stats::session_stats(&window, Some(100000)),
-        crate::session_stats::session_stats(&full, Some(100000))
+        crate::session_stats::session_stats(&window, Some(100_000)),
+        crate::session_stats::session_stats(&full, Some(100_000))
     );
     assert!(window.rewrite().is_err());
     window
@@ -173,8 +173,8 @@ fn window_preserves_transcript_metadata_and_append_then_hydrate() {
     assert_eq!(reopened_window.session_name(), Some("renamed"));
     assert_eq!(reopened_window.state(), reopened_full.state());
     assert_eq!(
-        crate::session_stats::session_stats(&reopened_window, Some(100000)),
-        crate::session_stats::session_stats(&reopened_full, Some(100000))
+        crate::session_stats::session_stats(&reopened_window, Some(100_000)),
+        crate::session_stats::session_stats(&reopened_full, Some(100_000))
     );
     window.append_session_info("pending name");
     let leaf = window.leaf_id.clone();
@@ -214,8 +214,8 @@ fn captured_window_matches_full_transcript_and_stats() {
         let reference = SessionFile::open(&path).unwrap();
         assert_eq!(window.messages(), reference.messages());
         assert_eq!(
-            crate::session_stats::session_stats(&window, Some(200000)),
-            crate::session_stats::session_stats(&reference, Some(200000))
+            crate::session_stats::session_stats(&window, Some(200_000)),
+            crate::session_stats::session_stats(&reference, Some(200_000))
         );
         assert_eq!(
             (

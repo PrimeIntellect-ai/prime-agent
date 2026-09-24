@@ -155,7 +155,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -177,7 +177,7 @@ impl Client {
     }
 
     fn read_response(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(240);
+        let deadline = Instant::now() + Duration::from_mins(4);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -264,7 +264,7 @@ fn run_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
 
 /// Poll for a kernel cell's receipt content (the cell writes its verdict).
 fn await_receipt(receipt: &Path) -> String {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         if let Ok(content) = std::fs::read_to_string(receipt) {
             return content;
@@ -451,7 +451,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
 
     // The child runs: its worker session is resident in the supervisor and
     // tracked in the parent's registry.
-    let child_row = wait_until(&mut client, Duration::from_secs(60), |client| {
+    let child_row = wait_until(&mut client, Duration::from_mins(1), |client| {
         let rows = rlm_children_rows(client, "g1", &parent_id);
         rows.into_iter()
             .find(|row| row["id"] == json!(child_id) && row["status"] == "running")
@@ -473,7 +473,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
 
     // The supervisor's death monitoring closes the child: its worker
     // leaves the resident roster.
-    wait_until(&mut client, Duration::from_secs(60), |client| {
+    wait_until(&mut client, Duration::from_mins(1), |client| {
         let summaries = roster_summaries(client, "l2");
         summaries
             .iter()
@@ -511,7 +511,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
     // could track anything, and the death close owns its children now.
     // (get_rlm_children fails while the worker restarts; poll for the
     // respawned answer.)
-    wait_until(&mut client, Duration::from_secs(60), |client| {
+    wait_until(&mut client, Duration::from_mins(1), |client| {
         client.send_command(
             "g3",
             json!({ "type": "get_rlm_children", "activeSessionId": parent_id }),
@@ -623,7 +623,7 @@ fn sigkill_keeps_a_created_root_session_running() {
     sigkill(pid);
     // The respawn (and with it the death close) settles before the
     // registry reads empty.
-    wait_until(&mut client, Duration::from_secs(60), |client| {
+    wait_until(&mut client, Duration::from_mins(1), |client| {
         client.send_command(
             "g1",
             json!({ "type": "get_rlm_children", "activeSessionId": parent_id }),

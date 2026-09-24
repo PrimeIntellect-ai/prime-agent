@@ -308,7 +308,7 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
             Err(error) => {
                 if self.is_current(scope, generation, opts)
                     && scope != PUBLIC_SCOPE
-                    && matches!(error.status(), Some(401) | Some(403))
+                    && matches!(error.status(), Some(401 | 403))
                 {
                     self.clear(scope);
                     return None;

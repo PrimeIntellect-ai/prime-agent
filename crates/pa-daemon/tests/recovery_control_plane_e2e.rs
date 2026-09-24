@@ -260,7 +260,7 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
         );
     }
     let supervisor_pid = daemon.child.id();
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     let worker_pids = loop {
         let children = child_pids_of(supervisor_pid);
         if children.len() == SESSIONS {
@@ -326,7 +326,7 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
     // covers the update restore pass; plain-restart adoption is covered by
     // the client's reconnect retry).
     let log_path = pa_daemon::paths::daemon_log_path(&socket, &agent_dir);
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         if distinct(workers_registered_since(&log_path, &restart_before)).len() == SESSIONS {
             break;

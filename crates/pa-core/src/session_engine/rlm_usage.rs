@@ -554,7 +554,7 @@ mod tests {
     async fn captured_ts_fixture_attributes_with_frozen_total_tokens() {
         // Parts sum 24,184 with totalTokens 23,032; input 2,690 captured.
         let raw_parent = usage_block(2_690, 1_577, 19_917, 0, 23_032, 0.0);
-        let child = usage_block(50_208, 2_929, 0, 0, 53_137, 0.0089957);
+        let child = usage_block(50_208, 2_929, 0, 0, 53_137, 0.008_995_7);
         let (_tmp, manager) = manager_with_assistant(raw_parent).await;
         let producer = RlmChildUsageAttributions::new(manager.clone());
         producer.register_spawn("sub-abc12345").await;
@@ -574,7 +574,7 @@ mod tests {
         assert_eq!(row["childUsage"]["input"], 50_208);
         assert_eq!(row["childUsage"]["output"], 2_929);
         assert_eq!(row["childUsage"]["totalTokens"], 53_137);
-        assert!((child_usage_total(row, "childUsage") - 0.0089957).abs() < 1e-9);
+        assert!((child_usage_total(row, "childUsage") - 0.008_995_7).abs() < 1e-9);
         assert_eq!(row["aggregateUsage"]["input"], 52_898);
         assert_eq!(row["aggregateUsage"]["output"], 4_506);
         assert_eq!(row["aggregateUsage"]["cacheRead"], 19_917);
@@ -589,7 +589,7 @@ mod tests {
                 + row["aggregateUsage"]["cacheWrite"].as_u64().unwrap(),
             77_321
         );
-        assert!((child_usage_total(row, "aggregateUsage") - 0.0089957).abs() < 1e-9);
+        assert!((child_usage_total(row, "aggregateUsage") - 0.008_995_7).abs() < 1e-9);
 
         // The in-memory fold (the manager's live copy of the assistant
         // row) carries the aggregate, and the live totalTokens stays the

@@ -60,7 +60,7 @@ const UI_REQUEST_TIMEOUT_MS: u64 = 10_000;
 /// How long a fetched model catalog stays fresh (TS
 /// `MODEL_CATALOG_REFRESH_TTL_MS`); a `/model` open past it refreshes
 /// again in the background.
-const MODEL_CATALOG_REFRESH_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const MODEL_CATALOG_REFRESH_TTL: std::time::Duration = std::time::Duration::from_mins(1);
 /// Cap on the detach request during the exit path: the client must exit
 /// promptly even when the worker socket is wedged.
 const EXIT_DETACH_TIMEOUT_MS: u64 = 600;
@@ -2388,9 +2388,9 @@ impl SessionUi {
     /// not the delta — carries the token truth.
     fn track_stream_activity(&mut self, event: &Value, view: &mut AgentView) {
         let (activity, download) = match event.get("type").and_then(Value::as_str) {
-            Some("thinking_start") | Some("thinking_delta") => ("Thinking", true),
-            Some("text_start") | Some("text_delta") => ("Writing", true),
-            Some("toolcall_start") | Some("toolcall_delta") => ("Writing code", true),
+            Some("thinking_start" | "thinking_delta") => ("Thinking", true),
+            Some("text_start" | "text_delta") => ("Writing", true),
+            Some("toolcall_start" | "toolcall_delta") => ("Writing code", true),
             _ => return,
         };
         if let Some(working) = &mut view.working {

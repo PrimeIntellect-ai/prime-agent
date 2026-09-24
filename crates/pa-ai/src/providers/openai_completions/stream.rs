@@ -749,7 +749,7 @@ mod tests {
             "reasoning": false,
             "input": ["text"],
             "cost": { "input": input, "output": output, "cacheRead": 0.0, "cacheWrite": 0.0 },
-            "contextWindow": 128000,
+            "contextWindow": 128_000,
             "maxTokens": 8192,
         })
     }

@@ -203,7 +203,7 @@ mod tests {
             user_row("u1"),
             assistant_row(
                 "a1",
-                captured_usage(50_208, 2_929, 53_137, 0.0089957),
+                captured_usage(50_208, 2_929, 53_137, 0.008_995_7),
                 "toolUse",
             ),
             custom_message_row(
@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(*origin, ChildUsageOrigin::SpawnTask);
         assert_eq!(usage.input, 50_208);
         assert_eq!(usage.output, 2_929);
-        assert!((usage.cost.total.as_f64() - 0.0089957).abs() < 1e-9);
+        assert!((usage.cost.total.as_f64() - 0.008_995_7).abs() < 1e-9);
         // The agent-message batch folded its turn's usage.
         let (_, agent_usage) = &batches[1];
         assert_eq!(agent_usage.input, 1_000);

@@ -126,7 +126,7 @@ pub fn walk_passive_rlm_children(
 /// once a message exists, draft otherwise.
 fn inactive_lifecycle(info: &SessionInfo) -> &'static str {
     match info.state.as_deref() {
-        Some("archived") | Some("crash") => "archived",
+        Some("archived" | "crash") => "archived",
         _ if info.message_count > 0 => "live",
         _ => "draft",
     }

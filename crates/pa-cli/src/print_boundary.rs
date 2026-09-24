@@ -1041,7 +1041,7 @@ mod tests {
         let mock = std::sync::Arc::new(pa_telemetry::MockSink::new());
         let mut config = pa_telemetry::TelemetryClientConfig::new("install-1");
         config.batch_size = 1;
-        config.flush_interval = std::time::Duration::from_secs(600);
+        config.flush_interval = std::time::Duration::from_mins(10);
         config.sinks = vec![mock.clone() as std::sync::Arc<dyn pa_telemetry::TelemetrySink>];
         let client = pa_telemetry::TelemetryClient::spawn(config).expect("spawn client");
         let telemetry = pa_core::session_engine::telemetry::TelemetryWiring {
@@ -1388,7 +1388,7 @@ mod tests {
             }),
             json!({
                 "compaction": {
-                    "enabled": true, "reserveTokens": 1, "keepRecentTokens": 100000
+                    "enabled": true, "reserveTokens": 1, "keepRecentTokens": 100_000
                 }
             }),
             None,
@@ -1758,7 +1758,7 @@ mod tests {
             json!({ "responses": [{"text": "seed reply"}] }),
             json!({
                 "compaction": {
-                    "enabled": true, "reserveTokens": 1, "keepRecentTokens": 100000
+                    "enabled": true, "reserveTokens": 1, "keepRecentTokens": 100_000
                 }
             }),
             None,

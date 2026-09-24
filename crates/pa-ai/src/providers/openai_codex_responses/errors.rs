@@ -532,10 +532,7 @@ pub fn resolve_codex_service_tier(
     request_service_tier: Option<String>,
 ) -> Option<String> {
     if response_service_tier.as_deref() == Some("default")
-        && matches!(
-            request_service_tier.as_deref(),
-            Some("flex") | Some("priority")
-        )
+        && matches!(request_service_tier.as_deref(), Some("flex" | "priority"))
     {
         return request_service_tier;
     }

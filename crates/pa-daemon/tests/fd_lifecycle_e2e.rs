@@ -694,7 +694,7 @@ fn supervisor_restart_loop_leaves_no_orphan_workers() {
         .expect("send SIGKILL to worker");
 
     // The restart loop runs to its failure budget and removes the session.
-    wait_until(Duration::from_secs(60), || {
+    wait_until(Duration::from_mins(1), || {
         client.send_command("l", serde_json::json!({ "type": "list" }));
         let list = client.read_response("l");
         list["data"]["sessions"]
