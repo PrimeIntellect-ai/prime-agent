@@ -412,7 +412,35 @@ fn passivated_summary(summary: Value) -> Value {
     if let Some(session_id) = object.get("sessionId").and_then(Value::as_str) {
         object.insert("id".to_string(), json!(session_id));
     }
+    normalize_model_to_durable_pair(object);
     summary
+}
+
+/// The passivated row's `model` is the DURABLE pair
+/// `{provider, modelId}` - the same row shape the ledger-seed hydrate
+/// writes (`hydrate_summary_display`) and the TS `SessionSummary.model`
+/// the agents view reads. A live worker's `get_state` summary carries the
+/// fuller live-catalog descriptor `{id, name, provider, reasoning}` (the
+/// #2631 reasoning-controls metadata); the stop keeps the durable
+/// display field, so the live descriptor collapses to the pair - the id
+/// IS the durable model id.
+fn normalize_model_to_durable_pair(object: &mut serde_json::Map<String, Value>) {
+    let Some(model) = object.get("model") else {
+        return;
+    };
+    let Some(provider) = model.get("provider").and_then(Value::as_str) else {
+        return;
+    };
+    if model.get("modelId").and_then(Value::as_str).is_some() {
+        return;
+    }
+    let Some(model_id) = model.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    object.insert(
+        "model".to_string(),
+        json!({ "provider": provider, "modelId": model_id }),
+    );
 }
 
 #[cfg(test)]
@@ -517,6 +545,42 @@ mod tests {
         assert_eq!(row.summary["cwd"], "/the/live/cwd");
         assert_eq!(row.summary["model"]["provider"], "live");
         assert_eq!(row.summary["thinkingLevel"], "low");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A live worker's summary carries the full live-catalog model
+    /// descriptor (`{id, name, provider, reasoning}`, the #2631
+    /// reasoning-controls metadata); the passivated row keeps the
+    /// DURABLE display field - the `{provider, modelId}` pair the
+    /// ledger-seed hydrate writes and the agents view reads (the
+    /// thinking_level e2e's post-stop assertion).
+    #[tokio::test]
+    async fn passivation_normalizes_the_live_model_descriptor_to_the_durable_pair() {
+        let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        register_root_worker(&supervisor, "w-root", &root_file).await;
+        let agent_dir = dir.join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        append_family_edge(&agent_dir, &sessions_dir, "sub-9", &root_file, &child_file);
+        let mut live = live_child_summary(&root_file, &child_file);
+        live["model"] = json!({
+            "id": "mock-1",
+            "name": "Mock 1",
+            "provider": "battery",
+            "reasoning": true,
+        });
+        let _ = supervisor.write_roster_summary(&live, Some("w-child"));
+        let mut events = supervisor.events.subscribe();
+        let _ = drain_roster_pushes(&mut events);
+        supervisor.passivate_roster_worker("w-child", false).await;
+        let pushes = drain_roster_pushes(&mut events);
+        assert_eq!(pushes.len(), 1, "the passivated row publishes: {pushes:?}");
+        let row = roster_row_for_child(&supervisor, "sub-9");
+        assert_eq!(
+            row.summary["model"],
+            json!({ "provider": "battery", "modelId": "mock-1" }),
+            "the durable pair, not the live descriptor: {row:?}"
+        );
+        assert_eq!(row.summary["thinkingLevel"], json!("low"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
