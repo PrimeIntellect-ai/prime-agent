@@ -258,8 +258,16 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
         "the rejection names the holder's active session: {error}"
     );
     assert!(
-        error.contains("Close it there first, or open a different session."),
-        "the rejection gives the next step: {error}"
+        error.contains("prime-agent-rust --daemon-socket <socket> --resume foreign01ab3c"),
+        "the continue path is the exact attach command: {error}"
+    );
+    assert!(
+        error.contains(&format!("kill {}", std::process::id())),
+        "the take-over path names the holder pid: {error}"
+    );
+    assert!(
+        error.contains("Session: foreign01ab3c"),
+        "the footer names the session: {error}"
     );
     // This test process runs a build of this product (the cargo test
     // binary under /target/), so the holder classification reads as

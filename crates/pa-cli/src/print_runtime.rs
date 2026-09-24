@@ -766,6 +766,7 @@ fn assert_session_not_active_in_daemon(
                 pid: Some(owner.pid),
                 active_session_id: owner.active_session_id,
             },
+            Some(session_path),
         ));
     }
     Ok(())

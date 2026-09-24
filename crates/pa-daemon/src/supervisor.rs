@@ -1171,7 +1171,8 @@ impl Supervisor {
             return Err(match response.error_info {
                 Some(error_info) => {
                     let message = response.error.clone().unwrap_or_default();
-                    self.log_line(&format!("relaunch create refused — {message}"));
+                    let headline = message.lines().next().unwrap_or_default();
+                    self.log_line(&format!("relaunch create refused — {headline}"));
                     TypedCreateRejection {
                         message,
                         error_info,
@@ -1994,18 +1995,23 @@ impl Supervisor {
             return Err(match response.error_info {
                 Some(error_info) => {
                     let message = response.error.clone().unwrap_or_default();
+                    // The typed rejection's text is multi-line (the
+                    // actionable refusal); the log keeps one record per
+                    // line, so only its headline rides the log line (the
+                    // full text reached the client on the wire).
+                    let headline = message.lines().next().unwrap_or_default();
                     match &error_info {
                         pa_types::daemon::DaemonErrorInfo::SessionAlreadyActive {
                             session_path,
                             active_session_id,
                         } => self.log_line(&format!(
-                            "create refused: session file {session_path} is already active{} — {message}",
+                            "create refused: session file {session_path} is already active{} — {headline}",
                             active_session_id
                                 .as_deref()
                                 .map(|id| format!(" in {id}"))
                                 .unwrap_or_default(),
                         )),
-                        _ => self.log_line(&format!("create refused — {message}")),
+                        _ => self.log_line(&format!("create refused — {headline}")),
                     }
                     TypedCreateRejection {
                         message,

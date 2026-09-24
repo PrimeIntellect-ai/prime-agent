@@ -9,8 +9,12 @@
 //! product by resolving its pid to the process image and classifying the
 //! executable - best-effort by design, the same contract as the liveness
 //! probes: an unresolvable holder stays anonymous rather than a wrong
-//! claim. The daemon logs every refused create (the supervisor's rotating
-//! log), so a silent-looking failure still leaves a clear record.
+//! claim - and it is actionable (operator-directed): the two paths out
+//! carry copy-pasteable commands, never a bare description - continue in
+//! the holder's product (the exact `--resume` command for it), or take the
+//! session over on this daemon (`kill` the holder, then retry). The daemon
+//! logs every refused create (the supervisor's rotating log), so a
+//! silent-looking failure still leaves a clear record.
 
 use crate::lease::SessionAlreadyActiveError;
 use crate::protocol::{response_failure, DaemonResponse};
@@ -113,34 +117,161 @@ pub fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor
 }
 
 /// The user-facing refusal for a session file a live foreign process
-/// holds: the holder's pid is resolved and classified live, then rendered.
-pub fn refusal_message(hold: &HoldIdentity) -> String {
-    refusal_for_flavor(classify_holder(hold.pid), hold)
+/// holds: the holder's pid is resolved and classified live, then rendered
+/// with the session's identity (the footer grounds the message in what
+/// the picker names). `session_path` is the refused file (the name probe
+/// is best-effort: an unreadable file renders without the name, never
+/// fails the refusal).
+pub fn refusal_message(hold: &HoldIdentity, session_path: Option<&Path>) -> String {
+    refusal_for_flavor(classify_holder(hold.pid), hold, session_path)
 }
 
-/// The refusal text for a classified holder. The TypeScript wording is
-/// the product's specified text byte-for-byte; the other flavors keep
-/// the same shape (what happened, the holder, the next step) without the
-/// cross-product sentence, which would be a wrong claim about them.
-/// Split from [`refusal_message`] so the exact wording stays testable
-/// against a synthetic classification, not a live foreign process.
-pub fn refusal_for_flavor(flavor: HolderFlavor, hold: &HoldIdentity) -> String {
-    let holder_id = hold.holder_id();
-    match flavor {
-        HolderFlavor::TypeScriptProduct => format!(
-            "This session is currently open in your TypeScript version of Prime Agent \
-(active in {holder_id}). Close it there first, or open a different session. \
-The Rust and TS versions share the same session store but not the same daemon."
-        ),
-        HolderFlavor::ThisBuild => format!(
-            "This session is currently open in another Rust build of Prime Agent \
-(active in {holder_id}). Close it there first, or open a different session."
-        ),
-        HolderFlavor::AnotherProcess => format!(
-            "This session is currently open in another process \
-(active in {holder_id}). Close it there first, or open a different session."
-        ),
+/// The holder's recorded identity for the footer and the `--resume`
+/// commands: its active session id, else the file path the picker names.
+fn session_label(hold: &HoldIdentity, session_path: Option<&Path>) -> String {
+    if let Some(id) = hold
+        .active_session_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+    {
+        return id.to_string();
     }
+    session_path
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "this session".to_string())
+}
+
+/// The session's name from its durable file, for the footer (best-effort:
+/// the lease is held, but reading the file for its name never fails the
+/// refusal).
+fn session_name_of(session_path: Option<&Path>) -> Option<String> {
+    let path = session_path?;
+    crate::session_store::SessionFile::open(path)
+        .ok()?
+        .session_name()
+        .map(str::to_string)
+}
+
+/// The take-over option: kill the holder and retry. With a resolved pid
+/// the `kill` is the surgical command; without one the state-root sweep
+/// (`shutdown --force`, which stops every daemon it discovers) is the
+/// honest fallback. The sweep binary is the flavor's own product.
+fn take_over_lines(hold: &HoldIdentity, sweep_binary: &str) -> Vec<String> {
+    match hold.pid {
+        Some(pid) => vec![
+            "• Take over on this daemon:".to_string(),
+            format!("  kill {pid}"),
+            "  Then retry — the file unlocks when the holder exits.".to_string(),
+        ],
+        None => vec![
+            "• Take over on this daemon:".to_string(),
+            format!("  {sweep_binary} shutdown --force"),
+            "  Then retry — it stops every daemon in the state root.".to_string(),
+        ],
+    }
+}
+
+/// The footer: the session's id (or file path) with its name, the same
+/// identity the session picker shows.
+fn session_footer(hold: &HoldIdentity, session_path: Option<&Path>) -> String {
+    let label = session_label(hold, session_path);
+    match session_name_of(session_path) {
+        Some(name) => format!("Session: {label} ({name})"),
+        None => format!("Session: {label}"),
+    }
+}
+
+/// The refusal text for a classified holder: what happened (the
+/// classified headline), then the paths out with copy-pasteable commands
+/// (operator-directed): continue in the holder's product, or take the
+/// session over on this daemon. The TypeScript product owns the session
+/// it holds, so its continue option is the TS `--resume` command — the
+/// one product that daemon serves; this-build holders point at the other
+/// daemon's socket (the `--daemon-socket` flag connects to it), and an
+/// anonymous holder claims nothing. Split from [`refusal_message`] so the
+/// exact wording stays testable against a synthetic classification, not a
+/// live foreign process.
+pub fn refusal_for_flavor(
+    flavor: HolderFlavor,
+    hold: &HoldIdentity,
+    session_path: Option<&Path>,
+) -> String {
+    let holder_id = hold.holder_id();
+    let id = hold
+        .active_session_id
+        .as_deref()
+        .filter(|id| !id.is_empty());
+    let mut lines = Vec::new();
+    match flavor {
+        HolderFlavor::TypeScriptProduct => {
+            lines.push(format!(
+                "This session is currently open in your TypeScript version of Prime Agent \
+(active in {holder_id}). The Rust and TS versions share the same session store but not \
+the same daemon, so this build cannot open the file while that process holds it."
+            ));
+            lines.push(String::new());
+            lines.push("• Continue where you left off:".to_string());
+            match id {
+                Some(id) => {
+                    lines.push(format!("  prime-agent --resume {id}"));
+                    lines
+                        .push("  (switch to the TypeScript product — its daemon owns this session)"
+                            .to_string());
+                }
+                None => {
+                    lines.push("  prime-agent --resume".to_string());
+                    lines
+                        .push("  (switch to the TypeScript product and pick the session — its daemon owns this session)"
+                            .to_string());
+                }
+            }
+            lines.push(String::new());
+            lines.extend(take_over_lines(hold, "prime-agent"));
+        }
+        HolderFlavor::ThisBuild => {
+            lines.push(format!(
+                "This session is currently open in another Rust build of Prime Agent \
+(active in {holder_id}) — another daemon or window of this product holds the file's \
+runtime lease."
+            ));
+            lines.push(String::new());
+            lines.push("• Continue where you left off:".to_string());
+            match id {
+                Some(id) => {
+                    lines.push(format!(
+                        "  prime-agent-rust --daemon-socket <socket> --resume {id}"
+                    ));
+                    lines.push(
+                        "  (<socket> is that instance's daemon socket, from the shell where \
+you started it — that daemon owns this session)"
+                            .to_string(),
+                    );
+                }
+                None => {
+                    lines.push("  prime-agent-rust --resume".to_string());
+                    lines.push(
+                        "  (switch to the window or shell where that instance is running — its \
+daemon owns this session)"
+                            .to_string(),
+                    );
+                }
+            }
+            lines.push(String::new());
+            lines.extend(take_over_lines(hold, "prime-agent-rust"));
+        }
+        HolderFlavor::AnotherProcess => {
+            lines.push(format!(
+                "This session is currently open in another process \
+(active in {holder_id}) — a live process this daemon does not host holds the file's \
+runtime lease."
+            ));
+            lines.push(String::new());
+            lines.extend(take_over_lines(hold, "prime-agent-rust"));
+        }
+    }
+    lines.push(String::new());
+    lines.push(session_footer(hold, session_path));
+    lines.join("\n")
 }
 
 /// The create response for a create the runtime lease refused: the typed
@@ -152,7 +283,10 @@ pub(crate) fn create_failure_response(error: &anyhow::Error) -> DaemonResponse {
         Some(active) => response_failure(
             None,
             "create",
-            &refusal_message(&HoldIdentity::from_error(active)),
+            &refusal_message(
+                &HoldIdentity::from_error(active),
+                Some(Path::new(&active.session_path)),
+            ),
             Some(active.error_info()),
         ),
         None => response_failure(None, "create", &error.to_string(), None),
@@ -165,43 +299,106 @@ mod tests {
     use pa_types::daemon::DaemonErrorInfo;
 
     /// The full message for a TypeScript-product holder, byte-for-byte:
-    /// the product-specified refusal, with the holder id in the
-    /// parenthetical.
+    /// the classified headline, the two actionable paths (continue in the
+    /// TS product with the exact command; take over on this daemon with
+    /// the exact kill), and the session footer. No third "open a
+    /// different session" option: the user is already in the picker
+    /// (operator-directed, 2026-09-24).
     #[test]
     fn the_typescript_refusal_is_exact() {
         let hold = HoldIdentity {
             pid: Some(4242),
             active_session_id: Some("ts01ab".to_string()),
         };
-        assert_eq!(
-            refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold),
-            "This session is currently open in your TypeScript version of Prime Agent \
-(active in ts01ab). Close it there first, or open a different session. \
-The Rust and TS versions share the same session store but not the same daemon."
-        );
+        let message = refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold, None);
+        let expected = "This session is currently open in your TypeScript version of Prime Agent \
+(active in ts01ab). The Rust and TS versions share the same session store but not \
+the same daemon, so this build cannot open the file while that process holds it.
+
+• Continue where you left off:
+  prime-agent --resume ts01ab
+  (switch to the TypeScript product — its daemon owns this session)
+
+• Take over on this daemon:
+  kill 4242
+  Then retry — the file unlocks when the holder exits.
+
+Session: ts01ab";
+        assert_eq!(message, expected);
     }
 
-    /// The holder id falls back to the pid when the holder recorded no
-    /// active session id, and to the anonymous wording without a pid.
+    /// The this-build refusal carries the `--daemon-socket` attach shape
+    /// (the exact flag a client uses to reach another daemon) and the
+    /// rust sweep binary; an anonymous holder gets the take-over path
+    /// only — no product is claimed for a process the classifier cannot
+    /// name.
     #[test]
-    fn the_holder_id_falls_back_pid_then_anonymous() {
+    fn the_thisbuild_and_anonymous_refusals_stay_actionable() {
         let hold = HoldIdentity {
-            pid: Some(4242),
-            active_session_id: None,
+            pid: Some(4300),
+            active_session_id: Some("rs01cd".to_string()),
         };
+        let message = refusal_for_flavor(HolderFlavor::ThisBuild, &hold, None);
         assert!(
-            refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold)
-                .contains("(active in pid 4242)"),
-            "the pid holder id renders"
+            message.contains("prime-agent-rust --daemon-socket <socket> --resume rs01cd"),
+            "the attach command names the flag and the session: {message}"
         );
+        assert!(
+            message.contains("  kill 4300"),
+            "the take-over names the holder pid: {message}"
+        );
+        assert!(
+            message.contains("Session: rs01cd"),
+            "the footer names the session: {message}"
+        );
+
         let hold = HoldIdentity {
             pid: None,
             active_session_id: None,
         };
+        let message = refusal_for_flavor(HolderFlavor::AnotherProcess, &hold, None);
         assert!(
-            refusal_for_flavor(HolderFlavor::AnotherProcess, &hold)
-                .contains("(active in another process)"),
-            "the anonymous holder id renders"
+            message.contains("(active in another process)"),
+            "the anonymous holder id renders: {message}"
+        );
+        assert!(
+            message.contains("prime-agent-rust shutdown --force"),
+            "without a pid the sweep command is the take-over path: {message}"
+        );
+    }
+
+    /// The footer carries the session's name when the file resolves one
+    /// (a real session file), and falls back to the file path when the
+    /// holder recorded no session id.
+    #[test]
+    fn the_footer_reads_the_session_name_and_the_path_fallback() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let file = dir.path().join("session.jsonl");
+        std::fs::write(&file, concat!(
+            "{\"type\":\"session\",\"version\":3,\"id\":\"sess01\",\n",
+            "\"timestamp\":\"2026-09-24T00:00:00Z\",\"cwd\":\"/w\"}\n",
+            "{\"type\":\"session_info\",\"id\":\"e1\",\n",
+            "\"timestamp\":\"2026-09-24T00:00:01Z\",\"name\":\"lane work\"}\n"
+        ))
+        .expect("write session file");
+        let hold = HoldIdentity {
+            pid: Some(4242),
+            active_session_id: Some("ts01ab".to_string()),
+        };
+        let message = refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold, Some(&file));
+        assert!(
+            message.ends_with("Session: ts01ab (lane work)"),
+            "the footer names the session and its name: {message}"
+        );
+
+        let hold = HoldIdentity {
+            pid: Some(4242),
+            active_session_id: None,
+        };
+        let message = refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold, Some(&file));
+        assert!(
+            message.ends_with(&format!("Session: {}", file.display())),
+            "without a holder id the footer names the file: {message}"
         );
     }
 

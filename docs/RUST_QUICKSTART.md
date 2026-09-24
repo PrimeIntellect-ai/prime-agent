@@ -99,19 +99,31 @@ the binary manually without the launcher and you must export this yourself
 
 **A session open in one product refuses to open in the other.** The session
 file's runtime lease belongs to the product that has it open; the other product
-refuses with:
+refuses with the session, who holds it, and the two ways out — concrete
+commands, so nothing is left to guess:
 
 > This session is currently open in your TypeScript version of Prime Agent
-> (active in \<holder-id\>). Close it there first, or open a different session.
-> The Rust and TS versions share the same session store but not the same
-> daemon.
+> (active in \<holder-id\>). The Rust and TS versions share the same session
+> store but not the same daemon, so this build cannot open the file while that
+> process holds it.
+>
+> • Continue where you left off:
+>   `prime-agent --resume \<session-id\>`
+>   (switch to the TypeScript product — its daemon owns this session)
+>
+> • Take over on this daemon:
+>   `kill \<holder-pid\>`
+>   Then retry — the file unlocks when the holder exits.
+>
+> Session: \<session-id\> (\<session-name\>)
 
 — and the TypeScript product refuses in the same situation when this build
-holds the session. `<holder-id>` is the holder's identity: its active session
-id when it recorded one (the TS session id), else the holder pid. Close the
-session in the product that holds it — the file's lease unlocks when the
-holder exits — or open a different session rather than racing one file in
-both products.
+holds the session (the Rust-holder flavor of the same refusal names the
+`prime-agent-rust --daemon-socket <socket> --resume <session-id>` attach
+command instead). `<holder-id>` is the holder's identity: its active session
+id when it recorded one (the TS session id), else the holder pid. Never race
+one file in both products — continue in the holder's product, or stop the
+holder and retry.
 
 **Refusals leave a log record.** The daemon logs every refused session open
 to its rotating log: `~/.prime/agent/logs/daemon.sock.<hash>.log` — the
