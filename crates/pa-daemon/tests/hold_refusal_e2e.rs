@@ -258,7 +258,7 @@ fn a_foreign_lease_holder_rejects_the_create_with_the_hold_refusal() {
         "the rejection names the holder's active session: {error}"
     );
     assert!(
-        error.contains("prime-agent-rust --daemon-socket <socket> --resume foreign01ab3c"),
+        error.contains("prime-agent-rust --daemon-socket <socket> --resume 'foreign01ab3c'"),
         "the continue path is the exact attach command: {error}"
     );
     assert!(

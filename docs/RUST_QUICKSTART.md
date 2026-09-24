@@ -88,8 +88,11 @@ prime-agent-rust agents       # running, idle, and saved sessions
 prime-agent-rust shutdown    # the TS state-root sweep (see Uninstall before relying on it)
 ```
 
-The rest of the public commands (`attach`, `status`, `doctor`, `update`,
-`prompt`, ...) mirror the TS product.
+The rest of the public commands (`attach`, `status`, `doctor`, `prompt`,
+...) mirror the TS product. To update this installation, re-run the
+installer (the `update` command needs the managed `releases/` layout a
+self-updating install uses, which the installer's flat
+`share/prime-agent-rust/` tree is not).
 
 ## Both versions installed — what to expect
 
@@ -160,7 +163,7 @@ Uninstall — close the sessions, stop the Rust daemon, remove the two paths:
 
 ```bash
 # Stop your sessions first (a held lease refuses the payload swap):
-prime-agent-rust daemon kill <active-session-id>   # or close them in the TUI
+prime-agent-rust stop <active-session-id>          # or close them in the TUI
 # The Rust daemon's socket is pinned OUTSIDE the shared state root, so the
 # TS-root `shutdown` sweep does not reach it — stop it directly. (Its pid is
 # also the first line of its log, beside the socket's hash-named file under

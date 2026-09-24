@@ -323,7 +323,7 @@ fn print_resume_refuses_a_foreign_lease_holder() {
             "runtime lease.\n",
             "\n",
             "• Continue where you left off:\n",
-            "  prime-agent-rust --daemon-socket <socket> --resume foreign01ab3c\n",
+            "  prime-agent-rust --daemon-socket <socket> --resume 'foreign01ab3c'\n",
             "  (<socket> is that instance's daemon socket, from the shell where you started ",
             "it — that daemon owns this session)\n",
             "\n",

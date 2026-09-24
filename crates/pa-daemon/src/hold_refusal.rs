@@ -48,7 +48,7 @@ impl HoldIdentity {
             .as_deref()
             .filter(|id| !id.is_empty())
         {
-            return id.to_string();
+            return single_line(id);
         }
         match self.pid {
             Some(pid) => format!("pid {pid}"),
@@ -155,15 +155,15 @@ pub fn refusal_message(hold: &HoldIdentity, session_path: Option<&Path>) -> Stri
     refusal_for_flavor(flavor, hold, session_path, holder_exe.as_deref())
 }
 
-/// The holder's recorded identity for the footer and the `--resume`
-/// commands: its active session id, else the file path the picker names.
+/// The holder's recorded identity for the footer: its active session id,
+/// else the file path the picker names.
 fn session_label(hold: &HoldIdentity, session_path: Option<&Path>) -> String {
     if let Some(id) = hold
         .active_session_id
         .as_deref()
         .filter(|id| !id.is_empty())
     {
-        return id.to_string();
+        return single_line(id);
     }
     session_path
         .map(|path| path.display().to_string())
@@ -205,6 +205,24 @@ fn session_name_of(session_path: Option<&Path>) -> Option<String> {
     name
 }
 
+/// One paste-safe line: control characters (a session id from a hostile
+/// lease could carry newlines) collapse to spaces, so no interpolated
+/// value can ever re-flow the refusal's structure.
+fn single_line(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// A single-quoted shell word: the recorded id cannot break out of the
+/// argument (the one character a quoted word cannot hold, the quote
+/// itself, is re-quoted as `'\''`), so pasting the command always runs
+/// `--resume` with exactly the id the lease recorded.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 /// The take-over option: kill the holder and retry. With a resolved pid
 /// the `kill` is the surgical command; without one the state-root sweep
 /// (`shutdown --force`, which stops every daemon it discovers) is the
@@ -228,6 +246,10 @@ fn take_over_lines(
             let kill = match holder_exe
                 .and_then(|exe| exe.file_name())
                 .map(|name| name.to_string_lossy().to_string())
+                // An image with control characters cannot ride in the
+                // comment at all (a newline would make the next line a
+                // new pasted command): those names stay anonymous.
+                .filter(|image| image.chars().all(|c| !c.is_control()))
             {
                 Some(image) => format!("  kill {pid} # the holder is {image}"),
                 None => format!("  kill {pid}"),
@@ -286,7 +308,10 @@ the same daemon, so this build cannot open the file while that process holds it.
             lines.push("• Continue where you left off:".to_string());
             match id {
                 Some(id) => {
-                    lines.push(format!("  prime-agent --resume {id}"));
+                    lines.push(format!(
+                        "  prime-agent --resume {}",
+                        shell_quote(&single_line(id))
+                    ));
                     lines.push(
                         "  (switch to the TypeScript product — its daemon owns this session)"
                             .to_string(),
@@ -313,7 +338,8 @@ runtime lease."
             match id {
                 Some(id) => {
                     lines.push(format!(
-                        "  prime-agent-rust --daemon-socket <socket> --resume {id}"
+                        "  prime-agent-rust --daemon-socket <socket> --resume {}",
+                        shell_quote(&single_line(id))
                     ));
                     lines.push(
                         "  (<socket> is that instance's daemon socket, from the shell where \
@@ -390,7 +416,7 @@ mod tests {
 the same daemon, so this build cannot open the file while that process holds it.
 
 • Continue where you left off:
-  prime-agent --resume ts01ab
+  prime-agent --resume 'ts01ab'
   (switch to the TypeScript product — its daemon owns this session)
 
 • Take over on this daemon:
@@ -399,6 +425,46 @@ the same daemon, so this build cannot open the file while that process holds it.
 
 Session: ts01ab";
         assert_eq!(message, expected);
+    }
+
+    /// A hostile recorded id cannot escape the paste-safe commands: the
+    /// resume argument rides as one quoted shell word (control
+    /// characters collapse first), and a holder image carrying a newline
+    /// never reaches the kill line's comment.
+    #[test]
+    fn hostile_values_stay_paste_safe() {
+        let hold = HoldIdentity {
+            pid: Some(4242),
+            active_session_id: Some("evil'; rm -rf ~".to_string()),
+        };
+        let message = refusal_for_flavor(
+            HolderFlavor::TypeScriptProduct,
+            &hold,
+            None,
+            Some(std::path::Path::new("/bin/hold\ner")),
+        );
+        assert!(
+            message.contains("prime-agent --resume 'evil'\\''; rm -rf ~'"),
+            "the id rides as one quoted word: {message}"
+        );
+        assert!(
+            message.contains("(active in evil'; rm -rf ~)"),
+            "the headline still names the id: {message}"
+        );
+        assert!(
+            message.lines().any(|line| line == "  kill 4242"),
+            "the newline image drops the kill annotation entirely: {message}"
+        );
+
+        let hold = HoldIdentity {
+            pid: None,
+            active_session_id: Some("li\nne".to_string()),
+        };
+        let message = refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold, None, None);
+        assert!(
+            message.contains("prime-agent --resume 'li ne'"),
+            "control characters in the id collapse before quoting: {message}"
+        );
     }
 
     /// The this-build refusal carries the `--daemon-socket` attach shape
@@ -414,7 +480,7 @@ Session: ts01ab";
         };
         let message = refusal_for_flavor(HolderFlavor::ThisBuild, &hold, None, None);
         assert!(
-            message.contains("prime-agent-rust --daemon-socket <socket> --resume rs01cd"),
+            message.contains("prime-agent-rust --daemon-socket <socket> --resume 'rs01cd'"),
             "the attach command names the flag and the session: {message}"
         );
         assert!(
