@@ -174,7 +174,8 @@ fn cursor_stays_hidden_and_positioned_across_mount_picker_and_suspend() {
 
     // Let the resumed app settle, then audit the whole byte stream.
     harness.drain_until_quiet(8);
-    let stream = &harness.output()[..];
+    let collected = harness.output();
+    let stream: &[u8] = &collected;
 
     // Exactly one cursor-show byte window in the whole session: the
     // suspend release tail. A mount, a frame, a picker, or a resume that

@@ -2053,6 +2053,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         let row = |title: &str| AgentsViewRow {
             section: Section::Idle,
@@ -2171,6 +2172,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -2197,6 +2199,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = roster;
         mode.rebuild_rows();
@@ -2479,6 +2482,7 @@ mod tests {
             }),
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("s1", "idle", parent_summary("s1")),
@@ -2512,6 +2516,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -2597,6 +2602,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::with_user_bindings(cfg),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -2797,6 +2803,7 @@ mod tests {
             }),
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -2830,6 +2837,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -2942,6 +2950,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = roster;
         mode.rebuild_rows();
