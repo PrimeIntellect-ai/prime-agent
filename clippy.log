@@ -1,0 +1,649 @@
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded anyhow v1.0.104
+  Downloaded zerovec-derive v0.11.6
+  Downloaded allocator-api2 v0.2.21
+  Downloaded zmij v1.0.23
+  Downloaded anstyle v1.0.14
+  Downloaded base64 v0.22.1
+  Downloaded async-compression v0.4.47
+  Downloaded atomic-waker v1.1.2
+  Downloaded zerovec v0.11.8
+  Downloaded zlib-rs v0.6.8
+  Downloaded anstream v1.0.0
+  Downloaded idna_adapter v1.2.2
+  Downloaded tower-layer v0.3.3
+  Downloaded tower-service v0.3.3
+  Downloaded anstyle-query v1.1.5
+  Downloaded tokio-macros v2.7.2
+  Downloaded bit-vec v0.8.0
+  Downloaded try-lock v0.2.5
+  Downloaded adler2 v2.0.1
+  Downloaded autocfg v1.5.1
+  Downloaded unicode-truncate v1.1.0
+  Downloaded tokio-rustls v0.26.5
+  Downloaded tokio-tungstenite v0.28.0
+  Downloaded tinyvec v1.13.3
+  Downloaded tracing-attributes v0.1.31
+  Downloaded unicode-ident v1.0.24
+  Downloaded unicode-properties v0.1.4
+  Downloaded tracing-core v0.1.36
+  Downloaded tungstenite v0.28.0
+  Downloaded tokio-util v0.7.19
+  Downloaded tower v0.5.3
+  Downloaded tower-http v0.6.11
+  Downloaded typenum v1.20.1
+  Downloaded unicode-normalization v0.1.25
+  Downloaded unicode-segmentation v1.13.3
+  Downloaded unicode-width v0.1.14
+  Downloaded unicode-width v0.2.0
+  Downloaded bytes v1.12.1
+  Downloaded tracing v0.1.44
+  Downloaded base64ct v1.8.3
+  Downloaded cfg_aliases v0.2.2
+  Downloaded block-buffer v0.10.4
+  Downloaded clap_derive v4.6.7
+  Downloaded darling_macro v0.24.1
+  Downloaded paste v1.0.15
+  Downloaded bitflags v2.13.2
+  Downloaded colorchoice v1.0.5
+  Downloaded tokio v1.53.1
+  Downloaded cfg-if v1.0.4
+  Downloaded indexmap v2.14.2
+  Downloaded castaway v0.2.4
+  Downloaded foldhash v0.1.5
+  Downloaded anstyle-parse v1.0.0
+  Downloaded zerofrom v0.1.8
+  Downloaded yoke-derive v0.8.3
+  Downloaded parking_lot_core v0.9.12
+  Downloaded zeroize v1.9.0
+  Downloaded num-bigint-dig v0.8.6
+  Downloaded once_cell v1.21.4
+  Downloaded cassowary v0.3.0
+  Downloaded clap_lex v1.1.1
+  Downloaded crc32fast v1.5.2
+  Downloaded zerocopy v0.8.57
+  Downloaded errno v0.3.14
+  Downloaded form_urlencoded v1.2.2
+  Downloaded lru-slab v0.1.3
+  Downloaded mio v1.2.3
+  Downloaded quinn-udp v0.5.15
+  Downloaded itoa v1.0.18
+  Downloaded libm v0.2.16
+  Downloaded quote v1.0.47
+  Downloaded zerofrom-derive v0.1.8
+  Downloaded pem-rfc7468 v0.7.0
+  Downloaded rand v0.10.2
+  Downloaded futures-channel v0.3.34
+  Downloaded futures-sink v0.3.34
+  Downloaded potential_utf v0.1.6
+  Downloaded compression-codecs v0.4.42
+  Downloaded cpufeatures v0.3.1
+  Downloaded crypto-common v0.1.7
+  Downloaded fastrand v2.5.0
+  Downloaded rand_core v0.9.5
+  Downloaded lru v0.12.5
+  Downloaded rand v0.9.5
+  Downloaded lazy_static v1.5.0
+  Downloaded percent-encoding v2.3.2
+  Downloaded lock_api v0.4.14
+  Downloaded xattr v1.6.1
+  Downloaded http-body v1.1.0
+  Downloaded rand_chacha v0.3.1
+  Downloaded rand_pcg v0.10.2
+  Downloaded instability v0.3.13
+  Downloaded memchr v2.8.3
+  Downloaded pin-project-lite v0.2.17
+  Downloaded pkcs8 v0.10.2
+  Downloaded indoc v2.0.7
+  Downloaded untrusted v0.9.0
+  Downloaded utf-8 v0.7.6
+  Downloaded crossbeam-deque v0.8.8
+  Downloaded log v0.4.34
+  Downloaded num-integer v0.1.47
+  Downloaded utf8parse v0.2.2
+  Downloaded walkdir v2.5.0
+  Downloaded is_terminal_polyfill v1.70.2
+  Downloaded hex v0.4.3
+  Downloaded num-iter v0.1.46
+  Downloaded same-file v1.0.6
+  Downloaded fnv v1.0.7
+  Downloaded futures-macro v0.3.34
+  Downloaded sync_wrapper v1.0.2
+  Downloaded compression-core v0.4.33
+  Downloaded signal-hook-mio v0.2.5
+  Downloaded futures-core v0.3.34
+  Downloaded futures-task v0.3.34
+  Downloaded ident_case v1.0.1
+  Downloaded futures-io v0.3.34
+  Downloaded generic-array v0.14.7
+  Downloaded aho-corasick v1.1.5
+  Downloaded bit-set v0.8.0
+  Downloaded cpufeatures v0.2.17
+  Downloaded data-encoding v2.11.1
+  Downloaded equivalent v1.0.2
+  Downloaded flate2 v1.1.10
+  Downloaded http-body-util v0.1.5
+  Downloaded signature v2.2.0
+  Downloaded strum v0.26.3
+  Downloaded chacha20 v0.10.2
+  Downloaded const-oid v0.9.6
+  Downloaded digest v0.10.7
+  Downloaded either v1.18.0
+  Downloaded futures v0.3.34
+  Downloaded stable_deref_trait v1.2.1
+  Downloaded displaydoc v0.2.7
+  Downloaded filetime v0.2.29
+  Downloaded globset v0.4.20
+  Downloaded heck v0.5.0
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded scopeguard v1.2.0
+  Downloaded sha2 v0.10.9
+  Downloaded signal-hook-registry v1.4.8
+  Downloaded static_assertions v1.1.0
+  Downloaded strum_macros v0.26.4
+  Downloaded synstructure v0.14.0
+  Downloaded want v0.3.1
+  Downloaded hmac v0.12.1
+  Downloaded httparse v1.10.1
+  Downloaded hyper-rustls v0.27.9
+  Downloaded ipnet v2.12.2
+  Downloaded parking_lot v0.12.5
+  Downloaded rustc-hash v2.1.3
+  Downloaded rustversion v1.0.23
+  Downloaded serde_urlencoded v0.7.1
+  Downloaded sha1 v0.10.7
+  Downloaded strsim v0.11.1
+  Downloaded subtle v2.6.1
+  Downloaded tempfile v3.27.0
+  Downloaded utf8_iter v1.0.4
+  Downloaded version_check v0.9.5
+  Downloaded writeable v0.6.4
+  Downloaded cc v1.4.6
+  Downloaded crossbeam-epoch v0.9.21
+  Downloaded crossbeam-utils v0.8.23
+  Downloaded darling v0.24.1
+  Downloaded fancy-regex v0.14.0
+  Downloaded find-msvc-tools v0.1.12
+  Downloaded futures-executor v0.3.34
+  Downloaded getrandom v0.2.17
+  Downloaded getrandom v0.3.4
+  Downloaded getrandom v0.4.3
+  Downloaded icu_locale_core v2.3.0
+  Downloaded icu_provider v2.3.1
+  Downloaded pkcs1 v0.7.5
+  Downloaded rand_chacha v0.9.0
+  Downloaded rand_core v0.6.4
+  Downloaded rand_core v0.10.1
+  Downloaded ryu v1.0.23
+  Downloaded serde_derive v1.0.229
+  Downloaded shlex v2.0.1
+  Downloaded simd-adler32 v0.3.10
+  Downloaded slab v0.4.12
+  Downloaded smallvec v1.16.1
+  Downloaded spki v0.7.3
+  Downloaded thiserror v2.0.20
+  Downloaded thiserror-impl v2.0.20
+  Downloaded tinystr v0.8.4
+  Downloaded webpki-roots v0.26.11
+  Downloaded yoke v0.8.3
+  Downloaded zerotrie v0.2.5
+  Downloaded clap v4.6.7
+  Downloaded darling_core v0.24.1
+  Downloaded icu_normalizer_data v2.3.0
+  Downloaded num-traits v0.2.19
+  Downloaded serde v1.0.229
+  Downloaded serde_yaml v0.9.34+deprecated
+  Downloaded spin v0.9.9
+  Downloaded unsafe-libyaml v0.2.11
+  Downloaded uuid v1.26.1
+  Downloaded compact_str v0.8.2
+  Downloaded der v0.7.10
+  Downloaded icu_collections v2.3.0
+  Downloaded icu_properties v2.3.0
+  Downloaded litemap v0.8.3
+  Downloaded proc-macro2 v1.0.107
+  Downloaded rustls-pki-types v1.15.1
+  Downloaded socket2 v0.6.5
+  Downloaded tar v0.4.46
+  Downloaded http v1.5.0
+  Downloaded hyper-util v0.1.20
+  Downloaded miniz_oxide v0.9.1
+  Downloaded rsa v0.9.10
+  Downloaded rustls-webpki v0.103.15
+  Downloaded serde_core v1.0.229
+  Downloaded signal-hook v0.3.18
+  Downloaded idna v1.1.0
+  Downloaded ignore v0.4.33
+  Downloaded quinn v0.11.12
+  Downloaded rand v0.8.8
+  Downloaded url v2.5.8
+  Downloaded crossterm v0.28.1
+  Downloaded hashbrown v0.15.5
+  Downloaded icu_properties_data v2.3.0
+  Downloaded regex v1.13.1
+  Downloaded reqwest v0.12.28
+  Downloaded clap_builder v4.6.7
+  Downloaded futures-util v0.3.34
+  Downloaded hashbrown v0.17.1
+  Downloaded hyper v1.11.1
+  Downloaded itertools v0.13.0
+  Downloaded serde_json v1.0.151
+  Downloaded h2 v0.4.19
+  Downloaded webpki-roots v1.0.9
+  Downloaded quinn-proto v0.11.18
+  Downloaded syn v2.0.119
+  Downloaded syn v3.0.5
+  Downloaded nix v0.29.0
+  Downloaded bstr v1.13.1
+  Downloaded regex-syntax v0.8.11
+  Downloaded rustix v0.38.44
+  Downloaded rustix v1.1.4
+  Downloaded rustls v0.23.45
+  Downloaded icu_normalizer v2.3.0
+  Downloaded ratatui v0.29.0
+  Downloaded regex-automata v0.4.18
+  Downloaded libc v0.2.189
+  Downloaded ring v0.17.14
+  Downloaded linux-raw-sys v0.4.15
+  Downloaded linux-raw-sys v0.12.1
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling libc v0.2.189
+    Checking cfg-if v1.0.4
+    Checking smallvec v1.16.1
+    Checking memchr v2.8.3
+    Checking log v0.4.34
+   Compiling parking_lot_core v0.9.12
+    Checking pin-project-lite v0.2.17
+    Checking itoa v1.0.18
+    Checking scopeguard v1.2.0
+    Checking bytes v1.12.1
+    Checking lock_api v0.4.14
+    Checking equivalent v1.0.2
+    Checking stable_deref_trait v1.2.1
+    Checking bitflags v2.13.2
+    Checking once_cell v1.21.4
+    Checking hashbrown v0.17.1
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+    Checking writeable v0.6.4
+    Checking litemap v0.8.3
+   Compiling zmij v1.0.23
+    Checking utf8_iter v1.0.4
+   Compiling serde_json v1.0.151
+   Compiling icu_properties_data v2.3.0
+   Compiling icu_normalizer_data v2.3.0
+    Checking indexmap v2.14.2
+    Checking percent-encoding v2.3.2
+   Compiling anyhow v1.0.104
+   Compiling syn v3.0.5
+   Compiling syn v2.0.119
+   Compiling thiserror v2.0.20
+    Checking ryu v1.0.23
+    Checking form_urlencoded v1.2.2
+    Checking base64 v0.22.1
+   Compiling getrandom v0.4.3
+    Checking zeroize v1.9.0
+   Compiling rustix v1.1.4
+    Checking aho-corasick v1.1.5
+    Checking regex-syntax v0.8.11
+    Checking futures-core v0.3.34
+    Checking linux-raw-sys v0.12.1
+    Checking errno v0.3.14
+    Checking signal-hook-registry v1.4.8
+    Checking mio v1.2.3
+    Checking socket2 v0.6.5
+    Checking parking_lot v0.12.5
+    Checking getrandom v0.2.17
+    Checking futures-sink v0.3.34
+    Checking futures-task v0.3.34
+    Checking subtle v2.6.1
+    Checking futures-channel v0.3.34
+    Checking futures-io v0.3.34
+   Compiling find-msvc-tools v0.1.12
+    Checking slab v0.4.12
+   Compiling shlex v2.0.1
+    Checking http v1.5.0
+   Compiling cc v1.4.6
+    Checking rustls-pki-types v1.15.1
+    Checking untrusted v0.9.0
+   Compiling httparse v1.10.1
+    Checking regex-automata v0.4.18
+    Checking fastrand v2.5.0
+   Compiling version_check v0.9.5
+   Compiling rustls v0.23.45
+   Compiling crc32fast v1.5.2
+    Checking http-body v1.1.0
+   Compiling generic-array v0.14.7
+    Checking tracing-core v0.1.36
+    Checking adler2 v2.0.1
+    Checking simd-adler32 v0.3.10
+    Checking tempfile v3.27.0
+    Checking const-oid v0.9.6
+    Checking miniz_oxide v0.9.1
+    Checking tower-service v0.3.3
+    Checking atomic-waker v1.1.2
+    Checking typenum v1.20.1
+    Checking bit-vec v0.8.0
+    Checking try-lock v0.2.5
+    Checking fnv v1.0.7
+   Compiling zerocopy v0.8.57
+    Checking bit-set v0.8.0
+   Compiling ring v0.17.14
+    Checking want v0.3.1
+    Checking flate2 v1.1.10
+    Checking webpki-roots v1.0.9
+    Checking compression-core v0.4.33
+   Compiling synstructure v0.14.0
+    Checking compression-codecs v0.4.42
+    Checking sync_wrapper v1.0.2
+    Checking tower-layer v0.3.3
+    Checking ipnet v2.12.2
+    Checking http-body-util v0.1.5
+   Compiling getrandom v0.3.4
+    Checking crypto-common v0.1.7
+    Checking block-buffer v0.10.4
+   Compiling autocfg v1.5.1
+   Compiling libm v0.2.16
+    Checking digest v0.10.7
+    Checking base64ct v1.8.3
+    Checking regex v1.13.1
+    Checking fancy-regex v0.14.0
+   Compiling num-traits v0.2.19
+    Checking pem-rfc7468 v0.7.0
+    Checking rand_core v0.6.4
+    Checking cpufeatures v0.2.17
+    Checking der v0.7.10
+    Checking rand_core v0.9.5
+   Compiling num-bigint-dig v0.8.6
+   Compiling tracing-attributes v0.1.31
+    Checking spin v0.9.9
+    Checking sha1 v0.10.7
+    Checking lazy_static v1.5.0
+    Checking utf-8 v0.7.6
+    Checking data-encoding v2.11.1
+   Compiling tokio-macros v2.7.2
+   Compiling zerofrom-derive v0.1.8
+   Compiling yoke-derive v0.8.3
+   Compiling zerovec-derive v0.11.6
+   Compiling displaydoc v0.2.7
+    Checking tokio v1.53.1
+   Compiling serde_derive v1.0.229
+   Compiling thiserror-impl v2.0.20
+   Compiling futures-macro v0.3.34
+    Checking zerofrom v0.1.8
+    Checking yoke v0.8.3
+    Checking tracing v0.1.44
+    Checking zerovec v0.11.8
+    Checking zerotrie v0.2.5
+    Checking ppv-lite86 v0.2.21
+    Checking futures-util v0.3.34
+    Checking tinystr v0.8.4
+    Checking potential_utf v0.1.6
+    Checking icu_locale_core v2.3.0
+    Checking icu_collections v2.3.0
+    Checking rand_chacha v0.3.1
+    Checking num-integer v0.1.47
+    Checking rand_chacha v0.9.0
+    Checking spki v0.7.3
+    Checking rand v0.9.5
+    Checking rustls-webpki v0.103.15
+    Checking num-iter v0.1.46
+    Checking rand v0.8.8
+    Checking pkcs8 v0.10.2
+    Checking pkcs1 v0.7.5
+    Checking icu_provider v2.3.1
+    Checking signature v2.2.0
+    Checking sha2 v0.10.9
+    Checking webpki-roots v0.26.11
+    Checking hmac v0.12.1
+    Checking icu_normalizer v2.3.0
+    Checking icu_properties v2.3.0
+    Checking hex v0.4.3
+   Compiling crossbeam-utils v0.8.23
+   Compiling crossbeam-epoch v0.9.21
+    Checking uuid v1.26.1
+   Compiling crossbeam-deque v0.8.8
+   Compiling cfg_aliases v0.2.2
+   Compiling nix v0.29.0
+    Checking rsa v0.9.10
+    Checking idna_adapter v1.2.2
+    Checking idna v1.1.0
+    Checking bstr v1.13.1
+    Checking same-file v1.0.6
+    Checking walkdir v2.5.0
+    Checking url v2.5.8
+    Checking xattr v1.6.1
+    Checking futures-executor v0.3.34
+    Checking filetime v0.2.29
+    Checking serde_urlencoded v0.7.1
+    Checking tinyvec v1.13.3
+    Checking globset v0.4.20
+    Checking unsafe-libyaml v0.2.11
+    Checking futures v0.3.34
+    Checking tar v0.4.46
+   Compiling rustversion v1.0.23
+    Checking ignore v0.4.33
+    Checking unicode-normalization v0.1.25
+    Checking pa-types v0.1.0 (/workspace/repo/crates/pa-types)
+    Checking tokio-util v0.7.19
+    Checking tower v0.5.3
+    Checking async-compression v0.4.47
+    Checking serde_yaml v0.9.34+deprecated
+   Compiling heck v0.5.0
+   Compiling signal-hook v0.3.18
+   Compiling strsim v0.11.1
+    Checking h2 v0.4.19
+    Checking tower-http v0.6.11
+   Compiling ident_case v1.0.1
+    Checking tokio-rustls v0.26.5
+    Checking tungstenite v0.28.0
+   Compiling darling_core v0.24.1
+    Checking utf8parse v0.2.2
+   Compiling rustix v0.38.44
+    Checking anstyle-parse v1.0.0
+    Checking anstyle-query v1.1.5
+    Checking allocator-api2 v0.2.21
+   Compiling instability v0.3.13
+    Checking linux-raw-sys v0.4.15
+    Checking tokio-tungstenite v0.28.0
+    Checking either v1.18.0
+   Compiling paste v1.0.15
+    Checking foldhash v0.1.5
+    Checking is_terminal_polyfill v1.70.2
+    Checking colorchoice v1.0.5
+    Checking anstyle v1.0.14
+    Checking hashbrown v0.15.5
+    Checking itertools v0.13.0
+    Checking signal-hook-mio v0.2.5
+    Checking anstream v1.0.0
+    Checking castaway v0.2.4
+   Compiling strum_macros v0.26.4
+    Checking clap_lex v1.1.1
+    Checking unicode-segmentation v1.13.3
+   Compiling indoc v2.0.7
+    Checking unicode-width v0.1.14
+    Checking static_assertions v1.1.0
+    Checking crossterm v0.28.1
+    Checking compact_str v0.8.2
+    Checking clap_builder v4.6.7
+    Checking lru v0.12.5
+    Checking unicode-truncate v1.1.0
+    Checking hyper v1.11.1
+   Compiling clap_derive v4.6.7
+    Checking unicode-width v0.2.0
+    Checking cassowary v0.3.0
+    Checking unicode-properties v0.1.4
+    Checking strum v0.26.3
+   Compiling darling_macro v0.24.1
+    Checking hyper-util v0.1.20
+   Compiling darling v0.24.1
+    Checking clap v4.6.7
+    Checking ratatui v0.29.0
+    Checking hyper-rustls v0.27.9
+    Checking reqwest v0.12.28
+    Checking pa-agent v0.1.0 (/workspace/repo/crates/pa-agent)
+    Checking pa-telemetry v0.1.0 (/workspace/repo/crates/pa-telemetry)
+    Checking pa-ai v0.1.0 (/workspace/repo/crates/pa-ai)
+    Checking pa-tui v0.1.0 (/workspace/repo/crates/pa-tui)
+    Checking pa-models v0.1.0 (/workspace/repo/crates/pa-models)
+    Checking pa-core v0.1.0 (/workspace/repo/crates/pa-core)
+error: variable does not need to be mutable
+   --> crates/pa-core/src/session_engine/rlm_usage.rs:273:13
+    |
+273 |         let mut retired_bases = retired.bases.lock().await;
+    |             ----^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `-D unused-mut` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_mut)]`
+
+error[E0631]: type mismatch in function arguments
+   --> crates/pa-core/src/session_engine/rlm_usage.rs:292:42
+    |
+292 |         let fallback = fallback.and_then(std::sync::Weak::upgrade)?;
+    |                                 -------- ^^^^^^^^^^^^^^^^^^^^^^^^
+    |                                 |        |
+    |                                 |        expected due to this
+    |                                 |        found signature defined here
+    |                                 required by a bound introduced by this call
+    |
+    = note: expected function signature `fn(std::sync::Weak<session_engine::rlm_usage::RlmChildUsageAttributions, std::alloc::Global>) -> _`
+               found function signature `fn(&std::sync::Weak<_, _>) -> _`
+note: required by a bound in `std::option::Option::<T>::and_then`
+   --> /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/option.rs:1537:4
+help: consider wrapping the function in a closure
+    |
+292 |         let fallback = fallback.and_then(|arg0: std::sync::Weak<session_engine::rlm_usage::RlmChildUsageAttributions>| std::sync::Weak::upgrade(&arg0))?;
+    |                                          +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++                         +++++++
+
+error[E0631]: type mismatch in function arguments
+   --> crates/pa-core/src/session_engine/rlm_usage.rs:324:48
+    |
+324 |         let Some(fallback) = fallback.and_then(std::sync::Weak::upgrade) else {
+    |                                       -------- ^^^^^^^^^^^^^^^^^^^^^^^^
+    |                                       |        |
+    |                                       |        expected due to this
+    |                                       |        found signature defined here
+    |                                       required by a bound introduced by this call
+    |
+    = note: expected function signature `fn(std::sync::Weak<session_engine::rlm_usage::RlmChildUsageAttributions, std::alloc::Global>) -> _`
+               found function signature `fn(&std::sync::Weak<_, _>) -> _`
+note: required by a bound in `std::option::Option::<T>::and_then`
+   --> /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/option.rs:1537:4
+help: consider wrapping the function in a closure
+    |
+324 |         let Some(fallback) = fallback.and_then(|arg0: std::sync::Weak<session_engine::rlm_usage::RlmChildUsageAttributions>| std::sync::Weak::upgrade(&arg0)) else {
+    |                                                +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++                         +++++++
+
+error[E0631]: type mismatch in function arguments
+   --> crates/pa-core/src/session_engine/rlm_usage.rs:352:51
+    |
+352 |         if let Some(fallback) = fallback.and_then(std::sync::Weak::upgrade) {
+    |                                          -------- ^^^^^^^^^^^^^^^^^^^^^^^^
+    |                                          |        |
+    |                                          |        expected due to this
+    |                                          |        found signature defined here
+    |                                          required by a bound introduced by this call
+    |
+    = note: expected function signature `fn(std::sync::Weak<session_engine::rlm_usage::RlmChildUsageAttributions, std::alloc::Global>) -> _`
+               found function signature `fn(&std::sync::Weak<_, _>) -> _`
+note: required by a bound in `std::option::Option::<T>::and_then`
+   --> /rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/core/src/option.rs:1537:4
+help: consider wrapping the function in a closure
+    |
+352 |         if let Some(fallback) = fallback.and_then(|arg0: std::sync::Weak<session_engine::rlm_usage::RlmChildUsageAttributions>| std::sync::Weak::upgrade(&arg0)) {
+    |                                                   +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++                         +++++++
+
+error: future cannot be sent between threads safely
+   --> crates/pa-core/src/session_engine/rlm_host.rs:407:9
+    |
+407 | /         host_handler(move |payload| {
+408 | |             let host = Arc::clone(&host);
+409 | |             let usage = Arc::clone(&usage);
+410 | |             Box::pin(async move {
+...   |
+424 | |             })
+425 | |         }),
+    | |__________^ future created by async block is not `Send`
+    |
+    = help: within `{async block@crates/pa-core/src/session_engine/rlm_host.rs:410:22: 410:32}`, the trait `std::marker::Send` is not implemented for `MutexGuard<'_, Option<Arc<RlmChildUsageAttributions>>>`
+note: future is not `Send` as this value is used across an await
+   --> crates/pa-core/src/session_engine/rlm_usage.rs:133:50
+    |
+132 |         if let Some(forward) = self.forward.lock().expect("rlm usage forward lock").clone() {
+    |                                ---------------------------------------------------- has type `std::sync::MutexGuard<'_, std::option::Option<std::sync::Arc<session_engine::rlm_usage::RlmChildUsageAttributions>>>` which is not `Send`
+133 |             forward.register_spawn(rlm_child_id).await;
+    |                                                  ^^^^^ await occurs here, with `self.forward.lock().expect("rlm usage forward lock")` maybe used later
+note: required by a bound in `kernel::shared::host_handler`
+   --> crates/pa-core/src/kernel/shared.rs:225:51
+    |
+222 | pub fn host_handler<F, Fut>(f: F) -> HostHandlerFn
+    |        ------------ required by a bound in this function
+...
+225 |     Fut: Future<Output = anyhow::Result<Value>> + Send + 'static,
+    |                                                   ^^^^ required by this bound in `host_handler`
+    = note: the full name for the type has been written to '/workspace/repo/target/debug/deps/pa_core-16bf910c258dcf54.long-type-209387159461175623.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error[E0733]: recursion in an async fn requires boxing
+   --> crates/pa-core/src/session_engine/rlm_usage.rs:131:5
+    |
+131 |     pub async fn register_spawn(&self, rlm_child_id: &str) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+132 |         if let Some(forward) = self.forward.lock().expect("rlm usage forward lock").clone() {
+133 |             forward.register_spawn(rlm_child_id).await;
+    |             ------------------------------------------ recursive call here
+    |
+    = note: a recursive `async fn` call must introduce indirection such as `Box::pin` to avoid an infinitely sized future
+
+error[E0733]: recursion in an async fn requires boxing
+   --> crates/pa-core/src/session_engine/rlm_usage.rs:159:5
+    |
+159 |     pub async fn record_child_usage(&self, report: RlmChildUsageReport) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+167 |             forward.record_child_usage(report).await;
+    |             ---------------------------------------- recursive call here
+    |
+    = note: a recursive `async fn` call must introduce indirection such as `Box::pin` to avoid an infinitely sized future
+
+Some errors have detailed explanations: E0631, E0733.
+For more information about an error, try `rustc --explain E0631`.
+error: could not compile `pa-core` (lib) due to 7 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: future cannot be sent between threads safely
+   --> crates/pa-core/src/session_engine/rlm_host.rs:407:9
+    |
+407 | /         host_handler(move |payload| {
+408 | |             let host = Arc::clone(&host);
+409 | |             let usage = Arc::clone(&usage);
+410 | |             Box::pin(async move {
+...   |
+424 | |             })
+425 | |         }),
+    | |__________^ future created by async block is not `Send`
+    |
+    = help: within `{async block@crates/pa-core/src/session_engine/rlm_host.rs:410:22: 410:32}`, the trait `std::marker::Send` is not implemented for `MutexGuard<'_, Option<Arc<RlmChildUsageAttributions>>>`
+note: future is not `Send` as this value is used across an await
+   --> crates/pa-core/src/session_engine/rlm_usage.rs:133:50
+    |
+132 |         if let Some(forward) = self.forward.lock().expect("rlm usage forward lock").clone() {
+    |                                ---------------------------------------------------- has type `std::sync::MutexGuard<'_, std::option::Option<std::sync::Arc<session_engine::rlm_usage::RlmChildUsageAttributions>>>` which is not `Send`
+133 |             forward.register_spawn(rlm_child_id).await;
+    |                                                  ^^^^^ await occurs here, with `self.forward.lock().expect("rlm usage forward lock")` maybe used later
+note: required by a bound in `kernel::shared::host_handler`
+   --> crates/pa-core/src/kernel/shared.rs:225:51
+    |
+222 | pub fn host_handler<F, Fut>(f: F) -> HostHandlerFn
+    |        ------------ required by a bound in this function
+...
+225 |     Fut: Future<Output = anyhow::Result<Value>> + Send + 'static,
+    |                                                   ^^^^ required by this bound in `host_handler`
+    = note: the full name for the type has been written to '/workspace/repo/target/debug/deps/pa_core-9fc35658f82d32d2.long-type-1537165706443823804.txt'
+    = note: consider using `--verbose` to print the full type name to the console
+
+error: could not compile `pa-core` (lib test) due to 7 previous errors

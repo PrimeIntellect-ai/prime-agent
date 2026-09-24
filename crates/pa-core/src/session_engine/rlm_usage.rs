@@ -129,8 +129,12 @@ impl RlmChildUsageAttributions {
     /// file's last assistant row — the observation path is the
     /// successor's).
     pub async fn register_spawn(&self, rlm_child_id: &str) {
-        if let Some(forward) = self.forward.lock().expect("rlm usage forward lock").clone() {
-            forward.register_spawn(rlm_child_id).await;
+        // The guard drops at its statement end (a std MutexGuard held
+        // across the forwarded await is not Send), and the recursion is
+        // boxed: a rebuild chain forwards across successors.
+        let forward = self.forward.lock().expect("rlm usage forward lock").clone();
+        if let Some(forward) = forward {
+            Box::pin(async move { forward.register_spawn(rlm_child_id).await }).await;
             return;
         }
         let target = {
@@ -163,8 +167,9 @@ impl RlmChildUsageAttributions {
         // the successor's later aggregates would compute from a base
         // that predates this late batch and the folded row would drop
         // it.
-        if let Some(forward) = self.forward.lock().expect("rlm usage forward lock").clone() {
-            forward.record_child_usage(report).await;
+        let forward = self.forward.lock().expect("rlm usage forward lock").clone();
+        if let Some(forward) = forward {
+            Box::pin(async move { forward.record_child_usage(report).await }).await;
             return;
         }
         let target_id = match self
@@ -270,7 +275,7 @@ impl RlmChildUsageAttributions {
                     .or_insert_with(|| target_id.clone());
             }
         }
-        let mut retired_bases = retired.bases.lock().await;
+        let retired_bases = retired.bases.lock().await;
         let mut bases = self.bases.lock().await;
         for (target_id, base) in retired_bases.iter() {
             bases.entry(target_id.clone()).or_insert_with(|| *base);
@@ -289,7 +294,7 @@ impl RlmChildUsageAttributions {
             .lock()
             .expect("rlm usage fallback lock")
             .clone();
-        let fallback = fallback.and_then(std::sync::Weak::upgrade)?;
+        let fallback = fallback.and_then(|weak| weak.upgrade())?;
         let target_id = {
             let retired_children = fallback.children.lock().expect("rlm usage children lock");
             retired_children.get(rlm_child_id).cloned()?
@@ -321,7 +326,7 @@ impl RlmChildUsageAttributions {
             .lock()
             .expect("rlm usage fallback lock")
             .clone();
-        let Some(fallback) = fallback.and_then(std::sync::Weak::upgrade) else {
+        let Some(fallback) = fallback.and_then(|weak| weak.upgrade()) else {
             return;
         };
         let mut retired_bases = fallback.bases.lock().await;
@@ -349,7 +354,7 @@ impl RlmChildUsageAttributions {
             .lock()
             .expect("rlm usage fallback lock")
             .clone();
-        if let Some(fallback) = fallback.and_then(std::sync::Weak::upgrade) {
+        if let Some(fallback) = fallback.and_then(|weak| weak.upgrade()) {
             // A separate lock section on purpose: nothing holds this
             // producer's children map while touching the retired side's
             // (the fallback consult takes them the other way around).
