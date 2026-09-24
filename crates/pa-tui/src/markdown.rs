@@ -1268,9 +1268,12 @@ mod tests {
             vec!["a ", "b", " ", "c", " ", "d", " (http://e)"]
         );
         // The label keeps its OSC 8 wrapper in the legacy form too (TS
-        // #2430: the app's click-open handles the link).
+        // #2430: the app's click-open handles the link) — under the
+        // canonicalized href `url::Url` resolves it to.
         let joined: String = spans.iter().map(|s| s.content.as_str()).collect();
-        assert!(joined.contains(&crate::hyperlinks::osc8_open("http://e")));
+        assert!(joined.contains(&crate::hyperlinks::osc8_open(
+            &crate::hyperlinks::resolve_link_href("http://e")
+        )));
         assert!(joined.contains(crate::hyperlinks::OSC8_CLOSE));
         crate::hyperlinks::set_hyperlinks_override(None);
     }

@@ -3054,11 +3054,13 @@ mod tests {
             started_at: Some(std::time::Instant::now()),
             ended_at: Some(std::time::Instant::now()),
             result: Some(ToolResultView {
-                // Four output lines with the marker last: the collapsed
-                // panel previews only the first three.
+                // Seven output lines with the marker FIRST: the collapsed
+                // bash card previews only the LAST five lines.
                 content: vec![serde_json::json!({
                     "type": "text",
-                    "text": format!("preview line one\npreview line two\npreview line three\n{marker}")
+                    "text": format!(
+                        "{marker}\npreview line two\npreview line three\npreview line four\npreview line five\npreview line six\npreview line seven"
+                    )
                 })],
                 details: serde_json::Value::Null,
                 is_error: false,

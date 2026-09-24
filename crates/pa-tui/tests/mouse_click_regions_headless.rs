@@ -197,9 +197,9 @@ fn attach_data(id: &str) -> Value {
             "role": "toolResult",
             "toolCallId": "t1",
             "toolName": "bash",
-            // Four output lines, the marker last: the collapsed card
-            // previews only the first three.
-            "content": [{ "type": "text", "text": "one first\none second\none third\nOUTPUT-ONE" }],
+            // Seven output lines, the marker FIRST: the collapsed card
+            // previews only the LAST five lines.
+            "content": [{ "type": "text", "text": "OUTPUT-ONE\none second\none third\none fourth\none fifth\none sixth\none seventh" }],
             "isError": false,
         }),
         json!({
@@ -214,7 +214,7 @@ fn attach_data(id: &str) -> Value {
             "role": "toolResult",
             "toolCallId": "t2",
             "toolName": "bash",
-            "content": [{ "type": "text", "text": "two first\ntwo second\ntwo third\nOUTPUT-TWO" }],
+            "content": [{ "type": "text", "text": "OUTPUT-TWO\ntwo second\ntwo third\ntwo fourth\ntwo fifth\ntwo sixth\ntwo seventh" }],
             "isError": false,
         }),
         json!({
@@ -354,6 +354,7 @@ fn clicking_a_tool_header_toggles_only_that_card() {
 
     // Clean press/release on the first card's header (the touch tap shape).
     let clicked = run_plan(vec![
+        HeadlessStep::WaitMs(700),
         HeadlessStep::ScrollTop,
         HeadlessStep::Mouse(press(header_col + 2, header_row + 1)),
         HeadlessStep::Mouse(release(header_col + 2, header_row + 1)),
@@ -370,6 +371,7 @@ fn clicking_a_tool_header_toggles_only_that_card() {
 
     // Clicking the header again collapses the card back.
     let recollapsed = run_plan(vec![
+        HeadlessStep::WaitMs(700),
         HeadlessStep::ScrollTop,
         HeadlessStep::Mouse(press(header_col + 2, header_row + 1)),
         HeadlessStep::Mouse(release(header_col + 2, header_row + 1)),
@@ -396,6 +398,7 @@ fn drags_and_modified_clicks_do_not_dispatch() {
 
     // Press, drag away, release: no dispatch.
     let dragged = run_plan(vec![
+        HeadlessStep::WaitMs(700),
         HeadlessStep::ScrollTop,
         HeadlessStep::Mouse(press(header_col + 2, header_row + 1)),
         HeadlessStep::Mouse(drag(header_col + 6, header_row + 1)),
@@ -409,6 +412,7 @@ fn drags_and_modified_clicks_do_not_dispatch() {
 
     // Shift+click on the header: selection-only, no dispatch.
     let shifted = run_plan(vec![
+        HeadlessStep::WaitMs(700),
         HeadlessStep::ScrollTop,
         HeadlessStep::Mouse(shift_press(header_col + 2, header_row + 1)),
         HeadlessStep::Mouse(shift_release(header_col + 2, header_row + 1)),
@@ -428,11 +432,13 @@ fn clicking_a_transcript_link_opens_it() {
     pa_tui::hyperlinks::set_hyperlinks_override(Some(true));
     // The link label rides the transcript tail - the default following
     // window shows it without scrolling (the top window folds it under
-    // the fold).
-    let probe = run_plan(vec![]);
+    // the fold). One idle hold lets the attach render land before the
+    // probe frame.
+    let probe = run_plan(vec![HeadlessStep::WaitMs(700)]);
     let (_, link_row, link_col, _) = locate(&probe.0, "spec")
         .unwrap_or_else(|| panic!("the link label renders: {:#?}", probe.0));
     let opened = run_plan(vec![
+        HeadlessStep::WaitMs(700),
         HeadlessStep::Mouse(press(link_col + 1, link_row + 1)),
         HeadlessStep::Mouse(release(link_col + 1, link_row + 1)),
     ]);
@@ -467,8 +473,8 @@ fn editor_click_places_the_caret() {
         HeadlessStep::WaitMs(700),
         HeadlessStep::Type("hello world".to_string()),
         HeadlessStep::ScrollTop,
-        HeadlessStep::Mouse(press(click_col, editor_row + 1)),
-        HeadlessStep::Mouse(release(click_col, editor_row + 1)),
+        HeadlessStep::Mouse(press(click_col + 1, editor_row + 1)),
+        HeadlessStep::Mouse(release(click_col + 1, editor_row + 1)),
         HeadlessStep::Type("X".to_string()),
     ]);
     let after = clicked.0.last().expect("a frame after typing");
