@@ -720,6 +720,77 @@ class ReplTest(unittest.TestCase):
             events = self.repl.execute("chk", "'In' in dir()")
             self.assertEqual(one(events, "result")["text"], "False")
 
+    def test_restore_revives_functions_with_live_globals_pr2471(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "state.dill")
+            self.repl.execute("fn1", "G = 1\ndef reader():\n    return G\ndef prober():\n    return late")
+            # priv.__globals__ is the private exec dict pn, not ns: drives backfill.
+            self.repl.execute("fn0", "exec('SECRET = 42\\ndef priv():\\n    return SECRET', pn:={'__name__': '__main__'})\npriv = pn['priv']")
+            self.repl.send({"type": "snapshot", "id": "fn2", "path": path, "manifest_path": os.path.join(tmp, "state.json")})
+            self.repl.send({"type": "restore", "id": "fn3", "path": path})
+            self.assertEqual(one(self.repl.until_done("fn3"), "done")["status"], "ok")
+            events = self.repl.execute("fn4", "G = 2\nreader()")
+            self.assertEqual(one(events, "result")["text"], "2")
+            events = self.repl.execute("fn5", "late = 'live'\nprober()")
+            self.assertEqual(one(events, "result")["text"], "'live'")
+            events = self.repl.execute("fn6", "priv()")
+            self.assertEqual(one(events, "result")["text"], "42")
+
+    def test_restore_revives_partial_wrapped_functions_pr2471(self):
+        # dill revives a partial's wrapped __main__ function with frozen globals.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "state.dill")
+            self.repl.execute("pt1", "import functools\nG = 1\ndef base():\n    return G\nwrapped = functools.partial(base)")
+            self.repl.send({"type": "snapshot", "id": "pt2", "path": path, "manifest_path": os.path.join(tmp, "state.json")})
+            self.repl.send({"type": "restore", "id": "pt3", "path": path})
+            self.assertEqual(one(self.repl.until_done("pt3"), "done")["status"], "ok")
+            events = self.repl.execute("pt4", "G = 2\nwrapped()")
+            self.assertEqual(one(events, "result")["text"], "2")
+
+    def _snapshot_restore(self, rid: str, code: str, tmp: str) -> None:
+        self.assertEqual(one(self.repl.execute(rid + "0", code), "done")["status"], "ok")
+        self.repl.send({"type": "snapshot", "id": rid + "1", "path": os.path.join(tmp, "s.dill"), "manifest_path": os.path.join(tmp, "s.json")})
+        self.repl.send({"type": "restore", "id": rid + "2", "path": os.path.join(tmp, "s.dill")})
+        self.assertEqual(one(self.repl.until_done(rid + "2"), "done")["status"], "ok")
+
+    def test_restore_rebuilt_partial_keeps_attributes_and_args_pr2471(self):
+        code = (
+            "import functools\nG = 1\ndef helper():\n    return G\ndef apply(fn):\n    return fn()\n"
+            "wrapped = functools.partial(apply, helper)\nwrapped.label = 'x'"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self._snapshot_restore("pa", code, tmp)
+            self.assertEqual(one(self.repl.execute("pa4", "wrapped.label"), "result")["text"], "'x'")
+            self.assertEqual(one(self.repl.execute("pa5", "G = 2\nwrapped()"), "result")["text"], "2")
+
+    def test_restore_backfill_skips_excluded_names_pr2471(self):
+        code = (
+            "exec('PUB = 1\\n_hidden = 2\\nIn = 3\\nOut = 4\\ndef user():\\n    return (PUB, _hidden, In, Out)', pn:={'__name__': '__main__'})\n"
+            "user = pn['user']"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            self._snapshot_restore("ex", code, tmp)
+            probe = "('PUB' in dir(), '_hidden' in dir(), 'In' in dir(), 'Out' in dir())"
+            self.assertEqual(one(self.repl.execute("ex4", probe), "result")["text"], "(True, False, False, False)")
+
+    def test_restore_revives_callables_in_defaults_and_closures_pr2471(self):
+        code = ("G = 1\ndef helper():\n    return G\nrun = lambda fn=helper: fn()\nrun2 = lambda *, fn=helper: fn()\nclosed = (lambda fn: lambda: fn())(helper)\n"
+                "def make():\n    n = 0\n    def get():\n        return n\n    def set(v):\n        nonlocal n\n        n = v\n    get.set = set\n    return get\ncounter = make()\nrun.callback = helper")
+        with tempfile.TemporaryDirectory() as tmp:
+            self._snapshot_restore("dc", code, tmp)
+            self.assertEqual(one(self.repl.execute("dc4", "G = 2\ncounter.set(5)\n(run(), run2(), closed(), counter(), run.callback())"), "result")["text"], "(2, 2, 2, 5, 2)")
+
+    def test_restore_publishes_rebuilt_partial_in_backfill_cycle_pr2471(self):
+        code = ("exec('import functools\\nG = 1\\ndef base():\\n    return G, wrapped\\nwrapped = functools.partial(base)\\n"
+                "def entry():\\n    return wrapped()', pn:={'__name__': '__main__'})\nentry = pn['entry']")
+        self._snapshot_restore("bp", code, self.enterContext(tempfile.TemporaryDirectory()))
+        self.assertEqual(one(self.repl.execute("bp4", "G = 2\nentry()[0]"), "result")["text"], "2")
+
+    def test_restore_revives_functions_inside_containers_pr2471(self):
+        code = "G = 1\ndef reader():\n    return G\ncallbacks = [reader]\nhandlers = {'read': reader}\npair = (reader,)"
+        self._snapshot_restore("ct", code, self.enterContext(tempfile.TemporaryDirectory()))
+        self.assertEqual(one(self.repl.execute("ct4", "G = 2\n(callbacks[0](), handlers['read'](), pair[0]())"), "result")["text"], "(2, 2, 2)")
+
     def test_snapshot_prune_oversized(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "kernel-state.dill")
@@ -741,6 +812,23 @@ class ReplTest(unittest.TestCase):
             self.assertEqual(done["pruned"], ["big"])
             events = self.repl.execute("p3", "'big' in dir()")
             self.assertEqual(one(events, "result")["text"], "False")
+
+    def test_prune_measures_the_current_value_2478(self):
+        # Redefinition or in-place shrink after an oversized skip: prune must re-measure.
+        for cell in ("def big(): pass", "big.clear()"):
+            with self.subTest(cell=cell):
+                with tempfile.TemporaryDirectory() as tmp:
+                    base = {"type": "snapshot", "path": os.path.join(tmp, "kernel-state.dill"),
+                            "manifest_path": os.path.join(tmp, "kernel-state.json"), "max_variable_bytes": 1024}
+                    self.repl.execute("pk1", "big = bytearray(b'x' * 100_000)\nkeep = 1")
+                    self.repl.send({"id": "pk2", **base})
+                    self.assertEqual(one(self.repl.until_done("pk2"), "done")["status"], "ok")
+                    self.repl.execute("pk3", cell)
+                    self.repl.send({"id": "pk4", "prune_oversized": True, **base})
+                    done = one(self.repl.until_done("pk4"), "done")
+                    self.assertEqual(done["status"], "ok")
+                    self.assertEqual(done["pruned"], [])
+                    self.assertEqual(done["saved"], ["big", "keep"])
 
     def test_emit_display(self):
         payloads = {
@@ -788,6 +876,26 @@ class ReplTest(unittest.TestCase):
         follow = self.repl.execute("after-emit-nan", "1+1")
         self.assertEqual(one(follow, "result")["text"], "2")
         self.assertEqual(one(follow, "done")["status"], "ok")
+
+    def test_large_write_ships_bounded_stream_frames(self):
+        events = self.repl.execute("chunk", "import sys\nsys.stdout.write('x' * 300_000)")
+        frames = [e["text"] for e in events if e.get("event") == "stdout"]
+        self.assertEqual("".join(frames), "x" * 300_000)
+        self.assertTrue(all(len(frame) <= 65536 for frame in frames))
+
+    def test_oversized_text_and_payloads_are_capped(self):
+        code = "class C:\n    def __repr__(self):\n        return 'x' * 3_000_000\nC()"
+        events = self.repl.execute("big-repr", code)
+        expected = "x" * 1_048_576 + "\n[... result truncated at 1048576 characters ...]"
+        self.assertEqual(one(events, "result")["text"], expected)
+        error = one(self.repl.execute("big-error", "raise ValueError('x' * 3_000_000)"), "error")
+        self.assertEqual(error["evalue"], expected)
+        self.assertEqual(error["traceback"][-1], "ValueError: " + expected[len("ValueError: ") :])
+        events = self.repl.execute("emit-big", "from rlm.repl import emit\nemit({'text/plain': 'x' * 17_000_000})")
+        self.assertEqual(one(events, "error")["ename"], "ValueError")
+        self.assertEqual(one(events, "done")["status"], "error")
+        code = "from rlm.repl import host_request\nawait host_request({'type': 'demo', 'blob': 'x' * 17_000_000})"
+        self.assertEqual(one(self.repl.execute("hr-big", code), "error")["ename"], "ValueError")
 
     def test_bash_integration(self):
         events = self.repl.execute(
@@ -858,17 +966,29 @@ class ReplTest(unittest.TestCase):
                 reply_ok(self.repl, notice)
                 read = self.repl.execute(f"withdraw-{label}-read", read_code)
                 self.assertIn(f"withdrawn-{label}", one(read, "result")["text"])
+                # The withdrawal must ship ahead of the reading cell's done, or the
+                # notice is delivered as a stale turn-boundary notice instead.
+                kinds = [event.get("event") for event in read]
+                self.assertLess(kinds.index("host_request"), kinds.index("done"))
                 request = wait_for_host_request(self.repl, read)
                 self.assertEqual(
                     request["data"], {"type": "bash.consumed", "pid": pid, "command": command}
                 )
-                # Old host: error reply is absorbed and the withdrawal never repeats.
+                # Old host: the error reply is dropped silently and the withdrawal never repeats.
                 self.repl.send(
                     {"type": "host_reply", "id": request["id"], "data": {"status": "error", "error": "unknown"}}
                 )
                 if label == "poll":
                     again = self.repl.execute("withdraw-again", "handle.output()\nhandle.tail(1)")
-                    self.assertIsNone(one(again, "host_request"))
+                    self.assertEqual([e for e in again if e.get("event") in ("error", "host_request")], [])
+
+    def test_result_read_before_notice_acceptance_withdraws_at_acceptance(self):
+        started = self.repl.execute("early", "from rlm import bash\nhandle = bash('printf early')\nhandle.pid")
+        notice = wait_for_host_request(self.repl, started)
+        self.assertIsNone(one(self.repl.execute("early-read", "handle.poll().output"), "host_request"))
+        reply_ok(self.repl, notice)
+        withdrawal = wait_for_host_request(self.repl, [])["data"]
+        self.assertEqual(withdrawal, {"type": "bash.consumed", "pid": notice["data"]["pid"], "command": "printf early"})
 
     def test_detached_read_between_turns_keeps_bash_completion(self):
         # A watcher reading the handle with no cell running reaches nobody: the
@@ -2161,6 +2281,15 @@ class RestoreApplyShieldTest(unittest.TestCase):
         self.assertEqual(result["restored"], ["a", "b"])
         self.assertEqual(dict(ns), {"a": 1, "b": 2})
 
+    def test_sigint_with_backfill_first_write_is_consumed(self):
+        from rlm.repl import _restore_state
+
+        exec("SECRET = 42\ndef reader():\n    return SECRET", source := {"__name__": "__main__"})
+        with tempfile.TemporaryDirectory() as tmp:
+            ns = self.SigintOnNthSet(fire_on=1)
+            result = _restore_state(ns, self._write_snapshot(tmp, {"reader": source["reader"]}))
+        self.assertEqual((result["restored"], ns["SECRET"]), (["reader"], 42))
+
     def _restore_with_sigint_at_unpark(self):
         """Real unparking swap, then the newly restored handler fires immediately."""
         from rlm.repl import _restore_state
@@ -2243,11 +2372,10 @@ class SnapshotTempCleanupTest(unittest.TestCase):
 
             real_dump = dill.dump
 
-            def interrupted_dump(payload, fh):
-                if isinstance(payload, dict):  # the complete payload, not a per-variable value
-                    fh.write(b"partial")
-                    raise KeyboardInterrupt
-                return real_dump(payload, fh)
+            def interrupted_dump(value, fh):
+                # Interrupt mid-dump, after partial bytes landed in the staged temp.
+                fh.write(b"partial")
+                raise KeyboardInterrupt
 
             with unittest_mock.patch.object(dill, "dump", interrupted_dump):
                 with self.assertRaises(KeyboardInterrupt):
@@ -2339,19 +2467,22 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
     def test_near_cap_payload_skips_tail_instead_of_failing_snapshot(self):
         import dill
 
+        from rlm.repl import _SNAPSHOT_MAGIC, _restore_state
+
         dill.settings["recurse"] = True
         source = {"a": "first", "b": "second"}
         blobs = {name: dill.dumps(value) for name, value in source.items()}
-        cap = len(dill.dumps(blobs)) - 1
-        self.assertLessEqual(sum(map(len, blobs.values())), cap)
-        self.assertLessEqual(len(dill.dumps({"a": blobs["a"]})), cap)
+        # One byte short of the full single-pass payload (magic + both records),
+        # so "a" fits exactly and "b" overflows the remaining aggregate budget.
+        cap = len(_SNAPSHOT_MAGIC) + 13 + len(blobs["a"]) + 13 + len(blobs["b"]) - 1
 
         result = self._snap(source, max_bytes=cap, max_variable_bytes=cap)
         self.assertEqual(result["saved"], ["a"])
         self.assertEqual(result["skipped"], [{"name": "b", "reason": "exceeds aggregate snapshot size cap"}])
         self.assertLessEqual(result["bytes"], cap)
-        with open(self.path, "rb") as fh:
-            self.assertEqual(list(dill.load(fh)), ["a"])
+        ns: dict = {}
+        self.assertNotIn("error", _restore_state(ns, self.path))
+        self.assertEqual(ns, {"a": "first"})
 
     def test_zero_size_cap_writes_no_empty_payload_overhead(self):
         result = self._snap({}, max_bytes=0, max_variable_bytes=0)
@@ -2540,6 +2671,28 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
                 with open(manifest_path) as fh:
                     self.assertEqual(json.load(fh)["savedNames"], ["keep"])
                 self.assertEqual(sorted(os.listdir(d)), sorted([payload_name, manifest_name]))
+
+    def test_each_variable_serialized_once_and_payload_is_not_a_pickle(self):
+        import dill
+
+        from rlm.repl import _SNAPSHOT_MAGIC
+
+        real_dump = dill.dump
+        dumped: list[object] = []
+
+        def counting_dump(value, writer):
+            dumped.append(value)
+            return real_dump(value, writer)
+
+        with mock.patch.object(dill, "dump", counting_dump):
+            result = self._snap({"a": 1, "b": 2, "c": 3})
+        self.assertEqual(result["saved"], ["a", "b", "c"])
+        self.assertEqual(dumped, [1, 2, 3])
+        self.assertEqual(result["bytes"], os.path.getsize(self.path))
+        with open(self.path, "rb") as fh:
+            self.assertEqual(fh.read(len(_SNAPSHOT_MAGIC)), _SNAPSHOT_MAGIC)
+            with self.assertRaises(Exception):
+                dill.load(fh)
 
 
 class OwnerWatchdogTest(unittest.TestCase):
