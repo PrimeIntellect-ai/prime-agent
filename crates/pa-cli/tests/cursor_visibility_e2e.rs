@@ -126,9 +126,19 @@ fn cursor_stays_hidden_and_positioned_across_mount_picker_and_suspend() {
         "the editor positions the hidden cursor at the caret",
     );
 
-    // The picker: `/model` opens the model picker (an empty catalog
-    // renders the empty panel, so the mount is deterministic) and Escape
-    // closes it. Both overlays own the frame without a hardware cursor.
+    // The picker: clear the editor first (the typed `hi` still sits in
+    // it — submitting `hi/model` would go to the daemon as a prompt, not
+    // the slash command), then `/model` opens the model picker (an empty
+    // catalog renders the empty panel, so the mount is deterministic) and
+    // Escape closes it. Both overlays own the frame without a hardware
+    // cursor.
+    let mark_clear = harness.mark();
+    harness.write(b"\x7f\x7f");
+    harness.wait_from(
+        mark_clear,
+        "\x1b[22;5H",
+        "the editor emptied back to the bare caret",
+    );
     let mark_picker = harness.mark();
     harness.write(b"/model\r");
     harness.wait_from(mark_picker, "Search models", "the model picker mounts");

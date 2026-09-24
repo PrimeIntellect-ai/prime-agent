@@ -1567,10 +1567,13 @@ impl Renderer {
                 if !show {
                     if let Some((row, col)) = cursor {
                         if row < area.height as usize && col < area.width as usize {
-                            use crossterm::cursor::MoveTo;
-                            let _ = crossterm::queue!(
+                            // execute! (not queue!): the position write must
+                            // flush now — the paint backend's flush already
+                            // ran inside `draw`, so a queued write would sit
+                            // in the stdout buffer until the next frame.
+                            let _ = crossterm::execute!(
                                 std::io::stdout(),
-                                MoveTo(col as u16, row as u16)
+                                crossterm::cursor::MoveTo(col as u16, row as u16)
                             );
                         }
                     }
