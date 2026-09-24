@@ -354,6 +354,7 @@ Method: every TS file in `packages/tui/src` read in full; each behavior located 
 | keybindings.ts:211 | Config file load, legacy-name migration, JSON rewrite | crates/pa-tui/src/keybindings.rs:499 (`migrate_keybindings_config`) | MATCHES | — |
 | kill-ring.ts:8 | `KillRing` push/peek/rotate/accumulate | crates/pa-tui/src/editor/kill_ring.rs:8 | MATCHES | — |
 | undo-stack.ts:7 | `UndoStack` clone-on-push | crates/pa-tui/src/editor/mod.rs:338 (`EditorSnapshot` push/pop) | MATCHES | — |
+| — (no TS counterpart) | SANCTIONED DIVERGENCE (operator ask 2026-09-24, per the #289 precedent): redo, the shift+arrow selection families, select-all, cut/copy of the selection, Ctrl+Home/End and Cmd+Up/Down doc jumps, Ctrl+Up/Down paragraph jumps, and Ctrl+T transposition — the standard keyboard-only editing set the TS editor lacks | crates/pa-tui/src/editor/selection.rs + mod.rs (`redo`), motion.rs (doc/paragraph), text_ops.rs (selection deletes), keybindings.rs (the `tui.editor.*` additions), keys.rs (SUPER decode) | FORWARD | prompt-editor-keybinds |
 | mouse.ts:32 | SGR parse, wheel/button codes, modifier/motion bits, `isMouseSequence` | crates/pa-tui/src/mouse.rs:51 | MATCHES | — |
 | selection-metadata.ts:71 | Table-cell selection markers (`_pi:table:` start/end/cell) | MISSING (no `_pi:table:` handling anywhere) | MISSING | mouse-select |
 | selection-metadata.ts:80 | `extractTableCellSelectionRegions` | MISSING | MISSING | mouse-select |
@@ -550,7 +551,7 @@ TS reference: packages/coding-agent/src/modes/interactive/ (read-only). Rust wor
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:1928-1982 | runOnboardingFlow (login -> provider picker -> trace opt-in) | crates/pa-tui/src/interactive.rs:337-404 + onboarding.rs (trace question only) | PARTIAL |  |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:1959-1967 | Prime inference login step inside onboarding | MISSING | MISSING | clip-auth-cmds |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:1988-2053 | askOnboardingProviders (connect-more-providers picker) | MISSING | MISSING | clip-auth-cmds |
-| packages/coding-agent/src/modes/interactive/interactive-mode.ts:2056-2092 | askOnboardingTraceOptIn (Share/Not now choice, reversible note) | crates/pa-tui/src/onboarding.rs + interactive.rs:368-378 | MATCHES |  |
+| packages/coding-agent/src/modes/interactive/interactive-mode.ts:2056-2092 | askOnboardingTraceOptIn (Share/Not now choice, reversible note) | crates/pa-tui/src/onboarding.rs + interactive.rs:368-378 | MATCHES | sanctioned divergence (Kevin, 2026-09-24): sharing ships pre-configured ON, so fresh installs never see the question; it mounts only for an explicit opt-out that never completed onboarding |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:2101-2171 | formatDisplayPath/formatExtensionDisplayPath/getShortPath helpers | MISSING | MISSING | loaded-resources (proposed) |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:2173-2272 | compact extension labels (npm/git source labels, unique suffix) | MISSING | MISSING | loaded-resources (proposed) |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:2274-2315 | getDisplaySourceInfo/getScopeGroup/isPackageSource | MISSING | MISSING | loaded-resources (proposed) |

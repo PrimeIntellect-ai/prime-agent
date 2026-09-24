@@ -26,7 +26,8 @@ struct SettingsOnboardingSink {
     agent_dir: PathBuf,
     /// When the onboarding task was created: the `onboarding completed`
     /// duration measures sink creation to completion (the TUI starts the
-    /// flow right away; the trace-question flow is the whole onboarding).
+    /// flow right away; the flow is silent on fresh homes and only the
+    /// retained opt-out question shows the pane).
     created_at: std::time::Instant,
 }
 
@@ -44,9 +45,10 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
     fn mark_onboarding_complete(&self) -> Result<()> {
         let mut settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
         settings.set_onboarding_shown(true)?;
-        // `onboarding completed` (schema v1): the Rust onboarding flow is the
-        // trace question, so outcome is always success and no auth/provider
-        // step runs (auth_category `none`). Best-effort like all telemetry.
+        // `onboarding completed` (schema v1): fresh homes complete the flow
+        // silently (sharing is pre-configured), so outcome is always success
+        // and no auth/provider step runs (auth_category `none`). Best-effort
+        // like all telemetry.
         if !crate::mode::telemetry_disabled(&settings) {
             let client =
                 pa_core::session_engine::telemetry::build_client(&settings, &self.agent_dir);
@@ -65,14 +67,17 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
 }
 
 /// TS `shouldRunOnboarding` + `isOnboardingModelReady`: first run is defined
-/// by the settings flag alone, but the flow only shows the trace question
-/// (no login sequence) when the startup model resolves and has configured
-/// auth. The startup model follows the TS `findInitialModel` chain —
+/// by the settings flag alone; the task mounts only when the startup model
+/// resolves and has configured auth (no login sequence). A fresh home
+/// ships trace sharing pre-configured, so the flow completes silently
+/// without any question; the trace question remains for a user who
+/// explicitly opted out before completing onboarding. The startup model
+/// follows the TS `findInitialModel` chain —
 /// explicit flags, the `--models` scope, the saved settings default, the
 /// featured default, the first available model — so a flagless launch with
-/// a configured default reaches the trace question exactly like TS. The
-/// TS non-ready path (sign-in + provider picker) is not ported yet: a
-/// first launch that resolves no usable model skips the notice.
+/// a configured default mounts the task exactly like TS. The TS non-ready
+/// path (sign-in + provider picker) is not ported yet: a first launch that
+/// resolves no usable model skips the notice.
 fn onboarding_task(options: &RunOptions) -> Option<pa_tui::interactive::OnboardingTask> {
     let config = &options.config;
     let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
@@ -1084,6 +1089,9 @@ fn spawn_supervisor_detached(socket_path: &Path, spawn_cwd: &Path, exe: &Path) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The sink's answers flow through the pa-tui trait; the tests call the
+    // trait methods directly (the impl header alone does not import them).
+    use pa_tui::interactive::OnboardingSink;
 
     #[test]
     fn session_flags_map_to_selections() {
@@ -1340,8 +1348,9 @@ mod tests {
         settings.set_onboarding_shown(false).expect("reset flag");
 
         // Flagless launch: a models.json provider key + saved default model
-        // resolve the startup model, so the trace question shows (TS
-        // `isOnboardingModelReady` over the `findInitialModel` chain).
+        // resolve the startup model, so the onboarding task mounts (TS
+        // `isOnboardingModelReady` over the `findInitialModel` chain); on a
+        // fresh home it completes silently (no trace question).
         std::fs::write(
             agent.join("models.json"),
             r#"{ "providers": {
@@ -1370,7 +1379,7 @@ mod tests {
         assert!(onboarding_task(&options).is_some());
 
         // Explicit flags that resolve to a provider without configured auth
-        // leave the model not ready: no trace question. TS `validateConfig`
+        // leave the model not ready: no onboarding task. TS `validateConfig`
         // requires an "apiKey" for custom providers, but a `!command` key
         // that fails resolves to nothing (TS `resolveConfigValue`), so the
         // provider stays unauthenticated.
@@ -1378,6 +1387,96 @@ mod tests {
         options.config.provider = Some("onboard-naked".into());
         options.config.model = Some("m2".into());
         assert!(onboarding_task(&options).is_none());
+    }
+
+    /// The product sink's persistence over the real settings files: the
+    /// retained-dialog home (sharing explicitly opted out, onboarding never
+    /// completed — the one home the question still mounts for) reads its
+    /// provisioned value through a fresh manager, the answer persists, and
+    /// the completion flag lands beside it. The next launch's gate reads
+    /// exactly this pair, so the question never re-mounts.
+    #[test]
+    fn settings_sink_persists_the_retained_dialog_answers() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        // The provisioned home: sharing opted out, telemetry off (the unit
+        // seam stays hermetic — no telemetry client for the completion event).
+        let mut provisioned = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+        provisioned
+            .set_agent_traces_enabled(false)
+            .expect("provision the opt-out");
+        provisioned
+            .set_telemetry_enabled(false)
+            .expect("telemetry off");
+
+        let sink = SettingsOnboardingSink {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: agent_dir.clone(),
+            created_at: std::time::Instant::now(),
+        };
+        assert!(
+            !sink.agent_traces_enabled(),
+            "the provisioned opt-out reads through a fresh manager"
+        );
+        sink.set_agent_traces_enabled(true).expect("answer Share");
+        sink.mark_onboarding_complete()
+            .expect("complete onboarding");
+
+        // The next launch reads the pair through its own fresh manager: the
+        // gate never mounts the task again and the standing choice survives.
+        let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+        assert!(settings.get_onboarding_shown(), "the flag persisted");
+        assert!(
+            settings.get_agent_traces_enabled(),
+            "the Share answer persisted with the flag"
+        );
+    }
+
+    /// A fresh home ships sharing pre-configured ON through the product sink
+    /// (the silent-completion branch's read): nothing is written for the
+    /// choice, and the silent completion persists only the flag.
+    #[test]
+    fn settings_sink_reads_the_fresh_home_default_and_completes_silently() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        let mut provisioned = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+        provisioned
+            .set_telemetry_enabled(false)
+            .expect("telemetry off");
+
+        let sink = SettingsOnboardingSink {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: agent_dir.clone(),
+            created_at: std::time::Instant::now(),
+        };
+        assert!(
+            sink.agent_traces_enabled(),
+            "a fresh home shares traces (the pre-configured default, nothing written)"
+        );
+        sink.mark_onboarding_complete().expect("silent completion");
+
+        let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+        assert!(
+            settings.get_onboarding_shown(),
+            "the silent flow marked onboarding shown"
+        );
+        // The choice stayed unwritten (the default IS the configuration):
+        // the storage serializes unset keys as null, so the assertion is on
+        // the value, not the key's presence.
+        let persisted =
+            std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings file");
+        let document: serde_json::Value = serde_json::from_str(&persisted).expect("settings json");
+        let agent_traces = document
+            .get("agentTraces")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        assert_eq!(
+            agent_traces,
+            serde_json::Value::Null,
+            "the default stood without a written value:\n{persisted}"
+        );
     }
 
     #[test]

@@ -154,7 +154,7 @@ emitted and flushed before the TUI starts.
 | property | type | notes |
 |---|---|---|
 | `duration_ms` | number | onboarding-task creation → completion |
-| `outcome` | string | `success` (the Rust onboarding flow is the trace question; no error/abort path exists yet) |
+| `outcome` | string | `success` (fresh homes complete the flow silently — trace sharing ships pre-configured; the retained opt-out question has no error/abort path yet) |
 | `auth_category` | string | `none` (no auth step in the flow) |
 | `provider_category` | string | `unknown` |
 
