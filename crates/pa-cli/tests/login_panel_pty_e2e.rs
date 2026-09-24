@@ -5,12 +5,14 @@
 //! release — while the panel and the team picker render inline (the TS
 //! `LoginDialogComponent` + `PrimeTeamSelectorComponent` surfaces).
 //!
-//! The child half re-executes this binary in terminal mode against a mock
-//! supervisor with a scripted provider-auth hook that drives the panel
-//! (a progress line, then the team picker), so the byte stream the pty
-//! collects is the product's own rendering path. A plain `cargo test`
-//! run (no `PA_LOGIN_PANEL_CHILD_SOCKET`) passes trivially — only the
-//! parent test drives the real path.
+//! The child halves re-execute this binary in terminal mode against a
+//! mock supervisor: the `/login` Prime Inference child (a scripted
+//! provider-auth hook that drives the panel through the team picker) and
+//! the `/mcp`-view child (a scripted client-auth hook + the roster whose
+//! Enter runs the login). The byte stream the pty collects is the
+//! product's own rendering path. A plain `cargo test` run (no
+//! `PA_LOGIN_PANEL_CHILD_SOCKET`) passes trivially — only the parent
+//! tests drive the real path.
 #![cfg(unix)]
 
 use std::io::{BufRead, Read, Write};
@@ -49,6 +51,22 @@ fn login_panel_child_mode() {
         return;
     };
     let options = child_options(PathBuf::from(socket));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let _ = runtime.block_on(run_interactive(options, UiMode::Terminal));
+}
+
+/// The `/mcp`-view child half: the same real interactive loop with a
+/// scripted client-auth hook (the `/mcp` view's login dispatch) and a
+/// roster that carries the connectable `linear` service.
+#[test]
+fn login_panel_mcp_child_mode() {
+    let Ok(socket) = std::env::var(CHILD_SOCKET_ENV) else {
+        return;
+    };
+    let options = mcp_child_options(PathBuf::from(socket));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -172,6 +190,52 @@ fn child_options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
+/// The `/mcp` view's client-auth hook (the login the view's Enter runs):
+/// one progress line, then the TS status. The paste arm shares the panel
+/// (the masked field).
+struct ScriptedClientAuth;
+
+impl pa_tui::client_auth::ClientAuthCommands for ScriptedClientAuth {
+    fn login(
+        &self,
+        server: &str,
+        panel: AuthPanelHandle,
+    ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>> {
+        let server = server.to_string();
+        Box::pin(async move {
+            panel.progress("Authorizing...");
+            Ok(format!(
+                "Connected {server}. Its skill activates in new sessions (/new)."
+            ))
+        })
+    }
+
+    fn paste_token(
+        &self,
+        _server: &str,
+        _panel: AuthPanelHandle,
+    ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>> {
+        Box::pin(async move { Ok("Connected.".to_string()) })
+    }
+
+    fn logout(
+        &self,
+        server: &str,
+    ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send>> {
+        let server = server.to_string();
+        Box::pin(async move { Ok(format!("{server} is not connected.")) })
+    }
+}
+
+fn mcp_child_options(socket: PathBuf) -> InteractiveOptions {
+    InteractiveOptions {
+        client_auth: Some(pa_tui::client_auth::ClientAuthCommandsHandle(Arc::new(
+            ScriptedClientAuth,
+        ))),
+        ..child_options(socket)
+    }
+}
+
 /// The terminal takeover signatures the login flow must never emit: the
 /// alternate-screen leave (`?1049l`), the screen clear (`\x1b[2J`), and
 /// the SGR mouse-tracking release (the `renderer.suspend` bracket's
@@ -241,6 +305,58 @@ fn prime_login_renders_the_team_picker_without_a_terminal_takeover() {
     harness.finish();
 }
 
+/// The `/mcp`-view login e2e (the operator's exact action): Enter on the
+/// connection row runs the login flow, and the pty's byte stream shows
+/// the panel rendering INLINE — no alternate-screen leave, no screen
+/// clear, no mouse-tracking release — with the settled status landing
+/// as a transcript note.
+#[test]
+fn mcp_view_enter_login_renders_inline_without_a_terminal_takeover() {
+    let mut harness = LoginPanelHarness::start_mcp();
+
+    harness.wait_from_start("\x1b[?1049h", "the startup alternate-screen enter");
+
+    // `/mcp` opens the connections view with the roster's Linear row.
+    harness.write(b"/mcp\r");
+    harness.wait_from_start("Linear", "the connections view row");
+
+    // Enter runs the row's login flow: the panel mounts inline (the TS
+    // login dialog), the flow's progress renders, and the settled status
+    // lands as a transcript note — the window from here proves no
+    // terminal takeover.
+    let mark = harness.mark();
+    harness.write(b"\r");
+    // Ratatui's diff paints changed cells word by word, so the waits pin
+    // single-word needles: the progress line only renders inside the
+    // panel, and the settle note's word is unique after the view closed.
+    // Ratatui's diff paints changed cells word by word and the frame
+    // scheduler coalesces (a fast scripted flow can settle inside one
+    // frame), so the wait pins the settle note's word — unique after the
+    // view closed — and the window assertion below proves the panel
+    // mounted inline (its title's first word).
+    harness.wait_from(mark, "Connected", "the settled login status");
+
+    let window = harness.window_since(mark);
+    assert!(
+        find_subsequence(window, b"Login").is_some(),
+        "the inline login panel mounted (its title word)"
+    );
+    assert!(
+        !find_subsequence(window, ALT_SCREEN_LEAVE.as_bytes()).is_some(),
+        "the /mcp login never leaves the alternate screen"
+    );
+    assert!(
+        !find_subsequence(window, SCREEN_CLEAR.as_bytes()).is_some(),
+        "the /mcp login never clears the screen"
+    );
+    assert!(
+        !find_subsequence(window, MOUSE_DISABLE.as_bytes()).is_some(),
+        "the /mcp login never releases the mouse tracking (the old suspend bracket)"
+    );
+
+    harness.finish();
+}
+
 /// One pty-backed product child plus the mock supervisor it attaches to.
 struct LoginPanelHarness {
     child: Child,
@@ -251,7 +367,17 @@ struct LoginPanelHarness {
 }
 
 impl LoginPanelHarness {
+    /// The `/login` child (the provider-auth hook).
     fn start() -> LoginPanelHarness {
+        LoginPanelHarness::start_for("login_panel_child_mode")
+    }
+
+    /// The `/mcp`-view child (the client-auth hook + the roster).
+    fn start_mcp() -> LoginPanelHarness {
+        LoginPanelHarness::start_for("login_panel_mcp_child_mode")
+    }
+
+    fn start_for(child_test: &'static str) -> LoginPanelHarness {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let socket = dir.path().join("tui.sock");
         let supervisor = MockSupervisor::bind(&socket);
@@ -268,7 +394,7 @@ impl LoginPanelHarness {
         )
         .expect("open pty");
 
-        let child = spawn_child(&socket, &pty.slave);
+        let child = spawn_child(&socket, &pty.slave, child_test);
         // Leak the temp dir's socket path on purpose: the child needs the
         // socket for the lifetime of the test, and the whole tree dies
         // with the child at teardown.
@@ -307,11 +433,11 @@ impl LoginPanelHarness {
     }
 }
 
-fn spawn_child(socket: &std::path::Path, slave: &OwnedFd) -> Child {
+fn spawn_child(socket: &std::path::Path, slave: &OwnedFd, child_test: &str) -> Child {
     let mut command = Command::new(std::env::current_exe().expect("test binary"));
     command
         .arg("--exact")
-        .arg("login_panel_child_mode")
+        .arg(child_test)
         .env(CHILD_SOCKET_ENV, socket)
         .env_remove("TMUX")
         .stdin(slave_as_stdio(slave))
@@ -447,6 +573,35 @@ impl MockSupervisor {
                 }
                 "attach" => {
                     write_json(&mut writer, &attach_data(id));
+                }
+                "get_mcp_connections" => {
+                    // The roster the `/mcp` view renders: one connectable
+                    // OAuth service (Enter runs its login flow).
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "get_mcp_connections",
+                            "success": true,
+                            "data": {
+                                "connections": [
+                                    {
+                                        "server": "linear",
+                                        "label": "Linear",
+                                        "connected": false,
+                                        "usesOAuth": true,
+                                        "authKind": "subscription",
+                                        "transport": "http",
+                                        "userDeclared": false,
+                                        "generic": false,
+                                        "tools": null,
+                                        "error": null
+                                    }
+                                ]
+                            },
+                        }),
+                    );
                 }
                 _ => {
                     write_json(
