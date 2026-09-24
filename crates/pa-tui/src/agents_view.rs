@@ -1949,6 +1949,11 @@ async fn run_agents_view_surface(
             }
             redraw = true;
         } else {
+            // The batch window's deadline, copied out of the loop state:
+            // select evaluates EVERY branch expression whether or not its
+            // precondition passes, so the flush arm below must never
+            // unwrap the Option itself.
+            let flush_at = saved_flush;
             tokio::select! {
                 maybe_event = events.recv() => {
                     match maybe_event {
@@ -1995,9 +2000,14 @@ async fn run_agents_view_surface(
                 _ = tokio::time::sleep_until(last_pulse + Duration::from_millis(PULSE_INTERVAL_MS)),
                     if mode.rows.iter().any(|row| row.section == Section::Running) => {}
                 // The streamed-catalog batch window: the buffered rows
-                // flush as one rebuild.
-                _ = tokio::time::sleep_until(saved_flush.unwrap()),
-                    if saved_flush.is_some() => {
+                // flush as one rebuild. A closed window pends forever
+                // (the copied deadline is None) instead of unwrapping.
+                _ = async {
+                    match flush_at {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
                     if mode.flush_saved_stream() {
                         redraw = true;
                     }
