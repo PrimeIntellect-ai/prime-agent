@@ -13,6 +13,26 @@ mod wrapping;
 #[cfg(test)]
 mod wrapping_tests;
 
+/// Truncate to a display-width budget and pad with spaces to exactly
+/// `width` columns — grapheme-aware (multi-codepoint clusters such as
+/// `\u{1f468}\u{200d}\u{1f469}...` measure as one cell through
+/// [`grapheme_width`], never per scalar): the table cells stay aligned.
+pub fn pad_cell(text: &str, width: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut cell = String::new();
+    let mut used = 0usize;
+    for grapheme in text.graphemes(true) {
+        let cell_width = grapheme_width(grapheme);
+        if used + cell_width > width {
+            break;
+        }
+        cell.push_str(grapheme);
+        used += cell_width;
+    }
+    cell.push_str(&" ".repeat(width - used));
+    cell
+}
+
 /// Width of one grapheme cluster approximated by its first char plus zero-width
 /// continuation chars. Good enough for the terminal layout we render.
 pub fn char_width(c: char) -> usize {

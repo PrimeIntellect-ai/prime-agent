@@ -127,9 +127,9 @@ pub struct AgentView {
     /// `HeartbeatManagerComponent`, inline-picker style): while set, it
     /// owns the editor dock like the `/model` and `/effort` pickers.
     pub heartbeats_picker: Option<crate::heartbeats_picker::HeartbeatsPicker>,
-    /// The unified activity panel (the dock's grouped list): while set, it
-    /// owns the editor dock like the inline pickers.
-    pub activity_panel: Option<crate::activity_panel::ActivityPanel>,
+    /// The dedicated bash view (the dock's Bash group's destination):
+    /// while set, it owns the editor dock like the inline pickers.
+    pub bash_view: Option<crate::bash_view::BashView>,
     /// A `/share` gist upload in flight (TS `BorderedLoader`): while set,
     /// it replaces the editor with the cancellable loader rows.
     pub share_loader: Option<ShareLoader>,
@@ -263,7 +263,7 @@ impl AgentView {
             effort_picker: None,
             mcp_view: None,
             heartbeats_picker: None,
-            activity_panel: None,
+            bash_view: None,
             share_loader: None,
             reload_box: None,
             side_pane: None,
@@ -1210,9 +1210,9 @@ impl AgentView {
             let mut dock = prompt_context;
             dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
             Some(dock)
-        } else if let Some(panel) = &self.activity_panel {
+        } else if let Some(view) = self.bash_view.as_ref() {
             let mut dock = prompt_context;
-            dock.extend(panel.render(&self.theme, width, self.editor.keybindings()));
+            dock.extend(view.render(&self.theme, width, self.editor.keybindings()));
             Some(dock)
         } else {
             None
@@ -1412,7 +1412,7 @@ impl AgentView {
             || self.model_picker.is_some()
             || self.effort_picker.is_some()
             || self.heartbeats_picker.is_some()
-            || self.activity_panel.is_some()
+            || self.bash_view.is_some()
             || self.tree_selector.is_some()
             || self.fork_selector.is_some()
             || self.share_loader.is_some()

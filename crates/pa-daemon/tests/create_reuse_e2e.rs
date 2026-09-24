@@ -444,3 +444,112 @@ fn create_over_a_dead_workers_file_launches_and_rebinds() {
     );
     assert_eq!(binding["sessionFile"].as_str(), Some(session_file.as_str()));
 }
+
+/// The per-file open single-flight (TS `openingWorkers`'s join): two
+/// concurrent creates for the same existing-but-unserved session file must
+/// both succeed and answer the SAME live binding — one launches, the
+/// other waits out the launch and reuses its worker — instead of both
+/// reaching the launch where one loses the runtime session lease and
+/// surfaces `Session is already active`.
+#[test]
+fn concurrent_creates_for_one_file_share_a_single_launch() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("daemon.sock");
+    let agent_dir = dir.path().join("agent");
+    std::fs::create_dir_all(&agent_dir).expect("agent dir");
+    let _daemon = spawn_daemon(&socket, &agent_dir, None);
+
+    let script_path = write_script(dir.path(), &["first scripted", "second scripted"]);
+    let create_config = json!({
+        "cwd": dir.path().to_string_lossy(),
+        "sessionDir": agent_dir.join("sessions").to_string_lossy(),
+        "script": script_path.to_string_lossy(),
+    });
+
+    // The saved, unserved session: a valid file no worker hosts.
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
+    let mut saved =
+        pa_daemon::session_store::SessionFile::create(&dir.path().to_string_lossy(), None, 0);
+    let session_path = sessions_dir.join(format!("{}.jsonl", saved.session_id()));
+    saved.set_path(session_path.clone());
+    saved.append_session_state("active");
+    saved.rewrite().expect("write the saved session");
+
+    // Two panes open the SAME file concurrently: both requests are in
+    // flight before either answers.
+    let mut first = Client::connect(&socket);
+    let mut second = Client::connect(&socket);
+    first.send_command(
+        "c-first",
+        json!({
+            "type": "create",
+            "sessionPath": session_path.to_string_lossy(),
+            "config": create_config,
+        }),
+    );
+    second.send_command(
+        "c-second",
+        json!({
+            "type": "create",
+            "sessionPath": session_path.to_string_lossy(),
+            "config": create_config,
+        }),
+    );
+    let opened_first = first.read_response("c-first");
+    let opened_second = second.read_response("c-second");
+    for (label, opened) in [("first", &opened_first), ("second", &opened_second)] {
+        assert_eq!(
+            opened["success"], true,
+            "the concurrent {label} open must not lose the session lease: {opened}"
+        );
+    }
+    let first_id = opened_first["data"]["id"]
+        .as_str()
+        .or_else(|| opened_first["data"]["sessionId"].as_str())
+        .expect("session id in the first open")
+        .to_string();
+    let second_id = opened_second["data"]["id"]
+        .as_str()
+        .or_else(|| opened_second["data"]["sessionId"].as_str())
+        .expect("session id in the second open")
+        .to_string();
+    assert_eq!(
+        first_id, second_id,
+        "the concurrent opens must share one live binding (one launch, one reuse)"
+    );
+
+    // The shared binding routes: the second pane attaches by it and a
+    // prompt runs its turn.
+    second.send_command(
+        "a-second",
+        json!({ "type": "attach", "activeSessionId": second_id }),
+    );
+    let attached = second.read_response("a-second");
+    assert_eq!(attached["success"], true, "attach failed: {attached}");
+    let text = second.prompt_and_final_text(
+        "p-second",
+        json!({ "type": "prompt", "activeSessionId": second_id, "message": "hi" }),
+    );
+    assert_eq!(text, "first scripted");
+
+    // Exactly one session serves the file: the single launch.
+    first.send_command("l1", json!({ "type": "list", "all": true }));
+    let listed = first.read_response("l1");
+    let sessions = listed["data"]["sessions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let for_file: Vec<&Value> = sessions
+        .iter()
+        .filter(|row| {
+            row.get("sessionFile").and_then(Value::as_str)
+                == Some(session_path.to_string_lossy().as_ref())
+        })
+        .collect();
+    assert_eq!(
+        for_file.len(),
+        1,
+        "one launch must serve the concurrent opens: {sessions:?}"
+    );
+}
