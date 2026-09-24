@@ -462,15 +462,17 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         "runtimeKind": "top-level",
     });
     let children = Arc::new(children);
-    // The send-path controller has no worker token: the direct peer path
-    // is refused and the supervisor-routed send (the TS remote path)
-    // delivers. The family view reads the supervisor roster, which IS
-    // worker-token gated (`list_agent_peers`), so it runs on the parent's
-    // real token from its worker descriptor.
+    // Both the sends and the family view ride the parent's real worker
+    // token from its worker descriptor (the same wiring the worker's
+    // engine performs): the supervisor roster (`list_agent_peers`) is
+    // worker-token gated, and the supervisor-routed delivery requires
+    // worker_auth - a deliberately token-less controller can never pass
+    // it, so the token-less refusal premise belongs to the peer-transport
+    // suite, not here.
     let controller = Arc::new(LinkAgentMessageController::new(
         Arc::clone(&link),
         parent_active_session_id.clone(),
-        "no-worker-token".to_string(),
+        parent_worker_token(&agent_dir, &parent_active_session_id),
         Arc::new(std::sync::Mutex::new(Some(own_summary.clone()))),
         Some(Arc::clone(&children)),
     ));
@@ -788,10 +790,12 @@ async fn family_edges_never_cross_families_end_to_end() {
         // writes its session file; the durable artifact is the proof, so
         // wait for it (bounded) before reading.
         let kid_session_id = row.session_id.clone().expect("child persisted id");
+        // The per-child artifact dir IS the rlm child id (it already
+        // carries the "sub-" prefix); do not prefix it again.
         let artifact_dir = agent_dir
             .join("session-artifacts")
             .join(session)
-            .join(format!("sub-{}", handle.rlm_child_id));
+            .join(&handle.rlm_child_id);
         let expected_file = artifact_dir.join(format!("{kid_session_id}.jsonl"));
         let artifact_deadline = Instant::now() + Duration::from_secs(15);
         while !expected_file.is_file() {
@@ -808,7 +812,7 @@ async fn family_edges_never_cross_families_end_to_end() {
             agent_dir
                 .join("session-artifacts")
                 .join(session)
-                .join(format!("sub-{}", handle.rlm_child_id)),
+                .join(&handle.rlm_child_id),
         )
         .expect("kid artifact dir")
         .flatten()
