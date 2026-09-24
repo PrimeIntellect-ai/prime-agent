@@ -229,9 +229,9 @@ fn print_continue_refuses_an_active_daemon_session() {
     );
     assert!(
         stderr.contains(&format!(
-            "Attach to it instead: prime-agent --resume {active_session_id}\n"
+            "Attach to it instead: prime-agent --resume '{active_session_id}'\n"
         )),
-        "the refusal suggests attaching to the live session: {stderr}"
+        "the refusal suggests attaching to the live session (the holder id rides shell-quoted): {stderr}"
     );
     assert!(
         stderr.contains("the file unlocks when that session exits"),
