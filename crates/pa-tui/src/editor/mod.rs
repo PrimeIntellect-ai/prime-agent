@@ -211,8 +211,11 @@ impl Editor {
     /// Replace the provider's `skill:` commands (TS
     /// `setupAutocompleteProvider` rebuilds the command list with the
     /// session's skills; this port swaps the list on the installed
-    /// provider).
+    /// provider, and the open dropdown — if any — cancels so a stale
+    /// menu never outlives the catalog it was built from (TS
+    /// `setAutocompleteProvider` cancels too).
     pub fn set_autocomplete_skill_commands(&mut self, skills: Vec<SlashCommandEntry>) {
+        self.cancel_autocomplete();
         if let Some(provider) = self.autocomplete_provider.as_mut() {
             provider.set_skill_commands(skills);
         }

@@ -637,7 +637,7 @@ impl SlashCommandEntry {
 /// branch is not reachable on this port's daemon wire — the skills
 /// loader only emits `local` sources — so the scope prefix is the
 /// fallback for any other source, exactly like the TS tail.
-pub fn autocomplete_source_tag(source_info: &serde_json::Value) -> Option<String> {
+fn autocomplete_source_tag(source_info: &serde_json::Value) -> Option<String> {
     // TS guards the whole ladder with `if (!sourceInfo) return undefined`:
     // an absent source info gets no tag (the row renders bare).
     if source_info.is_null() {
@@ -666,7 +666,7 @@ pub fn autocomplete_source_tag(source_info: &serde_json::Value) -> Option<String
 }
 
 /// The `#`-prefixed label the menu row renders (TS `getAutocompleteSourceLabel`).
-pub fn autocomplete_source_label(source_info: &serde_json::Value) -> Option<String> {
+fn autocomplete_source_label(source_info: &serde_json::Value) -> Option<String> {
     autocomplete_source_tag(source_info).map(|tag| format!("#{tag}"))
 }
 
@@ -808,6 +808,7 @@ impl CombinedAutocompleteProvider {
         let takes_argument = self
             .commands
             .iter()
+            .chain(self.skill_commands.iter())
             .find(|command| command.name == item.value)
             .is_some_and(|command| command.takes_argument);
         let has_separator_after_cursor =
@@ -900,10 +901,14 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
     ) -> CompletionResult {
         let is_slash = get_slash_command_context(lines, cursor_line, cursor_col)
             .is_some_and(|context| context.kind == SlashKind::Name && context.prefix == prefix);
+        // TS `applyCompletion` finds the item over its whole command list
+        // (builtins and skills share one array), so a `skill:` item applies
+        // through the slash path — the line keeps its leading `/`.
         if is_slash
             && self
                 .commands
                 .iter()
+                .chain(self.skill_commands.iter())
                 .any(|command| command.name == item.value)
         {
             return self.apply_slash_completion(lines, cursor_line, cursor_col, item, prefix);
@@ -1249,6 +1254,19 @@ mod tests {
             &item,
             "/skill:brain",
         );
+        assert_eq!(result.lines[0], "/skill:brainstorm");
+        assert_eq!(result.cursor_col, "/skill:brainstorm".chars().count());
+    }
+
+    #[test]
+    fn skill_completions_apply_through_the_slash_path() {
+        // TS `applyCompletion` finds skill items over the whole command
+        // list, so a menu-confirmed skill keeps the leading `/` and stays
+        // a command submission (the file path would drop it).
+        let provider = provider_with_skill("/tmp");
+        let item = item("skill:brainstorm");
+        let result =
+            provider.apply_completion(&["/skill:brain".to_string()], 0, 12, &item, "/skill:brain");
         assert_eq!(result.lines[0], "/skill:brainstorm");
         assert_eq!(result.cursor_col, "/skill:brainstorm".chars().count());
     }

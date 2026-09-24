@@ -6358,6 +6358,18 @@ impl SessionUi {
     pub(crate) fn spawn_command_catalog_refresh(&mut self) {
         self.command_refresh_epoch += 1;
         let epoch = self.command_refresh_epoch;
+        // TS's rebind completes only after the fresh catalog lands
+        // (`refreshConnectionCatalog` is awaited before the provider
+        // rebuild), so the menu never serves the previous session's
+        // skills. The clear rides the same FIFO channel ahead of the
+        // fetch's response (this send completes before the spawn below
+        // runs), so the old rows drop immediately and the fresh fetch
+        // repopulates — a rebind never offers stale cross-session
+        // commands.
+        let _ = self.command_updates.send(CommandCatalogUpdate {
+            epoch,
+            skill_commands: Vec::new(),
+        });
         let updates = self.command_updates.clone();
         let client = self.client.clone();
         let active_session_id = self.active_session_id.clone();
@@ -6401,12 +6413,13 @@ impl SessionUi {
         }
         // The cache keeps the raw fetch (the toggle re-applies it under
         // the setting's new value); the setting gates only what the
-        // provider lists.
+        // provider lists. The TS default (true) applies when the
+        // composition root supplies no settings seam.
         self.skill_commands_cache = update.skill_commands;
         let skills = if self
             .client_settings
             .as_ref()
-            .is_some_and(|settings| settings.enable_skill_commands())
+            .map_or(true, |settings| settings.enable_skill_commands())
         {
             self.skill_commands_cache.clone()
         } else {

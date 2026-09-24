@@ -422,6 +422,44 @@ fn skill_commands_surface_in_the_slash_menu() {
     assert!(all.contains("#user"), "the source label renders: {all}");
 }
 
+/// The TS default (`enableSkillCommands: true`) applies when the
+/// composition root supplies no settings seam at all — an embedded run
+/// without `/settings` still lists the skills.
+#[test]
+fn skills_surface_without_a_settings_seam() {
+    std::env::remove_var("TMUX");
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let socket = dir.path().join("tui.sock");
+    let supervisor = MockSupervisor::bind(&socket);
+    let handle = std::thread::spawn(move || supervisor.serve());
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let mut opts = options(socket);
+    opts.client_settings = None;
+    let plan = HeadlessPlan {
+        steps: vec![
+            HeadlessStep::WaitMs(300),
+            HeadlessStep::Type("/skill:web".to_string()),
+            HeadlessStep::SettleIdle,
+            HeadlessStep::WaitMs(100),
+        ],
+        width: 100,
+        height: 30,
+    };
+    let outcome = runtime
+        .block_on(run_interactive(opts, UiMode::Headless(plan)))
+        .expect("interactive run");
+    handle.join().expect("mock supervisor finished");
+    let all = outcome.frames.join("\n");
+    assert!(
+        all.contains("skill:web-search"),
+        "the TS default lists skills without a settings seam: {all}"
+    );
+}
+
 /// The `enableSkillCommands` setting gates the skill list (TS default
 /// true; off hides them from the autocomplete).
 #[test]
