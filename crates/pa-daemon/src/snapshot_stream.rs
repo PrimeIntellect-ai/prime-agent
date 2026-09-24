@@ -411,7 +411,7 @@ mod tests {
             .map(|i| json!({ "role": "user", "content": "y".repeat(1024), "timestamp": i }))
             .collect();
         let chunks = chunk_messages(&messages, SNAPSHOT_TARGET_CHUNK_BYTES);
-        let reassembled: Vec<Value> = chunks.iter().flat_map(|chunk| chunk.clone()).collect();
+        let reassembled: Vec<Value> = chunks.iter().flat_map(std::clone::Clone::clone).collect();
         assert_eq!(reassembled, messages, "index order reassembly is lossless");
         for chunk in &chunks {
             let bytes: usize = chunk

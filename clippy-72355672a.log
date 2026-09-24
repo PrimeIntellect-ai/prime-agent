@@ -1,0 +1,132 @@
+    Checking pa-daemon v0.1.0 (/workspace/repo/crates/pa-daemon)
+error[E0061]: this function takes 4 arguments but 3 arguments were supplied
+   --> crates/pa-daemon/src/saved_session_commands.rs:661:28
+    |
+661 |             let captured = tombstone_saved_session_delete_captured(
+    |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+664 |                 &capture,
+    |                 -------- argument #3 of type `&str` is missing
+    |
+note: function defined here
+   --> crates/pa-daemon/src/saved_session_commands.rs:242:15
+    |
+242 | pub(crate) fn tombstone_saved_session_delete_captured(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+245 |     session_path: &str,
+    |     ------------------
+help: provide the argument
+    |
+661 |             let captured = tombstone_saved_session_delete_captured(
+662 |                 &self.options.agent_dir,
+663 |                 sessions_dir.as_deref().unwrap_or(&self.options.agent_dir),
+664 ~                 /* &str */,
+665 ~                 &capture,
+    |
+
+error[E0061]: this function takes 4 arguments but 3 arguments were supplied
+   --> crates/pa-daemon/src/saved_session_commands.rs:925:29
+    |
+925 |             let _captured = tombstone_saved_session_delete_captured(
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+928 |                 &capture,
+    |                 -------- argument #3 of type `&str` is missing
+    |
+note: function defined here
+   --> crates/pa-daemon/src/saved_session_commands.rs:242:15
+    |
+242 | pub(crate) fn tombstone_saved_session_delete_captured(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+245 |     session_path: &str,
+    |     ------------------
+help: provide the argument
+    |
+925 |             let _captured = tombstone_saved_session_delete_captured(
+926 |                 &self.config.agent_dir,
+927 |                 &sessions_dir,
+928 ~                 /* &str */,
+929 ~                 &capture,
+    |
+
+error[E0433]: cannot find module or crate `fs` in this scope
+    --> crates/pa-daemon/src/saved_session_commands.rs:1078:13
+     |
+1078 |             fs::write(&parent, "{}").unwrap();
+     |             ^^ use of unresolved module or unlinked crate `fs`
+     |
+     = help: if you wanted to use a crate named `fs`, use `cargo add fs` to add it to your `Cargo.toml`
+     = note: module `crate::session_usage::tests::fs` exists but is inaccessible
+help: consider importing this module
+     |
+ 938 +     use std::fs;
+     |
+
+error[E0433]: cannot find module or crate `fs` in this scope
+    --> crates/pa-daemon/src/saved_session_commands.rs:1127:9
+     |
+1127 |         fs::write(&parent, "{}").unwrap();
+     |         ^^ use of unresolved module or unlinked crate `fs`
+     |
+     = help: if you wanted to use a crate named `fs`, use `cargo add fs` to add it to your `Cargo.toml`
+     = note: module `crate::session_usage::tests::fs` exists but is inaccessible
+help: consider importing this module
+     |
+ 938 +     use std::fs;
+     |
+
+error: unused variable: `session_path`
+   --> crates/pa-daemon/src/saved_session_commands.rs:245:5
+    |
+245 |     session_path: &str,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_session_path`
+    |
+    = note: `-D unused-variables` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_variables)]`
+
+For more information about this error, try `rustc --explain E0061`.
+error: could not compile `pa-daemon` (lib) due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...
+error[E0061]: this function takes 4 arguments but 3 arguments were supplied
+   --> crates/pa-daemon/src/saved_session_commands.rs:952:9
+    |
+952 |         tombstone_saved_session_delete_captured(agent_dir, sessions_dir, &capture)
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                          -------- argument #3 of type `&str` is missing
+    |
+note: function defined here
+   --> crates/pa-daemon/src/saved_session_commands.rs:242:15
+    |
+242 | pub(crate) fn tombstone_saved_session_delete_captured(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+245 |     session_path: &str,
+    |     ------------------
+help: provide the argument
+    |
+952 |         tombstone_saved_session_delete_captured(agent_dir, sessions_dir, /* &str */, &capture)
+    |                                                                          +++++++++++
+
+error[E0061]: this function takes 4 arguments but 3 arguments were supplied
+    --> crates/pa-daemon/src/saved_session_commands.rs:1156:24
+     |
+1156 |         let captured = tombstone_saved_session_delete_captured(&agent_dir, &sessions_dir, &capture);
+     |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^                            -------- argument #3 of type `&str` is missing
+     |
+note: function defined here
+    --> crates/pa-daemon/src/saved_session_commands.rs:242:15
+     |
+ 242 | pub(crate) fn tombstone_saved_session_delete_captured(
+     |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+ 245 |     session_path: &str,
+     |     ------------------
+help: provide the argument
+     |
+1156 |         let captured = tombstone_saved_session_delete_captured(&agent_dir, &sessions_dir, /* &str */, &capture);
+     |                                                                                           +++++++++++
+
+Some errors have detailed explanations: E0061, E0433.
+For more information about an error, try `rustc --explain E0061`.
+error: could not compile `pa-daemon` (lib test) due to 7 previous errors

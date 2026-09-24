@@ -794,7 +794,7 @@ pub fn provider_category(provider: Option<&str>) -> String {
     categories
         .iter()
         .find(|category| normalized.contains(*category))
-        .map(|category| category.to_string())
+        .map(std::string::ToString::to_string)
         .unwrap_or_else(|| "custom".to_string())
 }
 

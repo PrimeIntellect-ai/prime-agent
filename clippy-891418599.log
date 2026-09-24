@@ -1,0 +1,60 @@
+    Checking pa-types v0.1.0 (/workspace/repo/crates/pa-types)
+    Checking pa-ai v0.1.0 (/workspace/repo/crates/pa-ai)
+    Checking pa-tui v0.1.0 (/workspace/repo/crates/pa-tui)
+    Checking pa-models v0.1.0 (/workspace/repo/crates/pa-models)
+    Checking pa-core v0.1.0 (/workspace/repo/crates/pa-core)
+    Checking pa-daemon v0.1.0 (/workspace/repo/crates/pa-daemon)
+error[E0425]: cannot find type `RlmLedgerEdge` in this scope
+   --> crates/pa-daemon/src/supervisor_roster.rs:427:83
+    |
+427 |     fn edge(child_id: &str, parent: &str, child: &str, depth: u32, name: &str) -> RlmLedgerEdge {
+    |                                                                                   ^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct
+    |
+420 +     use crate::rlm_ledger::RlmLedgerEdge;
+    |
+
+error[E0422]: cannot find struct, variant or union type `RlmLedgerEdge` in this scope
+   --> crates/pa-daemon/src/supervisor_roster.rs:428:9
+    |
+428 |         RlmLedgerEdge {
+    |         ^^^^^^^^^^^^^ not found in this scope
+    |
+help: consider importing this struct
+    |
+420 +     use crate::rlm_ledger::RlmLedgerEdge;
+    |
+
+error: function `tombstone_saved_session_delete` is never used
+   --> crates/pa-daemon/src/saved_session_commands.rs:362:15
+    |
+362 | pub(crate) fn tombstone_saved_session_delete(
+    |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `-D dead-code` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error[E0063]: missing field `deleted_usage` in initializer of `rlm_ledger::RlmLedgerEdge`
+   --> crates/pa-daemon/src/rlm_roster.rs:335:19
+    |
+335 |             edge: RlmLedgerEdge {
+    |                   ^^^^^^^^^^^^^ missing `deleted_usage`
+
+error: could not compile `pa-daemon` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error[E0063]: missing field `deleted_usage` in initializer of `rlm_ledger::RlmLedgerEdge`
+   --> crates/pa-daemon/src/supervisor_roster_seed.rs:536:9
+    |
+536 |         RlmLedgerEdge {
+    |         ^^^^^^^^^^^^^ missing `deleted_usage`
+
+error[E0063]: missing field `deleted_usage` in initializer of `rlm_ledger::RlmLedgerEdge`
+    --> crates/pa-daemon/src/supervisor_roster_seed.rs:1050:18
+     |
+1050 |                 &crate::rlm_ledger::RlmLedgerEdge {
+     |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ missing `deleted_usage`
+
+Some errors have detailed explanations: E0063, E0422, E0425.
+For more information about an error, try `rustc --explain E0063`.
+error: could not compile `pa-daemon` (lib test) due to 5 previous errors

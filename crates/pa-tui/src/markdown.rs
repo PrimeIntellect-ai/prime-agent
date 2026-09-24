@@ -421,7 +421,7 @@ pub(crate) fn list_marker(t: &str) -> Option<(bool, usize)> {
         let _ = rest;
         return Some((false, 0));
     }
-    let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = t.chars().take_while(char::is_ascii_digit).collect();
     if !digits.is_empty() {
         let after = &t[digits.len()..];
         if let Some(rest) = after.strip_prefix(". ") {

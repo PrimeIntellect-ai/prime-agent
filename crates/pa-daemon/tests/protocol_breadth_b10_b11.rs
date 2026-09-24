@@ -744,10 +744,10 @@ fn worker_pid(agent_dir: &std::path::Path) -> u32 {
     loop {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(agent_dir.join("daemon-workers"))
             .expect("daemon-workers dir")
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .flat_map(|entry| std::fs::read_dir(entry.path()).ok())
             .flatten()
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .map(|entry| entry.path())
             .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
             .collect();

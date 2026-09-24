@@ -1270,7 +1270,7 @@ impl SessionEngine for ScriptedEngine {
         }
         let usage = scripted_usage();
         if !emit(EngineEvent::AssistantUpdate {
-            message: json!({"role": "assistant", "content": "", "provider": "scripted", "model": "faux-1", "usage": usage.clone(), "timestamp": crate::util::now_ms()}),
+            message: json!({"role": "assistant", "content": "", "provider": "scripted", "model": "faux-1", "usage": usage, "timestamp": crate::util::now_ms()}),
             stream_event: None,
         }) {
             emit(cancelled());

@@ -390,16 +390,14 @@ impl Supervisor {
         );
         if cancelled > 0 {
             self.log_line(&format!(
-                "stop finalize: cancelled {cancelled} scheduled job(s) of {}",
-                root_session_file
+                "stop finalize: cancelled {cancelled} scheduled job(s) of {root_session_file}"
             ));
         }
         let settled = match archive_error {
             None => true,
             Some(error) => {
                 self.log_line(&format!(
-                    "stop finalize: could not archive {}: {error:#}",
-                    root_session_file
+                    "stop finalize: could not archive {root_session_file}: {error:#}"
                 ));
                 false
             }
@@ -703,8 +701,8 @@ mod tests {
             ..serde_json::from_value(serde_json::json!({
                 "id": "job",
                 "status": "active",
-                "activeSessionId": session_id.clone(),
-                "sessionId": session_id.clone(),
+                "activeSessionId": session_id,
+                "sessionId": session_id,
                 "sessionFile": session_file.to_string_lossy(),
                 "cwd": "/work",
                 "prompt": "ping",

@@ -186,7 +186,7 @@ fn write_synthetic_family(agent_dir: &Path, children: usize) -> (PathBuf, usize)
         write_child_session(
             &child_path,
             &child_id,
-            &format!("worker-{:04}", index),
+            &format!("worker-{index:04}"),
             &format!("child task {index}"),
         );
         records.push_str(

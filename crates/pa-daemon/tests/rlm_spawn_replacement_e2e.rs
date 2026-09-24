@@ -252,7 +252,7 @@ fn child_session_file(agent_dir: &Path, child_id: &str) -> PathBuf {
         || {
             std::fs::read_dir(&dir)
                 .ok()?
-                .filter_map(|entry| entry.ok())
+                .filter_map(std::result::Result::ok)
                 .map(|entry| entry.path())
                 .find(|path| {
                     path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
@@ -383,7 +383,12 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
                     .unwrap_or_default();
                 let tail: Vec<&str> = stderr.lines().rev().take(80).collect();
                 let artifacts: Vec<PathBuf> = std::fs::read_dir(session_file.parent().unwrap())
-                    .map(|entries| entries.filter_map(|e| e.ok()).map(|e| e.path()).collect())
+                    .map(|entries| {
+                        entries
+                            .filter_map(std::result::Result::ok)
+                            .map(|e| e.path())
+                            .collect()
+                    })
                     .unwrap_or_default();
                 panic!(
                     "marker {marker} never landed for {name}\nsession file {session_file:?}: {content}\nartifacts dir: {artifacts:?}\nroster: {:?}\nsupervisor stderr tail (reversed): {tail:#?}",

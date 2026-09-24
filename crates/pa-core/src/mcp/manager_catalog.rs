@@ -506,7 +506,7 @@ pub async fn install_static_token(
         auth.get_all().get(&provider_id).cloned()
     };
     let credential: Option<AuthCredential> =
-        current.and_then(|value| serde_json::from_value(value.clone()).ok());
+        current.and_then(|value| serde_json::from_value(value).ok());
     let still_current = matches!(
         &credential,
         Some(AuthCredential::McpStaticToken { bearer, endpoint: Some(bound) })

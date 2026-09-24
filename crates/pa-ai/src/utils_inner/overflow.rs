@@ -143,7 +143,7 @@ mod tests {
             usage,
             stop_reason,
             stop_reason_raw: None,
-            error_message: error_message.map(|s| s.to_string()),
+            error_message: error_message.map(std::string::ToString::to_string),
             timestamp: 0,
             rest: Default::default(),
         }

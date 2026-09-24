@@ -110,7 +110,7 @@ pub fn retain_thought_signature(existing: Option<&str>, incoming: Option<&str>) 
             return Some(incoming.to_string());
         }
     }
-    existing.map(|existing| existing.to_string())
+    existing.map(std::string::ToString::to_string)
 }
 
 // Thought signatures must be base64 for Google APIs (TYPE_BYTES).
@@ -134,7 +134,7 @@ fn resolve_thought_signature(
     signature: Option<&str>,
 ) -> Option<String> {
     if is_same_provider_and_model && is_valid_thought_signature(signature) {
-        signature.map(|s| s.to_string())
+        signature.map(std::string::ToString::to_string)
     } else {
         None
     }
@@ -152,7 +152,7 @@ fn get_gemini_major_version(model_id: &str) -> Option<u64> {
         .map(|rest| rest.strip_prefix("-live").unwrap_or(rest))
         .unwrap_or(&lower);
     let digits = stripped.strip_prefix('-')?;
-    let major: String = digits.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let major: String = digits.chars().take_while(char::is_ascii_digit).collect();
     major.parse().ok()
 }
 

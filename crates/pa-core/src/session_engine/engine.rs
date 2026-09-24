@@ -423,7 +423,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                 let row = super::state_restore_notice::notice_message(result);
                 restore_rows
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(row);
             },
         ) as crate::kernel::provisioner::RestoreCallback)

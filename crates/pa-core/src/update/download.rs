@@ -643,7 +643,7 @@ mod tests {
         assert!(error.is_err());
         // A foreign digest recorded in the name is refused too.
         std::fs::write(release_dir.join("README.md"), "payload").unwrap();
-        std::fs::write(release_dir.join(".archive-sha256"), format!("{}0", sha)).unwrap();
+        std::fs::write(release_dir.join(".archive-sha256"), format!("{sha}0")).unwrap();
         assert!(stage_archive(&archive, &sha, &root, "0.2.0", "https://example.com").is_err());
     }
 

@@ -650,7 +650,7 @@ impl AgentsViewMode {
 
     /// The top-level ancestor row of a nested row (TS `findSubagentRootRow`).
     fn find_subagent_root_row(&self, row: &AgentsViewRow) -> Option<&AgentsViewRow> {
-        let mut identity = row.parent_identity.clone();
+        let mut identity = row.parent_identity.as_deref();
         let mut guard = 0;
         while let Some(current) = identity {
             guard += 1;
@@ -663,7 +663,7 @@ impl AgentsViewMode {
                 .find(|candidate| candidate.identity == current)?;
             match parent.kind {
                 RowKind::Agent => return Some(parent),
-                _ => identity = parent.parent_identity.clone(),
+                _ => identity = parent.parent_identity.as_deref(),
             }
         }
         None
@@ -1154,7 +1154,7 @@ impl AgentsViewMode {
             lines.insert(
                 0,
                 vec![crate::Span::styled(
-                    layout.legend.clone(),
+                    layout.legend,
                     self.theme
                         .fg_style(ThemeColor::Text)
                         .add_modifier(ratatui::style::Modifier::BOLD),
@@ -1321,7 +1321,7 @@ impl AgentsViewMode {
                 key_text("app.agents.new"),
             )
         };
-        truncate_line(vec![theme.fg(ThemeColor::Muted, hints.to_string())], width)
+        truncate_line(vec![theme.fg(ThemeColor::Muted, hints)], width)
     }
 }
 

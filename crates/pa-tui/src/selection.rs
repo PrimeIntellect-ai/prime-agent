@@ -681,7 +681,7 @@ mod tests {
     }
 
     fn rendered_row(frame: &[Line], row: usize) -> String {
-        row_text(frame.get(row).map(|l| l.as_slice()).unwrap_or(&[]))
+        row_text(frame.get(row).map(Vec::as_slice).unwrap_or(&[]))
     }
 
     /// A transcript window row: the top bar sits at row 0, so the first

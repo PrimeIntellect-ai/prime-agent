@@ -31,7 +31,7 @@ impl AgentCronJobStore {
             let files = self
                 .session_artifact_files
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             return files.values().map(|path| read_jobs_state(path)).collect();
         }
         vec![read_jobs_state(&self.require_file_path())]
@@ -44,7 +44,7 @@ impl AgentCronJobStore {
         let paths: Vec<PathBuf> = if self.session_artifact_mode {
             self.session_artifact_files
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .values()
                 .cloned()
                 .collect()
@@ -131,7 +131,7 @@ pub(crate) fn compare_optional_iso(
 
 pub(crate) fn normalize_optional_label(label: Option<&str>) -> Option<String> {
     let trimmed = label.map(str::trim).filter(|label| !label.is_empty());
-    trimmed.map(|label| label.to_string())
+    trimmed.map(std::string::ToString::to_string)
 }
 
 pub(crate) fn merge_fresh_jobs(
@@ -188,7 +188,7 @@ pub(crate) fn claim_due_in_state(
             .flatten()
             .map(iso_from_millis);
         job.next_run_at = next_run_at;
-        job.updated_at = claimed_iso.clone();
+        job.updated_at.clone_from(&claimed_iso);
         if claimed_job_ids.contains(&job.id) {
             job.last_skipped_at = Some(claimed_iso.clone());
             new_jobs.push(job);

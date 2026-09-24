@@ -474,7 +474,7 @@ fn new_session_closes_the_spawned_child_and_empties_the_roster() {
             .join(&child_id);
         let file = std::fs::read_dir(&child_dir)
             .expect("child session dir")
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .map(|entry| entry.path())
             .find(|path| path.extension().and_then(|extension| extension.to_str()) == Some("jsonl"))
             .expect("one child session file");

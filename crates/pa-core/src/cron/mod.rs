@@ -134,7 +134,7 @@ pub fn parse_agent_cron_schedule(
             return Ok((
                 AgentCronSchedule {
                     kind: ScheduleKind::Once,
-                    expression: text.clone(),
+                    expression: text,
                     interval_ms: None,
                 },
                 next,
@@ -149,7 +149,7 @@ pub fn parse_agent_cron_schedule(
                 return Ok((
                     AgentCronSchedule {
                         kind: ScheduleKind::Interval,
-                        expression: text.clone(),
+                        expression: text,
                         interval_ms: Some(interval_ms),
                     },
                     next,
@@ -167,7 +167,7 @@ pub fn parse_agent_cron_schedule(
         return Ok((
             AgentCronSchedule {
                 kind: ScheduleKind::Once,
-                expression: text.clone(),
+                expression: text,
                 interval_ms: None,
             },
             when,
@@ -216,10 +216,7 @@ fn parse_in_delay(rest: &str, now_millis: u64) -> anyhow::Result<Option<u64>> {
 /// `<digits> <unit?>` with the unit optionally attached (`10m`, `10 m`).
 fn split_amount_unit(rest: &str) -> Option<(u64, &str)> {
     let rest = rest.trim();
-    let digits: String = rest
-        .chars()
-        .take_while(|char| char.is_ascii_digit())
-        .collect();
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
     if digits.is_empty() {
         return None;
     }
@@ -516,7 +513,7 @@ fn consume_leading_every_schedule(text: &str) -> Option<(String, String)> {
                 let remainder = remainder
                     .strip_prefix("--")
                     .filter(|after| after.is_empty() || after.starts_with(char::is_whitespace))
-                    .map(|after| after.trim())
+                    .map(str::trim)
                     .unwrap_or(remainder)
                     .trim()
                     .to_string();

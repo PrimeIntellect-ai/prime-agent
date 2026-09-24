@@ -59,11 +59,7 @@ impl AbortSignal {
 
     /// Combine several signals: the merged signal fires when any source fires.
     pub fn any(sources: Vec<Option<AbortSignal>>) -> Option<AbortSignal> {
-        let live: Vec<CancellationToken> = sources
-            .into_iter()
-            .flatten()
-            .map(|s| s.token.clone())
-            .collect();
+        let live: Vec<CancellationToken> = sources.into_iter().flatten().map(|s| s.token).collect();
         if live.is_empty() {
             return None;
         }
@@ -93,7 +89,7 @@ pub(crate) fn merge_signals(
                 return Some(c.clone());
             }
             if t.is_aborted() {
-                return Some(t.clone());
+                return Some(t);
             }
             AbortSignal::any(vec![Some(c.clone()), Some(t)])
         }

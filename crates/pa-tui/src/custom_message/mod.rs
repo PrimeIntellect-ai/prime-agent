@@ -84,10 +84,12 @@ impl AgentMessageDirection {
     }
 }
 
-/// One agent-message summary row: `◆ <label> · <participant>[ · <preview>]`
+/// One agent-message summary row: `✉ <label> · <participant>[ · <preview>]`
 /// plus the guttered body when expanded (TS `AgentMessageComponent` for
 /// received rows; the sent/queued directions feed the ipython cell
-/// receipt rows).
+/// receipt rows). The `✉` mail envelope is the row's icon — a sanctioned
+/// divergence (Kevin directive 2026-09-24) from the TS `◆` diamond; the
+/// TS side is expected to adopt the same glyph.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentMessageRow {
     /// Which side renders: the label text follows it.
@@ -282,7 +284,7 @@ fn slash_row_entries(
 fn compaction_outcome_entry(message: &Value, details: &Value) -> ChatEntry {
     let valid = message
         .get("content")
-        .map(|c| c.is_string())
+        .map(Value::is_string)
         .unwrap_or(false)
         && matches!(
             details.get("reason").and_then(Value::as_str),

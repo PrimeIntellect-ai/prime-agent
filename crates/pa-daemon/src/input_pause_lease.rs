@@ -64,7 +64,7 @@ impl ClientConnectionState {
     fn is_detaching(&self, active_session_id: &str) -> bool {
         self.detaching_sessions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(active_session_id)
     }
 
@@ -75,7 +75,7 @@ impl ClientConnectionState {
         let mut detaching = self
             .detaching_sessions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for session in sessions {
             detaching.insert(session);
         }
@@ -87,7 +87,7 @@ impl ClientConnectionState {
         let mut detaching = self
             .detaching_sessions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for session in sessions {
             detaching.remove(&session);
         }

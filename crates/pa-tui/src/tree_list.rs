@@ -516,7 +516,7 @@ impl TreeList {
             node.indent = indent;
             node.show_connector = show_connector;
             node.is_last = is_last;
-            node.gutters = gutters.clone();
+            node.gutters.clone_from(&gutters);
             node.is_virtual_root_child = is_virtual_root_child;
             let children = self
                 .visible_children
@@ -636,7 +636,7 @@ impl TreeList {
     /// branch-point child (TS `isFoldable`).
     fn is_foldable(&self, id: &str) -> bool {
         let children = self.visible_children.get(&Some(id.to_string()));
-        if children.is_none_or(|children| children.is_empty()) {
+        if children.is_none_or(Vec::is_empty) {
             return false;
         }
         match self.visible_parent.get(id).cloned().flatten() {
@@ -663,7 +663,7 @@ impl TreeList {
                 self.flat[*index].data.entry.id().map(|id| (id, position))
             })
             .collect();
-        let mut current = selected_id.clone();
+        let mut current = selected_id;
         if direction == Direction::Down {
             loop {
                 let children = self
@@ -683,7 +683,7 @@ impl TreeList {
                         .copied()
                         .unwrap_or(self.selected);
                 }
-                current = children[0].clone();
+                current.clone_from(&children[0]);
             }
         }
         loop {
@@ -822,7 +822,7 @@ impl TreeList {
             .iter_mut()
             .find(|node| node.data.entry.id() == Some(entry_id))
         {
-            node.data.label = label.clone();
+            node.data.label.clone_from(&label);
             node.data.label_timestamp = label.map(|_| timestamp.to_string());
         }
         // Keep the filtered view consistent with the labeled-only filter.

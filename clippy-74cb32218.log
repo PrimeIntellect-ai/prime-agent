@@ -1,0 +1,74 @@
+    Checking pa-daemon v0.1.0 (/workspace/repo/crates/pa-daemon)
+    Checking pa-cli v0.1.0 (/workspace/repo/crates/pa-cli)
+error: function `edge` is never used
+   --> crates/pa-daemon/src/supervisor_roster.rs:428:8
+    |
+428 |     fn edge(child_id: &str, parent: &str, child: &str, depth: u32, name: &str) -> RlmLedgerEdge {
+    |        ^^^^
+    |
+    = note: `-D dead-code` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: items after a test module
+   --> crates/pa-daemon/src/saved_session_commands.rs:111:1
+    |
+111 |   mod tombstone_usage_tests {
+    |   ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+230 | / pub(crate) fn delete_session_file_after_file_removed(
+231 | |     path: &Path,
+232 | |     after_file_removed: &dyn Fn(&Path),
+233 | | ) -> Value {
+    | |__________^
+...
+256 |   pub(crate) fn remove_session_artifacts(session_path: &Path) {
+    |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+272 | / pub(crate) fn ledger_rename_by_child_path(
+273 | |     agent_dir: &Path,
+274 | |     sessions_dir: &Path,
+275 | |     child_path: &str,
+276 | |     name: &str,
+277 | | ) {
+    | |_^
+...
+298 |   pub(crate) enum SavedDeleteCapture {
+    |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+305 | / pub(crate) fn capture_saved_session_delete(
+306 | |     session_path: &str,
+307 | |     known_runtime_kind: Option<&str>,
+308 | | ) -> SavedDeleteCapture {
+    | |_______________________^
+...
+329 | / pub(crate) fn tombstone_saved_session_delete_captured(
+330 | |     agent_dir: &Path,
+331 | |     sessions_dir: &Path,
+332 | |     session_path: &str,
+333 | |     capture: &SavedDeleteCapture,
+334 | | ) -> usize {
+    | |__________^
+...
+365 | / pub(crate) fn tombstone_saved_session_delete(
+366 | |     agent_dir: &Path,
+367 | |     sessions_dir: &Path,
+368 | |     session_path: &str,
+369 | |     known_runtime_kind: Option<&str>,
+370 | | ) -> usize {
+    | |__________^
+...
+375 |   impl Supervisor {
+    |   ^^^^^^^^^^^^^^^
+...
+864 |   fn agent_peer_summary(summary: &Value) -> Value {
+    |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+918 |   impl Worker {
+    |   ^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#items_after_test_module
+    = note: `-D clippy::items-after-test-module` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::items_after_test_module)]`
+    = help: move the items to before the test module was defined
+
+error: could not compile `pa-daemon` (lib test) due to 2 previous errors

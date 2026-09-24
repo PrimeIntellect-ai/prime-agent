@@ -393,7 +393,7 @@ impl AgentInner {
                 )],
                 api: model.api.clone(),
                 provider: model.provider.clone(),
-                model: model.id.clone(),
+                model: model.id,
                 response_model: None,
                 response_id: None,
                 diagnostics: if aborted {
@@ -418,7 +418,10 @@ impl AgentInner {
         };
         {
             let mut shared = self.shared.lock().await;
-            shared.state.error_message = failure_message.error_message.clone();
+            shared
+                .state
+                .error_message
+                .clone_from(&failure_message.error_message);
         }
         // TS swallows listener errors on the failure path (`.catch(() => undefined)`).
         let _ = self
@@ -489,17 +492,19 @@ impl AgentInner {
         config.temperature = None;
         config.max_tokens = None;
         config.reasoning = shared.state.thinking_level;
-        config.session_id = self.session_id.clone();
-        config.transform_context = self.transform_context.clone();
-        config.get_api_key = self.get_api_key.clone();
+        config.session_id.clone_from(&self.session_id);
+        config.transform_context.clone_from(&self.transform_context);
+        config.get_api_key.clone_from(&self.get_api_key);
         config.should_stop_after_turn = should_stop_after_turn;
-        config.should_stop_before_turn = self.should_stop_before_turn.clone();
+        config
+            .should_stop_before_turn
+            .clone_from(&self.should_stop_before_turn);
         config.get_steering_messages = Some(steering);
         config.get_follow_up_messages = Some(follow_up);
         config.get_continuation_messages = continuation;
         config.tool_execution = self.tool_execution;
-        config.before_tool_call = self.before_tool_call.clone();
-        config.after_tool_call = self.after_tool_call.clone();
+        config.before_tool_call.clone_from(&self.before_tool_call);
+        config.after_tool_call.clone_from(&self.after_tool_call);
         config
     }
 

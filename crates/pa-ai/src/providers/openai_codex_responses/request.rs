@@ -188,10 +188,7 @@ mod tests {
         fn b64(json: &str) -> String {
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json)
         }
-        let payload = format!(
-            "{{\"{}\":{{\"chatgpt_account_id\":\"acct-123\"}}}}",
-            JWT_CLAIM_PATH
-        );
+        let payload = format!("{{\"{JWT_CLAIM_PATH}\":{{\"chatgpt_account_id\":\"acct-123\"}}}}");
         let token = format!("header.{}.signature", b64(&payload));
         assert_eq!(extract_account_id(&token).unwrap(), "acct-123");
 

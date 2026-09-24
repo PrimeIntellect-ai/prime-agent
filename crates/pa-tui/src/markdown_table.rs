@@ -335,7 +335,7 @@ pub(crate) fn render_table(
         .zip(&column_widths)
         .map(|(spans, &width)| wrap_cell(spans, width))
         .collect();
-    let header_lines = header_cells.iter().map(|c| c.len()).max().unwrap_or(0);
+    let header_lines = header_cells.iter().map(Vec::len).max().unwrap_or(0);
     for line_idx in 0..header_lines {
         let mut row: Line = vec![Span::raw("│ ")];
         for (col, cell) in header_cells.iter().enumerate() {
@@ -362,7 +362,7 @@ pub(crate) fn render_table(
             .zip(&column_widths)
             .map(|(spans, &width)| wrap_cell(spans, width))
             .collect();
-        let row_lines = cells.iter().map(|c| c.len()).max().unwrap_or(0);
+        let row_lines = cells.iter().map(Vec::len).max().unwrap_or(0);
         for line_idx in 0..row_lines {
             let mut row_line: Line = vec![Span::raw("│ ")];
             for (col, cell) in cells.iter().enumerate() {
@@ -509,8 +509,7 @@ mod tests {
             for span in row {
                 assert!(
                     !span.style.add_modifier.contains(Modifier::BOLD),
-                    "no bold in table rows: {:?}",
-                    row
+                    "no bold in table rows: {row:?}"
                 );
             }
         }

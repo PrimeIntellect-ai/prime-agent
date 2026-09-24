@@ -546,7 +546,7 @@ mod tests {
     fn overflow_compacts_retries_once_then_reports_the_failure() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
             json!({
                 "responses": [
@@ -651,7 +651,7 @@ mod tests {
     fn overflow_retry_succeeds_on_the_compacted_context() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
             json!({
                 "responses": [
@@ -701,7 +701,7 @@ mod tests {
     fn combined_limit_overflow_compacts_and_retries() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
             json!({
                 "responses": [
@@ -753,7 +753,7 @@ mod tests {
     fn overflow_recovery_skip_surfaces_the_warning_row() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // `keepRecentTokens` beyond the whole session: the cut keeps
         // everything, so the compaction has no history to summarize.
         let (engine, _dir) = faux_engine_with_compaction_settings(
@@ -801,7 +801,7 @@ mod tests {
     fn stale_overflow_error_recovers_before_the_next_prompt() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
             json!({
                 "responses": [
@@ -873,7 +873,7 @@ mod tests {
     fn non_overflow_error_never_triggers_the_arm() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
             json!({
                 "responses": [
@@ -906,7 +906,7 @@ mod tests {
     fn overflow_recovery_aborted_mid_run_records_the_cancelled_outcome() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
             json!({
                 "responses": [
@@ -943,7 +943,7 @@ mod tests {
 
         let events = events
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let starts = compaction_starts(&events);
         assert_eq!(starts.len(), 1);
@@ -981,7 +981,7 @@ mod tests {
     fn overflow_error_with_compaction_disabled_ends_without_recovery() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_compaction_settings(
             json!({
                 "responses": [

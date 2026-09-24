@@ -98,8 +98,8 @@ pub fn settings_menu_rows(current: &SettingsCurrentValues) -> Vec<SettingsMenuRo
     let bool_value = || vec!["true".to_string(), "false".to_string()];
     let mut idle_values: Vec<String> = ["off"]
         .iter()
-        .map(|v| v.to_string())
-        .chain([30, 60, 90, 180, 360].iter().map(|v| v.to_string()))
+        .map(ToString::to_string)
+        .chain([30, 60, 90, 180, 360].iter().map(ToString::to_string))
         .collect();
     if let Ok(minutes) = current.idle_eviction_minutes.parse::<u32>() {
         if minutes > 0 && !idle_values.contains(&minutes.to_string()) {
@@ -406,7 +406,7 @@ impl SettingsMenu {
             .map(|index| (index + 1) % values.len())
             .unwrap_or(0);
         let value = values[next].clone();
-        row.current = value.clone();
+        row.current.clone_from(&value);
         SettingsMenuAction::Change { id: row.id, value }
     }
 
@@ -476,7 +476,7 @@ impl SettingsMenu {
             // row it was opened from).
             if let Some(action) = value {
                 if let SettingsMenuAction::Change { value, .. } = &action {
-                    self.rows[sub.row].current = value.clone();
+                    self.rows[sub.row].current.clone_from(value);
                 }
                 return action;
             }
@@ -709,7 +709,10 @@ impl SettingsMenu {
         let cursor = self.search.cursor();
         let chars: Vec<char> = value.chars().collect();
         let before: String = chars[..cursor.min(chars.len())].iter().collect();
-        let at: String = chars.get(cursor).map(|c| c.to_string()).unwrap_or_default();
+        let at: String = chars
+            .get(cursor)
+            .map(ToString::to_string)
+            .unwrap_or_default();
         let after: String = chars[(cursor + 1).min(chars.len())..].iter().collect();
         let text = format!("{before}{at}{after}");
         let _ = width;

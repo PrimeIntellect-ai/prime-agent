@@ -94,7 +94,7 @@ fn stream_once(
         .collect();
     let tools: Vec<pa_types::ai::Tool> = context.tools.iter().filter_map(json_round_trip).collect();
     let ai_context = pa_types::ai::Context {
-        system_prompt: context.system_prompt.clone(),
+        system_prompt: context.system_prompt,
         messages,
         tools: Some(tools),
     };
@@ -425,7 +425,7 @@ mod tests {
         );
         // pa-ai stream output -> the pa-agent loop's message form.
         let agent_thinking: pa_agent::types::ThinkingContent =
-            serde_json::from_value(wire.clone()).unwrap();
+            serde_json::from_value(wire).unwrap();
         assert_eq!(agent_thinking.thinking_signature.as_deref(), Some("sig-1"));
         // The loop's message -> the provider-facing pa-ai form again.
         let back: pa_types::ai::ThinkingContent =

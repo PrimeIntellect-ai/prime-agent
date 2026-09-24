@@ -282,7 +282,7 @@ impl Supervisor {
             let roster = self
                 .roster
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for entry in roster.entries() {
                 let summary = &entry.summary;
                 rows.push(FamilyRow {
@@ -356,7 +356,7 @@ impl Supervisor {
             let roster = self
                 .roster
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             roster.by_session_file(&canonical).map(|entry| {
                 let summary = &entry.summary;
                 NameScope {
@@ -387,7 +387,7 @@ impl Supervisor {
                 name,
                 depth: info.rlm_depth,
                 parent_session_id: None,
-                parent_session_path: info.parent_session_path.clone(),
+                parent_session_path: info.parent_session_path,
             }),
             None => Err(format!("Session not found: {session_path}")),
         }
@@ -445,7 +445,7 @@ impl Supervisor {
             let mut pending = self
                 .pending_session_names
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             pending.insert(key.clone())
         };
         if !reserved {
@@ -462,7 +462,7 @@ impl Supervisor {
         let availability = self.assert_family_name_available(&scope);
         self.pending_session_names
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&key);
         if let Err(error) = availability {
             return (
@@ -531,14 +531,14 @@ impl Supervisor {
             let mut roster = self
                 .roster
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(entry) = roster.by_session_file(&canonical).cloned() else {
                 return;
             };
             let mut summary = entry.summary.clone();
             summary["sessionName"] = json!(name);
             let worker_id = entry.worker_id.clone();
-            let status_label = entry.status_label.clone();
+            let status_label = entry.status_label;
             Some(roster.write_summary(summary, worker_id.as_deref(), status_label.as_deref()))
         };
         if let Some(entry) = changed {
@@ -574,7 +574,7 @@ impl Supervisor {
             let roster = self
                 .roster
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             roster.by_session_file(&canonical).cloned()
         };
         if let Some(entry) = roster_entry.as_ref() {
@@ -672,10 +672,10 @@ impl Supervisor {
             // file still existed - the same key the table stores.
             self.session_bindings.forget_file(&canonical);
             if let Some(entry) = roster_entry {
-                let agent_id = entry.agent_id.clone();
+                let agent_id = entry.agent_id;
                 self.roster
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .delete(&agent_id);
                 self.push_roster_update(Vec::new(), vec![agent_id]);
             }
@@ -739,7 +739,7 @@ impl Supervisor {
                 let roster = self
                     .roster
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 roster
                     .by_active_session_id(&root_active_session_id)
                     .map(|entry| entry.summary.clone())
@@ -845,7 +845,7 @@ impl Worker {
             let core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             core.store.as_ref().is_some_and(|store| {
                 !store.path.as_os_str().is_empty()
                     && canonical_session_path(&store.path)
@@ -892,7 +892,7 @@ impl Worker {
             let core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             core.store.as_ref().is_some_and(|store| {
                 !store.path.as_os_str().is_empty()
                     && canonical_session_path(&store.path) == canonical_session_path(path)

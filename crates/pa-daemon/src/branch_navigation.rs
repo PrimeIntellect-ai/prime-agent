@@ -46,7 +46,7 @@ impl TreeNavigation {
         if let Some(controller) = self
             .abort
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
         {
             controller.abort();
@@ -204,7 +204,7 @@ impl TreeNavigation {
                     let mut slot = self
                         .abort
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     *slot = Some(Arc::clone(&controller));
                 }
                 let outcome = {
@@ -230,7 +230,7 @@ impl TreeNavigation {
                 let mut slot = self
                     .abort
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if slot
                     .as_ref()
                     .is_some_and(|live| Arc::ptr_eq(live, &controller))
@@ -435,7 +435,7 @@ impl TreeNavigation {
                 if store.path.as_os_str().is_empty() {
                     // In-memory session: the fork replaces the entries in
                     // place (TS non-persisted `createBranchedSession`).
-                    let mut forked = store.clone();
+                    let mut forked = store;
                     if let Err(error) = forked.replace_with_branch(Some(leaf_id)) {
                         return Err(response_failure(None, "fork", &error.to_string(), None));
                     }

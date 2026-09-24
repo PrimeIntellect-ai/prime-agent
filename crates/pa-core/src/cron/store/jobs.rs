@@ -198,9 +198,9 @@ impl AgentCronJobStore {
                 };
                 job.next_run_at = next_run_at;
                 job.last_run_at = Some(now_iso.clone());
-                job.last_error = result.error.clone();
+                job.last_error.clone_from(&result.error);
                 job.run_count += 1;
-                job.updated_at = now_iso.clone();
+                job.updated_at.clone_from(&now_iso);
                 updated = Some(job.clone());
                 job
             })
@@ -231,7 +231,7 @@ impl AgentCronJobStore {
                     .flatten()
                     .map(iso_from_millis);
                 job.last_skipped_at = Some(now_iso.clone());
-                job.updated_at = now_iso.clone();
+                job.updated_at.clone_from(&now_iso);
                 updated = Some(job.clone());
                 job
             })
@@ -348,7 +348,7 @@ impl AgentCronJobStore {
                             .flatten()
                             .map(iso_from_millis);
                         job.last_skipped_at = Some(now_iso.clone());
-                        job.updated_at = now_iso.clone();
+                        job.updated_at.clone_from(&now_iso);
                     } else {
                         job.status = if job.schedule.kind == ScheduleKind::Once {
                             JobStatus::Completed
@@ -356,9 +356,9 @@ impl AgentCronJobStore {
                             job.status
                         };
                         job.last_run_at = Some(now_iso.clone());
-                        job.last_error = result.error.clone();
+                        job.last_error.clone_from(&result.error);
                         job.run_count += 1;
-                        job.updated_at = now_iso.clone();
+                        job.updated_at.clone_from(&now_iso);
                     }
                     updated = Some(job.clone());
                     job
