@@ -1559,4 +1559,3 @@ the port.
 - **FUTURE — not implemented**: nothing in the codebase changes today;
   the dock's `bash` activity tracking and the `bash()` tool API stay as
   they are.
->>>>>>> dbd293da6842b8cb8f2dd725f59714f53a307d38

@@ -142,11 +142,9 @@ impl Drop for RunningGuard<'_> {
 
 impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
     pub async fn run_due_at(&self, now: u64) -> anyhow::Result<usize> {
-        // Claim the pass atomically: a load-then-store pair let two
-        // concurrent calls both pass, and the second's pass-head
-        // recovery cleared the first call's LIVE dispatch (its result
-        // recording found nothing, and one-shot jobs could complete
-        // before their invocation settled).
+        // The pass claim is atomic: exactly one pass runs at a time (a
+        // concurrent caller returns before touching another pass's
+        // dispatches).
         if (self.stopped.load(Ordering::SeqCst) && self.has_started.load(Ordering::SeqCst))
             || self
                 .running
@@ -160,12 +158,11 @@ impl<H: AgentCronSchedulerHooks + 'static> SchedulerCore<H> {
         // pass while the timer keeps spinning. The guard resets it on
         // the way out however the pass ends.
         let _running = RunningGuard(&self.running);
-        // Recover interrupted dispatches before claiming: a pass that
-        // unwound mid-fire (a panic, or the teardown abort) left its
-        // claimed dispatch on record — the next claim would mark the
-        // job skipped forever instead of retrying its next occurrence.
-        // The re-entrancy flag above serializes passes, so this can
-        // never recover another live pass's dispatch.
+        // Recover interrupted dispatches before claiming: a claimed
+        // dispatch left on record by an unwound pass is released here,
+        // so its job's next occurrence claims and fires. The atomic
+        // claim above serializes passes, so this never touches another
+        // live pass's dispatch.
         self.store.recover_interrupted_dispatches(now);
         let claimed = self.store.claim_due(now, self.hooks.now());
         let dispatches: Vec<PendingDispatch> = claimed
@@ -311,13 +308,10 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
     /// the notify with no waiter, and later wakes would reach nobody.
     async fn schedule_next(&self) {
         let mut timer = self.timer.lock().await;
-        // A LIVE task is never aborted: the abort-after-claim stranded the
-        // claimed dispatch (its record stayed interrupted, and the next
-        // pass marked the job skipped instead of retrying), so a wake
-        // landing mid-pass lost that fire. The parked loop re-evaluates
-        // at its head on the notify, so the wake needs no respawn —
-        // spawn only when no task is alive. The explicit `stop` abort
-        // stays (teardown; the next `start` recovers the interrupted
+        // A live task is never aborted: the parked loop re-evaluates at
+        // its head on the notify, so a wake landing mid-pass needs no
+        // respawn. Only a dead task spawns a replacement; the explicit
+        // `stop` abort stays (the next `start` recovers the interrupted
         // dispatches).
         if let Some(previous) = timer.get_mut() {
             if !previous.is_finished() {
@@ -329,12 +323,11 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
         let core = self.core.clone();
         let handle = tokio::spawn(async move {
             loop {
-                // Register the wake BEFORE reading the store (the enabled
-                // future holds a waiter slot from here): a mutation whose
-                // notify_waiters lands between the read and the await is
-                // captured, never dropped on an un-registered park (the
-                // pre-fix race let a job created in that window strand a
-                // parked timer forever).
+                // The wake is registered before the store read (the
+                // enabled future holds the waiter slot), so a notify
+                // landing between the read and the wait is captured —
+                // by the park or by the delay select, whichever the read
+                // selects.
                 let notified = core.wake.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();

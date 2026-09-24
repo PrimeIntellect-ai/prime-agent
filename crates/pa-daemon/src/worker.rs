@@ -1177,6 +1177,12 @@ impl Worker {
                         &notice_core,
                         &notice_notify,
                         notice,
+                        // Revalidated inside the admission's own lock
+                        // section: the close paths mark the session
+                        // BEFORE clearing the lanes, so a notice that
+                        // slips past the check above is either refused
+                        // here or wiped by the close's clear.
+                        || engine.session_is_closed(),
                     );
                 });
                 let withdraw_core = Arc::clone(&core);
@@ -4970,6 +4976,7 @@ pub(crate) fn admit_bash_completion_notice(
     core: &Arc<Mutex<SessionCore>>,
     work_notify: &Arc<Notify>,
     notice: crate::engine::BashCompletionNotice,
+    session_is_closed: impl Fn() -> bool,
 ) {
     let row = pa_core::session_engine::messages::create_async_bash_completion_message(
         notice.pid,
@@ -4987,6 +4994,13 @@ pub(crate) fn admit_bash_completion_notice(
     // critical section: a turn starting between a separate sample and
     // the push would queue an invisible row for a busy session.
     let mut core_guard = core.lock().unwrap();
+    // The close paths mark the session and then clear the lanes in their
+    // own core section: a notice that raced past the sink's first check
+    // is refused here (the marker is visible by now), or the close's
+    // clear wipes it — never a completion turn for a closed session.
+    if session_is_closed() {
+        return;
+    }
     let (policy, queue_visible) = if core_guard.busy {
         (TurnPolicy::Queued, true)
     } else {
@@ -10328,6 +10342,7 @@ mod recovery_verdict_tests {
                 command: "sleep 12; echo RW_WAKE_DONE".to_string(),
                 exit_code: 0,
             },
+            || false,
         );
         let core = worker.core.lock().unwrap();
         let item = core
@@ -10394,6 +10409,7 @@ mod recovery_verdict_tests {
                 command: "make gates".to_string(),
                 exit_code: 2,
             },
+            || false,
         );
         let core = worker.core.lock().unwrap();
         let item = core.steering.front().expect("the queued notice");
@@ -10420,6 +10436,7 @@ mod recovery_verdict_tests {
                 command: "sleep 12; echo RW_WAKE_DONE".to_string(),
                 exit_code: 0,
             },
+            || false,
         );
         assert!(
             WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),

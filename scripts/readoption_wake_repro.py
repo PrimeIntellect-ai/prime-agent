@@ -13,7 +13,6 @@ evidence (no bash-done row, kernel stderr's rejection) and exits 1.
 """
 import json
 import os
-import shutil
 import signal
 import socket
 import subprocess
@@ -186,7 +185,11 @@ def wait_for(predicate, timeout, what):
 
 
 def main():
-    shutil.rmtree(ROOT, ignore_errors=True)
+    # The work-dir must be disposable AND fresh: refuse an existing path
+    # (a caller pointing this at a real directory must never lose it).
+    if ROOT.exists():
+        raise RuntimeError(f"work-dir already exists: {ROOT} (use a fresh disposable path)")
+    ROOT.mkdir(parents=True)
     for d in (AGENT_DIR, SESSIONS):
         d.mkdir(parents=True)
     port = start_mock()
@@ -244,6 +247,19 @@ def main():
     assert "watcher started" in json.dumps(first["data"]), first
     print("turn 1 settled; the detached watcher runs (sleep 12)")
 
+    # The false-green guard: the watcher must still be RUNNING at the
+    # kill — a completion that already landed means the wake was not
+    # exercised across re-adoption (fail loudly instead of matching a
+    # pre-restart reply later).
+    prekill = client.request(
+        {"type": "get_messages", "activeSessionId": active_id}, "gm0b"
+    )
+    assert prekill.get("success"), prekill
+    assert "bash-done" not in json.dumps(prekill["data"]), (
+        "the watcher completed BEFORE the restart - the repro did not "
+        "exercise the re-adoption wake"
+    )
+
     # The supervisor dies hard; the worker survives, orphaned.
     os.kill(supervisor.pid, signal.SIGKILL)
     supervisor.wait()
@@ -289,6 +305,17 @@ def main():
         for i, body in enumerate(MOCK_REQUESTS):
             print(f"  --- request {i} (last 400 chars):")
             print("  " + body[-400:].replace("\n", " ")[:400])
+        # The red path cleans up like the green one: a leaked supervisor
+        # (and its adopted workers) would poison later runs.
+        try:
+            client.request({"type": "kill", "activeSessionId": active_id}, "k1")
+        except Exception:
+            pass
+        os.kill(supervisor.pid, signal.SIGTERM)
+        try:
+            supervisor.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            os.kill(supervisor.pid, signal.SIGKILL)
         sys.exit(1)
 
     file_rows = session_file.read_text()
