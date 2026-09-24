@@ -62,8 +62,12 @@ impl SessionAlreadyActiveError {
             active_session_id: owner
                 .and_then(|o| o.active_session_id.clone())
                 .filter(|id| !id.is_empty()),
+            // An owner without a session id is still identifiable by its
+            // pid (the descriptive session-open error surfaces it).
             owner: owner
                 .and_then(|o| o.active_session_id.clone())
+                .filter(|id| !id.is_empty())
+                .or_else(|| owner.map(|o| format!("another process (pid {})", o.pid)))
                 .unwrap_or_else(|| "another process".to_string()),
             holder_pid: owner.map(|o| o.pid),
         }

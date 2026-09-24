@@ -175,7 +175,9 @@ impl AgentView {
                 self.entry_heights[index][detail] = Some((spacing, count));
             }
             offsets.push(offsets.last().copied().unwrap_or(0) + count);
-            preceded_by_tool_activity = matches!(entry, ChatEntry::Tool(_));
+            // TS `precededByToolActivity` = the compact set (tool calls,
+            // agent messages, bash executions, shell completions).
+            preceded_by_tool_activity = self.is_compact_neighbor(entry);
             first = false;
         }
         let tail = self.render_transcript_tail(width);

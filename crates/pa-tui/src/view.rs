@@ -41,15 +41,6 @@ enum SpacingContent {
     Hidden,
 }
 
-/// TS `isCompactAgentMessageNeighbor`: agent messages, tool calls, and
-/// shell completions render flush against each other.
-fn is_compact_neighbor(entry: &ChatEntry) -> bool {
-    matches!(
-        entry,
-        ChatEntry::Tool(_) | ChatEntry::AgentMessage(_) | ChatEntry::ShellCompletion(_)
-    )
-}
-
 /// A `/share` gist upload in flight (TS `BorderedLoader` with
 /// `CancellableLoader`): the spinner "Creating gist..." rows that replace
 /// the editor while `gh gist create` runs.
@@ -226,9 +217,26 @@ pub struct AgentView {
     /// frame; the window re-styles only the rows the selection change
     /// touched): walked base rows, their styled copies, and the spans.
     pub(crate) selection_restyle: restyle::SelectionRestyle,
+    /// The ephemeral action toasts (the top-right auto-dismiss overlay;
+    /// a sanctioned divergence from TS — see `toast`).
+    pub toasts: crate::toast::Toasts,
 }
 
 impl AgentView {
+    /// TS `isCompactAgentMessageNeighbor`: agent messages, tool calls (the
+    /// ipython cells included), bash executions, and shell completions
+    /// render flush against each other — the set both the leading-space
+    /// scan and `precededByToolActivity` compact decisions use.
+    pub(super) fn is_compact_neighbor(&self, entry: &ChatEntry) -> bool {
+        matches!(
+            entry,
+            ChatEntry::Tool(_)
+                | ChatEntry::AgentMessage(_)
+                | ChatEntry::ShellCompletion(_)
+                | ChatEntry::BashExecution(_)
+        )
+    }
+
     pub fn new(theme: Theme) -> Self {
         Self {
             theme,
@@ -270,6 +278,7 @@ impl AgentView {
             dock_cursor: None,
             window_rows: 0,
             osc_last_rows: std::collections::HashMap::new(),
+            toasts: crate::toast::Toasts::default(),
             entry_layout: Vec::new(),
             entry_heights: Vec::new(),
             sparse_window: None,
@@ -632,9 +641,12 @@ impl AgentView {
                             continue;
                         }
                         SpacingContent::Visible => {
-                            // TS `hasTrailingSpace` on the visible body.
+                            // TS `hasTrailingSpace` on the visible body
+                            // (`precededByToolActivity` is the full compact
+                            // set: a tool call, agent message, bash
+                            // execution, or shell completion).
                             let preceded_by_tool =
-                                idx > 0 && matches!(&self.chat[idx - 1], ChatEntry::Tool(_));
+                                idx > 0 && self.is_compact_neighbor(&self.chat[idx - 1]);
                             if tool_separator
                                 || message.has_trailing_space(self.detail, preceded_by_tool)
                             {
@@ -648,13 +660,13 @@ impl AgentView {
                     }
                 }
                 preceding => {
-                    if tool_separator && !is_compact_neighbor(preceding) {
+                    if tool_separator && !self.is_compact_neighbor(preceding) {
                         return false;
                     }
                     if expanded {
                         return true;
                     }
-                    return !is_compact_neighbor(preceding);
+                    return !self.is_compact_neighbor(preceding);
                 }
             }
         }
@@ -1312,6 +1324,32 @@ impl AgentView {
         }
         self.frame_rows = frame.len();
         self.apply_frame_selection(&mut frame, width);
+        // The action toasts overlay the transcript window's top rows
+        // (newest at the bottom of the stack), above the selection restyle
+        // so the transient text stays legible. The overlay never runs
+        // past the window's last row (a short transcript keeps the dock
+        // untouched) and sits out an in-progress selection drag: the
+        // transient overlay must never hide rows a drag is selecting —
+        // releasing over covered text could copy content that was not
+        // visible.
+        let now = std::time::Instant::now();
+        let toasts: Vec<String> = if self.selection.is_dragging() {
+            Vec::new()
+        } else {
+            self.toasts.active(now).map(str::to_string).collect()
+        };
+        if !toasts.is_empty() {
+            // The action ack renders in the Success color.
+            let style = self.theme.fg_style(crate::theme::ThemeColor::Success);
+            crate::toast::overlay_toasts(
+                &mut frame,
+                top_rows,
+                top_rows + window_height,
+                &toasts,
+                width,
+                style,
+            );
+        }
         frame
     }
 
@@ -2182,6 +2220,25 @@ mod tests {
         );
     }
 
+    fn user_row() -> ChatEntry {
+        ChatEntry::User {
+            text: "hello".to_string(),
+        }
+    }
+
+    /// A tool-carrying assistant whose only body is a thinking block: the
+    /// body hides in collapsed mode (TS `hideThinkingBlock`), so the
+    /// message's whole height rides the spacing decisions.
+    fn thinking_tool_assistant() -> ChatEntry {
+        ChatEntry::Assistant(Box::new(AssistantMessage {
+            blocks: vec![MessageBlock::Thinking("thinking body".to_string())],
+            has_tool_calls: true,
+            streaming: false,
+            error: None,
+            aborted: false,
+        }))
+    }
+
     fn agent_message_row() -> ChatEntry {
         ChatEntry::AgentMessage(Box::new(crate::custom_message::AgentMessageRow {
             direction: crate::custom_message::AgentMessageDirection::Received,
@@ -2335,6 +2392,130 @@ mod tests {
         assert!(view.conversation_leading(2, false));
     }
 
+    /// TS `AgentMessageComponent` is a compact neighbor
+    /// (`isCompactAgentMessageNeighbor`): the hidden thinking of a
+    /// tool-carrying assistant after an agent message renders ZERO rows
+    /// — no leading spacer, no trailing tool separator — so the tool
+    /// card sits flush under the agent-message row (the collapsed
+    /// thinking never leaves a visual gap).
+    #[test]
+    fn hidden_thinking_after_an_agent_message_renders_zero_height() {
+        let mut view = view_with(vec![
+            user_row(),
+            agent_message_row(),
+            thinking_tool_assistant(),
+            settled_tool_card("c1"),
+        ]);
+        view.detail = Detail::Overview;
+        let text = transcript_text(&mut view, 80);
+        assert!(!text.contains("thinking body"), "collapsed hides thinking");
+        let lines: Vec<&str> = text.lines().collect();
+        let agent_row = lines
+            .iter()
+            .position(|line| line.contains("Agent message received"))
+            .expect("the agent-message row renders");
+        // The card's panel header is its FIRST row; the seam check must
+        // look above it, never inside the panel's own padding.
+        let header_row = lines
+            .iter()
+            .position(|line| line.contains("bash \u{b7} done"))
+            .expect("the tool card header renders");
+        // Flush: the row directly above the card header is the agent
+        // message block's own last row (its body), never the hidden
+        // thinking's trailing spacer (the pre-fix gap).
+        assert!(
+            agent_row < header_row,
+            "the card renders after the agent message:\n{text}"
+        );
+        assert!(
+            lines[header_row - 1].contains("Agent message received"),
+            "the agent message header sits directly above the card header:\n{text}"
+        );
+    }
+
+    /// A bash execution card is a compact neighbor like the tool cards
+    /// themselves: the hidden thinking between a `!` bash card and the
+    /// next tool call renders zero height (TS
+    /// `isCompactAgentMessageNeighbor` includes
+    /// `BashExecutionComponent`).
+    #[test]
+    fn hidden_thinking_after_a_bash_card_renders_zero_height() {
+        let mut view = view_with(vec![
+            user_row(),
+            ChatEntry::BashExecution(Box::new(crate::bash_card::BashExecutionCard {
+                id: "b1".to_string(),
+                command: "echo hi".to_string(),
+                excluded: false,
+                output_lines: vec!["hi".to_string()],
+                running: false,
+                exit_code: Some(0),
+                cancelled: false,
+                error_message: None,
+                truncated: false,
+                full_output_path: None,
+                suppress_leading_space: false,
+            })),
+            thinking_tool_assistant(),
+            settled_tool_card("c1"),
+        ]);
+        view.detail = Detail::Overview;
+        let text = transcript_text(&mut view, 80);
+        assert!(!text.contains("thinking body"), "collapsed hides thinking");
+        let lines: Vec<&str> = text.lines().collect();
+        let bash_row = lines
+            .iter()
+            .position(|line| line.contains("echo hi"))
+            .expect("the bash card renders");
+        // The tool panel's header is its first row; the seam sits above it.
+        let header_row = lines
+            .iter()
+            .position(|line| line.contains("bash \u{b7} done"))
+            .expect("the tool card header renders");
+        // Flush: the row directly above the tool card header is the bash
+        // card's own closing border, never a hidden-thinking spacer.
+        assert!(
+            bash_row < header_row,
+            "the card renders after the bash card:\n{text}"
+        );
+        assert!(
+            lines[header_row - 1].contains("\u{2500}"),
+            "the bash card's border sits directly above the card header:\n{text}"
+        );
+    }
+
+    /// A visible assistant body after a compact neighbor keeps its own
+    /// spacers (the collapsed fix only flattens the invisible body).
+    #[test]
+    fn a_visible_assistant_after_an_agent_message_keeps_its_spacers() {
+        let mut view = view_with(vec![
+            user_row(),
+            agent_message_row(),
+            ChatEntry::Assistant(Box::new(AssistantMessage {
+                blocks: vec![MessageBlock::Text("answer body".to_string())],
+                has_tool_calls: true,
+                streaming: false,
+                error: None,
+                aborted: false,
+            })),
+            settled_tool_card("c1"),
+        ]);
+        view.detail = Detail::Overview;
+        let text = transcript_text(&mut view, 80);
+        let lines: Vec<&str> = text.lines().collect();
+        let agent_row = lines
+            .iter()
+            .position(|line| line.contains("Agent message received"))
+            .expect("the agent-message row renders");
+        // In overview the agent message renders its header alone; the
+        // visible assistant body then leads with its blank, renders, and
+        // keeps the tool separator before the card (TS `hasTrailingSpace`
+        // with a visible body).
+        assert!(lines[agent_row + 1].trim().is_empty(), "{text}");
+        assert!(lines[agent_row + 2].contains("answer body"), "{text}");
+        assert!(lines[agent_row + 3].trim().is_empty(), "{text}");
+        assert!(lines[agent_row + 4].contains("bash \u{b7} done"), "{text}");
+    }
+
     /// The custom rows render through the transcript path: the agent
     /// message header plus its guttered body, and the shell-completion row.
     #[test]
@@ -2367,6 +2548,47 @@ mod tests {
         view.mark_entry_stale(0);
         let frame1 = transcript_text(&mut view, 80);
         assert!(frame1.contains("and more"));
+    }
+
+    /// The action toast overlays the top transcript rows right-aligned
+    /// (the newest at the bottom of the stack) and auto-dismisses once its
+    /// TTL passes.
+    #[test]
+    fn action_toasts_overlay_the_top_rows_and_auto_dismiss() {
+        let mut view = view();
+        view.toasts.push("Copied to clipboard");
+        let frame = view.render_frame(60, 24);
+        let rows: Vec<String> = frame
+            .iter()
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .collect();
+        let toast_row = rows
+            .iter()
+            .position(|row| row.contains("Copied to clipboard"))
+            .expect("the toast renders");
+        // Right-aligned: the row leads with blanks and the top bar stays
+        // above the overlay (fullscreen: row 0).
+        assert!(toast_row >= 1, "the toast sits below the top bar");
+        // Right-aligned: the overlaid row is the label alone (its column
+        // padding trimmed), not the transcript row beneath it.
+        assert_eq!(rows[toast_row].trim(), "Copied to clipboard");
+        // The overlay expires with its TTL.
+        view.toasts
+            .age_by(crate::toast::TOAST_TTL + std::time::Duration::from_millis(1));
+        let frame = view.render_frame(60, 24);
+        let joined: String = frame
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !joined.contains("Copied to clipboard"),
+            "the expired toast is gone: {joined}"
+        );
     }
 
     /// The browse header inserts BELOW the editor's top row with an empty

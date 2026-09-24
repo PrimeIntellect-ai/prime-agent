@@ -1628,6 +1628,13 @@ async fn run_interactive_surface(
             hint_painted = false;
         }
 
+        // The action toasts auto-dismiss on their TTL: once one goes, the
+        // overlay repaints away (the same tick-driven repaint the exit
+        // hint's expiry uses).
+        if view.toasts.prune_expired(Instant::now()) {
+            session.dirty = true;
+        }
+
         // The tray override row (the Ctrl+C exit hint, or the streaming
         // follow-up hint over a draft) follows the session's hint state on
         // every frame. Refreshed here — after the select, right before
