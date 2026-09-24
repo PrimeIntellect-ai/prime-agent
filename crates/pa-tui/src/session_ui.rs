@@ -157,6 +157,9 @@ pub(crate) enum BashActivityUpdate {
         /// one row): a late failure lands only on that row's open detail
         /// pane, never on whichever row the user switched to.
         activity_id: Option<String>,
+        /// The failure came from a tail fetch (the view supersedes it on
+        /// the next successful fetch) rather than a kill.
+        fetch: bool,
     },
 }
 
@@ -5941,6 +5944,7 @@ impl SessionUi {
             BashActivityUpdate::Error {
                 message,
                 activity_id,
+                fetch,
                 ..
             } => {
                 // An in-view action's failure surfaces in the open bash
@@ -5954,7 +5958,7 @@ impl SessionUi {
                 };
                 if view.bash_view.is_some() && detail_matches {
                     if let Some(bash_view) = view.bash_view.as_mut() {
-                        bash_view.set_error(message);
+                        bash_view.set_error(message, fetch);
                     }
                 } else {
                     self.error_row(&message, view);
@@ -6061,6 +6065,7 @@ impl SessionUi {
                         session,
                         message: format!("Bash output: {error:#}"),
                         activity_id: Some(response_id),
+                        fetch: true,
                     });
                 }
             }
@@ -6131,6 +6136,7 @@ impl SessionUi {
                                 session,
                                 message: format!("Could not kill bash command: {error:#}"),
                                 activity_id: Some(error_id),
+                                fetch: false,
                             });
                         }
                     }

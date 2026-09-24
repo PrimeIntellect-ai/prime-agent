@@ -183,6 +183,11 @@ pub struct BashView {
     /// and the region cannot scroll).
     detail_region_rows: std::cell::Cell<usize>,
     error: Option<String>,
+    /// Whether the shown error came from a tail fetch: a later
+    /// successful fetch supersedes it (the retried load proves the
+    /// failure gone); a kill error keeps the registry-refresh lifecycle
+    /// ([`BashView::clear_error`]).
+    fetch_error: bool,
     viewport_rows: usize,
 }
 
@@ -201,6 +206,7 @@ impl BashView {
             scroll_from_end: 0,
             detail_region_rows: std::cell::Cell::new(0),
             error: None,
+            fetch_error: false,
             viewport_rows,
         };
         view.selected_id = view.activities.first().map(|row| row.id.clone());
@@ -255,6 +261,13 @@ impl BashView {
             return;
         }
         let lines: Vec<String> = tail.lines().map(clean_line).collect();
+        // A landed window supersedes a shown fetch error (the retry — or
+        // the fresh open — proves the failure gone); a kill error keeps
+        // its registry-refresh lifecycle.
+        if self.fetch_error {
+            self.error = None;
+            self.fetch_error = false;
+        }
         if self.loading_more {
             self.loading_more = false;
             let loaded = self.output_tail.as_ref().map(|(_, output)| output.len());
@@ -287,10 +300,12 @@ impl BashView {
 
     /// Surface a fetch or kill failure (the host's error channel). A
     /// failed lazy load releases its in-flight claim so a later up press
-    /// can retry.
-    pub fn set_error(&mut self, error: String) {
+    /// can retry; `fetch` marks a tail-fetch failure, which the next
+    /// successful fetch supersedes.
+    pub fn set_error(&mut self, error: String, fetch: bool) {
         self.loading_more = false;
         self.error = Some(error);
+        self.fetch_error = fetch;
     }
 
     /// A landed REGISTRY update supersedes a shown error (a retried kill
@@ -298,6 +313,7 @@ impl BashView {
     /// registry itself changed, not on unrelated dock repaints.
     pub fn clear_error(&mut self) {
         self.error = None;
+        self.fetch_error = false;
     }
 
     /// The selected row's index (first when unset).
@@ -622,15 +638,19 @@ impl BashView {
                     // newest output (0 = the newest line rides the
                     // region's bottom).
                     let window_start = len.saturating_sub(output_rows + from_end);
+                    // More below: the window sits lifted off the newest
+                    // output (a scrolled-up view). A marker replaces its
+                    // edge row of the window, so a marker renders only
+                    // while a content row survives beside it: a one-row
+                    // region (the designed minimum under a long command)
+                    // always shows the output line itself, never a
+                    // marker-only row (and the subtractions never
+                    // underflow).
+                    let more_bottom = from_end > 0 && output_rows > 1;
                     // More above: older loaded lines the window scrolled
                     // past, or a lazily loadable tail window.
-                    let more_top = window_start > 0 || !self.tail_complete;
-                    // More below: the window sits lifted off the newest
-                    // output (a scrolled-up view).
-                    let more_bottom = from_end > 0;
-                    // A marker replaces its edge row of the window: the
-                    // newest output never slides off the bottom when the
-                    // leading marker renders.
+                    let more_top = (window_start > 0 || !self.tail_complete)
+                        && output_rows - usize::from(more_bottom) > 1;
                     let content = output_rows - usize::from(more_top) - usize::from(more_bottom);
                     let start = window_start + usize::from(more_top);
                     let shown = content.min(len - start);
@@ -1759,9 +1779,12 @@ mod tests {
     }
 
     /// A fetch or load error surfaces in the pane and releases the
-    /// in-flight load claim so a later up press can retry.
+    /// in-flight load claim so a later up press can retry — and the
+    /// retried load's success supersedes the shown fetch error (the
+    /// failure it described is gone; a kill error keeps the
+    /// registry-refresh lifecycle and never clears on a tail landing).
     #[test]
-    fn an_error_releases_the_load_claim() {
+    fn an_error_releases_the_load_claim_and_a_success_clears_it() {
         let mut catalog = activities();
         catalog[0].command = "run".to_string();
         let mut view = BashView::new(catalog, 24);
@@ -1777,7 +1800,7 @@ mod tests {
                 BashViewAction::LoadMore {
                     generation, lines, ..
                 } => {
-                    view.set_error("kernel stalled".to_string());
+                    view.set_error("kernel stalled".to_string(), true);
                     assert!(view.error.is_some());
                     assert!(!view.loading_more, "the failure releases the claim");
                     assert_eq!(view.tail_window, lines);
@@ -1790,13 +1813,28 @@ mod tests {
             }
         }
         assert!(loaded, "the up press issued the load");
+        let frame = view.render(&theme(), 70, &kb());
+        assert!(
+            frame_text(&frame)
+                .iter()
+                .any(|row| row.contains("Error: kernel stalled")),
+            "the fetch error surfaces"
+        );
         // A retry issues a fresh load (the window keeps growing from the
         // last requested size).
         let mut retried = false;
         for _ in 0..FIRST_TAIL_LINES {
             match view.handle_key("up", &kb()) {
-                BashViewAction::LoadMore { lines, .. } => {
+                BashViewAction::LoadMore {
+                    lines, generation, ..
+                } => {
                     assert_eq!(lines, FIRST_TAIL_LINES * 4);
+                    // The grown window lands: the shown fetch error is
+                    // stale — the fetch just succeeded.
+                    let grown: Vec<String> = (1..=FIRST_TAIL_LINES * 4)
+                        .map(|n| format!("line-{n:03}"))
+                        .collect();
+                    view.set_output("a", &grown.join("\n"), generation);
                     retried = true;
                     break;
                 }
@@ -1805,6 +1843,71 @@ mod tests {
             }
         }
         assert!(retried, "the retry loads again");
+        assert!(
+            view.error.is_none(),
+            "the successful fetch supersedes the fetch error"
+        );
+        let frame = view.render(&theme(), 70, &kb());
+        assert!(
+            !frame_text(&frame).iter().any(|row| row.contains("Error:")),
+            "the error row is gone after the landing"
+        );
+
+        // A kill error keeps its lifecycle: a tail landing never clears
+        // it (only the registry refresh does).
+        view.set_error("Could not kill bash command: gone".to_string(), false);
+        assert!(view.error.is_some());
+        view.set_output("a", &tail.join("\n"), view.detail_generation);
+        assert!(
+            view.error.is_some(),
+            "a tail landing never clears a kill error"
+        );
+        view.clear_error();
+        assert!(view.error.is_none());
+    }
+
+    /// A one-row output region (the designed minimum under a long
+    /// command) always shows the output line itself: a marker renders
+    /// only while a content row survives beside it, so scrolling never
+    /// underflows the region and never leaves a marker-only row.
+    #[test]
+    fn a_one_row_region_keeps_the_output_line() {
+        let mut catalog = activities();
+        catalog[0].command = "run".to_string();
+        // viewport 9: fixed 7 (running row) leaves a 2-row budget - the
+        // one-line command and exactly one output row.
+        let mut view = BashView::new(catalog, 9);
+        view.handle_key("enter", &kb());
+        let tail: Vec<String> = (1..=5).map(|n| format!("line-{n}")).collect();
+        view.set_output("a", &tail.join("\n"), view.detail_generation);
+        let frame = view.render(&theme(), 70, &kb());
+        assert!(frame.len() <= 9, "the pane fits: {}", frame.len());
+        let text = frame_text(&frame);
+        assert!(
+            text.iter().any(|row| row.contains("line-5")),
+            "the one-row region anchors on the newest line: {text:?}"
+        );
+        // The recorded region height is exactly one row.
+        assert_eq!(view.detail_region_rows.get(), 1);
+
+        // Scrolling up never panics and never leaves a marker-only row:
+        // the single row shows the scrolled line itself.
+        for expected in ["line-4", "line-3", "line-2", "line-1"] {
+            view.handle_key("up", &kb());
+            let frame = view.render(&theme(), 70, &kb());
+            let text = frame_text(&frame);
+            assert!(
+                text.iter().any(|row| row.contains(expected)),
+                "the up press walks to {expected}: {text:?}"
+            );
+        }
+        // Down walks back to the newest.
+        for _ in 0..4 {
+            view.handle_key("down", &kb());
+        }
+        let frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        assert!(text.iter().any(|row| row.contains("line-5")));
     }
 
     /// The exact command renders verbatim: repeated spaces and embedded
