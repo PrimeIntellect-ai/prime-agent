@@ -366,6 +366,16 @@ pub trait SessionEngine: Send + Sync {
     /// silent no-op like the TS controller being `undefined`.
     fn abort_auto_compaction(&self) {}
 
+    /// Whether a successful compaction left the compact-trigger
+    /// auto-refine review armed (TS `_compactAutoRefinePending`): the
+    /// servicing surfaces' cheap pre-check before spawning a round. The
+    /// turn loop never consumes the trigger itself (TS schedules the
+    /// review in the background after the settled compaction), so the
+    /// flag is the worker's cue to service the round off the settle.
+    fn compact_auto_refine_pending(&self) -> bool {
+        false
+    }
+
     /// Consume a pending compact-trigger auto-refine review (TS
     /// `_maybeAutoRefine("compact")` after a successful compaction): the
     /// engine resolves the model and runs the gated round (busy gates

@@ -2011,6 +2011,13 @@ impl SessionEngine for AgentSessionEngine {
         self.consume_compact_auto_refine_round()
     }
 
+    /// The cheap pre-check for the turn-settle servicing (TS
+    /// `_compactAutoRefinePending`): the worker reads it before spawning
+    /// the background round.
+    fn compact_auto_refine_pending(&self) -> bool {
+        AgentSessionEngine::compact_auto_refine_pending(self)
+    }
+
     /// The worker's live session summary (the TS
     /// `createAgentSessionMessageSender` source): rendered into the
     /// sender identity block of direct worker-to-worker deliveries.
@@ -3651,7 +3658,8 @@ impl AgentSessionEngine {
                 }
                 // TS `_scheduleAutoRefineAfterCompaction`: the compaction
                 // arms the compact-trigger review; the run stops on
-                // purpose, so the round services it before the `Done`.
+                // purpose, and the worker services the armed round off the
+                // turn's settle (the review never runs before the `Done`).
                 self.mark_compact_auto_refine_pending();
                 let entry = serde_json::to_value(&run.entry).unwrap_or(Value::Null);
                 // The wire result is the TS `CompactionResult` shape
@@ -3848,14 +3856,12 @@ impl AgentSessionEngine {
             match self.run_turn_boundary(emit) {
                 BoundaryRun::Cancelled => return,
                 BoundaryRun::StoppedForCompaction { compacted } => {
-                    // The requested compaction armed the trigger; the run
-                    // stops here, so the round services it before the
-                    // `Done` reaches attached clients (TS agent_end's
-                    // background scheduling, mapped onto the quiescent
-                    // boundary).
-                    if !self.run_compact_auto_refine(emit) {
-                        return;
-                    }
+                    // The requested compaction armed the trigger; the
+                    // round stays armed past this run: TS
+                    // `_scheduleAutoRefineAfterCompaction` schedules the
+                    // review in the background (never on the
+                    // completion path), and the worker services the
+                    // armed trigger off the turn's settle.
                     // TS `compact()`'s `didCompact` + active-goal branch:
                     // a compaction that ran re-consults the goal at the
                     // post-compaction boundary (`_goalContinuationAwaitsRlmWork
@@ -3884,15 +3890,14 @@ impl AgentSessionEngine {
             if self.run_auto_compaction(emit) == AutoCompactionRun::Cancelled {
                 return;
             }
-            // The compact-trigger round at the settled boundary (TS
-            // `_scheduleAutoRefineAfterAgentEnd`'s background review after
-            // the agent_end arms ran): a compaction armed earlier — the
-            // pre-turn arm, an overflow compact-and-retry, or this
-            // boundary's arms — services its review here, before the
-            // autonomous decision may queue a continuation.
-            if !self.run_compact_auto_refine(emit) {
-                return;
-            }
+            // The compact-trigger round is NOT consumed here: TS
+            // `_scheduleAutoRefineAfterAgentEnd` schedules the review as a
+            // background round (`setTimeout(0)`) that runs while the
+            // session is idle, never between the compaction and its
+            // settled turn — the worker services the armed trigger off
+            // the turn's settle (a review LLM call on this boundary held
+            // the queued next prompt behind the whole round; the
+            // compaction-completion-stall measurement pinned it).
             // TS `_getContinuationMessages` at the agent loop's natural
             // turn end: the goal continuation takes exclusive priority
             // over autonomous continuation, so the goal arm runs first

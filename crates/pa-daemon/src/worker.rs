@@ -4856,6 +4856,37 @@ fn restore_queue_snapshot(
 /// level: sequence + meta under the core lock, then one broadcast (the
 /// free-standing form of `Worker::emit_worker_event`, shared with the
 /// goal admission sink).
+/// Record one durable custom row of the background compact-trigger
+/// review and broadcast its `message_start`/`message_end` pair (the TS
+/// `_emit` for rows the session appends outside a turn): the same shape
+/// `Worker::emit_custom_row` persists for the `/refine` command's rows.
+fn emit_refinement_row(core: &Arc<Mutex<SessionCore>>, events: &Arc<EventPump>, message: Value) {
+    {
+        let mut core = core.lock().unwrap();
+        if let Some(store) = core.store.as_mut() {
+            let _ = store.persist_entry(
+                "custom_message",
+                json!({
+                    "customType": message.get("customType").cloned().unwrap_or(Value::Null),
+                    "content": message.get("content").cloned().unwrap_or(Value::Null),
+                    "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
+                    "details": message.get("details").cloned().unwrap_or(Value::Null),
+                }),
+            );
+        }
+    }
+    emit_worker_event_with(
+        core,
+        events,
+        json!({ "type": "message_start", "message": message.clone() }),
+    );
+    emit_worker_event_with(
+        core,
+        events,
+        json!({ "type": "message_end", "message": message }),
+    );
+}
+
 pub(crate) fn emit_worker_event_with(
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,
@@ -5378,6 +5409,10 @@ impl TurnRunner {
         let events = self.events.clone();
         let turn_coalescer = Arc::clone(&coalescer);
         let agent_dir = crate::paths::agent_dir().unwrap_or_default();
+        // The settle tail's compact-trigger servicing reads the engine
+        // after the turn closure dropped its own clone (the shadowing
+        // clone below moves into the closure).
+        let settle_engine = std::sync::Arc::clone(&engine);
         // The turn's settled outcome reaches the waiting prompt only
         // after the runner flipped the session back to idle (TS
         // `promptAndWait` resolves after the full settle): the blocking
@@ -6002,6 +6037,69 @@ impl TurnRunner {
             for done in items_done {
                 let _ = done.send(result.clone());
             }
+        }
+        // The compact-trigger review a compaction armed this run services
+        // off the settle (TS `_scheduleAutoRefineAfterCompaction` ->
+        // `setTimeout(0)` background `_maybeAutoRefine("compact")`): the
+        // turn settled and the waiting prompts resolved, so the review's
+        // model call runs as a background round and the queued next
+        // prompt's admission never waits on it. The round's own gates
+        // (the armed trigger, queued work) keep the trigger armed for the
+        // next settle when work is queued mid-review.
+        if settle_engine.compact_auto_refine_pending() {
+            let engine = std::sync::Arc::clone(&settle_engine);
+            let core = Arc::clone(&self.core);
+            let events = self.events.clone();
+            tokio::spawn(async move {
+                pa_core::session_engine::compaction_trace::trace(
+                    "autorefine.review_started",
+                    serde_json::Value::Null,
+                );
+                let refined =
+                    tokio::task::spawn_blocking(move || engine.consume_compact_auto_refine())
+                        .await
+                        .unwrap_or_else(|error| {
+                            Err(anyhow::anyhow!("auto-refinement task failed: {error}"))
+                        });
+                pa_core::session_engine::compaction_trace::trace(
+                    "autorefine.review_done",
+                    serde_json::json!({ "ran": refined.is_ok() }),
+                );
+                match refined {
+                    Ok(Some(result)) => {
+                        // TS `refine()` appends the TUI outcome row and
+                        // the model-facing notice (when edits applied) as
+                        // durable rows: persist both to the session file
+                        // and broadcast their message pairs like the
+                        // `/refine` command.
+                        let outcome_row =
+                            pa_core::session_engine::refine::create_refinement_outcome_message(
+                                &result,
+                            );
+                        if let Ok(value) = serde_json::to_value(
+                            pa_types::session::AgentMessage::Custom(outcome_row),
+                        ) {
+                            emit_refinement_row(&core, &events, value);
+                        }
+                        if result.applied_edits.iter().any(|edit| edit.applied) {
+                            let notice =
+                                pa_core::session_engine::refine::create_refinement_notice_message(
+                                    &result,
+                                    pa_core::session_engine::refine::RefinementSource::Auto,
+                                );
+                            if let Ok(value) = serde_json::to_value(
+                                pa_types::session::AgentMessage::Custom(notice),
+                            ) {
+                                emit_refinement_row(&core, &events, value);
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
+                    }
+                }
+            });
         }
     }
 
