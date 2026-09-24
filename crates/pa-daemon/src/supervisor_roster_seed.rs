@@ -129,6 +129,9 @@ impl Supervisor {
         // subscribe drains (the handle is owned by the table; callers
         // that need completion drain it exactly like the subscribe).
         if let Ok(mut pending) = self.pending_registration_seeds.lock() {
+            // Self-pruning (see the registration seed): finished
+            // handles drop; a live seed is never prunable.
+            pending.retain(|handle| !handle.is_finished());
             let supervisor = Arc::clone(self);
             pending.push(tokio::spawn(async move {
                 supervisor.seed_roster_ledger().await;
@@ -158,6 +161,12 @@ impl Supervisor {
         // not block on hydration (that would reintroduce the
         // large-session open latency this PR removes).
         if let Ok(mut pending) = self.pending_registration_seeds.lock() {
+            // Self-pruning: a daemon without subscribers must not
+            // accumulate one retained handle per registration (an
+            // eventual subscribe would drain the whole backlog).
+            // Finished handles drop here - a live seed is never
+            // prunable, and the barrier keeps every unfinished seed.
+            pending.retain(|handle| !handle.is_finished());
             let supervisor = Arc::clone(self);
             let root = root.to_path_buf();
             let handle = tokio::spawn(async move {

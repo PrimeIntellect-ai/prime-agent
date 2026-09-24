@@ -49,6 +49,8 @@ impl Supervisor {
         // (a client that applies the push first and then the snapshot
         // would lose the seeded rows): drain the in-flight seed tasks
         // and await them to completion BEFORE the snapshot is read.
+        // Finished handles await instantly; the take-and-await also
+        // bounds the retained set on every subscribe.
         let pending = std::mem::take(&mut *self.pending_registration_seeds.lock().unwrap());
         for handle in pending {
             let _ = handle.await;
