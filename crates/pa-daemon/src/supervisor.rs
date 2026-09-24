@@ -3280,12 +3280,26 @@ impl Supervisor {
         // path). Both reads share this one lock acquisition - the
         // create path holds this mutex around its own replay steps, and a
         // second acquisition here let the two race into a stall.
-        let (durable_session_id, previous_worker_instance_id) = {
+        let durable_session_id = {
             let mut descriptor = resident.descriptor.lock().await;
             if token.as_str() != descriptor.authentication_token {
                 return fail("Session worker authentication failed");
             }
             let previous_worker_instance_id = descriptor.worker_instance_id.clone();
+            // A REPLACEMENT registration flips the roster's stale-delta
+            // slot to the replacement BEFORE the replacement is exposed
+            // anywhere — the descriptor update below, the persisted
+            // record, the recorded registration: a predecessor's pull or
+            // frame still in flight must already meet the slot naming the
+            // replacement (its own stamp mismatches and drops), never the
+            // predecessor it carries. A same-process re-register (a
+            // dropped supervisor link, a create replay) keeps the slot
+            // untouched — the counter did not restart.
+            if previous_worker_instance_id.as_deref() != worker_instance_id.as_deref() {
+                let replacement = worker_instance_id.clone().unwrap_or_default();
+                let mut roster = self.roster.lock().unwrap();
+                roster.note_worker_generation(&resident.worker_id, &replacement);
+            }
             descriptor.pid = *pid;
             descriptor.socket_path = socket_path.clone();
             descriptor.worker_instance_id = worker_instance_id.clone();
@@ -3312,25 +3326,9 @@ impl Supervisor {
                     .and_then(|file| Path::new(file).file_stem())
                     .map(|stem| stem.to_string_lossy().to_string()),
             };
-            (durable_session_id, previous_worker_instance_id)
+            durable_session_id
         };
         let record = self.registry.record_registration(registration).await;
-        // A REPLACEMENT registration (a new worker process instance for
-        // the same resident worker id) flips the roster's stale-delta
-        // slot to the replacement: the replacement restarts its monotonic
-        // counter, so the slot's watermark starts fresh and every frame
-        // or pull still in flight from the predecessor drops on the
-        // generation mismatch (stale by construction — the registration
-        // refresh below writes the replacement's authoritative state).
-        // A same-process re-register (a dropped supervisor link, a
-        // create replay) keeps the slot untouched — the counter did not
-        // restart, and clearing it would let the older in-flight deltas
-        // apply again.
-        if previous_worker_instance_id.as_deref() != worker_instance_id.as_deref() {
-            let replacement = worker_instance_id.clone().unwrap_or_default();
-            let mut roster = self.roster.lock().unwrap();
-            roster.note_worker_generation(&resident.worker_id, &replacement);
-        }
         // A restore pass that owns this session's roster row can settle it
         // now (spec §10.4): the live worker serves the row's waiters
         // without queueing behind the rest of the recovery. Covers the
