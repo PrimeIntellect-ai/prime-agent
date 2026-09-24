@@ -333,8 +333,13 @@ pub(crate) struct SessionUi {
     /// run loop folds them into the transcript).
     traces_upload_notes: mpsc::UnboundedSender<crate::traces::TraceUploadAllNote>,
     /// A parked `/traces login` (or the enable arm's credential-less
-    /// entry): the run loop hands the terminal over and runs the flow.
+    /// entry): the run loop mounts the inline auth panel and spawns the
+    /// flow once; the parked intent leaves with the spawn.
     pending_traces_login: Option<TracesLoginIntent>,
+    /// The in-flight traces login's enable intent: taken from the park
+    /// when the flow spawns (so a later key cannot spawn a second flow
+    /// over the same panel), consumed by the settle.
+    traces_login_run: Option<TracesLoginIntent>,
     /// Where the background catalog refresh delivers `get_model_catalog`
     /// responses (the run loop folds them into the picker catalog).
     catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
@@ -394,10 +399,10 @@ pub(crate) struct SessionUi {
     /// `/login` + `/logout`: the provider auth flows the composition root
     /// owns (credential storage, OAuth flows, the provider catalog).
     provider_auth: Option<crate::provider_auth::ProviderAuthCommandsHandle>,
-    /// A provider login that needs the plain terminal (browser OAuth /
-    /// the MCP device flow): the run loop hands the terminal over and
-    /// runs this row's flow.
-    pending_terminal_login: Option<crate::provider_auth::ProviderRow>,
+    /// The inline auth panel's request channel (the login flows drive the
+    /// panel through it; the run loop owns the receiving side and folds
+    /// each request into the mounted panel).
+    auth_panel_notes: mpsc::UnboundedSender<crate::auth_panel::AuthPanelRequest>,
     /// A `/update` run parked for the run loop: the child processes need
     /// the plain terminal, and a successful self-update replaces this
     /// process with the updated CLI.
@@ -549,11 +554,11 @@ pub(crate) struct SessionUi {
     /// right after dispatch, because the renderer is the loop's terminal.
     suspend_requested: bool,
     /// The `/mcp` view's internal auth resolution (its Enter on a
-    /// connection, or the inline paste panel — the args for the client
-    /// auth commands, e.g. `login <server>`): dispatched by the loop
-    /// through the auth seam with its terminal-suspension bracket, never
-    /// through the typed-command path.
-    pending_mcp_auth: Option<String>,
+    /// connection, or the pasteable service's paste flow): the auth args
+    /// plus the inline auth panel's title; the loop mounts the panel and
+    /// spawns the command through the auth seam, never through the
+    /// typed-command path.
+    pending_mcp_auth: Option<McpAuthIntent>,
     /// The Tab-interception path restored the stashed browse draft into
     /// the editor when it opened the picker, so the editor holds the
     /// user's draft, not the command's typed partial: a picker apply
@@ -631,6 +636,7 @@ impl SessionUi {
         reload_notes: mpsc::UnboundedSender<ReloadNote>,
         traces_upload_notes: mpsc::UnboundedSender<crate::traces::TraceUploadAllNote>,
         catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
+        auth_panel_notes: mpsc::UnboundedSender<crate::auth_panel::AuthPanelRequest>,
         activity_updates: ActivityUpdates,
     ) -> Result<SessionUi> {
         let active_session_id = match &options.session {
@@ -681,6 +687,7 @@ impl SessionUi {
             trace_upload: None,
             traces_upload_notes,
             pending_traces_login: None,
+            traces_login_run: None,
             pasted_images: Default::default(),
             next_image_marker_id: 1,
             pending_snapshot: None,
@@ -702,7 +709,7 @@ impl SessionUi {
             pending_confirm: None,
             traces: options.traces.clone(),
             provider_auth: options.provider_auth.clone(),
-            pending_terminal_login: None,
+            auth_panel_notes,
             pending_update: None,
             update_commands: options.update_commands.clone(),
             exit_requested: false,
@@ -3470,8 +3477,8 @@ impl SessionUi {
 
     /// One key press while the provider selector owns the frame (TS
     /// `OAuthSelectorComponent.handleInput`): Enter closes the panel and
-    /// runs the row's flow; the terminal-suspending flows park for the
-    /// run loop to hand the terminal over first.
+    /// runs the row's flow; the panel-driven flows mount the inline auth
+    /// panel and spawn.
     async fn handle_provider_auth_key(
         &mut self,
         key: KeyEvent,
@@ -3500,15 +3507,26 @@ impl SessionUi {
                 view.provider_auth = None;
                 match api_key {
                     // The panel-prompted key: store it (TS
-                    // `showApiKeyLoginDialog`'s save path, no terminal
-                    // handover needed).
+                    // `showApiKeyLoginDialog`'s save path, no panel
+                    // needed).
                     Some(api_key) => {
                         let auth = self.provider_auth.clone().expect("the selector was open");
                         let outcome = auth.0.login(&provider, Some(&api_key)).await;
                         self.apply_auth_outcome(outcome, view);
                     }
                     None => {
-                        self.pending_terminal_login = Some(provider);
+                        let auth = self.provider_auth.clone().expect("the selector was open");
+                        if provider.id.starts_with("mcp:")
+                            || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
+                        {
+                            self.start_provider_panel_login(&provider, auth, view);
+                        } else {
+                            // The unported OAuth subscription stubs: the
+                            // error row is the whole flow (nothing drives
+                            // the panel).
+                            let outcome = auth.0.login(&provider, None).await;
+                            self.apply_auth_outcome(outcome, view);
+                        }
                     }
                 }
             }
@@ -3518,6 +3536,51 @@ impl SessionUi {
                 let outcome = auth.0.logout(&provider).await;
                 self.apply_auth_outcome(outcome, view);
             }
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Enter on a panel-driven login row (the MCP OAuth logins, the Prime
+    /// Inference login): mount the inline auth panel (TS `showAuthPanel`
+    /// mounts the login dialog as the flow starts) and spawn the flow
+    /// against it. The flow's requests fold into the panel through the
+    /// run loop's channel arm; the settled outcome lands the same way
+    /// (the flow never touches the terminal).
+    fn start_provider_panel_login(
+        &mut self,
+        provider: &crate::provider_auth::ProviderRow,
+        auth: crate::provider_auth::ProviderAuthCommandsHandle,
+        view: &mut AgentView,
+    ) {
+        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(format!(
+            "Login to {}",
+            provider.name
+        )));
+        let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        let provider = provider.clone();
+        tokio::spawn(async move {
+            let outcome = auth.0.login_on_panel(&provider, panel.clone()).await;
+            panel.send(crate::auth_panel::AuthPanelRequest::ProviderSettled { outcome });
+        });
+    }
+
+    /// One key press while the inline auth panel owns the frame (TS the
+    /// login dialog's / team selector's `handleInput`): the panel answers
+    /// its mounted input through the request's oneshot.
+    async fn handle_auth_panel_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
+        let Some(id) = key_event_to_id(&key) else {
+            return Ok(());
+        };
+        // The panel consumes Ctrl+C (cancel the mounted input, not the
+        // app): report the handled press so the force-quit guard stays in
+        // sync with the reader's observations.
+        if id == "ctrl+c" {
+            self.exit_guard.note_ctrl_c_handled();
+        }
+        if let Some(panel) = view.auth_panel.as_mut() {
+            let kb = view.editor.keybindings();
+            panel.handle_key(&id, kb);
         }
         self.dirty = true;
         Ok(())
@@ -3543,26 +3606,73 @@ impl SessionUi {
         }
     }
 
-    /// Whether a provider login parked for the plain terminal (the run
-    /// loop checks this after each key and hands the terminal over).
-    pub(crate) fn pending_terminal_login(&self) -> bool {
-        self.pending_terminal_login.is_some()
+    /// One paste payload while the inline auth panel owns the frame: the
+    /// payload lands in the panel's mounted input (the paste field or
+    /// the picker's search) — never in the hidden editor behind the
+    /// panel, where a later Enter could submit the secret as a prompt.
+    pub(crate) fn paste_to_auth_panel(&mut self, text: &str, view: &mut AgentView) {
+        if let Some(panel) = view.auth_panel.as_mut() {
+            panel.handle_paste(text);
+        }
+        self.dirty = true;
     }
 
-    /// The run loop hands the terminal over and calls this for a parked
-    /// terminal login flow (the TS auth panel prompts on the plain
-    /// terminal; this build runs the composition root's flow there).
-    pub(crate) async fn run_terminal_login(&mut self, view: &mut AgentView) -> Result<()> {
-        let Some(provider) = self.pending_terminal_login.take() else {
-            return Ok(());
-        };
-        let Some(auth) = self.provider_auth.clone() else {
-            return Ok(());
-        };
-        let outcome = auth.0.login(&provider, None).await;
-        self.apply_auth_outcome(outcome, view);
+    /// One request from a login flow driving the inline auth panel (the
+    /// run loop's channel arm folds it in): the render requests mount
+    /// into the panel (a request with no mounted panel cancels its flow
+    /// — the dropped oneshot reply, the same contract a closed terminal
+    /// input had); the settled requests unmount the panel and apply the
+    /// outcome (a flow that never needed input — the credential-reuse
+    /// paths — still settles).
+    pub(crate) async fn apply_auth_panel_request(
+        &mut self,
+        request: crate::auth_panel::AuthPanelRequest,
+        view: &mut AgentView,
+    ) {
+        use crate::auth_panel::AuthPanelRequest;
+        match request {
+            AuthPanelRequest::Progress { message } => {
+                if let Some(panel) = view.auth_panel.as_mut() {
+                    panel.push_progress(message);
+                }
+            }
+            AuthPanelRequest::AuthUrl { url, instructions } => {
+                if let Some(panel) = view.auth_panel.as_mut() {
+                    panel.show_auth_url(url, instructions);
+                }
+            }
+            AuthPanelRequest::PastePrompt {
+                prompt,
+                style,
+                reply,
+            } => {
+                if let Some(panel) = view.auth_panel.as_mut() {
+                    panel.mount_paste(prompt, style, reply);
+                }
+            }
+            AuthPanelRequest::SelectTeam {
+                teams,
+                current,
+                reply,
+            } => {
+                if let Some(panel) = view.auth_panel.as_mut() {
+                    panel.mount_teams(teams, current, reply);
+                }
+            }
+            AuthPanelRequest::ProviderSettled { outcome } => {
+                view.auth_panel = None;
+                self.apply_auth_outcome(outcome, view);
+            }
+            AuthPanelRequest::McpSettled { note } => {
+                view.auth_panel = None;
+                self.note(&note, view);
+            }
+            AuthPanelRequest::TracesSettled { outcome } => {
+                view.auth_panel = None;
+                self.finish_traces_login(outcome, view).await;
+            }
+        }
         self.dirty = true;
-        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -3800,8 +3910,8 @@ impl SessionUi {
             }
             "login" => {
                 // TS runs the login dialog; the terminal port parks the
-                // flow for the plain terminal (the run loop hands it
-                // over right after this key).
+                // flow against the inline auth panel (the run loop mounts
+                // it right after this key).
                 self.pending_traces_login = Some(TracesLoginIntent::Login);
             }
             _ => {
@@ -3839,27 +3949,51 @@ impl SessionUi {
         Ok(())
     }
 
-    /// Whether a parked `/traces login` waits for the terminal handoff
-    /// (the run loop checks this after each key).
+    /// Whether a parked `/traces login` waits for the panel mount (the
+    /// run loop checks this after each key).
     pub(crate) fn pending_traces_login(&self) -> bool {
         self.pending_traces_login.is_some()
     }
 
-    /// The parked traces login (the run loop hands the terminal over
-    /// around the flow; TS `runPrimeAgentTracesLogin`'s dialog surfaces
-    /// live on the plain terminal here). On success the enable intent
-    /// continues TS's `on` arm.
-    pub(crate) async fn run_traces_login(&mut self, view: &mut AgentView) -> Result<()> {
+    /// The parked traces login: mount the inline auth panel (TS the
+    /// login dialog mounts as the flow starts) and spawn the flow against
+    /// it; the settled outcome folds in through the panel channel and
+    /// continues the enable intent (TS's `on` arm).
+    pub(crate) fn run_traces_login(&mut self, view: &mut AgentView) {
+        // The park is consumed here (the intent moves to the in-flight
+        // run): the key-path check spawns the flow exactly once.
         let Some(intent) = self.pending_traces_login.take() else {
-            return Ok(());
+            return;
         };
         let Some(traces) = self.traces.clone() else {
-            return Ok(());
+            return;
         };
-        match traces.0.login().await {
+        self.traces_login_run = Some(intent);
+        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(
+            "Login to Prime Agent Traces",
+        ));
+        let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        tokio::spawn(async move {
+            let outcome = traces.0.login(panel.clone()).await;
+            panel.send(crate::auth_panel::AuthPanelRequest::TracesSettled { outcome });
+        });
+    }
+
+    /// A settled traces login (the panel channel's `TracesSettled`): the
+    /// outcome row lands, and the enable intent continues TS's `on` arm.
+    async fn finish_traces_login(
+        &mut self,
+        outcome: crate::traces::TraceLoginOutcome,
+        view: &mut AgentView,
+    ) {
+        let intent = self.traces_login_run.take();
+        let Some(traces) = self.traces.clone() else {
+            return;
+        };
+        match outcome {
             crate::traces::TraceLoginOutcome::Status(message) => {
                 self.note(&message, view);
-                if matches!(intent, TracesLoginIntent::Enable) {
+                if matches!(intent, Some(TracesLoginIntent::Enable)) {
                     // TS re-reads the credential after the login: still
                     // none is the TS error row; a resolved one continues
                     // the enable (set, flush, upload once).
@@ -3873,8 +4007,12 @@ impl SessionUi {
                             .and_then(|state| state.get("sessionFile"))
                             .and_then(Value::as_str)
                             .map(str::to_string);
-                        self.enable_traces(&traces, session_file.as_deref(), view)
-                            .await?;
+                        if let Err(error) = self
+                            .enable_traces(&traces, session_file.as_deref(), view)
+                            .await
+                        {
+                            self.error_row(&format!("{error:#}"), view);
+                        }
                     }
                 }
             }
@@ -3886,7 +4024,6 @@ impl SessionUi {
             crate::traces::TraceLoginOutcome::Cancelled => {}
         }
         self.dirty = true;
-        Ok(())
     }
 
     /// Whether a `/traces upload-all` sweep is in flight (the run loop
@@ -5244,15 +5381,33 @@ impl SessionUi {
     }
 
     /// Run one internal MCP auth request (the `/mcp` view's resolution):
-    /// the client auth commands own the flow; an unavailable auth client
-    /// reports the TS note.
-    pub(crate) async fn run_mcp_auth(&mut self, args: &str, view: &mut AgentView) {
+    /// mount the inline auth panel (TS the login dialog / token paste
+    /// panel mounts as the flow starts) and spawn the command against
+    /// it; the settled line folds in through the panel channel. An
+    /// unavailable auth client reports the TS note.
+    pub(crate) fn run_mcp_auth(&mut self, view: &mut AgentView) {
+        let Some(intent) = self.pending_mcp_auth.take() else {
+            return;
+        };
         let Some(auth) = self.client_auth.clone() else {
             self.note("/mcp is not available in this client yet", view);
             return;
         };
-        let note = crate::client_auth::run_mcp_auth_command(auth.0.as_ref(), args).await;
-        self.note(&note, view);
+        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(intent.title));
+        let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        let args = intent.args;
+        tokio::spawn(async move {
+            let note =
+                crate::client_auth::run_mcp_auth_command(auth.0.as_ref(), &args, panel.clone())
+                    .await;
+            panel.send(crate::auth_panel::AuthPanelRequest::McpSettled { note });
+        });
+    }
+
+    /// Whether the `/mcp` view parked an auth request for the loop to
+    /// spawn (checked after each dispatched key).
+    pub(crate) fn pending_mcp_auth(&self) -> bool {
+        self.pending_mcp_auth.is_some()
     }
 
     /// Open the `/model` picker over the cached catalog, its search
@@ -5340,11 +5495,10 @@ impl SessionUi {
     }
 
     /// One key press while the `/mcp` connections view is open: Esc or
-    /// Ctrl+C close it; Enter (or the paste panel) resolves the selected
+    /// Ctrl+C close it; Enter (or the paste flow) resolves the selected
     /// connection by parking `pending_mcp_auth`, which the input loop
-    /// runs once the key handler returns (so the auth flow keeps the
-    /// terminal-suspension bracket); everything else navigates or edits
-    /// the search field.
+    /// mounts the inline auth panel for once the key handler returns;
+    /// everything else navigates or edits the search field.
     async fn handle_mcp_view_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
@@ -5366,7 +5520,7 @@ impl SessionUi {
                 self.picker_restored_draft = false;
                 self.dirty = true;
             }
-            Some(crate::mcp_view::McpViewAction::Select(server)) => {
+            Some(crate::mcp_view::McpViewAction::Select { server, label }) => {
                 view.mcp_view = None;
                 self.dirty = true;
                 // The Tab path leaves the typed `/mcp <partial>` behind;
@@ -5382,9 +5536,12 @@ impl SessionUi {
                 // flow. The typed-command arg path is gone, so the view
                 // resolves through the internal auth seam instead of a
                 // submitted `/mcp login <name>` string.
-                self.pending_mcp_auth = Some(format!("login {server}"));
+                self.pending_mcp_auth = Some(McpAuthIntent {
+                    args: format!("login {server}"),
+                    title: format!("Login to {label}"),
+                });
             }
-            Some(crate::mcp_view::McpViewAction::Paste(server)) => {
+            Some(crate::mcp_view::McpViewAction::Paste { server, label }) => {
                 view.mcp_view = None;
                 self.dirty = true;
                 if self.picker_restored_draft {
@@ -5394,24 +5551,14 @@ impl SessionUi {
                 }
                 // The inline paste panel's client surface: prompt for the
                 // token, store it bound to the service endpoint, verify.
-                self.pending_mcp_auth = Some(format!("paste {server}"));
+                self.pending_mcp_auth = Some(McpAuthIntent {
+                    args: format!("paste {server}"),
+                    title: format!("Connect {label}"),
+                });
             }
             None => {}
         }
         Ok(())
-    }
-
-    /// Whether dispatching this input needs the terminal handed over
-    /// (raw-mode off, alternate screen left) so the auth flow can prompt.
-    /// `args` is the auth-args form (the `/mcp` view's internal
-    /// resolution, e.g. `login <name>`): a login suspends, a paste
-    /// prompts on the plain terminal too (its token prompt reads
-    /// stdin), so both hand the terminal over.
-    pub(crate) fn mcp_auth_needs_terminal(&self, args: &str) -> bool {
-        if self.client_auth.is_none() {
-            return false;
-        }
-        mcp_auth_args_need_terminal(args)
     }
 
     /// `/resume <selector>`: a session file path, an `<id>.jsonl` under the
@@ -6977,15 +7124,6 @@ impl SessionUi {
         std::mem::take(&mut self.suspend_requested)
     }
 
-    /// Take the pending MCP auth request the connections view resolved to
-    /// (its Enter on a connection, or the inline paste panel): the args
-    /// run through the client auth commands directly — the typed-command
-    /// arg path is gone (`/mcp` is menu-only), so the view never resolves
-    /// through a submitted `/mcp <args>` string.
-    pub(crate) fn take_pending_mcp_auth(&mut self) -> Option<String> {
-        self.pending_mcp_auth.take()
-    }
-
     /// Report the run's first suspend cycle (`tui suspend used`),
     /// fire-and-forget like the scroll event: the keypress never waits on
     /// the telemetry flush. `outcome` is `resumed` (the SIGCONT
@@ -7057,6 +7195,11 @@ impl SessionUi {
         // same way (TS's auth panel mounts over the prompt).
         if view.provider_auth.is_some() {
             return self.handle_provider_auth_key(key, view).await;
+        }
+        // The inline auth panel owns the frame the same way (TS the login
+        // dialog / team selector mounts over the prompt).
+        if view.auth_panel.is_some() {
+            return self.handle_auth_panel_key(key, view).await;
         }
         // The `/settings` menu owns the frame the same way (TS
         // `showSelector`).
@@ -9091,11 +9234,13 @@ async fn describe_session_open_failure(
     })
 }
 
-/// The auth-args subcommands that prompt on the plain terminal: a login
-/// (OAuth/device flow) and a paste (its token prompt reads stdin from the
-/// terminal). Anything else (logout, malformed args) stays in-band.
-fn mcp_auth_args_need_terminal(args: &str) -> bool {
-    matches!(args.split_whitespace().next(), Some("login" | "paste"))
+/// The `/mcp` view's parked auth request: the auth-args form (e.g.
+/// `login <server>`) and the title the inline auth panel mounts (TS
+/// `Login to {label}` for the login dialog, `Connect {label}` for the
+/// token paste panel).
+pub(crate) struct McpAuthIntent {
+    pub(crate) args: String,
+    pub(crate) title: String,
 }
 
 /// The retry-episode collapse (SANCTIONED DIVERGENCE from TS, operator
@@ -9339,28 +9484,6 @@ mod loader_token_tests {
         stats.tokens += 100;
         stats.duration_ms += 500;
         assert_eq!(stats.average_rate(), 200.0);
-    }
-}
-
-#[cfg(test)]
-mod mcp_auth_terminal_tests {
-    use super::mcp_auth_args_need_terminal;
-
-    /// The inline paste panel's `paste <server>` prompts for the token on
-    /// the plain terminal (its read of stdin cannot happen under the raw
-    /// renderer), so it needs the same hand-over as a login.
-    #[test]
-    fn login_and_paste_need_the_terminal() {
-        assert!(mcp_auth_args_need_terminal("login anthropic"));
-        assert!(mcp_auth_args_need_terminal("paste anthropic"));
-    }
-
-    /// A logout and a bare/unknown subcommand stay in-band.
-    #[test]
-    fn logout_and_malformed_args_stay_in_band() {
-        assert!(!mcp_auth_args_need_terminal("logout anthropic"));
-        assert!(!mcp_auth_args_need_terminal(""));
-        assert!(!mcp_auth_args_need_terminal("refresh anthropic"));
     }
 }
 
