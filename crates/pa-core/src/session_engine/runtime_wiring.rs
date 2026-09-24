@@ -229,6 +229,7 @@ pub fn kernel_provisioner(
     agent_dir: &std::path::Path,
     snapshot_dir: Option<std::path::PathBuf>,
     on_restore: Option<crate::kernel::provisioner::RestoreCallback>,
+    on_unavailable_skills: Option<crate::kernel::provisioner::UnavailableSkillsCallback>,
     on_bootstrap_result: Option<crate::kernel::provisioner::KernelBootstrapResultHandler>,
 ) -> Arc<KernelProvisioner> {
     let mut env = HashMap::with_capacity(1);
@@ -252,6 +253,7 @@ pub fn kernel_provisioner(
             snapshot_dir,
             ready_gate: None,
             on_restore,
+            on_unavailable_skills,
             on_bootstrap_result,
         },
     ))

@@ -29,6 +29,10 @@ pub trait ClientSettings: Send + Sync {
     /// `images.blockImages` (TS default false).
     fn block_images(&self) -> bool;
     fn set_block_images(&self, blocked: bool) -> Result<()>;
+    /// `imageModel` (TS `getImageModel`: "provider/model-id" or a bare id;
+    /// unset by default). Read-only for the paste-time hint that names the
+    /// setting when the session model lacks image input.
+    fn image_model(&self) -> Option<String>;
     /// `enableSkillCommands` (TS default true).
     fn enable_skill_commands(&self) -> bool;
     fn set_enable_skill_commands(&self, enabled: bool) -> Result<()>;

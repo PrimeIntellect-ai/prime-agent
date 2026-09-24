@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Context};
 
 use dir_lock::acquire_bootstrap_lock;
-pub use runtime_code::build_rlm_bootstrap_code;
+pub use runtime_code::{build_rlm_bootstrap_code, PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER};
 use venv::{
     bootstrap_venv, ensure_uv, expand_home, has_prime_agent_runtime,
     missing_python_skill_import_labels, missing_rlm_extra_import_labels, normalize_python_skills,

@@ -116,6 +116,11 @@ pub struct SessionEngineConfig {
     /// scheduler fires (TS daemon-mode wires
     /// `AgentCronJobStore.forSessionArtifacts()` into both).
     pub cron_store: Option<super::runtime_wiring::KernelCronWiring>,
+    /// The image-model routing host seam (TS agent-session's settings +
+    /// registry reads at dispatch): the headless surfaces install theirs;
+    /// the daemon worker stays `None` because its turn dispatch owns
+    /// routing (its queued lanes re-dispatch every batch).
+    pub image_model_router: Option<super::image_model_routing::ImageModelRouter>,
 }
 
 /// An assembled, running session.
@@ -404,11 +409,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     let has_snapshot = session_artifact_dir
         .as_ref()
         .is_some_and(|dir| crate::kernel::state_snapshot::snapshot_path_in(dir).exists());
-    // The restore-notice mailbox (TS `deliverAs: "nextTurn"`): a boot's
-    // `onRestore` fires from a background task that can settle before
-    // the AgentSession exists (the resume prewarm starts at build), so
-    // the row parks in a mailbox the session adopts once constructed and
-    // shares afterwards.
+    // The next-turn notice mailbox (TS `deliverAs: "nextTurn"`): a boot's
+    // `onRestore` or `onUnavailableSkills` fires from a background task that
+    // can settle before the AgentSession exists (the resume prewarm starts at
+    // build), so the row parks in a mailbox the session adopts once
+    // constructed and shares afterwards.
     let restore_rows = std::sync::Arc::new(std::sync::Mutex::new(Vec::<
         pa_types::session::CustomMessage,
     >::new()));
@@ -428,6 +433,21 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
             },
         ) as crate::kernel::provisioner::RestoreCallback)
     };
+    // TS `_onPythonSkillsUnavailable`: a broken skill import reports at
+    // kernel start so the model learns before its first call, riding the
+    // next admitted turn like the restore notice.
+    let on_unavailable_skills = {
+        let restore_rows = std::sync::Arc::clone(&restore_rows);
+        Some(std::sync::Arc::new(
+            move |errors: &crate::session_engine::python_skills_notice::UnavailablePythonSkills| {
+                let row = super::python_skills_notice::notice_message(errors);
+                restore_rows
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(row);
+            },
+        ) as crate::kernel::provisioner::UnavailableSkillsCallback)
+    };
     let provisioner = super::runtime_wiring::kernel_provisioner(
         session_id,
         handlers,
@@ -436,6 +456,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         &config.agent_dir,
         session_artifact_dir,
         on_restore,
+        on_unavailable_skills,
         on_bootstrap_result,
     );
     let mut tools = config.tools.clone();
@@ -689,6 +710,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // reads the resource loader at expansion time; the session snapshots
     // the engine's loaded list).
     session.set_skills(resources.skills.clone());
+    // The embedding's image-model routing seam (the headless surfaces
+    // install theirs; the daemon worker's turn dispatch owns routing).
+    session.set_image_model_router(config.image_model_router.clone());
     // The restore-notice mailbox becomes the session's next-turn queue:
     // rows parked by a boot that settled mid-build merge in, and later
     // restores (a lazy first-call boot) push straight into the live

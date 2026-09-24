@@ -229,7 +229,27 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
     // Resolve request auth once (single-shot mode).
     let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
 
-    let stream_fn = real_stream_fn(resolved.api_key.clone(), model.clone());
+    // The session's serving target stays a swappable slot (the same adapter
+    // the daemon uses): image-model routing swaps it per dispatched batch.
+    let provider_target = std::sync::Arc::new(std::sync::RwLock::new(Some(
+        pa_core::session_engine::provider_adapter::ProviderTarget {
+            api_key: resolved.api_key.clone(),
+            model: model.clone(),
+            service_tier: None,
+        },
+    )));
+    let stream_fn = pa_core::session_engine::provider_adapter::switchable_stream_fn(
+        std::sync::Arc::clone(&provider_target),
+    );
+    // TS settings.imageModel routing (the headless surfaces' host seam):
+    // image-attaching batches on a session model without image input
+    // route to the configured image model or fail the turn with the
+    // actionable refusal naming the setting.
+    let image_model_router = headless_image_model_router(
+        provider_target,
+        config.cwd.clone(),
+        config.agent_dir.clone(),
+    );
     let agent_model: AgentModel = json_round_trip(&model).ok_or("model conversion failed")?;
 
     let session_manager = if options.session.no_session {
@@ -327,6 +347,7 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
             prewarm_ipython_kernel: Some(true),
             queued_goal_context_purge: None,
             queued_steering_probe: None,
+            image_model_router: Some(image_model_router),
         },
     )
     .await
@@ -336,6 +357,96 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
         model,
         api_key: resolved.api_key,
     })
+}
+
+/// The headless image-model router (TS `resolveImageModelOverride` over the
+/// CLI's settings + registry, applied to the session's swappable stream
+/// target): the routing decision for one dispatched batch — `Err` is the
+/// actionable refusal that fails the turn — and the serving-target swap
+/// (`None` restores the session target).
+fn headless_image_model_router(
+    provider_target: std::sync::Arc<
+        std::sync::RwLock<Option<pa_core::session_engine::provider_adapter::ProviderTarget>>,
+    >,
+    cwd: std::path::PathBuf,
+    agent_dir: std::path::PathBuf,
+) -> pa_core::session_engine::image_model_routing::ImageModelRouter {
+    let session_target = provider_target
+        .read()
+        .expect("provider target lock")
+        .clone();
+    let decide = {
+        let cwd = cwd.clone();
+        let agent_dir = agent_dir.clone();
+        std::sync::Arc::new(
+            move |carries_images: bool,
+                  session_model: &AgentModel,
+                  thinking_level: pa_agent::types::ThinkingLevel| {
+                if !carries_images {
+                    return Ok(None);
+                }
+                let session_model: pa_types::ai::Model = json_round_trip(session_model)
+                    .ok_or_else(|| "model conversion failed".to_string())?;
+                let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
+                let image_model_reference = settings.get_image_model();
+                let block_images = settings.get_block_images();
+                let auth = pa_core::auth::AuthStorage::create(&agent_dir);
+                let mut registry =
+                    pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+                registry.load_private_authorization_from_cache();
+                let available: Vec<pa_types::ai::Model> =
+                    registry.get_available().into_iter().cloned().collect();
+                pa_core::models::resolve_image_model_override(
+                    &pa_core::models::ImageModelRoutingInputs {
+                        session_model: &session_model,
+                        thinking_level:
+                            pa_core::session_engine::provider_adapter::model_thinking_level(
+                                thinking_level,
+                            ),
+                        service_tier: None,
+                        image_model_reference: image_model_reference.as_deref(),
+                        available_models: &available,
+                        has_configured_auth: &|model| registry.has_configured_auth(model),
+                        block_images,
+                    },
+                )
+            },
+        )
+    };
+    let swap_target = {
+        let provider_target = std::sync::Arc::clone(&provider_target);
+        let agent_dir = agent_dir.clone();
+        std::sync::Arc::new(move |route: Option<&pa_core::models::ResolvedImageModel>| {
+            let target = match route {
+                Some(resolved) => {
+                    // The routed model's request auth resolves like the
+                    // session model's did at startup (registry + headers).
+                    let auth = pa_core::auth::AuthStorage::create(&agent_dir);
+                    let mut registry = pa_core::models::ModelRegistry::create(
+                        auth,
+                        agent_dir.join("models.json"),
+                    );
+                    registry.load_private_authorization_from_cache();
+                    let api_key = registry
+                        .get_api_key_and_headers(&resolved.model, resolved.model.headers.as_ref())
+                        .api_key;
+                    pa_core::session_engine::provider_adapter::ProviderTarget {
+                        api_key,
+                        model: resolved.model.clone(),
+                        service_tier: resolved.service_tier,
+                    }
+                }
+                None => session_target
+                    .clone()
+                    .expect("the session target is set at startup"),
+            };
+            *provider_target.write().expect("provider target lock") = Some(target);
+        })
+    };
+    pa_core::session_engine::image_model_routing::ImageModelRouter {
+        decide,
+        swap_target,
+    }
 }
 
 /// The engine alone (callers that do not drive session commands).

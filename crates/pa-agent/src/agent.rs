@@ -41,6 +41,17 @@ pub enum AgentContinueErrorCode {
     NothingToContinue,
 }
 
+/// Model that serves the LLM requests of a routed run, with per-request
+/// fields clamped for it (TS `AgentModelOverride`). When set, every LLM
+/// request for prompt and continuation runs uses this model with its own
+/// thinking level, while the agent state keeps identifying the session
+/// model for UI and persistence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentModelOverride {
+    pub model: Model,
+    pub thinking_level: ThinkingLevel,
+}
+
 /// Typed precondition failure from [`Agent::continue_run`], so callers
 /// classify by code instead of message text (TS `AgentContinueError`).
 #[derive(Debug, thiserror::Error)]
@@ -284,6 +295,9 @@ struct Shared {
 struct ActiveRun {
     controller: AbortController,
     idle_tx: watch::Sender<bool>,
+    /// Model serving the run when it started; failures stay attributed to
+    /// it (TS `ActiveRun.model`).
+    model: Model,
 }
 
 struct AgentInner {
@@ -309,6 +323,14 @@ struct AgentInner {
     /// own state exists. A plain mutex: cloned at run-config build, never
     /// held across an await.
     get_continuation_messages: Mutex<Option<GetContinuationMessagesFn>>,
+    /// Per-run model override (TS `Agent.modelOverride`): when set, the
+    /// loop config serves every LLM request of the run on this model with
+    /// its own thinking level, while the agent state keeps identifying the
+    /// session model. A plain mutex: read at run-config build, never held
+    /// across an await. The owner sets it right before starting a routed
+    /// run and clears it before the next dispatch, so retries and
+    /// post-compaction continuations of a routed turn keep serving it.
+    model_override: Mutex<Option<AgentModelOverride>>,
     session_id: Option<String>,
     tool_execution: ToolExecutionMode,
 }
@@ -383,7 +405,24 @@ impl AgentInner {
     async fn handle_run_failure(self: &Arc<Self>, error: &anyhow::Error, aborted: bool) {
         let failure_message = {
             let shared = self.shared.lock().await;
-            let model = shared.state.model.clone();
+            // The model that served the run when it started tags its
+            // failures: a routed run keeps the override, and even a
+            // mid-run override change cannot re-attribute an in-flight
+            // request to a model that never saw it (TS `handleRunFailure`).
+            let model = self
+                .run
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|run| run.model.clone())
+                .or_else(|| {
+                    self.model_override
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .map(|routed| routed.model.clone())
+                })
+                .unwrap_or_else(|| shared.state.model.clone());
             crate::types::AssistantMessage {
                 content: vec![crate::types::AssistantContent::Text(
                     crate::types::TextContent {
@@ -486,12 +525,22 @@ impl AgentInner {
         let continuation = self.get_continuation_messages.lock().unwrap().clone();
         let should_stop_after_turn = self.should_stop_after_turn.clone();
 
-        let mut config =
-            AgentLoopConfig::new(shared.state.model.clone(), Arc::clone(&self.convert_to_llm));
+        // A routed run serves every LLM request on the override model with
+        // its own thinking level (TS `createLoopConfig`'s `modelOverride`
+        // reads); the agent state keeps identifying the session model.
+        let override_config = self.model_override.lock().unwrap().clone();
+        let (model, reasoning) = match &override_config {
+            Some(override_config) => (
+                override_config.model.clone(),
+                override_config.thinking_level,
+            ),
+            None => (shared.state.model.clone(), shared.state.thinking_level),
+        };
+        let mut config = AgentLoopConfig::new(model, Arc::clone(&self.convert_to_llm));
         config.api_key = None;
         config.temperature = None;
         config.max_tokens = None;
-        config.reasoning = shared.state.thinking_level;
+        config.reasoning = reasoning;
         config.session_id.clone_from(&self.session_id);
         config.transform_context.clone_from(&self.transform_context);
         config.get_api_key.clone_from(&self.get_api_key);
@@ -521,9 +570,22 @@ impl AgentInner {
             if run.is_some() {
                 anyhow::bail!("Agent is already processing.");
             }
+            // The model that serves the run when it starts tags its
+            // failures (TS `ActiveRun.model`); even a mid-run override
+            // change cannot re-attribute an in-flight request to a model
+            // that never saw it.
+            let run_model = {
+                let shared = self.shared.lock().await;
+                self.model_override
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map_or_else(|| shared.state.model.clone(), |routed| routed.model.clone())
+            };
             *run = Some(ActiveRun {
                 controller: controller.clone(),
                 idle_tx,
+                model: run_model,
             });
         }
         let run_signal = controller.signal();
@@ -705,6 +767,7 @@ impl Agent {
             should_stop_after_turn: options.should_stop_after_turn,
             should_stop_before_turn: options.should_stop_before_turn,
             get_continuation_messages: Mutex::new(options.get_continuation_messages),
+            model_override: Mutex::new(None),
             session_id: options.session_id,
             tool_execution: options
                 .tool_execution
@@ -780,6 +843,28 @@ impl Agent {
     /// Set the requested reasoning level for future turns.
     pub async fn set_thinking_level(&self, level: ThinkingLevel) {
         self.inner.shared.lock().await.state.thinking_level = level;
+    }
+
+    /// Per-run model override (TS `Agent.modelOverride`): `Some` serves
+    /// every LLM request of the runs started while it is set on the
+    /// override model (with its own thinking level), `None` returns to the
+    /// session model. Set right before a routed run and re-evaluated
+    /// before the next dispatch.
+    pub fn set_model_override(&self, model_override: Option<AgentModelOverride>) {
+        *self
+            .inner
+            .model_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = model_override;
+    }
+
+    /// The current per-run model override (TS `Agent.modelOverride`).
+    pub fn model_override(&self) -> Option<AgentModelOverride> {
+        self.inner
+            .model_override
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// Set the tools available to future turns (the array is owned; the TS

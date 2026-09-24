@@ -1588,9 +1588,23 @@ impl SessionUi {
                 telemetry.image_pasted(&mime_type).await;
             });
         }
-        if !self.model_supports_images(view) {
+        // TS post-#2453: the hint names `settings.imageModel` and only
+        // fires when routing cannot help (an unset imageModel) and images
+        // are not blocked globally; with either configured the dispatch
+        // routes the turn or fails it with the actionable setup error.
+        if !self.model_supports_images(view)
+            && self
+                .client_settings
+                .as_ref()
+                .and_then(|settings| settings.image_model())
+                .is_none()
+            && !self
+                .client_settings
+                .as_ref()
+                .is_some_and(|settings| settings.block_images())
+        {
             self.note(
-                "Current model does not support images; the attachment will be omitted.",
+                "Current model does not support images; set imageModel in settings.json or the turn will fail with setup guidance.",
                 view,
             );
         }
@@ -2113,13 +2127,12 @@ impl SessionUi {
     /// TS streaming behavior: Enter parks mid-turn input on the steering
     /// lane, the follow-up key on the follow-up lane; an idle session runs
     /// either immediately. The images whose markers are present in
-    /// `text`, or `None` when there are none (TS `collectImagesFor`).
-    /// Resolved against the current model: when it has no image input the
-    /// attachments are dropped here, matching the paste-time hint.
-    fn collect_images_for(&self, text: &str, view: &AgentView) -> Option<serde_json::Value> {
-        if !self.model_supports_images(view) {
-            return None;
-        }
+    /// `text`, or `None` when there are none (TS `collectImagesFor`):
+    /// attachments always reach the session - a text-only session model is
+    /// either routed to `settings.imageModel` at dispatch or the turn
+    /// fails there with the actionable setup error, so nothing is
+    /// silently downgraded downstream.
+    fn collect_images_for(&self, text: &str, _view: &AgentView) -> Option<serde_json::Value> {
         let images: Vec<&LoadedImage> = collect_marked_images(&self.pasted_images, text)
             .into_iter()
             .map(|(_, image)| image)

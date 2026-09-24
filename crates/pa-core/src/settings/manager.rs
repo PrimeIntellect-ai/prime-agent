@@ -495,6 +495,18 @@ impl SettingsManager {
         self.merged.auxiliary_model.as_deref()
     }
 
+    /// TS `getImageModel`: the "provider/model-id" (or bare id) reference
+    /// that serves turns attaching images on session models without image
+    /// input. Same shape as `providerBackupModel`: malformed values behave
+    /// as unset and the image-turn refusal names the setting instead.
+    pub fn get_image_model(&self) -> Option<String> {
+        self.merged
+            .image_model
+            .as_ref()
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty())
+    }
+
     /// The daemon-level model allowlist (settings `allowedModels`): model
     /// patterns the daemon may resolve to, enforced at every daemon
     /// model resolution (`set_model`, RLM child-model resolution, the

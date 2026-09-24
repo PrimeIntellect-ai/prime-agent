@@ -132,6 +132,21 @@ struct ProducerUsageSink(
     std::sync::Arc<pa_core::session_engine::rlm_usage::RlmChildUsageAttributions>,
 );
 
+/// The routed image-model serving state for one dispatched episode (TS
+/// `AgentModelOverride` + the provider target the daemon's stream reads per
+/// call): turns whose delivered messages attach image blocks run on the
+/// configured `settings.imageModel` while the session model keeps
+/// identifying the session for UI and persistence.
+#[derive(Clone)]
+struct ImageRoute {
+    /// The stream's provider target for the episode (the image model, its
+    /// resolved key, and the session tier clamped for it).
+    target: ProviderTarget,
+    /// The agent's per-run override (the image model + the session thinking
+    /// level clamped for it) feeding the loop config.
+    agent_override: pa_agent::agent::AgentModelOverride,
+}
+
 impl pa_core::session_engine::rlm_usage::RlmChildUsageSink for ProducerUsageSink {
     fn record(
         &self,
@@ -378,6 +393,14 @@ pub struct AgentSessionEngine {
     /// One compact-and-retry attempt per context overflow (TS
     /// `_overflowRecovery`): the state machine the overflow arm walks.
     pub(crate) overflow_recovery: std::sync::Mutex<OverflowRecovery>,
+    /// The image-model route armed for the dispatched episode (TS
+    /// `agent.modelOverride`, set at dispatch when the batch attaches
+    /// images the session model cannot serve): the stream's provider
+    /// target for the episode plus the agent's per-run override. Re-applied
+    /// at every model-turn attempt so retries and post-compaction
+    /// continuations keep serving it; cleared (and the session target
+    /// restored) when the episode settles.
+    image_route: std::sync::Mutex<Option<ImageRoute>>,
     /// The live automatic-compaction abort slot (TS
     /// `_autoCompactionAbortController`): the threshold and requested
     /// turn-boundary runs each register their controller here for the
@@ -566,6 +589,7 @@ impl AgentSessionEngine {
             reloaded_goal_update: std::sync::Mutex::new(None),
             faux_model: std::sync::OnceLock::new(),
             overflow_recovery: std::sync::Mutex::new(OverflowRecovery::default()),
+            image_route: std::sync::Mutex::new(None),
             auto_compaction_abort: std::sync::Mutex::new(None),
             model_refusal_telemetry,
         })
@@ -2999,6 +3023,137 @@ impl SessionEngine for AgentSessionEngine {
         Ok(result)
     }
 
+    /// TS `_imageModelOverrideForTurns` + `resolveImageModelOverride`: the
+    /// routing decision for one dispatched turn batch. `carries_images` is
+    /// the batch's delivered image blocks (the primary prompt's plus the
+    /// batched rows'). `Ok(None)` when the batch does not route (no
+    /// images, a vision session model, or `images.blockImages`); `Err` is
+    /// the actionable refusal that fails the turn.
+    fn resolve_image_turn_route(
+        &self,
+        carries_images: bool,
+    ) -> anyhow::Result<Option<pa_core::models::ResolvedImageModel>> {
+        if !carries_images {
+            return Ok(None);
+        }
+        let session_model = self.session_model()?;
+        let settings =
+            pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
+        let image_model_reference = settings.get_image_model();
+        let block_images = settings.get_block_images();
+        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
+        let mut registry =
+            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+        registry.load_private_authorization_from_cache();
+        let available: Vec<pa_types::ai::Model> =
+            registry.get_available().into_iter().cloned().collect();
+        let route = pa_core::models::resolve_image_model_override(
+            &pa_core::models::ImageModelRoutingInputs {
+                session_model: &session_model,
+                thinking_level: self.effective_thinking(),
+                service_tier: *self.service_tier.read().expect("service tier lock"),
+                image_model_reference: image_model_reference.as_deref(),
+                available_models: &available,
+                has_configured_auth: &|model| registry.has_configured_auth(model),
+                block_images,
+            },
+        )?;
+        Ok(route)
+    }
+
+    /// Arm (or clear) the dispatched batch's image-model route: the
+    /// resolved image model becomes the episode's serving target (the
+    /// provider slot + the agent's per-run override), applied at every
+    /// model-turn attempt so retries and post-compaction continuations
+    /// keep serving it. A text-only session model with an unusable or
+    /// missing `settings.imageModel` returns the actionable refusal.
+    fn arm_image_turn_route(
+        &self,
+        carries_images: bool,
+    ) -> Result<(), String> {
+        let route = self
+            .resolve_image_turn_route(carries_images)
+            .map_err(|error| format!("{error:#}"))?;
+        let armed = route.map(|resolved| {
+            let agent_model = json_round_trip(&resolved.model)
+                .ok_or_else(|| "model conversion failed".to_string())?;
+            ImageRoute {
+                target: ProviderTarget {
+                    service_tier: resolved.service_tier,
+                    api_key: self.resolve_request_api_key(&resolved.model),
+                    model: resolved.model.clone(),
+                },
+                agent_override: pa_agent::agent::AgentModelOverride {
+                    thinking_level: map_thinking_level(resolved.thinking_level),
+                    model: agent_model,
+                },
+            }
+        });
+        *self
+            .image_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = armed?;
+        Ok(())
+    }
+
+    /// Apply the armed route to a model turn (after the session build, so
+    /// the build-time target cannot clobber it): the stream's provider
+    /// target and the agent's per-run model override swap to the routed
+    /// image model for the episode.
+    fn apply_armed_image_route(&self, agent: &std::sync::Arc<pa_agent::agent::Agent>) {
+        let route = self
+            .image_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(route) = route else {
+            return;
+        };
+        agent.set_model_override(Some(route.agent_override));
+        *self.provider_target.write().expect("provider target lock") = Some(route.target);
+    }
+
+    /// Clear the armed route and restore the session's serving target (a
+    /// fresh resolution, so a mid-episode model switch is honored): the
+    /// next dispatched batch re-evaluates the routing against it (TS
+    /// `_clearModelOverrideWhenIdle` + the next-dispatch re-evaluation).
+    fn clear_image_route(&self) {
+        let route = self
+            .image_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(route) = route else {
+            return;
+        };
+        // The agent override clears even when the session target cannot be
+        // rebuilt (an auth/read failure): the next run must not silently
+        // serve on the routed image model.
+        let agent = self.turn_agent.lock().expect("turn agent lock").clone();
+        if let Some(agent) = agent {
+            agent.set_model_override(None);
+        }
+        let _ = route; // the session target recompute does not read the route
+        let Ok(model) = self.resolve_model() else {
+            return;
+        };
+        *self.provider_target.write().expect("provider target lock") = Some(ProviderTarget {
+            service_tier: *self.service_tier.read().expect("service tier lock"),
+            api_key: self.resolve_request_api_key(&model),
+            model,
+        });
+    }
+
+    /// Whether an image-model route is armed for the running episode (the
+    /// failover primary capture keys off it: a routed episode's failover
+    /// restores the routed target, not the session model).
+    fn armed_image_route(&self) -> Option<ImageRoute> {
+        self.image_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     fn run_prompt(
         &self,
         _prompt_index: usize,
@@ -3152,7 +3307,28 @@ impl SessionEngine for AgentSessionEngine {
                 batch: request.batch,
             },
         };
+        // TS commit-time routing decision (`_imageModelOverrideForTurns` at
+        // commit): a batch whose delivered messages attach image blocks
+        // routes to `settings.imageModel` when the session model cannot
+        // serve them, or the turn fails with the actionable refusal naming
+        // the setting - nothing silently downgrades the images to
+        // "(image omitted)" placeholders.
+        let carries_images = match &turn_prompt {
+            TurnPrompt::User { images, batch, .. } => {
+                !images.is_empty() || batch.iter().any(|row| !row.images.is_empty())
+            }
+            TurnPrompt::Injected(_) => false,
+        };
+        if let Err(refusal) = self.arm_image_turn_route(carries_images) {
+            emit(EngineEvent::Done(Err(refusal)));
+            return;
+        }
         self.run_turns(turn_prompt, aborted, &mut emit);
+        // The episode settled: clear the routed image model and restore the
+        // session's serving target, so the next dispatched batch
+        // re-evaluates the routing against the session model (TS the next
+        // dispatch re-evaluates the override before pre-turn compaction).
+        self.clear_image_route();
     }
 
     fn abort_in_flight_turn(&self) {
@@ -3280,9 +3456,25 @@ impl AgentSessionEngine {
                 }
             }
         };
+        // A routed image-model episode serves this attempt on the routed
+        // model: the build-time target cannot clobber it (the swap follows
+        // the session build), and retries/continuations re-apply it (TS the
+        // override stays until the next dispatch re-evaluates it).
+        self.apply_armed_image_route(&agent);
         let policy = self.retry_policy();
         let failover_policy = self.failover_policy();
-        let candidates = self.failover_candidates(&model);
+        // A routed image-model episode fails over between providers serving
+        // the SERVING (routed) model, and its overflow classification
+        // follows the routed model's context window (TS `_runModel()`):
+        // the session model's id would switch the images to a provider
+        // that cannot serve them.
+        let (candidates, serving_context_window) = match self.armed_image_route() {
+            Some(route) => (
+                self.failover_candidates(&route.target.model),
+                route.target.model.context_window,
+            ),
+            None => (self.failover_candidates(&model), model.context_window),
+        };
         // The pa-core retry driver owns the attempt loop; this engine owns
         // one turn. The driver awaits each attempt to completion before
         // emitting retry events, so the single `emit` reference is handed
@@ -3309,11 +3501,14 @@ impl AgentSessionEngine {
             let guard = self.session.blocking_lock();
             guard.as_deref().and_then(|engine| engine.telemetry.clone())
         };
+        // TS `_backupModel` state: the primary serving target (the stream's
+        // provider slot restored when the failover episode settles), plus
+        // the session model + thinking level the agent state restores to.
         let primary_state: std::cell::RefCell<
             Option<(
+                ProviderTarget,
                 pa_types::ai::Model,
                 pa_agent::types::ThinkingLevel,
-                Option<String>,
             )>,
         > = std::cell::RefCell::new(None);
         let result = self.runtime.block_on(
@@ -3321,7 +3516,7 @@ impl AgentSessionEngine {
                 &policy,
                 &failover_policy,
                 &candidates,
-                model.context_window,
+                serving_context_window,
                 None,
                 || {
                     let mut emit = emit_cell.borrow_mut();
@@ -3402,16 +3597,33 @@ impl AgentSessionEngine {
                     let persistence = persistence.clone();
                     {
                         let mut primary = primary_state.borrow_mut();
-                        // Capture the primary model + thinking level + key
-                        // once (TS `_backupModel` state): the level the
-                        // session was built with, restored when the turn
-                        // settles.
+                        // Capture the primary serving target + session state
+                        // once (TS `_backupModel` state): the target the
+                        // stream's provider slot restores to (the ROUTED
+                        // image-model target while a routed episode runs -
+                        // the failover keeps serving the routed model), plus
+                        // the session model + thinking level the agent state
+                        // returns to when the episode settles.
                         if primary.is_none() {
-                            *primary = Some((
-                                model.clone(),
-                                map_thinking_level(self.effective_thinking()),
-                                self.resolve_request_api_key(&model),
-                            ));
+                            *primary = Some(match self.armed_image_route() {
+                                Some(route) => (
+                                    route.target,
+                                    model.clone(),
+                                    map_thinking_level(self.effective_thinking()),
+                                ),
+                                None => (
+                                    ProviderTarget {
+                                        service_tier: *self
+                                            .service_tier
+                                            .read()
+                                            .expect("service tier lock"),
+                                        api_key: self.resolve_request_api_key(&model),
+                                        model: model.clone(),
+                                    },
+                                    model.clone(),
+                                    map_thinking_level(self.effective_thinking()),
+                                ),
+                            });
                         }
                     }
                     let next = next.clone();
@@ -3453,35 +3665,38 @@ impl AgentSessionEngine {
                     let persistence = persistence.clone();
                     let primary = primary_state.borrow().clone();
                     async move {
-                        let Some((primary_model, thinking_level, primary_api_key)) = primary
+                        let Some((primary_target, session_model, session_thinking)) = primary
                         else {
                             return Ok(None);
                         };
-                        let agent_model = json_round_trip(&primary_model)
+                        let agent_model = json_round_trip(&session_model)
                             .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
                         // Restore the stream's provider target with the
-                        // primary (the slot the build-time target set).
+                        // primary (the slot the build-time target set; the
+                        // ROUTED image-model target while a routed episode
+                        // runs, so the episode keeps serving the routed
+                        // model across the failover restore).
                         {
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
-                            *target = Some(ProviderTarget {
-                service_tier: *self.service_tier.read().expect("service tier lock"),
-                                api_key: primary_api_key,
-                                model: primary_model.clone(),
-                            });
+                            *target = Some(primary_target.clone());
                         }
+                        // The agent state returns to the session model +
+                        // thinking level (a routed turn never swaps them:
+                        // the loop reads the per-run override, not the
+                        // state).
                         agent.set_model(agent_model).await;
-                        agent.set_thinking_level(thinking_level).await;
+                        agent.set_thinking_level(session_thinking).await;
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
                             session.append_model_change(
-                                &primary_model.provider,
-                                &primary_model.id,
+                                &session_model.provider,
+                                &session_model.id,
                             )?;
                         }
                         Ok(Some(format!(
                             "{}/{}",
-                            primary_model.provider, primary_model.id
+                            session_model.provider, session_model.id
                         )))
                     }
                 },

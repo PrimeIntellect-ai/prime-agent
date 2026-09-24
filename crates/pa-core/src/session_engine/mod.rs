@@ -21,11 +21,13 @@ pub mod goal_driver;
 pub mod harness_digest;
 pub mod headless;
 pub mod host_requests;
+pub mod image_model_routing;
 pub mod ipython_state;
 pub mod messages;
 pub mod provider_adapter;
 pub mod provider_failover;
 pub mod provider_retry;
+pub mod python_skills_notice;
 pub mod refine;
 pub mod rlm_host;
 pub mod rlm_notices;
@@ -162,6 +164,10 @@ pub struct AgentSession {
     /// The telemetry handle for the `skill used` adoption event the
     /// prompt path owns (`None` in sessions without telemetry).
     skill_telemetry: Option<std::sync::Arc<telemetry::SessionTelemetry>>,
+    /// The image-model routing host seam (`None` keeps the session model on
+    /// image turns: verification harnesses, and the daemon worker whose
+    /// turn dispatch owns routing itself).
+    image_model_router: Option<image_model_routing::ImageModelRouter>,
 }
 
 impl AgentSession {
@@ -214,9 +220,65 @@ impl AgentSession {
             pending_next_turn_rows: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             skills: Vec::new(),
             skill_telemetry: None,
+            image_model_router: None,
         };
         this.ensure_harness_digest_context().await?;
         Ok(this)
+    }
+
+    /// Install the image-model routing host seam (the headless surfaces'
+    /// settings + registry + pinned stream target); `None` keeps image
+    /// turns on the session model.
+    pub fn set_image_model_router(&mut self, router: Option<image_model_routing::ImageModelRouter>) {
+        self.image_model_router = router;
+    }
+
+    /// The dispatch-time routing decision for one admitted batch (TS
+    /// `_imageModelOverrideForTurns` at commit): when the batch attaches
+    /// image blocks the session model cannot serve, the host's route
+    /// takes the stream target and the agent's per-run override, so the
+    /// run serves on the configured image model while the session model
+    /// keeps identifying the session. The fresh decision of EVERY admitted
+    /// batch (image-free included) re-evaluates the route, so retries and
+    /// post-compaction continuations of a routed turn keep serving it and
+    /// the next image-free batch returns to the session model. `Err` fails
+    /// the turn with the actionable refusal.
+    async fn apply_image_model_routing(
+        &self,
+        images: &[pa_agent::types::ImageContent],
+        batch: &[PromptBatchRow],
+    ) -> anyhow::Result<()> {
+        let Some(router) = self.image_model_router.as_ref() else {
+            return Ok(());
+        };
+        let carries_images =
+            !images.is_empty() || batch.iter().any(|row| !row.images.is_empty());
+        let state = self.agent.state().await;
+        let route = (router.decide)(carries_images, &state.model, state.thinking_level)
+            .map_err(anyhow::Error::msg)?;
+        match &route {
+            Some(resolved) => {
+                (router.swap_target)(Some(resolved));
+                let agent_model = crate::session_engine::provider_adapter::json_round_trip(
+                    &resolved.model,
+                )
+                .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
+                self.agent.set_model_override(Some(
+                    pa_agent::agent::AgentModelOverride {
+                        model: agent_model,
+                        thinking_level:
+                            crate::session_engine::provider_adapter::map_thinking_level(
+                                resolved.thinking_level,
+                            ),
+                    },
+                ));
+            }
+            None => {
+                (router.swap_target)(None);
+                self.agent.set_model_override(None);
+            }
+        }
+        Ok(())
     }
 
     /// Override the compaction settings from the session's resolved
@@ -716,6 +778,12 @@ impl AgentSession {
                 None => unreachable!("busy without a streaming behavior errors above"),
             }
         } else {
+            // The dispatch-time image-model routing decision (TS
+            // `_imageModelOverrideForTurns` at commit): an image-attaching
+            // batch routes to the host's configured image model or fails
+            // with the actionable refusal, never silently downgrading the
+            // images to placeholders.
+            self.apply_image_model_routing(&images, &options.batch).await?;
             // The turn's prompt messages (TS preparedMessages): the deferred
             // first-turn harness digest rides first when one is due, so the
             // loop streams its message pair ahead of the user prompt and
