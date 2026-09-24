@@ -5593,12 +5593,23 @@ impl SessionUi {
                 if self.bash_activities == data {
                     return;
                 }
-                // A landed REGISTRY update supersedes a shown error (a
-                // retried kill settles here); the unrelated dock repaints
-                // never clear it.
+                // A landed REGISTRY update supersedes a shown error — but
+                // only when the registry's rows actually moved (a row
+                // settled, started, or left): the running rows' duration
+                // ticks every poll and never clear anything. The
+                // unrelated dock repaints never clear it either.
+                let row_signature = |data: &Value| -> Vec<(String, String, Option<i64>)> {
+                    crate::bash_view::parse_bash_activities(data)
+                        .into_iter()
+                        .map(|row| (row.id, row.status, row.exit_code))
+                        .collect()
+                };
+                let rows_settled = row_signature(&self.bash_activities) != row_signature(&data);
                 self.bash_activities = data;
-                if let Some(bash_view) = view.bash_view.as_mut() {
-                    bash_view.clear_error();
+                if rows_settled {
+                    if let Some(bash_view) = view.bash_view.as_mut() {
+                        bash_view.clear_error();
+                    }
                 }
                 self.update_subagent_summary(view);
             }

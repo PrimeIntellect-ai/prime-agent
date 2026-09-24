@@ -176,18 +176,7 @@ fn finish_menu_row(theme: &Theme, row: Line, width: usize, selected: bool) -> Li
 /// ellipsis — the tables stay aligned, and the detail drill-ins carry
 /// the full text).
 pub(crate) fn plain_cell(text: &str, width: usize) -> String {
-    let mut cell = String::new();
-    let mut used = 0usize;
-    for ch in text.chars() {
-        let char_width = crate::width::char_width(ch);
-        if used + char_width > width {
-            break;
-        }
-        cell.push(ch);
-        used += char_width;
-    }
-    cell.push_str(&" ".repeat(width - used));
-    cell
+    crate::width::pad_cell(text, width)
 }
 
 /// Non-newline control characters become spaces (ANSI/OSC sequences in
@@ -455,6 +444,21 @@ mod tests {
 
     fn row_text(line: &Line) -> String {
         line.iter().map(|span| span.content.as_str()).collect()
+    }
+
+    /// The table cell pads by GRAPHEME width: a multi-codepoint cluster
+    /// (the family emoji is four scalars but renders one cell-picture)
+    /// never pads short or overflows its column.
+    #[test]
+    fn plain_cell_pads_by_grapheme_width() {
+        use unicode_segmentation::UnicodeSegmentation;
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
+        assert_eq!(family.graphemes(true).count(), 1, "one cluster");
+        let cell = plain_cell(family, 6);
+        // One emoji cell-picture plus five pad columns — not eight.
+        assert_eq!(str_width(&cell), 6, "the cell is exactly the budget");
+        let text = format!("{cell}next");
+        assert_eq!(crate::width::str_width(&text), 10, "the columns align");
     }
 
     #[test]
