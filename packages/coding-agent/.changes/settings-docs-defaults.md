@@ -1,1 +1,0 @@
-- Corrected the documented defaults in `docs/settings.md` and `docs/themes.md`: unset thinking starts at `medium` (not `xhigh`), the default theme is `prime`/`light` (not `dark`), `transport` defaults to `auto` (not `sse`, and `websocket-cached` is a valid value), and the removed `collapseChangelog` setting is no longer documented.
