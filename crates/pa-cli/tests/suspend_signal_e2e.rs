@@ -106,6 +106,23 @@ fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
     if !sigtstp_session_runner() {
         return;
     }
+    // This runner becomes the leader of a fresh session with no
+    // controlling terminal (a new session gets none until TIOCSCTTY),
+    // and the child (spawn_child) then moves into its own process group
+    // INSIDE that session. Both halves are load-bearing for the cycle:
+    // the child's group needs a parent in a different process group of
+    // its own session — otherwise the group is orphaned and job control
+    // discards the app's SIGTSTP, so the stop never completes; and the
+    // session must have no controlling terminal — otherwise the child
+    // inherits one (the runner's, under a session-attached runner) and
+    // the renderer sizes itself from that terminal's `/dev/tty` instead
+    // of the harness pty, painting 0x0-empty frames. The setsid runs in
+    // the runner, not the child, so the runner stays the child's
+    // waitpid parent across the whole cycle.
+    match nix::unistd::setsid() {
+        Ok(_) => {}
+        Err(error) => panic!("the harness could not start a fresh session: {error}"),
+    }
     let _lock = match HARNESS_LOCK.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -320,16 +337,18 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// A child process group of this very binary, re-executed in child mode
 /// with the pty slave as its terminal and no tmux (the tmux keyboard
 /// check must stay out of the way). The child moves into its own process
-/// group but stays in this runner's session: kill(0, SIGTSTP) then stops
-/// the child and not this runner, and a parent in a different process
-/// group of the same session is the job-control shape a shell gives a
-/// real Ctrl+Z. The session membership is load-bearing: an own-session
-/// child's group is ORPHANED (its parent — this runner — is in another
-/// session), and job control discards stop signals generated for an
-/// orphaned group under the default disposition, so the stop would
-/// never complete. The child's terminal is the harness pty, never a
-/// controlling terminal, so no background-group arbitration
-/// (SIGTTIN/SIGTTOU) applies to its I/O across the stop/continue cycle.
+/// group inside the runner's fresh session (the test's setsid): kill(0,
+/// SIGTSTP) then stops the child and not this runner, and its parent —
+/// the runner, the session leader in its own process group — is the
+/// job-control shape a shell gives a real Ctrl+Z. An own-session child
+/// would instead be an ORPHANED process group (job control discards
+/// stop signals generated for an orphaned group under the default
+/// disposition, so the stop would never complete), and a child in a
+/// session with a controlling terminal would size its renderer from
+/// that terminal instead of the harness pty. The child's terminal is
+/// the harness pty, never a controlling terminal, so no
+/// background-group arbitration (SIGTTIN/SIGTTOU) applies to its I/O
+/// across the stop/continue cycle.
 fn spawn_child(socket: &std::path::Path, slave: &OwnedFd) -> Child {
     // Runs between fork and exec in the child: setpgid moves it into its
     // own process group, inside the runner's session.
