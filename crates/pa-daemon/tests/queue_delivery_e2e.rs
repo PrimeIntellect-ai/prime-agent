@@ -30,8 +30,8 @@ const ANSWER_DELAY_MS: u64 = 1200;
 /// test releases it. The answer clock alone is a wall-clock race: under
 /// battery load the busy turn can settle before every queue admission
 /// landed, and the runner legitimately delivered the parked-at-pickup
-/// prefix (TS `_pumpSessionInputs` batches `queuedActions(first.delivery)`
-/// - what is parked AT the boundary), so the full parked-lane projection
+/// prefix (TS `_pumpSessionInputs` batches `queuedActions(first.delivery)`,
+/// what is parked AT the boundary), so the full parked-lane projection
 /// the setup asserts never existed. Holding the answer makes the
 /// "park behind a busy turn" setup deterministic under any scheduler load.
 #[derive(Default)]
