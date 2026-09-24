@@ -4264,6 +4264,16 @@ class Battery:
         # fired-row check asserts each side's glyph separately.
         text = text.replace("♥", "<HBICON>")
         text = text.replace("◷", "<HBICON>")
+        # The agent-message rows' icon is a sanctioned divergence (Kevin
+        # directive 2026-09-24): the Rust side renders the ✉ mail
+        # envelope, the TS side the ◆ diamond. The diamond also fronts
+        # other rows that keep matching directly (the compaction and
+        # refinement summary rows), so the canonicalization is scoped to
+        # the agent-message label compositions (received/sent/queued all
+        # start `Agent message`); the f15 flow asserts each side's glyph
+        # separately.
+        text = text.replace("◆ Agent message", "<AMICON> Agent message")
+        text = text.replace("✉ Agent message", "<AMICON> Agent message")
         return text
 
 
@@ -4453,11 +4463,13 @@ class Battery:
 
 
     def f15_a2a(self) -> None:
-        """agent_message send/receive: the ◆ diamond-decorated rows in both
+        """agent_message send/receive: the icon-decorated rows in both
         directions — the received row in the receiver's transcript, the sent
         summary row inside the sender's ipython cell — with participant
-        labels and the expanded preview body. Two sibling daemon sessions
-        exchange one message each way through their kernels."""
+        labels and the expanded preview body (the icon diverges by
+        directive: ts renders the ◆ diamond, rust the ✉ mail envelope —
+        the Kevin-directed 2026-09-24 divergence). Two sibling daemon
+        sessions exchange one message each way through their kernels."""
         flow = "f15_a2a"
         reply = "f15 a2a turn reply"
         frames: dict[str, dict[str, str]] = {"ts": {}, "rust": {}}
@@ -4512,11 +4524,23 @@ class Battery:
             settled = self.settle_frame(tui, quiet_s=3.0, timeout=90)
             side.evidence(flow, "02-received-settled.txt", settled)
             frames[side.name]["received"] = settled
-            if "Agent message received" in settled:
+            # The received row's icon diverges by directive (Kevin,
+            # 2026-09-24): the TS side keeps the ◆ diamond; the Rust side
+            # renders the ✉ mail envelope (the a2a rows read as agent
+            # mail).
+            icon_a = "◆" if side.name == "ts" else "✉"
+            if icon_a + " Agent message received" in settled:
                 self.record(
                     flow, "visual",
-                    f"{side.name}: a sibling agent message renders the '◆ Agent message received' row with participant label",
+                    f"{side.name}: a sibling agent message renders the '{icon_a} Agent message received' row with participant label",
                     gap=False,
+                )
+            elif "Agent message received" in settled:
+                self.record(
+                    flow, "behavior",
+                    f"{side.name}: the received agent-message row renders the wrong icon (expected '{icon_a}')",
+                    evidence=side.root / flow / "02-received-settled.txt",
+                    lane=FLOW_LANES[flow],
                 )
             else:
                 self.record(
@@ -4545,16 +4569,27 @@ class Battery:
             settled2 = self.settle_frame(tui, quiet_s=3.0, timeout=90)
             side.evidence(flow, "04-sent-settled.txt", settled2)
             frames[side.name]["sent"] = settled2
-            if "Agent message sent" in settled2 or "Agent message queued" in settled2:
+            # The sent/queued receipt rows share the same summary line (and
+            # its icon divergence): TS ◆ diamond, Rust ✉ envelope.
+            icon_b = "◆" if side.name == "ts" else "✉"
+            if (icon_b + " Agent message sent" in settled2
+                    or icon_b + " Agent message queued" in settled2):
                 self.record(
                     flow, "visual",
-                    f"{side.name}: the sender's ipython cell renders the '◆ Agent message sent/queued' summary row with the participant label",
+                    f"{side.name}: the sender's ipython cell renders the '{icon_b} Agent message sent/queued' summary row with the participant label",
                     gap=False,
+                )
+            elif "Agent message sent" in settled2 or "Agent message queued" in settled2:
+                self.record(
+                    flow, "behavior",
+                    f"{side.name}: the sent agent-message row renders the wrong icon (expected '{icon_b}')",
+                    evidence=side.root / flow / "04-sent-settled.txt",
+                    lane=FLOW_LANES[flow],
                 )
             else:
                 self.record(
                     flow, "visual",
-                    f"{side.name}: the sender's ipython cell shows no '◆ Agent message sent/queued' row",
+                    f"{side.name}: the sender's ipython cell shows no 'Agent message sent/queued' row",
                     evidence=side.root / flow / "04-sent-settled.txt",
                     lane=FLOW_LANES[flow],
                 )
