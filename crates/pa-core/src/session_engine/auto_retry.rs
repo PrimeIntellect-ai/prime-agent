@@ -343,7 +343,7 @@ mod tests {
             &fast_policy(),
             0,
             None,
-            || async { Ok(error_message(Some("rate_limit"), Some(4_363_000), None)) },
+            || async { Ok(error_message(Some("rate_limit"), None, Some(4_363_000))) },
             move |event| {
                 let events = Arc::clone(&events_for_emit);
                 async move {
@@ -389,7 +389,7 @@ mod tests {
             &fast_policy(),
             0,
             None,
-            || async { Ok(error_message(Some("rate_limit"), Some(4_363_000), None)) },
+            || async { Ok(error_message(Some("rate_limit"), None, Some(4_363_000))) },
             move |event| {
                 let events = Arc::clone(&events_for_emit);
                 async move {
@@ -436,7 +436,7 @@ mod tests {
             &fast_policy(),
             0,
             None,
-            || async { Ok(error_message(Some("server_error"), Some(4_363_000), None)) },
+            || async { Ok(error_message(Some("server_error"), None, Some(4_363_000))) },
             move |event| {
                 let events = Arc::clone(&events_for_emit);
                 async move {

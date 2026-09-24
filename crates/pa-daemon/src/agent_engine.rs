@@ -3431,10 +3431,7 @@ impl AgentSessionEngine {
                 let abort = abort.to_string();
                 let quota_parked_flag = std::sync::Arc::clone(&quota_parked_flag);
                 Box::pin(async move {
-                    let Some(engine) = engine_weak.as_ref().and_then(std::sync::Weak::upgrade)
-                    else {
-                        return None;
-                    };
+                    let engine = engine_weak.as_ref().and_then(std::sync::Weak::upgrade)?;
                     let outcome = engine.park_for_quota_reset(&message, &abort).await;
                     if outcome.is_some() {
                         quota_parked_flag.store(true, std::sync::atomic::Ordering::SeqCst);
