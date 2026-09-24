@@ -3153,7 +3153,10 @@ mod tests {
         let link_col = stripped.find("docs").expect("the label column");
         assert_eq!(
             v.frame_link_at(link_row, link_col).as_deref(),
-            Some("https://example.com/docs")
+            Some("https://example.com/docs"),
+            "row={:?} ranges={:?}",
+            row_text(&frame[link_row]),
+            crate::hyperlinks::frame_link_ranges(&frame)
         );
         crate::hyperlinks::set_hyperlinks_override(None);
     }
