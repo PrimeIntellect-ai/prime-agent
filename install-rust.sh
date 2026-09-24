@@ -1,11 +1,20 @@
 #!/bin/sh
 # install-rust.sh — one-command installer for the Rust build of Prime Agent.
 #
-# What it installs: one rust-v* release's payload (the prime-agent binary,
-# prime-agent-runtime/ kernel sidecar, skills/, docs/, LICENSE, README.md,
-# and the commit-stamped package.json) under
+# SOURCE: the `continuous` workflow's build artifacts (every push to the
+# `rust` branch builds the matrix; this script installs the latest
+# successful run's platform tarball). No tags, no GitHub releases: the
+# repo's release history belongs to the TypeScript product, and the Rust
+# port's versioned releases come when it graduates
+# (prime-agent-design/RELEASE_SECURITY.md).
+#
+# What it installs: one continuous build's payload (the prime-agent
+# binary, prime-agent-runtime/ kernel sidecar, skills/, docs/, LICENSE,
+# README.md, and the commit-stamped package.json) under
 # $PRIME_AGENT_RUST_PREFIX/share/prime-agent-rust/, plus a
-# prime-agent-rust launcher in $PRIME_AGENT_RUST_PREFIX/bin/.
+# prime-agent-rust launcher in $PRIME_AGENT_RUST_PREFIX/bin/. The
+# installed binary answers its exact source commit via --version
+# (<workspace-version>-continuous.<commit-sha>).
 #
 # It never writes any path the TypeScript product owns: no ~/.local/bin/prime-agent,
 # no ~/.local/share/prime-agent/ — every path it creates carries the
@@ -23,161 +32,136 @@
 # Config (env with defaults):
 #   PRIME_AGENT_RUST_REPO    the <org>/<repo> to install from
 #                            (default: PrimeIntellect-ai/prime-agent)
-#   PRIME_AGENT_RUST_TAG     the rust-v* release tag to install
-#                            (default: "latest" — the highest rust-v* release,
-#                            stable preferred)
+#   PRIME_AGENT_RUST_RUN     the continuous workflow run id to install
+#                            (default: "latest" — the newest successful
+#                            run on the `rust` branch)
 #   PRIME_AGENT_RUST_PREFIX  install prefix (default: ~/.local)
 #
-# The repo is private, so authentication is mandatory: `gh` is used when on
-# PATH; otherwise GITHUB_TOKEN must be set and the REST API is called with
-# curl (python3 parses the JSON — POSIX sh has no JSON parser, and the
-# product itself needs a Python runtime for its kernel sidecar, so the
-# dependency adds nothing the product does not already require).
+# Authentication is mandatory even though the repo is public: GitHub's
+# workflow-artifact DOWNLOAD API requires an authenticated principal (an
+# anonymous request answers 401). `gh` is used when on PATH; otherwise
+# GITHUB_TOKEN must be set and the REST API is called with curl (python3
+# unzips the artifact — POSIX sh has no unzip, and the product itself
+# needs a Python runtime for its kernel sidecar, so the dependency adds
+# nothing the product does not already require).
 set -eu
 
 REPO="${PRIME_AGENT_RUST_REPO:-PrimeIntellect-ai/prime-agent}"
-TAG="${PRIME_AGENT_RUST_TAG:-latest}"
+RUN="${PRIME_AGENT_RUST_RUN:-latest}"
 PREFIX="${PRIME_AGENT_RUST_PREFIX:-$HOME/.local}"
+WORKFLOW="continuous"
+BRANCH="rust"
 
 die() { echo "install-rust.sh: $1" >&2; exit 1; }
 
 # --- platform detection ----------------------------------------------------
-# uname -m maps directly to the published target: an Apple-Silicon Mac whose
-# shell (and therefore binaries) run under Rosetta 2 reports x86_64 and gets
-# the x86_64 build, which is the correct build for that runtime.
+# uname -m maps directly to the built target: an Apple-Silicon Mac whose
+# shell (and therefore binaries) run under Rosetta 2 reports x86_64 and
+# gets the x86_64 build, which is the correct build for that runtime.
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 case "$OS:$ARCH" in
   Darwin:arm64) TARGET=aarch64-apple-darwin ;;
   Darwin:x86_64) TARGET=x86_64-apple-darwin ;;
   Linux:x86_64) TARGET=x86_64-unknown-linux-gnu ;;
-  Linux:aarch64)
-    die "no linux-arm64 rust build is published yet (uname reported ${OS} ${ARCH});
-the rust-release pipeline publishes aarch64-apple-darwin, x86_64-apple-darwin,
-and x86_64-unknown-linux-gnu today; track it for the aarch64-unknown-linux-gnu row"
-    ;;
+  Linux:aarch64) TARGET=aarch64-unknown-linux-gnu ;;
   *)
     die "no rust build is published for ${OS} ${ARCH} (detected via uname);
-published targets: aarch64-apple-darwin, x86_64-apple-darwin, x86_64-unknown-linux-gnu"
+the continuous workflow builds aarch64-apple-darwin, x86_64-apple-darwin,
+aarch64-unknown-linux-gnu, and x86_64-unknown-linux-gnu"
     ;;
 esac
 
-# --- auth (the repo is private: no anonymous path exists) -------------------
+# --- auth (workflow-artifact downloads require a principal) ----------------
 if command -v gh >/dev/null 2>&1; then
   HAVE_GH=1
 else
   HAVE_GH=0
   [ -n "${GITHUB_TOKEN:-}" ] \
-    || die "the repo is private; authenticate with gh or set GITHUB_TOKEN"
+    || die "workflow-artifact downloads need authentication; install/use gh or set GITHUB_TOKEN"
 fi
 
-# --- resolve the release tag ------------------------------------------------
-# The default resolves the highest rust-v* release, stable preferred — the
-# same rule GitHub itself applies to "latest" (a prerelease loses to any
-# stable release regardless of version, and only counts when no stable
-# rust-v* release exists). Both resolution paths implement that one rule.
+# --- resolve the continuous run --------------------------------------------
+# The default takes the newest SUCCESSFUL run of the continuous workflow
+# on the rust branch — the run whose artifacts carry the freshest commit
+# that passed the build. PRIME_AGENT_RUST_RUN pins an exact run instead
+# (the id from the run page URL).
 if [ "$HAVE_GH" = 1 ]; then
-  if [ "$TAG" = "latest" ]; then
-    # tag_utils (embedded awk) owns the whole selection policy — the rust-v*
-    # filter, stable-preference, and the semver compare itself — so the choice
-    # stays inspectable in one place; gh only projects the two fields.
-    # rust-vX.Y.Z[-suffix] -> zero-padded numeric key, so plain string
-    # comparison orders versions; the stable/prerelease flag prefixes the key
-    # so a stable release always beats a prerelease regardless of version.
-    TAG="$(gh release list --repo "$REPO" --limit 100 \
-      --json tagName,isPrerelease \
-      --jq '.[] | "\(.isPrerelease)\t\(.tagName)"' \
-      | awk -F '\t' '
-          function key(prerelease, tag,  v, a) {
-            v = tag; sub(/^rust-v/, "", v); sub(/-.*$/, "", v)
-            split(v, a, ".")
-            return (prerelease == "false" ? 2 : 1) \
-                   sprintf("%03d%03d%03d", a[1]+0, a[2]+0, a[3]+0)
-          }
-          $2 !~ /^rust-v/ { next }
-          { k = key($1, $2); if (k > best) { best = k; best_tag = $2 } }
-          END { if (best_tag != "") print best_tag }')" \
-      || die "could not list releases in ${REPO} (is gh authenticated?)"
-    [ -n "$TAG" ] || die "no rust-v* releases found in ${REPO}"
+  if [ "$RUN" = "latest" ]; then
+    RUN="$(gh run list --repo "$REPO" --workflow "$WORKFLOW" --branch "$BRANCH" \
+      --status success --limit 1 --json databaseId \
+      --jq '.[0].databaseId')" \
+      || die "could not list ${WORKFLOW} runs in ${REPO} (is gh authenticated?)"
   fi
+  [ -n "$RUN" ] || die "no successful ${WORKFLOW} run found on ${BRANCH} in ${REPO}"
 else
   api() {
     curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
       -H "Accept: application/vnd.github+json" "$@"
   }
-  if [ "$TAG" = "latest" ]; then
-    TAG="$(api "https://api.github.com/repos/${REPO}/releases?per_page=100" \
-      | python3 -c '
-import json, re, sys
-best = None
-for release in json.load(sys.stdin):
-    m = re.match(r"^rust-v(\d+)\.(\d+)\.(\d+)", release.get("tag_name", ""))
-    if not m or release.get("draft"):
-        continue
-    key = (0 if release.get("prerelease") else 1,
-           tuple(int(x) for x in m.groups()))
-    if best is None or key > best[0]:
-        best = (key, release["tag_name"])
-print(best[1] if best else "")')"
-    [ -n "$TAG" ] || die "no rust-v* releases found in ${REPO}"
+  if [ "$RUN" = "latest" ]; then
+    RUN="$(api "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW}.yml/runs?branch=${BRANCH}&status=success&per_page=1" \
+      | python3 -c 'import json, sys; print(json.load(sys.stdin)["workflow_runs"][0]["id"])')" \
+      || die "could not list ${WORKFLOW} runs in ${REPO} (check GITHUB_TOKEN)"
   fi
-  release_json="$(api "https://api.github.com/repos/${REPO}/releases/tags/${TAG}")"
 fi
+echo "installing the ${WORKFLOW} run ${RUN} ${TARGET} artifact from ${REPO}"
 
-# --- pick this platform's asset ----------------------------------------------
-if [ "$HAVE_GH" = 1 ]; then
-  assets="$(gh release view "$TAG" --repo "$REPO" --json assets,tagName \
-    --jq '.assets[].name')"
-else
-  assets="$(printf '%s' "$release_json" | python3 -c '
-import json, sys
-for asset in json.load(sys.stdin).get("assets", []):
-    print(asset["name"])')"
-fi
-asset="$(printf '%s\n' "$assets" | grep "prime-agent-.*-${TARGET}\.tar\.gz$" | head -n 1)"
-[ -n "$asset" ] \
-  || die "release ${TAG} has no prime-agent-<version>-${TARGET}.tar.gz asset (assets: $(printf '%s\n' "$assets" | tr '\n' ' '))"
-printf '%s\n' "$assets" | grep -qx "SHA256SUMS" \
-  || die "release ${TAG} has no SHA256SUMS asset"
-echo "installing ${asset} from ${REPO} ${TAG}"
-
-# --- download -----------------------------------------------------------------
+# --- download the platform artifact -----------------------------------------
+# The artifact zip is flat (the build job uploads the assembled dist tree),
+# so the download carries the platform tarball, its SHA256SUMS line, and
+# the run's manifest.json (with the exact commit).
 dl="$(mktemp -d "${TMPDIR:-/tmp}/prime-agent-rust-download.XXXXXX")"
 if [ "$HAVE_GH" = 1 ]; then
-  gh release download "$TAG" --repo "$REPO" --dir "$dl" \
-    --pattern "$asset" --pattern "SHA256SUMS"
+  gh run download "$RUN" --repo "$REPO" \
+    --name "artifacts-${TARGET}" --dir "$dl" \
+    || die "artifact artifacts-${TARGET} not found in run ${RUN} (is the build matrix up?)"
 else
-  asset_url() {
-    printf '%s' "$release_json" | python3 -c '
+  artifact_id="$(api "https://api.github.com/repos/${REPO}/actions/runs/${RUN}/artifacts?per_page=100" \
+    | python3 -c '
 import json, sys
-for a in json.load(sys.stdin).get("assets", []):
-    if a["name"] == sys.argv[1]:
-        print(a["browser_download_url"])
-        break' "$1"
-  }
-  for name in "$asset" SHA256SUMS; do
-    url="$(asset_url "$name")"
-    [ -n "$url" ] || die "no download URL for ${name} in ${TAG}"
-    curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-      -o "${dl}/${name}" "$url"
-  done
+name = "artifacts-" + sys.argv[1]
+for artifact in json.load(sys.stdin).get("artifacts", []):
+    if artifact["name"] == name:
+        print(artifact["id"])
+        break' "$TARGET")"
+  [ -n "${artifact_id:-}" ] \
+    || die "artifact artifacts-${TARGET} not found in run ${RUN}"
+  curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+    -o "${dl}/artifact.zip" \
+    "https://api.github.com/repos/${REPO}/actions/artifacts/${artifact_id}/zip" \
+    || die "could not download artifact ${artifact_id} from run ${RUN}"
+  python3 -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' \
+    "${dl}/artifact.zip" "$dl"
+  rm -f "${dl}/artifact.zip"
 fi
+asset="$(printf '%s\n' "$dl"/*.tar.gz 2>/dev/null | head -n 1)"
+[ -n "$asset" ] \
+  || die "the ${TARGET} artifact of run ${RUN} carried no platform tarball"
+asset_name="${asset##*/}"
+[ -f "$dl/SHA256SUMS" ] \
+  || die "the ${TARGET} artifact of run ${RUN} carried no SHA256SUMS"
 
 # --- verify the checksum -------------------------------------------------------
-# The release's SHA256SUMS carries one line per platform (merged from the
-# per-target build jobs); verify only this platform's line.
-line="$(grep "  ${asset}\$" "$dl/SHA256SUMS" || true)"
-[ -n "$line" ] || die "SHA256SUMS in ${TAG} has no line for ${asset}"
+# The artifact's own SHA256SUMS covers the tarball the build produced; the
+# verification happens before extraction, so a truncated or tampered
+# download refuses to install. (The checksum rides the same channel as the
+# tarball — the known same-channel limitation; the signed-asset design is
+# the graduation path in RELEASE_SECURITY.md.)
+line="$(grep "  ${asset_name}\$" "$dl/SHA256SUMS" || true)"
+[ -n "$line" ] || die "SHA256SUMS in run ${RUN} has no line for ${asset_name}"
 printf '%s\n' "$line" > "$dl/SHA256SUMS.check"
 if command -v sha256sum >/dev/null 2>&1; then
   (cd "$dl" && sha256sum -c SHA256SUMS.check) \
-    || die "checksum mismatch for ${asset}: the download is corrupt; re-run the installer"
+    || die "checksum mismatch for ${asset_name}: the download is corrupt; re-run the installer"
 elif command -v shasum >/dev/null 2>&1; then
   (cd "$dl" && shasum -a 256 -c SHA256SUMS.check) \
-    || die "checksum mismatch for ${asset}: the download is corrupt; re-run the installer"
+    || die "checksum mismatch for ${asset_name}: the download is corrupt; re-run the installer"
 else
   die "no sha256 tool found (sha256sum or shasum is required to verify the download)"
 fi
+commit="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("commit", ""))' "$dl/manifest.json" 2>/dev/null || true)"
+echo "checksum verified: ${asset_name} (built from ${commit:-unknown commit})"
 
 # --- install ---------------------------------------------------------------------
 share_dir="${PREFIX}/share/prime-agent-rust"
@@ -190,7 +174,7 @@ mkdir -p "${PREFIX}/share" "${bin_dir}"
 # install with rm + mv. No backups: re-running this script is the update
 # path, and the launcher is only pointed at a fully-extracted tree either way.
 stage="$(mktemp -d "${PREFIX}/share/prime-agent-rust.stage.XXXXXX")"
-tar -xzf "${dl}/${asset}" -C "$stage"
+tar -xzf "$asset" -C "$stage"
 [ -x "${stage}/prime-agent" ] \
   || die "the tarball did not contain an executable prime-agent payload"
 rm -rf "$share_dir"
@@ -237,8 +221,9 @@ else
   printf '%s\n' "$version_out"
   echo "  ${launcher} --version"
 fi
-echo "launcher: ${launcher}"
-echo "payload:  ${share_dir}"
+echo "launcher:  ${launcher}"
+echo "payload:   ${share_dir}"
+echo "source:    ${WORKFLOW} run ${RUN} (commit ${commit:-unknown})"
 
 # --- cohabitation note --------------------------------------------------------------
 if command -v prime-agent >/dev/null 2>&1; then

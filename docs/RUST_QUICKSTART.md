@@ -12,69 +12,71 @@ parity tracker, not this page.
 
 ## Install
 
-The safe path: download the installer, verify it against the release's
-`SHA256SUMS`, inspect it, then run it. The repo is private, so
-authentication is mandatory: `gh auth login` once, or export a
+The safe path: download the installer from the repo's `rust` branch,
+inspect it, then run it. The script fetches the binary from the
+`continuous` workflow's build artifacts — GitHub's artifact downloads need
+an authenticated principal, so `gh auth login` once, or export a
 `GITHUB_TOKEN`:
 
 ```bash
-gh release download rust-v0.1.0 --repo PrimeIntellect-ai/prime-agent \
-  --pattern 'install-rust.sh' --pattern 'SHA256SUMS' --dir /tmp/pa
-cd /tmp/pa
-grep ' install-rust.sh$' SHA256SUMS | shasum -a 256 -c   # verify the script
-less install-rust.sh                                     # inspect what you run
-sh install-rust.sh
+curl -fsSL \
+  https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/rust/install-rust.sh \
+  -o /tmp/install-rust.sh
+less /tmp/install-rust.sh                                     # inspect what you run
+sh /tmp/install-rust.sh
 ```
 
 The convenience one-liner (internal use — it pipes the script straight
-from the release into `sh`, so you are trusting the release channel
-instead of verifying the download; prefer the safe path when in doubt):
+from the branch into `sh`, so you are trusting the branch instead of
+verifying the download; prefer the safe path when in doubt):
 
 ```bash
-curl -fsSL -H "Authorization: Bearer $(gh auth token)" \
-  https://github.com/PrimeIntellect-ai/prime-agent/releases/download/rust-v0.1.0/install-rust.sh | sh
+curl -fsSL \
+  https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/rust/install-rust.sh | sh
 ```
 
-`install-rust.sh` travels on every `rust-v*` release, so the one-liner works
-from whichever one you grab; whatever release the script came from, it installs
-the latest `rust-v*` binaries by default (`PRIME_AGENT_RUST_TAG=rust-v0.2.0`
-pins a version). It verifies the tarball against the release's `SHA256SUMS`,
-installs the payload under `~/.local/share/prime-agent-rust/`, and writes the
-`~/.local/bin/prime-agent-rust` launcher (`PRIME_AGENT_RUST_PREFIX` moves both;
-`PRIME_AGENT_RUST_REPO` retargets the repo).
+`install-rust.sh` resolves the newest **successful `continuous` run on the
+`rust` branch** and installs its platform artifact (`PRIME_AGENT_RUST_RUN=<id>`
+pins an exact run; the run id is in the run-page URL). It verifies the
+tarball against the artifact's `SHA256SUMS` before extracting, installs the
+payload under `~/.local/share/prime-agent-rust/`, and writes the
+`~/.local/bin/prime-agent-rust` launcher (`PRIME_AGENT_RUST_PREFIX` moves
+both; `PRIME_AGENT_RUST_REPO` retargets the repo). The installed binary
+answers its exact source commit: `--version` reports
+`<workspace-version>-continuous.<commit-sha>`.
 
-Manual steps — download the tarball for your platform, verify it, extract it,
-and run the binary directly:
+Manual steps — download the platform artifact from the latest run, verify
+it, extract it, and run the binary directly:
 
 ```bash
-gh release download rust-v0.1.0 --repo PrimeIntellect-ai/prime-agent \
-  --pattern 'prime-agent-0.1.0-aarch64-apple-darwin.tar.gz' --pattern SHA256SUMS --dir /tmp/pa
+run="$(gh run list --repo PrimeIntellect-ai/prime-agent --workflow continuous \
+  --branch rust --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
+gh run download "$run" --repo PrimeIntellect-ai/prime-agent \
+  --name artifacts-aarch64-apple-darwin --dir /tmp/pa
 cd /tmp/pa
-# SHA256SUMS covers every platform; check only the one you downloaded
-# (portable on macOS and Linux — no --ignore-missing needed).
-grep 'prime-agent-0.1.0-aarch64-apple-darwin.tar.gz$' SHA256SUMS | shasum -a 256 -c
+shasum -a 256 -c SHA256SUMS                                   # verify the tarball
 mkdir -p ~/.local/share/prime-agent-rust
-tar xzf prime-agent-0.1.0-aarch64-apple-darwin.tar.gz -C ~/.local/share/prime-agent-rust
+tar xzf prime-agent-*-aarch64-apple-darwin.tar.gz -C ~/.local/share/prime-agent-rust
 # Load-bearing without the launcher (see the daemon section below): the Rust
 # daemon must get its OWN socket so it never touches the TS daemon.
 export PRIME_AGENT_DAEMON_SOCKET="${TMPDIR:-/tmp}/prime-agent-rust/daemon.sock"
 ~/.local/share/prime-agent-rust/prime-agent --version
 ```
 
-Published platforms (`0.1.0` is the workspace version at the time of writing;
-each `rust-v*` release supersedes it — the asset names follow the release
-tag):
+Built platforms (the `continuous` matrix; the tarball names carry the
+workspace version, the binary inside answers `<version>-continuous.<sha>`):
 
-| Platform | uname | Target triple | Tarball |
+| Platform | uname | Target triple | Artifact |
 |---|---|---|---|
-| macOS Apple Silicon | `Darwin arm64` | `aarch64-apple-darwin` | `prime-agent-0.1.0-aarch64-apple-darwin.tar.gz` |
-| macOS Intel (incl. Rosetta shells) | `Darwin x86_64` | `x86_64-apple-darwin` | `prime-agent-0.1.0-x86_64-apple-darwin.tar.gz` |
-| Linux x86_64 | `Linux x86_64` | `x86_64-unknown-linux-gnu` | `prime-agent-0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS Apple Silicon | `Darwin arm64` | `aarch64-apple-darwin` | `artifacts-aarch64-apple-darwin` |
+| macOS Intel (incl. Rosetta shells) | `Darwin x86_64` | `x86_64-apple-darwin` | `artifacts-x86_64-apple-darwin` |
+| Linux x86_64 | `Linux x86_64` | `x86_64-unknown-linux-gnu` | `artifacts-x86_64-unknown-linux-gnu` |
+| Linux arm64 | `Linux aarch64` | `aarch64-unknown-linux-gnu` | `artifacts-aarch64-unknown-linux-gnu` |
 
-Before a tag is cut, every push to the `rust` branch also produces downloadable
-artifacts on the continuous workflow's run page (the commit-stamped
-`-continuous.<sha>` channel) — the early-adopter path; the rust-release
-workflow itself is tag-only (`rust-v*` publishes).
+No tags, no releases: the repo's release history belongs to the TypeScript
+product, and versioned Rust releases come when the port graduates
+(`prime-agent-design/RELEASE_SECURITY.md`). Artifacts stay downloadable
+from each run's page (GitHub's default 90-day retention window).
 
 ## Run
 
@@ -149,9 +151,10 @@ silent-looking failure still leaves a trace.
 
 ## Updating and uninstalling
 
-Update: re-run the installer. It resolves the latest `rust-v*` release by
-default, verifies, and replaces the payload in place; the launcher is
-rewritten each time, and the session store is never touched by an update.
+Update: re-run the installer. It resolves the newest successful
+`continuous` run by default, verifies, and replaces the payload in place;
+the launcher is rewritten each time, and the session store is never
+touched by an update.
 
 Uninstall:
 
@@ -170,12 +173,13 @@ paths are exactly the two above.
 
 ## Known limits
 
-- No linux-arm64 or Windows builds yet. The rust-release matrix publishes
-  darwin arm64/x64 and linux x64; `install-rust.sh` turns linux-arm64 away
-  with a specific message instead of a guess.
-- The nightly/benchmark distribution channels are TS-only for now; the Rust
-  build reaches coworkers through `rust-v*` releases and branch-push
-  artifacts only.
+- No Windows build yet. The `continuous` matrix publishes darwin
+  arm64/x64 and linux x64/arm64; `install-rust.sh` installs all four and
+  turns other platforms away with a specific message instead of a guess.
+- The nightly/benchmark distribution channels are TS-only for now; the
+  Rust build reaches coworkers through the `continuous` branch-push
+  artifacts only — no tags, no releases (the repo's release history is
+  the TypeScript product's).
 - The port is mid-flight. Before filing a "missing feature" bug, check the
   row in [FEATURE_PARITY.md](FEATURE_PARITY.md) — the gap may already be
   known and owned by a lane.
