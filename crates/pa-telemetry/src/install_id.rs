@@ -46,12 +46,11 @@ pub fn install_id(agent_dir: &Path) -> Result<String> {
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
             // Lost a create race: prefer the winner's id if it is valid,
             // otherwise replace the invalid state atomically.
-            match read_install_id(&path)? {
-                Some(existing) => Ok(existing),
-                None => {
-                    replace_invalid_state(&path, &payload)?;
-                    Ok(installation_id)
-                }
+            if let Some(existing) = read_install_id(&path)? {
+                Ok(existing)
+            } else {
+                replace_invalid_state(&path, &payload)?;
+                Ok(installation_id)
             }
         }
         Err(err) => Err(err).with_context(|| format!("create {}", path.display())),
