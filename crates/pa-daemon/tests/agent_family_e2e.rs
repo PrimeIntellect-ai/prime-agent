@@ -974,8 +974,13 @@ async fn family_edges_never_cross_families_end_to_end() {
     if let Ok(error) = std::fs::read_to_string(receipts_dir.join("kid-broadcast.error")) {
         panic!("kid kernel cell failed: {error}");
     }
-    // The child's broadcast reaches its parent alone (no siblings, no
-    // children, and never another family's session).
+    // The child's broadcast reaches its own family - the parent, and
+    // per the TS family-roster broadcast semantics its own spawned
+    // children too when they exist at send time - never a sibling,
+    // never another family's session. The grandkid's presence in the
+    // receipt set depends on the turn interleaving (the broadcast cell
+    // and the grandkid spawn are independent queue events), so pin the
+    // isolation, not the exact set.
     let kid_broadcast = read_recorded(&receipts_dir, "kid-broadcast.json");
     let kid_targets: Vec<&str> = kid_broadcast["receipts"]
         .as_array()
@@ -988,10 +993,19 @@ async fn family_edges_never_cross_families_end_to_end() {
                 .expect("receipt target")
         })
         .collect();
-    assert_eq!(
-        kid_targets,
-        vec![parent_a_active.as_str()],
-        "the child's broadcast stays inside its nuclear family: {kid_broadcast}"
+    let allowed = [parent_a_active.as_str(), grandkid_active.as_str()];
+    assert!(
+        kid_targets.iter().all(|target| allowed.contains(target)),
+        "the child's broadcast stays inside its own family: {kid_broadcast}"
+    );
+    assert!(
+        kid_targets.contains(&parent_a_active.as_str()),
+        "the child's broadcast reaches its parent: {kid_broadcast}"
+    );
+    assert!(
+        !kid_targets.contains(&kid_b_active.as_str())
+            && !kid_targets.contains(&parent_b_active.as_str()),
+        "the child's broadcast never crosses families: {kid_broadcast}"
     );
     if let Ok(error) = std::fs::read_to_string(receipts_dir.join("kid-observe.error")) {
         panic!("kid kernel cell failed: {error}");
