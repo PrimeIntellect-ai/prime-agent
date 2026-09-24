@@ -8,6 +8,7 @@
 //! wait on the Stage-3 reply machinery.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -163,6 +164,12 @@ pub struct AgentsViewOutcome {
 /// TS `WORKING_ICON_INTERVAL_MS`: the running-row icon frame cadence.
 const PULSE_INTERVAL_MS: u64 = 250;
 
+/// The saved-catalog stream's batch window (TS
+/// `SAVED_CATALOG_RECONCILE_INTERVAL_MS`): streamed rows reconcile into
+/// the view on this cadence, so a continuous scan still appears
+/// progressively without a rebuild per row.
+const SAVED_CATALOG_RECONCILE_INTERVAL_MS: u64 = 75;
+
 /// The transient status hint while the entry anchor still waits on its
 /// row (see [`AgentsViewMode::open_selected`]); dropped once the anchor
 /// lands.
@@ -297,6 +304,15 @@ struct AgentsViewMode {
     /// A failed saved-catalog fetch wants re-arming on the query's next
     /// change (the loop owns the client, so the mode records the intent).
     saved_query_rearm: bool,
+    /// The saved catalog's streamed rows waiting for the batch window
+    /// (TS `refreshSavedSessions`'s `onSession` progressive map): the
+    /// daemon streams `session_list_item` frames newest-first while the
+    /// scan runs, the loop buffers the live fetch's frames, and one
+    /// rebuild flushes the batch - the entry anchor's row lands long
+    /// before the scan's final response, so a dead continue-target is
+    /// selectable within the first window instead of the whole scan
+    /// (the operator's `Still loading sessions` hold).
+    saved_stream: Vec<Value>,
 }
 
 impl AgentsViewMode {
@@ -354,6 +370,7 @@ impl AgentsViewMode {
             new_session: false,
             saved_fetch_failed: false,
             saved_query_rearm: false,
+            saved_stream: Vec::new(),
         }
     }
 
@@ -594,6 +611,46 @@ impl AgentsViewMode {
     fn end_anchor_wait(&mut self) {
         self.anchor_selection_pending = false;
         self.clear_anchor_loading_hint();
+    }
+
+    /// Buffer one streamed saved row (TS `refreshSavedSessions`'s
+    /// `onSession`): the loop flushes the batch in its reconcile window,
+    /// never per row.
+    fn buffer_saved_stream_item(&mut self, session: Value) {
+        self.saved_stream.push(session);
+    }
+
+    /// Flush the streamed batch into the catalog (TS's bounded reconcile
+    /// window): upsert by the row's own identity - the path first, then
+    /// the durable id - so a superseded fetch's late frames never
+    /// duplicate a row, then one rebuild. Returns whether the catalog
+    /// changed.
+    fn flush_saved_stream(&mut self) -> bool {
+        if self.saved_stream.is_empty() {
+            return false;
+        }
+        for row in std::mem::take(&mut self.saved_stream) {
+            let path = row.get("path").and_then(Value::as_str);
+            let durable_id = row.get("id").and_then(Value::as_str);
+            let existing = self.saved.iter().position(|saved| {
+                path.is_some_and(|path| saved.get("path").and_then(Value::as_str) == Some(path))
+                    || durable_id
+                        .is_some_and(|id| saved.get("id").and_then(Value::as_str) == Some(id))
+            });
+            match existing {
+                Some(index) => self.saved[index] = row,
+                None => self.saved.push(row),
+            }
+        }
+        self.rebuild_rows();
+        true
+    }
+
+    /// Drop the unflushed stream batch: the terminal response replaces the
+    /// catalog wholesale (its array is the authoritative set), and a
+    /// terminal failure keeps the last good rows.
+    fn drop_saved_stream(&mut self) {
+        self.saved_stream.clear();
     }
 
     /// The saved-catalog fetch settled on a terminal failure: the entry
@@ -1691,24 +1748,37 @@ async fn open_roster_link(
 }
 
 /// The saved-catalog fetch (TS `armSavedSearchFetch`): one request whose
-/// result (or failure) re-enters the loop as a `UiInput`. The scan is the
-/// known-slow path — the whole-file re-parse of every saved session — so it
-/// rides the LONG-RUNNING request budget: the default 30s class would turn
-/// every large sessions dir into a false `Saved sessions unavailable` and
-/// leave the entry anchor's row permanently unloaded (the loading state
-/// that outlives the scan). A terminal failure re-arms on the next query
-/// change (the loop's `take_saved_fetch_rearm`), like TS
-/// `rearmSavedSearchFetch`.
+/// result (or failure) re-enters the loop as a `UiInput`, while the scan's
+/// `session_list_item` stream re-enters as events under the fetch's own
+/// request id — the id the loop compares against (TS's connection routes
+/// the stream to the originating `listDaemonSavedSessions` callbacks). The
+/// scan is the known-slow path — the whole-file re-parse of every saved
+/// session — so it rides the LONG-RUNNING request budget: the default 30s
+/// class would turn every large sessions dir into a false
+/// `Saved sessions unavailable` and leave the entry anchor's row
+/// permanently unloaded (the loading state that outlives the scan). A
+/// terminal failure re-arms on the next query change (the loop's
+/// `take_saved_fetch_rearm`), like TS `rearmSavedSearchFetch`.
 fn spawn_saved_catalog_fetch(
     client: &DaemonClient,
     ui_tx: mpsc::UnboundedSender<UiInput>,
     cwd: PathBuf,
     session_dir: Option<PathBuf>,
-) {
+) -> String {
     let client = client.clone();
+    static CATALOG_FETCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    // The id rides the supervisor reader's `daemon_` namespace: the
+    // socket-close failure pass (`fail_pending("daemon_", ..)`) must cover
+    // the fetch too, or a dead connection leaves the long-running scan's
+    // oneshot armed until its whole budget (the exit-hang class of bugs).
+    let id = format!(
+        "daemon_catalog-{}",
+        CATALOG_FETCH_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1
+    );
+    let request_id = id.clone();
     tokio::spawn(async move {
         let saved = client
-            .request_with_timeout(
+            .request_supervisor_with_id(
                 DaemonCommand::ListSavedSessions {
                     id: None,
                     cwd: Some(cwd.to_string_lossy().to_string()),
@@ -1717,6 +1787,7 @@ fn spawn_saved_catalog_fetch(
                     scope: Value::Null,
                     rest: Default::default(),
                 },
+                &request_id,
                 saved_catalog_timeout_ms(),
             )
             .await;
@@ -1739,6 +1810,7 @@ fn spawn_saved_catalog_fetch(
         };
         let _ = ui_tx.send(input);
     });
+    id
 }
 
 pub async fn run_agents_view(
@@ -1835,12 +1907,22 @@ async fn run_agents_view_surface(
     // row state, never the client).
     let cwd = mode.options.cwd.clone();
     let session_dir = mode.options.session_dir.clone();
-    spawn_saved_catalog_fetch(&client, ui_tx.clone(), cwd.clone(), session_dir.clone());
     // Broadcast frames that landed on the parked connection while the view
     // was closed (heartbeats): the fresh roster snapshot supersedes them.
+    // The drain runs BEFORE the catalog fetch spawns - the fetch's
+    // `session_list_item` stream is live data now, and a drain after the
+    // spawn could discard its first frames (the entry anchor's row rides
+    // the scan's newest-first head, exactly the rows the wait needs
+    // soonest).
     while events.try_recv().is_ok() {}
+    let mut catalog_request =
+        spawn_saved_catalog_fetch(&client, ui_tx.clone(), cwd.clone(), session_dir.clone());
     let mut pending: Vec<UiInput> = Vec::new();
     let mut last_pulse = tokio::time::Instant::now();
+    // The saved-catalog stream's open batch window: the first buffered row
+    // arms it, the flush closes it (TS `refreshSavedSessions`'s
+    // `savedCatalogReconcileTimer`).
+    let mut saved_flush: Option<tokio::time::Instant> = None;
 
     while mode.running {
         let mut redraw = false;
@@ -1854,18 +1936,28 @@ async fn run_agents_view_surface(
                     // a terminal failure instead of staying empty for the
                     // rest of the run.
                     if mode.take_saved_fetch_rearm() {
-                        spawn_saved_catalog_fetch(
+                        catalog_request = spawn_saved_catalog_fetch(
                             &client,
                             ui_tx.clone(),
                             cwd.clone(),
                             session_dir.clone(),
                         );
+                        // A superseded fetch's stream stops applying: the
+                        // new fetch owns the catalog (TS's generation gate
+                        // drops the old refresh's late `onSession` calls).
+                        mode.drop_saved_stream();
+                        saved_flush = None;
                     }
                 }
                 UiInput::Resize | UiInput::Settled => {}
                 // The saved-catalog scan landed (TS `armSavedSearchFetch`
                 // applying its result): the Inactive section builds now.
                 UiInput::SavedLoaded { sessions } => {
+                    // The final response is the authoritative array: the
+                    // stream's unflushed rows are its prefix, and the scan
+                    // never re-orders after streaming them.
+                    mode.drop_saved_stream();
+                    saved_flush = None;
                     mode.saved = sessions;
                     mode.saved_fetch_failed = false;
                     // The failure status is the fetch's own honest error;
@@ -1890,6 +1982,8 @@ async fn run_agents_view_surface(
                     // pending would re-arm the loading hint on every open
                     // behind an error the status line already showed (TS
                     // `resolveMissingSelectionAnchor`'s finally arm).
+                    mode.drop_saved_stream();
+                    saved_flush = None;
                     mode.settle_anchor_wait_on_saved_failure();
                     mode.saved_fetch_failed = true;
                     mode.status = Some(format!("Saved sessions unavailable: {error}"));
@@ -1907,12 +2001,37 @@ async fn run_agents_view_surface(
             }
             redraw = true;
         } else {
+            // The batch window's deadline, copied out of the loop state:
+            // select evaluates EVERY branch expression whether or not its
+            // precondition passes, so the flush arm below must never
+            // unwrap the Option itself.
+            let flush_at = saved_flush;
             tokio::select! {
                 maybe_event = events.recv() => {
                     match maybe_event {
                         Some(DaemonClientEvent::RosterUpdate { changed, removed, resync }) => {
                             mode.apply_roster_update(changed, removed, resync);
                             redraw = true;
+                        }
+                        // The saved-catalog scan streams its rows while it
+                        // runs (newest first): the view buffers the live
+                        // fetch's frames and flushes them in one rebuild
+                        // per batch window, so the Inactive section (and
+                        // the entry anchor's row) appears progressively
+                        // instead of after the whole scan (TS
+                        // `refreshSavedSessions`'s `onSession` batching).
+                        Some(DaemonClientEvent::SessionListItem { session, request_id }) => {
+                            if request_id == catalog_request {
+                                mode.buffer_saved_stream_item(session);
+                                if saved_flush.is_none() {
+                                    saved_flush = Some(
+                                        tokio::time::Instant::now()
+                                            + Duration::from_millis(
+                                                SAVED_CATALOG_RECONCILE_INTERVAL_MS,
+                                            ),
+                                    );
+                                }
+                            }
                         }
                         Some(_) => {}
                         None => {
@@ -1932,6 +2051,20 @@ async fn run_agents_view_surface(
                 // stays tied to the last pulse across unrelated inputs.
                 _ = tokio::time::sleep_until(last_pulse + Duration::from_millis(PULSE_INTERVAL_MS)),
                     if mode.rows.iter().any(|row| row.section == Section::Running) => {}
+                // The streamed-catalog batch window: the buffered rows
+                // flush as one rebuild. A closed window pends forever
+                // (the copied deadline is None) instead of unwrapping.
+                _ = async {
+                    match flush_at {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if mode.flush_saved_stream() {
+                        redraw = true;
+                    }
+                    saved_flush = None;
+                }
             }
         }
         // Coalesce a due animation pulse with the input or roster frame.
@@ -2140,6 +2273,89 @@ mod tests {
             "messageCount": 2,
             "rlmDepth": 0,
         })
+    }
+
+    /// One saved-catalog row (TS `serializeSavedSessionInfo`'s shape): the
+    /// path identity, the durable id, and the display fields the filters
+    /// read.
+    fn saved_catalog_row(path: &str, id: &str, name: &str) -> serde_json::Value {
+        serde_json::json!({
+            "path": path,
+            "id": id,
+            "cwd": "/tmp",
+            "rlmDepth": 0,
+            "created": "2024-01-01T00:00:00.000Z",
+            "modified": "2024-01-01T00:00:00.000Z",
+            "messageCount": 3,
+            "name": name,
+        })
+    }
+
+    /// The streamed catalog lands progressively: a buffered row flushes
+    /// as one rebuild, and the entry anchor's wait ends with the flush -
+    /// the row the scan streams first (newest) is selectable (and
+    /// Enter-able) inside the first batch window instead of after the
+    /// whole scan (the operator's `Still loading sessions` hold).
+    #[test]
+    fn streamed_catalog_rows_land_progressively_and_settle_the_anchor() {
+        let mut mode = mode_with_anchor(
+            Some("s2"),
+            vec![roster_entry("s1", "idle", parent_summary("s1"))],
+        );
+        assert!(mode.anchor_selection_pending, "the anchor waits on its row");
+        mode.buffer_saved_stream_item(saved_catalog_row("/x/s2.jsonl", "s2", "second chat"));
+        assert!(mode.flush_saved_stream(), "the flush rebuilds once");
+        assert!(
+            !mode.anchor_selection_pending,
+            "the anchor landed from the stream, before the final response"
+        );
+        assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s2");
+        // Enter opens the anchor now: no hint, no wait.
+        mode.handle_key("enter");
+        assert!(
+            mode.opened.is_some(),
+            "the anchor opens without waiting for the scan's end"
+        );
+        assert_ne!(mode.status.as_deref(), Some(ANCHOR_LOADING_HINT));
+    }
+
+    /// The streamed upsert never duplicates: a row re-streamed by a
+    /// superseded fetch's late frames replaces by path (then durable id),
+    /// and the final response's authoritative array replaces the whole
+    /// catalog.
+    #[test]
+    fn streamed_catalog_upserts_by_identity_and_the_final_response_replaces() {
+        let mut mode = mode_with_anchor(None, vec![]);
+        assert!(
+            !mode.flush_saved_stream(),
+            "an empty buffer flushes nothing"
+        );
+        mode.buffer_saved_stream_item(saved_catalog_row("/x/a.jsonl", "a", "first"));
+        mode.buffer_saved_stream_item(saved_catalog_row("/x/a.jsonl", "a", "first (again)"));
+        mode.buffer_saved_stream_item(saved_catalog_row("/x/b.jsonl", "b", "second"));
+        assert!(mode.flush_saved_stream());
+        assert_eq!(
+            mode.saved.len(),
+            2,
+            "the same path upserts, never duplicates"
+        );
+        assert_eq!(mode.saved[0]["name"], "first (again)");
+        // A row whose path moved but id survived still upserts by id.
+        mode.buffer_saved_stream_item(saved_catalog_row("/x/a-moved.jsonl", "a", "moved"));
+        assert!(mode.flush_saved_stream());
+        assert_eq!(mode.saved.len(), 2, "the durable id upserts too");
+        assert_eq!(mode.saved[0]["path"], "/x/a-moved.jsonl");
+        // The final response replaces the catalog wholesale.
+        mode.drop_saved_stream();
+        mode.saved = vec![saved_catalog_row(
+            "/x/c.jsonl",
+            "c",
+            "the authoritative row",
+        )];
+        mode.rebuild_rows();
+        assert_eq!(mode.saved.len(), 1);
+        assert_eq!(mode.saved[0]["id"], "c");
+        assert!(mode.saved_stream.is_empty());
     }
 
     fn child_summary(id: &str, parent: &str, name: &str) -> serde_json::Value {
