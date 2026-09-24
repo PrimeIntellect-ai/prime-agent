@@ -495,7 +495,7 @@ fn read_proc_environ(pid: u32) -> Option<Vec<String>> {
 fn exe_is_product_binary(pid: u32) -> bool {
     std::fs::read_link(format!("/proc/{pid}/exe"))
         .ok()
-        .and_then(|exe| exe.to_str().map(|exe| is_product_binary(exe)))
+        .and_then(|exe| exe.to_str().map(is_product_binary))
         .unwrap_or(false)
 }
 
