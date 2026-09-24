@@ -376,7 +376,7 @@ fn resolve_dropped_ancestor(
     let mut seen = std::collections::HashSet::new();
     let mut current = Some(start.to_string());
     while let Some(ref id) = current {
-        if let Some(answer) = resolved.get(&id) {
+        if let Some(answer) = resolved.get(id.as_str()) {
             let answer = answer.clone();
             for node in path {
                 resolved.insert(node, answer.clone());
@@ -388,7 +388,7 @@ fn resolve_dropped_ancestor(
             // child, memoized for no one else.
             return Some(id.clone());
         }
-        match dropped_parent.get(&id) {
+        match dropped_parent.get(id.as_str()) {
             Some(next) => {
                 path.push(id.clone());
                 current.clone_from(next);
