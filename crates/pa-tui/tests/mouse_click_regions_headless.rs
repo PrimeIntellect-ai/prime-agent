@@ -449,14 +449,16 @@ fn editor_click_places_the_caret() {
         HeadlessStep::ScrollTop,
     ]);
     let (_, editor_row, hello_col, _) =
-        locate(&probe.0, "> hello world").expect("the editor renders the typed text");
-    // Click between "hello" and " world" (five columns past the text
-    // start), then type: the X lands at the clicked caret.
+        locate(&probe.0, "hello world").expect("the editor renders the typed text");
+    // Click between "hello" and " world": the needle sits at the text's
+    // first column (the row's leading pad, `> ` prompt, and inner pad
+    // precede it), so the caret's cell is five text columns in.
+    let click_col = hello_col + 5;
     let clicked = run_plan(vec![
         HeadlessStep::Type("hello world".to_string()),
         HeadlessStep::ScrollTop,
-        HeadlessStep::Mouse(press(hello_col + 5, editor_row + 1)),
-        HeadlessStep::Mouse(release(hello_col + 5, editor_row + 1)),
+        HeadlessStep::Mouse(press(click_col, editor_row + 1)),
+        HeadlessStep::Mouse(release(click_col, editor_row + 1)),
         HeadlessStep::Type("X".to_string()),
     ]);
     let after = clicked.0.last().expect("a frame after typing");
