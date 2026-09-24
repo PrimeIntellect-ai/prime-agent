@@ -318,6 +318,40 @@ struct WorkerDescriptor {
     token: String,
 }
 
+/// Wait until the worker's recovery journal holds the admission `busy:
+/// true` record for one session (the durable busy-at-crash evidence): the
+/// kill that follows provably lands mid-turn, whatever the runner's
+/// pacing does to the stream (the loaded-host failure mode where the
+/// whole turn settled before the kill and the revival signal was lost).
+fn wait_for_busy_journal_evidence(agent_dir: &Path, socket: &Path, session_id: &str) {
+    let journal_path = pa_daemon::descriptor::descriptor_dir(agent_dir, socket)
+        .join(format!("{session_id}.recovery.jsonl"));
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let evidence = std::fs::read_to_string(&journal_path)
+            .ok()
+            .map(|content| {
+                content.lines().any(|line| {
+                    let Ok(record) = serde_json::from_str::<Value>(line) else {
+                        return false;
+                    };
+                    record["activeSessionId"].as_str() == Some(session_id)
+                        && record["busy"].as_bool() == Some(true)
+                })
+            })
+            .unwrap_or(false);
+        if evidence {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "busy journal evidence never landed for {session_id}: {}",
+            journal_path.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn load_worker_descriptor(agent_dir: &Path, socket: &Path, worker_id: &str) -> WorkerDescriptor {
     let descriptor_dir = pa_daemon::descriptor::descriptor_dir(agent_dir, socket);
     let content = std::fs::read_to_string(descriptor_dir.join(format!("{worker_id}.json")))
@@ -663,17 +697,17 @@ fn plain_boot_revives_only_journal_busy_workers() {
     let done = client.read_response("p0");
     assert_eq!(done["success"], true, "idle turn failed: {done}");
 
-    // Session 1 dies busy-at-crash: its scripted turn is still streaming
-    // when the supervisor and both workers are killed. The pacing keeps
-    // the turn deterministically in flight (`delayMs` only gates the
-    // stream start; `tokensPerSecond` drips the text out over seconds,
-    // so the kill lands mid-stream, before the settle checkpoint).
+    // Session 1 dies busy-at-crash: its scripted turn is still open when
+    // the supervisor and both workers are killed. The turn holds open
+    // through its 30s scripted delay, so the kill lands mid-turn on any
+    // runner pacing (the journal's admission `busy: true` record is the
+    // durable evidence the kill waits for below).
     let script_busy = dir.path().join("journal-busy.json");
     let busy_text = "still streaming ".repeat(40);
     std::fs::write(
         &script_busy,
         json!({
-            "responses": [ { "text": busy_text, "delayMs": 100 } ],
+            "responses": [ { "text": busy_text, "delayMs": 30_000 } ],
             "tokensPerSecond": 20,
         })
         .to_string(),
@@ -711,16 +745,18 @@ fn plain_boot_revives_only_journal_busy_workers() {
             "message": "go",
         }),
     );
-    let (ack, mut busy_turn_lines) = client.read_response_and_lines("p1");
+    let (ack, busy_turn_lines) = client.read_response_and_lines("p1");
     assert_eq!(ack["success"], true, "busy prompt failed: {ack}");
-    let mut started = false;
-    while !started {
-        let line = client.next_line_of_type(&mut busy_turn_lines, "session_event");
-        if line["event"]["type"].as_str() == Some("message_start") {
-            started = true;
-        }
-    }
-    assert!(started, "the busy turn started streaming");
+    drop(busy_turn_lines);
+    // The busy-at-crash premise is DURABLE EVIDENCE, never stream pacing:
+    // wait for the worker's recovery journal to record the admission
+    // `busy: true` for this session BEFORE the kill. The scripted turn
+    // holds open through its 30s delay, so the journal's latest record
+    // stays busy at the kill on any runner pacing - the loaded-host mode
+    // where the old message_start race let the whole turn settle before
+    // the kill landed (both workers then read idle-at-exit, and the
+    // only-busy-revives signal was lost).
+    wait_for_busy_journal_evidence(&agent_dir, &socket, &busy_session);
 
     // kill -9 the supervisor, then the workers: the descriptors stay on
     // disk with dead sockets and the journals keep their last evidence
