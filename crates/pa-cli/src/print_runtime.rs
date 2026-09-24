@@ -747,10 +747,20 @@ fn assert_session_not_active_in_daemon(
             .or_else(|| row.get("id"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        return Err(format!(
-            "Session is already active in {active_session_id}: {}",
-            target.display()
-        ));
+        // The descriptive refusal (operator-directed): the TS-identical
+        // first line, then the holder's identity and the next steps —
+        // attach to the live session instead of reopening its file.
+        let message = match pa_tui::session_open_error::holder_from_roster(
+            std::slice::from_ref(&row),
+            &target,
+        ) {
+            Some(holder) => pa_tui::session_open_error::already_active_error(&holder, &target),
+            None => format!(
+                "Session is already active in {active_session_id}: {}",
+                target.display()
+            ),
+        };
+        return Err(message);
     }
     Ok(())
 }

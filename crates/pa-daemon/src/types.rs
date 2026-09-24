@@ -73,6 +73,11 @@ pub struct SessionSummary {
     pub is_compacting: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_bash_running: Option<bool>,
+    /// A streaming turn with tool calls in flight (TS `isRunningTools`:
+    /// `isStreaming && pendingToolCalls.size > 0`); drives the agents-view
+    /// activity label's `running tools` state.
+    #[serde(default)]
+    pub is_running_tools: bool,
     pub attached_clients: u32,
     pub message_count: u32,
     pub session_actions: SessionActionSnapshot,

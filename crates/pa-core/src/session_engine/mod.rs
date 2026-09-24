@@ -29,6 +29,7 @@ pub mod provider_retry;
 pub mod refine;
 pub mod rlm_host;
 pub mod rlm_notices;
+pub mod rlm_usage;
 pub mod runtime;
 pub mod runtime_wiring;
 pub mod session_commands;

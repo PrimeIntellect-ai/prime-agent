@@ -777,6 +777,35 @@ mod tests {
         assert_eq!(fallback.cost.output.0, 0.0);
     }
 
+    /// Port of the TS regression (#2459): Prime Inference rejects
+    /// `enable_thinking` with a 400, so a fallback model — public or
+    /// private — must never inherit the zai thinking format from its
+    /// template.
+    #[test]
+    fn fallback_models_never_inherit_the_zai_thinking_format() {
+        use pa_ai::types::ModelExt;
+        use pa_types::ai::{CompatKind, ThinkingFormat};
+        let mut catalog: Vec<Model> =
+            vec![
+                pa_ai::models_generated::get_model("prime-inference", "z-ai/glm-5.3")
+                    .expect("the compiled prime-inference default")
+                    .clone(),
+            ];
+        catalog.extend(private_prime_inference_models());
+        for model_id in ["z-ai/glm-9", "internal/glm-5.9-turbo"] {
+            let fallback = build_fallback_model("prime-inference", model_id, &catalog)
+                .unwrap_or_else(|| panic!("{model_id} has a fallback template"));
+            let Some(CompatKind::OpenAiCompletions(compat)) = fallback.compat_kind() else {
+                panic!("{model_id}: fallback inherits a compat object");
+            };
+            assert_ne!(
+                compat.thinking_format,
+                Some(ThinkingFormat::Zai),
+                "{model_id}: fallback must not inherit the zai thinking format"
+            );
+        }
+    }
+
     #[test]
     fn initial_model_prefers_cli_flags() {
         let catalog = catalog();
