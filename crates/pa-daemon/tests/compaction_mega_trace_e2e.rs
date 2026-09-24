@@ -480,4 +480,15 @@ fn mega_session_threshold_compaction_phase_measurement() {
     std::fs::write(&summary_path, summary.to_string()).expect("write summary");
     println!("summary written: {summary_path}");
     println!("trace file: {trace_path}");
+    // The driver's artifact dir (the tempdir dies with the test): copy the
+    // trace + summary out when the harness asks for it.
+    if let Ok(out_dir) = std::env::var("PA_MEGA_OUT_DIR") {
+        let out_dir = PathBuf::from(out_dir);
+        std::fs::create_dir_all(&out_dir).expect("artifact dir");
+        std::fs::copy(&trace_path, out_dir.join("compaction-trace.jsonl"))
+            .expect("copy trace");
+        std::fs::copy(&summary_path, out_dir.join("mega-measurement.json"))
+            .expect("copy summary");
+        println!("artifacts copied to {out_dir:?}");
+    }
 }
