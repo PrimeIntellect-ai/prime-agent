@@ -566,8 +566,12 @@ const SPINNER_INTERVAL_MS: u128 = 80;
 /// Spec §10.2: the client reconnect window after an update restart
 /// (10 minutes).
 const RECONNECT_WINDOW: Duration = Duration::from_mins(10);
-/// One reconnect attempt's connect budget.
-const RECONNECT_ATTEMPT_TIMEOUT_S: u64 = 5;
+/// One reconnect attempt's connect budget: covers the whole connect leg —
+/// the connect (3s refused-socket budget) plus the hello handshake (the
+/// 15s budget a loaded daemon legitimately needs), so a slow-greeting
+/// daemon is never cancelled short on every attempt (a dead socket still
+/// fails fast inside the same bound).
+const RECONNECT_ATTEMPT_TIMEOUT_S: u64 = 20;
 /// One reconnect attempt's reattach budget: a queued attach can legitimately
 /// wait out a slow restore (§10.4), so the attempt hands back to the loop
 /// instead of wedging the UI.
@@ -1581,6 +1585,13 @@ async fn run_interactive_surface(
                 }
             }
             _reconnect_tick = async {
+                // Park the tick while an attempt is in flight: the armed
+                // `next_attempt` is in the past (the attempt consumed it),
+                // so an unparked tick would resolve instantly and
+                // busy-spin the loop for the attempt's duration.
+                if reconnect_connect.is_some() {
+                    std::future::pending::<()>().await;
+                }
                 match reconnect.as_ref() {
                     Some(state) => tokio::time::sleep_until(state.next_attempt).await,
                     None => std::future::pending::<()>().await,
