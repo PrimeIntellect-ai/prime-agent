@@ -704,9 +704,10 @@ mod tests {
             .get("sub-rebuild2")
             .cloned()
             .expect("sub-rebuild2 registered on the successor");
-        let mut retired_children = retired.children.lock().expect("children lock");
-        retired_children.insert("sub-raced".to_string(), target_of_second);
-        drop(retired_children);
+        {
+            let mut retired_children = retired.children.lock().expect("children lock");
+            retired_children.insert("sub-raced".to_string(), target_of_second);
+        }
         fresh
             .record_child_usage(RlmChildUsageReport {
                 rlm_child_id: "sub-raced".to_string(),
