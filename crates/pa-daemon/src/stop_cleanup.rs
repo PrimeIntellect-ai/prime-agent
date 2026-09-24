@@ -476,7 +476,17 @@ impl Supervisor {
             self.log_line("deleted-child capture: could not resolve the spawn ledger");
             return;
         };
-        let captured = append_deleted_child_usage_amendments(&ledger, session_file, child_id);
+        // The capture reads and JSON-parses the whole frozen transcript
+        // and appends ledger records - blocking work that must not stall
+        // an async runtime worker (a large child would delay unrelated
+        // daemon tasks), so it runs on the blocking executor.
+        let session_file = session_file.to_string();
+        let child_id = child_id.to_string();
+        let captured = tokio::task::spawn_blocking(move || {
+            append_deleted_child_usage_amendments(&ledger, &session_file, &child_id)
+        })
+        .await
+        .unwrap_or(None);
         self.note_deleted_child_usage_captured(source, captured.unwrap_or(0));
     }
 
