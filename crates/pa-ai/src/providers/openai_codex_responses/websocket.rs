@@ -221,7 +221,7 @@ async fn spawn_connection_worker(
 
     if signal
         .as_ref()
-        .map(|signal| signal.is_cancelled())
+        .map(tokio_util::sync::CancellationToken::is_cancelled)
         .unwrap_or(false)
     {
         return Err(CodexStreamError::Aborted);
@@ -304,7 +304,7 @@ async fn read_request_events(
     loop {
         if signal
             .as_ref()
-            .map(|signal| signal.is_cancelled())
+            .map(tokio_util::sync::CancellationToken::is_cancelled)
             .unwrap_or(false)
         {
             return Err(CodexStreamError::Aborted);
@@ -426,7 +426,7 @@ impl AcquiredConnection {
     ) -> Result<mpsc::Receiver<WorkerEvent>, CodexStreamError> {
         if signal
             .as_ref()
-            .map(|signal| signal.is_cancelled())
+            .map(tokio_util::sync::CancellationToken::is_cancelled)
             .unwrap_or(false)
         {
             return Err(CodexStreamError::Aborted);
@@ -670,7 +670,7 @@ mod tests {
     fn computes_input_delta_for_matching_bodies() {
         let base = json!({ "model": "gpt", "input": [ { "type": "a" } ] });
         let items = vec![json!({ "type": "assistant_item" })];
-        let cont = continuation(base.clone(), items);
+        let cont = continuation(base, items);
         let next = json!({
             "model": "gpt",
             "input": [ { "type": "a" }, { "type": "assistant_item" }, { "type": "new" } ],
@@ -683,7 +683,7 @@ mod tests {
     #[test]
     fn rejects_delta_when_body_differs() {
         let base = json!({ "model": "gpt", "input": [ { "type": "a" } ] });
-        let cont = continuation(base.clone(), vec![]);
+        let cont = continuation(base, vec![]);
         let next = json!({ "model": "other", "input": [ { "type": "a" }, { "type": "b" } ] });
         let request = build_cached_websocket_request_body(Some(&cont), &next, 42);
         assert!(request.get("previous_response_id").is_none());
@@ -693,7 +693,7 @@ mod tests {
     #[test]
     fn rejects_delta_when_prefix_differs() {
         let base = json!({ "model": "gpt", "input": [ { "type": "a" } ] });
-        let cont = continuation(base.clone(), vec![json!({ "type": "x" })]);
+        let cont = continuation(base, vec![json!({ "type": "x" })]);
         let next = json!({ "model": "gpt", "input": [ { "type": "a" }, { "type": "y" } ] });
         let request = build_cached_websocket_request_body(Some(&cont), &next, 42);
         assert!(request.get("previous_response_id").is_none());
@@ -923,15 +923,13 @@ mod ws_wire_tests {
                 error
                     .to_string()
                     .starts_with("WebSocket connection to 'ws://127.0.0.1:"),
-                "unexpected text {}",
-                error
+                "unexpected text {error}"
             );
             assert!(
                 error
                     .to_string()
                     .ends_with("/codex/responses' failed: Expected 101 status code"),
-                "unexpected text {}",
-                error
+                "unexpected text {error}"
             );
             assert_eq!(error.error_name(), "Error");
         }

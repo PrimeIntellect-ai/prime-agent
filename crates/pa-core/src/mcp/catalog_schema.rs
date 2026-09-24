@@ -722,7 +722,7 @@ mod tests {
             "entry unknown key rejects"
         );
         // Unknown AUTH key rejects the file.
-        let mut doc = base.clone();
+        let mut doc = base;
         doc["entries"][0]["auth"]["alternatives"] = serde_json::json!([]);
         assert!(
             parse_plugins_catalog(doc.to_string().as_bytes()).is_err(),

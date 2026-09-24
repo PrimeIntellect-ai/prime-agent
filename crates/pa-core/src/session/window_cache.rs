@@ -199,7 +199,7 @@ pub fn append_cached(path: &Path, bytes: &[u8], ownership: AppendOwnership) -> i
             snapshots.remove(path);
             return Ok(());
         }
-        snapshot.leaf = id.to_owned();
+        id.clone_into(&mut snapshot.leaf);
         super::window::update_snapshot(snapshot, &entry);
     }
     snapshot.generation = generation;

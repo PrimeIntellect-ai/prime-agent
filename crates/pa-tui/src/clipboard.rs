@@ -77,7 +77,7 @@ impl Env {
     }
 
     fn has(&self, key: &str) -> bool {
-        self.values.get(key).is_some_and(|value| value.is_some())
+        self.values.get(key).is_some_and(Option::is_some)
     }
 
     fn value(&self, key: &str) -> Option<String> {

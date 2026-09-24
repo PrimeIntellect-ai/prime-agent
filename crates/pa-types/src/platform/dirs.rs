@@ -84,7 +84,7 @@ mod tests {
     fn with_env(names: &[(&str, Option<&str>)], body: impl FnOnce()) {
         let _guard = ENV_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous: Vec<(&str, Option<std::ffi::OsString>)> = names
             .iter()
             .map(|(name, _)| (*name, std::env::var_os(name)))

@@ -294,7 +294,6 @@ impl<T: Clone + Send + Sync + 'static> CatalogCache<T> {
                 if !self.is_current(scope, generation, opts) {
                     return None;
                 }
-                let models = models.clone();
                 let snapshot = Snapshot {
                     scope: scope.to_string(),
                     fetched_at: now_ms(),
@@ -514,7 +513,7 @@ mod tests {
         // Every rename consumed its temp: no writer litter remains.
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
-            .filter_map(|entry| entry.ok())
+            .filter_map(Result::ok)
             .map(|entry| entry.file_name())
             .filter(|name| name.to_string_lossy().contains(".tmp"))
             .collect();

@@ -189,7 +189,7 @@ fn worker_pid(agent_dir: &Path, socket_path: &Path, worker_id: &str) -> Option<u
     .ok()?;
     descriptor
         .get("pid")
-        .and_then(|p| p.as_u64())
+        .and_then(serde_json::Value::as_u64)
         .map(|p| p as u32)
 }
 
@@ -201,7 +201,7 @@ fn wait_until(deadline: Duration, mut probe: impl FnMut() -> bool) {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("condition not reached within {:?}", deadline);
+    panic!("condition not reached within {deadline:?}");
 }
 
 const CYCLES: usize = 20;
@@ -308,7 +308,7 @@ fn supervisor_fd_count_stable_across_session_cycles() {
             let list = client.read_response("l");
             list["data"]["sessions"]
                 .as_array()
-                .is_some_and(|s| s.is_empty())
+                .is_some_and(std::vec::Vec::is_empty)
         });
 
         let targets = fd_snapshot(supervisor_pid);
@@ -699,7 +699,7 @@ fn supervisor_restart_loop_leaves_no_orphan_workers() {
         let list = client.read_response("l");
         list["data"]["sessions"]
             .as_array()
-            .is_some_and(|sessions| sessions.is_empty())
+            .is_some_and(std::vec::Vec::is_empty)
     });
 
     // No orphan worker survives the loop: every spawned worker either

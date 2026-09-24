@@ -369,7 +369,7 @@ impl ProviderAuthSelector {
                                 match provider.flow {
                                     AuthFlow::ApiKeyPrompt => {
                                         self.mode = Mode::Prompt {
-                                            provider: provider.clone(),
+                                            provider,
                                             input: SearchInput::new(),
                                         };
                                         AuthSelectorAction::None

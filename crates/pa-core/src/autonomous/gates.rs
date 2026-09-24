@@ -326,7 +326,10 @@ pub async fn capture_git_worktree_snapshot(cwd: &Path) -> Option<GitWorktreeSnap
 
 /// One git invocation: `None` on any non-zero exit, timeout, or truncation.
 async fn run_git(prefix: &[&str], pathspec: &[String], cwd: &Path) -> Option<String> {
-    let mut args: Vec<String> = prefix.iter().map(|arg| arg.to_string()).collect();
+    let mut args: Vec<String> = prefix
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     args.extend(pathspec.iter().cloned());
     let result = run_child_process("git", &args, cwd, SNAPSHOT_TIMEOUT_MS)
         .await

@@ -233,8 +233,6 @@ fn child_cell(receipts_dir: &Path) -> String {
     let error_path = receipts_dir.join("child-reply.error").display().to_string();
     format!(
         "from rlm import host_request\nimport json, traceback\ntry:\n    receipt = await host_request(\"agent_message.send\", {{\"message\": \"kid reply\", \"receiver_role\": \"parent\"}})\n    open({receipt_path:?}, \"w\").write(json.dumps(receipt))\nexcept Exception:\n    open({error_path:?}, \"w\").write(traceback.format_exc())\n    raise",
-        receipt_path = receipt_path,
-        error_path = error_path,
     )
 }
 
@@ -276,7 +274,7 @@ fn receipt_listing(dir: &Path) -> String {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .map(|entries| {
             entries
-                .filter_map(|entry| entry.ok())
+                .filter_map(std::result::Result::ok)
                 .map(|entry| entry.file_name().to_string_lossy().to_string())
                 .collect()
         })
@@ -610,9 +608,6 @@ fn record_cell(request: &str, name: &str, receipts_dir: &Path) -> String {
         .to_string();
     format!(
         "from rlm import host_request\nimport json, traceback\ntry:\n    result = await host_request({request})\n    open({receipt_path:?}, \"w\").write(json.dumps(result))\nexcept Exception:\n    open({error_path:?}, \"w\").write(traceback.format_exc())\n    raise",
-        request = request,
-        receipt_path = receipt_path,
-        error_path = error_path,
     )
 }
 
@@ -974,8 +969,10 @@ async fn family_edges_never_cross_families_end_to_end() {
     if let Ok(error) = std::fs::read_to_string(receipts_dir.join("kid-broadcast.error")) {
         panic!("kid kernel cell failed: {error}");
     }
-    // The child's broadcast reaches its parent alone (no siblings, no
-    // children, and never another family's session).
+    // The TS broadcast ("all") reaches the family roster, which for a
+    // subagent includes its own children; the grandkid's presence
+    // depends on the broadcast-versus-spawn interleaving, so pin the
+    // isolation, not the exact set.
     let kid_broadcast = read_recorded(&receipts_dir, "kid-broadcast.json");
     let kid_targets: Vec<&str> = kid_broadcast["receipts"]
         .as_array()
@@ -988,10 +985,19 @@ async fn family_edges_never_cross_families_end_to_end() {
                 .expect("receipt target")
         })
         .collect();
-    assert_eq!(
-        kid_targets,
-        vec![parent_a_active.as_str()],
-        "the child's broadcast stays inside its nuclear family: {kid_broadcast}"
+    let allowed = [parent_a_active.as_str(), grandkid_active.as_str()];
+    assert!(
+        kid_targets.iter().all(|target| allowed.contains(target)),
+        "the child's broadcast stays inside its own family: {kid_broadcast}"
+    );
+    assert!(
+        kid_targets.contains(&parent_a_active.as_str()),
+        "the child's broadcast reaches its parent: {kid_broadcast}"
+    );
+    assert!(
+        !kid_targets.contains(&kid_b_active.as_str())
+            && !kid_targets.contains(&parent_b_active.as_str()),
+        "the child's broadcast never crosses families: {kid_broadcast}"
     );
     if let Ok(error) = std::fs::read_to_string(receipts_dir.join("kid-observe.error")) {
         panic!("kid kernel cell failed: {error}");

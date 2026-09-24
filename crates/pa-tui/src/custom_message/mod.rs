@@ -284,7 +284,7 @@ fn slash_row_entries(
 fn compaction_outcome_entry(message: &Value, details: &Value) -> ChatEntry {
     let valid = message
         .get("content")
-        .map(|c| c.is_string())
+        .map(Value::is_string)
         .unwrap_or(false)
         && matches!(
             details.get("reason").and_then(Value::as_str),

@@ -697,8 +697,7 @@ fn acp_daemon_attached_serves_a_client_owned_session() {
     let (new_response, _) = client.wait_response(new, Duration::from_secs(60));
     assert!(
         new_response["result"]["sessionId"].is_string(),
-        "daemon-attached admission succeeds: {}",
-        new_response
+        "daemon-attached admission succeeds: {new_response}"
     );
     let session_id = new_response["result"]["sessionId"]
         .as_str()
@@ -1060,7 +1059,8 @@ fn acp_autonomous_disabled_reports_end_turn_without_accounting() {
     for update in &updates {
         let meta = &update["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"];
         assert!(
-            meta.get("autonomous").is_none_or(|v| v.is_null()),
+            meta.get("autonomous")
+                .is_none_or(serde_json::Value::is_null),
             "no autonomous meta"
         );
     }
@@ -1390,9 +1390,10 @@ fn acp_threshold_auto_compaction_publishes_the_compaction_meta() {
     let metas = compaction_metas(&updates);
     assert!(!metas.is_empty(), "the threshold arm ran: {updates:?}");
     assert!(
-        metas
-            .iter()
-            .all(|meta| meta.as_object().map(|o| o.is_empty()).unwrap_or(false)),
+        metas.iter().all(|meta| meta
+            .as_object()
+            .map(serde_json::Map::is_empty)
+            .unwrap_or(false)),
         "the single-turn compaction skipped: {metas:?}"
     );
 

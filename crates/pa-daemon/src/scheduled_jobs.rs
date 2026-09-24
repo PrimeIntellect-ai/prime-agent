@@ -79,7 +79,7 @@ impl QueueHooks {
         let core = self
             .core
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         HeartbeatSessionActivity {
             is_streaming: core.busy,
             is_compacting: core.compacting,
@@ -151,7 +151,7 @@ impl AgentCronSchedulerHooks for QueueHooks {
             let mut core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !core.created || core.shutdown_requested || job.status != JobStatus::Active {
                 return Ok(Some("skipped"));
             }
@@ -387,7 +387,7 @@ impl ScheduledJobs {
                 .hooks
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             core.steering
                 .retain(|item| item.queue_key.as_deref() != Some(key.as_str()));
             core.follow_up
@@ -454,7 +454,7 @@ impl Worker {
             let core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.bind_store_artifact(&core);
             let Some(store) = core.store.as_ref() else {
                 return;
@@ -490,7 +490,7 @@ impl Worker {
             let core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.bind_store_artifact(&core);
             (
                 core.runtime_kind == "subagent",
@@ -566,7 +566,7 @@ impl Worker {
             let core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.bind_store_artifact(&core);
         }
         let jobs: Vec<Value> = self
@@ -599,7 +599,7 @@ impl Worker {
             let core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.bind_store_artifact(&core);
             self.summary_locked(&core)
         };
@@ -659,7 +659,7 @@ impl Worker {
             let core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.bind_store_artifact(&core);
         }
         let managed = self.scheduled.store().manage_heartbeat(
@@ -696,7 +696,7 @@ impl Worker {
             let core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.bind_store_artifact(&core);
             let store = match core.store.as_ref() {
                 Some(store) if !store.path.as_os_str().is_empty() => store,
@@ -756,7 +756,7 @@ impl Worker {
             let core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.bind_store_artifact(&core);
         }
         match self
@@ -797,7 +797,7 @@ impl Worker {
             let core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.bind_store_artifact(&core);
         }
         let heartbeat = self
@@ -828,7 +828,7 @@ impl Worker {
             let core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.bind_store_artifact(&core);
             let store = match core.store.as_ref() {
                 Some(store) if !store.path.as_os_str().is_empty() => store,
@@ -907,7 +907,7 @@ impl Worker {
             let core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.bind_store_artifact(&core);
         }
         let outcome = match payload.get("action").and_then(Value::as_str) {
@@ -1329,7 +1329,7 @@ mod tests {
             let core = worker
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let (binding, _) = live_binding(&core).expect("the created session is persisted");
             worker
                 .scheduled
@@ -1396,7 +1396,7 @@ mod tests {
             let core = worker
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(store) = core.store.as_ref() else {
                 panic!("the session store vanished");
             };

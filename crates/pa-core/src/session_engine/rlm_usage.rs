@@ -334,15 +334,11 @@ impl RlmChildUsageAttributions {
             .lock()
             .expect("rlm usage fallback lock")
             .clone();
-        while let Some(weak) = link {
+        while let Some(ref weak) = link {
             let Some(producer) = weak.upgrade() else {
                 break;
             };
-            link = producer
-                .fallback
-                .lock()
-                .expect("rlm usage fallback lock")
-                .clone();
+            link.clone_from(&producer.fallback.lock().expect("rlm usage fallback lock"));
             chain.push(producer);
         }
         chain

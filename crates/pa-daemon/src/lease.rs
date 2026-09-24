@@ -77,7 +77,7 @@ impl SessionAlreadyActiveError {
 pub fn canonical_session_path(path: &Path) -> PathBuf {
     match path.canonicalize() {
         Ok(canonical) => canonical,
-        Err(_) => match path.parent().map(|parent| parent.canonicalize()) {
+        Err(_) => match path.parent().map(std::path::Path::canonicalize) {
             Some(Ok(parent)) => parent.join(path.file_name().unwrap_or_default()),
             _ => path.to_path_buf(),
         },
@@ -593,14 +593,14 @@ mod tests {
         let stale = std::sync::Arc::new(stale);
         let winner = std::sync::Arc::new(winner);
         let stale_task = {
-            let stale = stale.clone();
+            let stale = stale;
             std::thread::spawn(move || {
                 barrier_a.wait();
                 stale.append(&path_a, b"stale\n")
             })
         };
         let winner_task = {
-            let winner = winner.clone();
+            let winner = winner;
             std::thread::spawn(move || {
                 barrier_b.wait();
                 winner.append(&path_b, b"winner\n")

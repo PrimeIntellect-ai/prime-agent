@@ -99,7 +99,7 @@ pub fn thinking_level_map(
 ) -> std::collections::BTreeMap<ModelThinkingLevel, Option<String>> {
     pairs
         .iter()
-        .map(|(key, value)| (*key, value.map(|value| value.to_string())))
+        .map(|(key, value)| (*key, value.map(ToString::to_string)))
         .collect()
 }
 

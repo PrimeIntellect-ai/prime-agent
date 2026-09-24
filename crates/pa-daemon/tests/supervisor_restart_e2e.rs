@@ -778,10 +778,7 @@ fn plain_boot_revives_only_journal_busy_workers() {
 
     // The idle-at-exit session is skipped with a log line and stays off
     // the roster.
-    let skip_line = format!(
-        "session worker {idle_session} was idle at exit; not revived",
-        idle_session = idle_session
-    );
+    let skip_line = format!("session worker {idle_session} was idle at exit; not revived");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !std::fs::read_to_string(&log_path)
         .unwrap_or_default()

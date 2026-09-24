@@ -39,7 +39,7 @@ pub(crate) async fn settle_post_turn<T>(
     match operation.await {
         Ok(value) => Ok(PostTurnResult::Completed(value)),
         Err(error) => {
-            if signal.map(|s| s.is_aborted()).unwrap_or(false) && is_abort_error(&error) {
+            if signal.map(AbortSignal::is_aborted).unwrap_or(false) && is_abort_error(&error) {
                 Ok(PostTurnResult::Aborted)
             } else {
                 Err(error)
@@ -56,7 +56,7 @@ pub(crate) async fn poll_messages_unless_aborted(
     let Some(poll) = poll else {
         return Ok(Vec::new());
     };
-    if signal.map(|s| s.is_aborted()).unwrap_or(false) {
+    if signal.map(AbortSignal::is_aborted).unwrap_or(false) {
         return Ok(Vec::new());
     }
     race_with_abort(poll(), signal).await

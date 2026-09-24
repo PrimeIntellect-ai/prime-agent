@@ -175,7 +175,7 @@ impl Supervisor {
             let mut map = self
                 .opening_files
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             map.entry(key.clone())
                 .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
                 .clone()
@@ -208,7 +208,7 @@ impl Supervisor {
         let mut map = self
             .opening_files
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(entry) = map.get(key) {
             if Arc::strong_count(entry) == 1 {
                 map.remove(key);
@@ -333,7 +333,7 @@ impl Supervisor {
             .await
         {
             Ok(response) => {
-                let data = response.data.filter(|data| data.is_object());
+                let data = response.data.filter(serde_json::Value::is_object);
                 match (response.success, data) {
                     (true, Some(data)) => Ok(ReuseAnswer::Summary(data)),
                     _ => Err(anyhow!(

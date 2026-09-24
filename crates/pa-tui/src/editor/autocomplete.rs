@@ -184,7 +184,7 @@ impl Editor {
             let item = suggestions.items[0].clone();
             self.push_undo_snapshot();
             self.last_action = None;
-            let prefix = suggestions.prefix.clone();
+            let prefix = suggestions.prefix;
             let result = self.apply_completion(&item, &prefix);
             self.lines = result.lines;
             self.cursor_line = result.cursor_line;

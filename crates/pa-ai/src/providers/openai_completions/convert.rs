@@ -67,7 +67,7 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                             }),
                             crate::types::UserBlockPayload::Image { data, mime_type } => json!({
                                 "type": "image_url",
-                                "image_url": { "url": format!("data:{};base64,{}", mime_type, data) },
+                                "image_url": { "url": format!("data:{mime_type};base64,{data}") },
                             }),
                             crate::types::UserBlockPayload::Opaque(json) => json!({
                                 "type": "text",

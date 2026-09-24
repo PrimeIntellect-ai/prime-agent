@@ -49,3 +49,12 @@ tokio = { workspace = true, features = ["test-util"] }
 [[test]]
 name = "golden_system_prompt"
 path = "tests/golden/system_prompt.rs"
+
+[lints.clippy]
+redundant_clone = "warn"
+clone_on_copy = "warn"
+assigning_clones = "warn"
+unnecessary_to_owned = "warn"
+uninlined_format_args = "warn"
+collapsible_if = "warn"
+redundant_closure_for_method_calls = "warn"

@@ -304,7 +304,7 @@ pub fn acp_updates_for_event(
             })]
         }
         AcpEngineEvent::BashStart { command, run_id } => {
-            state.active_bash_run_id = run_id.clone();
+            state.active_bash_run_id.clone_from(run_id);
             vec![AcpSessionUpdate::ToolCall {
                 tool_call_id: bash_tool_call_id(run_id.clone()),
                 title: command.clone(),
@@ -440,7 +440,7 @@ fn ipython_rich_output(result: &Value) -> Option<Value> {
     let diff_count = details
         .get("diffs")
         .and_then(Value::as_array)
-        .map(|diffs| diffs.len());
+        .map(std::vec::Vec::len);
     if attachments.is_empty() && diff_count.is_none() {
         return None;
     }

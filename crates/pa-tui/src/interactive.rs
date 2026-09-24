@@ -718,6 +718,11 @@ async fn run_interactive_surface(
     let (heartbeats_tx, mut heartbeats_rx) =
         mpsc::unbounded_channel::<crate::session_ui::HeartbeatsUpdate>();
     let (bash_tx, mut bash_rx) = mpsc::unbounded_channel::<crate::session_ui::BashActivityUpdate>();
+    // Background slash-command-catalog refreshes (`get_commands`) report
+    // here; the loop folds the session's skill commands into the
+    // autocomplete provider.
+    let (commands_tx, mut commands_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::CommandCatalogUpdate>();
     // The double-Ctrl+C force-quit guard: the terminal reader observes the
     // pair even while this loop is wedged in a daemon request, and a plain
     // std-thread watchdog enforces the exit deadline without the runtime.
@@ -786,6 +791,7 @@ async fn run_interactive_surface(
         crate::session_ui::ActivityUpdates {
             heartbeats: heartbeats_tx,
             bash: bash_tx,
+            commands: commands_tx,
         },
     )
     .await
@@ -1440,6 +1446,11 @@ async fn run_interactive_surface(
                     session.apply_bash_activity(update, &mut view);
                 }
             }
+            maybe_commands = commands_rx.recv() => {
+                if let Some(update) = maybe_commands {
+                    session.apply_command_catalog(update, &mut view);
+                }
+            }
             _reconnect_tick = async {
                 match reconnect.as_ref() {
                     Some(state) => tokio::time::sleep_until(state.next_attempt).await,
@@ -1835,7 +1846,7 @@ async fn run_interactive_surface(
 /// Seed the static chrome state for a fresh interactive run: splash
 /// version/cwd, top-bar name, and the `manage` hint for persisted sessions.
 fn apply_startup_chrome(view: &mut AgentView, options: &InteractiveOptions) {
-    view.chrome.version = options.version.clone();
+    view.chrome.version.clone_from(&options.version);
     view.chrome.cwd = options.cwd.to_string_lossy().to_string();
     view.chrome.chat_name = crate::chrome::display_name(&view.chrome.cwd);
     view.chrome.show_manage = !options.no_session;
@@ -1862,8 +1873,8 @@ async fn check_tmux_keyboard_setup() -> Option<String> {
         )
         .await
         .ok()
-        .and_then(|joined| joined.ok())
-        .and_then(|output| output.ok())
+        .and_then(Result::ok)
+        .and_then(Result::ok)
         .and_then(|output| {
             if output.status.success() {
                 Some(String::from_utf8_lossy(&output.stdout).trim().to_string())

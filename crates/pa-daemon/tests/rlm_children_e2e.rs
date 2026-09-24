@@ -231,7 +231,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
     // detached task prompt at the boundary the worker would signal.
     children.notify_turn_done();
     assert_eq!(handle.name, "worker-a");
-    assert!(handle.rlm_child_id.starts_with("sub-"), "{:?}", handle);
+    assert!(handle.rlm_child_id.starts_with("sub-"), "{handle:?}");
     assert_eq!(handle.model, "scripted/faux-1");
     // TS child-session layout: the child persists inside its per-child
     // directory under the parent's session-artifacts tree.
@@ -245,7 +245,7 @@ async fn rlm_children_spawn_roster_collect_delete_end_to_end() {
     // per-child display file the passive roster reads for hydration.
     let child_files: Vec<std::fs::DirEntry> = std::fs::read_dir(&expected_dir)
         .expect("child session dir")
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|entry| {
             entry
                 .path()

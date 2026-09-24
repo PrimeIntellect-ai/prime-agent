@@ -461,7 +461,7 @@ mod tests {
     async fn goal_continuation_loop_mints_per_settled_turn() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut bed =
             AcpGoalBed::new(json!({ "responses": ["one", "two", "three"] }), 128_000).await;
         let (response, notifications) = bed.prompt("/goal keep working".to_string()).await;
@@ -503,7 +503,7 @@ mod tests {
     async fn budget_crossing_runs_the_wrap_up_steer_and_settles() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut bed = AcpGoalBed::new(
             json!({ "responses": ["GOAL-PROGRESS", "WRAP-UP"] }),
             128_000,
@@ -539,7 +539,7 @@ mod tests {
     async fn threshold_arm_queues_the_goal_continuation_before_compacting() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut bed = AcpGoalBed::new(
             json!({
                 "responses": [
@@ -610,7 +610,7 @@ mod tests {
     async fn compact_command_with_active_goal_mints_the_continue() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // No threshold interference (reserve 0 keeps the full window
         // free), and two seeded turns so the manual compact runs (a
         // single-turn session skips).
@@ -658,7 +658,7 @@ mod tests {
     async fn cancelled_threshold_compaction_rolls_back_the_mint() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut bed = AcpGoalBed::new(
             json!({
                 "responses": [

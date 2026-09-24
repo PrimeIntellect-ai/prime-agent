@@ -555,7 +555,7 @@ fn package_manager_corpus_matches_ts_binary() {
     assert_eq!(
         std::fs::read_dir(&git_root)
             .unwrap()
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .count(),
         1
     );

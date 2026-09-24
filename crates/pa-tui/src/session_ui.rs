@@ -124,6 +124,16 @@ pub(crate) struct HeartbeatsUpdate {
 pub(crate) struct ActivityUpdates {
     pub heartbeats: mpsc::UnboundedSender<HeartbeatsUpdate>,
     pub bash: mpsc::UnboundedSender<BashActivityUpdate>,
+    pub commands: mpsc::UnboundedSender<CommandCatalogUpdate>,
+}
+
+/// A landed `get_commands` refresh (TS `refreshCommandCatalogForCurrentSession`
+/// over `connectionCommands`): the session's `skill:` commands for the
+/// autocomplete provider. A response from an older refresh (a rebind raced
+/// a fetch) never applies — the epoch drops it.
+pub(crate) struct CommandCatalogUpdate {
+    pub epoch: u64,
+    pub skill_commands: Vec<crate::autocomplete::SlashCommandEntry>,
 }
 
 /// Kernel-bash channel frames: list snapshots refresh the dock and the
@@ -411,6 +421,17 @@ pub(crate) struct SessionUi {
     /// Monotonic epoch of the newest heartbeat refresh; an older
     /// response never overwrites a newer catalog.
     heartbeat_refresh_epoch: u64,
+    /// Where background `get_commands` refreshes deliver the session's
+    /// skill commands (the run loop folds them into the autocomplete
+    /// provider).
+    command_updates: mpsc::UnboundedSender<CommandCatalogUpdate>,
+    /// Monotonic epoch of the newest command-catalog refresh; an older
+    /// response (a rebind raced the fetch) never applies to the current
+    /// session's provider.
+    command_refresh_epoch: u64,
+    /// The session's fetched skill commands (the `enableSkillCommands`
+    /// toggle re-applies them without a daemon round trip).
+    skill_commands_cache: Vec<crate::autocomplete::SlashCommandEntry>,
     /// The current Python bash() registry snapshot from the owning kernel.
     bash_activities: Value,
     /// Monotonic id of the latest issued kernel-bash list request; a late
@@ -684,6 +705,9 @@ impl SessionUi {
             heartbeat_refresh_in_flight: false,
             heartbeat_refresh_queued: false,
             heartbeat_refresh_epoch: 0,
+            command_updates: activity_updates.commands,
+            command_refresh_epoch: 0,
+            skill_commands_cache: Vec::new(),
             bash_activities: serde_json::json!({"activities": []}),
             bash_list_epoch: 0,
             bash_updates: activity_updates.bash,
@@ -887,8 +911,8 @@ impl SessionUi {
                 .await;
         }
         self.session_id = reconstructed.session_id;
-        self.session_name = reconstructed.session_name.clone();
-        self.service_tier = reconstructed.service_tier.clone();
+        self.session_name.clone_from(&reconstructed.session_name);
+        self.service_tier.clone_from(&reconstructed.service_tier);
         self.session_file = attach
             .snapshot
             .get("state")
@@ -907,6 +931,11 @@ impl SessionUi {
         // refreshes the catalog on every chat open).
         self.heartbeat_catalog.clear();
         self.spawn_heartbeat_refresh();
+        // The slash-command catalog is session-scoped too (TS
+        // `refreshConnectionCatalog` fetches `get_commands` on every
+        // rebind): the skill commands land in the autocomplete provider
+        // when the response arrives.
+        self.spawn_command_catalog_refresh();
         // The bash registry is kernel-owned and session-scoped: the previous
         // session's rows are not this one's (the next poll refills).
         self.bash_activities = serde_json::json!({"activities": []});
@@ -3247,7 +3276,7 @@ impl SessionUi {
             Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
             _ => std::env::current_exe()
                 .ok()
-                .and_then(|exe| exe.parent().map(|parent| parent.to_path_buf()))
+                .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
                 .unwrap_or_else(|| PathBuf::from(".")),
         };
         package_dir.join("CHANGELOG.md")
@@ -4048,7 +4077,7 @@ impl SessionUi {
         // ships the builtins).
         values.available_themes = pa_types::themes::BUILTIN_THEME_NAMES
             .iter()
-            .map(|name| name.to_string())
+            .map(ToString::to_string)
             .collect();
         let rows = crate::settings_menu::settings_menu_rows(&values);
         view.settings_menu = Some(crate::settings_menu::SettingsMenu::new(rows));
@@ -4141,6 +4170,22 @@ impl SessionUi {
                     value,
                     view,
                 );
+                // TS `onEnableSkillCommandsChange` calls
+                // `setupAutocompleteProvider()` immediately: the cached
+                // skill list re-applies under the new setting value
+                // (no daemon round trip — the list the last refresh
+                // fetched is still the session's inventory).
+                let enabled = self
+                    .client_settings
+                    .as_ref()
+                    .is_some_and(|settings| settings.enable_skill_commands());
+                let skills = if enabled {
+                    self.skill_commands_cache.clone()
+                } else {
+                    Vec::new()
+                };
+                view.editor.set_autocomplete_skill_commands(skills);
+                self.dirty = true;
             }
             "builtin-skills" => {
                 self.persist_bool_setting(
@@ -4646,6 +4691,9 @@ impl SessionUi {
                 // TS `refreshConnectionCatalog`: the daemon's model catalog
                 // re-fetch lands through the run loop's channel.
                 self.spawn_model_catalog_refresh();
+                // The same refresh re-fetches the slash-command catalog
+                // (skills the reload may have changed).
+                self.spawn_command_catalog_refresh();
                 // TS `showStatus`: tracked, so a back-to-back status
                 // (e.g. the `/thinking` unavailable row) rewrites it in
                 // place.
@@ -4866,7 +4914,7 @@ impl SessionUi {
         if data
             .get("flatNodes")
             .and_then(Value::as_array)
-            .is_none_or(|nodes| nodes.is_empty())
+            .is_none_or(Vec::is_empty)
         {
             self.note("No entries in session", view);
             return Ok(());
@@ -6302,6 +6350,85 @@ impl SessionUi {
         });
     }
 
+    /// Fetch the session's slash-command catalog in the background (TS
+    /// `refreshConnectionCatalog`'s `getCommands` arm, best-effort with a
+    /// bounded wait like the heartbeat refresh): the response carries the
+    /// `skill:` commands the autocomplete provider lists. A fetch races a
+    /// rebind silently — the epoch drops the stale response at fold time.
+    pub(crate) fn spawn_command_catalog_refresh(&mut self) {
+        self.command_refresh_epoch += 1;
+        let epoch = self.command_refresh_epoch;
+        // TS's rebind completes only after the fresh catalog lands
+        // (`refreshConnectionCatalog` is awaited before the provider
+        // rebuild), so the menu never serves the previous session's
+        // skills. The clear rides the same FIFO channel ahead of the
+        // fetch's response (this send completes before the spawn below
+        // runs), so the old rows drop immediately and the fresh fetch
+        // repopulates — a rebind never offers stale cross-session
+        // commands.
+        let _ = self.command_updates.send(CommandCatalogUpdate {
+            epoch,
+            skill_commands: Vec::new(),
+        });
+        let updates = self.command_updates.clone();
+        let client = self.client.clone();
+        let active_session_id = self.active_session_id.clone();
+        tokio::spawn(async move {
+            let request = DaemonCommand::GetCommands {
+                id: None,
+                active_session_id,
+                rest: Default::default(),
+            };
+            let fetched = tokio::time::timeout(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                client.request_ok(request),
+            )
+            .await;
+            let skill_commands = match fetched {
+                Ok(Ok(data)) => crate::autocomplete::skill_command_entries(&data),
+                // TS `refreshCommandCatalogForCurrentSession` clears the
+                // catalog on failure (`connectionCommands = []`); the
+                // attach-time fetch keeps nothing either.
+                Ok(Err(_)) | Err(_) => Vec::new(),
+            };
+            let _ = updates.send(CommandCatalogUpdate {
+                epoch,
+                skill_commands,
+            });
+        });
+    }
+
+    /// Fold a landed command-catalog refresh into the session (TS
+    /// `refreshConnectionCatalog` -> `setupAutocompleteProvider`): the
+    /// `skill:` commands replace the provider's list — gated by the
+    /// `enableSkillCommands` setting (TS default true) — and a stale
+    /// epoch never applies.
+    pub(crate) fn apply_command_catalog(
+        &mut self,
+        update: CommandCatalogUpdate,
+        view: &mut AgentView,
+    ) {
+        if update.epoch < self.command_refresh_epoch {
+            return;
+        }
+        // The cache keeps the raw fetch (the toggle re-applies it under
+        // the setting's new value); the setting gates only what the
+        // provider lists. The TS default (true) applies when the
+        // composition root supplies no settings seam.
+        self.skill_commands_cache = update.skill_commands;
+        let skills = if self
+            .client_settings
+            .as_ref()
+            .is_none_or(|settings| settings.enable_skill_commands())
+        {
+            self.skill_commands_cache.clone()
+        } else {
+            Vec::new()
+        };
+        view.editor.set_autocomplete_skill_commands(skills);
+        self.dirty = true;
+    }
+
     /// Fold a landed heartbeat-catalog refresh into the session: re-scope
     /// and re-sort, keep the open view's selection, surface the fetch
     /// error, and re-sync the activity dock (TS `applyHeartbeatCatalog` over
@@ -6335,7 +6462,7 @@ impl SessionUi {
         } else {
             let mut heartbeats = self.scope_heartbeats(update.heartbeats);
             sort_heartbeats(&mut heartbeats);
-            self.heartbeat_catalog = heartbeats.clone();
+            self.heartbeat_catalog.clone_from(&heartbeats);
             if let Some(picker) = view.heartbeats_picker.as_mut() {
                 picker.apply_catalog(heartbeats, None);
             }
@@ -8196,8 +8323,8 @@ impl SessionUi {
                     bash.exit_code = exit_code;
                     bash.cancelled = cancelled;
                     bash.truncated = truncated;
-                    bash.full_output_path = full_output_path.clone();
-                    bash.error_message = error_message.clone();
+                    bash.full_output_path.clone_from(&full_output_path);
+                    bash.error_message.clone_from(&error_message);
                 }
                 if run.seed_transcript && !cancelled && error_message.is_none() {
                     let raw = pane
@@ -8213,7 +8340,7 @@ impl SessionUi {
                         truncated || tail_truncated,
                         full_output_path.as_deref(),
                     );
-                    pane.extra_seeds.push((run.input.clone(), answer));
+                    pane.extra_seeds.push((run.input, answer));
                 }
             }
         }
@@ -8246,12 +8373,9 @@ impl SessionUi {
                 if let Some(card) = view.pending_bash.iter_mut().find(|card| card.id == card_id) {
                     match &error_message {
                         Some(message) => card.set_failed(message),
-                        None => card.set_complete(
-                            exit_code,
-                            cancelled,
-                            truncated,
-                            full_output_path.clone(),
-                        ),
+                        None => {
+                            card.set_complete(exit_code, cancelled, truncated, full_output_path)
+                        }
                     }
                 }
             }
@@ -8836,7 +8960,7 @@ async fn describe_session_open_failure(
     )
     .await
     .ok()
-    .and_then(|result| result.ok())
+    .and_then(Result::ok)
     .map(|data| crate::session_open_error::roster_rows(&data).to_vec())
     .unwrap_or_default();
     // The path-keyed lookup first; the refusal's own holder id is the

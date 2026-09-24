@@ -1209,7 +1209,7 @@ mod tests {
 
         let mut options = run_options_for_continue(dir.path());
         options.session.continue_recent = true;
-        options.session.session_dir = Some(session_dir.clone());
+        options.session.session_dir = Some(session_dir);
         let view = continue_recent_view(&options, false).expect("candidate resolves");
         assert_eq!(
             view.session_id, "newest00000000000000000000000001",

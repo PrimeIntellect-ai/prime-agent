@@ -693,7 +693,7 @@ pub(crate) mod tests {
         let supervisor = Arc::new(
             Supervisor::new(crate::supervisor::SupervisorOptions {
                 socket_path: dir.join("daemon.sock"),
-                agent_dir: agent_dir.clone(),
+                agent_dir,
             })
             .expect("supervisor"),
         );

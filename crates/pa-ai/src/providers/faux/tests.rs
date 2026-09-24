@@ -29,7 +29,10 @@ fn register() -> FauxProviderRegistration {
 
 async fn event_types(model: &Model, context: &Context) -> Vec<&'static str> {
     let events = stream(model, context, None).unwrap().collect().await;
-    events.iter().map(|event| event.event_type()).collect()
+    events
+        .iter()
+        .map(crate::event_stream::AssistantMessageEventExt::event_type)
+        .collect()
 }
 
 #[tokio::test]
@@ -772,7 +775,10 @@ async fn streams_an_explicit_assistant_error_message_as_a_terminal_error() {
     .collect()
     .await;
 
-    let types: Vec<&str> = events.iter().map(|e| e.event_type()).collect();
+    let types: Vec<&str> = events
+        .iter()
+        .map(crate::event_stream::AssistantMessageEventExt::event_type)
+        .collect();
     assert_eq!(
         types,
         vec!["start", "text_start", "text_delta", "text_end", "error"]
@@ -810,7 +816,10 @@ async fn streams_an_explicit_assistant_aborted_message_as_a_terminal_error() {
     .collect()
     .await;
 
-    let types: Vec<&str> = events.iter().map(|e| e.event_type()).collect();
+    let types: Vec<&str> = events
+        .iter()
+        .map(crate::event_stream::AssistantMessageEventExt::event_type)
+        .collect();
     assert_eq!(
         types,
         vec!["start", "text_start", "text_delta", "text_end", "error"]

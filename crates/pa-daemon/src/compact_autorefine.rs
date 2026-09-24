@@ -267,7 +267,7 @@ mod tests {
     fn threshold_compaction_runs_the_compact_trigger_review() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let headroom = crossing_headroom();
         let (engine, _dir) = trigger_engine(
             json!({
@@ -322,7 +322,7 @@ mod tests {
     fn the_declining_review_stamps_the_cooldown() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // reserve 1: the headroom never crosses, so only the manual
         // compaction runs.
         let (engine, _dir) = trigger_engine(
@@ -402,7 +402,7 @@ mod tests {
     fn sessions_without_the_refine_surface_never_run_a_review() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let headroom = crossing_headroom();
         let (engine, _dir) = trigger_engine(
             json!({
@@ -453,7 +453,7 @@ mod tests {
     fn manual_compaction_arms_and_consumes_the_round() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = trigger_engine(
             json!({
                 "responses": [

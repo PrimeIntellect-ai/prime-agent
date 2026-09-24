@@ -80,7 +80,7 @@ impl BashExecutionCard {
         let new_lines: Vec<&str> = clean.split('\n').collect();
         if self.output_lines.is_empty() {
             self.output_lines
-                .extend(new_lines.iter().map(|line| line.to_string()));
+                .extend(new_lines.iter().map(ToString::to_string));
         } else {
             let last = self
                 .output_lines
@@ -88,7 +88,7 @@ impl BashExecutionCard {
                 .expect("checked non-empty above");
             last.push_str(new_lines[0]);
             self.output_lines
-                .extend(new_lines[1..].iter().map(|line| line.to_string()));
+                .extend(new_lines[1..].iter().map(ToString::to_string));
         }
     }
 

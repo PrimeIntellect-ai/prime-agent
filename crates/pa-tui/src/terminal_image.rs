@@ -211,7 +211,7 @@ pub fn test_state_lock() -> std::sync::MutexGuard<'static, ()> {
     static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Override the cached capabilities (tests exercise both image paths).
@@ -223,7 +223,7 @@ pub fn set_capabilities(caps: TerminalCapabilities) {
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The current cell dimensions (TS `getCellDimensions`).

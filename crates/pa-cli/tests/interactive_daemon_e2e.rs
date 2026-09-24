@@ -1824,7 +1824,7 @@ async fn tui_big_streamed_turns_render_at_the_producer_rate() {
         .flat_map(|frame| frame.lines())
         .flat_map(|line| line.split_whitespace())
         .filter(|word| word.starts_with("MARK-"))
-        .map(|word| word.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
     assert!(
         marks.len() >= 5,

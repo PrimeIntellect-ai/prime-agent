@@ -346,7 +346,9 @@ pub fn reserved_mcp_ownership(
     let canonical = service.transport.endpoint() == Some(url.as_str())
         && config_uses_oauth(config)
         && bearer_token_env_var.is_none()
-        && headers.as_ref().is_none_or(|headers| headers.is_empty());
+        && headers
+            .as_ref()
+            .is_none_or(std::collections::HashMap::is_empty);
     if canonical {
         ReservedOwnership::Canonical
     } else {
@@ -494,7 +496,6 @@ pub fn mcp_login_eligibility(
     };
     let repair_endpoint = match &exact_record {
         Some(record) => bound_endpoint
-            .clone()
             .filter(|bound| bound == &record.endpoint)
             .or_else(|| {
                 verified_endpoint

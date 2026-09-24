@@ -594,10 +594,10 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
     let mut stream = match Arc::try_unwrap(stream) {
         Ok(mutex) => mutex
             .into_inner()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
         Err(stream) => stream
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone_stream(),
     };
     let full_output = stream.chunks.join("");

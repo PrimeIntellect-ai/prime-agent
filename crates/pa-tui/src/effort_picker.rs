@@ -157,7 +157,7 @@ mod tests {
     fn levels() -> Vec<String> {
         ["off", "low", "medium", "high"]
             .iter()
-            .map(|level| level.to_string())
+            .map(ToString::to_string)
             .collect()
     }
 

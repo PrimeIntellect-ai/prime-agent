@@ -136,7 +136,7 @@ pub async fn ensure_kernel_python(options: EnsureKernelPythonOptions) -> anyhow:
     let shared = {
         let mut in_flight = IN_FLIGHT
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match in_flight.as_ref() {
             Some((existing_key, promise)) if *existing_key == key => promise.clone(),
             _ => {
@@ -155,7 +155,7 @@ pub async fn ensure_kernel_python(options: EnsureKernelPythonOptions) -> anyhow:
     // a cached rejection forever.
     let mut in_flight = IN_FLIGHT
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if matches!(in_flight.as_ref(), Some((_, promise)) if Arc::ptr_eq(promise, &shared)) {
         *in_flight = None;
     }

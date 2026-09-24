@@ -10,6 +10,7 @@
 //! `text_ops` (deletion/yank), `motion` (cursor movement), `input` (key
 //! dispatch), `autocomplete`, and `layout` (rendering-facing layout).
 
+use crate::autocomplete::SlashCommandEntry;
 use crate::keybindings::KeybindingsManager;
 use crate::width::is_whitespace_char;
 use std::collections::HashMap;
@@ -207,6 +208,26 @@ impl Editor {
         }
     }
 
+    /// Replace the provider's `skill:` commands (TS
+    /// `setupAutocompleteProvider` rebuilds the command list with the
+    /// session's skills; this port swaps the list on the installed
+    /// provider). The open dropdown — if any — drops, because its rows
+    /// came from the old catalog (TS `setAutocompleteProvider` cancels
+    /// too), but a PARKED request stays: the host loop materializes it
+    /// against the new provider, so a `/` typed while the catalog
+    /// refresh was still in flight still opens its menu (Cursor thread:
+    /// the swap must not eat the parked request).
+    pub fn set_autocomplete_skill_commands(&mut self, skills: Vec<SlashCommandEntry>) {
+        let was_showing = self.autocomplete.is_some();
+        self.autocomplete = None;
+        if was_showing {
+            self.emit(EditorEvent::AutocompleteToggled(false));
+        }
+        if let Some(provider) = self.autocomplete_provider.as_mut() {
+            provider.set_skill_commands(skills);
+        }
+    }
+
     pub fn is_showing_autocomplete(&self) -> bool {
         self.autocomplete.is_some()
     }
@@ -349,7 +370,7 @@ impl Editor {
     }
 
     fn set_text_internal(&mut self, text: &str) {
-        let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+        let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
         self.lines = if lines.is_empty() {
             vec![String::new()]
         } else {
@@ -473,7 +494,7 @@ impl Editor {
         }
         let line = self.lines[self.cursor_line].clone();
         let (before, after) = split_at_char(&line, self.cursor_col);
-        self.lines[self.cursor_line] = format!("{}{}{}", before, ch, after);
+        self.lines[self.cursor_line] = format!("{before}{ch}{after}");
         self.set_cursor_col(self.cursor_col + ch.chars().count());
         self.emit(EditorEvent::Changed(self.get_text()));
         self.maybe_autocomplete_after_insert(ch);
@@ -484,11 +505,11 @@ impl Editor {
             return;
         }
         let normalized = normalize_text(text);
-        let inserted: Vec<String> = normalized.split('\n').map(|s| s.to_string()).collect();
+        let inserted: Vec<String> = normalized.split('\n').map(str::to_string).collect();
         let current_line = self.lines[self.cursor_line].clone();
         let (before, after) = split_at_char(&current_line, self.cursor_col);
         if inserted.len() == 1 {
-            self.lines[self.cursor_line] = format!("{}{}{}", before, normalized, after);
+            self.lines[self.cursor_line] = format!("{before}{normalized}{after}");
             self.set_cursor_col(self.cursor_col + normalized.chars().count());
         } else {
             let mut new_lines: Vec<String> = Vec::with_capacity(self.lines.len() + inserted.len());
@@ -571,7 +592,7 @@ impl Editor {
             let char_before = char_at(line, self.cursor_col.saturating_sub(1));
             if let Some(c) = char_before {
                 if c.is_alphanumeric() || c == '_' {
-                    filtered = format!(" {}", filtered);
+                    filtered = format!(" {filtered}");
                 }
             }
         }
@@ -581,7 +602,7 @@ impl Editor {
             let id = self.paste_counter;
             self.pastes.insert(id, filtered.clone());
             let marker = if line_count > LARGE_PASTE_LINES {
-                format!("[paste #{} +{} lines]", id, line_count)
+                format!("[paste #{id} +{line_count} lines]")
             } else {
                 format!("[paste #{} {} chars]", id, filtered.chars().count())
             };

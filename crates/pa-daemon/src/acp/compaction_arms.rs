@@ -117,13 +117,13 @@ impl CompactionArms {
         *self
             .overflow_recovery
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = OverflowRecovery::Idle;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = OverflowRecovery::Idle;
     }
 
     fn overflow_recovery(&self) -> std::sync::MutexGuard<'_, OverflowRecovery> {
         self.overflow_recovery
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Abort an in-flight arm compaction (TS `abortCompaction`): the
@@ -133,7 +133,7 @@ impl CompactionArms {
         if let Some(controller) = self
             .auto_compaction_abort
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take()
         {
             controller.abort();
@@ -145,7 +145,7 @@ impl CompactionArms {
         *self
             .auto_compaction_abort
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&controller));
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&controller));
         controller
     }
 
@@ -153,7 +153,7 @@ impl CompactionArms {
         let mut slot = self
             .auto_compaction_abort
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if slot
             .as_ref()
             .is_some_and(|live| Arc::ptr_eq(live, controller))
@@ -917,7 +917,7 @@ mod tests {
     async fn threshold_arm_compacts_and_publishes_the_acp_meta() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Probe: the seed turn's total usage (system prompt included).
         let mut probe =
             acp_test_bed(json!({ "responses": [{ "text": "seed reply" }] }), 1, 10).await;
@@ -980,7 +980,7 @@ mod tests {
     async fn below_headroom_no_arm_fires() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut bed =
             acp_test_bed(json!({ "responses": [{ "text": "small reply" }] }), 1, 10).await;
         let (response, notifications) = bed.prompt("small turn".to_string()).await;
@@ -1000,7 +1000,7 @@ mod tests {
     async fn overflow_arm_compacts_and_retries_the_turn() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut bed = acp_test_bed(
             json!({
                 "responses": [
@@ -1049,7 +1049,7 @@ mod tests {
     async fn overflow_retry_that_overflows_again_reports_once() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut bed = acp_test_bed(
             json!({
                 "responses": [
@@ -1109,7 +1109,7 @@ mod tests {
     async fn requested_arm_consumes_the_scheduled_compaction() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut bed = acp_test_bed(
             json!({
                 "responses": [
@@ -1160,7 +1160,7 @@ mod tests {
     async fn requested_arm_skip_publishes_the_empty_payload() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // `keepRecentTokens` beyond the whole session: the cut keeps
         // everything, so the compaction skips as too short.
         let mut bed = acp_test_bed(
@@ -1202,7 +1202,7 @@ mod tests {
     async fn overflow_state_resets_per_agent_run() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut bed = acp_test_bed(
             json!({
                 "responses": [
@@ -1251,7 +1251,7 @@ mod tests {
     async fn overflow_retry_turn_adds_no_user_row() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut bed = acp_test_bed(
             json!({
                 "responses": [

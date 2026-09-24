@@ -47,7 +47,7 @@ impl MistralToolCallIdNormalizer {
 
 /// Port of `deriveMistralToolCallId`.
 pub(crate) fn derive_mistral_tool_call_id(id: &str, attempt: u32) -> String {
-    let normalized: String = id.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let normalized: String = id.chars().filter(char::is_ascii_alphanumeric).collect();
     if attempt == 0 && normalized.len() == MISTRAL_TOOL_CALL_ID_LENGTH {
         return normalized;
     }
@@ -63,7 +63,7 @@ pub(crate) fn derive_mistral_tool_call_id(id: &str, attempt: u32) -> String {
     };
     short_hash(&seed)
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .take(MISTRAL_TOOL_CALL_ID_LENGTH)
         .collect()
 }
@@ -183,7 +183,7 @@ fn to_chat_messages(messages: &[Message], supports_images: bool) -> Vec<Value> {
                             {
                                 content.push(json!({
                                     "type": "image_url",
-                                    "image_url": format!("data:{};base64,{}", mime_type, data),
+                                    "image_url": format!("data:{mime_type};base64,{data}"),
                                 }));
                             }
                             crate::types::UserBlockPayload::Image { .. } => {}

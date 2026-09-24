@@ -98,7 +98,7 @@ pub fn worker_launch_env(
             crate::worker::WORKER_RECOVERY_JOURNAL_ENV.to_string(),
             descriptor.recovery_journal_path.clone(),
         ),
-        (crate::worker::WORKER_CWD_ENV.to_string(), cwd.clone()),
+        (crate::worker::WORKER_CWD_ENV.to_string(), cwd),
         (
             crate::paths::AGENT_DIR_ENV.to_string(),
             agent_dir.to_string_lossy().to_string(),

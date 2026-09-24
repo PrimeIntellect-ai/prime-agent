@@ -136,7 +136,7 @@ pub fn entry_to_items(entry: &FileEntry) -> Vec<TranscriptItem> {
             task_state: payload
                 .status
                 .task_state
-                .map(|t| format!("{:?}", t).to_lowercase())
+                .map(|t| format!("{t:?}").to_lowercase())
                 .unwrap_or_default(),
         }],
         FileEntry::ModelChange { payload, .. } => vec![TranscriptItem::ModelChange {
