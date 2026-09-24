@@ -710,7 +710,7 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             text,
-            " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 bash"
+            " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells"
         );
         // Finished-only bash rows keep the dock mounted (the bash view's
         // history stays reachable) while the indicator reads zero live

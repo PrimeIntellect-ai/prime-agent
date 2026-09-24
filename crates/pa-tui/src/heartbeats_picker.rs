@@ -1582,7 +1582,12 @@ mod tests {
             .iter()
             .find(|row| row.contains("Interval") && row.contains("Next run"))
             .expect("the header");
-        let (Some(h), Some(r)) = (header.find("Status"), row.find("\u{25d0}")) else {
+        // The display column is a CHAR offset (the glyphs before the
+        // status cell are multi-byte UTF-8; a byte offset would read the
+        // row as misaligned).
+        let column_of =
+            |text: &str, needle: &str| text.find(needle).map(|byte| text[..byte].chars().count());
+        let (Some(h), Some(r)) = (column_of(header, "Status"), column_of(row, "\u{25d0}")) else {
             panic!("header and row status cells: {header:?} {row:?}");
         };
         assert_eq!(h, r, "the status column aligns: {header:?} vs {row:?}");
