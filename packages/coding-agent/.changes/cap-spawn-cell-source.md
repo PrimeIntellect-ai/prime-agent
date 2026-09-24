@@ -1,1 +1,0 @@
-- Capped the spawning cell source attached to kernel host requests at 2KB with a truncation marker, so oversized cells stop re-shipping their full source on every spawn/progress-note/collect round trip and in each child's persisted spawnCode.

@@ -1,1 +1,0 @@
-- Fixed spawn name reservations releasing before admission was durable, which let two parallel same-name spawns both admit and write duplicate ledger edges that made child selectors ambiguous.

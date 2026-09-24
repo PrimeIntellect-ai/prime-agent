@@ -1,1 +1,0 @@
-- Added an optional `modelOverride` run field: when set, prompt and continuation runs use that model (with its own thinking level and service tier) while `state.model` keeps identifying the session model; failures are tagged with the model that served the run.

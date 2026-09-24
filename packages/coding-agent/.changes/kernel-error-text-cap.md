@@ -1,3 +1,0 @@
-- Fixed a Python cell raising an exception with a huge message restarting the kernel through protocol repair: error text and traceback entries are now capped at 1 Mi characters with a truncation marker, like result text, so the error is reported in the cell.
-- Fixed an oversized `host_request` payload (for example a huge skill-call argument) tearing the kernel protocol and restarting the kernel: `rlm.host_request()` now raises `ValueError` in the calling cell, like `emit()` does for display payloads.
-- Fixed a stale background `bash()` completion notice waking the model after it had already read the finished handle's result in the same turn ([#2372](https://github.com/PrimeIntellect-ai/prime-agent/pull/2372)).
