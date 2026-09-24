@@ -22,8 +22,8 @@
 //! the predecessor identity by the socket path alone.
 //!
 //! What the reap takes, exactly:
-//! - Worker processes (`worker` as their first argument - the argv the
-//!   supervisor spawns) whose `PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET`
+//! - Worker processes (`worker` as the first argument of a product binary -
+//!   the argv the supervisor spawns) whose `PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET`
 //!   names THIS daemon's socket, minus the pids this daemon's own
 //!   descriptors name (those are the adoption pass's business: a crash
 //!   restart's live workers re-register and keep serving - the
@@ -31,7 +31,10 @@
 //!   the supervisor-socket env var propagates to every process a session
 //!   worker spawns (kernels, bash children, tool servers), and an env-only
 //!   match would kill a session's whole process tree at the next daemon
-//!   boot - the readoption_wake regression this gate exists for.
+//!   boot - the readoption_wake regression this gate exists for. The
+//!   target's own endpoint path gates only the cleanup unlink (a
+//!   validated deterministic name); the kill never depends on the
+//!   endpoint file.
 //! - Supervisor processes of THIS socket path that are not this process:
 //!   a wedged predecessor (alive but unreachable - its socket was probed
 //!   stale and replaced) would otherwise keep its orphaned listener and
@@ -103,22 +106,21 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
     let socket_path = supervisor.options.socket_path.clone();
     let descriptor_dir = supervisor.descriptor_dir();
     // The adoption pass's business, never the reap's: the pids this
-    // daemon's own descriptors name, protected only while the process
-    // identity still matches the descriptor (a recycled pid is a different
-    // process and must not shield a leftover; an unobservable identity
-    // keeps the skip - a missed reap is recoverable, a wrong one is not).
+    // daemon's own descriptors name, protected while the identity still
+    // matches. A RECORDED identity must match the live one (a recycled pid
+    // is a different process and never shields a leftover); a descriptor
+    // with NO identity recorded stays protected - the adoption pass owns
+    // it either way, and a conservative skip never kills a live
+    // descriptor-backed worker (a missed reap is recoverable, a wrong
+    // one is not).
     let protected: HashSet<u32> =
         crate::descriptor::load_descriptors(&descriptor_dir, &socket_path)
             .into_iter()
-            .filter(|(_, descriptor)| {
-                crate::lease::get_process_start_id(descriptor.pid as u32)
-                    .map(|observed| {
-                        descriptor
-                            .process_start_id
-                            .as_deref()
-                            .is_some_and(|expected| observed == expected)
-                    })
-                    .unwrap_or(true)
+            .filter(|(_, descriptor)| match &descriptor.process_start_id {
+                Some(expected) => crate::lease::get_process_start_id(descriptor.pid as u32)
+                    .map(|observed| observed == expected.as_str())
+                    .unwrap_or(true),
+                None => true,
             })
             .map(|(_, descriptor)| descriptor.pid as u32)
             .collect();
@@ -272,23 +274,23 @@ fn same_socket_worker_targets(socket_path: &Path, protected: &HashSet<u32>) -> V
         }) {
             continue;
         }
-        // The target's own endpoint must be THIS supervisor's deterministic
-        // worker-socket name (`<socket_dir>/worker-<hash12(ours)>-*.sock`),
-        // read from the process env: a forged or foreign value never names
-        // our socket dir and our key, so the unlink below stays inside the
-        // product's own endpoint namespace.
-        let Some(worker_socket) = environ
+        // The KILL decision rests on the worker role and the same-socket
+        // identity alone - a leftover whose own endpoint file was already
+        // removed (or whose env carries a stale socket-dir path from a
+        // TMPDIR change between boots) must still be reaped: it holds its
+        // session lease regardless of its endpoint file. The endpoint path
+        // only gates the unlink: the cleanup runs only for a path that is
+        // one of THIS supervisor's deterministic worker-socket names, so
+        // a forged or foreign value never names an arbitrary file.
+        let worker_socket = environ
             .iter()
             .find_map(|entry| entry.strip_prefix(&format!("{}=", crate::worker::WORKER_SOCKET_ENV)))
             .filter(|path| is_our_worker_socket(path, socket_path))
-            .map(PathBuf::from)
-        else {
-            continue;
-        };
+            .map(PathBuf::from);
         targets.push(ReapTarget {
             pid,
             start_id: crate::lease::get_process_start_id(pid),
-            worker_socket: Some(worker_socket),
+            worker_socket,
             kind: ReapKind::Worker,
         });
     }
