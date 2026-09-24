@@ -513,7 +513,6 @@ fn truncate_spans_to_width(spans: &[crate::Span], width: usize) -> Vec<crate::Sp
             let mut piece = span.clone();
             piece.content = text;
             out.push(piece);
-            remaining -= consumed;
             break;
         }
         let mut piece = span.clone();
