@@ -597,7 +597,6 @@ mod tests {
                 custom_instructions: None,
                 usage: None,
                 harness_digest: None,
-                auxiliary: None,
             },
             base: EntryBase {
                 id: Some("c".to_string()),
@@ -1707,6 +1706,7 @@ mod tests {
                 },
                 abort: None,
                 harness_digest: Some(inputs),
+                auxiliary: None,
             },
         )
         .await
@@ -2084,7 +2084,7 @@ mod tests {
     fn aux_context(
         dir: &std::path::Path,
         selector: Option<&str>,
-    ) -> super::auxiliary_model::AuxiliaryModelContext {
+    ) -> crate::session_engine::auxiliary_model::AuxiliaryModelContext {
         std::fs::write(
             dir.join("settings.json"),
             serde_json::to_string_pretty(&serde_json::json!({
@@ -2093,7 +2093,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        super::auxiliary_model::AuxiliaryModelContext {
+        crate::session_engine::auxiliary_model::AuxiliaryModelContext {
             cwd: dir.to_path_buf(),
             agent_dir: dir.to_path_buf(),
         }
