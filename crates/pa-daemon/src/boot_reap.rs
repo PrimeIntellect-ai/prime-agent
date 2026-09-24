@@ -104,34 +104,24 @@ pub(crate) enum ReapOutcome {
 /// holder answers the lease refusal; after the reap it succeeds).
 pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
     let socket_path = supervisor.options.socket_path.clone();
-    let descriptor_dir = supervisor.descriptor_dir();
-    // The adoption pass's business, never the reap's: the pids this
-    // daemon's own descriptors name, protected while the identity still
-    // matches. A RECORDED identity must match the live one (a recycled pid
-    // is a different process and never shields a leftover); a descriptor
-    // with NO identity recorded stays protected - the adoption pass owns
-    // it either way, and a conservative skip never kills a live
+    // The adoption pass's business, never the reap's: the pids of the
+    // descriptors this SOCKET identity owns, protected while the identity
+    // still matches. Equivalent socket spellings resolve to the same
+    // identity (`/tmp/x/y/../daemon.sock` and `/tmp/x/daemon.sock` are
+    // ONE socket), but the on-disk descriptor directories are keyed by
+    // the RAW spelling each daemon started with - so the protected set
+    // loads EVERY spelling directory and keeps the descriptors whose
+    // supervisorSocketPath normalizes to THIS daemon's socket (the same
+    // identity the worker discovery matches; a live crash-restart worker
+    // under a predecessor's spelling stays protected either way).
+    // A RECORDED identity must match the live one (a recycled pid is a
+    // different process and never shields a leftover); a descriptor with
+    // NO identity recorded stays protected - the adoption pass owns it
+    // either way, and a conservative skip never kills a live
     // descriptor-backed worker (a missed reap is recoverable, a wrong
     // one is not).
     let protected: HashSet<u32> =
-        crate::descriptor::load_descriptors(&descriptor_dir, &socket_path)
-            .into_iter()
-            .filter(|(_, descriptor)| {
-                // A tombstoned descriptor is DURABLE STOP INTENT: its
-                // worker is something to finish stopping, never to adopt -
-                // the reap is the executor (a tombstoned leftover that
-                // survived the predecessor's own escalation, or whose
-                // worker socket died while the process lives).
-                descriptor.stop_requested_at.is_none()
-            })
-            .filter(|(_, descriptor)| match &descriptor.process_start_id {
-                Some(expected) => crate::lease::get_process_start_id(descriptor.pid as u32)
-                    .map(|observed| observed == expected.as_str())
-                    .unwrap_or(true),
-                None => true,
-            })
-            .map(|(_, descriptor)| descriptor.pid as u32)
-            .collect();
+        protected_worker_pids(&supervisor.options.agent_dir, &socket_path);
     let mut targets = same_socket_worker_targets(&socket_path, &protected);
     targets.extend(same_socket_supervisor_targets(&socket_path));
     if targets.is_empty() {
@@ -268,6 +258,13 @@ fn same_socket_worker_targets(socket_path: &Path, protected: &HashSet<u32>) -> V
         if pid == std::process::id() || protected.contains(&pid) {
             continue;
         }
+        // The identity captures BEFORE the /proc reads and re-verifies
+        // AFTER the qualification: a worker that exits mid-census and
+        // whose pid the kernel immediately recycles must never leave a
+        // target behind under the REUSHER'S identity (the late capture
+        // would have validated the replacement and signaled an
+        // unrelated process).
+        let start_id = crate::lease::get_process_start_id(pid);
         let Some(argv) = read_proc_argv(pid) else {
             continue;
         };
@@ -289,8 +286,13 @@ fn same_socket_worker_targets(socket_path: &Path, protected: &HashSet<u32>) -> V
         if !environ.iter().any(|entry| {
             entry
                 .strip_prefix(&format!("{}=", crate::worker::WORKER_SUPERVISOR_SOCKET_ENV))
-                .is_some_and(|value| normalize_socket_spelling(Path::new(value)) == socket)
+                .is_some_and(|value| socket_spelling_of(pid, value) == socket)
         }) {
+            continue;
+        }
+        // The post-qualification identity re-check: the pid must still
+        // name the same process the census qualified.
+        if crate::lease::get_process_start_id(pid).as_deref() != start_id.as_deref() {
             continue;
         }
         // The KILL decision rests on the worker role and the same-socket
@@ -308,12 +310,30 @@ fn same_socket_worker_targets(socket_path: &Path, protected: &HashSet<u32>) -> V
             .map(PathBuf::from);
         targets.push(ReapTarget {
             pid,
-            start_id: crate::lease::get_process_start_id(pid),
+            start_id,
             worker_socket,
             kind: ReapKind::Worker,
         });
     }
     targets
+}
+
+/// One socket value's identity AS THE TARGET PROCESS SEES IT: a relative
+/// spelling resolves against the PROCESS's working directory (read from
+/// /proc/<pid>/cwd - never this daemon's), then normalizes. Two daemons
+/// started from different directories with the same relative socket
+/// argument are DIFFERENT sockets; a worker's inherited relative spelling
+/// resolves exactly where its daemon resolved it.
+#[cfg(target_os = "linux")]
+fn socket_spelling_of(pid: u32, value: &str) -> String {
+    let path = Path::new(value);
+    if path.is_absolute() {
+        return normalize_socket_spelling(path);
+    }
+    match std::fs::read_link(format!("/proc/{pid}/cwd")) {
+        Ok(cwd) => normalize_socket_spelling(&cwd.join(path)),
+        Err(_) => String::new(),
+    }
 }
 
 /// The product's own binary names (the roles run from these): `prime-agent`
@@ -374,9 +394,17 @@ fn same_socket_supervisor_targets(socket_path: &Path) -> Vec<ReapTarget> {
         if pid == std::process::id() {
             continue;
         }
-        let Some(argv) = read_proc_argv(pid) else {
+        // Identity-first capture (the same anti-recycling order as the
+        // worker census).
+        let start_id = crate::lease::get_process_start_id(pid);
+        let Some(mut argv) = read_proc_argv(pid) else {
             continue;
         };
+        // A RELATIVE socket token resolves against the PROCESS's own
+        // working directory (never this daemon's): two daemons started
+        // from different directories with the same relative argument are
+        // different sockets.
+        resolve_relative_socket_tokens(pid, &mut argv);
         if !supervisor_argv_names_socket(&argv, &socket) {
             continue;
         }
@@ -385,9 +413,13 @@ fn same_socket_supervisor_targets(socket_path: &Path) -> Vec<ReapTarget> {
         if !exe_is_product_binary(pid) {
             continue;
         }
+        // The post-qualification identity re-check.
+        if crate::lease::get_process_start_id(pid).as_deref() != start_id.as_deref() {
+            continue;
+        }
         targets.push(ReapTarget {
             pid,
-            start_id: crate::lease::get_process_start_id(pid),
+            start_id,
             worker_socket: None,
             kind: ReapKind::Supervisor,
         });
@@ -398,6 +430,24 @@ fn same_socket_supervisor_targets(socket_path: &Path) -> Vec<ReapTarget> {
 #[cfg(not(target_os = "linux"))]
 fn same_socket_supervisor_targets(_socket_path: &Path) -> Vec<ReapTarget> {
     Vec::new()
+}
+
+/// Resolve the socket-flag tokens that are RELATIVE against the target
+/// process's own working directory (`/proc/<pid>/cwd`): the supervisor
+/// match compares absolute identities, and a relative token means what
+/// the TARGET resolved it to mean, not what this daemon's cwd would.
+#[cfg(target_os = "linux")]
+fn resolve_relative_socket_tokens(pid: u32, argv: &mut [String]) {
+    let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) else {
+        return;
+    };
+    for flag in ["--daemon-socket", "--socket"] {
+        for index in 0..argv.len().saturating_sub(1) {
+            if argv[index] == flag && !Path::new(&argv[index + 1]).is_absolute() {
+                argv[index + 1] = cwd.join(&argv[index + 1]).to_string_lossy().to_string();
+            }
+        }
+    }
 }
 
 /// Whether a command line is a supervisor of `socket`: a product binary
@@ -420,8 +470,17 @@ pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> boo
     };
     // Both spellings normalize: the caller passes this daemon's socket in
     // its normalized form, and a predecessor's argv token may carry the
-    // symlink or `..` spelling of the very same socket.
-    let names_socket = |named: &str| normalize_socket_spelling(Path::new(named)) == socket;
+    // symlink or `..` spelling of the very same socket. A RELATIVE token
+    // stays unmatched here (the argv-only view cannot know the
+    // predecessor's working directory); the scan resolves it against the
+    // process's /proc/<pid>/cwd before calling.
+    let names_socket = |named: &str| {
+        if Path::new(named).is_absolute() {
+            normalize_socket_spelling(Path::new(named)) == socket
+        } else {
+            false
+        }
+    };
     match after_flag("--daemon-socket") {
         Some(named) => names_socket(named) && argv.iter().any(|arg| arg == "daemon"),
         None => {
@@ -440,6 +499,74 @@ fn is_unix_socket_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
         .map(|meta| meta.file_type().is_socket())
         .unwrap_or(false)
+}
+
+/// The pids the reap must never touch: the live-worker descriptors this
+/// SOCKET identity owns, across every raw-spelling directory on disk.
+/// (Discovery matches the normalized socket; this reads the same identity
+/// out of each descriptor's `supervisorSocketPath`, so a live
+/// crash-restart worker under a predecessor's equivalent spelling stays
+/// protected.)
+#[cfg(target_os = "linux")]
+fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
+    let ours = normalize_socket_spelling(socket_path);
+    let mut protected = HashSet::new();
+    let Ok(spellings) = std::fs::read_dir(agent_dir.join("daemon-workers")) else {
+        return protected;
+    };
+    for spelling in spellings.flatten() {
+        let Some(name) = spelling.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let dir = spelling.path();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(descriptor) =
+                serde_json::from_str::<crate::descriptor::WorkerDescriptor>(&content)
+            else {
+                continue;
+            };
+            if descriptor.version != 2 || descriptor.pid == 0 {
+                continue;
+            }
+            // The same normalized-socket identity the worker discovery
+            // matches (the descriptor's supervisor socket path).
+            if normalize_socket_spelling(Path::new(&descriptor.supervisor_socket_path)) != ours {
+                continue;
+            }
+            // A tombstoned descriptor is DURABLE STOP INTENT: its worker
+            // is something to finish stopping, never to adopt - the reap
+            // is the executor.
+            if descriptor.stop_requested_at.is_some() {
+                continue;
+            }
+            let identity_holds = match &descriptor.process_start_id {
+                Some(expected) => crate::lease::get_process_start_id(descriptor.pid as u32)
+                    .map(|observed| observed == expected.as_str())
+                    .unwrap_or(true),
+                None => true,
+            };
+            if identity_holds {
+                protected.insert(descriptor.pid as u32);
+            }
+        }
+    }
+    protected
+}
+
+#[cfg(not(target_os = "linux"))]
+fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
+    let _ = (agent_dir, socket_path);
+    HashSet::new()
 }
 
 /// One socket path's NORMALIZED spelling: the canonicalized form when the
