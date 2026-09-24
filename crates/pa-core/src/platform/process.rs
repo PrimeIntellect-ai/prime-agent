@@ -172,11 +172,9 @@ pub fn pid_exists(pid: u32) -> bool {
 /// stop is recoverable, a wrong one is not).
 ///
 /// LINUX ONLY: the `pidfd_*` syscall numbers exist in libc on Linux
-/// (x86_64/aarch64 share them); every other platform - darwin included,
-/// whose libc has no `SYS_pidfd_open` - compiles the no-handle stub and
-/// the callers' conservative never-signal default (the tip-red the
-/// continuous run's Apple builds caught: the earlier `unix`-wide cfg
-/// matched darwin and its libc rejected the constant).
+/// (x86_64/aarch64 share them); every other platform compiles the
+/// no-handle stub, and the callers' conservative never-signal default
+/// applies.
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")

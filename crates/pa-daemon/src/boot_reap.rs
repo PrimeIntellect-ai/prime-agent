@@ -703,6 +703,10 @@ mod tests {
     /// own child (the same contract the CLI stop test uses) dies inside the
     /// TERM grace and reports Term. The signal rides the kernel-held pidfd
     /// (the open itself proves the handle is available on this kernel).
+    /// LINUX ONLY: the stop is real only where the pidfd opens - elsewhere
+    /// `stop_target` is the never-signal no-op, and the live `sleep` child
+    /// would never exit for the wait.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_real_process_stops_inside_the_term_grace() {
         let mut child = std::process::Command::new("sleep")
@@ -710,7 +714,6 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         let pid = child.id();
-        #[cfg(target_os = "linux")]
         assert!(
             pa_core::platform::process::open_pidfd(pid).is_some(),
             "the kernel-held handle opens"
