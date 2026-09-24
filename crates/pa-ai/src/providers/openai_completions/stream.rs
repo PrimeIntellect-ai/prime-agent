@@ -21,6 +21,7 @@ use crate::providers::openai_completions::{
     encode_reasoning_details, get_compat, resolve_cache_retention, OpenAICompletionsOptions,
     REASONING_FIELDS,
 };
+use crate::providers::openai_responses_hooks::apply_service_tier_pricing;
 use crate::types::{
     done_reason, error_reason, AssistantContent, AssistantMessage, CacheRetention, Context, Model,
     StopReason, TextContent, ThinkingContent, ToolCall, Usage,
@@ -40,6 +41,7 @@ struct StreamingState {
     reasoning_details_by_index: Vec<(u64, Value)>,
     next_reasoning_details_index: u64,
     reasoning_details_block: Option<usize>,
+    response_service_tier: Option<String>,
 }
 
 impl StreamingState {
@@ -54,6 +56,7 @@ impl StreamingState {
             reasoning_details_by_index: Vec::new(),
             next_reasoning_details_index: 0,
             reasoning_details_block: None,
+            response_service_tier: None,
         }
     }
 
@@ -203,6 +206,9 @@ fn handle_chunk(
         if state.output.response_id.is_none() {
             state.output.response_id = Some(id.to_string());
         }
+    }
+    if let Some(service_tier) = chunk.get("service_tier").and_then(|value| value.as_str()) {
+        state.response_service_tier = Some(service_tier.to_string());
     }
     if let Some(chunk_model) = chunk.get("model").and_then(|value| value.as_str()) {
         if !chunk_model.is_empty()
@@ -629,6 +635,16 @@ async fn run_stream(
             handle_chunk(&chunk, model, cache_write_cost, &mut state, writer);
         }
     }
+    // The multiplier table is OpenAI's own; gateways price tiers per endpoint
+    // (OpenRouter reports its cost in usage instead, see parse_chunk_usage).
+    if model.provider == "openai" {
+        apply_service_tier_pricing(
+            &mut state.output.usage,
+            state.response_service_tier.as_deref(),
+            &model.id,
+        );
+    }
+
     finish_blocks(&mut state, writer);
     *output = state.output;
 
@@ -667,5 +683,169 @@ fn parse_sse_event_data(event: &ServerSentEvent) -> Option<Value> {
     match parse_json_with_repair(&event.data) {
         Ok(value) => Some(value),
         Err(_) => Some(parse_streaming_json(Some(&event.data))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Serve one SSE response body for the provider's POST and return the
+    /// bound address.
+    async fn serve_sse(body: String) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0u8; 8192];
+            let _ = socket.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        addr
+    }
+
+    /// Run the provider stream against the SSE body and return the final
+    /// assistant message.
+    async fn stream_final_message(mut model: Value, body: String) -> AssistantMessage {
+        let addr = serve_sse(body).await;
+        model["baseUrl"] = json!(format!("http://{addr}"));
+        let model: Model = serde_json::from_value(model).unwrap();
+        let options = OpenAICompletionsOptions::from_base(crate::types::StreamOptions {
+            api_key: Some("test".into()),
+            ..Default::default()
+        });
+        let mut reader = stream_openai_completions(
+            &model,
+            &Context {
+                system_prompt: None,
+                messages: vec![],
+                tools: None,
+            },
+            Some(&options),
+        );
+        loop {
+            let event = reader.next_event().await.unwrap();
+            if let AssistantMessageEvent::Done { message, .. } = event {
+                return message;
+            }
+            if let AssistantMessageEvent::Error { error, .. } = event {
+                panic!("stream failed: {:?}", error.error_message);
+            }
+        }
+    }
+
+    fn completions_model(id: &str, provider: &str, input: f64, output: f64) -> Value {
+        json!({
+            "id": id,
+            "name": id,
+            "api": "openai-completions",
+            "provider": provider,
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": input, "output": output, "cacheRead": 0.0, "cacheWrite": 0.0 },
+            "contextWindow": 128000,
+            "maxTokens": 8192,
+        })
+    }
+
+    // Captured chat-completions chunk shapes: OpenAI echoes `service_tier` on
+    // the chunks that served the request; the final usage-only chunk carries
+    // the token accounting.
+    const TIERED_CONTENT_CHUNK: &str = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5.5\",\"service_tier\":\"priority\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n";
+    const USAGE_CHUNK: &str = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"gpt-5.5\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1000000,\"completion_tokens\":1000000,\"total_tokens\":2000000,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n";
+    const DONE: &str = "data: [DONE]\n\n";
+
+    fn tier_on_usage_sse(tier: &str) -> String {
+        let content = "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"}}]}\n\n";
+        let usage = format!("data: {{\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"service_tier\":\"{tier}\",\"choices\":[],\"usage\":{{\"prompt_tokens\":1000000,\"completion_tokens\":1000000,\"total_tokens\":2000000,\"prompt_tokens_details\":{{\"cached_tokens\":0}}}}}}\n\n");
+        format!("{content}{usage}{DONE}")
+    }
+
+    // Captured OpenRouter chunk shapes: the gateway echoes the upstream
+    // model and tier, and reports billing in the final usage chunk.
+    fn openrouter_sse(usage_fields: &str) -> String {
+        let content = "data: {\"id\":\"gen-01\",\"object\":\"chat.completion.chunk\",\"model\":\"anthropic/claude-fable-5\",\"service_tier\":\"priority\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"}}]}\n\n";
+        let usage = format!("data: {{\"id\":\"gen-01\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{{\"prompt_tokens\":50000,\"completion_tokens\":50000,\"total_tokens\":100000,\"prompt_tokens_details\":{{\"cached_tokens\":0}}{usage_fields}}}}}\n\n");
+        format!("{content}{usage}{DONE}")
+    }
+
+    #[tokio::test]
+    async fn openai_priority_tier_captured_from_earlier_chunk() {
+        let model = completions_model("gpt-5.5", "openai", 1.25, 10.0);
+        let message =
+            stream_final_message(model, format!("{TIERED_CONTENT_CHUNK}{USAGE_CHUNK}{DONE}")).await;
+        assert_eq!(message.usage.input, 1_000_000);
+        assert_eq!(message.usage.output, 1_000_000);
+        assert!((message.usage.cost.input.as_f64() - 3.125).abs() < 1e-9);
+        assert!((message.usage.cost.output.as_f64() - 25.0).abs() < 1e-9);
+        assert!((message.usage.cost.total.as_f64() - 28.125).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn openai_priority_tier_doubles_other_models() {
+        let model = completions_model("gpt-5.6", "openai", 1.25, 10.0);
+        let message = stream_final_message(model, tier_on_usage_sse("priority")).await;
+        assert!((message.usage.cost.input.as_f64() - 2.5).abs() < 1e-9);
+        assert!((message.usage.cost.output.as_f64() - 20.0).abs() < 1e-9);
+        assert!((message.usage.cost.total.as_f64() - 22.5).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn openai_flex_tier_halves_cost() {
+        let model = completions_model("gpt-5.5", "openai", 1.25, 10.0);
+        let message = stream_final_message(model, tier_on_usage_sse("flex")).await;
+        assert!((message.usage.cost.input.as_f64() - 0.625).abs() < 1e-9);
+        assert!((message.usage.cost.output.as_f64() - 5.0).abs() < 1e-9);
+        assert!((message.usage.cost.total.as_f64() - 5.625).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn openai_default_tier_keeps_catalog_cost() {
+        let model = completions_model("gpt-5.5", "openai", 1.25, 10.0);
+        let message = stream_final_message(model, tier_on_usage_sse("default")).await;
+        assert!((message.usage.cost.input.as_f64() - 1.25).abs() < 1e-9);
+        assert!((message.usage.cost.output.as_f64() - 10.0).abs() < 1e-9);
+        assert!((message.usage.cost.total.as_f64() - 11.25).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn gateway_service_tier_not_applied_to_openrouter() {
+        let model = completions_model("anthropic/claude-fable-5", "openrouter", 0.5, 0.5);
+        let message = stream_final_message(model, openrouter_sse("")).await;
+        // The tier multiplier table is OpenAI's own; gateways price their
+        // tiers per endpoint, so the catalog estimate stands.
+        assert!((message.usage.cost.input.as_f64() - 0.025).abs() < 1e-9);
+        assert!((message.usage.cost.output.as_f64() - 0.025).abs() < 1e-9);
+        assert!((message.usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn openrouter_reported_cost_scales_catalog_estimate() {
+        let model = completions_model("anthropic/claude-fable-5", "openrouter", 0.5, 0.5);
+        let message =
+            stream_final_message(model, openrouter_sse(",\"cost\":0.07,\"is_byok\":false")).await;
+        assert!((message.usage.cost.input.as_f64() - 0.035).abs() < 1e-9);
+        assert!((message.usage.cost.output.as_f64() - 0.035).abs() < 1e-9);
+        assert!((message.usage.cost.total.as_f64() - 0.07).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn openrouter_byok_cost_adds_upstream_bill() {
+        let model = completions_model("anthropic/claude-fable-5", "openrouter", 0.5, 0.5);
+        let message = stream_final_message(
+            model,
+            openrouter_sse(",\"cost\":0.003,\"is_byok\":true,\"cost_details\":{\"upstream_inference_cost\":0.2}"),
+        )
+        .await;
+        // Credits charged by OpenRouter plus the upstream provider's bill.
+        assert!((message.usage.cost.total.as_f64() - 0.203).abs() < 1e-9);
+        assert!((message.usage.cost.input.as_f64() - 0.1015).abs() < 1e-9);
+        assert!((message.usage.cost.output.as_f64() - 0.1015).abs() < 1e-9);
     }
 }

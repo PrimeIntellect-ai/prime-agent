@@ -41,7 +41,7 @@ mod format;
 mod kill;
 pub(crate) mod plan;
 pub(crate) mod scan;
-mod stop;
+pub(crate) mod stop;
 
 pub(crate) use format::format_daemon_list_table;
 pub(crate) use stop::{run_ps, run_reap, run_shutdown_all};

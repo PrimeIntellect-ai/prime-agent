@@ -10,9 +10,7 @@ use pa_types::daemon::DaemonCommand;
 use pa_types::slash_commands::{SlashCommandExecution, SlashCommandRegistry};
 use serde_json::Value;
 
-use crate::activity_panel::{
-    ActivityPanel, ActivityPanelAction, ActivityPanelGroup, ActivityPanelSources,
-};
+use crate::bash_view::{BashView, BashViewAction};
 use crate::chat::{
     ChatEntry, CompactionReason, CompactionState, MessageBlock, RetryState, StatusKind,
     ToolResultView, WorkingState,
@@ -74,7 +72,7 @@ const EXIT_STATS_TIMEOUT_MS: u64 = 500;
 
 /// How a submitted prompt travels to the session (TS `streamingBehavior`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SubmitBehavior {
+pub(crate) enum SubmitBehavior {
     /// Plain Enter: mid-turn input parks on the steering lane (TS "steer").
     Steer,
     /// The follow-up key (`alt+enter`): parks on the follow-up lane and
@@ -128,8 +126,8 @@ pub(crate) struct ActivityUpdates {
     pub bash: mpsc::UnboundedSender<BashActivityUpdate>,
 }
 
-/// Kernel-bash channel frames: list snapshots refresh the dock and panel,
-/// a landed tail feeds the open panel's selected row, and a failed
+/// Kernel-bash channel frames: list snapshots refresh the dock and the
+/// open bash view, a landed tail feeds the open view's detail row, and
 /// background action surfaces as an error row.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BashActivityUpdate {
@@ -143,17 +141,22 @@ pub(crate) enum BashActivityUpdate {
     Tail {
         session: String,
         activity_id: String,
+        /// The detail-open generation the request was issued under: a
+        /// late tail from an earlier open never lands on a newer one.
+        generation: u64,
         tail: String,
     },
     /// A background action settled; re-issue the list from the main loop so
     /// the request carries a fresh epoch (one issued mid-action must not
     /// supersede the post-action snapshot).
-    Refresh {
-        session: String,
-    },
+    Refresh { session: String },
     Error {
         session: String,
         message: String,
+        /// The activity the failed request was about (a tail or kill for
+        /// one row): a late failure lands only on that row's open detail
+        /// pane, never on whichever row the user switched to.
+        activity_id: Option<String>,
     },
 }
 
@@ -337,9 +340,10 @@ pub(crate) struct SessionUi {
     pub(crate) turn_active: bool,
     /// The session's queue delivery mode (TS `steeringMode`, the state's
     /// `steeringMode`): `all` delivers the queued steering prefix as one
-    /// batched turn at the boundary; `one-at-a-time` (the TS default) one
-    /// per turn. Cached at every connection-state read so the queued-input
-    /// adoption event reports the mode without a synchronous fetch.
+    /// batched turn at the boundary; `one-at-a-time` one per turn. The
+    /// product default is `all`. Cached at every connection-state read
+    /// so the queued-input adoption event reports the mode without a
+    /// synchronous fetch.
     pub(crate) steering_mode: String,
     /// The chat index of the assistant message still streaming.
     streaming_index: Option<usize>,
@@ -515,11 +519,12 @@ pub(crate) struct SessionUi {
     /// process-group suspend: the interactive loop performs the cycle
     /// right after dispatch, because the renderer is the loop's terminal.
     suspend_requested: bool,
-    /// A client command a selector resolved to (the `/mcp` view's Enter:
-    /// TS `authenticate` runs the login flow): the interactive loop
-    /// dispatches it through the ordinary submit path right after the key,
-    /// so the terminal-suspending auth flows keep their bracket.
-    pending_client_command: Option<String>,
+    /// The `/mcp` view's internal auth resolution (its Enter on a
+    /// connection, or the inline paste panel — the args for the client
+    /// auth commands, e.g. `login <server>`): dispatched by the loop
+    /// through the auth seam with its terminal-suspension bracket, never
+    /// through the typed-command path.
+    pending_mcp_auth: Option<String>,
     /// Whether this run already reported its first suspend cycle.
     suspend_adoption_emitted: bool,
     /// The armed selection auto-scroll (TS `selectionAutoScroll*`): a drag
@@ -652,7 +657,7 @@ impl SessionUi {
             cost_usd: None,
             list_rows: Vec::new(),
             turn_active: false,
-            steering_mode: "one-at-a-time".to_string(),
+            steering_mode: "all".to_string(),
             streaming_index: None,
             working_tokens: LoaderTokenTracker::default(),
             turn_error_shown: false,
@@ -712,7 +717,7 @@ impl SessionUi {
             side_bash_discarded: None,
             side_bash_counter: 0,
             suspend_requested: false,
-            pending_client_command: None,
+            pending_mcp_auth: None,
             suspend_adoption_emitted: false,
             selection_auto_scroll: None,
             selection_adoption_emitted: false,
@@ -1013,19 +1018,25 @@ impl SessionUi {
         let goal_tokens = (goal.status == pa_types::goal::GoalStatus::Active)
             .then_some((goal.tokens_used, goal.token_budget));
         // The dock's bash indicator counts only runs actively running
-        // right now (operator scoping): finished runs stay as dimmed rows
-        // inside the panel, never in the indicator. The feed itself is the
+        // right now (operator scoping): finished runs stay as rows inside
+        // the bash view, never in the indicator. The feed is the
         // current session's kernel registry — nested subagents' kernels
         // are separate and never appear here. The total keeps the dock
-        // (and the panel's dimmed history) mounted when no run is live.
-        let bash_rows = crate::activity_panel::parse_bash_activities(&self.bash_activities);
+        // (and the bash view's history) mounted when no run is live.
+        let bash_rows = crate::bash_view::parse_bash_activities(&self.bash_activities);
         let bash_running = bash_rows
             .iter()
             .filter(|activity| activity.running())
             .count();
+        // The dock's subagent count stays live-only: dead registry rows
+        // (passivated children the ledger still seeds) never bloat the
+        // indicator — running and idle are the activities to act on.
+        let live = counts.running + counts.idle;
         let dock = crate::chrome::ActivityDock {
-            subagents: counts.total,
+            subagents: live,
             subagents_running: counts.running,
+            subagents_idle: counts.idle,
+            subagents_total: counts.total,
             heartbeats: self.heartbeat_catalog.len(),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             bash_running,
@@ -1056,38 +1067,29 @@ impl SessionUi {
             focused: self.subagents_focused,
             ..dock
         });
-        if let Some(panel) = view.activity_panel.as_mut() {
-            panel.apply_sources(&self.activity_sources(&identity));
+        if let Some(bash_view) = view.bash_view.as_mut() {
+            bash_view.apply_activities(crate::bash_view::parse_bash_activities(
+                &self.bash_activities,
+            ));
         }
     }
 
     fn activity_selectable(&self, group: crate::chrome::ActivityGroup) -> bool {
         match group {
             crate::chrome::ActivityGroup::Subagents => {
+                // The group stays openable while any descendant exists
+                // (finished subagents are browsable history in the agents
+                // view); the dock's rendered count is live-only.
                 self.return_to_agents_view && self.subagent_counts.total > 0
             }
             crate::chrome::ActivityGroup::Heartbeats => !self.heartbeat_catalog.is_empty(),
             // Any catalogued bash row keeps the dock's bash group
             // reachable — the dock stays mounted (bash_total) whenever a
             // row exists, so a selected group never binds to a hidden
-            // surface, and the panel lists the dimmed finished rows.
+            // surface, and the bash view lists the finished rows.
             crate::chrome::ActivityGroup::Bash => {
-                !crate::activity_panel::parse_bash_activities(&self.bash_activities).is_empty()
+                !crate::bash_view::parse_bash_activities(&self.bash_activities).is_empty()
             }
-        }
-    }
-
-    /// The panel's row sources over the same feeds as the dock.
-    fn activity_sources<'a>(
-        &'a self,
-        identity: &'a crate::subagents::SessionIdentity,
-    ) -> ActivityPanelSources<'a> {
-        ActivityPanelSources {
-            roster: &self.roster,
-            identity,
-            goal: &self.goal_view.goal,
-            heartbeats: &self.heartbeat_catalog,
-            bash: &self.bash_activities,
         }
     }
 
@@ -1155,12 +1157,12 @@ impl SessionUi {
             .then(|| std::mem::take(&mut view.pending_bash))
             .unwrap_or_default();
         // A rebind replaces the whole view: the previous session's open
-        // activity panel dies with its transcript instead of owning keys
-        // over the new session's sources. Sessions are independent (TS
+        // bash view dies with its transcript instead of owning keys over
+        // the new session's registry. Sessions are independent (TS
         // `rebindCurrentSession`): a rebind also restarts the tok/sec
         // stats and clears the readout left over from the previous session.
         if matches!(kind, RebuildKind::Rebind) {
-            view.activity_panel = None;
+            view.bash_view = None;
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }
@@ -1396,6 +1398,15 @@ impl SessionUi {
 
     pub(crate) fn note(&mut self, text: &str, view: &mut AgentView) {
         self.note_as(text, StatusKind::Info, view);
+    }
+
+    /// Show an ephemeral action toast (the top-right auto-dismiss overlay;
+    /// a sanctioned divergence from TS — see `toast`): the confirmation
+    /// never lands in the transcript, and the frame repaints so the
+    /// overlay appears at once (its expiry repaints it away).
+    pub(crate) fn toast(&mut self, text: &str, view: &mut AgentView) {
+        view.toasts.push(text);
+        self.dirty = true;
     }
 
     /// A plain appended dim row (TS `chatContainer.addChild(new
@@ -1774,8 +1785,15 @@ impl SessionUi {
 
     /// Submit a prompt (the Enter path). The user message arrives back as a
     /// `message_start` session event (no local echo), and prompts sent while
-    /// a turn is active queue on the daemon side.
-    pub(crate) async fn submit_prompt(&mut self, text: &str, view: &mut AgentView) -> Result<()> {
+    /// a turn is active queue on the daemon side. `behavior` selects the
+    /// lane (TS `handleFollowUp` routes the follow-up key through this
+    /// same ladder with the `followUp` behavior).
+    pub(crate) async fn submit_prompt(
+        &mut self,
+        text: &str,
+        behavior: SubmitBehavior,
+        view: &mut AgentView,
+    ) -> Result<()> {
         let text = text.trim();
         if text.is_empty() {
             return Ok(());
@@ -1831,12 +1849,12 @@ impl SessionUi {
             return Ok(());
         }
         if text.starts_with('/') {
-            return self.handle_slash(text, view).await;
+            return self.handle_slash(text, behavior, view).await;
         }
         // TS `clearShortcutGuide`: every prompt submission dismisses the
         // `?` quick-shortcut guide (slash commands keep it).
         view.shortcut_guide = None;
-        self.send_prompt(text, SubmitBehavior::Steer, view).await
+        self.send_prompt(text, behavior, view).await
     }
 
     // ------------------------------------------------------------------
@@ -2264,6 +2282,18 @@ impl SessionUi {
                             continue;
                         }
                     }
+                    if crate::daemon_client::is_daemon_rejection(&error) {
+                        // TS `onSubmit`'s prompt catch: the daemon answered
+                        // with a refusal for THIS request (admission, queue
+                        // capacity, a superseded session the rebind could
+                        // not recover, ...) — the connection is healthy, so
+                        // the `⚠ Error` row surfaces the refusal and the
+                        // draft returns to the editor; a refused prompt
+                        // never exits the UI.
+                        self.error_row(&rendered, view);
+                        view.editor.set_text(text);
+                        return Ok(());
+                    }
                     return Err(anyhow!("{rendered}"));
                 }
             }
@@ -2426,7 +2456,18 @@ impl SessionUi {
     /// commands (`compact`/`refine`/`goal`/`autonomous`) forward to the
     /// session, and unknown commands get the TS suggestion error — anything
     /// without a suggestion passes through as a prompt.
-    async fn handle_slash(&mut self, text: &str, view: &mut AgentView) -> Result<()> {
+    ///
+    /// `behavior` is TS `onSubmit`'s captured `streamingBehavior`: the
+    /// submit lane that carried the text (alt+enter = followUp), passed
+    /// through to every fallthrough prompt — TS sends the fallthrough with
+    /// the submit's own lane, so a slash-prefixed follow-up keeps parking
+    /// on the follow-up lane (Bugbot's lost-lane finding).
+    async fn handle_slash(
+        &mut self,
+        text: &str,
+        behavior: SubmitBehavior,
+        view: &mut AgentView,
+    ) -> Result<()> {
         let registry = SlashCommandRegistry::builtin();
         let (name, args) = pa_types::slash_commands::parse_slash_command(text)
             .unwrap_or_else(|| (String::new(), String::new()));
@@ -2464,7 +2505,7 @@ impl SessionUi {
             // bails out before fuzzy matching). Close typos get the exact TS
             // error; everything else passes through to the model.
             if name.chars().count() > 64 {
-                return self.send_prompt(text, SubmitBehavior::Steer, view).await;
+                return self.send_prompt(text, behavior, view).await;
             }
             let candidates = registry.suggestion_candidates();
             return match pa_types::slash_commands::find_slash_command_suggestion(&name, &candidates)
@@ -2476,7 +2517,7 @@ impl SessionUi {
                     );
                     Ok(())
                 }
-                None => self.send_prompt(text, SubmitBehavior::Steer, view).await,
+                None => self.send_prompt(text, behavior, view).await,
             };
         };
 
@@ -2484,9 +2525,7 @@ impl SessionUi {
             .get(resolved.name)
             .expect("resolved name is builtin");
         match command.execution {
-            SlashCommandExecution::Session => {
-                self.send_prompt(text, SubmitBehavior::Steer, view).await
-            }
+            SlashCommandExecution::Session => self.send_prompt(text, behavior, view).await,
             SlashCommandExecution::Client => {
                 self.dispatch_client_command(&resolved, text, view).await
             }
@@ -2541,36 +2580,21 @@ impl SessionUi {
                     }
                 }
             }
-            // `/model [search]` (TS `handleModelCommand` →
-            // `showConfigurationMenu("models")`): open the inline menu
-            // panel over the cached catalog, the search term prefilled as
-            // its filter; a refresh fires in the background when the
-            // snapshot is stale (forced when a search argument rides the
-            // command) and lands into the open picker.
+            // `/model` opens the model picker (menu-only: the TS
+            // `handleModelCommand` inline-arg form — an exact match applies
+            // directly, anything else prefills the search — is deliberately
+            // removed; a partial + Tab opens the picker filtered instead,
+            // and a submitted argument is the usage error).
             "model" => {
                 self.track_command_used("model");
-                let current = self.current_model(view);
-                let thinking_level = self
-                    .picker_initial_thinking_level(current.as_ref(), view)
-                    .await;
-                let options = ModelPickerOptions {
-                    models: self.model_catalog.clone(),
-                    current,
-                    configured_providers: self.model_configured_providers.clone(),
-                    recent_models: self.model_recent_models.clone(),
-                    thinking_level,
-                    viewport_rows: picker_viewport_rows(view.terminal_rows()),
-                };
-                // TS `handleModelCommand` always opens the menu (an empty
-                // catalog renders the empty panel).
-                let crate::model_picker::ModelCommandOutcome::Open(picker) =
-                    ModelPicker::open(options, &resolved.args);
-                view.model_picker = Some(*picker);
-                // TS `refreshModels(initialModelSearch !== undefined)`.
-                let force = !resolved.args.trim().is_empty();
-                if self.model_refresh_due(force) {
-                    self.spawn_model_catalog_refresh();
+                if !resolved.args.trim().is_empty() {
+                    view.editor
+                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
+                    self.error_row("Usage: /model (Tab filters the picker)", view);
+                    return Ok(());
                 }
+                self.open_model_picker(view, "").await?;
+                self.track_menu_opened("model", "command");
             }
             // `/effort [level]` (TS `handleEffortCommand`): the
             // session's thinking levels drive the outcome — a model
@@ -2717,6 +2741,82 @@ impl SessionUi {
                 self.track_command_used("traces");
                 self.handle_traces_command(resolved, view).await?;
             }
+            // `/nightly [on|off|status]` (TS `interactive-mode.ts`
+            // 5455-5484): status resolves the effective channel,
+            // off/stable pins the settings channel to stable, and on (or
+            // bare) hands a `--self --nightly` update to the same parked
+            // plan `/update` builds (the update command owns the nightly
+            // warning, the channel switch, and the relaunch).
+            "nightly" => {
+                self.track_command_used("nightly");
+                let arg = resolved.args.trim().to_lowercase();
+                if arg == "status" {
+                    // The effective channel resolves through the
+                    // client-settings seam (pa-tui cannot reach the
+                    // update flow's resolver); a surface without the
+                    // seam never claims a channel.
+                    let Some(settings) = &self.client_settings else {
+                        self.note("/nightly is not available in this client yet", view);
+                        return Ok(());
+                    };
+                    let preferred = settings.update_channel();
+                    let channel = settings.effective_update_channel(&view.chrome.version);
+                    let source = if preferred.is_some() {
+                        "set in settings"
+                    } else {
+                        "inferred from the running version"
+                    };
+                    self.note(
+                        &format!(
+                            "Updates follow the {channel} channel ({source}). v{} installed.",
+                            view.chrome.version
+                        ),
+                        view,
+                    );
+                    return Ok(());
+                }
+                if arg == "off" || arg == "stable" {
+                    // The pin persists through the client-settings seam; a
+                    // surface without the seam never claims the pin (TS
+                    // always has a settings manager, so the gate is this
+                    // client's honesty guard).
+                    let Some(settings) = &self.client_settings else {
+                        self.note("/nightly is not available in this client yet", view);
+                        return Ok(());
+                    };
+                    if let Err(error) = settings.set_update_channel("stable") {
+                        self.error_row(&format!("{error:#}"), view);
+                        return Ok(());
+                    }
+                    self.note(
+                        "Updates now follow the stable channel. Run /update to install the latest stable release.",
+                        view,
+                    );
+                    return Ok(());
+                }
+                if !arg.is_empty() && arg != "on" {
+                    self.error_row("Usage: /nightly [on|off|status]", view);
+                    return Ok(());
+                }
+                // TS guards on compacting/streaming/bash: `turn_active`
+                // carries the streaming and compaction arms, and the
+                // user-bash slot (`!` runs) is its own state — a relaunch
+                // mid-run would interrupt either.
+                if self.turn_active || self.user_bash_running {
+                    self.note_as(
+                        "Wait for the current work to finish before updating.",
+                        StatusKind::Warning,
+                        view,
+                    );
+                    return Ok(());
+                }
+                let plan = crate::update_command::parse_update_args(&[
+                    "--self".to_string(),
+                    "--nightly".to_string(),
+                ]);
+                view.editor.set_text("");
+                self.pending_update = Some(plan);
+            }
             // `/update [source|--self|--extensions|--extension <source>
             // |--force|--rollback|--nightly|--stable]` (TS
             // `handleUpdateCommand`): the busy guard, then the child
@@ -2758,7 +2858,7 @@ impl SessionUi {
             // prefills its search field like TS's initial search.
             "plugins" => {
                 self.track_command_used("plugins");
-                self.open_mcp_view("/plugins", view).await?;
+                self.open_mcp_view("/plugins", view, "").await?;
                 let search = resolved.args.trim();
                 if !search.is_empty() {
                     if let Some(mcp) = view.mcp_view.as_mut() {
@@ -3121,7 +3221,7 @@ impl SessionUi {
                     return Ok(());
                 }
                 self.track_command_used("heartbeats");
-                self.open_heartbeats_view(view, None).await;
+                self.open_heartbeats_view(view);
             }
             other => {
                 self.note(
@@ -3476,6 +3576,13 @@ impl SessionUi {
         let mut args = vec!["update".to_string()];
         args.extend(plan.flags.clone());
         let child_result = update.0.run_cli_child(args).await;
+        // TS skips the relaunch when the interactive child exits with the
+        // not-attempted code (75): a declined confirmation or a no-change
+        // skip keeps the running client as-is, so the session is not torn
+        // down and restarted for nothing.
+        if matches!(child_result, Ok(75)) {
+            return Ok(());
+        }
         match child_result {
             Err(error) => {
                 eprintln!("Update failed: {error}");
@@ -3848,7 +3955,7 @@ impl SessionUi {
             return Ok(());
         };
         match crate::clipboard::copy_to_clipboard(&text, &mut self.osc_sink) {
-            Ok(()) => self.note("Copied last agent message to clipboard", view),
+            Ok(()) => self.toast("Copied last agent message to clipboard", view),
             Err(message) => self.error_row(&message, view),
         }
         Ok(())
@@ -3874,7 +3981,7 @@ impl SessionUi {
             steering_mode: state
                 .get("steeringMode")
                 .and_then(Value::as_str)
-                .unwrap_or("one-at-a-time")
+                .unwrap_or("all")
                 .to_string(),
             follow_up_mode: state
                 .get("followUpMode")
@@ -5052,37 +5159,97 @@ impl SessionUi {
         self.escape_repeat_until = Some(Instant::now() + ESCAPE_REPEAT_WINDOW_MS);
     }
 
-    /// `/mcp` (TS `handleMcpCommand`): the bare command opens the inline
-    /// connections view over the daemon's roster (TS opens the
-    /// configuration menu's MCP Connections tab); `login`/`logout <name>`
-    /// run the composition root's auth flow (only the login prompts on
-    /// the terminal, so `needs_terminal_suspension` covers it); anything
-    /// else keeps the usage note.
+    /// `/mcp` (menu-only: the bare command opens the inline connections
+    /// view; a submitted argument is the usage error; the view resolves
+    /// its own auth through the internal seam).
     async fn handle_mcp_command(
         &mut self,
         resolved: &pa_types::slash_commands::ResolvedSlashCommand,
         view: &mut AgentView,
     ) -> Result<()> {
         self.track_command_used("mcp");
-        if resolved.args.trim().is_empty() {
-            return self.open_mcp_view("/mcp", view).await;
-        }
-        let Some(auth) = self.client_auth.clone() else {
-            self.note("/mcp is not available in this client yet", view);
+        // `/mcp` is menu-only: the TS `handleMcpCommand` typed subcommands
+        // (login/logout/...) are deliberately removed — the connections
+        // view resolves its own auth internally, and a submitted argument
+        // is the usage error. A partial + Tab opens the view filtered.
+        if !resolved.args.trim().is_empty() {
+            view.editor
+                .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
+            self.error_row("Usage: /mcp (Tab filters the menu)", view);
             return Ok(());
-        };
-        let note = crate::client_auth::run_mcp_auth_command(auth.0.as_ref(), &resolved.args).await;
-        self.note(&note, view);
+        }
+        self.open_mcp_view("/mcp", view, "").await?;
+        self.track_menu_opened("mcp", "command");
         Ok(())
     }
 
+    /// Run one internal MCP auth request (the `/mcp` view's resolution):
+    /// the client auth commands own the flow; an unavailable auth client
+    /// reports the TS note.
+    pub(crate) async fn run_mcp_auth(&mut self, args: &str, view: &mut AgentView) {
+        let Some(auth) = self.client_auth.clone() else {
+            self.note("/mcp is not available in this client yet", view);
+            return;
+        };
+        let note = crate::client_auth::run_mcp_auth_command(auth.0.as_ref(), args).await;
+        self.note(&note, view);
+    }
+
+    /// Open the `/model` picker over the cached catalog, its search
+    /// prefilled with `search` (the Tab-intercepted partial; empty for the
+    /// bare command). A refresh fires in the background when the snapshot
+    /// is stale (forced when a search rides the open) and lands into the
+    /// open picker.
+    async fn open_model_picker(&mut self, view: &mut AgentView, search: &str) -> Result<()> {
+        let current = self.current_model(view);
+        let thinking_level = self
+            .picker_initial_thinking_level(current.as_ref(), view)
+            .await;
+        let options = ModelPickerOptions {
+            models: self.model_catalog.clone(),
+            current,
+            configured_providers: self.model_configured_providers.clone(),
+            recent_models: self.model_recent_models.clone(),
+            thinking_level,
+            viewport_rows: picker_viewport_rows(view.terminal_rows()),
+        };
+        // TS `handleModelCommand` always opens the menu (an empty catalog
+        // renders the empty panel).
+        let crate::model_picker::ModelCommandOutcome::Open(picker) =
+            ModelPicker::open(options, search);
+        view.model_picker = Some(*picker);
+        // TS `refreshModels(initialModelSearch !== undefined)`.
+        let force = !search.trim().is_empty();
+        if self.model_refresh_due(force) {
+            self.spawn_model_catalog_refresh();
+        }
+        Ok(())
+    }
+
+    /// Report a menu surface opening (`tui menu opened`, fire-and-forget
+    /// like the other adoption seams): `menu` names the surface (`model`,
+    /// `mcp`), `source` how it opened (`command`, `tab`).
+    fn track_menu_opened(&self, menu: &'static str, source: &'static str) {
+        if let Some(telemetry) = self.telemetry.clone() {
+            tokio::spawn(async move {
+                telemetry.menu_opened(menu, source).await;
+            });
+        }
+    }
+
     /// Open the inline `/mcp` connections view over the daemon's
-    /// `get_mcp_connections` roster. The request carries the kernel's tool
-    /// listing (it opens each connected generic server, bounded), so it
-    /// gets the wider deadline.
+    /// `get_mcp_connections` roster, its filter prefilled with `search`
+    /// (the Tab-intercepted partial). The request carries the kernel's
+    /// tool listing (it opens each connected generic server, bounded), so
+    /// it gets the wider deadline.
     /// `command` names the entry the user ran (`/mcp` or `/plugins`), so a
     /// failed roster load reports the command that failed.
-    async fn open_mcp_view(&mut self, command: &str, view: &mut AgentView) -> Result<()> {
+    async fn open_mcp_view(
+        &mut self,
+        command: &str,
+        view: &mut AgentView,
+        search: &str,
+    ) -> Result<()> {
         let data = match self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS * 4),
@@ -5100,19 +5267,24 @@ impl SessionUi {
                 return Ok(());
             }
         };
-        view.mcp_view = Some(crate::mcp_view::McpView::from_response(
+        let mut mcp_view = crate::mcp_view::McpView::from_response(
             &data,
             picker_viewport_rows(view.terminal_rows()),
-        ));
+        );
+        if !search.trim().is_empty() {
+            mcp_view.set_search(search);
+        }
+        view.mcp_view = Some(mcp_view);
         self.dirty = true;
         Ok(())
     }
 
     /// One key press while the `/mcp` connections view is open: Esc or
-    /// Ctrl+C close it; Enter resolves to the selected connection's login
-    /// (dispatched as a client command after the key returns, so the auth
-    /// flow keeps the terminal-suspension bracket); everything else
-    /// navigates or edits the search field.
+    /// Ctrl+C close it; Enter (or the paste panel) resolves the selected
+    /// connection by parking `pending_mcp_auth`, which the input loop
+    /// runs once the key handler returns (so the auth flow keeps the
+    /// terminal-suspension bracket); everything else navigates or edits
+    /// the search field.
     async fn handle_mcp_view_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
@@ -5136,16 +5308,22 @@ impl SessionUi {
             Some(crate::mcp_view::McpViewAction::Select(server)) => {
                 view.mcp_view = None;
                 self.dirty = true;
+                // The Tab path leaves the typed `/mcp <partial>` behind;
+                // resolving fulfills the command (a Cancel keeps it).
+                view.editor.set_text("");
                 // TS `authenticate`: Enter runs the connection's login
-                // flow — the same command path as `/mcp login <name>`.
-                self.pending_client_command = Some(format!("/mcp login {server}"));
+                // flow. The typed-command arg path is gone, so the view
+                // resolves through the internal auth seam instead of a
+                // submitted `/mcp login <name>` string.
+                self.pending_mcp_auth = Some(format!("login {server}"));
             }
             Some(crate::mcp_view::McpViewAction::Paste(server)) => {
                 view.mcp_view = None;
                 self.dirty = true;
+                view.editor.set_text("");
                 // The inline paste panel's client surface: prompt for the
                 // token, store it bound to the service endpoint, verify.
-                self.pending_client_command = Some(format!("/mcp paste {server}"));
+                self.pending_mcp_auth = Some(format!("paste {server}"));
             }
             None => {}
         }
@@ -5154,14 +5332,15 @@ impl SessionUi {
 
     /// Whether dispatching this input needs the terminal handed over
     /// (raw-mode off, alternate screen left) so the auth flow can prompt.
-    pub(crate) fn needs_terminal_suspension(&self, text: &str) -> bool {
-        let Some((name, args)) = pa_types::slash_commands::parse_slash_command(text) else {
-            return false;
-        };
-        if name != "mcp" || self.client_auth.is_none() {
+    /// `args` is the auth-args form (the `/mcp` view's internal
+    /// resolution, e.g. `login <name>`): a login suspends, a paste
+    /// prompts on the plain terminal too (its token prompt reads
+    /// stdin), so both hand the terminal over.
+    pub(crate) fn mcp_auth_needs_terminal(&self, args: &str) -> bool {
+        if self.client_auth.is_none() {
             return false;
         }
-        matches!(args.split_whitespace().next(), Some("login"))
+        mcp_auth_args_need_terminal(args)
     }
 
     /// `/resume <selector>`: a session file path, an `<id>.jsonl` under the
@@ -5391,6 +5570,11 @@ impl SessionUi {
             }
             Some(ModelPickerAction::Apply(applied)) => {
                 view.model_picker = None;
+                // The Tab path leaves the typed `/model <partial>` behind in
+                // the editor; the command path's submission already drained
+                // it. Applying fulfills the command either way, so the
+                // editor clears (a Cancel keeps the partial for editing).
+                view.editor.set_text("");
                 self.apply_model_selection(&applied.provider, &applied.model_id, view)
                     .await;
                 // A user-edited effort applies after the model switch (TS
@@ -5431,7 +5615,7 @@ impl SessionUi {
         let overlay_focused = view.model_picker.is_some()
             || view.effort_picker.is_some()
             || view.heartbeats_picker.is_some()
-            || view.activity_panel.is_some()
+            || view.bash_view.is_some()
             || view.tree_selector.is_some()
             || view.fork_selector.is_some()
             || view.share_loader.is_some()
@@ -5501,14 +5685,15 @@ impl SessionUi {
     /// through tmux (`set-clipboard`), so the write goes straight to the
     /// terminal; a headless run has no terminal and records the text for
     /// its verifier instead. A successful copy surfaces the
-    /// "Copied selection to clipboard" status row (TS `showStatus`), a
-    /// failed write the failure row (TS `showError`).
+    /// "Copied selection to clipboard" action toast (the ephemeral
+    /// overlay, not the TS `showStatus` chat row — sanctioned divergence),
+    /// a failed write the failure row (TS `showError`).
     fn copy_selection(&mut self, text: &str, view: &mut AgentView) {
         let lines = text.lines().count().max(1);
         self.copies.push(text.to_string());
         self.track_selection(lines);
         if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-            self.note("Copied selection to clipboard", view);
+            self.toast("Copied selection to clipboard", view);
             return;
         }
         use base64::Engine;
@@ -5518,7 +5703,7 @@ impl SessionUi {
         match out.write_all(format!("\x1b]52;c;{encoded}\x07").as_bytes()) {
             Ok(()) => {
                 let _ = out.flush();
-                self.note("Copied selection to clipboard", view);
+                self.toast("Copied selection to clipboard", view);
             }
             Err(error) => {
                 self.error_row(&format!("Failed to copy selection: {error}"), view);
@@ -5589,10 +5774,10 @@ impl SessionUi {
             self.dirty = true;
             return;
         }
-        // The activity panel owns the whole frame while open (like its key
+        // The bash view owns the whole frame while open (like its key
         // dispatch): a paste never lands in the hidden editor prompt,
         // where a later Enter would submit it unedited.
-        if view.activity_panel.is_some() {
+        if view.bash_view.is_some() {
             self.dirty = true;
             return;
         }
@@ -5647,7 +5832,7 @@ impl SessionUi {
         {
             return;
         }
-        // The 2s poll, the panel open, and the post-kill refresh can
+        // The 2s poll, the view open, and the post-kill refresh can
         // overlap: every request stamps the epoch it was issued under, and
         // only the latest issued request's response lands.
         self.bash_list_epoch += 1;
@@ -5698,18 +5883,57 @@ impl SessionUi {
                 if self.bash_activities == data {
                     return;
                 }
+                // A landed REGISTRY update supersedes a shown error — but
+                // only when the registry's rows actually moved (a row
+                // settled, started, or left): the running rows' duration
+                // ticks every poll and never clear anything. The
+                // unrelated dock repaints never clear it either.
+                let row_signature = |data: &Value| -> Vec<(String, String, Option<i64>)> {
+                    crate::bash_view::parse_bash_activities(data)
+                        .into_iter()
+                        .map(|row| (row.id, row.status, row.exit_code))
+                        .collect()
+                };
+                let rows_settled = row_signature(&self.bash_activities) != row_signature(&data);
                 self.bash_activities = data;
+                if rows_settled {
+                    if let Some(bash_view) = view.bash_view.as_mut() {
+                        bash_view.clear_error();
+                    }
+                }
                 self.update_subagent_summary(view);
             }
             BashActivityUpdate::Tail {
-                activity_id, tail, ..
+                activity_id,
+                tail,
+                generation,
+                ..
             } => {
-                if let Some(panel) = view.activity_panel.as_mut() {
-                    panel.set_bash_tail(&activity_id, &tail);
+                if let Some(bash_view) = view.bash_view.as_mut() {
+                    bash_view.set_output(&activity_id, &tail, generation);
                 }
             }
-            BashActivityUpdate::Error { message, .. } => {
-                self.error_row(&message, view);
+            BashActivityUpdate::Error {
+                message,
+                activity_id,
+                ..
+            } => {
+                // An in-view action's failure surfaces in the open bash
+                // view — and only when the failed request's row is the
+                // open detail (a late failure for another row's request
+                // never lands on it); with no view open the transcript
+                // row carries it.
+                let detail_matches = match (&view.bash_view, &activity_id) {
+                    (Some(bash_view), Some(id)) => bash_view.detail_id().as_deref() == Some(id),
+                    _ => true,
+                };
+                if view.bash_view.is_some() && detail_matches {
+                    if let Some(bash_view) = view.bash_view.as_mut() {
+                        bash_view.set_error(message);
+                    }
+                } else {
+                    self.error_row(&message, view);
+                }
             }
             BashActivityUpdate::Refresh { .. } => {
                 // Issue a fresh list from the main loop; its own response
@@ -5729,24 +5953,13 @@ impl SessionUi {
         }
     }
 
-    /// Open the dock's grouped list over the current feeds, pre-selecting
-    /// the dock's group when it has rows.
-    fn open_activity_panel(&mut self, view: &mut AgentView) {
+    /// Open the dedicated bash view over the kernel bash registry (the
+    /// dock's Bash group's destination): the latest snapshot mounts and
+    /// the 2s refresh keeps it current.
+    fn open_bash_view(&mut self, view: &mut AgentView) {
         self.spawn_bash_activity_refresh();
-        let identity = crate::subagents::SessionIdentity::new(
-            (!self.active_session_id.is_empty()).then(|| self.active_session_id.clone()),
-            (!self.session_id.is_empty()).then(|| self.session_id.clone()),
-            self.session_file.clone(),
-        );
-        let sources = self.activity_sources(&identity);
-        let initial = match self.activity_group {
-            crate::chrome::ActivityGroup::Subagents => Some(ActivityPanelGroup::Subagents),
-            crate::chrome::ActivityGroup::Heartbeats => Some(ActivityPanelGroup::Heartbeats),
-            crate::chrome::ActivityGroup::Bash => Some(ActivityPanelGroup::Bash),
-        };
-        view.activity_panel = Some(ActivityPanel::new(
-            &sources,
-            initial,
+        view.bash_view = Some(BashView::new(
+            crate::bash_view::parse_bash_activities(&self.bash_activities),
             picker_viewport_rows(view.terminal_rows()),
         ));
         self.subagents_focused = false;
@@ -5754,11 +5967,42 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    async fn handle_activity_panel_key(
-        &mut self,
-        key: KeyEvent,
-        view: &mut AgentView,
-    ) -> Result<()> {
+    /// The dock's Enter hand-off (the operator's direct-navigation
+    /// redesign): the focused group opens its own view directly — the
+    /// scoped agents view for subagents, the heartbeats view, or the
+    /// bash view — with no intermediate grouped list.
+    fn open_dock_group_view(&mut self, view: &mut AgentView) {
+        match self.activity_group {
+            crate::chrome::ActivityGroup::Subagents => {
+                self.emit_activity_opened("subagents");
+                // The same gate as before: a run that cannot open the
+                // scoped agents view shows the note instead of leaving
+                // the session view.
+                if self.return_to_agents_view {
+                    self.open_scoped_agents_view(view);
+                } else {
+                    self.subagents_focused = false;
+                    self.note(
+                        "The agents view needs a daemon-hosted session; start normally (without --no-session) to browse sessions",
+                        view,
+                    );
+                }
+            }
+            crate::chrome::ActivityGroup::Heartbeats => {
+                self.emit_activity_opened("heartbeats");
+                self.open_heartbeats_view(view);
+            }
+            crate::chrome::ActivityGroup::Bash => {
+                self.emit_activity_opened("bash");
+                self.open_bash_view(view);
+            }
+        }
+    }
+
+    /// One key press while the bash view is open: the view owns the frame
+    /// the same way as the heartbeats view; its actions run the kernel
+    /// bash requests off the key loop.
+    async fn handle_bash_view_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
@@ -5766,47 +6010,19 @@ impl SessionUi {
             self.exit_guard.note_ctrl_c_handled();
         }
         let action = view
-            .activity_panel
+            .bash_view
             .as_mut()
-            .map(|panel| panel.handle_key(&id, view.editor.keybindings()));
+            .map(|bash_view| bash_view.handle_key(&id, view.editor.keybindings()));
         match action {
-            Some(ActivityPanelAction::Close) => {
-                view.activity_panel = None;
+            Some(BashViewAction::Close) => {
+                view.bash_view = None;
             }
-            Some(ActivityPanelAction::OpenGroup { group, selected_id }) => {
-                view.activity_panel = None;
-                match group {
-                    ActivityPanelGroup::Subagents => {
-                        // The same gate as the dock's group: a run that
-                        // cannot open the scoped agents view shows the
-                        // note instead of leaving the session view.
-                        if self.return_to_agents_view {
-                            self.emit_activity_opened("subagents");
-                            self.open_scoped_agents_view(view);
-                        } else {
-                            self.note(
-                                "The agents view needs a daemon-hosted session; start normally (without --no-session) to browse sessions",
-                                view,
-                            );
-                        }
-                    }
-                    ActivityPanelGroup::Heartbeats => {
-                        self.emit_activity_opened("heartbeats");
-                        // The panel's chosen row opens selected, not the
-                        // catalog's first entry.
-                        self.open_heartbeats_view(view, selected_id).await;
-                    }
-                    // Enter never opens these groups from the panel: the
-                    // goal row is read-only and the bash rows fetch their
-                    // tail in place.
-                    ActivityPanelGroup::Goals | ActivityPanelGroup::Bash => {}
-                }
-            }
-            Some(ActivityPanelAction::ViewBashOutput { id }) => {
-                self.emit_activity_opened("bash");
-                // The request runs off the key loop: a stalled daemon
-                // must not freeze the TUI behind the request bound. The
-                // tail lands on the open panel through the update channel.
+            Some(BashViewAction::OpenDetail { id, generation }) => {
+                // The request runs off the key loop (a stalled kernel
+                // must not freeze the TUI behind the request bound): the
+                // tail lands on the open view through the update channel,
+                // stamped with this open's generation so a late response
+                // from an earlier open never overwrites it.
                 let client = self.client.clone();
                 let session = self.active_session_id.clone();
                 let tx = self.bash_updates.clone();
@@ -5817,7 +6033,7 @@ impl SessionUi {
                             id: None,
                             active_session_id: session.clone(),
                             activity_id: id,
-                            lines: Some(50),
+                            lines: Some(crate::bash_view::TAIL_LINES),
                             rest: Default::default(),
                         })
                         .await;
@@ -5827,6 +6043,7 @@ impl SessionUi {
                                 let _ = tx.send(BashActivityUpdate::Tail {
                                     session,
                                     activity_id: response_id,
+                                    generation,
                                     tail: tail.to_string(),
                                 });
                             }
@@ -5835,16 +6052,18 @@ impl SessionUi {
                             let _ = tx.send(BashActivityUpdate::Error {
                                 session,
                                 message: format!("Bash output: {error:#}"),
+                                activity_id: Some(response_id),
                             });
                         }
                     }
                 });
             }
-            Some(ActivityPanelAction::KillBash { id }) => {
+            Some(BashViewAction::Kill { id }) => {
                 let client = self.client.clone();
                 let session = self.active_session_id.clone();
                 let tx = self.bash_updates.clone();
                 tokio::spawn(async move {
+                    let error_id = id.clone();
                     let result = client
                         .request_ok(DaemonCommand::KillKernelBash {
                             id: None,
@@ -5855,23 +6074,21 @@ impl SessionUi {
                         .await;
                     match result {
                         Ok(_) => {
-                            // The killed row settles immediately: the
-                            // main loop re-issues the list under a fresh
-                            // epoch (the one stamped here predates any
-                            // poll that fired while the kill was in
-                            // flight).
+                            // The killed row settles immediately: the main
+                            // loop re-issues the list under a fresh epoch.
                             let _ = tx.send(BashActivityUpdate::Refresh { session });
                         }
                         Err(error) => {
                             let _ = tx.send(BashActivityUpdate::Error {
                                 session,
                                 message: format!("Could not kill bash command: {error:#}"),
+                                activity_id: Some(error_id),
                             });
                         }
                     }
                 });
             }
-            Some(ActivityPanelAction::None) | None => {}
+            Some(BashViewAction::None) | None => {}
         }
         self.dirty = true;
         Ok(())
@@ -5990,29 +6207,6 @@ impl SessionUi {
         }
     }
 
-    /// Fetch the session-scoped heartbeat catalog (TS
-    /// `refreshHeartbeatCatalog`'s fetch + `getScopedHeartbeats`): the
-    /// selector-less supervisor catalog, scoped to this session and its
-    /// live RLM children, sorted, or the fetch error that replaces it.
-    async fn fetch_scoped_heartbeats(&self) -> (Vec<HeartbeatEntry>, Option<String>) {
-        let request = DaemonCommand::HeartbeatsList {
-            id: None,
-            active_session_id: None,
-            rest: Default::default(),
-        };
-        match self
-            .bounded_request(Duration::from_millis(UI_REQUEST_TIMEOUT_MS), request)
-            .await
-        {
-            Ok(data) => {
-                let mut heartbeats = self.scope_heartbeats(parse_heartbeats(&data));
-                sort_heartbeats(&mut heartbeats);
-                (heartbeats, None)
-            }
-            Err(error) => (Vec::new(), Some(format!("{error:#}"))),
-        }
-    }
-
     /// Scope a fetched catalog to THIS session only (operator scoping:
     /// nested sessions' heartbeats do not surface in the dock, the
     /// panel, or the `/heartbeats` view — a sanctioned divergence from
@@ -6128,30 +6322,22 @@ impl SessionUi {
         }
     }
 
-    /// Fetch the scoped catalog and open the `/heartbeats` view over it
-    /// (TS `showHeartbeatManager`): the fetch error opens over the cached
-    /// catalog with the failure surfaced inside the view (stale-while-
-    /// revalidate), and the activity dock follows the landed catalog.
-    /// `preselect` carries the activity panel's chosen heartbeat row into
-    /// the view's selection.
-    async fn open_heartbeats_view(&mut self, view: &mut AgentView, preselect: Option<String>) {
-        // The direct fetch is the newest snapshot: bump the epoch so an
-        // in-flight background response never overwrites this catalog.
-        self.heartbeat_refresh_epoch += 1;
-        let (fetched, fetch_error) = self.fetch_scoped_heartbeats().await;
-        let heartbeats = if fetch_error.is_some() {
-            self.heartbeat_catalog.clone()
-        } else {
-            fetched
-        };
-        self.heartbeat_catalog = heartbeats.clone();
+    /// Open the `/heartbeats` view over the CACHED catalog at once (TS
+    /// `showHeartbeatManager`'s mount): the keypress never waits on the
+    /// daemon — a non-blocking refresh lands through the update channel,
+    /// and stale-while-revalidate keeps the mounted catalog on failure
+    /// (the error surfaces inside the open view only). The picker owns
+    /// the frame: the dock's focus hands off, so closing the picker
+    /// returns to the editor, not the dock.
+    fn open_heartbeats_view(&mut self, view: &mut AgentView) {
+        self.subagents_focused = false;
         view.heartbeats_picker = Some(HeartbeatsPicker::new(
-            heartbeats,
-            fetch_error,
-            preselect,
+            self.heartbeat_catalog.clone(),
+            None,
+            None,
             picker_viewport_rows(view.terminal_rows()),
         ));
-        self.sync_activity_dock(view);
+        self.spawn_heartbeat_refresh();
         self.dirty = true;
     }
 
@@ -6604,11 +6790,13 @@ impl SessionUi {
         std::mem::take(&mut self.suspend_requested)
     }
 
-    /// Take the pending client command a selector resolved to (the `/mcp`
-    /// view's Enter): the interactive loop dispatches it through the
-    /// ordinary submit path, so the auth flows keep the suspend bracket.
-    pub(crate) fn take_pending_client_command(&mut self) -> Option<String> {
-        self.pending_client_command.take()
+    /// Take the pending MCP auth request the connections view resolved to
+    /// (its Enter on a connection, or the inline paste panel): the args
+    /// run through the client auth commands directly — the typed-command
+    /// arg path is gone (`/mcp` is menu-only), so the view never resolves
+    /// through a submitted `/mcp <args>` string.
+    pub(crate) fn take_pending_mcp_auth(&mut self) -> Option<String> {
+        self.pending_mcp_auth.take()
     }
 
     /// Report the run's first suspend cycle (`tui suspend used`),
@@ -6662,9 +6850,9 @@ impl SessionUi {
         if view.heartbeats_picker.is_some() {
             return self.handle_heartbeats_picker_key(key, view).await;
         }
-        // The unified activity panel owns the frame the same way.
-        if view.activity_panel.is_some() {
-            return self.handle_activity_panel_key(key, view).await;
+        // The bash view owns the frame the same way.
+        if view.bash_view.is_some() {
+            return self.handle_bash_view_key(key, view).await;
         }
         // The `/tree` and `/fork` selectors own the frame the same way.
         if view.tree_selector.is_some() {
@@ -6743,18 +6931,20 @@ impl SessionUi {
             self.dirty = true;
             return Ok(());
         }
-        // The activity dock owns focus while focused: Enter and a second
-        // Alt+A open the grouped list (the panel pre-selects the dock's
-        // group), left/right move the dock's group, up/cancel/back
-        // returns to the editor, expand cycles the conversation detail
-        // and KEEPS the focus, and every other key falls through after
-        // releasing the focus (TS `onChatAction` -> `focusEditor` -> the
-        // editor handles it).
+        // The activity dock owns focus while focused: Enter (and a second
+        // Alt+A) opens the focused group's own view directly (the
+        // operator's direct-navigation redesign), left/right move the
+        // dock's group, up/cancel/back returns to the editor, expand
+        // cycles the conversation detail and KEEPS the focus, and every
+        // other key falls through after releasing the focus (TS
+        // `onChatAction` -> `focusEditor` -> the editor handles it).
         if self.subagents_focused {
             let kb = view.editor.keybindings();
             if kb.matches(&id, "tui.select.confirm") || kb.matches(&id, "app.subagents.focus") {
-                self.emit_activity_opened("panel");
-                self.open_activity_panel(view);
+                // The dock is the direct launcher: Enter opens the
+                // focused group's own view (the operator's redesign —
+                // the grouped activity panel is gone).
+                self.open_dock_group_view(view);
                 return Ok(());
             }
             if id == "left" || id == "right" {
@@ -6819,11 +7009,25 @@ impl SessionUi {
             .keybindings()
             .matches(&id, "app.heartbeats.open")
         {
-            self.open_heartbeats_view(view, None).await;
+            self.open_heartbeats_view(view);
             return Ok(());
         }
         if view.editor.keybindings().matches(&id, "app.input.clear") {
-            view.editor.cancel_autocomplete();
+            // The completion surface consumes Esc: the open dropdown
+            // closes, and a parked request (Tab before the input-idle
+            // tick materializes it) cancels before it can open the menu —
+            // either way the key stops there. The abort ladder (the
+            // escape-repeat arming and `interrupt_running_work`) runs only
+            // when no menu is open or about to open — closing a menu must
+            // never abort a running turn (the TS base editor consumes
+            // `tui.select.cancel` inside the dropdown; the TS
+            // custom-editor overlay propagates Esc to the interrupt after
+            // closing, the behavior this deliberately removes).
+            if view.editor.is_showing_autocomplete() || view.editor.has_pending_autocomplete() {
+                view.editor.cancel_autocomplete();
+                self.clear_ctrl_c_hint();
+                return Ok(());
+            }
             self.clear_ctrl_c_hint();
             // TS `handleEscape`: an open side-question pane owns the key —
             // the running turn aborts and the pane closes; the armed
@@ -7061,30 +7265,84 @@ impl SessionUi {
             }
         }
         // The follow-up key (TS `app.message.followUp`, default alt+enter):
-        // the same submit path as Enter, but the message parks on the
+        // the same submit ladder as Enter, but the message parks on the
         // follow-up lane and delivers when the run goes idle. While a
         // queued message is selected, the edit re-parks it there instead
-        // (TS `handleFollowUp`'s browsing branch).
+        // (TS `handleFollowUp`'s browsing branch). An empty follow-up is
+        // TS `handleFollowUp`'s silent no-op: never submitted, never
+        // dispatched to the daemon.
         if view
             .editor
             .keybindings()
             .matches(&id, "app.message.followUp")
         {
-            view.editor.submit();
-            for event in view.editor.take_events() {
-                if let crate::editor::EditorEvent::Submitted(text) = event {
-                    if self.queue_selection.is_browsing() {
-                        self.apply_queue_selection(&text, QueueLane::FollowUp, view)
-                            .await?;
-                    } else {
-                        view.editor.add_to_history(&text);
-                        self.send_prompt(&text, SubmitBehavior::FollowUp, view)
-                            .await?;
+            if self.queue_selection.is_browsing() || !view.editor.get_text().trim().is_empty() {
+                view.editor.submit();
+                for event in view.editor.take_events() {
+                    if let crate::editor::EditorEvent::Submitted(text) = event {
+                        if self.queue_selection.is_browsing() {
+                            self.apply_queue_selection(&text, QueueLane::FollowUp, view)
+                                .await?;
+                        } else {
+                            view.editor.add_to_history(&text);
+                            self.submit_prompt(&text, SubmitBehavior::FollowUp, view)
+                                .await?;
+                        }
                     }
                 }
             }
             self.dirty = true;
             return Ok(());
+        }
+        // Tab in a picker-command argument context opens that command's
+        // menu prefilled with the typed partial: `/model <partial>` Tab
+        // opens the model picker filtered to the match, `/mcp <partial>`
+        // Tab the connections view filtered. The menu-only commands have
+        // no typed-arg execution, so the partial's only destination is the
+        // picker's filter. An open completion dropdown keeps its own Tab
+        // (apply the selection); the interception is the no-menu path.
+        if view.editor.keybindings().matches(&id, "tui.input.tab")
+            && !view.editor.is_showing_autocomplete()
+        {
+            if let Some((command, partial)) = view.editor.picker_argument_context() {
+                // The menu takes the Tab: a completion request parked by
+                // this same press (before the idle tick) must not
+                // materialize a dropdown over the menu on the next tick.
+                view.editor.cancel_autocomplete();
+                // The menu also takes the frame from a queue browse: the
+                // parked message keeps its text (the typed partial is the
+                // command being fulfilled now), and the next Enter submits
+                // a prompt instead of routing into apply_queue_selection,
+                // which would delete or replace the still-selected message.
+                // Ending the browse restores the stashed draft like every
+                // other leave-browse path (Esc, an applied queue edit), so
+                // the editor never strands the browsed message's text and
+                // a failed menu open loses nothing: the draft returns.
+                if matches!(command.as_str(), "model" | "mcp") {
+                    if self.queue_selection.has_draft() {
+                        let draft = self.queue_selection.reset();
+                        view.editor.set_text(&draft);
+                    } else {
+                        self.queue_selection.reset();
+                    }
+                    self.sync_queue_selection(view);
+                }
+                match command.as_str() {
+                    "model" => {
+                        self.open_model_picker(view, partial.trim()).await?;
+                        self.track_menu_opened("model", "tab");
+                        self.dirty = true;
+                        return Ok(());
+                    }
+                    "mcp" => {
+                        self.open_mcp_view("/mcp", view, partial.trim()).await?;
+                        self.track_menu_opened("mcp", "tab");
+                        self.dirty = true;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
         }
         // TS `CustomEditor.handleInput`'s move-below-prompt hook
         // (`onMoveBelowPrompt` -> `focusSubagentSummary`): Down at the end
@@ -7121,7 +7379,8 @@ impl SessionUi {
                         .await?;
                 } else {
                     view.editor.add_to_history(&text);
-                    self.submit_prompt(&text, view).await?;
+                    self.submit_prompt(&text, SubmitBehavior::Steer, view)
+                        .await?;
                 }
             }
         }
@@ -7560,6 +7819,15 @@ impl SessionUi {
                 // reason is a provider-failover switch: the loader names
                 // the backup provider the turn re-routes to (no countdown;
                 // the switch re-issues immediately).
+                //
+                // SANCTIONED DIVERGENCE (operator ruling 2026-09-23): the
+                // just-failed attempt's error row leaves the chat — the
+                // transient loader line (error + attempt + countdown,
+                // updated in place) is the ONE error the chat shows while
+                // the episode runs, and the episode's durable outcome row
+                // replaces it at the settle. (TS keeps one error row per
+                // failed attempt; a 429-storm spammed the chat.)
+                pop_superseded_attempt_row(view);
                 view.retry = Some(RetryState {
                     attempt,
                     max_attempts,
@@ -7570,19 +7838,18 @@ impl SessionUi {
             }
             TurnUpdate::AutoRetryEnd {
                 success: _,
-                attempt,
+                attempt: _,
                 final_error,
                 restored_model,
             } => {
                 view.retry = None;
-                if let Some(final_error) = final_error {
+                if final_error.is_some() {
                     self.turn_error_shown = true;
-                    view.push_entry(ChatEntry::Status {
-                        text: format!(
-                            "\u{26a0} Error: Retry failed after {attempt} attempts: {final_error}"
-                        ),
-                        kind: StatusKind::Error,
-                    });
+                    // The give-up's final failed attempt is superseded by
+                    // the ONE terminal line (the durable outcome row that
+                    // follows this event renders it; the row text matches
+                    // the old live banner).
+                    pop_superseded_attempt_row(view);
                 }
                 // A settled switch restores the primary provider (TS
                 // `restoredModel` status line).
@@ -8452,7 +8719,10 @@ async fn create_session(
         Some(SessionSelection::Resume(path)) => Some(path.to_string_lossy().to_string()),
         _ => None,
     };
-    let data = client
+    // The create consumes the path; a refusal needs it again for the
+    // descriptive error.
+    let refused_path = session_path.clone();
+    let data = match client
         .request_ok(DaemonCommand::Create {
             id: None,
             session_path,
@@ -8470,12 +8740,107 @@ async fn create_session(
             launch_env: None,
             rest: Default::default(),
         })
-        .await?;
+        .await
+    {
+        Ok(data) => data,
+        Err(error) => {
+            return Err(describe_session_open_failure(client, error, refused_path).await);
+        }
+    };
     data.get("activeSessionId")
         .or_else(|| data.get("id"))
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| anyhow!("the daemon did not report a session id for the new session"))
+}
+
+/// A create refusal for a session file another holder already owns
+/// names the holder and the next steps (the operator-directed
+/// descriptive session-open error) instead of stopping at the bare
+/// lease id. Any other failure propagates unchanged.
+async fn describe_session_open_failure(
+    client: &DaemonClient,
+    error: anyhow::Error,
+    session_path: Option<String>,
+) -> anyhow::Error {
+    // Only a typed daemon rejection decorates (transport failures pass
+    // through unchanged), and the RAW rejection message is what gets
+    // decorated — the typed wrapper's own display adds the framing
+    // prefix exactly once.
+    let Some(rejected) = error
+        .downcast_ref::<crate::daemon_client::RequestRejected>()
+        .map(|rejected| rejected.message.clone())
+    else {
+        return error;
+    };
+    let Some(owner) = crate::session_open_error::owner_from_refusal(&rejected) else {
+        return error;
+    };
+    let Some(path) = session_path.map(std::path::PathBuf::from) else {
+        return error;
+    };
+    // The live-roster probe is best-effort and BOUNDED: a stalled `list`
+    // must not hold the refusal for the daemon's full request timeout —
+    // the startup hands off to the agents view promptly either way.
+    let rows: Vec<Value> = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        client.request_ok(DaemonCommand::List {
+            id: None,
+            all: None,
+            cwd: None,
+            session_dir: None,
+            include_client_owned: None,
+            rest: Default::default(),
+        }),
+    )
+    .await
+    .ok()
+    .and_then(|result| result.ok())
+    .map(|data| crate::session_open_error::roster_rows(&data).to_vec())
+    .unwrap_or_default();
+    // The path-keyed lookup first; the refusal's own holder id is the
+    // fallback (a relative resume path can miss the canonical row).
+    let holder = crate::session_open_error::holder_from_roster(&rows, &path)
+        .or_else(|| crate::session_open_error::holder_by_id(&rows, &owner));
+    // The daemon's ORIGINAL refusal line stays verbatim (never
+    // reconstructed from a possibly-relative caller path) and the holder
+    // guidance rides the same line — the agents-view handoff renders the
+    // notice on a single status line, so a multiline decoration would
+    // hide the holder and the next steps.
+    let message =
+        crate::session_open_error::decorate_interactive_refusal(&rejected, holder, &owner);
+    // The refusal stays a typed `RequestRejected`: `is_daemon_rejection`
+    // keeps classifying it (the interactive open hands off to the agents
+    // view with the notice instead of exiting the client).
+    anyhow::Error::new(crate::daemon_client::RequestRejected {
+        command: "create".to_string(),
+        message,
+    })
+}
+
+/// The auth-args subcommands that prompt on the plain terminal: a login
+/// (OAuth/device flow) and a paste (its token prompt reads stdin from the
+/// terminal). Anything else (logout, malformed args) stays in-band.
+fn mcp_auth_args_need_terminal(args: &str) -> bool {
+    matches!(args.split_whitespace().next(), Some("login" | "paste"))
+}
+
+/// The retry-episode collapse (SANCTIONED DIVERGENCE from TS, operator
+/// ruling 2026-09-23): pop the trailing failed-attempt error row the
+/// retry supersedes, so the ONE line the episode shows while it runs is
+/// the transient loader (updated in place) and the ONE line it leaves is
+/// the durable outcome row. No-op when the trailing entry is anything
+/// else (an abort row, tool-call-carrying failures, a settled reply).
+pub(crate) fn pop_superseded_attempt_row(view: &mut AgentView) -> bool {
+    if view
+        .chat
+        .last()
+        .is_some_and(crate::snapshot::is_superseded_attempt_row)
+    {
+        view.pop_chat_entry().is_some()
+    } else {
+        false
+    }
 }
 
 #[cfg(test)]
@@ -8609,11 +8974,11 @@ mod activity_dock_counts_tests {
     }
 
     /// Operator scoping: the dock's bash indicator counts only runs
-    /// actively running right now — finished runs stay in the panel as
-    /// dimmed rows, never in the count.
+    /// actively running right now — finished runs stay in the bash view
+    /// as rows, never in the indicator.
     #[test]
     fn dock_bash_counts_only_running_runs() {
-        let activities = crate::activity_panel::parse_bash_activities(&json!({"activities": [
+        let activities = crate::bash_view::parse_bash_activities(&json!({"activities": [
             {"id":"a","command":"sleep 1","status":"running"},
             {"id":"b","command":"echo hi","status":"finished","exitCode":0},
             {"id":"c","command":"sleep 2","status":"running"},
@@ -8701,5 +9066,104 @@ mod loader_token_tests {
         stats.tokens += 100;
         stats.duration_ms += 500;
         assert_eq!(stats.average_rate(), 200.0);
+    }
+}
+
+#[cfg(test)]
+mod mcp_auth_terminal_tests {
+    use super::mcp_auth_args_need_terminal;
+
+    /// The inline paste panel's `paste <server>` prompts for the token on
+    /// the plain terminal (its read of stdin cannot happen under the raw
+    /// renderer), so it needs the same hand-over as a login.
+    #[test]
+    fn login_and_paste_need_the_terminal() {
+        assert!(mcp_auth_args_need_terminal("login anthropic"));
+        assert!(mcp_auth_args_need_terminal("paste anthropic"));
+    }
+
+    /// A logout and a bare/unknown subcommand stay in-band.
+    #[test]
+    fn logout_and_malformed_args_stay_in_band() {
+        assert!(!mcp_auth_args_need_terminal("logout anthropic"));
+        assert!(!mcp_auth_args_need_terminal(""));
+        assert!(!mcp_auth_args_need_terminal("refresh anthropic"));
+    }
+}
+
+#[cfg(test)]
+mod retry_collapse_tests {
+    use super::pop_superseded_attempt_row;
+    use crate::chat::{ChatEntry, StatusKind};
+    use crate::theme::{ColorMode, Theme};
+    use crate::view::AgentView;
+
+    fn view_with(entries: Vec<ChatEntry>) -> AgentView {
+        let mut view = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
+        for entry in entries {
+            view.push_entry(entry);
+        }
+        view
+    }
+
+    fn failed_attempt(text: &str) -> ChatEntry {
+        ChatEntry::Assistant(Box::new(crate::chat::AssistantMessage {
+            blocks: Vec::new(),
+            has_tool_calls: false,
+            streaming: false,
+            error: Some(format!("Error: {text}")),
+            aborted: false,
+        }))
+    }
+
+    fn aborted_attempt() -> ChatEntry {
+        ChatEntry::Assistant(Box::new(crate::chat::AssistantMessage {
+            blocks: Vec::new(),
+            has_tool_calls: false,
+            streaming: false,
+            error: Some("Operation aborted".to_string()),
+            aborted: true,
+        }))
+    }
+
+    /// The 429-storm single-line collapse (operator ruling 2026-09-23): the
+    /// trailing failed-attempt error row pops when its retry supersedes it —
+    /// and only that row (an abort, a settled reply, or a tool-carrying
+    /// failure stays).
+    #[test]
+    fn pops_only_the_superseded_failed_attempt() {
+        let mut view = view_with(vec![
+            ChatEntry::User {
+                text: "hi".to_string(),
+            },
+            failed_attempt("429 Too many concurrent requests"),
+        ]);
+        assert!(pop_superseded_attempt_row(&mut view));
+        assert_eq!(view.chat_len(), 1, "only the user row remains");
+        // A second pop finds nothing: exactly one row per attempt.
+        assert!(!pop_superseded_attempt_row(&mut view));
+
+        // An abort row never pops (aborts are not retried).
+        let mut view = view_with(vec![aborted_attempt()]);
+        assert!(!pop_superseded_attempt_row(&mut view));
+
+        // A tool-carrying failure never pops (the cards carry the failure).
+        let mut view = view_with(vec![ChatEntry::Assistant(Box::new(
+            crate::chat::AssistantMessage {
+                blocks: Vec::new(),
+                has_tool_calls: true,
+                streaming: false,
+                error: Some("Error: mid-run failure".to_string()),
+                aborted: false,
+            },
+        ))]);
+        assert!(!pop_superseded_attempt_row(&mut view));
+
+        // A status row (the episode outcome) never pops.
+        let mut view = view_with(vec![ChatEntry::Status {
+            text: "Recovered after 2 retries: provider down".to_string(),
+            kind: StatusKind::Info,
+        }]);
+        assert!(!pop_superseded_attempt_row(&mut view));
     }
 }

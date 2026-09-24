@@ -113,6 +113,10 @@ pub struct SupervisorOptions {
 pub(crate) enum ClientRouting {
     /// Every connected client (e.g. `daemon_closing`).
     Broadcast,
+    /// Every connected client except one (the shutdown initiator receives its
+    /// `daemon_closing` through the command response instead, so the
+    /// broadcast cannot overtake that response or duplicate the frame).
+    BroadcastExcept { connection_id: String },
     /// Clients attached to the session.
     AttachedSession { active_session_id: String },
     /// Clients holding a roster subscription (`roster_subscribe`).
@@ -149,9 +153,27 @@ pub struct Supervisor {
     /// rename of the same name fails the second caller.
     pub(crate) pending_session_names: std::sync::Mutex<std::collections::HashSet<String>>,
     shutting_down: AtomicBool,
-    /// Wakes the accept loop when [`Supervisor::begin_shutdown`] sets the
-    /// flag: a listening socket blocks in `accept` until a client connects,
-    /// so the shutdown must interrupt it for the process to exit.
+    /// Whether some path has taken ownership of the one terminal stop pass.
+    /// `shutting_down` flips synchronously when the shutdown command is
+    /// accepted; this flag ensures exactly one connection runs
+    /// `begin_shutdown`, even if several clients notice the shutdown.
+    shutdown_started: AtomicBool,
+    /// The connection that accepted the one terminal shutdown request. Only
+    /// this connection may run the stop pass from its response-write or
+    /// disconnect paths; another client disconnecting in the response window
+    /// cannot preempt the acknowledgement or turn an update restart into a
+    /// terminal worker-descriptor sweep.
+    shutdown_owner: std::sync::Mutex<Option<String>>,
+    /// The accept loop's exit flag. `shutting_down` refuses new work the
+    /// moment a terminal stop begins, but the loop itself must stay up
+    /// until [`Supervisor::begin_shutdown`] has stopped every resident
+    /// worker: an inbound connection must not fall it out mid-stop and
+    /// orphan the workers that pass is still shutting down.
+    accept_exit: AtomicBool,
+    /// Wakes the accept loop when [`Supervisor::begin_shutdown`] sets
+    /// [`Self::accept_exit`]: a listening socket blocks in `accept` until
+    /// a client connects, so the completed shutdown must interrupt it for
+    /// the process to exit.
     shutdown_notify: tokio::sync::Notify,
     log: paths::RotatingLog,
     /// Memoized ledger over the default sessions dir (ledgers are per
@@ -261,6 +283,9 @@ impl Supervisor {
             roster: std::sync::Mutex::new(crate::agent_roster::AgentRoster::new()),
             pending_session_names: std::sync::Mutex::new(std::collections::HashSet::new()),
             shutting_down: AtomicBool::new(false),
+            shutdown_started: AtomicBool::new(false),
+            shutdown_owner: std::sync::Mutex::new(None),
+            accept_exit: AtomicBool::new(false),
             shutdown_notify: tokio::sync::Notify::new(),
             log,
             rlm_ledger: tokio::sync::Mutex::new(None),
@@ -599,7 +624,7 @@ impl Supervisor {
             });
         }
 
-        while !self.shutting_down.load(Ordering::SeqCst) {
+        while !self.accept_exit.load(Ordering::SeqCst) {
             let stream = tokio::select! {
                 accepted = listener.accept() => match accepted {
                     Ok(accepted) => accepted,
@@ -1287,7 +1312,13 @@ impl Supervisor {
         }
         {
             let mut descriptor = resident.descriptor.lock().await;
-            descriptor.pid = child.id().unwrap_or(0) as u64;
+            // Capture the child's start identity alongside its pid (TS
+            // `getProcessStartId(childPid)` at spawn): the identity-aware
+            // holder checks can only recognize a recycled pid when the
+            // descriptor carries the start id the original holder had.
+            let child_pid = child.id().unwrap_or(0);
+            descriptor.pid = child_pid as u64;
+            descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
             descriptor.lifecycle = DaemonWorkerLifecycle::Starting;
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
         }
@@ -1757,6 +1788,14 @@ impl Supervisor {
         else {
             return Err(anyhow!("launch_worker requires a create command"));
         };
+        // The shutdown gate: a create dispatched while the supervisor is
+        // stopping must never launch a worker the stop pass would miss (a
+        // late create racing a shutdown would otherwise orphan its worker
+        // process). The command surfaces the same failure as any refused
+        // create.
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(anyhow!("Supervisor is shutting down"));
+        }
         let config_object = config.as_ref().and_then(Value::as_object);
         let cwd_value = config_object
             .and_then(|config| config.get("cwd"))
@@ -2081,6 +2120,7 @@ impl Supervisor {
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
         let mut events = self.events.subscribe();
+        let connection_id = client_id.clone();
         // Connection state shared with the per-command dispatch tasks: the
         // envelope-overridden client id and the attached-session list (the
         // event arm reads the latter to route session events).
@@ -2119,6 +2159,7 @@ impl Supervisor {
                     let roster_subscribed = Arc::clone(&roster_subscribed);
                     let connection = Arc::clone(&connection);
                     let dispatch_tx = dispatch_tx.clone();
+                    let connection_id = connection_id.clone();
                     tokio::spawn(async move {
                         let (lines, stop) = supervisor
                             .dispatch_client(
@@ -2127,17 +2168,48 @@ impl Supervisor {
                                 &attached,
                                 &roster_subscribed,
                                 &connection,
+                                &connection_id,
                             )
                             .await;
-                        let _ = dispatch_tx.send((lines, stop));
+                        if dispatch_tx.send((lines, stop)).is_err() && stop {
+                            // The initiating connection left before its response
+                            // was selected. Only a terminal shutdown owns the
+                            // descriptor-deleting stop pass; an update restart
+                            // must leave its descriptors for the successor.
+                            let is_shutdown_owner = supervisor
+                                .shutdown_owner
+                                .lock()
+                                .unwrap()
+                                .as_deref()
+                                == Some(connection_id.as_str());
+                            if is_shutdown_owner
+                                && supervisor.shutting_down.load(Ordering::SeqCst)
+                                && !supervisor.accept_exit.load(Ordering::SeqCst)
+                            {
+                                supervisor.ensure_shutdown_started().await;
+                            }
+                        }
                     });
                 }
                 dispatched = dispatch_rx.recv() => {
                     let Some((lines, stop)) = dispatched else { break };
                     for outbound in lines {
-                        write_line(&mut writer, &outbound).await?;
+                        if let Err(error) = write_line(&mut writer, &outbound).await {
+                            // A failed response write must not strand the
+                            // shutdown: the stop pass still has to run.
+                            if stop {
+                                self.ensure_shutdown_started().await;
+                            }
+                            return Err(error);
+                        }
                     }
                     if stop {
+                        // The initiating client's response and daemon_closing
+                        // lines are flushed above; only now may the stop pass
+                        // end the runtime. The accept loop stays up until
+                        // begin_shutdown sets accept_exit, so worker stops
+                        // cannot be cut short by another inbound connection.
+                        self.ensure_shutdown_started().await;
                         break;
                     }
                 }
@@ -2146,6 +2218,9 @@ impl Supervisor {
                         Ok((routing, payload)) => {
                             let deliver = match &routing {
                                 ClientRouting::Broadcast => true,
+                                ClientRouting::BroadcastExcept {
+                                    connection_id: excluded,
+                                } => excluded.as_str() != connection_id.as_str(),
                                 ClientRouting::AttachedSession { active_session_id } => {
                                     attached.lock().unwrap().iter().any(|id| id == active_session_id)
                                 }
@@ -2154,7 +2229,24 @@ impl Supervisor {
                                 }
                             };
                             if deliver {
-                                write_line(&mut writer, &payload).await?;
+                                if let Err(error) = write_line(&mut writer, &payload).await {
+                                    // An event-write failure must not strand an
+                                    // accepted shutdown: if this connection owns
+                                    // the stop, it still starts the pass.
+                                    let is_shutdown_owner = self
+                                        .shutdown_owner
+                                        .lock()
+                                        .unwrap()
+                                        .as_deref()
+                                        == Some(connection_id.as_str());
+                                    if is_shutdown_owner
+                                        && self.shutting_down.load(Ordering::SeqCst)
+                                        && !self.accept_exit.load(Ordering::SeqCst)
+                                    {
+                                        self.ensure_shutdown_started().await;
+                                    }
+                                    return Err(error);
+                                }
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -2162,6 +2254,20 @@ impl Supervisor {
                     }
                 }
             }
+        }
+        // A shutdown command may have been accepted just before this client
+        // disconnected (or its response write failed). Only the connection
+        // that accepted the shutdown may run the stop pass from this
+        // fallback: another client disconnecting in the response window
+        // must not preempt the acknowledgement or turn an update restart
+        // into a terminal descriptor sweep.
+        let is_shutdown_owner =
+            self.shutdown_owner.lock().unwrap().as_deref() == Some(connection_id.as_str());
+        if is_shutdown_owner
+            && self.shutting_down.load(Ordering::SeqCst)
+            && !self.accept_exit.load(Ordering::SeqCst)
+        {
+            self.ensure_shutdown_started().await;
         }
         // Detach from every attached session on disconnect (a TUI exit does
         // not stop the session; the worker keeps running).
@@ -2193,6 +2299,7 @@ impl Supervisor {
         attached: &Arc<std::sync::Mutex<Vec<String>>>,
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
+        connection_id: &str,
     ) -> (Vec<Value>, bool) {
         let envelope = match parse_supervisor_command_line(line) {
             Ok(envelope) => envelope,
@@ -2251,6 +2358,22 @@ impl Supervisor {
             }
         }
         let type_name = command_type_name(&envelope.command).to_string();
+        // Terminal shutdown admission gate: once the shutdown command has
+        // flipped `shutting_down`, no later client command may reach a
+        // worker (the stop pass may already be retiring it). The command
+        // that started the shutdown passed this point before it set the
+        // gate, so its own response path is unaffected.
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return (
+                vec![response_line(&response_failure(
+                    Some(&command_id),
+                    &type_name,
+                    "Supervisor is shutting down",
+                    None,
+                ))],
+                false,
+            );
+        }
         // Update-prepare watchdog on any later command (spec §5): a prepared
         // transaction whose marker expired returns the supervisor to Serving
         // before the command is served.
@@ -2293,6 +2416,7 @@ impl Supervisor {
                 attached,
                 roster_subscribed,
                 connection,
+                connection_id,
                 command_id,
                 type_name,
             )
@@ -2313,6 +2437,7 @@ impl Supervisor {
         attached: &Arc<std::sync::Mutex<Vec<String>>>,
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
+        connection_id: &str,
         command_id: String,
         type_name: String,
     ) -> (Vec<Value>, bool) {
@@ -2323,11 +2448,22 @@ impl Supervisor {
                 let mut lines = vec![response_line(&response)];
                 // daemon_closing goes to every client before the exit.
                 let closing = json!({ "type": "daemon_closing", "reason": "shutdown" });
-                let _ = self
-                    .events
-                    .send((ClientRouting::Broadcast, closing.clone()));
+                let _ = self.events.send((
+                    ClientRouting::BroadcastExcept {
+                        connection_id: connection_id.to_string(),
+                    },
+                    closing.clone(),
+                ));
                 lines.push(closing);
-                self.begin_shutdown().await;
+                // Answer first, then shut down: the connection loop writes
+                // these lines before it awaits begin_shutdown, so the client
+                // always receives the response and daemon_closing before the
+                // stop pass can end the process. The shutdown gate flips
+                // synchronously here — before the response is written — so
+                // no create dispatched after the shutdown can slip past it
+                // and launch a worker the stop pass would miss.
+                *self.shutdown_owner.lock().unwrap() = Some(connection_id.to_string());
+                self.shutting_down.store(true, Ordering::SeqCst);
                 (lines, true)
             }
             DaemonCommand::List {
@@ -2365,15 +2501,21 @@ impl Supervisor {
                 worker_token,
                 summary,
                 removed,
+                sequence,
+                worker_instance_id,
                 ..
             } => {
                 let response = self
                     .handle_worker_roster_delta(
                         &command_id,
                         &type_name,
-                        worker_token,
-                        summary.clone(),
-                        removed.clone().unwrap_or_default(),
+                        crate::supervisor_roster::WorkerRosterDelta {
+                            worker_token: worker_token.clone(),
+                            summary: summary.clone(),
+                            removed: removed.clone().unwrap_or_default(),
+                            sequence: *sequence,
+                            worker_instance_id: worker_instance_id.clone(),
+                        },
                     )
                     .await;
                 (vec![response_line(&response)], false)
@@ -3171,6 +3313,11 @@ impl Supervisor {
     /// workers from them. Contrast `begin_shutdown`, which deletes
     /// descriptors for a terminal stop.
     fn exit_for_update(self: &Arc<Self>) {
+        // The update exit is already complete: publish the accept-loop exit
+        // before the general shutdown gate, so a client disconnect can never
+        // observe the transient `shutting_down && !accept_exit` window and
+        // mistake the update restart for a terminal stop pass.
+        self.accept_exit.store(true, Ordering::SeqCst);
         self.shutting_down.store(true, Ordering::SeqCst);
         self.shutdown_notify.notify_one();
     }
@@ -3279,7 +3426,31 @@ impl Supervisor {
             if token.as_str() != descriptor.authentication_token {
                 return fail("Session worker authentication failed");
             }
+            let previous_worker_instance_id = descriptor.worker_instance_id.clone();
+            // A REPLACEMENT registration flips the roster's stale-delta
+            // slot to the replacement BEFORE the replacement is exposed
+            // anywhere — the descriptor update below, the persisted
+            // record, the recorded registration: a predecessor's pull or
+            // frame still in flight must already meet the slot naming the
+            // replacement (its own stamp mismatches and drops), never the
+            // predecessor it carries. A same-process re-register (a
+            // dropped supervisor link, a create replay) keeps the slot
+            // untouched — the counter did not restart.
+            if previous_worker_instance_id.as_deref() != worker_instance_id.as_deref() {
+                let replacement = worker_instance_id.clone().unwrap_or_default();
+                let mut roster = self.roster.lock().unwrap();
+                roster.note_worker_generation(&resident.worker_id, &replacement);
+            }
             descriptor.pid = *pid;
+            // Refresh the identity from the live registrant (TS captures
+            // an identity while the process is known alive): a supervisor
+            // restart re-adopts the worker, and a pid that was recycled in
+            // between must not keep the old holder's identity. An
+            // unobservable start id keeps the previous value (a possibly
+            // live worker is never orphaned on a transient lookup failure).
+            if let Some(start_id) = crate::protocol::process_start_id(*pid as u32) {
+                descriptor.process_start_id = Some(start_id);
+            }
             descriptor.socket_path = socket_path.clone();
             descriptor.worker_instance_id = worker_instance_id.clone();
             if let Some(session_id) = &registration.session_id {
@@ -3296,7 +3467,7 @@ impl Supervisor {
                 descriptor.session_file.as_deref(),
             );
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
-            match registration.session_id.clone() {
+            let durable_session_id = match registration.session_id.clone() {
                 Some(session_id) => Some(session_id),
                 None => descriptor
                     .session_file
@@ -3304,7 +3475,8 @@ impl Supervisor {
                     .as_deref()
                     .and_then(|file| Path::new(file).file_stem())
                     .map(|stem| stem.to_string_lossy().to_string()),
-            }
+            };
+            durable_session_id
         };
         let record = self.registry.record_registration(registration).await;
         // A restore pass that owns this session's roster row can settle it
@@ -3551,6 +3723,13 @@ impl Supervisor {
             "list_saved_sessions",
             Some(json!({ "sessions": sessions })),
         )));
+        // Telemetry: how many served rows carry a usage summary — the
+        // agents-view spend columns' data (a count only, never session
+        // payload).
+        let rows_with_usage = infos.iter().filter(|info| info.usage.is_some()).count();
+        if let Some(client) = &*self.telemetry.lock().unwrap() {
+            pa_core::session_engine::telemetry::track_saved_sessions_usage(client, rows_with_usage);
+        }
         lines
     }
 
@@ -3776,12 +3955,6 @@ impl Supervisor {
         command: &DaemonCommand,
         client_id: String,
     ) -> Result<Value> {
-        if let DaemonCommand::Create {
-            name: Some(name), ..
-        } = command
-        {
-            self.assert_session_name_available(name).await?;
-        }
         // The per-file open single-flight (TS `openingWorkers`): one
         // create at a time per session file. A concurrent open waits
         // behind this one and then reuses the worker it launched — both
@@ -3792,17 +3965,27 @@ impl Supervisor {
         // client attaches next) instead of launching a second worker over
         // the same file — a launch the runtime session lease would reject
         // with `Session is already active`. `None` keeps the launch path.
+        // The seam runs BEFORE the name check (TS reserves names only on
+        // the fresh-launch path): a named open of an already-active
+        // session reuses it — its own name is not a conflict.
         if let Some(summary) = self
             .reuse_live_worker_for_create(command, &client_id)
             .await?
         {
             return Ok(summary);
         }
+        if let DaemonCommand::Create {
+            name: Some(name), ..
+        } = command
+        {
+            self.assert_session_name_available(name).await?;
+        }
         let (resident, create_summary) = self.launch_worker(command, Some(client_id)).await?;
         // The launch registered its worker (the registry insert precedes
-        // the spawn): the single-flight releases here so a concurrent
-        // open's classification finds the freshly-launched resident.
-        drop(_opening_guard);
+        // the spawn). The single-flight stays held through the spawn
+        // admission below: an admission failure tears the resident down,
+        // and a concurrent open that had just reused it would hold a
+        // summary for a worker that no longer exists.
         // Spawn admission is the moment the supervisor knows the child's
         // edge firsthand. The ledger is the only topology store, so the
         // append's outcome is load-bearing: admission fails if the spawn
@@ -3823,6 +4006,9 @@ impl Supervisor {
             let _ = self.stop_worker(&resident).await;
             return Err(error);
         }
+        // The admission settled: the single-flight may release (a
+        // concurrent open's classification now finds a durable resident).
+        drop(_opening_guard);
         // The response still matches attach/list rows exactly: prefer a
         // fresh get_state, but a degraded one falls back to the
         // authoritative create summary instead of failing the spawn (the
@@ -3837,8 +4023,11 @@ impl Supervisor {
             _ => create_summary.clone(),
         };
         // The new session joins the agent roster immediately (subscribers
-        // see the roster_update before their next list).
-        self.write_roster_summary(&summary, Some(&resident.worker_id));
+        // see the roster_update before their next list) — as an
+        // authoritative pull write, so its embedded counter raises the
+        // stale-delta watermark for the resident.
+        self.write_roster_summary_for_resident(&resident, &summary)
+            .await;
         // The spawn append is a ledger-append moment: the new edge can be
         // the first time this family is live in the roster (a resumed
         // parent, a supervisor restart), so the seed runs here too - after
@@ -4422,6 +4611,20 @@ impl Supervisor {
         self.seed_roster_ledger().await;
     }
 
+    /// Run the one terminal stop pass, whichever connection first reaches it.
+    ///
+    /// The shutdown command sets `shutting_down` synchronously, but the stop
+    /// pass still has to start even if its initiating client disconnects or
+    /// the response write fails. `shutdown_started` is the one-owner gate:
+    /// the first caller runs `begin_shutdown`; every later observer returns
+    /// immediately instead of duplicating the worker stops.
+    async fn ensure_shutdown_started(self: &Arc<Self>) {
+        if self.shutdown_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.begin_shutdown().await;
+    }
+
     async fn begin_shutdown(self: &Arc<Self>) {
         self.shutting_down.store(true, Ordering::SeqCst);
         for resident in self.registry.list().await {
@@ -4433,8 +4636,10 @@ impl Supervisor {
             let _ = std::fs::remove_file(&resident.descriptor_path);
         }
         self.registry.clear().await;
-        // Wake the accept loop only after the workers stopped, so the process
-        // cannot exit mid-stop and orphan a live worker.
+        // The workers are all stopped now, so the accept loop may exit;
+        // setting the gate alone is not enough — an inbound connection
+        // could otherwise fall the loop out mid-stop.
+        self.accept_exit.store(true, Ordering::SeqCst);
         self.shutdown_notify.notify_one();
     }
 }
@@ -4604,6 +4809,15 @@ fn saved_session_summary(info: &crate::session_store::SessionInfo) -> Value {
             object.insert("thinkingLevel".to_string(), json!(level));
         }
     }
+    // TS `summaryForInactiveSession` publishes the scan's own-usage
+    // summary: the agents-view roster record reads it before the saved
+    // catalog row's (own cost `daemon.usage ?? saved.usage`). The child's
+    // own row carries the child spend, so rollups never double count.
+    if let Some(usage) = &info.usage {
+        if let Some(object) = row.as_object_mut() {
+            object.insert("usage".to_string(), json!(usage));
+        }
+    }
     row
 }
 
@@ -4662,6 +4876,13 @@ fn saved_session_row(info: &crate::session_store::SessionInfo) -> Value {
             "model".to_string(),
             json!({ "provider": provider, "modelId": model_id }),
         );
+    }
+    // TS `serializeSavedSessionInfo` publishes the scan's own-usage
+    // summary: the agents-view spend columns and the archived-row
+    // keep-condition read `saved.usage.cost`. The child's own row
+    // carries the child spend, so rollups never double count.
+    if let Some(usage) = &info.usage {
+        object.insert("usage".to_string(), json!(usage));
     }
     // The persisted thinking level rides the catalog row too: the TUI merges
     // it into live summaries that lack one (the same enrichment as `model`).
@@ -4812,6 +5033,50 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The saved-session surfaces publish the scan's own-usage summary (TS
+    /// `serializeSavedSessionInfo` and `summaryForInactiveSession`): the
+    /// agents-view spend columns and the archived-row keep-condition read
+    /// `usage.cost`; a session with no billable work stays bare, exactly
+    /// like TS's undefined serialization.
+    #[test]
+    fn saved_session_rows_publish_the_own_usage_summary() {
+        let dir = std::env::temp_dir().join(format!("pa-saved-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+        let path = dir.join(format!("{}.jsonl", session.session_id()));
+        session.set_path(path.clone());
+        session.append_message(json!({
+            "role": "assistant", "content": "done", "provider": "p", "model": "m",
+            "timestamp": 1u64,
+            "usage": {
+                "input": 100, "output": 10, "cacheRead": 5, "cacheWrite": 0,
+                "totalTokens": 115,
+                "cost": { "input": 0.0, "output": 0.25, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.25 }
+            }
+        }));
+        session.rewrite().unwrap();
+        let info = crate::session_store::read_session_info(&path).unwrap();
+        let row = saved_session_row(&info);
+        assert_eq!(
+            row["usage"],
+            json!({ "inputTokens": 105, "outputTokens": 10, "cost": 0.25 })
+        );
+        let summary = saved_session_summary(&info);
+        assert_eq!(
+            summary["usage"],
+            json!({ "inputTokens": 105, "outputTokens": 10, "cost": 0.25 })
+        );
+        // A draft with no billable work stays bare on both surfaces.
+        let mut draft = crate::session_store::SessionFile::create("/tmp", None, 0);
+        let draft_path = dir.join(format!("{}.jsonl", draft.session_id()));
+        draft.set_path(draft_path.clone());
+        draft.rewrite().unwrap();
+        let draft_info = crate::session_store::read_session_info(&draft_path).unwrap();
+        assert!(saved_session_row(&draft_info).get("usage").is_none());
+        assert!(saved_session_summary(&draft_info).get("usage").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn worker_probe_fails_at_the_deadline_and_names_the_worker() {
         let dir = std::env::temp_dir().join(format!("pa-probe-{}", uuid::Uuid::new_v4()));
@@ -4843,5 +5108,66 @@ mod tests {
         let _ = std::fs::remove_file(&socket);
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The shutdown gate: a create dispatched while the supervisor stops
+    /// must fail instead of launching a worker the stop pass would miss
+    /// (a late create racing a shutdown would orphan its worker process).
+    #[tokio::test]
+    async fn a_create_while_shutting_down_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        supervisor.shutting_down.store(true, Ordering::SeqCst);
+        let create = DaemonCommand::Create {
+            id: None,
+            session_path: None,
+            continue_recent: None,
+            no_session: None,
+            name: None,
+            config: None,
+            telemetry_disabled: None,
+            runtime_metadata: None,
+            lifecycle: None,
+            env: None,
+            launch_env: None,
+            rest: Default::default(),
+        };
+        let refused = supervisor
+            .launch_worker(&create, None)
+            .await
+            .err()
+            .expect("the shutting-down supervisor accepted a create");
+        assert_eq!(
+            refused.to_string(),
+            "Supervisor is shutting down",
+            "the refusal error: {refused:#}"
+        );
+    }
+
+    /// The shutdown gate and the accept loop's exit flag are separate: the
+    /// gate refuses creates the moment a terminal stop begins, but the
+    /// loop must stay up until begin_shutdown finishes stopping the workers.
+    #[tokio::test]
+    async fn begin_shutdown_sets_the_accept_exit_after_the_stop_pass() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        supervisor.shutting_down.store(true, Ordering::SeqCst);
+        assert!(
+            !supervisor.accept_exit.load(Ordering::SeqCst),
+            "the gate alone must not exit the accept loop"
+        );
+        supervisor.begin_shutdown().await;
+        assert!(
+            supervisor.accept_exit.load(Ordering::SeqCst),
+            "the completed stop pass must exit the accept loop"
+        );
     }
 }

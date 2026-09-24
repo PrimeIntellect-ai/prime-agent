@@ -73,6 +73,11 @@ pub struct SessionSummary {
     pub is_compacting: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub is_bash_running: Option<bool>,
+    /// A streaming turn with tool calls in flight (TS `isRunningTools`:
+    /// `isStreaming && pendingToolCalls.size > 0`); drives the agents-view
+    /// activity label's `running tools` state.
+    #[serde(default)]
+    pub is_running_tools: bool,
     pub attached_clients: u32,
     pub message_count: u32,
     pub session_actions: SessionActionSnapshot,
@@ -108,6 +113,23 @@ pub struct SessionSummary {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_state: Option<String>,
+    /// The worker's roster-delta sequence counter at snapshot time (every
+    /// roster delta this worker stamped before the snapshot carries a
+    /// sequence at or below it): the supervisor's authoritative pulls
+    /// (registration, create, refresh) gate against it in the same
+    /// roster-lock section that writes the summary, so a delta still in
+    /// flight when the pull answered is dropped instead of overwriting
+    /// the pull's fresher state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roster_delta_sequence: Option<u64>,
+    /// The worker process instance that took this summary (stamped with
+    /// [`SessionSummary::roster_delta_sequence`], so the pair names the
+    /// generation the counter orders): the supervisor's pull gate keys
+    /// its stale-delta watermark by the generation that answered the
+    /// pull, never by whichever process registered last — a delayed
+    /// pull from a replaced process is stale by construction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_instance_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<Value>,
     /// TS `modelFallbackMessage`: why a revived session's saved model fell

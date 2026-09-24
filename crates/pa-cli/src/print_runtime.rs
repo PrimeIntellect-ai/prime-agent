@@ -251,7 +251,8 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
     // TS `sdk.ts` seeds the Agent's queue modes from the settings manager
     // (`steeringMode`/`followUpMode`): the print runtime reads the same
     // settings its telemetry does, so the agent-level queues drain per
-    // the configured modes (default "one-at-a-time").
+    // the configured modes (the steering default is "all"; follow-ups
+    // keep "one-at-a-time").
     let queue_settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
     let queue_mode = |mode: pa_core::settings::QueueModeSetting| match mode {
         pa_core::settings::QueueModeSetting::All => pa_agent::agent::QueueMode::All,
@@ -746,10 +747,20 @@ fn assert_session_not_active_in_daemon(
             .or_else(|| row.get("id"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        return Err(format!(
-            "Session is already active in {active_session_id}: {}",
-            target.display()
-        ));
+        // The descriptive refusal (operator-directed): the TS-identical
+        // first line, then the holder's identity and the next steps —
+        // attach to the live session instead of reopening its file.
+        let message = match pa_tui::session_open_error::holder_from_roster(
+            std::slice::from_ref(&row),
+            &target,
+        ) {
+            Some(holder) => pa_tui::session_open_error::already_active_error(&holder, &target),
+            None => format!(
+                "Session is already active in {active_session_id}: {}",
+                target.display()
+            ),
+        };
+        return Err(message);
     }
     Ok(())
 }
