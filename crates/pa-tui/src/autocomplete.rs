@@ -1081,30 +1081,32 @@ mod tests {
         };
         provider.set_argument_completions("tier", tier_items("flex"));
         // No term: every tier lists, the current one marked.
-        let suggestions =
-            provider.get_suggestions(&["/tier ".to_string()], 0, 6, false);
+        let suggestions = provider.get_suggestions(&["/tier ".to_string()], 0, 6, false);
         let items = suggestions.expect("tier suggestions").items;
         assert_eq!(
-            items.iter().map(|item| item.value.as_str()).collect::<Vec<_>>(),
+            items
+                .iter()
+                .map(|item| item.value.as_str())
+                .collect::<Vec<_>>(),
             ["default", "flex", "priority", "auto"]
         );
         assert!(items
             .iter()
             .any(|item| item.description.as_deref() == Some("tier (current)")));
         // A term filters by prefix.
-        let suggestions =
-            provider.get_suggestions(&["/tier pr".to_string()], 0, 8, false);
+        let suggestions = provider.get_suggestions(&["/tier pr".to_string()], 0, 8, false);
         let items = suggestions.expect("tier suggestions").items;
         assert_eq!(
-            items.iter().map(|item| item.value.as_str()).collect::<Vec<_>>(),
+            items
+                .iter()
+                .map(|item| item.value.as_str())
+                .collect::<Vec<_>>(),
             ["priority"]
         );
         // No match falls through to path completion (None here).
-        assert!(
-            provider
-                .get_suggestions(&["/tier zz".to_string()], 0, 8, false)
-                .is_none()
-        );
+        assert!(provider
+            .get_suggestions(&["/tier zz".to_string()], 0, 8, false)
+            .is_none());
     }
 
     #[test]
