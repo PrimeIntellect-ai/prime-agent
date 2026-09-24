@@ -702,10 +702,15 @@ impl LinkAgentObserveController {
 
     /// The full roster rows plus the caller's durable family identity.
     async fn roster_and_identity(&self) -> anyhow::Result<(Vec<Value>, FamilyIdentity)> {
+        // The full session walk (`all: true`): live residents plus the
+        // passive ledger children, so a released child's durable row
+        // stays in the caller's nuclear family exactly like the TS
+        // roster (a live-residents-only join would drop it the moment
+        // its worker settles and releases).
         let data = self
             .link
             .request_success(
-                json!({ "type": "list" }),
+                json!({ "type": "list", "all": true }),
                 std::time::Duration::from_secs(30),
             )
             .await?;

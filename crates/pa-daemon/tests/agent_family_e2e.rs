@@ -506,6 +506,7 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
     // Send by name, by RLM child id, and by persisted session id: every
     // form resolves through the family view and delivers into the real
     // child worker with the TS receipt shape.
+    let mut expected_cards = 0;
     for selector in ["kid", &child_id, &child_session_id] {
         let receipt = send_agent_message(&handlers, selector)
             .await
@@ -524,6 +525,29 @@ async fn parent_child_agent_message_round_trip_end_to_end() {
         );
         assert_eq!(receipt["receiverRole"], "child", "{receipt}");
         assert!(receipt["id"].as_str().unwrap().starts_with("agentmsg_"));
+        // Send sequentially - the next selector only fires after this
+        // prompt's reply card renders. The batched-steering default (one
+        // turn at the tool boundary) would otherwise merge rapid queued
+        // prompts into a single turn and its single reply.
+        expected_cards += 1;
+        let card_deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            client.wait_idle("w-parent", &parent_active_session_id);
+            if client
+                .messages("gm-parent", &parent_active_session_id)
+                .matches("[agent-message from child:kid]")
+                .count()
+                >= expected_cards
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < card_deadline,
+                "the parent never rendered the child's reply to the {selector} send: {}",
+                client.messages("gm-parent", &parent_active_session_id)
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 
     // The child rendered every delivered prompt once and answered each
@@ -629,13 +653,9 @@ async fn family_edges_never_cross_families_end_to_end() {
     // broadcast receipts (its real worker token authorizes the roster).
     let parent_a_cell = format!(
         "{}\n{}",
+        record_cell(r#""agent_observe.list""#, "parent-observe", &receipts_dir),
         record_cell(
-            r#"("agent_observe.list_agents")"#,
-            "parent-observe",
-            &receipts_dir
-        ),
-        record_cell(
-            r#"("agent_message.send", {"message": "parent broadcast", "target": "all"})"#,
+            r#""agent_message.send", {"message": "parent broadcast", "target": "all"}"#,
             "parent-broadcast",
             &receipts_dir
         )
@@ -664,25 +684,21 @@ async fn family_edges_never_cross_families_end_to_end() {
     // grandchild nests under it, never under the root).
     let kid_cells = [
         record_cell(
-            r#"("agent_message.send", {"message": "hello sibling", "receiver_role": "sibling", "receiver_name": "kid-b"})"#,
+            r#""agent_message.send", {"message": "hello sibling", "receiver_role": "sibling", "receiver_name": "kid-b"}"#,
             "kid-sibling-cross",
             &receipts_dir,
         ),
         record_cell(
-            r#"("agent_message.send", {"message": "parent update", "receiver_role": "parent"})"#,
+            r#""agent_message.send", {"message": "parent update", "receiver_role": "parent"}"#,
             "kid-parent-reply",
             &receipts_dir,
         ),
         record_cell(
-            r#"("agent_message.send", {"message": "kid broadcast", "target": "all"})"#,
+            r#""agent_message.send", {"message": "kid broadcast", "target": "all"}"#,
             "kid-broadcast",
             &receipts_dir,
         ),
-        record_cell(
-            r#"("agent_observe.list_agents")"#,
-            "kid-observe",
-            &receipts_dir,
-        ),
+        record_cell(r#""agent_observe.list""#, "kid-observe", &receipts_dir),
     ];
     // One scripted turn per cell: the tool-call entry, then the text
     // entry that closes it (a nested array is not a valid script).
@@ -975,7 +991,8 @@ async fn family_edges_never_cross_families_end_to_end() {
     // the other family never appears.
     let kid_roster = read_recorded(&receipts_dir, "kid-observe.json");
     let kid_roster = kid_roster
-        .as_array()
+        .get("agents")
+        .and_then(Value::as_array)
         .expect("the observe roster is a list of summaries");
     assert_eq!(
         kid_roster.len(),
@@ -998,7 +1015,10 @@ async fn family_edges_never_cross_families_end_to_end() {
     );
     let grandkid_row = kid_roster
         .iter()
-        .find(|summary| summary["activeSessionId"] == grandkid_active.as_str())
+        .find(|summary| {
+            summary["activeSessionId"] == grandkid_active.as_str()
+                || summary["rlmChildId"] == grandkid_handle.rlm_child_id.as_str()
+        })
         .expect("the grandchild nests under its parent");
     assert_eq!(grandkid_row["relationship"], "child", "{grandkid_row:?}");
     assert!(
@@ -1035,7 +1055,8 @@ async fn family_edges_never_cross_families_end_to_end() {
     // subagent.
     let roster = read_recorded(&receipts_dir, "parent-observe.json");
     let roster = roster
-        .as_array()
+        .get("agents")
+        .and_then(Value::as_array)
         .expect("the observe roster is a list of summaries");
     assert_eq!(
         roster.len(),
