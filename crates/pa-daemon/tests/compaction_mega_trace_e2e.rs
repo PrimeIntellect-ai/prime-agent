@@ -37,9 +37,9 @@ impl Drop for Supervisor {
 }
 
 /// An OpenAI-compatible SSE mock: every request is answered with the
-/// scripted reply; the crossing turn (request index = FATTENING_TURNS +
-/// 1) reports the over-threshold usage so the post-turn threshold check
-/// fires a compaction over the fattened session.
+/// scripted reply; the crossing turn (request index FATTENING_TURNS
+/// plus one) reports the over-threshold usage so the post-turn
+/// threshold check fires a compaction over the fattened session.
 struct MegaMock {
     requests: Arc<Mutex<Vec<Value>>>,
     port: u16,
@@ -67,6 +67,8 @@ impl MegaMock {
         format!("http://127.0.0.1:{}/v1", self.port)
     }
 
+    /// Every request the mock answered (the seeded turns, the crossing
+    /// turn, the compaction's summarizer call, the status-line recaps).
     fn request_count(&self) -> usize {
         self.requests.lock().expect("mock lock").len()
     }
@@ -130,7 +132,7 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
     }
     let body: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
     let index = requests.lock().expect("mock lock").len();
-    requests.lock().expect("mock lock").push(body.clone());
+    requests.lock().expect("mock lock").push(body);
     // The crossing turn is the last one (index FATTENING_TURNS + 1, after
     // the seed turn): its usage crosses the seeded reserve.
     let crossing = index == FATTENING_TURNS + 1;
@@ -411,6 +413,14 @@ fn mega_session_threshold_compaction_phase_measurement() {
         "crossing prompt failed: {crossed}"
     );
 
+    // The compaction's summarizer call really reached the provider
+    // (past the seeded turns and the crossing turn).
+    assert!(
+        mock.request_count() > 1 + FATTENING_TURNS + 1,
+        "the compaction's summarizer request never arrived ({})",
+        mock.request_count()
+    );
+
     // The trace table.
     let trace = read_trace(&trace_path);
     assert!(
@@ -456,7 +466,7 @@ fn mega_session_threshold_compaction_phase_measurement() {
     let session_file = session_dir
         .read_dir()
         .expect("session dir read")
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
         .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
         .expect("session file");

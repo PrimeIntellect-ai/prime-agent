@@ -81,7 +81,6 @@ struct StallMock {
     review_request_at: Arc<Mutex<Option<Instant>>>,
     review_replied_at: Arc<Mutex<Option<Instant>>>,
     summarizer_delay_ms: AtomicU64,
-    review_delay_ms: AtomicU64,
     port: u16,
 }
 
@@ -129,7 +128,6 @@ impl StallMock {
             review_request_at,
             review_replied_at,
             summarizer_delay_ms: summarizer_delay,
-            review_delay_ms: review_delay,
             port,
         }
     }
@@ -471,7 +469,7 @@ fn session_chain(session_dir: &Path) -> (bool, Vec<(String, String)>) {
     let session_file = session_dir
         .read_dir()
         .expect("session dir read")
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
         .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
         .expect("session file");
