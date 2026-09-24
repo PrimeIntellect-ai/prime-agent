@@ -751,7 +751,9 @@ fn assert_session_not_active_in_daemon(
                     std::slice::from_ref(&row),
                     &target,
                 ) {
-                    Some(holder) => pa_tui::session_open_error::already_active_error(&holder, &target),
+                    Some(holder) => {
+                        pa_tui::session_open_error::already_active_error(&holder, &target)
+                    }
                     None => format!(
                         "Session is already active in {active_session_id}: {}",
                         target.display()

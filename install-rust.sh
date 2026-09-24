@@ -173,15 +173,41 @@ launcher="${bin_dir}/prime-agent-rust"
 mkdir -p "${PREFIX}/share" "${bin_dir}"
 
 # Extract to a staging dir inside the prefix (same filesystem, so the final
-# swap is a rename, not a cross-device copy), then replace the previous
-# install with rm + mv. No backups: re-running this script is the update
-# path, and the launcher is only pointed at a fully-extracted tree either way.
+# swap is a rename, not a cross-device copy). Publication is SERIALIZED
+# (a mkdir lock, pid-liveness-recoverable): concurrent installers must not
+# interleave the directory swap. The old tree is renamed ASIDE first and
+# removed only after the new stage is in place, so the live tree is never
+# rm'd while the launcher still points into it - and mv can never nest a
+# stage inside a recreated live dir.
 stage="$(mktemp -d "${PREFIX}/share/prime-agent-rust.stage.XXXXXX")"
 tar -xzf "$asset" -C "$stage"
 [ -x "${stage}/prime-agent" ] \
   || die "the tarball did not contain an executable prime-agent payload"
-rm -rf "$share_dir"
-mv "$stage" "$share_dir"
+lock_dir="${PREFIX}/share/.prime-agent-rust-install.lock"
+until mkdir "$lock_dir" 2>/dev/null; do
+  held_by="$(cat "$lock_dir/pid" 2>/dev/null)"
+  if [ -z "$held_by" ]; then
+    sleep 1    # a fresh holder may still be writing its pid
+    held_by="$(cat "$lock_dir/pid" 2>/dev/null)"
+    [ -n "$held_by" ] || { rm -rf "$lock_dir"; continue; }
+  fi
+  if kill -0 "$held_by" 2>/dev/null; then
+    die "another install-rust.sh (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
+  fi
+  rm -rf "$lock_dir"   # a dead holder's stale lock: remove and retry
+done
+printf '%s\n' "$$" > "$lock_dir/pid"
+trap 'rm -rf "$lock_dir"' EXIT
+old="${PREFIX}/share/prime-agent-rust.old.$$"
+if [ -d "$share_dir" ]; then
+  mv "$share_dir" "$old"
+fi
+if ! mv "$stage" "$share_dir"; then
+  if [ -d "$old" ]; then mv "$old" "$share_dir"; fi   # put the old tree back
+  die "could not publish ${share_dir}"
+fi
+rm -rf "$old"
+rm -rf "${PREFIX}"/share/prime-agent-rust.old.* 2>/dev/null || true
 
 # --- the launcher (the cohabitation contract lives here) -------------------------
 # Every line is load-bearing. The heredoc is QUOTED ('EOF'): the launcher
@@ -190,7 +216,11 @@ mv "$stage" "$share_dir"
 # rides ../share/ from wherever the prefix placed the binary), the
 # per-user socket suffix runs at launch, and a prefix containing shell
 # syntax can never end up reparsed inside this generated script.
-cat > "$launcher" <<'EOF'
+# The launcher is written to a temp file in bin_dir and renamed into place:
+# an interrupted write leaves the PREVIOUS launcher intact instead of a
+# truncated one (the payload is already published by this point).
+launcher_tmp="$(mktemp "${bin_dir}/.prime-agent-rust.XXXXXX")"
+cat > "$launcher_tmp" <<'EOF'
 #!/bin/sh
 # prime-agent-rust — launcher written by install-rust.sh.
 # The session store is shared with the TypeScript product BY DESIGN: both
@@ -206,7 +236,8 @@ export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prim
 export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock}"
 exec "$(dirname "$0")/../share/prime-agent-rust/prime-agent" "$@"
 EOF
-chmod 0755 "$launcher"
+chmod 0755 "$launcher_tmp"
+mv -f "$launcher_tmp" "$launcher"
 
 # --- PATH check (warn, not fail) ---------------------------------------------------
 case ":$PATH:" in

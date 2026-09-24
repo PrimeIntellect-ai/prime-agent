@@ -97,7 +97,7 @@ fn holder_process(pid: Option<u32>) -> (HolderFlavor, Option<std::path::PathBuf>
 /// separators, no raw substrings): an arbitrary parent directory named
 /// `target` must not claim a TypeScript holder, and a Windows cargo build
 /// (`target\debug\prime-agent.exe`) classifies the same as a Unix one.
-pub fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor {
+fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor {
     let Some(exe) = exe else {
         return HolderFlavor::AnotherProcess;
     };

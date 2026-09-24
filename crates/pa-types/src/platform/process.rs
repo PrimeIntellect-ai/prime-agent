@@ -94,7 +94,11 @@ pub fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
     if pid == 0 {
         return None;
     }
-    let mut buffer = [0u8; libc::PATH_MAX as usize];
+    // `proc_pidpath`'s documented buffer contract is
+    // `PROC_PIDPATHINFO_MAXSIZE` (4 * MAXPATHLEN); Apple's samples use it
+    // and every XNU version accepts it, so the probe stays inside the
+    // documented shape instead of the implementation's bare minimum.
+    let mut buffer = [0u8; 4 * libc::PATH_MAX as usize];
     // SAFETY: writes the pid's executable path into `buffer` (at most its
     // size, NUL-terminated) and returns the byte count; 0 means the path
     // was not resolvable.
