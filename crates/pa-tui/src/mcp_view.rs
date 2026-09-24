@@ -1345,11 +1345,11 @@ mod tests {
     /// TS picker (the review finding).
     #[test]
     fn scoring_measures_utf16_units_like_ts() {
-        // The prefix tiebreak: "\u{1f600}ab" leaves one UTF-16 unit of
-        // rest after the emoji prefix (two units), not two chars.
+        // The prefix tiebreak: the rest after the emoji prefix is one
+        // more emoji — TWO UTF-16 units, not one char (TS `.length`).
         assert_eq!(
-            identity_match_score("\u{1f600}ab", "\u{1f600}"),
-            Some(SCORE_PREFIX + 1.0 * 0.01),
+            identity_match_score("\u{1f600}\u{1f600}", "\u{1f600}"),
+            Some(SCORE_PREFIX + 2.0 * 0.01),
             "the prefix remainder counts UTF-16 units"
         );
         // The substring tiebreak: the position after the two-unit emoji
