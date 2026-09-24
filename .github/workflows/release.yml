@@ -295,3 +295,33 @@ jobs:
             release-out/prime-agent-*.tar.gz
             release-out/SHA256SUMS
             release-out/*.json
+      - name: Refresh the rolling nightly release (the nightly channel's discoverable base)
+        if: contains(github.ref_name, '-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # GitHub's latest/download/ alias serves only the latest
+          # NON-prerelease release, so the nightly channel's beta.json has no
+          # discoverable address there (Bugbot: nightly clients get a 404).
+          # The fix is the rolling-release pattern: every -beta* tag also
+          # overwrites the fixed `nightly` release's assets, so
+          # .../releases/download/nightly/ is the stable base nightly installs
+          # record (.install-source) and resolve beta.json + its archives
+          # against. The rolling release is a prerelease itself, so it can
+          # never take the Latest pointer either.
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release upload nightly \
+              release-out/prime-agent-*.tar.gz \
+              release-out/SHA256SUMS \
+              release-out/beta.json \
+              --clobber
+          else
+            gh release create nightly \
+              --title "nightly" \
+              --notes "The rolling nightly channel (beta builds). Assets are overwritten per -beta* tag; beta.json names the current build." \
+              --prerelease \
+              release-out/prime-agent-*.tar.gz \
+              release-out/SHA256SUMS \
+              release-out/beta.json
+          fi

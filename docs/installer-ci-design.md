@@ -202,7 +202,13 @@ exactly one channel manifest per tag —
   skip it); the nightly release attaches as a GitHub **prerelease** so it never takes the
   Latest pointer — the stable channel's download base
   `.../releases/latest/download/` keeps serving the latest stable release's
-  `latest.json` (Bugbot: beta tags steal GitHub Latest);
+  `latest.json` (Bugbot: beta tags steal GitHub Latest), and every -beta* tag
+  also refreshes the rolling `nightly` release (the documented
+  continuous-release pattern): `.../releases/download/nightly/` is the stable
+  base nightly installs record (`.install-source`) and resolve `beta.json` +
+  its archives against — GitHub's `latest/download/` alias structurally
+  serves only the latest non-prerelease release, so the nightly channel has
+  no discoverable address there (Bugbot: nightly clients get a 404);
 
 shaped as `{"version": "v<ver>", "binaries": [...], "binaries_v2": [...]}` where each row is
 `{"platform", "file", "sha256"}` and the file names are the alias-named archives above. The

@@ -48,6 +48,8 @@ struct Job {
 struct Step {
     name: Option<String>,
     #[serde(default)]
+    r#if: Option<String>,
+    #[serde(default)]
     run: Option<String>,
     #[serde(default)]
     with: Option<With>,
@@ -252,6 +254,46 @@ fn the_workflow_wires_the_channel_manifest_producer() {
     assert_eq!(
         prerelease, "${{ contains(github.ref_name, '-') }}",
         "the attach step must mark prerelease-tag releases as prereleases"
+    );
+    // The rolling `nightly` release is the nightly channel's discoverable
+    // base: GitHub's latest/download/ alias serves only the latest
+    // NON-prerelease release, so beta.json needs a fixed rolling address
+    // (.../releases/download/nightly/) refreshed per -beta* tag (Bugbot:
+    // nightly clients get a 404).
+    let nightly = step(
+        promote,
+        "Refresh the rolling nightly release (the nightly channel's discoverable base)",
+    );
+    assert_eq!(
+        nightly.r#if.as_deref(),
+        Some("contains(github.ref_name, '-')"),
+        "only -beta* tags refresh the rolling nightly release"
+    );
+    let nightly_run = nightly
+        .run
+        .as_deref()
+        .expect("the nightly step runs a script");
+    assert!(
+        nightly_run.contains("gh release upload nightly"),
+        "{nightly_run}"
+    );
+    assert!(
+        nightly_run.contains("release-out/beta.json"),
+        "{nightly_run}"
+    );
+    assert!(nightly_run.contains("--clobber"), "{nightly_run}");
+    assert!(
+        nightly_run.contains("release-out/prime-agent-*.tar.gz"),
+        "{nightly_run}"
+    );
+    assert!(nightly_run.contains("--prerelease"), "{nightly_run}");
+    assert!(
+        step_position(promote, "Attach to GitHub release")
+            < step_position(
+                promote,
+                "Refresh the rolling nightly release (the nightly channel's discoverable base)",
+            ),
+        "the tag release attaches before the rolling refresh"
     );
 }
 
