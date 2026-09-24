@@ -418,7 +418,7 @@ fn a_descriptorless_leftover_dies_and_its_session_resumes() {
     // enumerate processes, the reap clears it — the end state is the
     // same); the lease releases and the session file resumes through a
     // fresh registered worker.
-    let mut daemon2 = spawn_daemon(&socket, &agent_dir);
+    let daemon2 = spawn_daemon(&socket, &agent_dir);
     if !wait_gone(worker_pid, Instant::now() + Duration::from_secs(20)) {
         force_kill(worker_pid);
         panic!("the descriptorless leftover worker survived the next daemon cycle (the registration heal or the boot reap must clear it)");
@@ -467,7 +467,7 @@ fn an_owned_stop_kills_a_worker_that_missed_the_shutdown() {
     let sessions_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
 
-    let mut daemon = spawn_daemon(&socket, &agent_dir);
+    let daemon = spawn_daemon(&socket, &agent_dir);
     let daemon_pid = daemon.child.id();
     let mut client = Client::connect(&socket);
     let script_path = write_script(dir.path(), &["first scripted", "resumed turn"]);
