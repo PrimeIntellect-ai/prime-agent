@@ -571,6 +571,7 @@ struct BaseRow {
     descendant_count: usize,
     running_subagent_count: usize,
     record: usize,
+    search_score: Option<f64>,
 }
 
 /// Build the session-list rows (TS `buildAgentsViewRows`): top-level
@@ -657,6 +658,7 @@ pub fn build_rows(
         base.push(BaseRow {
             kind,
             section: record.section,
+            search_score: record.search_score,
             identity: record.identity.clone(),
             title: session_title(&summary),
             status_label: status,
@@ -687,6 +689,7 @@ pub fn build_rows(
         })
         .collect();
     let mut children_by_parent: HashMap<usize, Vec<usize>> = HashMap::new();
+    let mut parent_by_child: HashMap<usize, usize> = HashMap::new();
     let mut nested: HashSet<usize> = HashSet::new();
     for index in 0..base.len() {
         if base[index].kind != RowKind::Subagent {
@@ -712,6 +715,7 @@ pub fn build_rows(
         }
         nested.insert(index);
         children_by_parent.entry(parent).or_default().push(index);
+        parent_by_child.insert(index, parent);
     }
     // Busy-descendant tally from the live rows, iterative over the parent
     // forest so deep chains cannot overflow (TS `runningSubagentCount`).
@@ -744,6 +748,28 @@ pub fn build_rows(
             base[*index].descendant_count = descendants;
             base[*index].recursive_cost = base[*index].own_cost + descendants_cost;
         }
+    }
+    // An active query renders the picker as one flat, globally ranked
+    // run: every hit and every retained ancestor gets one row (no
+    // nesting, no `N subagents` summaries), `compare_base` orders scored
+    // hits by relevance and recency and sinks unscored ancestors below
+    // every hit, and each row keeps its parent linkage so drill-ins
+    // still resolve the ancestor chain.
+    if records.iter().any(|record| record.search_score.is_some()) {
+        let scope_root_record = scope_root.as_ref().map(|(root, _)| *root);
+        let mut flat: Vec<usize> = (0..base.len())
+            .filter(|index| Some(base[*index].record) != scope_root_record)
+            .collect();
+        flat.sort_by(|a, b| compare_base(&base[*a], &base[*b], anchor));
+        return flat
+            .into_iter()
+            .map(|index| {
+                let parent = parent_by_child
+                    .get(&index)
+                    .map(|parent| base[*parent].identity.as_str());
+                agents_row(&base[index], 0, parent)
+            })
+            .collect();
     }
     // Flatten: roots in list order, each followed by its summary row and,
     // when expanded, its children (TS `emit`).
@@ -888,6 +914,30 @@ fn compare_base(a: &BaseRow, b: &BaseRow, anchor: Option<&str>) -> std::cmp::Ord
             .map(|value| crate::agents_view_state::timestamp_ms(Some(value)))
             .unwrap_or(0)
     };
+    // Search hits rank relevance first: the score decides before
+    // anything else, retained ancestors (unscored) sink below every hit,
+    // and recency breaks score ties; section grouping only orders rows
+    // that the query did not rank.
+    if let (Some(left), Some(right)) = (a.search_score, b.search_score) {
+        let by_score = left.total_cmp(&right);
+        if by_score != Ordering::Equal {
+            return by_score;
+        }
+        let activity =
+            timestamp(&b.summary, "lastActivityAt").cmp(&timestamp(&a.summary, "lastActivityAt"));
+        if activity != Ordering::Equal {
+            return activity;
+        }
+        let created = timestamp(&b.summary, "created").cmp(&timestamp(&a.summary, "created"));
+        if created != Ordering::Equal {
+            return created;
+        }
+        return finalize_base(a, b);
+    }
+    if a.search_score.is_some() != b.search_score.is_some() {
+        // The scored hit renders before the retained ancestor.
+        return b.search_score.is_some().cmp(&a.search_score.is_some());
+    }
     let section = section_rank(a.section).cmp(&section_rank(b.section));
     if section != Ordering::Equal {
         return section;
@@ -922,11 +972,22 @@ fn compare_base(a: &BaseRow, b: &BaseRow, anchor: Option<&str>) -> std::cmp::Ord
     if created != Ordering::Equal {
         return created;
     }
+    finalize_base(a, b)
+}
+
+/// The shared final tiebreaks: title, then session id.
+fn finalize_base(a: &BaseRow, b: &BaseRow) -> std::cmp::Ordering {
+    fn session_id(row: &BaseRow) -> Option<&str> {
+        row.summary
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    }
     let title = a.title.cmp(&b.title);
-    if title != Ordering::Equal {
+    if title != std::cmp::Ordering::Equal {
         return title;
     }
-    get_str(&a.summary, "sessionId").cmp(&get_str(&b.summary, "sessionId"))
+    session_id(a).cmp(&session_id(b))
 }
 
 /// Session ids of every ancestor of a nested row, root-most first (TS
@@ -1402,5 +1463,143 @@ mod tests {
         // Without rollups the per-pass walk fills the same totals.
         assert_eq!(rows[0].cost, 0.75);
         assert_eq!(rows[0].descendant_count, 1);
+    }
+
+    #[test]
+    fn an_active_query_ranks_hits_globally_ancestors_sink_last() {
+        // With a query active the list is one flat, globally ranked run:
+        // the scored child hit renders by its relevance against every
+        // other hit — not nested after its retained ancestor and the
+        // ancestor's summary — the unscored ancestor sinks below every
+        // scored row, and the child keeps its parent linkage for the
+        // drill-in open.
+        let roster = vec![
+            roster_entry("orch", "running", {
+                let mut summary = parent_summary("orch");
+                summary["sessionName"] = json!("zebra worker");
+                summary
+            }),
+            roster_entry(
+                "kid",
+                "running",
+                child_summary("kid", "orch", "policy sweep"),
+            ),
+            roster_entry(
+                "cache",
+                "idle",
+                json!({
+                    "sessionId": "cache",
+                    "lifecycle": "live",
+                    "sessionName": "sweep cache",
+                    "messageCount": 2,
+                }),
+            ),
+            roster_entry(
+                "weep",
+                "idle",
+                json!({
+                    "sessionId": "weep",
+                    "lifecycle": "live",
+                    "sessionName": "siberian weeping pine",
+                    "messageCount": 2,
+                }),
+            ),
+        ];
+        let records = reconcile_unified_sessions(&roster, &[]);
+        let filtered = crate::agents_view_state::filter_unified_sessions(
+            &records,
+            &crate::agents_view_state::parse_search_query("sweep"),
+        );
+        // The child hit and the top-level hits carry scores; the
+        // retained parent stays unscored.
+        let by_name = |name: &str| {
+            filtered
+                .iter()
+                .find(|record| record.search.name == name)
+                .unwrap_or_else(|| panic!("missing record {name}"))
+        };
+        assert!(by_name("policy sweep").search_score.is_some());
+        assert!(by_name("sweep cache").search_score.is_some());
+        assert!(by_name("siberian weeping pine").search_score.is_some());
+        assert_eq!(by_name("zebra worker").search_score, None);
+        let rollups: HashMap<String, Rollup> = HashMap::new();
+        // Expansion state must not reintroduce nesting under a query.
+        let mut expanded = HashSet::new();
+        expanded.insert("file:/x/orch.jsonl".to_string());
+        let rows = build_rows(&filtered, None, &expanded, &rollups, None);
+        let titles: Vec<&str> = rows.iter().map(|row| row.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec![
+                "sweep cache",
+                "policy sweep",
+                "siberian weeping pine",
+                "zebra worker",
+            ],
+            "hits rank globally by relevance; the retained ancestor sinks last"
+        );
+        assert!(
+            rows.iter().all(|row| row.kind != RowKind::SubagentSummary),
+            "the flat query list carries no expander summaries"
+        );
+        assert!(
+            rows.iter().all(|row| row.depth == 0),
+            "the flat query list renders unindented"
+        );
+        let kid = rows
+            .iter()
+            .find(|row| row.title == "policy sweep")
+            .expect("the child hit is present");
+        assert_eq!(kid.kind, RowKind::Subagent);
+        assert_eq!(
+            kid.parent_identity.as_deref(),
+            Some("file:/x/orch.jsonl"),
+            "the child keeps its ancestor linkage"
+        );
+    }
+
+    #[test]
+    fn equal_scores_break_ties_by_recency_not_section() {
+        // Two scored hits with equal tier scores: the more recent one
+        // renders first even though it sits in a later section.
+        let roster = vec![
+            roster_entry(
+                "old",
+                "running",
+                json!({
+                    "sessionId": "old",
+                    "lifecycle": "live",
+                    "sessionName": "sweep alpha",
+                    "lastActivityAt": "2024-01-01T00:00:00.000Z",
+                    "created": "2024-01-01T00:00:00.000Z",
+                    "messageCount": 2,
+                }),
+            ),
+            roster_entry(
+                "new",
+                "idle",
+                json!({
+                    "sessionId": "new",
+                    "lifecycle": "live",
+                    "sessionName": "sweep beta",
+                    "lastActivityAt": "2025-01-01T00:00:00.000Z",
+                    "created": "2025-01-01T00:00:00.000Z",
+                    "messageCount": 2,
+                }),
+            ),
+        ];
+        let records = reconcile_unified_sessions(&roster, &[]);
+        let filtered = crate::agents_view_state::filter_unified_sessions(
+            &records,
+            &crate::agents_view_state::parse_search_query("sweep"),
+        );
+        assert_eq!(filtered.len(), 2);
+        let rollups: HashMap<String, Rollup> = HashMap::new();
+        let rows = build_rows(&filtered, None, &Default::default(), &rollups, None);
+        assert_eq!(
+            rows[0].title, "sweep beta",
+            "recency breaks score ties before section grouping"
+        );
+        assert_eq!(rows[1].title, "sweep alpha");
     }
 }
