@@ -56,7 +56,7 @@ gh run download "$run" --repo PrimeIntellect-ai/prime-agent \
 cd /tmp/pa
 shasum -a 256 -c SHA256SUMS                                   # verify the tarball
 mkdir -p ~/.local/share/prime-agent-rust
-tar xzf prime-agent-*-aarch64-apple-darwin.tar.gz -C ~/.local/share/prime-agent-rust
+tar xzf prime-agent-*-darwin-arm64.tar.gz -C ~/.local/share/prime-agent-rust
 # Load-bearing without the launcher (see the daemon section below): the Rust
 # daemon must get its OWN socket so it never touches the TS daemon.
 export PRIME_AGENT_DAEMON_SOCKET="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
