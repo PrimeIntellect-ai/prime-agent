@@ -57,7 +57,10 @@ pub fn install_id(agent_dir: &Path) -> Result<String> {
                 Some(existing) => Ok(existing),
                 None => {
                     replace_invalid_state(&path, &payload)?;
-                    Ok(installation_id)
+                    // Return the id the state file stores now: a concurrent
+                    // repair may have landed its rename after ours, and every
+                    // caller must converge on the durable id.
+                    Ok(read_install_id(&path)?.unwrap_or(installation_id))
                 }
             }
         }
