@@ -8880,7 +8880,7 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
     let (engine, _dir) = tokio::task::spawn_blocking(|| {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().unwrap();
         let agent_dir = dir.path().join("agent");
         let skill_dir = agent_dir.join("skills").join("demo-skill");
