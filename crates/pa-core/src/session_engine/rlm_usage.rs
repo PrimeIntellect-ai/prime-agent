@@ -217,6 +217,14 @@ impl RlmChildUsageAttributions {
         // the copies instead.
         let forward = self.forward.lock().expect("rlm usage forward lock").clone();
         if let Some(forward) = forward {
+            // Release the bases BEFORE forwarding: the successor's
+            // fallback_base re-locks THIS producer's bases (tokio Mutex
+            // is not reentrant), and holding it across the await would
+            // deadlock the handoff path, the adoption, and the child's
+            // emit lock. The dropped report forwards whole — its
+            // aggregate lands on the successor's side, so nothing that
+            // the adoption copy could miss is written here anyway.
+            drop(bases);
             Box::pin(async move { forward.record_child_usage(report).await }).await;
             return;
         }
