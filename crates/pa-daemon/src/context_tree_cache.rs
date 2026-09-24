@@ -76,8 +76,14 @@ pub(crate) struct ContextTreeCache {
     /// guard and targets a session the in-flight walk does NOT serve
     /// (a fork/switch racing a walk): the completing walk re-arms the
     /// pending session itself, so the replaced tree does not stay cold
-    /// until a later read.
+    /// until a later read. The last poke wins (an overwritten earlier
+    /// session re-arms on its next read).
     pending: Mutex<Option<(String, Option<PathBuf>)>>,
+    /// The session the CURRENT in-flight walk serves (the guard holder's
+    /// own record — the published snapshot is NOT a proxy for it: after a
+    /// fork the in-flight walk serves the new session while the published
+    /// one is still the old).
+    in_flight: Mutex<Option<String>>,
 }
 
 impl ContextTreeCache {
@@ -224,23 +230,23 @@ impl ContextTreeCache {
                 // progress a poke's task takes nothing and records a
                 // pending session instead (below).
                 let Ok(_guard) = cache.refresh.try_lock() else {
-                    // A walk is in flight; if it serves a DIFFERENT
-                    // session (a fork/switch racing it), remember this
-                    // poke so the completing walk re-arms the new
-                    // session's tree itself — the replaced tree must not
-                    // stay cold until a later read.
-                    let serving = {
-                        let state = cache
-                            .state
+                    // A walk is in flight: record this poke unless the
+                    // in-flight walk already serves this session — the
+                    // completing walk re-arms a DIFFERENT session's tree
+                    // itself, so a replaced tree must not stay cold until
+                    // a later read. `in_flight` is the guard holder's own
+                    // record (the published snapshot is not a proxy for
+                    // it); an unread record (the tiny window between the
+                    // guard's acquisition and its write) records the poke,
+                    // which the drain then drops as already-served.
+                    let in_flight = {
+                        let in_flight = cache
+                            .in_flight
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        state.as_ref().map(|walk| walk.session_id.clone())
+                        in_flight.clone()
                     };
-                    let served_elsewhere = match &serving {
-                        Some(serving) => *serving != request.0,
-                        None => true,
-                    };
-                    if served_elsewhere {
+                    if in_flight.as_deref() != Some(request.0.as_str()) {
                         *cache
                             .pending
                             .lock()
@@ -249,20 +255,44 @@ impl ContextTreeCache {
                     return;
                 };
                 let (session_id, session_file) = request;
+                *cache
+                    .in_flight
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_id.clone());
                 // Another task may have completed a fresh walk between
                 // this poke's TTL check and its guard acquisition (a
                 // burst of expired reads): recheck so redundant walks
-                // cannot serialize behind each other.
-                {
+                // cannot serialize behind each other. A pending session
+                // recorded meanwhile still gets served (the loop takes it
+                // instead of returning).
+                let already_fresh = {
                     let state = cache
                         .state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if state.as_ref().is_some_and(|walk| {
+                    state.as_ref().is_some_and(|walk| {
                         walk.session_id == session_id && walk.computed_at.elapsed() < REFRESH_TTL
-                    }) {
-                        return;
-                    }
+                    })
+                };
+                if already_fresh {
+                    request = match cache
+                        .pending
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                    {
+                        Some((pending_id, pending_file)) if pending_id != session_id => {
+                            (pending_id, pending_file)
+                        }
+                        _ => {
+                            *cache
+                                .in_flight
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                            return;
+                        }
+                    };
+                    continue;
                 }
                 let snapshots = engine.rlm_child_snapshots().await;
                 let registry_dir = agent_dir.clone();
@@ -325,7 +355,13 @@ impl ContextTreeCache {
                     Some((pending_id, pending_file)) if pending_id != session_id => {
                         (pending_id, pending_file)
                     }
-                    _ => return,
+                    _ => {
+                        *cache
+                            .in_flight
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                        return;
+                    }
                 };
             }
         });

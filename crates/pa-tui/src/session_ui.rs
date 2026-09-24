@@ -792,6 +792,12 @@ impl SessionUi {
         view: &mut AgentView,
         lost: bool,
     ) -> Result<()> {
+        // One reattach attempt's budget (§10.4: a queued attach can
+        // legitimately wait out a slow restore). The bound lives INSIDE
+        // this function — a caller-side timeout would cancel this future
+        // mid-attach and skip the failure-path `close()` below, leaking
+        // the half-installed client's supervisor connection and reader.
+        const REATTACH_BUDGET: Duration = Duration::from_secs(30);
         let hello_resume = client
             .hello()
             .get("updateResume")
@@ -813,13 +819,27 @@ impl SessionUi {
             self.client.close();
             anyhow::bail!("the session's durable id is unknown; cannot reattach");
         }
-        if let Err(error) = self
-            .attach_session(&durable)
-            .await
-            .with_context(|| format!("reattaching session {durable} after the update"))
-        {
-            self.client.close();
-            return Err(error);
+        let attach = tokio::time::timeout(REATTACH_BUDGET, self.attach_session(&durable)).await;
+        match attach {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                // A failed reattach must not leave the half-installed
+                // client (its supervisor connection and reader task)
+                // running: close it, and the reconnect driver installs a
+                // fresh one on its next attempt.
+                self.client.close();
+                return Err(
+                    error.context(format!("reattaching session {durable} after the update"))
+                );
+            }
+            Err(_) => {
+                // A wedged attach outlived the budget: same disposal, and
+                // the driver's retry owns the next attempt.
+                self.client.close();
+                return Err(anyhow!(
+                    "the reattach attempt outlived its budget (session {durable})"
+                ));
+            }
         }
         // Flush the attach snapshot BEFORE the banner lands: `rebuild_view`
         // replaces the transcript from the snapshot, so the banner must come

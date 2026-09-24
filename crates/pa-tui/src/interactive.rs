@@ -567,10 +567,6 @@ const SPINNER_INTERVAL_MS: u128 = 80;
 /// (10 minutes).
 const RECONNECT_WINDOW: Duration = Duration::from_mins(10);
 
-/// One reconnect attempt's reattach budget: a queued attach can legitimately
-/// wait out a slow restore (§10.4), so the attempt hands back to the loop
-/// instead of wedging the UI.
-const RECONNECT_ATTACH_TIMEOUT_S: u64 = 30;
 /// The reconnect backoff cap.
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 
@@ -1658,13 +1654,11 @@ async fn run_interactive_surface(
                 };
                 match maybe_attempt {
                     Ok(Ok((client, fresh_events))) => {
-                        match tokio::time::timeout(
-                            Duration::from_secs(RECONNECT_ATTACH_TIMEOUT_S),
-                            session.reattach_after_update(client, &mut view, lost),
-                        )
-                        .await
-                        {
-                            Ok(Ok(())) => {
+                        // The reattach self-bounds (its budget is inside
+                        // the function, so a timeout cannot cancel the
+                        // failure-path client close).
+                        match session.reattach_after_update(client, &mut view, lost).await {
+                            Ok(()) => {
                                 events = fresh_events;
                                 events_closed = false;
                                 reader_dead = session.client.reader_dead();
@@ -1684,7 +1678,7 @@ async fn run_interactive_surface(
                                 }
                                 session.dirty = true;
                             }
-                            Ok(Err(error)) => {
+                            Err(error) => {
                                 // An unexpected-loss reattach failure is a
                                 // hiccup like any other (the worker still
                                 // respawning): keep retrying through the
@@ -1710,18 +1704,6 @@ async fn run_interactive_surface(
                                     session.exit_reason = "update_reattach_failed";
                                     session.dirty = true;
                                     running = false;
-                                }
-                            }
-                            Err(_) => {
-                                // The queued attach outlived this attempt's
-                                // budget (a long restore): schedule another.
-                                session.note(
-                                    "the daemon is still restoring — retrying…",
-                                    &mut view,
-                                );
-                                session.dirty = true;
-                                if let Some(state) = reconnect.take() {
-                                    reconnect = Some(state.next_attempt());
                                 }
                             }
                         }
