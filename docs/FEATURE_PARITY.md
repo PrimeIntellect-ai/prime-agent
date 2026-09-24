@@ -510,7 +510,7 @@ TS reference: packages/coding-agent/src/modes/interactive/ (read-only). Rust wor
 | packages/coding-agent/src/modes/interactive/image-markers.ts:43-56 | collectMarkedImages (marker-presence picks images, once) | crates/pa-tui/src/image_markers.rs:43-56 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/image-markers.ts:62-79 | evictImagesToBudget (keep-set, oldest-first eviction) | crates/pa-tui/src/image_markers.rs:62-81 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/image-markers.ts:44-52 | remapImageMarkers (literal-marker remap for retained drafts) | MISSING | MISSING | prompt-stash |
-| packages/coding-agent/src/modes/interactive/queue-selection.ts:20-91 | QueueSelection browse/stash/reset state machine | crates/pa-tui/src/queued.rs:193-300 + session_ui.rs:2985-3126 | MATCHES |  |
+| packages/coding-agent/src/modes/interactive/queue-selection.ts:20-91 | QueueSelection browse/stash/reset state machine | crates/pa-tui/src/queued.rs:261-357 + session_ui.rs:2985-3126 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/queue-selection.ts:60-77 | refreshAt reconciles selection after queue mutation | crates/pa-tui/src/session_ui.rs:3422-3433,3061 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/agent-activity.ts:24-135 | AgentActivityTracker (activity labels + token accounting) | crates/pa-tui/src/session_ui.rs:1085-1096,1099-1159,3243,3265 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/agent-activity.ts:117-135 | formatTokenCount | crates/pa-tui/src/chrome.rs:127-141 | MATCHES |  |
@@ -572,7 +572,7 @@ TS reference: packages/coding-agent/src/modes/interactive/ (read-only). Rust wor
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5526-5699 | connection extension_ui_request wire methods (select/confirm/input/editor/notify/setStatus/setWorkingMessage/setWorkingVisible/setWorkingIndicator/setHiddenThinkingLabel/setWidget/setTitle/setEditorText) | MISSING (attach sends supports_extension_ui: None) | MISSING | extension-ui (proposed) |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5573-5586 | cancelActiveConnectionExtensionUiRequests (respond cancelled on reset) | MISSING | MISSING | extension-ui (proposed) |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:2790-2805 | applyRuntimeSettings (editor padding, autocomplete max, hardware cursor, clearOnShrink) | crates/pa-tui hardcodes layout; no settings surface | MISSING | settings-menu (proposed) |
-| packages/coding-agent/src/modes/interactive/interactive-mode.ts:2807-2812 | getConnectionQueue (steering/followUp projection) | crates/pa-tui/src/snapshot.rs:573-579 + queued.rs:53-65 | MATCHES |  |
+| packages/coding-agent/src/modes/interactive/interactive-mode.ts:2807-2812 | getConnectionQueue (steering/followUp projection) | crates/pa-tui/src/snapshot.rs:263-272,640-646 + queued.rs:82-88 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:2814-2827 | refreshConnectionCatalog (state+commands+models+resources fetch) | crates/pa-tui/src/session_ui.rs:2275-2346 (models only; commands are a static local registry) | PARTIAL |  |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:2829-2889 | refreshHeartbeatCatalog / applyHeartbeatCatalog / getScopedHeartbeats | MISSING | MISSING | heartbeats-menu |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:2891-2903 | applyConnectionStateSnapshot (stash bind, footer auto-compact, recap, pulse sync) | crates/pa-tui/src/session_ui.rs:467-515,628-664 | PARTIAL |  |
@@ -854,11 +854,11 @@ Method: every TS method in scope read in full; the Rust implementing code locate
 | interactive-mode.ts:7378 | handleCtrlZ suspend cycle (SIGTSTP/SIGCONT, SIGINT ignored) | crates/pa-tui/src/suspend.rs:56 + session_ui.rs:2771-2778 + interactive.rs:670-688 | MATCHES | — |
 | interactive-mode.ts:7271 | handleAgentsBack/requestAgentsView/returnToAgentsView | crates/pa-tui/src/session_ui.rs:2870-2884 + interactive.rs:1081-1094 | MATCHES | — |
 | interactive-mode.ts:7718 | handleFollowUp (alt+enter: empty follow-up silent no-op, follow-up lane, same submit ladder as Enter) | crates/pa-tui/src/session_ui.rs:6608-6637 | MATCHES | — |
-| interactive-mode.ts:7462 | browseQueueSelection (alt+up/alt+down, draft stash) | crates/pa-tui/src/session_ui.rs:2992-3000 + crates/pa-tui/src/queued.rs:199-300 | MATCHES | — |
+| interactive-mode.ts:7462 | browseQueueSelection (alt+up/alt+down, draft stash) | crates/pa-tui/src/session_ui.rs:2992-3000 + crates/pa-tui/src/queued.rs:261-357 | MATCHES | — |
 | interactive-mode.ts:7480 | moveQueueSelection (ctrl+alt+arrows reorder + local mirror) | crates/pa-tui/src/session_ui.rs:3038-3077 | MATCHES | — |
 | interactive-mode.ts:7539 | applyQueueSelection (empty deletes, enter steers, failure restore) | crates/pa-tui/src/session_ui.rs:3083-3126 | MATCHES | — |
 | interactive-mode.ts:7631 | collectQueueReplaceImages (marker-resolved image replace/clear) | crates/pa-tui/src/session_ui.rs:3092-3099 (images always omitted) | PARTIAL | queue-images |
-| interactive-mode.ts:7649 | getQueueSelectionHeader (dim browse header) | crates/pa-tui/src/queued.rs:132-148 + view.rs:821 | MATCHES | — |
+| interactive-mode.ts:7649 | getQueueSelectionHeader (dim browse header) | crates/pa-tui/src/queued.rs:177-191 + view.rs:821 | MATCHES | — |
 | interactive-mode.ts:7471 | enqueueQueueMutation serialization + session generation guards | crates/pa-tui/src/session_ui.rs:3005-3031 (single-loop serialization) | MATCHES | — |
 | interactive-mode.ts:7664 | updateEditorBorderColor (theme-driven editor chrome) | crates/pa-tui/src/view.rs:806-933 (render_editor_surface) | MATCHES | — |
 | interactive-mode.ts:7671 | prompt dock / prompt context containers | crates/pa-tui/src/view.rs:709-743 (render_dock) | MATCHES | — |
@@ -872,7 +872,7 @@ Method: every TS method in scope read in full; the Rust implementing code locate
 | interactive-mode.ts:6606 | showStatus back-to-back in-place rewrite | crates/pa-tui/src/session_ui.rs:788-806 + crates/pa-tui/src/view.rs:246-263 | MATCHES | — |
 | interactive-mode.ts:7838 | showNewVersionNotification | MISSING | MISSING | update-notices |
 | interactive-mode.ts:7843 | showPackageUpdateNotification | MISSING | MISSING | update-notices |
-| interactive-mode.ts:7852 | updatePendingMessagesDisplay (steering/follow-up previews + hint) | crates/pa-tui/src/queued.rs:104-131 | MATCHES | — |
+| interactive-mode.ts:7852 | updatePendingMessagesDisplay (steering/follow-up previews + hint) | crates/pa-tui/src/queued.rs:133-165 + 228-236 — INTENTIONAL DIVERGENCE (operator request 2026-09-24, queue-condensed-display): the queued internal prompts (heartbeat fires, agent messages, goal contexts, background-command notices) condense into one summed-count row below the human previews, so the strip prioritizes human-inserted prompts; TS renders every internal prompt as its own preview row — expected to adopt (the browse/edit affordances still walk every queued item; only the strip rows condense) | DIVERGES | queue-condensed-display (TS expected to adopt) |
 | interactive-mode.ts:7881 | flushPendingBashComponents / pendingMessagesContainer (live bash above indicator) | crates/pa-tui/src/view.rs::pending_bash + session_ui.rs::flush_pending_bash (mount above the indicator while a turn streams; flush at turn_end, the next prompt, and the rebuilt view) | MATCHES | bash-mode |
 | interactive-mode.ts:7893 | showSelector (inline picker replaces editor) | crates/pa-tui/src/session_ui.rs:1285-1309 + view.rs:952-989 | MATCHES | — |
 | interactive-mode.ts:7906 | showFullPaneOverlay (full-width overlay surface) | crates/pa-tui/src/view.rs:946-951 (onboarding pane only) | PARTIAL | heartbeats-menu |
