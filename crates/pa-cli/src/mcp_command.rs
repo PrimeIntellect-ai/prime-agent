@@ -425,7 +425,7 @@ fn validate_http_url(value: &str) -> Result<String> {
     let host_lower = authority.to_ascii_lowercase();
     let path = &rest[rest.find(authority).unwrap_or(0) + authority.len()..];
     let path = if path.is_empty() || path.starts_with('?') || path.starts_with('#') {
-        format!("/{}", path)
+        format!("/{path}")
     } else {
         path.to_string()
     };

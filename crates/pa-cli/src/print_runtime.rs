@@ -1418,8 +1418,7 @@ mod tests {
             assert_eq!(
                 assistant_message_event_json(&event).as_ref(),
                 Some(&expected),
-                "wire shape of {:?}",
-                event
+                "wire shape of {event:?}"
             );
         }
         // Terminal events never ride a message_update.
