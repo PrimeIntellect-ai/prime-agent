@@ -368,11 +368,17 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // alone behind it), revealed by the expansion with its persisted
     // `rlmDepth` and its own saved descendants (the grandchild) behind its
     // own collapsed summary row.
+    // Expand the parent from its own selected row (the child sits hidden
+    // behind the collapsed summary, so the carried selection falls back to
+    // the parent and re-syncs to it), then walk to the child — its summary
+    // row, then the child — and open it.
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2_000 },
             AgentsStep::Key("alt+right".to_string()),
             AgentsStep::WaitSettle { timeout_ms: 300 },
+            AgentsStep::Key("down".to_string()),
+            AgentsStep::Key("down".to_string()),
             AgentsStep::Key("enter".to_string()),
         ],
         width: 120,
