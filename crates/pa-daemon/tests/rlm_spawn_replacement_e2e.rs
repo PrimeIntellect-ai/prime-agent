@@ -83,7 +83,7 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
         .env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "90000")
         .spawn()
         .expect("spawn pa-daemon supervisor");
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < deadline {
         if UnixStream::connect(socket).is_ok() {
             return Daemon {
@@ -141,7 +141,7 @@ impl Client {
         // Generous: under parallel load the supervisor process competes
         // for CPU with the whole workspace run, and a line can lag far
         // past an interactive box's latency.
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -163,7 +163,7 @@ impl Client {
     }
 
     fn read_response(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -255,7 +255,7 @@ fn child_session_file(agent_dir: &Path, child_id: &str) -> PathBuf {
         .join("parent-session-uuid")
         .join(child_id);
     wait_until(
-        Duration::from_secs(60),
+        Duration::from_mins(1),
         &format!("session file for {child_id}"),
         || {
             std::fs::read_dir(&dir)
@@ -334,7 +334,7 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
     // The supervisor roster carries all four resident children.
     for name in names {
         wait_until(
-            Duration::from_secs(120),
+            Duration::from_mins(2),
             &format!("roster row for {name}"),
             || {
                 roster_summaries(&mut client, "l0")
@@ -352,7 +352,7 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
     // boundary, released below). The supervisor restarts the worker
     // (backoff + relaunch + create replay) while the prompt is in flight.
     let kid_a_worker_id = {
-        let row = wait_until(Duration::from_secs(60), "kid-a roster row", || {
+        let row = wait_until(Duration::from_mins(1), "kid-a roster row", || {
             roster_summaries(&mut client, "l1")
                 .into_iter()
                 .find(|summary| summary["sessionName"] == json!("kid-a"))
@@ -430,7 +430,7 @@ async fn concurrent_spawns_prompt_exactly_once_across_a_worker_replacement() {
             "relaunched child archived: {row}"
         );
     }
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_mins(3);
     loop {
         let entries = children.list_subagents().await.expect("list subagents");
         let settled = entries

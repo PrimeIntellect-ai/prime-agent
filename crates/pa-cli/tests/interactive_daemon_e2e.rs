@@ -305,7 +305,7 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
     // environment to the workers it spawns).
     command.env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "90000");
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < deadline {
         if socket.exists() {
             return Supervisor { child, socket };
