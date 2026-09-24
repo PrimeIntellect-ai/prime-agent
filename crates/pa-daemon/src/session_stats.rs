@@ -137,12 +137,12 @@ fn kept_region_messages(store: &SessionFile) -> Vec<&Value> {
                 .get("firstKeptEntryId")
                 .and_then(Value::as_str)
                 .and_then(|id| chain.iter().find(|position| entries[**position].id == id))
-                .unwrap_or(*compaction)
+                .unwrap_or(compaction)
         });
     chain
         .iter()
         .filter(|position| match boundary {
-            Some(boundary) => **position >= boundary,
+            Some(boundary) => **position >= *boundary,
             None => true,
         })
         .filter(|position| entries[**position].type_ == "message")
