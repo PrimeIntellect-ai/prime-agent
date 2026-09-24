@@ -139,19 +139,26 @@ pub(crate) fn already_active_line(holder: &str, session_path: &Path) -> String {
 /// command (or inject a second one). Unix: POSIX single quotes with the
 /// embedded-quote escape - the exact form a shell round-trips
 /// byte-identically, and inert for the hex ids the product mints.
-/// Windows (`cmd.exe` passes the whole token through and the CLI's own
-/// argument parser splits on the quotes): double quotes with the
-/// embedded-quote doubling, the CRT parsing rule.
+/// Windows: the CRT parser's backslash/quote rules PLUS cmd.exe's own
+/// metacharacters (both documented in the arm below).
 pub(crate) fn quoted_resume_arg(id: &str) -> String {
     #[cfg(windows)]
     {
-        // The CRT parsing rule: a backslash run before a quote (or before
-        // the closing quote) folds 2n -> n, so every backslash doubles and
-        // every embedded quote escapes - neither can terminate the
-        // argument.
+        // Two parsers see a pasted command on Windows: the CRT argument
+        // parser (a backslash run before a quote folds 2n -> n, so every
+        // backslash doubles and every embedded quote escapes - neither
+        // can terminate the argument) and cmd.exe itself (every `"`
+        // toggles its quote state, exposing the separator metacharacters
+        // to command interpretation - so each of cmd's separators is
+        // ^-escaped, which renders it literal even in a toggle-out).
+        let cmd_escaped = ['&', '|', '<', '>', '^']
+            .iter()
+            .fold(id.to_string(), |escaped, metachar| {
+                escaped.replace(*metachar, &format!("^{metachar}"))
+            });
         format!(
             "--resume \"{}\"",
-            id.replace('\\', "\\\\").replace('"', "\\\"")
+            cmd_escaped.replace('\\', "\\\\").replace('"', "\\\"")
         )
     }
     #[cfg(not(windows))]

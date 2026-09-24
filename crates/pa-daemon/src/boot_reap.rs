@@ -274,6 +274,15 @@ fn same_socket_worker_targets(socket_path: &Path, protected: &HashSet<u32>) -> V
         if !is_worker_argv(&argv) {
             continue;
         }
+        // The executable check rides the UNFORGEABLE identity: argv[0] can
+        // be forged (`exec -a prime-agent sleep worker 300` inherits the
+        // env and passes the argv gate), while /proc/<pid>/exe names the
+        // binary the kernel actually loaded. An unreadable exe link
+        // (permission, a dying process) is never a target - the
+        // conservative no-signal default.
+        if !exe_is_product_binary(pid) {
+            continue;
+        }
         let Some(environ) = read_proc_environ(pid) else {
             continue;
         };
@@ -369,6 +378,11 @@ fn same_socket_supervisor_targets(socket_path: &Path) -> Vec<ReapTarget> {
             continue;
         };
         if !supervisor_argv_names_socket(&argv, &socket) {
+            continue;
+        }
+        // Same unforgeable-exe gate as the worker census: a forged argv
+        // never carries a signal.
+        if !exe_is_product_binary(pid) {
             continue;
         }
         targets.push(ReapTarget {
@@ -472,6 +486,17 @@ fn read_proc_environ(pid: u32) -> Option<Vec<String>> {
             .map(|entry| String::from_utf8_lossy(entry).to_string())
             .collect(),
     )
+}
+
+/// The UNFORGEABLE executable check for one pid: /proc/<pid>/exe names the
+/// binary the kernel loaded (argv[0] is forgeable via `exec -a`). An
+/// unreadable link answers false - the conservative no-signal default.
+#[cfg(target_os = "linux")]
+fn exe_is_product_binary(pid: u32) -> bool {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .and_then(|exe| exe.to_str().map(|exe| is_product_binary(exe)))
+        .unwrap_or(false)
 }
 
 /// One process's argv (None when unreadable).
@@ -625,6 +650,28 @@ mod tests {
             !is_worker_argv(&foreign_worker_arg),
             "a foreign binary with a worker argument never matches"
         );
+    }
+
+    /// The unforgeable-exe gate: a forged argv (`exec -a prime-agent sleep
+    /// worker 300`) never passes - the kernel's /proc/<pid>/exe link names
+    /// the real binary. (The live check runs per-pid in the census; the
+    /// helper is exercised through the product-binary predicate it reads.)
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_exe_gate_reads_the_kernel_binary() {
+        // A sleep process's exe link is /usr/bin/sleep (or a resolved
+        // alias) - never a product binary: the gate answers false for it
+        // and true only for the product binaries.
+        let mut child = std::process::Command::new("sleep")
+            .arg("2")
+            .spawn()
+            .expect("spawn sleep");
+        assert!(
+            !exe_is_product_binary(child.id()),
+            "a foreign executable never passes the unforgeable gate"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     /// The endpoint gate: only this supervisor's deterministic worker-socket
