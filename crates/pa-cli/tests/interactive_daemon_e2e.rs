@@ -602,11 +602,21 @@ async fn fresh_home_completes_onboarding_silently_without_the_trace_dialog() {
         settings.get_agent_traces_enabled(),
         "a fresh home shares traces (the pre-configured default)"
     );
+    // Nothing was written for sharing on a fresh home: the storage
+    // serializes every unset key as null, so the assertion is on the
+    // value (an explicit opt-out would persist an object), not the key.
     let persisted =
         std::fs::read_to_string(agent_dir.join("settings.json")).expect("global settings file");
-    assert!(
-        !persisted.contains("agentTraces"),
-        "the default stood without a written key:\n{persisted}"
+    let document: serde_json::Value =
+        serde_json::from_str(&persisted).expect("global settings json");
+    let agent_traces = document
+        .get("agentTraces")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    assert_eq!(
+        agent_traces,
+        serde_json::Value::Null,
+        "the default stood without a written value:\n{persisted}"
     );
     drop(supervisor);
 }
