@@ -772,32 +772,32 @@ mod tests {
     #[test]
     fn worker_argv_shapes() {
         let worker = ["/bin/prime-agent", "worker"]
-            .iter()
-            .map(|arg| arg.to_string())
+            .into_iter()
+            .map(String::from)
             .collect::<Vec<_>>();
         let pa_daemon_worker = ["/usr/bin/pa-daemon", "worker", "--flag"]
-            .iter()
-            .map(|arg| arg.to_string())
+            .into_iter()
+            .map(String::from)
             .collect::<Vec<_>>();
         let kernel = [
             "/opt/kernel-venv/bin/python",
             "-m",
             "prime_agent_runtime.kernel",
         ]
-        .iter()
-        .map(|arg| arg.to_string())
+        .into_iter()
+        .map(String::from)
         .collect::<Vec<_>>();
         let bash_child = ["/usr/bin/sleep", "300"]
-            .iter()
-            .map(|arg| arg.to_string())
+            .into_iter()
+            .map(String::from)
             .collect::<Vec<_>>();
         let bare = ["/usr/local/bin/prime-agent"]
-            .iter()
-            .map(|arg| arg.to_string())
+            .into_iter()
+            .map(String::from)
             .collect::<Vec<_>>();
         let worker_flag_second = ["/usr/local/bin/prime-agent", "--mode", "worker"]
-            .iter()
-            .map(|arg| arg.to_string())
+            .into_iter()
+            .map(String::from)
             .collect::<Vec<_>>();
         assert!(is_worker_argv(&worker), "the product worker role");
         assert!(
@@ -818,8 +818,8 @@ mod tests {
             "a flag never substitutes for the role argument"
         );
         let foreign_worker_arg = ["/usr/bin/python", "worker"]
-            .iter()
-            .map(|arg| arg.to_string())
+            .into_iter()
+            .map(String::from)
             .collect::<Vec<_>>();
         assert!(
             !is_worker_argv(&foreign_worker_arg),
@@ -877,8 +877,8 @@ mod tests {
             "--daemon-socket",
             "/tmp/x/daemon.sock",
         ]
-        .iter()
-        .map(|arg| arg.to_string())
+        .into_iter()
+        .map(String::from)
         .collect::<Vec<_>>();
         assert!(supervisor_argv_names_socket(
             &direct,
@@ -891,8 +891,8 @@ mod tests {
             "--daemon-socket",
             "/tmp/x/y/../daemon.sock",
         ]
-        .iter()
-        .map(|arg| arg.to_string())
+        .into_iter()
+        .map(String::from)
         .collect::<Vec<_>>();
         assert!(
             supervisor_argv_names_socket(
@@ -946,8 +946,8 @@ mod tests {
             "--daemon-socket",
             "/tmp/sock/daemon.sock",
         ]
-        .iter()
-        .map(|arg| arg.to_string())
+        .into_iter()
+        .map(String::from)
         .collect::<Vec<_>>();
         let direct = [
             "/usr/bin/pa-daemon",
@@ -957,8 +957,8 @@ mod tests {
             "--agent-dir",
             "/agent",
         ]
-        .iter()
-        .map(|arg| arg.to_string())
+        .into_iter()
+        .map(String::from)
         .collect::<Vec<_>>();
         let other_socket = [
             "/usr/local/bin/prime-agent",
@@ -967,12 +967,12 @@ mod tests {
             "--daemon-socket",
             "/tmp/OTHER/daemon.sock",
         ]
-        .iter()
-        .map(|arg| arg.to_string())
+        .into_iter()
+        .map(String::from)
         .collect::<Vec<_>>();
         let interactive = ["/usr/local/bin/prime-agent"]
-            .iter()
-            .map(|arg| arg.to_string())
+            .into_iter()
+            .map(String::from)
             .collect::<Vec<_>>();
         assert!(supervisor_argv_names_socket(
             &product,
