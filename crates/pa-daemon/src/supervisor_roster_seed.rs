@@ -202,7 +202,11 @@ Option<AgentRosterEntry> {
 
     /// The create path's family seed: a newly resident root (a resumed
     /// parent, a supervisor restart, a spawned child) renders its passive
-    /// descendants immediately from the ledger edges alone - TS
+    /// descendants immediately from the ledger edges alone - but only
+    /// while the root is still a resident (the registration seed runs
+    /// this walk in the background, and passivation never revisits
+    /// seeded rows), so the root's residency is revalidated after the
+    /// walk's awaits. TS
     /// `rosterEntryForSpawnLedgerEdge` rows with the dirname cwd and the
     /// `seededCwd` marker, zero transcript reads on the event path - and
     /// returns the written rows for the bounded background hydration,
@@ -235,6 +239,21 @@ Option<AgentRosterEntry> {
         let Ok(ledger) = self.rlm_spawn_ledger_for(None).await else {
             return Vec::new();
         };
+        // The root's residency is revalidated after the awaits: the
+        // registration seed runs this walk in the background, so a stop
+        // or give-up can settle while the ledger was being read, and
+        // passivation only settles rows the stopping worker still owned
+        // (seeded rows are unowned) - a dead root must not receive ghost
+        // family rows. The walk below holds no further await, so this
+        // one check covers every write of the pass (exactly like the
+        // boot seed's post-await revalidation).
+        if !self
+            .roster_seed_roots()
+            .await
+            .contains(&canonical_session_path(root))
+        {
+            return Vec::new();
+        }
         // The family walk outside the roster lock: the descent check is
         // an in-memory parent walk and the liveness check is a
         // stat-backed ledger read, and neither may block every roster
@@ -936,6 +955,7 @@ Some("w-live"));
     #
     async fn family_seed_renders_edges_then_hydrates_in_the_background() {
         let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        register_root_worker(&supervisor, "w-root", &root_file).await;
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
@@ -991,6 +1011,7 @@ Some("w-live"));
     #
     async fn hydration_loses_to_a_newer_worker_write() {
         let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        register_root_worker(&supervisor, "w-root", &root_file).await;
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
@@ -1078,6 +1099,7 @@ Some("w-live"));
 
     /// An unhydrated seeded row is a hydration candidate on every walk
     /// that re-finds it: a transcript that is unreadable at seed time
+    /// (corrupt, but present - the liveness walk drops deleted files)
     /// keeps the `seededCwd` marker, and the next family walk (a
     /// registration seed, a create) offers the file one more read
     /// without republishing the row. A replaced row never loses the
@@ -1093,10 +1115,13 @@ Some("w-live"));
             &root_file,
             &child_file,
         );
+        register_root_worker(&supervisor, "w-root", &root_file).await;
         let mut events = supervisor.events.subscribe();
-        // The child transcript does not exist yet: the family seed
-        // writes the edge-only row and the hydration keeps the marker.
-        let _ = std::fs::remove_file(&child_file);
+        // The child transcript is corrupt (present, but no readable
+        // session info - a deleted transcript would drop the edge from
+        // the liveness walk): the family seed writes the edge-only row
+        // and the hydration keeps the marker.
+        std::fs::write(&child_file, "not a session transcript\n").expect("corrupt child");
         let seeded = supervisor.seed_roster_family_edges(&root_file).await;
         assert_eq!(seeded.len(), 1);
         supervisor
@@ -1146,6 +1171,7 @@ Some("w-live"));
     #
     async fn the_registration_seed_publishes_a_late_worker_family() {
         let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        register_root_worker(&supervisor, "w-late", &root_file).await;
         let agent_dir = dir.join("agent");
         append_family_edge(
             &agent_dir,
