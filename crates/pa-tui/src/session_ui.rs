@@ -7021,8 +7021,17 @@ impl SessionUi {
                 // command being fulfilled now), and the next Enter submits
                 // a prompt instead of routing into apply_queue_selection,
                 // which would delete or replace the still-selected message.
+                // Ending the browse restores the stashed draft like every
+                // other leave-browse path (Esc, an applied queue edit), so
+                // the editor never strands the browsed message's text and
+                // a failed menu open loses nothing: the draft returns.
                 if matches!(command.as_str(), "model" | "mcp") {
-                    self.queue_selection.reset();
+                    if self.queue_selection.has_draft() {
+                        let draft = self.queue_selection.reset();
+                        view.editor.set_text(&draft);
+                    } else {
+                        self.queue_selection.reset();
+                    }
                     self.sync_queue_selection(view);
                 }
                 match command.as_str() {
