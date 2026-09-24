@@ -542,11 +542,14 @@ impl RlmSpawnLedger {
         let child_path = canonical_session_path(Path::new(child));
         // The writer never records what the reader refuses: replay
         // rejects a negative or NaN usage cost outright, which would
-        // make the whole ledger unreadable. A session file may carry
-        // such a cost (the file's own summary read preserves it), so a
-        // snapshot the reader would reject rides as absent - the
-        // tombstone still lands bare (the historical-gap zero).
-        if !(usage.cost.is_finite() && usage.cost >= 0.0) {
+        // make the whole ledger unreadable. That includes negative
+        // zero - `is_sign_negative()` is how replay reads it, and
+        // `>= 0.0` alone would have passed `-0.0` through. A session
+        // file may carry such a cost (the file's own summary read
+        // preserves it), so a snapshot the reader would reject rides as
+        // absent - the tombstone still lands bare (the historical-gap
+        // zero).
+        if !(usage.cost.is_finite() && !usage.cost.is_sign_negative()) {
             return self.append_delete(child_id, child, reason);
         }
         let usage = serde_json::to_value(usage)
@@ -1798,7 +1801,7 @@ mod tests {
                 name: "w".into(),
             })
             .unwrap();
-        for bad_cost in [-0.40, f64::NAN, f64::INFINITY] {
+        for bad_cost in [-0.40, -0.0, f64::NAN, f64::INFINITY] {
             ledger
                 .append_delete_with_usage(
                     "neg",
