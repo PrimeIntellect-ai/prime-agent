@@ -1516,16 +1516,19 @@ async fn run_interactive_surface(
                     } else if session_reconnect.is_some() {
                         // The direct link already died and the session-plane
                         // driver is retrying through the NOW-DEAD supervisor:
-                        // hand the recovery to the full driver (client
-                        // replacement + durable-id reattach) instead of
-                        // letting it keep riding a dead client.
+                        // stop it (it would ride a dead client) and hand the
+                        // recovery to the full driver — unless the update
+                        // restart already armed it (its resume semantics own
+                        // the window; the loss joins the running driver).
                         session_reconnect = None;
-                        session.note_as(
-                            "the daemon connection closed — reconnecting…",
-                            crate::chat::StatusKind::Warning,
-                            &mut view,
-                        );
-                        reconnect = Some(ReconnectLoop::start_lost());
+                        if reconnect.is_none() {
+                            session.note_as(
+                                "the daemon connection closed — reconnecting…",
+                                crate::chat::StatusKind::Warning,
+                                &mut view,
+                            );
+                            reconnect = Some(ReconnectLoop::start_lost());
+                        }
                         session.dirty = true;
                     } else if reconnect.is_none() {
                         session.note_as(
@@ -1662,10 +1665,38 @@ async fn run_interactive_surface(
             } => {
                 reconnect_connect = None;
                 reconnect_attempt_in_flight = false;
+                // The deadline check runs here too: the tick arm parks
+                // while an attempt is in flight, so the window can never
+                // overrun its advertised bound by more than the in-flight
+                // attempt's connect leg — the expiry note fires as soon as
+                // the leg reports back.
+                let expired = match reconnect.as_ref() {
+                    Some(state) => tokio::time::Instant::now() > state.deadline,
+                    None => continue,
+                };
                 let lost = match reconnect.as_ref() {
                     Some(state) => state.lost,
                     None => continue,
                 };
+                if expired {
+                    if lost {
+                        session.note(
+                            "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
+                            &mut view,
+                        );
+                        session.exit_reason = "daemon_reconnect_failed";
+                    } else {
+                        session.note(
+                            "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
+                            &mut view,
+                        );
+                        session.exit_reason = "update_reconnect_failed";
+                    }
+                    reconnect = None;
+                    session.dirty = true;
+                    running = false;
+                    continue;
+                }
                 match maybe_attempt {
                     Ok(Ok((client, fresh_events))) => {
                         // The reattach self-bounds (its budget is inside
