@@ -26,7 +26,32 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
+  # The dependency audit gate (RELEASE_SECURITY pragmatic baseline): the
+  # same advisories + licenses check as `make deny` (deny.toml), on every
+  # tree the branch channel builds binaries from. Advisories that are
+  # triaged-unmaintained carry an `ignore` entry with the reason and a
+  # review date (docs/installer-ci-design.md §7); the gate fails on
+  # anything new. SEAM: pin the advisory-DB snapshot (or vendor it) when
+  # the channel goes public.
+  deny:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Dependency audit (cargo-deny advisories + licenses)
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          arguments: --all-features --workspace
+          command-arguments: advisories licenses
+
+  # The audit gates every build: an unaudited tree must not produce
+  # downloadable branch-channel binaries.
   build:
+    needs: deny
     name: build-${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}
     permissions:

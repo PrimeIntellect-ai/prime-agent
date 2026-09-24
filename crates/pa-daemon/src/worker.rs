@@ -2336,9 +2336,7 @@ impl Worker {
                         }
                         opened
                     }
-                    Err(error) => {
-                        return response_failure(None, "create", &error.to_string(), None)
-                    }
+                    Err(error) => return crate::hold_refusal::create_failure_response(&error),
                 }
             }
             (Some(path), false) => {
@@ -2360,9 +2358,7 @@ impl Worker {
                 };
                 match acquired {
                     Ok(lease) => created.lease = Some(Arc::new(lease)),
-                    Err(error) => {
-                        return response_failure(None, "create", &error.to_string(), None)
-                    }
+                    Err(error) => return crate::hold_refusal::create_failure_response(&error),
                 }
                 if let Err(error) = created.rewrite() {
                     return response_failure(None, "create", &error.to_string(), None);
@@ -2416,9 +2412,7 @@ impl Worker {
                 };
                 match acquired {
                     Ok(lease) => created.lease = Some(Arc::new(lease)),
-                    Err(error) => {
-                        return response_failure(None, "create", &error.to_string(), None)
-                    }
+                    Err(error) => return crate::hold_refusal::create_failure_response(&error),
                 }
                 if let Err(error) = created.rewrite() {
                     return response_failure(None, "create", &error.to_string(), None);

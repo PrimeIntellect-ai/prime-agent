@@ -132,11 +132,12 @@ async fn try_daemon_attached_acp(options: &RunOptions) -> Option<i32> {
     if std::env::var_os("PRIME_AGENT_FAUX_SCRIPT").is_some() {
         return None;
     }
-    let socket_path = options
-        .daemon_socket
-        .clone()
-        .map(|socket| crate::config::expand_tilde_path(&socket))
-        .unwrap_or_else(pa_daemon::socket::default_daemon_socket_path);
+    // Flag > env > default: the ACP transport resolves the same
+    // `PRIME_AGENT_DAEMON_SOCKET` contract as every other mode (the
+    // `prime-agent-rust` launcher pins that env, so the ACP path must
+    // honor it or it would target the TypeScript default socket and
+    // treat the schema mismatch as a stale daemon).
+    let socket_path = crate::config::resolve_daemon_socket_path(options.daemon_socket.as_deref());
     let cwd = options.config.cwd.clone();
     let result = async {
         crate::interactive_mode::ensure_daemon_running(&socket_path, &cwd)
@@ -713,54 +714,94 @@ fn assert_session_not_active_in_daemon(
     session_path: &std::path::Path,
 ) -> Result<(), String> {
     let socket = crate::interactive_mode::resolve_socket_path(socket_path);
-    let Ok(mut client) = crate::daemon_client::DaemonClient::connect(&socket) else {
-        return Ok(());
-    };
-    let list = client
-        .request(pa_types::daemon::DaemonCommand::List {
-            id: None,
-            all: None,
-            cwd: None,
-            session_dir: None,
-            include_client_owned: None,
-            rest: Default::default(),
-        })
-        .map_err(|error| format!("Could not check active sessions: {error:#}"))?;
-    if !list.success {
-        return Ok(());
-    }
-    let target = pa_daemon::lease::canonical_session_path(session_path);
-    for row in list
-        .data
-        .and_then(|data| data.get("sessions").cloned())
-        .and_then(|sessions| sessions.as_array().cloned())
-        .unwrap_or_default()
-    {
-        let Some(file) = row.get("sessionFile").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        if pa_daemon::lease::canonical_session_path(std::path::Path::new(file)) != target {
-            continue;
+    if let Ok(mut client) = crate::daemon_client::DaemonClient::connect(&socket) {
+        let list = client
+            .request(pa_types::daemon::DaemonCommand::List {
+                id: None,
+                all: None,
+                cwd: None,
+                session_dir: None,
+                include_client_owned: None,
+                rest: Default::default(),
+            })
+            .map_err(|error| format!("Could not check active sessions: {error:#}"))?;
+        if list.success {
+            let target = pa_daemon::lease::canonical_session_path(session_path);
+            for row in list
+                .data
+                .and_then(|data| data.get("sessions").cloned())
+                .and_then(|sessions| sessions.as_array().cloned())
+                .unwrap_or_default()
+            {
+                let Some(file) = row.get("sessionFile").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                if pa_daemon::lease::canonical_session_path(std::path::Path::new(file)) != target {
+                    continue;
+                }
+                let active_session_id = row
+                    .get("activeSessionId")
+                    .or_else(|| row.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                // The descriptive refusal (operator-directed): the TS-identical
+                // first line, then the holder's identity and the next steps —
+                // attach to the live session instead of reopening its file.
+                let message = match pa_tui::session_open_error::holder_from_roster(
+                    std::slice::from_ref(&row),
+                    &target,
+                ) {
+                    Some(holder) => {
+                        pa_tui::session_open_error::already_active_error(&holder, &target)
+                    }
+                    None => format!(
+                        "Session is already active in {active_session_id}: {}",
+                        target.display()
+                    ),
+                };
+                return Err(message);
+            }
         }
-        let active_session_id = row
-            .get("activeSessionId")
-            .or_else(|| row.get("id"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        // The descriptive refusal (operator-directed): the TS-identical
-        // first line, then the holder's identity and the next steps —
-        // attach to the live session instead of reopening its file.
-        let message = match pa_tui::session_open_error::holder_from_roster(
-            std::slice::from_ref(&row),
-            &target,
-        ) {
-            Some(holder) => pa_tui::session_open_error::already_active_error(&holder, &target),
-            None => format!(
-                "Session is already active in {active_session_id}: {}",
-                target.display()
-            ),
-        };
-        return Err(message);
+    }
+    // The daemon's roster covers only its own sessions; the session store
+    // is shared, so the file may instead be held by a live process no
+    // roster here names - typically the TypeScript product's daemon or one
+    // of its surviving workers, with this Rust daemon running beside it
+    // (each product owns its daemon; the store is the shared part). The
+    // runtime lease table is the one cross-daemon ownership record the
+    // shared agent dir offers, so a live holder refuses the in-process
+    // open with the same refusal the daemon's create path answers - a
+    // print-mode run over a held file would be a second writer on it.
+    let agent_dir = crate::config::get_agent_dir();
+    // Acquire, not observe: a probe leaves a window where a daemon worker
+    // (or another CLI) acquires the file's runtime lease after the check
+    // and before this in-process open - two writers on one file. The
+    // acquire is atomic against the shared lease table: a live foreign
+    // holder answers with the session-hold refusal, and a successful
+    // acquire is held for the process lifetime (the one-shot print run
+    // IS the writer; `forget` keeps the lease armed until the process
+    // exits, whose dead pid the liveness probes treat as released).
+    match pa_daemon::lease::acquire_runtime_session_lease(session_path, &agent_dir) {
+        Ok(lease) => {
+            std::mem::forget(lease);
+        }
+        Err(error) => {
+            let Some(active) = error.downcast_ref::<pa_daemon::lease::SessionAlreadyActiveError>()
+            else {
+                // The lease table itself failed (io, permissions): never
+                // silently proceed over an undeterminable ownership record.
+                return Err(format!(
+                    "could not verify the session file is not held: {error:#}"
+                ));
+            };
+            return Err(pa_daemon::hold_refusal::refusal_message(
+                &pa_daemon::hold_refusal::HoldIdentity {
+                    pid: active.holder_pid,
+                    active_session_id: active.active_session_id.clone(),
+                },
+                Some(session_path),
+            ));
+        }
     }
     Ok(())
 }
