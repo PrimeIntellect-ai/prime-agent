@@ -158,7 +158,7 @@ async fn wait_for_boot(
     agent_dir: &Path,
     cold: bool,
 ) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         let events = kernel_bootstrap_events(client, agent_dir).await;
         if let Some(event) = events.iter().find(|event| {
@@ -352,7 +352,7 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
     // generous ceiling only (the sandbox may be loaded), the structural
     // claim is "ready before the first prompt", proven by the event.
     assert!(
-        ready_elapsed < Duration::from_secs(60),
+        ready_elapsed < Duration::from_mins(1),
         "resume boot took too long: {ready_elapsed:?}"
     );
 

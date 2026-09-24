@@ -144,7 +144,7 @@ fn decode_utf8_char(buf: &[u8]) -> Decoded {
         }
         cp = (cp << 6) | u32::from(b & 0x3F);
     }
-    if cp < min || (0xD800..=0xDFFF).contains(&cp) || cp > 0x10FFFF {
+    if cp < min || (0xD800..=0xDFFF).contains(&cp) || cp > 0x0010_FFFF {
         return Decoded::Invalid(len);
     }
     Decoded::Char(len)

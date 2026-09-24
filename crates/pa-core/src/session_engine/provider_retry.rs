@@ -149,7 +149,7 @@ pub fn is_permanent_provider_failure_kind(
 ) -> bool {
     match kind {
         Some("invalid_request") if status == Some(404) => false,
-        Some("invalid_request") | Some("refusal") | Some("permission") => true,
+        Some("invalid_request" | "refusal" | "permission") => true,
         Some("auth") => retries_performed > 0,
         _ => false,
     }
