@@ -1004,9 +1004,11 @@ mod tests {
             !rows.iter().any(|row| row.contains("(1/69)")),
             "no scroll indicator in the too-short frame: {rows:?}"
         );
+        // The selected not-connected catalog row's action names the
+        // hint (TS `actionText`): no `Enter select` filler.
         assert_eq!(
             rows.last().map(String::as_str),
-            Some(" \u{2191}/\u{2193} navigate \u{b7} Enter select \u{b7} Esc close"),
+            Some(" \u{2191}/\u{2193} navigate \u{b7} Enter connect \u{b7} Esc close"),
             "the hint rides the skeleton's last row"
         );
     }
