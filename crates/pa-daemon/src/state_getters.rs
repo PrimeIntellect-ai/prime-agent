@@ -772,9 +772,8 @@ mod tests {
         // The children come from the background cache refresh (the create
         // warm armed it): a cold read serves the root from memory
         // instantly, and the persisted tree fills when the walk lands.
-        let mut children = Vec::new();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
+        let children = loop {
             let response = worker
                 .dispatch(
                     "get_context_tree",
@@ -788,12 +787,12 @@ mod tests {
                 json!(30),
                 "the root usage counts"
             );
-            children = tree["children"].as_array().cloned().unwrap_or_default();
+            let children = tree["children"].as_array().cloned().unwrap_or_default();
             if children.len() == 1 || std::time::Instant::now() > deadline {
-                break;
+                break children;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        };
         assert_eq!(
             children.len(),
             1,
