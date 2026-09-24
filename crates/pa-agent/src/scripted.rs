@@ -231,7 +231,6 @@ impl ModelStream for ScriptedStream {
                         match prelude.pop_front() {
                             Some(ScriptStep::SleepMs(ms)) => {
                                 tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-                                continue;
                             }
                             Some(ScriptStep::Event(event)) => {
                                 if let Some(message) = event.terminal_message() {
