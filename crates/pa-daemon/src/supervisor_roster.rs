@@ -18,6 +18,21 @@ use crate::registry::ResidentWorker;
 use crate::supervisor::{ClientRouting, Supervisor, ROUTE_TIMEOUT_MS};
 use crate::supervisor_roster_seed::family_descends_from;
 
+/// `worker_roster_delta`'s parsed frame (worker.rs `push_roster_delta`):
+/// the summary, the removals, the sending worker's per-connection sequence
+/// counter (the stale-delta gate's input: the roster's per-worker watermark
+/// drops a delayed older snapshot, matching the TS worker's ordered socket
+/// delivery), and the sending worker process instance (the generation the
+/// roster's stale-delta slot names; a replacement process restarts the
+/// counter under a new instance and the registration flips the slot to it).
+pub(crate) struct WorkerRosterDelta {
+    pub worker_token: String,
+    pub summary: Value,
+    pub removed: Vec<String>,
+    pub sequence: Option<u64>,
+    pub worker_instance_id: Option<String>,
+}
+
 impl Supervisor {
     /// `roster_subscribe` (TS: sets the client flag and answers with the
     /// full roster snapshot; the caller stores the flag). Pure in-memory:
@@ -64,22 +79,20 @@ impl Supervisor {
         response_success(Some(command_id), type_name, None)
     }
 
-    /// `worker_roster_delta`: a worker pushes its slim session summary (the
-    /// Rust-native form of the TS `roster_delta` worker frame) so the
-    /// roster tracks live status without polling. Authenticated by the
-    /// worker token, like `worker_register`. One delta pushes one
-    /// `roster_update`: the summary write and any removals batch into a
-    /// single frame (TS `applyWorkerRosterDelta` + its coalescing
-    /// `scheduleRosterPush`), never one push per mutation.
     pub(crate) async fn handle_worker_roster_delta(
         self: &Arc<Self>,
         command_id: &str,
         type_name: &str,
-        worker_token: &str,
-        summary: Value,
-        removed: Vec<String>,
+        delta: WorkerRosterDelta,
     ) -> DaemonResponse {
-        let Some(resident) = self.registry.find_by_token(worker_token).await else {
+        let WorkerRosterDelta {
+            worker_token,
+            summary,
+            removed,
+            sequence,
+            worker_instance_id,
+        } = delta;
+        let Some(resident) = self.registry.find_by_token(&worker_token).await else {
             return response_failure(
                 Some(command_id),
                 type_name,
@@ -87,17 +100,36 @@ impl Supervisor {
                 None,
             );
         };
-        let changed = vec![self.roster.lock().unwrap().write_summary(
-            summary,
-            Some(&resident.worker_id),
-            None,
-        )];
+        // The stale-delta gate and the write share ONE roster lock
+        // acquisition: two accepted deltas must never write in reverse
+        // order (each supervisor connection runs its own task), so the
+        // accept order is the apply order. The gate drops both a delayed
+        // older snapshot (a newer sequence already applied) and any frame
+        // from a generation the roster's slot no longer names (a replaced
+        // process's delayed delivery — stale by construction), and the
+        // supervisor answers success for a stale delta (delivered, just
+        // superseded). The summary write and any removals batch into the
+        // single frame the one push carries (TS `applyWorkerRosterDelta`
+        // + its coalescing `scheduleRosterPush`), never one push per
+        // mutation.
+        let mut changed = Vec::new();
         let mut removed_ids = Vec::new();
-        for agent_id in removed {
+        {
             let mut roster = self.roster.lock().unwrap();
-            if roster.get(&agent_id).is_some() {
-                roster.delete(&agent_id);
-                removed_ids.push(agent_id);
+            if !roster.accept_delta_sequence(
+                &resident.worker_id,
+                worker_instance_id.as_deref().unwrap_or(""),
+                sequence.unwrap_or(0),
+            ) {
+                return response_success(Some(command_id), type_name, None);
+            }
+            let entry = roster.write_summary(summary, Some(&resident.worker_id), None);
+            changed.push(entry);
+            for agent_id in removed {
+                if roster.get(&agent_id).is_some() {
+                    roster.delete(&agent_id);
+                    removed_ids.push(agent_id);
+                }
             }
         }
         self.push_roster_update(changed, removed_ids);
@@ -105,7 +137,12 @@ impl Supervisor {
     }
 
     /// Write one summary into the roster and push the change to
-    /// subscribers. Returns the classified entry.
+    /// subscribers. Returns the classified entry. Test-support arm: the
+    /// production paths write through the sequence-gated
+    /// [`Self::write_roster_summary_for_resident`] (the authoritative
+    /// pull write); the plain write remains for the roster tests that
+    /// place rows directly.
+    #[cfg(test)]
     pub(crate) fn write_roster_summary(
         &self,
         summary: &Value,
@@ -120,6 +157,48 @@ impl Supervisor {
         Some(entry)
     }
 
+    pub(crate) async fn write_roster_summary_for_resident(
+        self: &Arc<Self>,
+        resident: &Arc<ResidentWorker>,
+        summary: &Value,
+    ) -> Option<AgentRosterEntry> {
+        let stamped_instance = summary
+            .get("workerInstanceId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|stamped| !stamped.is_empty());
+        let instance = match stamped_instance {
+            Some(stamped) => stamped.to_string(),
+            None => resident
+                .descriptor
+                .lock()
+                .await
+                .worker_instance_id
+                .clone()
+                .unwrap_or_default(),
+        };
+        // The counter stamp stays an Option: ABSENT means unsequenced
+        // (a legacy summary that predates the sequence wire field) — an
+        // authoritative write — while PRESENT-and-zero is the worker's
+        // counter before its first push, a sequenced snapshot the gate
+        // orders like any other (a delayed zero-counter pull must not
+        // overwrite a newer delta's state, and a predecessor's must not
+        // overwrite the replacement's row).
+        let counter = summary
+            .get("rosterDeltaSequence")
+            .and_then(serde_json::Value::as_u64);
+        let entry = {
+            let mut roster = self.roster.lock().unwrap();
+            if !roster.accept_roster_pull(&resident.worker_id, &instance, counter) {
+                return None;
+            }
+            roster.write_summary(summary.clone(), Some(&resident.worker_id), None)
+        };
+        self.push_roster_update(vec![entry.clone()], Vec::new());
+        Some(entry)
+    }
+
+    /// Refresh one resident worker's entry from its live `get_state`
+    /// (registration, adoption, and create flows).
     /// Refresh one resident worker's entry from its live `get_state`
     /// (registration, adoption, and create flows).
     pub(crate) async fn refresh_roster_entry(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
@@ -129,7 +208,8 @@ impl Supervisor {
         if let Ok(response) = response {
             if response.success {
                 if let Some(data) = response.data {
-                    self.write_roster_summary(&data, Some(&resident.worker_id));
+                    self.write_roster_summary_for_resident(resident, &data)
+                        .await;
                 }
             }
         }
@@ -215,6 +295,9 @@ impl Supervisor {
                     removed.push(entry.agent_id);
                 }
             }
+            // The sequence slot dies with the rows: a replacement process
+            // for the same worker restarts its counter from zero.
+            roster.forget_worker_sequences(worker_id);
         }
         self.push_roster_update(changed, removed);
     }
