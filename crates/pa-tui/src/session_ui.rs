@@ -2353,14 +2353,18 @@ impl SessionUi {
                             continue;
                         }
                     }
-                    if crate::daemon_client::is_daemon_rejection(&error) {
+                    if crate::daemon_client::is_daemon_rejection(&error)
+                        || crate::daemon_client::is_daemon_unreachable(&error)
+                    {
                         // TS `onSubmit`'s prompt catch: the daemon answered
                         // with a refusal for THIS request (admission, queue
                         // capacity, a superseded session the rebind could
-                        // not recover, ...) — the connection is healthy, so
-                        // the `⚠ Error` row surfaces the refusal and the
-                        // draft returns to the editor; a refused prompt
-                        // never exits the UI.
+                        // not recover, ...), or the connection could not
+                        // carry the submission at all (a down or
+                        // reconnecting daemon) — the `⚠ Error` row surfaces
+                        // it and the draft returns to the editor; a failed
+                        // prompt never exits the UI (the reconnect driver
+                        // owns the connection's recovery).
                         self.error_row(&rendered, view);
                         view.editor.set_text(text);
                         return Ok(());

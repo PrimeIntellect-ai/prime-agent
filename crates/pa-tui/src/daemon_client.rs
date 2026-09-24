@@ -856,6 +856,18 @@ pub fn is_daemon_timeout(error: &anyhow::Error) -> bool {
         .any(|cause| cause.to_string().contains("Timed out after"))
 }
 
+/// Whether an error means the daemon connection could not carry the
+/// request at all (a timeout, or a closed connection): a transient the
+/// submit path surfaces without exiting — the pane stays mounted for the
+/// reconnect driver to restore the connection.
+pub fn is_daemon_unreachable(error: &anyhow::Error) -> bool {
+    is_daemon_timeout(error)
+        || error.chain().any(|cause| {
+            let cause = cause.to_string().to_lowercase();
+            cause.contains("daemon connection") || cause.contains("prime agent daemon closed")
+        })
+}
+
 /// Unwrap a settled response into its `data`, surfacing the daemon
 /// refusal as a typed [`RequestRejected`] on failure.
 fn response_data_or_error(name: &str, response: DaemonResponse) -> Result<Value> {
