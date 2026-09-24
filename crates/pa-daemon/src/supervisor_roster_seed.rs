@@ -91,7 +91,7 @@ impl Supervisor {
             // tombstoned during the read, must not receive rows (the
             // delete's roster removal already settled and never
             // revisits them).
-            if !ledger.edge_not_tombstoned(&edge.child_id, &edge.child)
+            if !ledger.edge_is_live(&edge.child_id, &edge.child)
                 || !family_descends_from(&parent_by_child, &parent, &self.roster_seed_roots().await)
             {
                 continue;
@@ -253,7 +253,7 @@ impl Supervisor {
                     // ledger-read await: a child deleted in that
                     // window never seeds (its completed delete must
                     // not be followed by a fresh row).
-                    && ledger.edge_not_tombstoned(&edge.child_id, &edge.child)
+                    && ledger.edge_is_live(&edge.child_id, &edge.child)
             })
             .collect();
         let mut changed = Vec::new();

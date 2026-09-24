@@ -421,19 +421,18 @@ impl RlmSpawnLedger {
             .collect())
     }
 
-    /// Live edges: no delete tombstone. File existence is deliberately
-    /// NOT part of the answer: a child transcript that is missing or
-    /// unreadable still carries its edge (the seed writes the
-    /// edge-only row with the `seededCwd` marker, TS `hydratedSeedEntry`'s
-    /// dirname fallback), and a moved file resolves through its durable
-    /// session id elsewhere; only a delete tombstone drops the edge.
+    /// Live edges reconciled by stat: a dead parent or child drops the edge.
     pub fn live_edges(&self) -> Result<Vec<RlmLedgerEdge>> {
         self.seed_once()?;
         let state = self.replay_cached()?;
         Ok(state
             .edges
             .iter()
-            .filter(|edge| edge.deleted.is_none())
+            .filter(|edge| {
+                edge.deleted.is_none()
+                    && is_file(Path::new(&edge.child))
+                    && is_file(Path::new(&edge.parent))
+            })
             .cloned()
             .collect())
     }
@@ -447,13 +446,7 @@ impl RlmSpawnLedger {
     /// edges with different paths, and only the exact edge a seed
     /// snapshotted counts as live. A broken ledger reads as not-live,
     /// like every other read here degrades to nothing.
-    /// Per-write revalidation for the roster seed: the edge carries no
-    /// delete tombstone NOW (one landed since the caller's snapshot).
-    /// The child's file existence is deliberately NOT part of the
-    /// answer: a missing or unreadable child transcript still seeds its
-    /// edge-only row with the `seededCwd` marker (TS `hydratedSeedEntry`'s
-    /// dirname fallback); only a delete tombstone kills the seed.
-    pub fn edge_not_tombstoned(&self, child_id: &str, child: &str) -> bool {
+    pub fn edge_is_live(&self, child_id: &str, child: &str) -> bool {
         let child = canonical_session_path(Path::new(child));
         self.seed_once().is_ok()
             && self.replay_cached().is_ok_and(|state| {
@@ -461,6 +454,8 @@ impl RlmSpawnLedger {
                     edge.child_id == child_id
                         && edge.deleted.is_none()
                         && canonical_session_path(Path::new(&edge.child)) == child
+                        && is_file(Path::new(&edge.child))
+                        && is_file(Path::new(&edge.parent))
                 })
             })
     }
@@ -770,6 +765,10 @@ fn file_identity(path: &Path) -> Result<Option<FileIdentity>> {
     }))
 }
 
+fn is_file(path: &Path) -> bool {
+    fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+}
+
 /// One legacy `rlm-subagents.jsonl` registry entry (the pre-ledger topology
 /// store; still read for seeding and hydration metadata). The fields beyond
 /// the edge (prompt, model, node ids) are display-grade.
@@ -994,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn edge_not_tombstoned_ignores_files_until_a_delete_tombstone() {
+    fn edge_is_live_reflects_tombstones_and_files() {
         let dir = temp_dir("liveness");
         let ledger = ledger_for(&dir);
         let parent = dir.join("p.jsonl");
@@ -1011,19 +1010,18 @@ mod tests {
                 name: "w".into(),
             })
             .unwrap();
-        // The child transcript missing (unreadable, the seededCwd
-        // fallback scenario) does not drop the edge: the seed still
-        // writes the edge-only row.
+        assert!(ledger.edge_is_live("sub-1", &child_path));
+        // The child file vanishing flips the answer even without a
+        // tombstone.
         fs::remove_file(&child).unwrap();
-        assert!(ledger.edge_not_tombstoned("sub-1", &child_path));
-        assert_eq!(ledger.live_edges().unwrap().len(), 1);
+        assert!(!ledger.edge_is_live("sub-1", &child_path));
         fs::write(&child, "{}").unwrap();
-        // A dead parent file does not drop the edge either: a moved or
-        // unwritten parent still carries topology; only a tombstone
-        // does.
+        assert!(ledger.edge_is_live("sub-1", &child_path));
+        // A dead parent reads as not-live, like `live_edges` drops it.
         fs::remove_file(&parent).unwrap();
-        assert!(ledger.edge_not_tombstoned("sub-1", &child_path));
+        assert!(!ledger.edge_is_live("sub-1", &child_path));
         fs::write(&parent, "{}").unwrap();
+        assert!(ledger.edge_is_live("sub-1", &child_path));
         // A completed delete tombstones the edge: no resurrection, and
         // a different edge sharing the child id (a different child
         // path) cannot keep the deleted edge live.
@@ -1042,16 +1040,20 @@ mod tests {
         ledger
             .append_delete("sub-1", &child_path, RlmLedgerDeleteReason::User)
             .unwrap();
-        assert!(!ledger.edge_not_tombstoned("sub-1", &child_path));
-        // The raw replay still holds the tombstone; live edges drop it.
-        assert_eq!(ledger.live_edges().unwrap().len(), 1);
-        assert_eq!(ledger.edges(true).unwrap().len(), 2);
-        // An unknown child reads as not-tombstoned-false.
-        assert!(!ledger.edge_not_tombstoned("sub-none", &child_path));
+        assert!(
+            !ledger.edge_is_live("sub-1", &child_path),
+            "the tombstoned edge stays dead beside a shared-id sibling"
+        );
+        assert!(
+            ledger.edge_is_live("sub-1", &other_child.to_string_lossy()),
+            "the live sibling still reads live"
+        );
+        // An unknown child reads as not-live.
+        assert!(!ledger.edge_is_live("sub-none", &child_path));
     }
 
     #[test]
-    fn live_edges_keep_missing_files_until_a_tombstone() {
+    fn dead_child_or_parent_drops_from_live_edges() {
         let dir = temp_dir("live");
         let ledger = ledger_for(&dir);
         let parent = dir.join("p.jsonl");
@@ -1068,22 +1070,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(ledger.live_edges().unwrap().len(), 1);
-        // A missing child transcript does NOT drop the live edge: the
-        // seed writes the edge-only row with the seededCwd fallback (TS
-        // `hydratedSeedEntry` keeps the dirname row when the read
-        // fails), and a tombstone is the only thing that drops it.
         fs::remove_file(&child).unwrap();
-        assert_eq!(ledger.live_edges().unwrap().len(), 1);
-        // The edge stays in the raw replay as well.
-        assert_eq!(ledger.edges(false).unwrap().len(), 1);
-        ledger
-            .append_delete(
-                "sub-1",
-                &child.to_string_lossy(),
-                RlmLedgerDeleteReason::User,
-            )
-            .unwrap();
         assert!(ledger.live_edges().unwrap().is_empty());
+        // The edge stays in the raw replay.
+        assert_eq!(ledger.edges(false).unwrap().len(), 1);
     }
 
     #[test]
