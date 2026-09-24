@@ -1061,14 +1061,15 @@ impl SessionUi {
         self.subagent_counts = counts;
 
         let goal = &self.goal_view.goal;
-        // The dock carries the goal only while it is actively being
-        // pursued, and its row reads the elapsed time (the operator's
-        // 2026-09-24 directive: "make it 'Pursuing goal (time)'"): the
-        // token budget lives inside the goal panel the row opens, not on
-        // the bar. A completed goal's bookkeeping is not a live activity.
-        let goal_label = (goal.status == pa_types::goal::GoalStatus::Active)
-            .then(|| tray_goal_label(goal))
-            .flatten();
+        // The dock is the goal's one chrome surface (the operator's
+        // 2026-09-24 directive moved it off the line below the prompt
+        // bar): every live state renders its row — pursuing reads the
+        // elapsed time ("make it 'Pursuing goal (time)'"), and the
+        // paused and budget-limited states keep their persistent label
+        // here too (the tray's TS cluster no longer exists to carry
+        // them; terminal states carry no row). The token budget lives
+        // inside the goal panel the row opens, not on the bar.
+        let goal_label = tray_goal_label(goal);
         // The dock's bash indicator counts only runs actively running
         // right now (operator scoping): finished runs stay as rows inside
         // the bash view, never in the indicator. The feed is the
@@ -1141,12 +1142,10 @@ impl SessionUi {
             crate::chrome::ActivityGroup::Bash => {
                 !crate::bash_view::parse_bash_activities(&self.bash_activities).is_empty()
             }
-            // The goal group rides the dock's `Pursuing goal` row: it
-            // stays selectable exactly while that row renders (an active
-            // goal — the same gate as the row itself).
-            crate::chrome::ActivityGroup::Goal => {
-                self.goal_view.goal.status == pa_types::goal::GoalStatus::Active
-            }
+            // The goal group rides the dock's goal row: it stays
+            // selectable exactly while that row renders — every live
+            // state (the same gate as the row itself).
+            crate::chrome::ActivityGroup::Goal => tray_goal_label(&self.goal_view.goal).is_some(),
         }
     }
 

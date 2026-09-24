@@ -644,9 +644,19 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
         ),
     ];
     if let Some(goal) = &dock.goal_label {
+        // The goal row carries the dock's activity convention: an
+        // actively pursued goal reads green, and the paused and
+        // budget-limited states read amber (the paused heartbeat
+        // cluster's own warning color) — the dock is the goal's one
+        // chrome surface, so every live state stays visible.
+        let goal_color = if goal.starts_with("Pursuing goal") {
+            ThemeColor::Success
+        } else {
+            ThemeColor::Warning
+        };
         groups.push((
             ActivityGroup::Goal,
-            vec![theme.fg_span(ThemeColor::Success, goal.clone())],
+            vec![theme.fg_span(goal_color, goal.clone())],
         ));
     }
     let mut line = vec![Span::raw(" ")];
@@ -738,6 +748,29 @@ mod tests {
         assert!(colored("▸ 1 shell", success));
         assert!(colored("Pursuing goal", success));
         assert!(colored("◆ subagents", muted));
+        // A paused goal stays on the dock (the tray cluster is gone) in
+        // the warning color — every live goal state keeps a surface.
+        let dock = ActivityDock {
+            subagents_total: 1,
+            goal_label: Some("Goal paused (0s)".to_string()),
+            ..ActivityDock::default()
+        };
+        let frame = render_activity_dock(&dock, &theme, 100).unwrap();
+        let text = frame[1]
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        let warning = theme.fg_style(ThemeColor::Warning).fg;
+        assert!(
+            text.contains("Goal paused (0s)"),
+            "the paused row renders: {text}"
+        );
+        assert!(
+            frame[1]
+                .iter()
+                .any(|span| span.content.contains("Goal paused") && span.style.fg == warning),
+            "the paused goal reads amber"
+        );
         // A running count of zero still renders: a long idle roster must
         // read as quiet, not as uniformly busy — and the count segments
         // go neutral at zero.
