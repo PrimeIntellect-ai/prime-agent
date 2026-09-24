@@ -168,7 +168,7 @@ prime-agent-rust stop <active-session-id>          # or close them in the TUI
 # TS-root `shutdown` sweep does not reach it — stop it directly. (Its pid is
 # also the first line of its log, beside the socket's hash-named file under
 # ~/.prime/agent/logs/.)
-pkill -f 'prime-agent-rust/prime-agent daemon'
+pkill -f 'prime-agent-rust/prime-agent --mode daemon'
 rm -rf ~/.local/share/prime-agent-rust ~/.local/bin/prime-agent-rust
 ```
 

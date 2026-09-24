@@ -270,7 +270,7 @@ fn take_over_lines(
 fn session_footer(hold: &HoldIdentity, session_path: Option<&Path>) -> String {
     let label = session_label(hold, session_path);
     match session_name_of(session_path) {
-        Some(name) => format!("Session: {label} ({name})"),
+        Some(name) => format!("Session: {label} ({})", single_line(&name)),
         None => format!("Session: {label}"),
     }
 }
@@ -542,6 +542,26 @@ Session: ts01ab";
         assert!(
             message.ends_with(&format!("Session: {} (lane work)", file.display())),
             "without a holder id the footer names the file and its name: {message}"
+        );
+
+        // A persisted name with a newline cannot add footer lines: the
+        // interpolation collapses control characters first.
+        std::fs::write(
+            &file,
+            concat!(
+                "{\"type\":\"session\",\"version\":3,\"id\":\"sess01\",\"timestamp\":\"2026-09-24T00:00:00Z\",\"cwd\":\"/w\"}\n",
+                "{\"type\":\"session_info\",\"id\":\"e1\",\"timestamp\":\"2026-09-24T00:00:01Z\",\"name\":\"lane\\nwork\"}\n"
+            ),
+        )
+        .expect("write session file");
+        let hold = HoldIdentity {
+            pid: Some(4242),
+            active_session_id: Some("ts01ab".to_string()),
+        };
+        let message = refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold, Some(&file), None);
+        assert!(
+            message.ends_with("Session: ts01ab (lane work)"),
+            "a newline in the persisted name collapses to one footer line: {message}"
         );
     }
 
