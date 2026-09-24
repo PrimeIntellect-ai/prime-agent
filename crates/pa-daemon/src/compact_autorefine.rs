@@ -80,7 +80,15 @@ impl AgentSessionEngine {
         &self,
         emit: &mut dyn FnMut(EngineEvent) -> bool,
     ) -> bool {
+        pa_core::session_engine::compaction_trace::trace(
+            "autorefine.review_started",
+            serde_json::Value::Null,
+        );
         let outcome = self.consume_compact_auto_refine_round();
+        pa_core::session_engine::compaction_trace::trace(
+            "autorefine.review_done",
+            serde_json::json!({ "ran": outcome.is_ok() }),
+        );
         self.emit_compact_auto_refine_outcome(outcome, emit)
     }
 

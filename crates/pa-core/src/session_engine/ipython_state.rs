@@ -185,6 +185,12 @@ pub async fn capture_notice_content(probe: &dyn CompactionKernelProbe) -> Option
         return None;
     }
     let pruned = probe.prune_oversized_variables().await;
+    super::compaction_trace::trace(
+        "compact.kernel_pruned",
+        serde_json::json!({
+            "pruned": pruned.as_ref().map(|names| names.len()),
+        }),
+    );
     let signal = crate::kernel::cancellation::AbortSignal::new();
     let timer = {
         let signal = signal.clone();
@@ -198,6 +204,12 @@ pub async fn capture_notice_content(probe: &dyn CompactionKernelProbe) -> Option
     };
     let names = probe.list_namespace_names(Some(signal)).await;
     timer.abort();
+    super::compaction_trace::trace(
+        "compact.kernel_listed",
+        serde_json::json!({
+            "names": names.as_ref().map(|names| names.len()),
+        }),
+    );
     if names.is_none() && !probe.has_running_kernel() {
         return None;
     }

@@ -5499,6 +5499,12 @@ impl TurnRunner {
                 } = event
                 {
                     if !entry.is_null() {
+                        let repin_started = std::time::Instant::now();
+                        let durable_entries = core
+                            .store
+                            .as_ref()
+                            .and_then(|store| store.branch().len().checked_sub(1))
+                            .unwrap_or(0);
                         if let Some(id) = core.store.as_ref().and_then(|store| {
                             store.durable_first_kept_entry_id(keep_recent_tokens(
                                 &core.cwd, &agent_dir,
@@ -5511,6 +5517,13 @@ impl TurnRunner {
                                 result.insert("firstKeptEntryId".to_string(), json!(id));
                             }
                         }
+                        pa_core::session_engine::compaction_trace::trace(
+                            "emit.compaction_repin",
+                            serde_json::json!({
+                                "durableEntries": durable_entries,
+                                "micros": repin_started.elapsed().as_micros(),
+                            }),
+                        );
                     }
                 }
                 match &event {
@@ -5560,7 +5573,14 @@ impl TurnRunner {
                         // A skipped compaction carries a null entry (the
                         // skip shape): publish the event, never persist it.
                         if let Some(store) = core.store.as_mut().filter(|_| !entry.is_null()) {
+                            let persist_started = std::time::Instant::now();
                             let _ = store.persist_entry("compaction", entry.clone());
+                            pa_core::session_engine::compaction_trace::trace(
+                                "emit.compaction_persist",
+                                serde_json::json!({
+                                    "micros": persist_started.elapsed().as_micros(),
+                                }),
+                            );
                         }
                     }
                     // The durable mirror of a goal-state change (TS
@@ -5587,6 +5607,12 @@ impl TurnRunner {
                         // waiting on it (the parent's continuation request
                         // is in flight before any child's first turn).
                         engine.on_turn_done();
+                        pa_core::session_engine::compaction_trace::trace(
+                            "turn.done_emitted",
+                            serde_json::json!({
+                                "ok": matches!(result, Ok(())),
+                            }),
+                        );
                         Some(match result {
                             Ok(()) => TurnSettle::Completed,
                             Err(error) => TurnSettle::Failed(error.clone()),

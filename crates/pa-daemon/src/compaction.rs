@@ -90,6 +90,10 @@ impl CompactionManager {
         }
         let start = compaction_start_event("manual", custom_instructions.as_deref());
         let _ = self.emit_session_event(start);
+        pa_core::session_engine::compaction_trace::trace(
+            "manual.start_emitted",
+            serde_json::Value::Null,
+        );
 
         let engine = Arc::clone(&self.engine);
         let request = CompactionRequest {
@@ -110,7 +114,18 @@ impl CompactionManager {
             core.compacting = false;
         }
         if let CompactionOutcome::Compacted { run } = &outcome {
+            pa_core::session_engine::compaction_trace::trace(
+                "manual.compact_returned",
+                serde_json::Value::Null,
+            );
+            let persist_started = std::time::Instant::now();
             self.persist_compaction(run, custom_instructions.as_deref());
+            pa_core::session_engine::compaction_trace::trace(
+                "manual.compaction_persisted",
+                serde_json::json!({
+                    "micros": persist_started.elapsed().as_micros(),
+                }),
+            );
             // The post-compaction kernel notice (TS
             // `_syncKernelStateAfterCompaction` runs inside
             // `_performCompaction`, so its `message_start`/`message_end`
@@ -122,6 +137,10 @@ impl CompactionManager {
         }
         let end = compaction_end_event(&outcome, custom_instructions.as_deref());
         let _ = self.emit_session_event(end);
+        pa_core::session_engine::compaction_trace::trace(
+            "manual.end_emitted",
+            serde_json::Value::Null,
+        );
         {
             let mut slot = self.abort.lock().unwrap();
             if slot
