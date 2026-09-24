@@ -832,6 +832,7 @@ pub fn parse_streaming_json(partial_json: &str) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stream::ModelStream;
     use crate::types::ServiceTier;
 
     /// Serve one `POST /api/stream` on a local listener, capture the
