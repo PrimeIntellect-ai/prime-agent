@@ -1,6 +1,3 @@
-Executing command: cat /root/repo6/crates/pa-daemon/src/rlm_ledger.rs
-
-stdout:
 //! The daemon-owned RLM spawn ledger: one append-only JSONL file per sessions
 //! dir recording spawn, rename, and delete admissions. Family topology
 //! (parent/child edges, depths, names) is read back from this file instead of
@@ -38,8 +35,8 @@ pub const RLM_LEDGER_MAX_BYTES: u64 = 32 * 1024 * 1024;
 pub const RLM_LEDGER_MAX_RECORDS: usize = 100_000;
 
 /// Why a child's edge was tombstoned.
-#
-#
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum RlmLedgerDeleteReason {
     User,
     ParentTeardown,
@@ -71,7 +68,7 @@ impl RlmLedgerDeleteReason {
 
 /// One live family edge after replay (last writer wins per childId+child).
 /// Edges are replay-ordered: the append order of the ledger file.
-#
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RlmLedgerEdge {
     pub child_id: String,
     pub parent: String,
@@ -82,7 +79,7 @@ pub struct RlmLedgerEdge {
 }
 
 /// One replayed ledger record (`meta` records carry no edge and are skipped).
-#
+#[derive(Debug, Clone, PartialEq)]
 enum LedgerRecord {
     Spawn {
         child_id: String,
@@ -116,8 +113,7 @@ fn parse_ledger_line(line: &str, index: usize) -> Result<Option<LedgerRecord>> {
     let record: Value = serde_json::from_str(line.trim())
         .with_context(|| format!("malformed RLM ledger line {line_no}"))?;
     if record.get("v") != Some(&json!(1)) {
-        bail!("malformed RLM ledger line {line_no}: unsupported record 
-version");
+        bail!("malformed RLM ledger line {line_no}: unsupported record version");
     }
     if record.get("at").and_then(Value::as_str).is_none() {
         bail!("malformed RLM ledger line {line_no}: missing at");
@@ -134,16 +130,13 @@ version");
                 child(),
                 str_field(&record, "name"),
             ) else {
-                bail!("malformed RLM ledger line {line_no}: invalid spawn 
-record");
+                bail!("malformed RLM ledger line {line_no}: invalid spawn record");
             };
             let Some(depth) = record.get("depth").and_then(Value::as_u64) else {
-                bail!("malformed RLM ledger line {line_no}: invalid spawn 
-record");
+                bail!("malformed RLM ledger line {line_no}: invalid spawn record");
             };
             if depth < 1 || depth > u32::MAX as u64 {
-                bail!("malformed RLM ledger line {line_no}: invalid spawn 
-record");
+                bail!("malformed RLM ledger line {line_no}: invalid spawn record");
             }
             Ok(Some(LedgerRecord::Spawn {
                 child_id,
@@ -157,8 +150,7 @@ record");
             let (Some(child_id), Some(child), Some(name)) =
                 (child_id(), child(), str_field(&record, "name"))
             else {
-                bail!("malformed RLM ledger line {line_no}: invalid rename 
-record");
+                bail!("malformed RLM ledger line {line_no}: invalid rename record");
             };
             Ok(Some(LedgerRecord::Rename {
                 child_id,
@@ -168,16 +160,14 @@ record");
         }
         "delete" => {
             let (Some(child_id), Some(child)) = (child_id(), child()) else {
-                bail!("malformed RLM ledger line {line_no}: invalid delete 
-record");
+                bail!("malformed RLM ledger line {line_no}: invalid delete record");
             };
             let Some(reason) = record
                 .get("reason")
                 .and_then(Value::as_str)
                 .and_then(RlmLedgerDeleteReason::from_wire)
             else {
-                bail!("malformed RLM ledger line {line_no}: invalid delete 
-record");
+                bail!("malformed RLM ledger line {line_no}: invalid delete record");
             };
             Ok(Some(LedgerRecord::Delete {
                 child_id,
@@ -190,7 +180,7 @@ record");
 }
 
 /// The replayed edge set: replay order plus a key index for record joins.
-#
+#[derive(Debug, Default, Clone)]
 struct ReplayState {
     edges: Vec<RlmLedgerEdge>,
     index: HashMap<String, usize>,
@@ -205,7 +195,7 @@ fn edge_key(child_id: &str, child: &str) -> String {
 
 /// Inputs for `append_spawn` (validated like a record the reader would
 /// refuse to read back).
-#
+#[derive(Debug, Clone)]
 pub struct RlmSpawnInput {
     pub child_id: String,
     pub parent: String,
@@ -226,17 +216,17 @@ pub struct RlmSpawnLedger {
     log: Box<dyn Fn(&str) + Send + Sync>,
 }
 
-#
+#[derive(Debug)]
 struct ReplaySnapshot {
     identity: FileIdentity,
     state: ReplayState,
 }
 
-#
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct FileIdentity {
     size: u64,
     mtime: Option<std::time::SystemTime>,
-    #
+    #[cfg(unix)]
     ino: Option<u64>,
 }
 
@@ -325,12 +315,10 @@ impl RlmSpawnLedger {
         let state = self.replay_cached()?;
         for edge in &state.edges {
             let edge_child = canonical_session_path(Path::new(&edge.child));
-            if edge.deleted.is_none() && edge_child == child_path && 
-edge.child_id != input.child_id
+            if edge.deleted.is_none() && edge_child == child_path && edge.child_id != input.child_id
             {
                 bail!(
-                    "RLM ledger: duplicate child session path {child_path_text} 
-(already {})",
+                    "RLM ledger: duplicate child session path {child_path_text} (already {})",
                     edge.child_id
                 );
             }
@@ -340,8 +328,7 @@ edge.child_id != input.child_id
             "op": "spawn",
             "at": now_iso(),
             "childId": input.child_id,
-            "parent": 
-canonical_session_path(Path::new(&input.parent)).to_string_lossy(),
+            "parent": canonical_session_path(Path::new(&input.parent)).to_string_lossy(),
             "child": child_path_text,
             "depth": input.depth,
             "name": input.name,
@@ -349,8 +336,7 @@ canonical_session_path(Path::new(&input.parent)).to_string_lossy(),
     }
 
     /// Record a rename for a known child edge.
-    pub fn append_rename(&self, child_id: &str, child: &str, name: &str) -> 
-Result<()> {
+    pub fn append_rename(&self, child_id: &str, child: &str, name: &str) -> Result<()> {
         let child_path = canonical_session_path(Path::new(child));
         self.append_record(json!({
             "v": 1,
@@ -364,13 +350,11 @@ Result<()> {
 
     /// Rename by child session path alone (an offline rename knows no
     /// childId): one rename record for every live edge at that path.
-    pub fn append_rename_by_child_path(&self, child: &str, name: &str) -> 
-Result<()> {
+    pub fn append_rename_by_child_path(&self, child: &str, name: &str) -> Result<()> {
         let target = canonical_session_path(Path::new(child));
         let state = self.replay_cached()?;
         for edge in &state.edges {
-            if edge.deleted.is_none() && 
-canonical_session_path(Path::new(&edge.child)) == target {
+            if edge.deleted.is_none() && canonical_session_path(Path::new(&edge.child)) == target {
                 self.append_record(json!({
                     "v": 1,
                     "op": "rename",
@@ -415,8 +399,7 @@ canonical_session_path(Path::new(&edge.child)) == target {
         let matching: Vec<RlmLedgerEdge> = state
             .edges
             .iter()
-            .filter(|edge| canonical_session_path(Path::new(&edge.child)) == 
-target)
+            .filter(|edge| canonical_session_path(Path::new(&edge.child)) == target)
             .cloned()
             .collect();
         for edge in &matching {
@@ -458,9 +441,10 @@ target)
     /// Whether the given spawn edge is still live (not tombstoned, and
     /// both its child and parent transcripts present - the same
     /// reconciliation `live_edges` applies) - the seed arms' per-write
-    /// liveness revalidation. The child id is matched together with the
-    /// child path: ids can be shared by edges with different paths, and
-    /// only the exact edge a seed
+    /// liveness revalidation: an edge deleted (or a file removed) while
+    /// a seed was mid-read never writes its row. The child id is
+    /// matched together with the child path: ids can be shared by
+    /// edges with different paths, and only the exact edge a seed
     /// snapshotted counts as live. A broken ledger reads as not-live,
     /// like every other read here degrades to nothing.
     /// Per-write revalidation for the roster seed: the edge carries no
@@ -476,8 +460,7 @@ target)
                 state.edges.iter().any(|edge| {
                     edge.child_id == child_id
                         && edge.deleted.is_none()
-                        && canonical_session_path(Path::new(&edge.child)) == 
-child
+                        && canonical_session_path(Path::new(&edge.child)) == child
                 })
             })
     }
@@ -523,8 +506,7 @@ child
         };
         if content.len() as u64 > RLM_LEDGER_MAX_BYTES {
             bail!(
-                "RLM ledger {} exceeds {RLM_LEDGER_MAX_BYTES} bytes; refusing to
-read",
+                "RLM ledger {} exceeds {RLM_LEDGER_MAX_BYTES} bytes; refusing to read",
                 self.path.display()
             );
         }
@@ -537,8 +519,7 @@ read",
             records += 1;
             if records > RLM_LEDGER_MAX_RECORDS {
                 bail!(
-                    "RLM ledger {} exceeds {RLM_LEDGER_MAX_RECORDS} records; 
-refusing to read",
+                    "RLM ledger {} exceeds {RLM_LEDGER_MAX_RECORDS} records; refusing to read",
                     self.path.display()
                 );
             }
@@ -562,7 +543,7 @@ refusing to read",
                     let key = edge_key(&child_id, &child);
                     match state.index.get(&key).copied() {
                         Some(at) => {
-                            state.edges = RlmLedgerEdge {
+                            state.edges[at] = RlmLedgerEdge {
                                 child_id,
                                 parent,
                                 child,
@@ -591,10 +572,9 @@ refusing to read",
                 } => {
                     let key = edge_key(&child_id, &child);
                     if let Some(&at) = state.index.get(&key) {
-                        state.edges.name = name;
-                    } else if let Some(at) = sole_edge_by_child_id(&state, 
-&child_id) {
-                        state.edges.name = name;
+                        state.edges[at].name = name;
+                    } else if let Some(at) = sole_edge_by_child_id(&state, &child_id) {
+                        state.edges[at].name = name;
                     }
                 }
                 LedgerRecord::Delete {
@@ -608,7 +588,7 @@ refusing to read",
                         None => sole_edge_by_child_id(&state, &child_id),
                     };
                     if let Some(at) = at {
-                        state.edges.deleted = Some(reason);
+                        state.edges[at].deleted = Some(reason);
                     }
                 }
             }
@@ -629,8 +609,7 @@ refusing to read",
             .create(true)
             .append(true)
             .open(&self.path)
-            .with_context(|| format!("open RLM ledger {}", 
-self.path.display()))?;
+            .with_context(|| format!("open RLM ledger {}", self.path.display()))?;
         if file.metadata()?.len() == 0 {
             let meta = json!({
                 "v": 1,
@@ -665,8 +644,7 @@ self.path.display()))?;
         let mut queue: Vec<(PathBuf, u32)> = root_entries
             .flatten()
             .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|e| e.to_str()) == 
-Some("jsonl"))
+            .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
             .map(|path| (path, 0))
             .collect();
         queue.sort();
@@ -682,12 +660,10 @@ Some("jsonl"))
                     continue;
                 }
                 if entry.child_id.is_empty() {
-                    self.log("RLM ledger: skipped seeding a registry entry 
-without a childId");
+                    self.log("RLM ledger: skipped seeding a registry entry without a childId");
                     continue;
                 }
-                let child_path = 
-canonical_session_path(Path::new(&entry.session_file));
+                let child_path = canonical_session_path(Path::new(&entry.session_file));
                 if visited.contains(&child_path) {
                     continue;
                 }
@@ -705,8 +681,7 @@ canonical_session_path(Path::new(&entry.session_file));
                     "op": "spawn",
                     "at": now_iso(),
                     "childId": entry.child_id,
-                    "parent": 
-canonical_session_path(&session_file).to_string_lossy(),
+                    "parent": canonical_session_path(&session_file).to_string_lossy(),
                     "child": child_path.to_string_lossy(),
                     "depth": child_depth,
                     "name": entry.session_name,
@@ -719,12 +694,10 @@ canonical_session_path(&session_file).to_string_lossy(),
         if records.is_empty() {
             return Ok(());
         }
-        if records.len() as u64 > RLM_LEDGER_MAX_BYTES || record_count + 1 > 
-RLM_LEDGER_MAX_RECORDS
+        if records.len() as u64 > RLM_LEDGER_MAX_BYTES || record_count + 1 > RLM_LEDGER_MAX_RECORDS
         {
             self.log(&format!(
-                "RLM ledger: seed exceeds read bounds ({record_count} records, 
-{} bytes); skipping seeding",
+                "RLM ledger: seed exceeds read bounds ({record_count} records, {} bytes); skipping seeding",
                 records.len()
             ));
             return Ok(());
@@ -753,12 +726,10 @@ RLM_LEDGER_MAX_RECORDS
         // append created the real file meanwhile and wins.
         match fs::hard_link(&temp_path, &self.path) {
             Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => 
-{}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => {
                 self.log(&format!(
-                    "RLM ledger: link publish unavailable ({error}); skipping 
-seeding"
+                    "RLM ledger: link publish unavailable ({error}); skipping seeding"
                 ));
             }
         }
@@ -791,7 +762,7 @@ fn file_identity(path: &Path) -> Result<Option<FileIdentity>> {
     Ok(Some(FileIdentity {
         size: metadata.len(),
         mtime: metadata.modified().ok(),
-        #
+        #[cfg(unix)]
         ino: {
             use std::os::unix::fs::MetadataExt;
             Some(metadata.ino())
@@ -802,74 +773,72 @@ fn file_identity(path: &Path) -> Result<Option<FileIdentity>> {
 /// One legacy `rlm-subagents.jsonl` registry entry (the pre-ledger topology
 /// store; still read for seeding and hydration metadata). The fields beyond
 /// the edge (prompt, model, node ids) are display-grade.
-#
-#
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LegacyRlmSubagentEntry {
-    #
+    #[serde(default)]
     pub child_id: String,
-    #
+    #[serde(default)]
     pub session_name: String,
-    #
+    #[serde(default)]
     pub session_file: String,
-    #
+    #[serde(default)]
     pub rlm_depth: u32,
-    #
+    #[serde(default)]
     pub status: String,
-    #
+    #[serde(default)]
     pub session_dir: String,
-    #
+    #[serde(default)]
     pub parent_session_id: String,
-    #
+    #[serde(default)]
     pub parent_session_file: String,
-    #
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rlm_parent_node_id: Option<String>,
-    #
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    #
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_code: Option<String>,
-    #
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<Value>,
-    #
+    #[serde(default)]
     pub created_at: u64,
 }
 
 /// The per-child display file (`rlm-subagent.json` in the child's session
 /// dir): display-grade hydration metadata, never topology.
-#
-#
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RlmSubagentDisplayEntry {
     /// Always `rlm_subagent`; a file of any other type is not a display
     /// entry and reads as absent.
-    #
+    #[serde(default, rename = "type")]
     pub type_tag: String,
-    #
+    #[serde(default)]
     pub child_id: String,
-    #
+    #[serde(default)]
     pub session_name: String,
-    #
+    #[serde(default)]
     pub session_dir: String,
-    #
+    #[serde(default)]
     pub session_file: String,
-    #
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rlm_parent_node_id: Option<String>,
-    #
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    #
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_code: Option<String>,
-    #
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<Value>,
-    #
+    #[serde(default)]
     pub status: String,
-    #
+    #[serde(default)]
     pub created_at: u64,
 }
 
 /// Read one child's display entry; `None` when absent, unreadable, or not
 /// describing the requested child (a stale file from a re-used session dir).
-pub fn read_rlm_subagent_display(child_session_dir: &Path) -> 
-Option<RlmSubagentDisplayEntry> {
-    let content = 
-fs::read_to_string(child_session_dir.join("rlm-subagent.json")).ok()?;
+pub fn read_rlm_subagent_display(child_session_dir: &Path) -> Option<RlmSubagentDisplayEntry> {
+    let content = fs::read_to_string(child_session_dir.join("rlm-subagent.json")).ok()?;
     let entry: RlmSubagentDisplayEntry = serde_json::from_str(&content).ok()?;
     if entry.type_tag != "rlm_subagent"
         || !matches!(entry.status.as_str(), "running" | "completed" | "deleted")
@@ -882,8 +851,7 @@ fs::read_to_string(child_session_dir.join("rlm-subagent.json")).ok()?;
 /// Atomically write one child's display entry. A non-delete write over a
 /// deletion tombstone is refused (the deleted child stays deleted), exactly
 /// like the TS display writer.
-pub fn write_rlm_subagent_display(entry: &RlmSubagentDisplayEntry) -> 
-Result<bool> {
+pub fn write_rlm_subagent_display(entry: &RlmSubagentDisplayEntry) -> Result<bool> {
     if entry.status != "deleted"
         && read_rlm_subagent_display(Path::new(&entry.session_dir))
             .is_some_and(|current| current.status == "deleted")
@@ -913,8 +881,7 @@ Result<bool> {
     // previous file intact - never a half-written display state.
     file.sync_all()?;
     pa_core::platform::rename_onto(&temp, &dir.join("rlm-subagent.json"))
-        .with_context(|| format!("persist rlm-subagent display at {}", 
-dir.display()))?;
+        .with_context(|| format!("persist rlm-subagent display at {}", dir.display()))?;
     Ok(true)
 }
 
@@ -927,16 +894,14 @@ fn legacy_registry_path(session_file: &Path) -> Option<PathBuf> {
     let header_id = header.get("id")?.as_str()?;
     // TS `getSessionArtifactsRoot`: the artifacts tree is the sibling of
     // the session file's directory, keyed by the session header id.
-    let artifacts_root = 
-session_file.parent()?.parent()?.join("session-artifacts");
+    let artifacts_root = session_file.parent()?.parent()?.join("session-artifacts");
     Some(artifacts_root.join(header_id).join("rlm-subagents.jsonl"))
 }
 
 /// Tolerant reader for a per-parent legacy registry (TS
 /// `readLegacyRlmSubagentRegistry`): latest entry per childId, malformed
 /// lines ignored, a missing file an empty registry.
-pub(crate) fn read_legacy_registry(session_file: &Path) -> 
-Vec<LegacyRlmSubagentEntry> {
+pub(crate) fn read_legacy_registry(session_file: &Path) -> Vec<LegacyRlmSubagentEntry> {
     let Some(registry) = legacy_registry_path(session_file) else {
         return Vec::new();
     };
@@ -949,14 +914,12 @@ Vec<LegacyRlmSubagentEntry> {
         if trimmed.is_empty() {
             continue;
         }
-        let Ok(entry) = serde_json::from_str::<LegacyRlmSubagentEntry>(trimmed) 
-else {
+        let Ok(entry) = serde_json::from_str::<LegacyRlmSubagentEntry>(trimmed) else {
             continue;
         };
         if entry.child_id.is_empty()
             || entry.session_file.is_empty()
-            || !matches!(entry.status.as_str(), "running" | "completed" | 
-"deleted")
+            || !matches!(entry.status.as_str(), "running" | "completed" | "deleted")
         {
             continue;
         }
@@ -965,13 +928,12 @@ else {
     latest.into_values().collect()
 }
 
-#
+#[cfg(test)]
 mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("pa-ledger-{name}-{}", 
-uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("pa-ledger-{name}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -980,7 +942,7 @@ uuid::Uuid::new_v4()));
         RlmSpawnLedger::new(dir, &dir.join("sessions"), |_| {})
     }
 
-    #
+    #[test]
     fn ledger_path_hashes_the_canonical_sessions_dir() {
         let dir = temp_dir("path");
         let a = rlm_ledger_path(&dir, &dir.join("sessions"));
@@ -991,7 +953,7 @@ uuid::Uuid::new_v4()));
         assert_ne!(a, c);
     }
 
-    #
+    #[test]
     fn spawn_rename_delete_replay_in_order() {
         let dir = temp_dir("replay");
         let ledger = ledger_for(&dir);
@@ -1031,7 +993,7 @@ uuid::Uuid::new_v4()));
         assert_eq!(ledger.edges(true).unwrap(), tombstones);
     }
 
-    #
+    #[test]
     fn edge_not_tombstoned_ignores_files_until_a_delete_tombstone() {
         let dir = temp_dir("liveness");
         let ledger = ledger_for(&dir);
@@ -1088,7 +1050,7 @@ uuid::Uuid::new_v4()));
         assert!(!ledger.edge_not_tombstoned("sub-none", &child_path));
     }
 
-    #
+    #[test]
     fn live_edges_keep_missing_files_until_a_tombstone() {
         let dir = temp_dir("live");
         let ledger = ledger_for(&dir);
@@ -1124,7 +1086,7 @@ uuid::Uuid::new_v4()));
         assert!(ledger.live_edges().unwrap().is_empty());
     }
 
-    #
+    #[test]
     fn duplicate_child_path_and_bad_records_fail_loudly() {
         let dir = temp_dir("dup");
         let ledger = ledger_for(&dir);
@@ -1165,7 +1127,7 @@ uuid::Uuid::new_v4()));
         assert!(ledger.edges(false).is_err());
     }
 
-    #
+    #[test]
     fn unknown_op_records_are_skipped_forward_compatible() {
         let dir = temp_dir("fwd");
         let ledger = ledger_for(&dir);
@@ -1176,11 +1138,9 @@ uuid::Uuid::new_v4()));
         fs::write(
             &path,
             format!(
-                "{{\"v\":1,\"op\":\"meta\",\"at\":\"t\",\"sessionsDir\":\"x\"}}\
-n\
+                "{{\"v\":1,\"op\":\"meta\",\"at\":\"t\",\"sessionsDir\":\"x\"}}\n\
                  {{\"v\":1,\"op\":\"future\",\"at\":\"t\"}}\n\
-                 {{\"v\":1,\"op\":\"spawn\",\"at\":\"t\",\"childId\":\"sub-1\",\
-"parent\":\"{}\",\"child\":\"{}\",\"depth\":1,\"name\":\"w\"}}\n",
+                 {{\"v\":1,\"op\":\"spawn\",\"at\":\"t\",\"childId\":\"sub-1\",\"parent\":\"{}\",\"child\":\"{}\",\"depth\":1,\"name\":\"w\"}}\n",
                 parent.to_string_lossy(),
                 parent.to_string_lossy().replace("p.jsonl", "c.jsonl"),
             ),
@@ -1191,7 +1151,7 @@ n\
         assert_eq!(edges[0].child_id, "sub-1");
     }
 
-    #
+    #[test]
     fn seeds_from_legacy_registries_once_and_atomically() {
         let dir = temp_dir("seed");
         let sessions = dir.join("sessions");
@@ -1209,9 +1169,7 @@ n\
         fs::write(
             artifacts.join("rlm-subagents.jsonl"),
             format!(
-                "{{\"type\":\"rlm_subagent\",\"childId\":\"sub-9\",\"sessionName
-\":\"w\",\"sessionFile\":\"{}\",\"rlmDepth\":1,\"status\":\"completed\",\"create
-dAt\":1}}\n",
+                "{{\"type\":\"rlm_subagent\",\"childId\":\"sub-9\",\"sessionName\":\"w\",\"sessionFile\":\"{}\",\"rlmDepth\":1,\"status\":\"completed\",\"createdAt\":1}}\n",
                 child.to_string_lossy()
             ),
         )
@@ -1233,7 +1191,7 @@ dAt\":1}}\n",
         assert!(first.contains("\"op\":\"meta\""));
     }
 
-    #
+    #[test]
     fn display_entries_round_trip_and_tombstones_stick() {
         let dir = temp_dir("display");
         let child_dir = dir.join("sub-1");
@@ -1262,7 +1220,7 @@ dAt\":1}}\n",
         assert!(!write_rlm_subagent_display(&entry).unwrap());
     }
 
-    #
+    #[test]
     fn display_entry_file_is_owner_only() {
         let dir = temp_dir("display-mode");
         let child_dir = dir.join("sub-1");
@@ -1283,7 +1241,7 @@ dAt\":1}}\n",
         assert!(write_rlm_subagent_display(&entry).unwrap());
         // The TS display writer creates its temp 0o600; the rename carries
         // that mode onto the visible file.
-        #
+        #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = fs::metadata(child_dir.join("rlm-subagent.json"))
@@ -1295,6 +1253,3 @@ dAt\":1}}\n",
         }
     }
 }
-
-
-Execution time: 180.2ms

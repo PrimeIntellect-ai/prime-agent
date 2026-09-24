@@ -1,13 +1,9 @@
-Executing command: cat 
-/root/repo6/crates/pa-daemon/tests/protocol_breadth_b6_b9.rs
-
-stdout:
 //! Supervisor wire-shape tests for the protocol-breadth waves b6-b9
 //! (roadmap item 7, docs/protocol-breadth-audit.md): every new command
 //! rides the real supervisor + worker over the socket and answers the
 //! exact TS wire shape (success and error paths), the same harness the
 //! supervisor e2e suite uses.
-#!
+#![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -20,7 +16,7 @@ use serde_json::{json, Value};
 
 struct Daemon {
     child: Child,
-    #
+    #[allow(dead_code)]
     socket: PathBuf,
 }
 
@@ -33,9 +29,8 @@ impl Drop for Daemon {
 
 // The timeout panic path cannot wait on the child; the test process exits
 // immediately afterwards, reaping it.
-#
-fn spawn_daemon(socket: &std::path::Path, agent_dir: &std::path::Path) -> Daemon
-{
+#[allow(clippy::zombie_processes)]
+fn spawn_daemon(socket: &std::path::Path, agent_dir: &std::path::Path) -> Daemon {
     let binary = env!("CARGO_BIN_EXE_pa-daemon");
     let child = Command::new(binary)
         .arg("supervisor")
@@ -73,7 +68,7 @@ struct Client {
     writer: UnixStream,
 }
 
-#
+#[allow(dead_code)]
 impl Client {
     fn connect(socket: &std::path::Path) -> (Self, serde_json::Value) {
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -124,8 +119,7 @@ impl Client {
                 Ok(0) => panic!("supervisor closed the connection"),
                 Ok(_) if line.trim().is_empty() => continue,
                 Ok(_) => {
-                    return serde_json::from_str(line.trim()).expect("parse 
-response line");
+                    return serde_json::from_str(line.trim()).expect("parse response line");
                 }
                 Err(error) => {
                     assert!(
@@ -233,8 +227,7 @@ fn scripted_session(
     let script_path = dir.join("script.json");
     std::fs::write(
         &script_path,
-        json!({ "responses": [ { "text": "ack", "delayMs": 10 } ] 
-}).to_string(),
+        json!({ "responses": [ { "text": "ack", "delayMs": 10 } ] }).to_string(),
     )
     .expect("write script");
     client.send_command(
@@ -260,21 +253,19 @@ fn scripted_session(
 
 /// Wave b6: the three RLM commands ride the supervisor route and answer
 /// the TS wire shapes against a live scripted session.
-#
+#[test]
 fn wave_b6_rlm_surface_wire_shapes() {
     let _serial = serial_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    let (_daemon, mut client, session_id, _socket) = 
-scripted_session(dir.path(), &agent_dir);
+    let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
 
     // cancel_rlm_child: an unknown child answers cancelled: false (TS
     // cancelRlmChildRun on an unmatched id), never an error.
     client.send_command(
         "r1",
-        json!({ "type": "cancel_rlm_child", "activeSessionId": session_id, 
-"childId": "ghost" }),
+        json!({ "type": "cancel_rlm_child", "activeSessionId": session_id, "childId": "ghost" }),
     );
     let response = client.read_response("r1");
     assert_eq!(response["success"], true, "{response}");
@@ -284,8 +275,7 @@ scripted_session(dir.path(), &agent_dir);
     // "not_found" outcome).
     client.send_command(
         "r2",
-        json!({ "type": "delete_rlm_subagent", "activeSessionId": session_id, 
-"childId": "ghost" }),
+        json!({ "type": "delete_rlm_subagent", "activeSessionId": session_id, "childId": "ghost" }),
     );
     let response = client.read_response("r2");
     assert_eq!(response["success"], true, "{response}");
@@ -294,8 +284,7 @@ scripted_session(dir.path(), &agent_dir);
     // set_rlm_max_depth: the TS SetRlmMaxDepthResult shape.
     client.send_command(
         "r3",
-        json!({ "type": "set_rlm_max_depth", "activeSessionId": session_id, 
-"maxDepth": 3 }),
+        json!({ "type": "set_rlm_max_depth", "activeSessionId": session_id, "maxDepth": 3 }),
     );
     let response = client.read_response("r3");
     assert_eq!(response["success"], true, "{response}");
@@ -308,7 +297,7 @@ scripted_session(dir.path(), &agent_dir);
 /// Wave b7: the selector-less agent-message forms answer the TS
 /// supervisor shapes - the empty-status object with no live worker, the
 /// broadcast through the live worker once a session exists.
-#
+#[test]
 fn wave_b7_agent_messages_wire_shapes() {
     let _serial = serial_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -335,8 +324,7 @@ fn wave_b7_agent_messages_wire_shapes() {
     // A live worker: the same selector-less commands broadcast through
     // it and answer the worker's safety status.
     {
-        let (_daemon, mut client, session_id, _socket) = 
-scripted_session(dir.path(), &agent_dir);
+        let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
         client.send_command("s1", json!({ "type": "agent_messages_status" }));
         let response = client.read_response("s1");
         assert_eq!(response["success"], true, "{response}");
@@ -387,8 +375,7 @@ scripted_session(dir.path(), &agent_dir);
         assert_eq!(response["success"], true, "{response}");
         client.send_command(
             "c1",
-            json!({ "type": "agent_messages_clear", "activeSessionId": 
-session_id }),
+            json!({ "type": "agent_messages_clear", "activeSessionId": session_id }),
         );
         let response = client.read_response("c1");
         assert_eq!(response["success"], true, "{response}");
@@ -401,20 +388,18 @@ session_id }),
 }
 
 /// Wave b8: the session input-pause lease surface over the supervisor.
-#
+#[test]
 fn wave_b8_session_input_pause_wire_shapes() {
     let _serial = serial_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    let (_daemon, mut client, session_id, _socket) = 
-scripted_session(dir.path(), &agent_dir);
+    let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
 
     // An unknown session answers the TS unknown-session error.
     client.send_command(
         "pa-0",
-        json!({ "type": "acquire_session_input_pause", "activeSessionId": 
-"bogus-1", "leaseKey": "k" }),
+        json!({ "type": "acquire_session_input_pause", "activeSessionId": "bogus-1", "leaseKey": "k" }),
     );
     let response = client.read_response("pa-0");
     assert_eq!(response["success"], false, "{response}");
@@ -424,8 +409,7 @@ scripted_session(dir.path(), &agent_dir);
     // the same pause id (the supervisor's own dedupe record).
     client.send_command(
         "pa-1",
-        json!({ "type": "acquire_session_input_pause", "activeSessionId": 
-session_id, "leaseKey": "lease-a" }),
+        json!({ "type": "acquire_session_input_pause", "activeSessionId": session_id, "leaseKey": "lease-a" }),
     );
     let response = client.read_response("pa-1");
     assert_eq!(response["success"], true, "{response}");
@@ -437,8 +421,7 @@ session_id, "leaseKey": "lease-a" }),
 
     client.send_command(
         "pa-2",
-        json!({ "type": "acquire_session_input_pause", "activeSessionId": 
-session_id, "leaseKey": "lease-a" }),
+        json!({ "type": "acquire_session_input_pause", "activeSessionId": session_id, "leaseKey": "lease-a" }),
     );
     let response = client.read_response("pa-2");
     assert_eq!(response["success"], true, "{response}");
@@ -447,8 +430,7 @@ session_id, "leaseKey": "lease-a" }),
     // A release naming another session answers the TS session error.
     client.send_command(
         "pa-3",
-        json!({ "type": "release_session_input_pause", "activeSessionId": 
-"other-session", "pauseId": pause_id }),
+        json!({ "type": "release_session_input_pause", "activeSessionId": "other-session", "pauseId": pause_id }),
     );
     let response = client.read_response("pa-3");
     assert_eq!(response["success"], false, "{response}");
@@ -461,15 +443,13 @@ session_id, "leaseKey": "lease-a" }),
     // answers the plain TS success (unknown pause id).
     client.send_command(
         "pa-4",
-        json!({ "type": "release_session_input_pause", "activeSessionId": 
-session_id, "pauseId": pause_id }),
+        json!({ "type": "release_session_input_pause", "activeSessionId": session_id, "pauseId": pause_id }),
     );
     let response = client.read_response("pa-4");
     assert_eq!(response["success"], true, "{response}");
     client.send_command(
         "pa-5",
-        json!({ "type": "release_session_input_pause", "activeSessionId": 
-session_id, "pauseId": pause_id }),
+        json!({ "type": "release_session_input_pause", "activeSessionId": session_id, "pauseId": pause_id }),
     );
     let response = client.read_response("pa-5");
     assert_eq!(response["success"], true, "{response}");
@@ -478,7 +458,7 @@ session_id, "pauseId": pause_id }),
 
 /// Wave b8: the pause holds the session's queued input - a queued steer
 /// waits behind a held pause and admits after the release.
-#
+#[test]
 fn wave_b8_held_pause_gates_queued_input() {
     let _serial = serial_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -523,14 +503,12 @@ fn wave_b8_held_pause_gates_queued_input() {
     // Start a turn (busy) and queue a steer behind it.
     client.send_command(
         "p-1",
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "go"
-}),
+        json!({ "type": "prompt", "activeSessionId": session_id, "message": "go" }),
     );
     let _ = client.read_response("p-1");
     client.send_command(
         "s-1",
-        json!({ "type": "steer", "activeSessionId": session_id, "message": 
-"queued text" }),
+        json!({ "type": "steer", "activeSessionId": session_id, "message": "queued text" }),
     );
     let response = client.read_response("s-1");
     assert_eq!(response["success"], true, "{response}");
@@ -539,8 +517,7 @@ fn wave_b8_held_pause_gates_queued_input() {
     // start: after the first turn settles, the queue keeps one item.
     client.send_command(
         "pa-1",
-        json!({ "type": "acquire_session_input_pause", "activeSessionId": 
-session_id, "leaseKey": "gate" }),
+        json!({ "type": "acquire_session_input_pause", "activeSessionId": session_id, "leaseKey": "gate" }),
     );
     let response = client.read_response("pa-1");
     assert_eq!(response["success"], true, "{response}");
@@ -568,8 +545,7 @@ session_id, "leaseKey": "gate" }),
     // The release lifts the gate; the queued item admits.
     client.send_command(
         "pa-2",
-        json!({ "type": "release_session_input_pause", "activeSessionId": 
-session_id, "pauseId": pause_id }),
+        json!({ "type": "release_session_input_pause", "activeSessionId": session_id, "pauseId": pause_id }),
     );
     let response = client.read_response("pa-2");
     assert_eq!(response["success"], true, "{response}");
@@ -589,14 +565,13 @@ session_id, "pauseId": pause_id }),
 
 /// Wave b9: the session-navigation commands ride the supervisor route and
 /// answer the TS wire shapes.
-#
+#[test]
 fn wave_b9_session_navigation_wire_shapes() {
     let _serial = serial_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    let (_daemon, mut client, session_id, _socket) = 
-scripted_session(dir.path(), &agent_dir);
+    let (_daemon, mut client, session_id, _socket) = scripted_session(dir.path(), &agent_dir);
 
     // new_session answers the TS `{ cancelled: false }`.
     client.send_command(
@@ -610,8 +585,7 @@ scripted_session(dir.path(), &agent_dir);
     // import_jsonl answers the TS import error for a missing input.
     client.send_command(
         "i-0",
-        json!({ "type": "import_jsonl", "activeSessionId": session_id, 
-"inputPath": "/tmp/no-such-import.jsonl" }),
+        json!({ "type": "import_jsonl", "activeSessionId": session_id, "inputPath": "/tmp/no-such-import.jsonl" }),
     );
     let response = client.read_response("i-0");
     assert_eq!(response["success"], false, "{response}");
@@ -626,17 +600,14 @@ scripted_session(dir.path(), &agent_dir);
     std::fs::write(
         &imported,
         concat!(
-            r#"{"type":"session","id":"imported-1","timestamp":"2026-01-01T00:00
-:00Z","cwd":"","version":1}"#, "\n",
-            r#"{"type":"message","id":"m1","message":{"role":"user","content":[{
-"type":"text","text":"imported question"}]}}"#, "\n",
+            r#"{"type":"session","id":"imported-1","timestamp":"2026-01-01T00:00:00Z","cwd":"","version":1}"#, "\n",
+            r#"{"type":"message","id":"m1","message":{"role":"user","content":[{"type":"text","text":"imported question"}]}}"#, "\n",
         ),
     )
     .expect("write import");
     client.send_command(
         "i-1",
-        json!({ "type": "import_jsonl", "activeSessionId": session_id, 
-"inputPath": imported.to_string_lossy() }),
+        json!({ "type": "import_jsonl", "activeSessionId": session_id, "inputPath": imported.to_string_lossy() }),
     );
     let response = client.read_response("i-1");
     assert_eq!(response["success"], true, "{response}");
@@ -646,16 +617,14 @@ scripted_session(dir.path(), &agent_dir);
     // existing session file and the failure for a missing one.
     client.send_command(
         "s-1",
-        json!({ "type": "switch_session", "activeSessionId": session_id, 
-"sessionPath": imported.to_string_lossy() }),
+        json!({ "type": "switch_session", "activeSessionId": session_id, "sessionPath": imported.to_string_lossy() }),
     );
     let response = client.read_response("s-1");
     assert_eq!(response["success"], true, "{response}");
     assert_eq!(response["data"], json!({ "cancelled": false }));
     client.send_command(
         "s-2",
-        json!({ "type": "switch_session", "activeSessionId": session_id, 
-"sessionPath": "/tmp/missing-switch.jsonl" }),
+        json!({ "type": "switch_session", "activeSessionId": session_id, "sessionPath": "/tmp/missing-switch.jsonl" }),
     );
     let response = client.read_response("s-2");
     assert_eq!(response["success"], false, "{response}");
@@ -663,7 +632,7 @@ scripted_session(dir.path(), &agent_dir);
 
 /// Wave b9: the prompt-admission surface - the parse-time registration
 /// errors, the cancel status ladder, and the cancelled queued prompt.
-#
+#[test]
 fn wave_b9_prompt_admission_wire_shapes() {
     let _serial = serial_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -707,8 +676,7 @@ fn wave_b9_prompt_admission_wire_shapes() {
     // An unregistered admission answers the TS `unknown` status.
     client.send_command(
         "c-0",
-        json!({ "type": "cancel_prompt_admission", "activeSessionId": 
-session_id, "admissionId": "never-registered" }),
+        json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "never-registered" }),
     );
     let response = client.read_response("c-0");
     assert_eq!(response["success"], true, "{response}");
@@ -717,8 +685,7 @@ session_id, "admissionId": "never-registered" }),
     // An empty admission id answers the TS parse error.
     client.send_command(
         "p-0",
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "x",
-"admissionId": "" }),
+        json!({ "type": "prompt", "activeSessionId": session_id, "message": "x", "admissionId": "" }),
     );
     let response = client.read_response("p-0");
     assert_eq!(response["success"], false, "{response}");
@@ -728,8 +695,7 @@ session_id, "admissionId": "never-registered" }),
     // Start the slow turn, then queue an admitted prompt behind it.
     client.send_command(
         "p-1",
-        json!({ "type": "prompt", "activeSessionId": session_id, "message": "go"
-}),
+        json!({ "type": "prompt", "activeSessionId": session_id, "message": "go" }),
     );
     let _ = client.read_response("p-1");
     // prompt_and_wait keeps its admission open for the whole turn (the
@@ -737,8 +703,7 @@ session_id, "admissionId": "never-registered" }),
     // admitted prompt is in its cancel window here.
     client.send_command(
         "p-2",
-        json!({ "type": "prompt_and_wait", "activeSessionId": session_id, 
-"message": "queued behind", "admissionId": "adm-1" }),
+        json!({ "type": "prompt_and_wait", "activeSessionId": session_id, "message": "queued behind", "admissionId": "adm-1" }),
     );
     // Give the admitted prompt's route its start (the TS single-loop
     // daemon registers an admission synchronously at parse time; this
@@ -749,8 +714,7 @@ session_id, "admissionId": "never-registered" }),
     // The cancel answers `cancelled` and the queued prompt never runs.
     client.send_command(
         "c-1",
-        json!({ "type": "cancel_prompt_admission", "activeSessionId": 
-session_id, "admissionId": "adm-1" }),
+        json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "adm-1" }),
     );
     // The cancelled wait's failure response may land before the cancel's
     // own response (both frames traverse the same worker pipe, and the
@@ -784,8 +748,7 @@ session_id, "admissionId": "adm-1" }),
     // A cancel for a fresh id answers `unknown` (nothing registered).
     client.send_command(
         "c-2",
-        json!({ "type": "cancel_prompt_admission", "activeSessionId": 
-session_id, "admissionId": "adm-2" }),
+        json!({ "type": "cancel_prompt_admission", "activeSessionId": session_id, "admissionId": "adm-2" }),
     );
     let response = client.read_response("c-2");
     assert_eq!(response["data"], json!({ "status": "unknown" }));
@@ -796,7 +759,7 @@ session_id, "admissionId": "adm-2" }),
 /// an owner mismatch answers the TS error. A plain create is unowned
 /// (TS: only a `client_owned`-lifecycle create marks ownership), so the
 /// owned lifecycle drives from the test's own `client_owned` create.
-#
+#[test]
 fn wave_b9_owned_session_lifecycle_wire_shapes() {
     let _serial = serial_lock();
     let dir = tempfile::TempDir::new().expect("temp dir");
@@ -808,8 +771,7 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
-        json!({ "responses": [ { "text": "ack", "delayMs": 10 } ] 
-}).to_string(),
+        json!({ "responses": [ { "text": "ack", "delayMs": 10 } ] }).to_string(),
     )
     .expect("write script");
     client.send_command(
@@ -835,8 +797,7 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     // Promote: the ownership clears and the summary answers.
     client.send_command(
         "pr-1",
-        json!({ "type": "promote_owned_session", "activeSessionId": session_id 
-}),
+        json!({ "type": "promote_owned_session", "activeSessionId": session_id }),
     );
     let response = client.read_response("pr-1");
     assert_eq!(response["success"], true, "{response}");
@@ -847,8 +808,7 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     let (mut foreign, _hello) = Client::connect(&socket);
     foreign.send_command(
         "pr-2",
-        json!({ "type": "promote_owned_session", "activeSessionId": session_id 
-}),
+        json!({ "type": "promote_owned_session", "activeSessionId": session_id }),
     );
     let response = foreign.read_response("pr-2");
     assert_eq!(response["success"], false, "{response}");
@@ -857,8 +817,7 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     // The promoting client's repeat promote stays the TS no-op success.
     client.send_command(
         "pr-3",
-        json!({ "type": "promote_owned_session", "activeSessionId": session_id 
-}),
+        json!({ "type": "promote_owned_session", "activeSessionId": session_id }),
     );
     let response = client.read_response("pr-3");
     assert_eq!(response["success"], true, "{response}");
@@ -877,13 +836,9 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     // complete_owned_session on an unowned session answers the TS error.
     client.send_command(
         "co-1",
-        json!({ "type": "complete_owned_session", "activeSessionId": session_id 
-}),
+        json!({ "type": "complete_owned_session", "activeSessionId": session_id }),
     );
     let response = client.read_response("co-1");
     assert_eq!(response["success"], false, "{response}");
     assert_eq!(response["error"], "Session is not owned by this client");
 }
-
-
-Execution time: 166.1ms
