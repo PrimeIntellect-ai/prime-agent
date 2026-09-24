@@ -1961,8 +1961,9 @@ impl Renderer {
                 // Bracketed paste and the kitty keyboard protocol come up
                 // with the raw-mode bracket (TS `ProcessTerminal.start`):
                 // pastes arrive as one chunk instead of per-line Enter
-                // submissions, and the kitty probe runs before the reader
-                // thread starts polling.
+                // submissions, and the kitty probe (once per process —
+                // see `enhanced_keys`) runs before the reader thread
+                // starts polling.
                 crate::enhanced_keys::enable(&mut std::io::stdout())?;
                 // One reader thread feeds the loop; crossterm events are
                 // process-global, so the reader registry joins the previous
@@ -2156,7 +2157,11 @@ impl Renderer {
                 crate::altscreen::enter()?;
                 // The raw-mode bracket re-arms the enhanced-key modes (TS
                 // `start` on SIGCONT re-runs the paste enable and the kitty
-                // query).
+                // query; the port resolves the kitty capability once per
+                // process, so a resume re-applies the resolved state —
+                // crossterm's support check monopolizes the event-reader
+                // lock for its 2s budget and must not run on the resume
+                // path).
                 crate::enhanced_keys::enable(&mut std::io::stdout())?;
                 // The fullscreen surface re-enables mouse tracking with the
                 // terminal (TS `applyFullscreen` on resume).
