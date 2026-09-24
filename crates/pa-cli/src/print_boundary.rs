@@ -714,7 +714,7 @@ impl TurnBoundary {
                             .as_deref()
                             .map(pa_core::session::timestamp_to_millis)
                             .unwrap_or_default(),
-                        rest: payload.rest.clone(),
+                        rest: payload.rest,
                     })
                 }
                 _ => None,
@@ -1650,7 +1650,7 @@ mod tests {
                             .as_deref()
                             .map(pa_core::session::timestamp_to_millis)
                             .unwrap_or_default(),
-                        rest: payload.rest.clone(),
+                        rest: payload.rest,
                     };
                     (row.custom_type == "refinement_outcome"
                         || row.custom_type == "refinement_notice")

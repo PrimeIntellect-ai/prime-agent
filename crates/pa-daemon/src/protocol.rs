@@ -301,7 +301,7 @@ pub fn supported_client_capabilities() -> &'static [&'static str] {
 pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
     supported_client_capabilities()
         .iter()
-        .map(|cap| cap.to_string())
+        .map(std::string::ToString::to_string)
         .chain(
             [
                 "delete_rlm_subagent",
@@ -325,9 +325,8 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
                 "direct_peer_transport",
             ]
             .iter()
-            .map(|cap| cap.to_string()),
+            .map(std::string::ToString::to_string),
         )
-        .map(|cap| cap.to_string())
         .collect()
 }
 

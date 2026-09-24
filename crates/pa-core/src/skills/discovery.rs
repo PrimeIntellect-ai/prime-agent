@@ -137,7 +137,7 @@ pub(crate) fn load_skill_from_file(
         ),
         disable_model_invocation: frontmatter
             .get("disable-model-invocation")
-            .and_then(|value| value.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
         kind: if python.is_some() {
             SkillKind::Python
@@ -271,7 +271,10 @@ fn load_skills_from_dir_internal(
         }
         let path = entry.path();
         let meta = std::fs::metadata(&path).ok();
-        let is_file = meta.as_ref().map(|m| m.is_file()).unwrap_or(false);
+        let is_file = meta
+            .as_ref()
+            .map(std::fs::Metadata::is_file)
+            .unwrap_or(false);
         names.push((path, is_file, false));
     }
     // SKILL.md in this directory: stop after loading it.

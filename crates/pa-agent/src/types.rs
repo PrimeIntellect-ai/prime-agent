@@ -366,7 +366,7 @@ impl AgentMessage {
             AgentMessage::Custom(m) => m
                 .payload
                 .get("timestamp")
-                .and_then(|v| v.as_i64())
+                .and_then(serde_json::Value::as_i64)
                 .unwrap_or(0),
         }
     }

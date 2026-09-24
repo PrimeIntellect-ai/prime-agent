@@ -144,7 +144,7 @@ mod tests {
             &path,
             [header, user_row, first_goal, second_goal]
                 .iter()
-                .map(|value| value.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("\n"),
         )
@@ -221,7 +221,7 @@ mod tests {
                 }),
             ]
             .iter()
-            .map(|value| value.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n"),
         )

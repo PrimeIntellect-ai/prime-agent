@@ -123,7 +123,7 @@ impl PackageManager {
                 .cloned()
                 .collect();
             let enabled_by_manifest = if manifest_patterns.is_empty() {
-                all_files.clone()
+                all_files
             } else {
                 apply_patterns(&all_files, &manifest_patterns, package_root)
             };

@@ -253,7 +253,7 @@ fn split_first_token(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
     }
     let end = bytes
         .iter()
-        .position(|byte| byte.is_ascii_whitespace())
+        .position(u8::is_ascii_whitespace)
         .unwrap_or(bytes.len());
     Some((&bytes[..end], &bytes[end..]))
 }
@@ -401,7 +401,7 @@ fn scan_listening_daemons_machine_wide(app_name: &str) -> Vec<DiscoveredDaemonPr
         if !pids.is_empty() {
             let pid_list = pids
                 .iter()
-                .map(|pid| pid.to_string())
+                .map(std::string::ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(",");
             if let Some(stdout) =

@@ -995,7 +995,7 @@ fn finalize_base(a: &BaseRow, b: &BaseRow) -> std::cmp::Ordering {
 /// when the drilled-in child returns to it.
 pub fn ancestor_session_ids(rows: &[AgentsViewRow], parent_identity: Option<&str>) -> Vec<String> {
     let mut ancestors: Vec<String> = Vec::new();
-    let mut parent = parent_identity.map(str::to_string);
+    let mut parent = parent_identity;
     let mut guard = 0;
     while let Some(identity) = parent {
         guard += 1;
@@ -1017,7 +1017,7 @@ pub fn ancestor_session_ids(rows: &[AgentsViewRow], parent_identity: Option<&str
                 .unwrap_or_default()
                 .to_string(),
         );
-        parent = row.parent_identity.clone();
+        parent = row.parent_identity.as_deref();
     }
     ancestors
 }
@@ -1088,7 +1088,7 @@ pub fn resolve_selection(
         return bounded;
     }
     rows.iter()
-        .position(|row| row.selectable())
+        .position(AgentsViewRow::selectable)
         .unwrap_or(bounded)
 }
 
@@ -1138,7 +1138,7 @@ mod tests {
     ) -> Vec<AgentsViewRow> {
         let records = reconcile_unified_sessions(roster, &[]);
         let rollups = compute_rollups(&records);
-        let expanded: HashSet<String> = expanded.iter().map(|id| id.to_string()).collect();
+        let expanded: HashSet<String> = expanded.iter().map(ToString::to_string).collect();
         build_rows(&records, scope, &expanded, &rollups, None)
     }
 

@@ -86,7 +86,7 @@ fn main() -> Result<()> {
             view.push(item);
         }
         for line in render_frame_text(&mut view, w, h) {
-            println!("{}", line);
+            println!("{line}");
         }
         let _ = &args.color;
         return Ok(());

@@ -195,8 +195,8 @@ pub(crate) async fn execute_prepared_tool_call(
                     }
                 }
                 Err(error) => {
-                    if !(signal.map(|s| s.is_aborted()).unwrap_or(false) && is_abort_error(&error))
-                    {
+                    let aborted = signal.map(AbortSignal::is_aborted).unwrap_or(false);
+                    if !(aborted && is_abort_error(&error)) {
                         return ExecutedToolCallOutcome {
                             result: error_tool_result(signal, &error),
                             is_error: true,
@@ -231,7 +231,7 @@ pub(crate) async fn execute_prepared_tool_call(
 }
 
 fn error_tool_result(signal: Option<&AbortSignal>, error: &anyhow::Error) -> AgentToolResult {
-    if signal.map(|s| s.is_aborted()).unwrap_or(false) {
+    if signal.map(AbortSignal::is_aborted).unwrap_or(false) {
         AgentToolResult::error("Tool execution aborted")
     } else {
         AgentToolResult::error(format!("{error:#}"))

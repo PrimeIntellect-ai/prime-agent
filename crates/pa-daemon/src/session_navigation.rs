@@ -145,7 +145,7 @@ impl SessionNavigation {
             match core.store.as_ref() {
                 Some(store) => (
                     core.cwd.clone(),
-                    store.path.parent().map(|dir| dir.to_path_buf()),
+                    store.path.parent().map(std::path::Path::to_path_buf),
                     store.header.rlm_depth.unwrap_or(0) as u32,
                 ),
                 None => {
@@ -239,7 +239,7 @@ impl SessionNavigation {
             let core = self.core.lock().unwrap();
             core.store
                 .as_ref()
-                .and_then(|store| store.path.parent().map(|dir| dir.to_path_buf()))
+                .and_then(|store| store.path.parent().map(std::path::Path::to_path_buf))
         };
         let target = match destination {
             Some(dir) => dir.join(
@@ -306,9 +306,8 @@ impl SessionNavigation {
         let mut file = SessionFile::open(std::path::Path::new(path))
             .map_err(|error| response_failure(None, command, &error.to_string(), None))?;
         file.lease = lease;
-        let cwd = cwd_override
-            .clone()
-            .or_else(|| (!file.header.cwd.is_empty()).then(|| file.header.cwd.clone()));
+        let cwd =
+            cwd_override.or_else(|| (!file.header.cwd.is_empty()).then(|| file.header.cwd.clone()));
         if let Some(cwd) = cwd.as_deref() {
             if !std::path::Path::new(cwd).is_dir() {
                 let fallback = {
@@ -520,7 +519,7 @@ mod tests {
     async fn replacement_flows_retire_only_on_a_prepared_file() {
         let _faux = crate::agent_engine::FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().expect("temp dir");
         let sessions_dir = dir.path().join("sessions");
         std::fs::create_dir_all(&sessions_dir).expect("sessions dir");

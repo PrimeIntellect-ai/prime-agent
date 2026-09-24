@@ -122,7 +122,7 @@ pub(crate) fn js_to_fixed(value: f64, digits: usize) -> String {
     if digits == 0 {
         return format!("{integer}");
     }
-    format!("{integer}.{fraction:0digits$}", digits = digits)
+    format!("{integer}.{fraction:0digits$}")
 }
 
 /// A JS number rendered with at most one decimal: `Math.round(x * 10) / 10`
@@ -191,7 +191,7 @@ pub fn logs_rows(logs_dir: &Path) -> Vec<ClientLine> {
     let mut files: Vec<String> = std::fs::read_dir(logs_dir)
         .map(|entries| {
             entries
-                .filter_map(|entry| entry.ok())
+                .filter_map(Result::ok)
                 .map(|entry| entry.file_name().to_string_lossy().into_owned())
                 .filter(|name| !name.starts_with('.'))
                 .collect()
@@ -299,7 +299,7 @@ fn is_version_header(rest: &str) -> bool {
     let mut rest = rest.trim_start();
     rest = rest.strip_prefix('[').unwrap_or(rest);
     for part in 0..3 {
-        let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
         if digits == 0 {
             return false;
         }
@@ -392,12 +392,12 @@ fn parse_context_node(value: &Value) -> ContextNode {
         totals
     };
     let context_usage = value.get("contextUsage").map(|usage| ContextUsageSnapshot {
-        tokens: ContextUsageSnapshot::parse_field(usage, "tokens", |value| value.as_u64()),
+        tokens: ContextUsageSnapshot::parse_field(usage, "tokens", Value::as_u64),
         context_window: usage
             .get("contextWindow")
             .and_then(Value::as_u64)
             .unwrap_or_default(),
-        percent: ContextUsageSnapshot::parse_field(usage, "percent", |value| value.as_f64()),
+        percent: ContextUsageSnapshot::parse_field(usage, "percent", Value::as_f64),
     });
     ContextNode {
         id: value
@@ -912,7 +912,7 @@ mod tests {
             ]
         );
         // A session name adds the Name row; a missing file is in-memory.
-        let mut with_name = stats.clone();
+        let mut with_name = stats;
         with_name["sessionFile"] = Value::Null;
         let rows = plain(&session_info_rows(&with_name, Some("lane work")));
         assert_eq!(rows[2], "Name: lane work");

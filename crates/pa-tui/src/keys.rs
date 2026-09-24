@@ -383,7 +383,7 @@ mod tests {
         // enhanced-keys module's state lock pattern.
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(false);
         let ctrl_bracket = KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL);
         assert_eq!(key_event_to_id(&ctrl_bracket).as_deref(), Some("ctrl+]"));
@@ -406,7 +406,7 @@ mod tests {
     fn raw_lf_maps_by_kitty_mode() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ctrl_j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
         crate::enhanced_keys::set_kitty_active_for_tests(true);
         assert_eq!(key_event_to_id(&ctrl_j).as_deref(), Some("shift+enter"));
@@ -451,7 +451,7 @@ mod tests {
     fn rxvt_alt_arrow_folds_map_to_arrows_outside_kitty() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(false);
         let alt = |c: char, shift: bool| {
             let mut modifiers = KeyModifiers::ALT;

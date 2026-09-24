@@ -404,7 +404,7 @@ fn windows_executable_candidates(name: &str, pathext: Option<&str>) -> Vec<Strin
     }
     let defaults: Vec<String> = WINDOWS_PATHEXT_DEFAULT
         .iter()
-        .map(|ext| ext.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
     let source: &[String] = if extensions.is_empty() {
         &defaults

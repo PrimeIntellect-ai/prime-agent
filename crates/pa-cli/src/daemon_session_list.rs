@@ -160,7 +160,7 @@ pub(crate) fn format_session_list_table(sessions: &[SessionSummary]) -> String {
         "name", "id", "status", "age", "model", "messages", "clients",
     ]
     .iter()
-    .map(|header| header.to_string())
+    .map(std::string::ToString::to_string)
     .collect();
     let widths: Vec<usize> = headers
         .iter()

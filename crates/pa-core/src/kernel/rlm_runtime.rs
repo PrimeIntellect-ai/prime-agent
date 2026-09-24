@@ -102,7 +102,7 @@ pub fn create_default_rlm_subagent_session_name(prompt: &str, child_id: &str) ->
         .strip_prefix("sub-")
         .unwrap_or(child_id)
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .collect();
     let id_suffix = if id_suffix.len() >= 8 {
         id_suffix[id_suffix.len() - 8..].to_string()
@@ -205,7 +205,7 @@ fn normalize_model_search_text(value: &str) -> String {
     value
         .to_lowercase()
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
+        .filter(char::is_ascii_alphanumeric)
         .collect()
 }
 
@@ -438,8 +438,8 @@ mod tests {
         ];
         assert!(find_unique_rlm_short_form_model_match("glm-5.3", &models, None).is_none());
         let one = vec![models[0].clone()];
-        let resolved =
-            find_unique_rlm_short_form_model_match("glm-5.3", &one, None).map(|m| m.selector());
+        let resolved = find_unique_rlm_short_form_model_match("glm-5.3", &one, None)
+            .map(super::RlmModelInfo::selector);
         assert_eq!(resolved.as_deref(), Some("prime-inference/z-ai/glm-5.3"));
         let message = format_rlm_model_unavailable_error("glm-5.3", "spawn", &models);
         assert!(message.contains("close matches"));

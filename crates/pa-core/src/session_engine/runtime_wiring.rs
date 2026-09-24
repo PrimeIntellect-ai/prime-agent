@@ -300,7 +300,7 @@ impl KernelExecutor for KernelManagerExecutor {
     > {
         let manager = self.manager.clone();
         let code = code.to_string();
-        let signal = options.signal.clone();
+        let signal = options.signal;
         Box::pin(async move {
             let result = manager
                 .execute(

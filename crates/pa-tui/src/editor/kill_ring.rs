@@ -13,9 +13,9 @@ impl KillRing {
         if accumulate && !self.ring.is_empty() {
             let last = self.ring.pop().unwrap_or_default();
             let merged = if prepend {
-                format!("{}{}", text, last)
+                format!("{text}{last}")
             } else {
-                format!("{}{}", last, text)
+                format!("{last}{text}")
             };
             self.ring.push(merged);
         } else {
@@ -23,7 +23,7 @@ impl KillRing {
         }
     }
     pub fn peek(&self) -> Option<&str> {
-        self.ring.last().map(|s| s.as_str())
+        self.ring.last().map(String::as_str)
     }
     pub fn rotate(&mut self) {
         if self.ring.len() > 1 {

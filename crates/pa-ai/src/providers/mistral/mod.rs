@@ -145,7 +145,7 @@ fn map_reasoning_effort(model: &Model, level: ModelThinkingLevel) -> MistralReas
         .thinking_level_map
         .as_ref()
         .and_then(|map| map.get(&level))
-        .and_then(|value| value.clone());
+        .and_then(std::clone::Clone::clone);
     match mapped.as_deref() {
         Some("none") => MistralReasoningEffort::None,
         _ => MistralReasoningEffort::High,

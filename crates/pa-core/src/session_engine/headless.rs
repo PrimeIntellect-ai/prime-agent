@@ -157,7 +157,7 @@ pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTer
                     severity: details
                         .get("severity")
                         .and_then(serde_json::Value::as_str)
-                        .map(|text| text.to_string()),
+                        .map(std::string::ToString::to_string),
                 })
             }
             _ => None,

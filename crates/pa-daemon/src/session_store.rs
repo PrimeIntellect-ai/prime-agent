@@ -338,7 +338,7 @@ impl SessionFile {
             }
         }
         full.leaf_id.clone_from(&self.leaf_id);
-        full.lease = self.lease.clone();
+        full.lease.clone_from(&self.lease);
         *self = full;
     }
 
@@ -561,8 +561,8 @@ impl SessionFile {
         let entries = self.branch_file_entries();
         let mut context = pa_core::session::build_session_context(&entries, self.leaf_id());
         if let Some(window) = &self.window {
-            context.model = window.model.clone();
-            context.thinking_level = window.thinking_level.clone();
+            context.model.clone_from(&window.model);
+            context.thinking_level.clone_from(&window.thinking_level);
             context.service_tier = window.service_tier;
             for entry in &self.entries[window.loaded_entries..] {
                 match entry.type_.as_str() {
@@ -590,7 +590,7 @@ impl SessionFile {
                         if let Some(level) =
                             entry.fields.get("thinkingLevel").and_then(Value::as_str)
                         {
-                            context.thinking_level = level.to_owned();
+                            level.clone_into(&mut context.thinking_level);
                         }
                     }
                     "service_tier_change" => {
@@ -651,7 +651,7 @@ impl SessionFile {
             .find(|entry| entry.type_ == "session_info")
             .and_then(|entry| entry.fields.get("name"))
             .and_then(Value::as_str)
-            .map(|name| name.trim())
+            .map(str::trim)
             .filter(|name| !name.is_empty())
     }
 
@@ -1670,7 +1670,7 @@ mod tests {
         // Forge the cycle: the two entries point at each other.
         let first = session.entries[0].id.clone();
         let second = session.entries[1].id.clone();
-        session.entries[0].parent_id = Some(second.clone());
+        session.entries[0].parent_id = Some(second);
         session.entries[1].parent_id = Some(first);
         let branch = session.branch();
         assert!(
@@ -1824,7 +1824,7 @@ mod tests {
             json!({"type": "message", "id": "e4", "parentId": "e3", "timestamp": "2026-09-22T00:00:04.000Z", "message": {"role": "assistant", "content": "ok"}}),
         ]
         .iter()
-        .map(|value| value.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
         fs::write(&path, content).unwrap();
@@ -1865,7 +1865,7 @@ mod tests {
             json!({"type": "message", "id": "e4", "parentId": "8b5f0d21", "timestamp": "2026-09-22T00:00:05.000Z", "message": {"role": "user", "content": "after the move"}}),
         ]
         .iter()
-        .map(|value| value.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
         fs::write(&path, content).unwrap();
@@ -1893,7 +1893,7 @@ mod tests {
             json!({"type": "message", "id": "e2", "parentId": "e1", "timestamp": "2026-09-22T00:00:03.000Z", "message": {"role": "assistant", "content": "leaf chain"}}),
         ]
         .iter()
-        .map(|value| value.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
         fs::write(&path, content).unwrap();

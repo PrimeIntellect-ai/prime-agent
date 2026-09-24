@@ -1762,7 +1762,7 @@ mod tests {
             "display": true,
             "details": { "success": false, "attempts": 1, "finalError": "Retry cancelled" },
         });
-        let entries = transcript_to_entries(&[user.clone(), aborted, outcome]);
+        let entries = transcript_to_entries(&[user, aborted, outcome]);
         assert_eq!(entries.len(), 3, "the abort row stays: {entries:?}");
         assert!(
             entries

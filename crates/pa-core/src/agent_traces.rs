@@ -344,7 +344,7 @@ fn is_trace_session_header(value: &Value) -> bool {
         && string_field("cwd")
         && value
             .get("parentSession")
-            .is_none_or(|parent| parent.is_string())
+            .is_none_or(serde_json::Value::is_string)
 }
 
 /// Node `resolve`'s lexical normalization (`.` and `..` folded; relative
@@ -483,7 +483,7 @@ fn resolve_trace_context(
         if depth == 0 {
             parent_session_id = Some(parent_header.id.clone());
         }
-        trace_id = parent_header.id.clone();
+        trace_id.clone_from(&parent_header.id);
         current_file = parent_path;
         current_header = parent_header;
     }
@@ -1057,7 +1057,7 @@ async fn fetch_with_retry(
             gate.before_request(options.cancel, options.on_upload_delay.as_ref())
                 .await?;
         }
-        if options.cancel.is_some_and(|cancel| cancel.is_cancelled()) {
+        if options.cancel.is_some_and(TraceUploadCancel::is_cancelled) {
             return Err(TraceHttpError::Cancelled);
         }
         let mut retry_delay_ms: Option<u64> = None;
@@ -1086,7 +1086,7 @@ async fn fetch_with_retry(
                 }
             }
             Err(error) => {
-                if options.cancel.is_some_and(|cancel| cancel.is_cancelled())
+                if options.cancel.is_some_and(TraceUploadCancel::is_cancelled)
                     || matches!(error, TraceHttpError::Cancelled)
                 {
                     return Err(TraceHttpError::Cancelled);
@@ -1097,13 +1097,13 @@ async fn fetch_with_retry(
             }
         }
         let backoff_ms = retry_delay_ms.unwrap_or_else(|| trace_upload_retry_delay(attempt));
-        if !options.cancel.is_some_and(|cancel| cancel.is_cancelled()) {
+        if !options.cancel.is_some_and(TraceUploadCancel::is_cancelled) {
             if let Some(sink) = &options.on_upload_delay {
                 sink(TraceUploadDelay::RetryBackoff(backoff_ms));
             }
         }
         delay(backoff_ms, options.cancel).await;
-        if options.cancel.is_some_and(|cancel| cancel.is_cancelled()) {
+        if options.cancel.is_some_and(TraceUploadCancel::is_cancelled) {
             return Err(TraceHttpError::Cancelled);
         }
         attempt += 1;
@@ -1141,7 +1141,7 @@ impl TraceRequestGate {
                 sink(TraceUploadDelay::RateLimit(wait_ms));
             }
             delay(wait_ms, cancel).await;
-            if cancel.is_some_and(|cancel| cancel.is_cancelled()) {
+            if cancel.is_some_and(TraceUploadCancel::is_cancelled) {
                 return Err(TraceHttpError::Cancelled);
             }
         }
@@ -1248,7 +1248,7 @@ pub async fn upload_all_traces(options: &TraceUploadAllOptions<'_>) -> TraceUplo
         result: None,
     });
 
-    let cancelled = || options.cancel.is_some_and(|cancel| cancel.is_cancelled());
+    let cancelled = || options.cancel.is_some_and(TraceUploadCancel::is_cancelled);
     let worker_count = total
         .min(
             options
@@ -1598,7 +1598,8 @@ mod tests {
     /// touch it serialize on one lock.
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     #[test]

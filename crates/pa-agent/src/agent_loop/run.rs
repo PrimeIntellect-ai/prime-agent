@@ -118,7 +118,7 @@ pub(crate) async fn run_loop(
                 tool_results: tool_results.clone(),
             })
             .await?;
-            if signal.map(|s| s.is_aborted()).unwrap_or(false) {
+            if signal.map(AbortSignal::is_aborted).unwrap_or(false) {
                 emit(AgentEvent::AgentEnd {
                     messages: new_messages.clone(),
                 })

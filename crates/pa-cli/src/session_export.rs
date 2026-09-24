@@ -33,7 +33,7 @@ mod tests {
                 args.push("--export".to_string());
                 args.push(export.to_string());
             }
-            args.extend(messages.iter().map(|message| message.to_string()));
+            args.extend(messages.iter().map(std::string::ToString::to_string));
             args
         })
     }

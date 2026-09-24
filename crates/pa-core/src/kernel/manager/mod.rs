@@ -45,7 +45,7 @@ pub struct KernelStartOptions {
 /// Lock a mutex, surviving poisoning: the guarded state is plain data, and a
 /// panicked reader must not cascade into an unusable kernel.
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -93,7 +93,9 @@ impl<'a> ResponsesStreamProcessor<'a> {
             .get("type")
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        let output_index = event.get("output_index").and_then(|value| value.as_u64());
+        let output_index = event
+            .get("output_index")
+            .and_then(serde_json::Value::as_u64);
         if event.get("output_index").is_some() {
             self.current_output_index = output_index;
         }
@@ -571,7 +573,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 if let Some(AssistantContent::Thinking(block)) =
                                     self.output.content.get_mut(content_index)
                                 {
-                                    block.thinking = final_text.clone();
+                                    block.thinking.clone_from(&final_text);
                                     block.thinking_signature = Some(item.to_string());
                                 }
                                 self.writer.push(AssistantMessageEvent::ThinkingEnd {
@@ -624,7 +626,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 if let Some(AssistantContent::Text(block)) =
                                     self.output.content.get_mut(content_index)
                                 {
-                                    block.text = text.clone();
+                                    block.text.clone_from(&text);
                                     block.text_signature = Some(signature);
                                 }
                                 self.writer.push(AssistantMessageEvent::TextEnd {
@@ -791,24 +793,24 @@ impl<'a> ResponsesStreamProcessor<'a> {
                     let cached_tokens = usage
                         .get("input_tokens_details")
                         .and_then(|details| details.get("cached_tokens"))
-                        .and_then(|value| value.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     let input_tokens = usage
                         .get("input_tokens")
-                        .and_then(|value| value.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0);
                     // OpenAI includes cached tokens in input_tokens; subtract them.
                     self.output.usage = Usage {
                         input: input_tokens.saturating_sub(cached_tokens),
                         output: usage
                             .get("output_tokens")
-                            .and_then(|value| value.as_u64())
+                            .and_then(serde_json::Value::as_u64)
                             .unwrap_or(0),
                         cache_read: cached_tokens,
                         cache_write: 0,
                         total_tokens: usage
                             .get("total_tokens")
-                            .and_then(|value| value.as_u64())
+                            .and_then(serde_json::Value::as_u64)
                             .unwrap_or(0),
                         cost: Default::default(),
                     };
@@ -818,7 +820,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                     let response_tier = response
                         .get("service_tier")
                         .and_then(|value| value.as_str())
-                        .map(|tier| tier.to_string());
+                        .map(std::string::ToString::to_string);
                     let request_tier = self.hooks.request_service_tier.map(|tier| {
                         serde_json::to_value(tier)
                             .unwrap_or_default()
@@ -858,7 +860,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                     message: format!("Error Code {}: {}", code.unwrap_or_default(), message),
                     info: StreamFailureInfo {
                         kind: classify_stream_failure(code, None),
-                        provider_error_type: code.map(|code| code.to_string()),
+                        provider_error_type: code.map(std::string::ToString::to_string),
                         ..StreamFailureInfo::unknown()
                     },
                 }));
@@ -899,7 +901,8 @@ impl<'a> ResponsesStreamProcessor<'a> {
                     message: msg,
                     info: StreamFailureInfo {
                         kind: classify_stream_failure(provider_error_type, None),
-                        provider_error_type: provider_error_type.map(|value| value.to_string()),
+                        provider_error_type: provider_error_type
+                            .map(std::string::ToString::to_string),
                         ..StreamFailureInfo::unknown()
                     },
                 }));

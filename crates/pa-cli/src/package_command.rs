@@ -435,7 +435,7 @@ pub fn handle_package_command(args: &[String]) -> PackageCommandOutcome {
         // invocation is CLI-internal (the update command spawns it).
         let (Some(socket), Some(status_path)) = (
             options.restart_daemon_socket.clone(),
-            options.restart_status_path.clone(),
+            options.restart_status_path,
         ) else {
             return fail(
                 "Invalid daemon update restart coordinator invocation.",

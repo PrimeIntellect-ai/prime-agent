@@ -205,22 +205,20 @@ fn validate_edit(edit: &RefinementEdit, computed_id: Option<&str>) -> Option<Str
         return Some("base system prompt is not editable".to_string());
     }
     if action != RefinementAction::Create && edit.id.is_none() {
-        return Some(format!("{:?} requires id", action).to_lowercase());
+        return Some(format!("{action:?} requires id").to_lowercase());
     }
     if action != RefinementAction::Delete && (edit.title.is_none() || edit.content.is_none()) {
-        return Some(format!("{:?} requires title and content", action).to_lowercase());
+        return Some(format!("{action:?} requires title and content").to_lowercase());
     }
     if action != RefinementAction::Delete && kind == RefinementKind::Skill {
         if edit.arguments.is_none() {
-            return Some(format!("{:?} skill requires arguments", action).to_lowercase());
+            return Some(format!("{action:?} skill requires arguments").to_lowercase());
         }
         let Some(reference) = &edit.reference else {
-            return Some(format!("{:?} skill requires python reference", action).to_lowercase());
+            return Some(format!("{action:?} skill requires python reference").to_lowercase());
         };
         if reference.get("type").and_then(|value| value.as_str()) != Some("python") {
-            return Some(
-                format!("{:?} skill reference.type must be python", action).to_lowercase(),
-            );
+            return Some(format!("{action:?} skill reference.type must be python").to_lowercase());
         }
         let has_import = reference
             .get("import")
@@ -239,11 +237,11 @@ fn validate_edit(edit: &RefinementEdit, computed_id: Option<&str>) -> Option<Str
                 .and_then(|value| value.as_str())
                 .is_some_and(|callable| !callable.is_empty());
         if !has_import {
-            return Some(format!("{:?} skill requires python import", action).to_lowercase());
+            return Some(format!("{action:?} skill requires python import").to_lowercase());
         }
         if !has_callable {
             return Some(
-                format!("{:?} skill requires callable or call_pattern", action).to_lowercase(),
+                format!("{action:?} skill requires callable or call_pattern").to_lowercase(),
             );
         }
     }

@@ -67,7 +67,10 @@ impl Editor {
             if self.kb_matches(input, "tui.input.tab")
                 || self.kb_matches(input, "tui.select.confirm")
             {
-                let selected = self.autocomplete.as_ref().and_then(|s| s.selected_item());
+                let selected = self
+                    .autocomplete
+                    .as_ref()
+                    .and_then(crate::autocomplete::AutocompleteState::selected_item);
                 if let Some(item) = selected {
                     let is_typed_exact = self.is_slash_name_completion_at_prompt_start();
                     self.push_undo_snapshot();

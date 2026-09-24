@@ -16,3 +16,6 @@ uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

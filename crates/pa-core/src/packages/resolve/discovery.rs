@@ -32,7 +32,7 @@ fn read_entries_sorted(dir: &Path) -> Vec<DirEntry> {
         return Vec::new();
     };
     let mut entries: Vec<DirEntry> = entries
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .map(|entry| DirEntry {
             name: entry.file_name().to_string_lossy().into_owned(),
             path: entry.path(),
@@ -358,7 +358,7 @@ pub(crate) fn resolve_extension_entries(dir: &Path) -> Option<Vec<PathBuf>> {
         let entries = manifest
             .as_ref()
             .and_then(|manifest| manifest.extensions.as_ref())
-            .map(|extensions| extensions.as_slice())
+            .map(std::vec::Vec::as_slice)
             .unwrap_or_default();
         if !entries.is_empty() {
             let mut resolved: Vec<PathBuf> = Vec::new();

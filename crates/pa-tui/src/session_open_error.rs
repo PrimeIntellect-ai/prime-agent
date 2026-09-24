@@ -121,7 +121,7 @@ pub fn holder_by_id(rows: &[Value], holder_id: &str) -> Option<SessionHolder> {
 pub fn roster_rows(data: &Value) -> &[Value] {
     data.get("sessions")
         .and_then(Value::as_array)
-        .map(|rows| rows.as_slice())
+        .map(Vec::as_slice)
         .unwrap_or(&[])
 }
 
@@ -207,7 +207,7 @@ pub fn decorate_interactive_refusal(
 fn canonical_form(path: &Path) -> std::path::PathBuf {
     match path.canonicalize() {
         Ok(canonical) => canonical,
-        Err(_) => match path.parent().map(|parent| parent.canonicalize()) {
+        Err(_) => match path.parent().map(Path::canonicalize) {
             Some(Ok(parent)) => parent.join(path.file_name().unwrap_or_default()),
             _ => path.to_path_buf(),
         },

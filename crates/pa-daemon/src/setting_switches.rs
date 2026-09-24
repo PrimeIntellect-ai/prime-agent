@@ -323,7 +323,7 @@ impl Worker {
                 }
             }
         }
-        self.core.lock().unwrap().scoped_models = scoped.clone();
+        self.core.lock().unwrap().scoped_models.clone_from(scoped);
         response_success(None, "set_scoped_models", None)
     }
 
@@ -410,7 +410,7 @@ impl Worker {
                     let _ = store
                         .persist_entry("service_tier_change", json!({ "serviceTier": effective }));
                 }
-                cwd = core.cwd.clone();
+                cwd.clone_from(&core.cwd);
             }
             (preference_changed, effective_changed, cwd)
         };

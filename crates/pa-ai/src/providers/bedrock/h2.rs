@@ -80,7 +80,7 @@ impl H2Response {
         if self
             .signal
             .as_ref()
-            .map(|signal| signal.is_cancelled())
+            .map(tokio_util::sync::CancellationToken::is_cancelled)
             .unwrap_or(false)
         {
             return Err(ProviderError::Aborted);
@@ -198,7 +198,7 @@ pub(crate) async fn send_h2(options: H2RequestOptions) -> Result<H2Response, Pro
 
     if signal
         .as_ref()
-        .map(|signal| signal.is_cancelled())
+        .map(tokio_util::sync::CancellationToken::is_cancelled)
         .unwrap_or(false)
     {
         return Err(ProviderError::Aborted);

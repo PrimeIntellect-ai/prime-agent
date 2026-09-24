@@ -349,7 +349,7 @@ impl Editor {
     }
 
     fn set_text_internal(&mut self, text: &str) {
-        let lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+        let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
         self.lines = if lines.is_empty() {
             vec![String::new()]
         } else {
@@ -473,7 +473,7 @@ impl Editor {
         }
         let line = self.lines[self.cursor_line].clone();
         let (before, after) = split_at_char(&line, self.cursor_col);
-        self.lines[self.cursor_line] = format!("{}{}{}", before, ch, after);
+        self.lines[self.cursor_line] = format!("{before}{ch}{after}");
         self.set_cursor_col(self.cursor_col + ch.chars().count());
         self.emit(EditorEvent::Changed(self.get_text()));
         self.maybe_autocomplete_after_insert(ch);
@@ -484,11 +484,11 @@ impl Editor {
             return;
         }
         let normalized = normalize_text(text);
-        let inserted: Vec<String> = normalized.split('\n').map(|s| s.to_string()).collect();
+        let inserted: Vec<String> = normalized.split('\n').map(str::to_string).collect();
         let current_line = self.lines[self.cursor_line].clone();
         let (before, after) = split_at_char(&current_line, self.cursor_col);
         if inserted.len() == 1 {
-            self.lines[self.cursor_line] = format!("{}{}{}", before, normalized, after);
+            self.lines[self.cursor_line] = format!("{before}{normalized}{after}");
             self.set_cursor_col(self.cursor_col + normalized.chars().count());
         } else {
             let mut new_lines: Vec<String> = Vec::with_capacity(self.lines.len() + inserted.len());
@@ -571,7 +571,7 @@ impl Editor {
             let char_before = char_at(line, self.cursor_col.saturating_sub(1));
             if let Some(c) = char_before {
                 if c.is_alphanumeric() || c == '_' {
-                    filtered = format!(" {}", filtered);
+                    filtered = format!(" {filtered}");
                 }
             }
         }
@@ -581,7 +581,7 @@ impl Editor {
             let id = self.paste_counter;
             self.pastes.insert(id, filtered.clone());
             let marker = if line_count > LARGE_PASTE_LINES {
-                format!("[paste #{} +{} lines]", id, line_count)
+                format!("[paste #{id} +{line_count} lines]")
             } else {
                 format!("[paste #{} {} chars]", id, filtered.chars().count())
             };

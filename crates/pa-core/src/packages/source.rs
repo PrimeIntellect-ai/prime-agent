@@ -309,7 +309,7 @@ pub fn parse_git_url(source: &str) -> Option<GitSource> {
                 repo: if https_prefixed {
                     format!("https://{split_repo}")
                 } else {
-                    split_repo.clone()
+                    split_repo
                 },
                 host: info.domain,
                 path: format!("{}/{}", info.user, info.project),
