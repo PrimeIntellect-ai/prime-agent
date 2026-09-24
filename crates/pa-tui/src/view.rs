@@ -1061,7 +1061,6 @@ impl AgentView {
     /// The editor surface (TS `Editor.render` with a background): a blank
     /// bg row, content rows with the `> ` prompt and a reverse-video cursor,
     /// and a trailing bg row. Scroll indicators replace the blank rows.
-
     fn render_editor_surface(&mut self, width: usize) -> (Vec<Line>, Option<(usize, usize)>) {
         let bg = crate::chrome::editor_background(&self.theme);
         let border = self.theme.fg_style(ThemeColor::BorderMuted);

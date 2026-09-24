@@ -553,7 +553,7 @@ mod tests {
             ),
             (
                 KeyCode::Char('Z'),
-                KeyModifiers::CTRL | KeyModifiers::SUPER,
+                KeyModifiers::CONTROL | KeyModifiers::SUPER,
                 "shift+ctrl+super+z",
                 "Cmd+Ctrl+Shift+Z redo family",
             ),
@@ -571,7 +571,7 @@ mod tests {
             ),
             (
                 KeyCode::Home,
-                KeyModifiers::CTRL,
+                KeyModifiers::CONTROL,
                 "ctrl+home",
                 "Ctrl+Home doc start",
             ),

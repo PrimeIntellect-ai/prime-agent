@@ -198,7 +198,7 @@ impl Editor {
     pub(crate) fn transpose_chars(&mut self) {
         self.history_index = -1;
         self.last_action = None;
-        let line = &self.lines[self.cursor_line];
+        let line = self.lines[self.cursor_line].clone();
         let len = line.chars().count();
         let line_start = self.line_start_col(self.cursor_line);
         if len - line_start < 2 {

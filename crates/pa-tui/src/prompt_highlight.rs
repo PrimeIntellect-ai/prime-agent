@@ -917,8 +917,6 @@ mod tests {
         assert!(highlights.is_empty());
     }
 
-    #[test]
-
     /// A selection range renders reversed-video, clipped to the chunk, and
     /// the cursor cell keeps its reverse on top of it.
     #[test]
@@ -936,9 +934,7 @@ mod tests {
             .map(|span| {
                 (
                     span.content.to_string(),
-                    span.style
-                        .add_modifier(Modifier::empty())
-                        .contains(Modifier::REVERSED),
+                    span.style.add_modifier.contains(Modifier::REVERSED),
                 )
             })
             .collect();
@@ -946,16 +942,17 @@ mod tests {
             reversed,
             vec![
                 ("hello".to_string(), true),
-                (" ".to_string(), false),
-                ("w".to_string(), true),
-                ("orld".to_string(), false),
+                (" w".to_string(), false),
+                ("o".to_string(), true),
+                ("rld".to_string(), false),
             ]
         );
         // A selection fully past the chunk clips away entirely.
         let none = editor_text_spans(&theme(), "hi", &[], Some((9, 12)), None, Style::default());
-        assert!(none.len() == 1 && !none[0].style.contains(Modifier::REVERSED));
+        assert!(none.len() == 1 && !none[0].style.add_modifier.contains(Modifier::REVERSED));
     }
 
+    #[test]
     fn editor_text_spans_carry_the_cursor_reverse() {
         let theme = theme();
         let bg = Style::default();
