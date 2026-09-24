@@ -124,7 +124,7 @@ impl UnixSocketAddress {
         use std::os::unix::fs::OpenOptionsExt;
         // `O_PATH` (Linux `asm-generic`): an fd that references the directory
         // without read/write access; only `/proc/self/fd` traversal uses it.
-        const O_PATH: i32 = 0o200000;
+        const O_PATH: i32 = 0o200_000;
         let name = path
             .file_name()
             .ok_or_else(|| anyhow::anyhow!("socket path has no file name: {}", path.display()))?;

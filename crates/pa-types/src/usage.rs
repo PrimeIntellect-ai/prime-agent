@@ -40,7 +40,7 @@ pub fn valid_assistant_usage(message: &Value) -> Option<Value> {
         return None;
     }
     match message.get("stopReason").and_then(Value::as_str) {
-        Some("aborted") | Some("error") => return None,
+        Some("aborted" | "error") => return None,
         _ => {}
     }
     message
