@@ -375,9 +375,12 @@ fn headless_image_model_router(
         .read()
         .expect("provider target lock")
         .clone();
+    // The decide closure takes its own copy; the swap closure moves the
+    // original (the last use).
+    let decide_agent_dir = agent_dir.clone();
     let decide = {
-        let cwd = cwd.clone();
-        let agent_dir = agent_dir.clone();
+        let cwd = cwd;
+        let agent_dir = decide_agent_dir;
         std::sync::Arc::new(
             move |carries_images: bool,
                   session_model: &AgentModel,
