@@ -117,8 +117,10 @@ fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
     // inherits one (the runner's, under a session-attached runner) and
     // the renderer sizes itself from that terminal's `/dev/tty` instead
     // of the harness pty, painting 0x0-empty frames. The setsid runs in
-    // the runner, not the child, so the runner stays the child's
-    // waitpid parent across the whole cycle.
+    // the runner: a child-side setsid would create the new session
+    // without this runner in it, leaving the child's group orphaned
+    // again; here the runner leads the child's session from a different
+    // process group, as the job-control parent the stop needs.
     match nix::unistd::setsid() {
         Ok(_) => {}
         Err(error) => panic!("the harness could not start a fresh session: {error}"),
