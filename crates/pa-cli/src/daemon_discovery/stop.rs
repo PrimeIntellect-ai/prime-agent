@@ -425,7 +425,7 @@ fn shutdown_daemon(socket_path: &Path, force: bool) -> bool {
     // of truth.
     let _ = client.request_with_timeout(shutdown, 1_500);
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(5_000);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         if !probe_daemon(socket_path).reachable {
             return true;

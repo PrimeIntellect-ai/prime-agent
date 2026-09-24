@@ -109,7 +109,7 @@ fn map_chat_stop_reason(reason: Option<&str>) -> StopReason {
     match reason {
         None => StopReason::Stop,
         Some("stop") => StopReason::Stop,
-        Some("length") | Some("model_length") => StopReason::Length,
+        Some("length" | "model_length") => StopReason::Length,
         Some("tool_calls") => StopReason::ToolUse,
         Some("error") => StopReason::Error,
         Some(_) => StopReason::Stop,

@@ -170,26 +170,32 @@ pub fn pid_exists(pid: u32) -> bool {
 /// the platform or kernel has no pidfd, or the process is already gone
 /// (the caller treats an unobtainable handle as never-signal: a missed
 /// stop is recoverable, a wrong one is not).
-///
-/// LINUX ONLY: the `pidfd_*` syscall numbers exist in libc on Linux
-/// (x86_64/aarch64 share them); every other platform compiles the
-/// no-handle stub, and the callers' conservative never-signal default
-/// applies.
 #[cfg(all(
+    unix,
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 pub fn open_pidfd(pid: u32) -> Option<i32> {
     // `SYS_pidfd_open`/`SYS_pidfd_send_signal` share their numbers across
-    // x86_64 and aarch64 Linux.
+    // x86_64 and aarch64 (the platforms this workspace ships) — Linux only:
+    // pidfd is a Linux syscall family, and the macOS libc crate carries no
+    // `SYS_pidfd_*` constants for the same cfg to compile against.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
     (fd >= 0).then_some(fd as i32)
 }
 
-#[cfg(not(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-)))]
+#[cfg(all(
+    unix,
+    not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))
+))]
+pub fn open_pidfd(_pid: u32) -> Option<i32> {
+    None
+}
+
+#[cfg(not(unix))]
 pub fn open_pidfd(_pid: u32) -> Option<i32> {
     None
 }
@@ -197,8 +203,8 @@ pub fn open_pidfd(_pid: u32) -> Option<i32> {
 /// Signal through the kernel-held handle (`pidfd_send_signal`): the
 /// signal reaches the pinned process and nothing else. The handle
 /// CLOSES on drop by the caller (`close(fd)` via [`close_pidfd`]).
-/// LINUX ONLY, symmetric with [`open_pidfd`].
 #[cfg(all(
+    unix,
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
@@ -218,10 +224,18 @@ pub fn pidfd_signal(fd: i32, signal: Signal) -> bool {
     }
 }
 
-#[cfg(not(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-)))]
+#[cfg(all(
+    unix,
+    not(all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))
+))]
+pub fn pidfd_signal(_fd: i32, _signal: Signal) -> bool {
+    false
+}
+
+#[cfg(not(unix))]
 pub fn pidfd_signal(_fd: i32, _signal: Signal) -> bool {
     false
 }

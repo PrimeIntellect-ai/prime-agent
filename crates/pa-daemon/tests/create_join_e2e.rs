@@ -201,7 +201,7 @@ fn write_models_json(agent_dir: &Path) {
                             "id": "mock-1",
                             "name": "Mock 1",
                             "api": "openai-completions",
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096,
                         }
                     ]

@@ -121,7 +121,7 @@ impl MockSupervisor {
                             "command": "get_session_stats",
                             "success": true,
                             "data": {
-                                "contextUsage": { "tokens": 1200, "contextWindow": 200000 },
+                                "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
                                 "cost": 0.01,
                             },
                         }),
@@ -393,7 +393,7 @@ fn interactive_session_rss_plateaus_over_long_stream() {
     });
 
     let outcome = outcome_rx
-        .recv_timeout(Duration::from_secs(300))
+        .recv_timeout(Duration::from_mins(5))
         .expect("interactive run finished");
     let _ = stop_tx.send(());
     let _ = sampler.join();
