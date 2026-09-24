@@ -175,7 +175,7 @@ pub fn open_pidfd(pid: u32) -> Option<i32> {
     // `SYS_pidfd_open`/`SYS_pidfd_send_signal` share their numbers across
     // x86_64 and aarch64 (the platforms this workspace ships).
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-    (fd >= 0).then(|| fd as i32)
+    (fd >= 0).then_some(fd as i32)
 }
 
 #[cfg(all(unix, not(any(target_arch = "x86_64", target_arch = "aarch64"))))]
