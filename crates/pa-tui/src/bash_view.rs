@@ -661,14 +661,14 @@ impl BashView {
                         Span::raw("  "),
                         theme.fg_span(ThemeColor::Dim, "No output yet".to_string()),
                     ]);
-                    lines.extend(std::iter::repeat(Vec::new()).take(output_rows - 1));
+                    lines.extend(std::iter::repeat_n(Vec::new(), output_rows - 1));
                 }
                 None => {
                     lines.push(vec![
                         Span::raw("  "),
                         theme.fg_span(ThemeColor::Dim, "Fetching output\u{2026}".to_string()),
                     ]);
-                    lines.extend(std::iter::repeat(Vec::new()).take(output_rows - 1));
+                    lines.extend(std::iter::repeat_n(Vec::new(), output_rows - 1));
                 }
             }
         }
@@ -1187,7 +1187,7 @@ mod tests {
             .expect("the selected row carries the wash");
         let used = crate::width::spans_width(selected);
         assert!(
-            used < 120 && used >= crate::menu_panel::MIN_HUG_WIDTH,
+            (crate::menu_panel::MIN_HUG_WIDTH..120).contains(&used),
             "the wash hugs the columns plus a little pad, never the width: {used}"
         );
         let header = frame
