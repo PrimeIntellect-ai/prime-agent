@@ -681,6 +681,68 @@ mod tests {
         assert_eq!(tree["totalUsage"]["cost"]["total"].as_f64(), Some(0.0));
     }
 
+    /// The captured-attribution fixture over the full daemon path (create
+    /// from a copy of the fixture file, so the repo fixture stays
+    /// read-only): the load-time fold makes the root's own/total split
+    /// TS-exact. `ownUsage` is the assistant's own row (input 2690, cost
+    /// $0 — `totalTokens` clamps to zero because the six attributions'
+    /// child `totalTokens` (54289) exceeds the aggregate's unchanged
+    /// 23032, TS `subtractAssistantUsage`'s clamp); `totalUsage` carries
+    /// the attributed child spend (input 52898, cost $0.0089957,
+    /// `totalTokens` stays 23032).
+    #[tokio::test]
+    async fn get_context_tree_folds_the_captured_attributions() {
+        let root = std::env::temp_dir().join(format!("pa-worker-af-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/attribution-fold-captured.jsonl");
+        let session_file = root.join("captured.jsonl");
+        std::fs::copy(&fixture, &session_file).unwrap();
+        let worker = created_worker_at(&root, &session_file).await;
+        let response = worker
+            .dispatch(
+                "get_context_tree",
+                &json!({ "activeSessionId": "getter-session" }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let tree = response.data.expect("data");
+        assert_eq!(tree["ownUsage"]["input"], json!(2690));
+        assert_eq!(tree["ownUsage"]["output"], json!(2934));
+        assert_eq!(tree["ownUsage"]["cacheRead"], json!(17408));
+        assert_eq!(tree["ownUsage"]["totalTokens"], json!(0));
+        // The six sequential per-entry subtractions leave float-order noise
+        // in the last ulps (TS `subtractAssistantUsage` walks the same
+        // order), so own cost pins at ~0, not bit-exact zero.
+        assert!(
+            tree["ownUsage"]["cost"]["total"].as_f64().unwrap().abs() < 1e-12,
+            "own cost {} is not ~0",
+            tree["ownUsage"]["cost"]["total"]
+        );
+        assert_eq!(tree["totalUsage"]["input"], json!(52898));
+        assert_eq!(tree["totalUsage"]["output"], json!(5863));
+        assert_eq!(tree["totalUsage"]["cacheRead"], json!(18560));
+        assert_eq!(tree["totalUsage"]["totalTokens"], json!(23032));
+        assert_eq!(
+            tree["totalUsage"]["cost"]["total"].as_f64(),
+            Some(0.0089957)
+        );
+        // `get_session_stats` reports the same folded totals over the
+        // gap-bridged branch.
+        let stats = worker
+            .dispatch(
+                "get_session_stats",
+                &json!({ "activeSessionId": "getter-session" }),
+            )
+            .await;
+        assert!(stats.success, "failed: {stats:?}");
+        let stats = stats.data.expect("data");
+        assert_eq!(stats["tokens"]["input"], json!(52898));
+        assert_eq!(stats["tokens"]["output"], json!(5863));
+        assert_eq!(stats["tokens"]["cacheRead"], json!(18560));
+        assert_eq!(stats["cost"].as_f64(), Some(0.0089957));
+    }
+
     /// `get_context_tree` surfaces the persisted child sessions under the
     /// session's artifact tree (idle, settled, and restart-orphaned
     /// subagents all appear, with their real usage and recursive

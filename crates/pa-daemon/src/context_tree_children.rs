@@ -49,8 +49,11 @@ pub type TombstonedChildren = HashMap<PathBuf, HashSet<String>>;
 
 /// The artifact tree root every session's children live under
 /// (`child_session_dir` writes `<agent-dir>/session-artifacts/<id>/...`).
+pub const RLM_SESSION_ARTIFACTS_DIR: &str = "session-artifacts";
+
+/// The artifact tree root path for one agent dir.
 pub fn session_artifacts_dir(agent_dir: &Path) -> PathBuf {
-    agent_dir.join("session-artifacts")
+    agent_dir.join(RLM_SESSION_ARTIFACTS_DIR)
 }
 
 /// Build one child node from its persisted session dir (TS

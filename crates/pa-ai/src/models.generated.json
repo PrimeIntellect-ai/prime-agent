@@ -21769,6 +21769,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -21805,6 +21806,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -21841,6 +21843,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -21877,6 +21880,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -21985,6 +21989,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -22021,6 +22026,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -22247,16 +22253,16 @@
     "supportsReasoningEffort": true,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false,
-    "requiresReasoningContentOnAssistantMessages": true,
-    "thinkingFormat": "deepseek"
+    "requiresReasoningContentOnAssistantMessages": true
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": null,
     "medium": null,
     "high": "high",
-    "xhigh": "max",
+    "xhigh": "xhigh",
     "max": null
    },
    "input": [
@@ -22284,17 +22290,17 @@
     "supportsReasoningEffort": true,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false,
-    "requiresReasoningContentOnAssistantMessages": true,
-    "thinkingFormat": "deepseek"
+    "requiresReasoningContentOnAssistantMessages": true
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
-    "low": null,
+    "low": "low",
     "medium": null,
     "high": "high",
-    "xhigh": "max",
-    "max": null
+    "xhigh": null,
+    "max": "max"
    },
    "input": [
     "text"
@@ -22320,16 +22326,16 @@
     "supportsReasoningEffort": true,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false,
-    "requiresReasoningContentOnAssistantMessages": true,
-    "thinkingFormat": "deepseek"
+    "requiresReasoningContentOnAssistantMessages": true
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": null,
     "medium": null,
     "high": "high",
-    "xhigh": "max",
+    "xhigh": "xhigh",
     "max": null
    },
    "input": [
@@ -22469,6 +22475,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": "minimal",
     "low": "low",
     "medium": "medium",
@@ -22678,7 +22685,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -22705,7 +22712,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -22731,7 +22738,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -22757,7 +22764,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -22783,7 +22790,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -22946,7 +22953,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -22978,6 +22985,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": null,
     "medium": null,
@@ -23007,7 +23015,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -23033,7 +23041,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -23175,6 +23183,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": null,
@@ -23276,7 +23285,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -23303,7 +23312,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -23330,7 +23339,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -23357,7 +23366,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -23384,7 +23393,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -23525,6 +23534,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -23560,6 +23570,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -23631,6 +23642,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -23667,6 +23679,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -23703,6 +23716,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -23739,6 +23753,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -23811,6 +23826,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -23878,6 +23894,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -23913,6 +23930,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -23948,6 +23966,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -23983,6 +24002,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -24018,6 +24038,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -24053,6 +24074,7 @@
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": "low",
     "medium": "medium",
@@ -24258,7 +24280,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -24284,7 +24306,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -24346,7 +24368,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -24372,7 +24394,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -24399,7 +24421,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -24426,7 +24448,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -24491,7 +24513,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -24518,7 +24540,7 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": true,
+    "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false
    },
@@ -24946,7 +24968,7 @@
     "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false,
-    "thinkingFormat": "zai"
+    "thinkingFormat": "openrouter"
    },
    "reasoning": true,
    "thinkingLevelMap": {
@@ -24981,7 +25003,7 @@
     "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false,
-    "thinkingFormat": "zai"
+    "thinkingFormat": "openrouter"
    },
    "reasoning": true,
    "thinkingLevelMap": {
@@ -25016,7 +25038,7 @@
     "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false,
-    "thinkingFormat": "zai"
+    "thinkingFormat": "openrouter"
    },
    "reasoning": true,
    "thinkingLevelMap": {
@@ -25051,7 +25073,7 @@
     "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false,
-    "thinkingFormat": "zai"
+    "thinkingFormat": "openrouter"
    },
    "reasoning": true,
    "thinkingLevelMap": {
@@ -25086,7 +25108,7 @@
     "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false,
-    "thinkingFormat": "zai"
+    "thinkingFormat": "openrouter"
    },
    "reasoning": true,
    "thinkingLevelMap": {
@@ -25121,7 +25143,7 @@
     "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false,
-    "thinkingFormat": "zai"
+    "thinkingFormat": "openrouter"
    },
    "reasoning": true,
    "thinkingLevelMap": {
@@ -25157,7 +25179,7 @@
     "supportsReasoningEffort": false,
     "maxTokensField": "max_tokens",
     "supportsStrictMode": false,
-    "thinkingFormat": "zai"
+    "thinkingFormat": "openrouter"
    },
    "reasoning": true,
    "thinkingLevelMap": {
@@ -25190,13 +25212,13 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": false,
+    "supportsReasoningEffort": true,
     "maxTokensField": "max_tokens",
-    "supportsStrictMode": false,
-    "thinkingFormat": "zai"
+    "supportsStrictMode": false
    },
    "reasoning": true,
    "thinkingLevelMap": {
+    "off": "none",
     "minimal": null,
     "low": null,
     "medium": null,
@@ -25226,10 +25248,9 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": false,
+    "supportsReasoningEffort": true,
     "maxTokensField": "max_tokens",
-    "supportsStrictMode": false,
-    "thinkingFormat": "zai"
+    "supportsStrictMode": false
    },
    "reasoning": true,
    "thinkingLevelMap": {
@@ -25262,10 +25283,9 @@
    "compat": {
     "supportsStore": false,
     "supportsDeveloperRole": false,
-    "supportsReasoningEffort": false,
+    "supportsReasoningEffort": true,
     "maxTokensField": "max_tokens",
-    "supportsStrictMode": false,
-    "thinkingFormat": "zai"
+    "supportsStrictMode": false
    },
    "reasoning": true,
    "thinkingLevelMap": {
@@ -25288,7 +25308,7 @@
     "cacheWrite": 0
    },
    "contextWindow": 1310720,
-   "maxTokens": 131072
+   "maxTokens": 943718
   }
  },
  "vercel-ai-gateway": {

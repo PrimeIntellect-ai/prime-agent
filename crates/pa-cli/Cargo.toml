@@ -26,6 +26,10 @@ path = "src/main.rs"
 [dev-dependencies]
 tempfile = "3"
 base64 = "0.22"
+# The traces login tests encrypt the challenge result with the flow's own
+# public key (same versions the workspace resolves for the engine).
+rsa = { version = "0.9", features = ["sha2", "pem"] }
+sha2 = "0.10"
 libc = "0.2"
 futures = { workspace = true }
 crossterm = "0.28"

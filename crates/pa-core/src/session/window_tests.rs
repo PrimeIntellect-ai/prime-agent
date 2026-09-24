@@ -19,6 +19,63 @@ fn fixture() -> String {
     rows.into_iter().map(|row| row.to_string() + "\n").collect()
 }
 
+/// An attribution targeting a discarded-prefix (older-path) assistant:
+/// the older-path stats must carry the assistant's cumulative aggregate
+/// (TS `applyChildUsageAttributions` over the whole file), not its raw
+/// row — otherwise the child spend attributed to a pre-window assistant
+/// vanishes from the windowed `get_session_stats` while a full open
+/// counts it.
+#[test]
+fn older_path_stats_fold_child_usage_attributions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("older-attribution.jsonl");
+    let mut rows = vec![
+        json!({"type":"session","id":"s","version":3,"cwd":"/tmp","timestamp":"2026-01-01T00:00:00Z"}),
+        json!({"type":"message","id":"old-a","parentId":null,"message":{"role":"assistant","provider":"p","model":"m",
+            "content":[{"type":"text","text":"old"}],"timestamp":0,
+            "usage":{"input":100,"output":10,"cacheRead":5,"cacheWrite":0,"totalTokens":115,
+            "cost":{"input":0.1,"output":0.01,"cacheRead":0.0,"cacheWrite":0.0,"total":0.11}}}}),
+    ];
+    let mut parent = "old-a".to_owned();
+    for i in 0..220 {
+        let id = format!("u{i}");
+        rows.push(json!({"type":"message","id":id,"parentId":parent,"message":{"role":"user","content":format!("hello {i}"),"timestamp":0}}));
+        parent = id;
+    }
+    rows.push(json!({"type":"compaction","id":"compact","parentId":parent,"summary":"summary","firstKeptEntryId":"u210","tokensBefore":999}));
+    rows.push(json!({"type":"child_usage_attributed","id":"attr","parentId":"compact","targetId":"old-a","origin":"spawn_task",
+        "childUsage":{"input":50,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":55,
+        "cost":{"input":0.05,"output":0.005,"cacheRead":0,"cacheWrite":0,"total":0.055}},
+        "aggregateUsage":{"input":150,"output":15,"cacheRead":5,"cacheWrite":0,"totalTokens":115,
+        "cost":{"input":0.15,"output":0.015,"cacheRead":0,"cacheWrite":0,"total":0.165}}}));
+    rows.push(json!({"type":"message","id":"leaf","parentId":"attr","message":{"role":"user","content":"latest","timestamp":0}}));
+    let body: String = rows
+        .into_iter()
+        .map(|row| {
+            row.to_string()
+                + "
+"
+        })
+        .collect();
+    std::fs::write(&path, &body).unwrap();
+    let store = WindowedSessionStore::open(&path).unwrap().unwrap();
+    // The discarded assistant reports the aggregate (150/15/5, $0.165),
+    // never the raw row (100/10/5, $0.11) and never raw-plus-child.
+    let stats = store.older_path_stats();
+    assert_eq!(stats.assistant_messages, 1);
+    assert_eq!(stats.user_messages, 210);
+    assert_eq!(
+        (
+            stats.input,
+            stats.output,
+            stats.cache_read,
+            stats.cache_write
+        ),
+        (150, 15, 5, 0)
+    );
+    assert!((stats.cost - 0.165).abs() < 1e-9);
+}
+
 #[test]
 fn warm_cache_reads_only_header_and_suffix_and_append_stays_warm() {
     let dir = tempfile::tempdir().unwrap();

@@ -129,6 +129,69 @@ pub fn parse_session_entries(content: &str) -> Vec<Value> {
         .collect()
 }
 
+/// `applyChildUsageAttributions` (TS `core/session-manager.ts`): fold each
+/// `child_usage_attributed` entry's `aggregateUsage` into its target
+/// assistant row. TS performs this fold on every session read, so the
+/// daemon's usage walks — which sum assistant rows — must see the same
+/// attributed aggregates the live turn did (`get_session_stats`, the
+/// /context own/total split, and the top-bar cost all read folded rows).
+/// The last attribution per target wins (each aggregate is cumulative),
+/// and a target that never loaded stays untouched. In-memory only: the
+/// file keeps the raw row plus the attribution entries, the same view the
+/// TS loader serves.
+fn fold_child_usage_attributions(entries: &mut [SessionEntry]) {
+    let mut assistant_rows: HashMap<&str, usize> = HashMap::new();
+    for (index, entry) in entries.iter().enumerate() {
+        if entry.type_ == "message"
+            && entry
+                .fields
+                .get("message")
+                .and_then(|message| message.get("role"))
+                .and_then(Value::as_str)
+                == Some("assistant")
+        {
+            assistant_rows.insert(entry.id.as_str(), index);
+        }
+    }
+    let mut folds: Vec<(usize, Value)> = Vec::new();
+    for entry in entries.iter() {
+        if entry.type_ != "child_usage_attributed" {
+            continue;
+        }
+        let Some(row) = entry
+            .fields
+            .get("targetId")
+            .and_then(Value::as_str)
+            .and_then(|id| assistant_rows.get(id))
+        else {
+            continue;
+        };
+        // A malformed aggregate (null, a scalar) must not overwrite the
+        // row's valid usage with nothing — the typed session reader
+        // rejects invalid attribution payloads the same way.
+        let Some(aggregate) = entry
+            .fields
+            .get("aggregateUsage")
+            .filter(|aggregate| aggregate.is_object())
+        else {
+            continue;
+        };
+        folds.push((*row, aggregate.clone()));
+    }
+    for (row, aggregate) in folds {
+        // TS assigns `target.message.usage = cloneUsage(aggregate)` —
+        // assignment, not merge: a row that never carried a `usage` field
+        // still gets the aggregate inserted (an assistant row without
+        // usage exists in foreign or synthetic files), and a row that
+        // carried one is overwritten. Insert-through, exactly like TS.
+        if let Some(message) = entries[row].fields.get_mut("message") {
+            if let Some(object) = message.as_object_mut() {
+                object.insert("usage".to_string(), aggregate);
+            }
+        }
+    }
+}
+
 /// Read the first line of a session file and parse it as a header.
 pub fn read_session_header(path: &Path) -> Option<SessionHeader> {
     let file = fs::File::open(path).ok()?;
@@ -184,6 +247,7 @@ impl SessionFile {
                 Err(_) => continue,
             }
         }
+        fold_child_usage_attributions(&mut file.entries);
         Ok(file)
     }
 
@@ -215,6 +279,11 @@ impl SessionFile {
             };
             file.push_index(entry);
         }
+        // The window keeps the retained-target attributions as metadata and
+        // parses them BEFORE the raw retained rows, so the fold runs once
+        // every row is in (the push_index live-fold cannot see a target
+        // that has not joined the index yet).
+        fold_child_usage_attributions(&mut file.entries);
         file.leaf_id = Some(window.leaf_id().to_owned());
         let context = window.context();
         file.window = Some(SessionWindow {
@@ -308,9 +377,73 @@ impl SessionFile {
     }
 
     fn push_index(&mut self, entry: SessionEntry) {
+        self.push_index_inner(entry, true);
+    }
+
+    /// The load and in-memory build paths fold live attributions as they
+    /// push (the end-of-load fold re-applies idempotently); the
+    /// rewrite-persist path defers the fold until the rewrite succeeds —
+    /// a failed rewrite rolls the index back, and the target row must not
+    /// keep a fold whose durable attribution row never landed (TS reverts
+    /// the live row in the same failure path).
+    fn push_index_inner(&mut self, entry: SessionEntry, fold_live: bool) {
+        // The live-append seam of the attribution fold (TS
+        // `SessionManager.append_child_usage_attribution` folds after the
+        // durable append): an attribution entry joining the index folds its
+        // aggregate into the target assistant row, or the in-memory view
+        // keeps stale usage until a reopen. The end-of-load fold re-applies
+        // idempotently (the fold SETS the aggregate) and also catches forward
+        // references in foreign files.
+        if fold_live && entry.type_ == "child_usage_attributed" {
+            self.fold_live_attribution(&entry);
+        }
         self.by_id.insert(entry.id.clone(), self.entries.len());
         self.leaf_id = Some(entry.id.clone());
         self.entries.push(entry);
+    }
+
+    /// Fold one already-indexed attribution entry's aggregate (the
+    /// rewrite-persist path calls this after the durable write succeeds).
+    fn fold_attribution_id(&mut self, id: &str) {
+        let Some(&row) = self.by_id.get(id) else {
+            return;
+        };
+        if self.entries[row].type_ != "child_usage_attributed" {
+            return;
+        }
+        let entry = self.entries[row].clone();
+        self.fold_live_attribution(&entry);
+    }
+
+    /// Fold one attribution entry's aggregate into its already-indexed
+    /// target assistant row, when the row has joined the index.
+    fn fold_live_attribution(&mut self, entry: &SessionEntry) {
+        let Some(row) = entry
+            .fields
+            .get("targetId")
+            .and_then(Value::as_str)
+            .and_then(|id| self.by_id.get(id).copied())
+        else {
+            return;
+        };
+        // A malformed aggregate (null, a scalar) must not overwrite the
+        // row's valid usage with nothing — the typed session reader
+        // rejects invalid attribution payloads the same way.
+        let Some(aggregate) = entry
+            .fields
+            .get("aggregateUsage")
+            .filter(|aggregate| aggregate.is_object())
+        else {
+            return;
+        };
+        // TS assigns `target.message.usage = cloneUsage(aggregate)`:
+        // insert the aggregate even when the row never carried a `usage`
+        // field (the same insert-through as the end-of-load fold).
+        if let Some(message) = self.entries[row].fields.get_mut("message") {
+            if let Some(object) = message.as_object_mut() {
+                object.insert("usage".to_string(), aggregate.clone());
+            }
+        }
     }
 
     pub fn entries(&self) -> &[SessionEntry] {
@@ -408,11 +541,9 @@ impl SessionFile {
             {
                 Some(parent) => Some(parent),
                 // A minted-but-never-persisted parent: bridge to the file
-                // predecessor (checked_sub: then_some is eager, so a
-                // position-zero bridge must not evaluate the subtraction).
-                // The first entry has none, so the walk ends there, exactly
-                // like a plain root.
-                None if entry.parent_id.is_some() => position.checked_sub(1),
+                // predecessor. The first entry has none, so the walk ends
+                // there, exactly like a plain root.
+                None if entry.parent_id.is_some() => (position > 0).then(|| position - 1),
                 None => None,
             };
         }
@@ -827,15 +958,18 @@ impl SessionFile {
             self.push_index(entry);
         } else {
             // The rewrite path serializes the whole index, so the entry must
-            // be indexed first; a failed rewrite rolls the index back.
+            // be indexed first; a failed rewrite rolls the index back. The
+            // live attribution fold is DEFERRED until the rewrite succeeds —
+            // the rolled-back index must leave the target row untouched.
             let previous_leaf = self.leaf_id.clone();
-            self.push_index(entry);
+            self.push_index_inner(entry, false);
             if let Err(error) = self.rewrite() {
                 self.by_id.remove(&id);
                 self.entries.pop();
                 self.leaf_id = previous_leaf;
                 return Err(error);
             }
+            self.fold_attribution_id(&id);
         }
         Ok(id)
     }
@@ -1317,6 +1451,176 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pa-daemon-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// The captured-attribution fixture: real devbox session rows
+    /// (content sanitized; ids, timestamps, and usage verbatim) — six
+    /// `child_usage_attributed` entries target one assistant row.
+    fn captured_attribution_fixture() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/attribution-fold-captured.jsonl")
+    }
+
+    #[test]
+    fn open_folds_captured_child_usage_attributions() {
+        let store = SessionFile::open(&captured_attribution_fixture()).unwrap();
+        // The raw file row: input 2690 / totalTokens 23032 / cost $0. The
+        // last attribution's cumulative aggregate replaces it (TS
+        // `applyChildUsageAttributions`): input 52898 / totalTokens 23032
+        // (unchanged — the aggregate keeps the row's context size) / cost
+        // $0.0089957. Six entries fold once, never sum.
+        let assistant = store.entry("4f61089a").expect("captured target row");
+        let usage = &assistant.fields["message"]["usage"];
+        assert_eq!(usage["input"], json!(52898));
+        assert_eq!(usage["output"], json!(5863));
+        assert_eq!(usage["cacheRead"], json!(18560));
+        assert_eq!(usage["cacheWrite"], json!(0));
+        assert_eq!(usage["totalTokens"], json!(23032));
+        assert_eq!(usage["cost"]["total"].as_f64(), Some(0.0089957));
+    }
+
+    #[test]
+    fn append_entry_folds_a_live_child_usage_attribution() {
+        let mut store = SessionFile::create("/tmp", None, 0);
+        store.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+        let assistant = store.append_message(json!({
+            "role": "assistant", "content": "hello", "provider": "p", "model": "m",
+            "timestamp": 2u64,
+            "usage": {"input": 10, "output": 2, "cacheRead": 0, "cacheWrite": 0,
+                      "totalTokens": 12,
+                      "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}},
+        }));
+        store.append_entry(
+            "child_usage_attributed",
+            json!({
+                "targetId": assistant,
+                "origin": "spawn_task",
+                "childUsage": {"input": 5, "output": 1, "cacheRead": 0, "cacheWrite": 0,
+                               "totalTokens": 6,
+                               "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.01}},
+                "aggregateUsage": {"input": 15, "output": 3, "cacheRead": 0, "cacheWrite": 0,
+                                   "totalTokens": 12,
+                                   "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.01}},
+            }),
+        );
+        // The live seam folds without a reopen (TS
+        // `SessionManager.append_child_usage_attribution` folds after the
+        // durable append).
+        let row = store.entry(&assistant).unwrap();
+        assert_eq!(row.fields["message"]["usage"]["input"], json!(15));
+        assert_eq!(row.fields["message"]["usage"]["output"], json!(3));
+        assert_eq!(row.fields["message"]["usage"]["totalTokens"], json!(12));
+        assert_eq!(
+            row.fields["message"]["usage"]["cost"]["total"].as_f64(),
+            Some(0.01)
+        );
+    }
+
+    #[test]
+    fn a_malformed_aggregate_does_not_zero_the_target_row() {
+        let mut store = SessionFile::create("/tmp", None, 0);
+        store.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+        let assistant = store.append_message(json!({
+            "role": "assistant", "content": "hello", "provider": "p", "model": "m",
+            "timestamp": 2u64,
+            "usage": {"input": 10, "output": 2, "cacheRead": 0, "cacheWrite": 0,
+                      "totalTokens": 12,
+                      "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}},
+        }));
+        // A malformed aggregate (null / a scalar) must not overwrite the
+        // row's valid usage with nothing — the fold skips it, exactly like
+        // the typed session reader rejects invalid attribution payloads.
+        store.append_entry(
+            "child_usage_attributed",
+            json!({"targetId": assistant, "origin": "spawn_task", "aggregateUsage": null}),
+        );
+        store.append_entry(
+            "child_usage_attributed",
+            json!({"targetId": assistant, "origin": "direct_user", "aggregateUsage": 42}),
+        );
+        let row = store.entry(&assistant).unwrap();
+        assert_eq!(row.fields["message"]["usage"]["input"], json!(10));
+        assert_eq!(row.fields["message"]["usage"]["totalTokens"], json!(12));
+    }
+
+    /// The depth-2 chain (the Macroscope #2671 thread's design pin): a
+    /// child session file carrying its OWN grandchild attributions (the
+    /// child spawned a child) opens FOLDED — the end-of-load fold replaces
+    /// the target assistant row's usage with the newest cumulative
+    /// aggregate — and the observer walk (`child_usage_batches` over the
+    /// OPENED store) reports the FOLDED aggregate to the root: the
+    /// grandchild's billable spend reaches the root parent exactly like
+    /// the TS in-process fold does.
+    #[test]
+    fn the_depth_two_chain_reports_the_folded_aggregate() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("depth-two.jsonl");
+        let row = |id: &str, parent: Option<&str>, message: Value| {
+            json!({
+                "type": "message", "id": id, "parentId": parent,
+                "timestamp": "2026-09-24T00:00:00.000Z",
+                "message": message,
+            })
+            .to_string()
+        };
+        let assistant_usage = json!({
+            "input": 1_000, "output": 40, "cacheRead": 0, "cacheWrite": 0,
+            "totalTokens": 1_040,
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.10 },
+        });
+        let lines = [
+            json!({"type": "session", "version": 3, "id": "child-s1", "timestamp": "2026-09-24T00:00:00.000Z", "cwd": "/tmp"}).to_string(),
+            row("u1", None, json!({"role": "user", "content": "task"})),
+            row(
+                "a1",
+                Some("u1"),
+                json!({
+                    "role": "assistant",
+                    "provider": "prime-inference", "model": "internal/glm-5.3-fast",
+                    "content": [{ "type": "text", "text": "hi" }],
+                    "stopReason": "stop",
+                    "usage": assistant_usage,
+                }),
+            ),
+            // The grandchild's attribution into the child's spawning row: the
+            // cumulative aggregate (raw + grandchild spend) that the fold
+            // installs at load.
+            json!({
+                "type": "child_usage_attributed", "id": "attr1", "parentId": "a1",
+                "timestamp": "2026-09-24T00:00:01.000Z",
+                "targetId": "a1", "origin": "spawn_task",
+                "childUsage": { "input": 500, "output": 10, "cacheRead": 0, "cacheWrite": 0,
+                                "totalTokens": 510,
+                                "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.05 } },
+                "aggregateUsage": { "input": 1_500, "output": 50, "cacheRead": 0, "cacheWrite": 0,
+                                    "totalTokens": 1_040,
+                                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.15 } },
+            })
+            .to_string(),
+        ];
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        // The fold applies at open (TS applyChildUsageAttributions).
+        let store = SessionFile::open(&path).unwrap();
+        let folded = store.entry("a1").expect("the target row");
+        assert_eq!(
+            folded.fields["message"]["usage"]["input"],
+            json!(1_500),
+            "the end-of-load fold installed the cumulative aggregate"
+        );
+        // The observer walk reads the FOLDED store: the depth-2 batch the
+        // root receives carries the grandchild's spend (input 1,500 — the
+        // raw 1,000 would mean the grandchild vanished at depth 2).
+        let (batches, next) = crate::rlm_child_usage::child_usage_batches(store.entries(), 0);
+        assert_eq!(next, store.entries().len(), "the walk consumes the file");
+        let spawn = batches
+            .iter()
+            .find(|(origin, _)| matches!(origin, pa_types::session::ChildUsageOrigin::SpawnTask))
+            .expect("the spawning turn's batch");
+        assert_eq!(
+            spawn.1.input, 1_500,
+            "the folded aggregate rides the report"
+        );
+        assert_eq!(spawn.1.cost.total, pa_types::JsNumber(0.15));
     }
 
     #[test]

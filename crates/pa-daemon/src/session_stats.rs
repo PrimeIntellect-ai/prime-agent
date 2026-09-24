@@ -251,6 +251,29 @@ fn context_usage(
 mod tests {
     use super::*;
 
+    /// The captured-attribution fixture end to end: `get_session_stats`
+    /// reports the folded (attributed) totals — cost $0 → $0.0089957,
+    /// input 2690 → 52898 — while `totalTokens` stays 23032 (the
+    /// aggregate keeps the row's context size, not a sum).
+    #[test]
+    fn captured_attribution_fixture_stats_count_the_fold() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/attribution-fold-captured.jsonl");
+        let store = SessionFile::open(&path).unwrap();
+        let stats = session_stats(&store, None);
+        assert_eq!(stats["userMessages"], json!(2));
+        assert_eq!(stats["assistantMessages"], json!(1));
+        assert_eq!(stats["totalMessages"], json!(3));
+        assert_eq!(
+            stats["tokens"],
+            json!({
+                "input": 52898, "output": 5863, "cacheRead": 18560, "cacheWrite": 0,
+                "total": 77321,
+            })
+        );
+        assert_eq!(stats["cost"].as_f64(), Some(0.0089957));
+    }
+
     fn message(role: &str, fields: Value) -> Value {
         let mut value = json!({ "role": role });
         if let (Some(object), Some(fields)) = (value.as_object_mut(), fields.as_object()) {

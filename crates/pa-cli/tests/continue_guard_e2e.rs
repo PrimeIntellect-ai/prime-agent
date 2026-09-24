@@ -213,12 +213,29 @@ fn print_continue_refuses_an_active_daemon_session() {
     );
     assert_eq!(code, 1);
     assert!(stdout.is_empty(), "stdout: {stdout}");
-    assert_eq!(
-        stderr,
-        format!(
-            "Error: Session is already active in {active_session_id}: {}\n",
-            session_path.canonicalize().expect("canonical").display()
-        )
+    // The descriptive refusal (operator-directed): the TS-identical first
+    // line, then the holder's identity and the next steps.
+    let first_line = format!(
+        "Error: Session is already active in {active_session_id}: {}\n",
+        session_path.canonicalize().expect("canonical").display()
+    );
+    assert!(
+        stderr.starts_with(&first_line),
+        "stderr keeps the TS refusal first line: {stderr}"
+    );
+    assert!(
+        stderr.contains("Holder: session "),
+        "the refusal identifies the holder: {stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "Attach to it instead: prime-agent --resume {active_session_id}\n"
+        )),
+        "the refusal suggests attaching to the live session: {stderr}"
+    );
+    assert!(
+        stderr.contains("the file unlocks when that session exits"),
+        "the refusal names the unlock condition: {stderr}"
     );
 
     // The same guard applies to --resume of the active file.

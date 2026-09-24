@@ -171,6 +171,82 @@ fn finish_menu_row(theme: &Theme, row: Line, width: usize, selected: bool) -> Li
     row
 }
 
+/// One plain-text cell truncated and padded to its column budget by
+/// display width (wide glyphs never overflow into the next column; no
+/// ellipsis — the tables stay aligned, and the detail drill-ins carry
+/// the full text).
+pub(crate) fn plain_cell(text: &str, width: usize) -> String {
+    crate::width::pad_cell(text, width)
+}
+
+/// Non-newline control characters become spaces (ANSI/OSC sequences in
+/// daemon- or process-supplied text can never execute terminal control
+/// operations when rendered); newlines stay for the wraps.
+pub(crate) fn scrub_controls(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
+        .collect::<String>()
+}
+
+/// The status-dot vocabulary (the operator's 2026-09-23 directive; TS
+/// `subagent-summary-line`'s counts box `● running / ◐ idle /
+/// ○ inactive`): the filled circle rides the live states (running,
+/// active), the half circle the waiting ones (idle, paused), the open
+/// circle the dead ones. The glyph is the state at a glance; the
+/// surface's word rides beside it.
+pub(crate) fn status_dot(status: &str) -> (&'static str, ThemeColor) {
+    match status {
+        "running" | "active" => ("\u{25cf}", ThemeColor::Success),
+        "idle" | "paused" => ("\u{25d0}", ThemeColor::Warning),
+        _ => ("\u{25cb}", ThemeColor::Dim),
+    }
+}
+
+/// How far the selection hug trails past the text (TS
+/// `OnboardingChoiceComponent`'s `ROW_TRAILING`).
+pub(crate) const HUG_TRAILING: usize = 6;
+
+/// The selection hug's floor (TS `MIN_ROW_WIDTH`).
+pub(crate) const MIN_HUG_WIDTH: usize = 30;
+
+/// The selected row's wash width (TS `OnboardingChoiceComponent.render`'s
+/// `rowWidth`): the content plus a little trailing pad, floored at
+/// [`MIN_HUG_WIDTH`] and capped at the pane width — never the full-width
+/// band of the plain menu rows.
+pub(crate) fn hug_width(content_width: usize, width: usize) -> usize {
+    (content_width + HUG_TRAILING).max(MIN_HUG_WIDTH).min(width)
+}
+
+/// One hug row: the content truncated to the pane, the selected row
+/// padded to its wash width and washed over the hug only (the
+/// onboarding-highlight treatment — a little past the text, not the
+/// whole terminal width).
+pub(crate) fn hug_row(
+    theme: &Theme,
+    row: Line,
+    content_width: usize,
+    selected: bool,
+    width: usize,
+) -> Line {
+    let mut row = truncate_line(&row, width, "");
+    if !selected {
+        return row;
+    }
+    let used = crate::width::spans_width(&row);
+    let hug = hug_width(content_width, width);
+    if used < hug {
+        row.push(Span::raw(" ".repeat(hug - used)));
+    }
+    let wash = crate::onboarding::highlight_wash(theme);
+    row.into_iter()
+        .map(|mut span| {
+            span.style = span.style.bg(wash);
+            span
+        })
+        .collect()
+}
+
 /// The inline search field (TS `MenuSearchInput.render`, inline mode): a
 /// full-width border rule, the field row, a border rule. The field is the
 /// single-line input with its `"> "` prompt; an empty field shows the dim
@@ -368,6 +444,21 @@ mod tests {
 
     fn row_text(line: &Line) -> String {
         line.iter().map(|span| span.content.as_str()).collect()
+    }
+
+    /// The table cell pads by GRAPHEME width: a multi-codepoint cluster
+    /// (the family emoji is four scalars but renders one cell-picture)
+    /// never pads short or overflows its column.
+    #[test]
+    fn plain_cell_pads_by_grapheme_width() {
+        use unicode_segmentation::UnicodeSegmentation;
+        let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
+        assert_eq!(family.graphemes(true).count(), 1, "one cluster");
+        let cell = plain_cell(family, 6);
+        // One emoji cell-picture plus five pad columns — not eight.
+        assert_eq!(str_width(&cell), 6, "the cell is exactly the budget");
+        let text = format!("{cell}next");
+        assert_eq!(crate::width::str_width(&text), 10, "the columns align");
     }
 
     #[test]
