@@ -1312,7 +1312,13 @@ impl Supervisor {
         }
         {
             let mut descriptor = resident.descriptor.lock().await;
-            descriptor.pid = child.id().unwrap_or(0) as u64;
+            // Capture the child's start identity alongside its pid (TS
+            // `getProcessStartId(childPid)` at spawn): the identity-aware
+            // holder checks can only recognize a recycled pid when the
+            // descriptor carries the start id the original holder had.
+            let child_pid = child.id().unwrap_or(0);
+            descriptor.pid = child_pid as u64;
+            descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
             descriptor.lifecycle = DaemonWorkerLifecycle::Starting;
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
         }
@@ -3436,6 +3442,15 @@ impl Supervisor {
                 roster.note_worker_generation(&resident.worker_id, &replacement);
             }
             descriptor.pid = *pid;
+            // Refresh the identity from the live registrant (TS captures
+            // an identity while the process is known alive): a supervisor
+            // restart re-adopts the worker, and a pid that was recycled in
+            // between must not keep the old holder's identity. An
+            // unobservable start id keeps the previous value (a possibly
+            // live worker is never orphaned on a transient lookup failure).
+            if let Some(start_id) = crate::protocol::process_start_id(*pid as u32) {
+                descriptor.process_start_id = Some(start_id);
+            }
             descriptor.socket_path = socket_path.clone();
             descriptor.worker_instance_id = worker_instance_id.clone();
             if let Some(session_id) = &registration.session_id {
@@ -3940,12 +3955,6 @@ impl Supervisor {
         command: &DaemonCommand,
         client_id: String,
     ) -> Result<Value> {
-        if let DaemonCommand::Create {
-            name: Some(name), ..
-        } = command
-        {
-            self.assert_session_name_available(name).await?;
-        }
         // The per-file open single-flight (TS `openingWorkers`): one
         // create at a time per session file. A concurrent open waits
         // behind this one and then reuses the worker it launched — both
@@ -3956,17 +3965,27 @@ impl Supervisor {
         // client attaches next) instead of launching a second worker over
         // the same file — a launch the runtime session lease would reject
         // with `Session is already active`. `None` keeps the launch path.
+        // The seam runs BEFORE the name check (TS reserves names only on
+        // the fresh-launch path): a named open of an already-active
+        // session reuses it — its own name is not a conflict.
         if let Some(summary) = self
             .reuse_live_worker_for_create(command, &client_id)
             .await?
         {
             return Ok(summary);
         }
+        if let DaemonCommand::Create {
+            name: Some(name), ..
+        } = command
+        {
+            self.assert_session_name_available(name).await?;
+        }
         let (resident, create_summary) = self.launch_worker(command, Some(client_id)).await?;
         // The launch registered its worker (the registry insert precedes
-        // the spawn): the single-flight releases here so a concurrent
-        // open's classification finds the freshly-launched resident.
-        drop(_opening_guard);
+        // the spawn). The single-flight stays held through the spawn
+        // admission below: an admission failure tears the resident down,
+        // and a concurrent open that had just reused it would hold a
+        // summary for a worker that no longer exists.
         // Spawn admission is the moment the supervisor knows the child's
         // edge firsthand. The ledger is the only topology store, so the
         // append's outcome is load-bearing: admission fails if the spawn
@@ -3987,6 +4006,9 @@ impl Supervisor {
             let _ = self.stop_worker(&resident).await;
             return Err(error);
         }
+        // The admission settled: the single-flight may release (a
+        // concurrent open's classification now finds a durable resident).
+        drop(_opening_guard);
         // The response still matches attach/list rows exactly: prefer a
         // fresh get_state, but a degraded one falls back to the
         // authoritative create summary instead of failing the spawn (the
