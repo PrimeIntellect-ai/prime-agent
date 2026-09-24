@@ -702,7 +702,17 @@ async fn family_edges_never_cross_families_end_to_end() {
     ];
     // One scripted turn per cell: the tool-call entry, then the text
     // entry that closes it (a nested array is not a valid script).
-    let mut kid_responses = vec![json!({ "text": "kid spawned" })];
+    let mut kid_responses = vec![
+        json!({ "text": "kid spawned" }),
+        // The parent's broadcast (target=all) delivers into this
+        // session's steering queue during the spawn turn; the loop's
+        // steering poll drains it as the spawn turn's follow-up. The
+        // filler text absorbs that delivered message's turn so the
+        // scripted cells align with the driven to-kid-N turns (without
+        // it every cell runs one turn early and the observe cell reads
+        // the roster before the grandchild spawns).
+        json!({ "text": "kid absorbed the broadcast" }),
+    ];
     for cell in &kid_cells {
         let turn = cell_turn(cell);
         kid_responses.push(turn[0].clone());
