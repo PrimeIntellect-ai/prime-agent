@@ -23,6 +23,13 @@ pub struct DaemonResponse {
     pub error_info: Option<DaemonErrorInfo>,
 }
 
+/// TS `UPDATE_RESTART_PREPARING_MESSAGE` (daemon-errors.ts): the
+/// client-facing rejection message for commands fenced out while the
+/// daemon prepares an update restart. The plain string stays for old
+/// clients; [`DaemonErrorInfo::UpdateRestarting`] rides alongside for
+/// clients that wait through the restart (TS #2391).
+pub const UPDATE_RESTART_PREPARING_MESSAGE: &str = "Daemon is preparing an update restart";
+
 /// Structured failure info carried on error responses, tagged by `code`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -45,6 +52,12 @@ pub enum DaemonErrorInfo {
     SessionRecovering {
         active_session_id: String,
     },
+    /// The daemon is preparing an update restart: mutating commands
+    /// (including session opens) are refused while the restart
+    /// coordinator drains and checkpoints (TS `update_restarting`, TS
+    /// #2391). A normal transient state: clients wait through it and
+    /// retry, never surface it as a hard failure.
+    UpdateRestarting,
     CommandResultUncertain {
         client_id: DaemonClientId,
         command_id: DaemonCommandId,
@@ -426,6 +439,11 @@ mod tests {
         );
         rt::<DaemonOutbound>(
             r#"{"type":"response","command":"import_jsonl","success":false,"error":"e","errorInfo":{"code":"session_import_file_not_found","filePath":"/x"}}"#,
+        );
+        // TS #2391 `update_restarting`: the fieldless typed refusal rides
+        // the wire beside the unchanged plain message.
+        rt::<DaemonOutbound>(
+            r#"{"type":"response","command":"create","success":false,"error":"Daemon is preparing an update restart","errorInfo":{"code":"update_restarting"}}"#,
         );
     }
 

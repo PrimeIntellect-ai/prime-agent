@@ -2521,7 +2521,11 @@ impl Supervisor {
                             Some(&command_id),
                             &type_name,
                             UPDATE_PREPARING_MESSAGE,
-                            None,
+                            // TS #2391: the typed `update_restarting` info
+                            // rides beside the unchanged plain message, so
+                            // clients can recognize the normal transient
+                            // state and wait through the restart.
+                            Some(DaemonErrorInfo::UpdateRestarting),
                         ))],
                         false,
                     );
@@ -3182,9 +3186,17 @@ impl Supervisor {
             };
             let connected = resident.cmd_tx.lock().await.is_some();
             if self.is_stopping(resident) || !connected {
+                // TS #2515: the refusal names the blocking session
+                // (`sessionFile`, else the root active session id) so the
+                // message ties the refused prepare to a specific session.
+                let descriptor = resident.descriptor.lock().await;
+                let session = descriptor
+                    .session_file
+                    .clone()
+                    .unwrap_or_else(|| descriptor.root_active_session_id.clone());
                 anyhow::bail!(
-                    "Cannot prepare update restart while resident worker {} is {state}",
-                    resident.worker_id
+                    "{}",
+                    update_prepare_resident_refusal(&resident.worker_id, state, &session)
                 );
             }
         }
@@ -5227,9 +5239,40 @@ impl crate::update_stop::WorkerStopTransport for std::sync::Arc<Supervisor> {
 /// How often the graceful-stop exit wait polls worker process liveness.
 const WORKER_EXIT_POLL: Duration = Duration::from_millis(250);
 
+/// TS #2515 `prepareUpdateRestartFenced`'s resident-worker refusal: the
+/// message names the blocking session, so the refused prepare ties to a
+/// specific session instead of a bare worker id.
+fn update_prepare_resident_refusal(worker_id: &str, state: &str, session: &str) -> String {
+    format!(
+        "Cannot prepare update restart while resident worker {worker_id} is {state} (session {session})"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TS #2515: the resident-worker prepare refusal names the blocking
+    /// session — `sessionFile` when the descriptor carries one, else the
+    /// root active session id — so the refused prepare ties to a session
+    /// the user can look at, not a bare worker id.
+    #[test]
+    fn update_prepare_refusal_names_the_blocking_session() {
+        assert_eq!(
+            update_prepare_resident_refusal(
+                "resident-1",
+                "disconnected",
+                "/sessions/blocked.jsonl"
+            ),
+            "Cannot prepare update restart while resident worker resident-1 is disconnected (session /sessions/blocked.jsonl)"
+        );
+        // The root active session id is the fallback (a worker whose
+        // descriptor carries no session file yet).
+        assert_eq!(
+            update_prepare_resident_refusal("resident-1", "stopping", "blocked-root"),
+            "Cannot prepare update restart while resident worker resident-1 is stopping (session blocked-root)"
+        );
+    }
 
     /// The crash-path failure count: spawn-dies-fast churn accumulates to
     /// the give-up cap (the storm's counter could never grow while

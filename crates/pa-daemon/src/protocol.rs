@@ -1099,6 +1099,24 @@ mod tests {
         );
     }
 
+    /// TS #2391: the admission gate's preparing-restart refusal keeps the
+    /// TS plain message for old clients and carries the typed
+    /// `update_restarting` info for clients that wait through the
+    /// restart.
+    #[test]
+    fn update_preparing_refusal_carries_the_typed_error_info() {
+        let failure = response_failure(
+            Some("k3"),
+            "create",
+            crate::update_prepare::UPDATE_PREPARING_MESSAGE,
+            Some(DaemonErrorInfo::UpdateRestarting),
+        );
+        assert_eq!(
+            serde_json::to_string(&response_line(&failure)).unwrap(),
+            "{\"id\":\"k3\",\"type\":\"response\",\"command\":\"create\",\"success\":false,\"error\":\"Daemon is preparing an update restart\",\"errorInfo\":{\"code\":\"update_restarting\"}}"
+        );
+    }
+
     /// The standalone response line byte-orders its keys exactly like the
     /// TS daemon wire bytes (`daemon-protocol.ts` `success`/`failure`):
     /// id?, type, command, success, then data or error/errorInfo.

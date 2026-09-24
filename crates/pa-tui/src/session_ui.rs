@@ -9040,9 +9040,9 @@ async fn describe_session_open_failure(
     // through unchanged), and the RAW rejection message is what gets
     // decorated — the typed wrapper's own display adds the framing
     // prefix exactly once.
-    let Some(rejected) = error
+    let Some((rejected, error_info)) = error
         .downcast_ref::<crate::daemon_client::RequestRejected>()
-        .map(|rejected| rejected.message.clone())
+        .map(|rejected| (rejected.message.clone(), rejected.error_info.clone()))
     else {
         return error;
     };
@@ -9088,6 +9088,10 @@ async fn describe_session_open_failure(
     anyhow::Error::new(crate::daemon_client::RequestRejected {
         command: "create".to_string(),
         message,
+        // The typed refusal info rides the decorated refusal unchanged
+        // (an `update_restarting` create refusal never reaches this
+        // decorator: `owner_from_refusal` passes it through untouched).
+        error_info,
     })
 }
 
