@@ -1491,10 +1491,13 @@ mod tests {
     use std::io::Write as _;
     use std::sync::Mutex;
 
+    /// One captured request (url, headers, body).
+    type CapturedRequest = (String, Vec<(String, String)>, String);
+
     /// A scripted transport: one PUT slot at a time with its captured
-    /// request (url, headers, body) and scripted answer.
+    /// request and scripted answer.
     struct ScriptedTraceHttp {
-        requests: Mutex<Vec<(String, Vec<(String, String)>, String)>>,
+        requests: Mutex<Vec<CapturedRequest>>,
         answers: Mutex<VecDeque<Result<TraceHttpResponse, TraceHttpError>>>,
     }
 
@@ -1506,7 +1509,7 @@ mod tests {
             }
         }
 
-        fn last_request(&self) -> (String, Vec<(String, String)>, String) {
+        fn last_request(&self) -> CapturedRequest {
             self.requests.lock().unwrap().last().cloned().unwrap()
         }
     }
@@ -1537,7 +1540,9 @@ mod tests {
     }
 
     struct Fixture {
-        dir: tempfile::TempDir,
+        /// The temp dir stays alive for the fixture's life (the paths
+        /// point into it); it is never read.
+        _dir: tempfile::TempDir,
         cwd: PathBuf,
         agent_dir: PathBuf,
         session_dir: PathBuf,
@@ -1553,7 +1558,7 @@ mod tests {
                 cwd: dir.path().to_path_buf(),
                 agent_dir,
                 session_dir,
-                dir,
+                _dir: dir,
             }
         }
 
@@ -1616,6 +1621,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the engine's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_upload_sends_the_ts_request_and_records_the_cursor() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_API_KEY");
@@ -1679,6 +1687,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the engine's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn a_missing_credential_short_circuits_the_request() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_API_KEY");
@@ -1691,6 +1702,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the engine's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn an_oversize_session_reports_the_limit() {
         let _env = env_lock();
         std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
@@ -1722,6 +1736,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the engine's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn an_error_response_carries_the_status_and_message() {
         let _env = env_lock();
         std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
@@ -1741,6 +1758,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the engine's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_retriable_statuses_back_off_and_503_honors_retry_after() {
         let _env = env_lock();
         std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
@@ -1773,6 +1793,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the engine's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_outbox_cursor_makes_an_enabled_upload_unchanged() {
         let _env = env_lock();
         std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
@@ -1903,7 +1926,7 @@ mod tests {
         let future_ms = now_ms() + 5000;
         let future = format_http_date(future_ms);
         let parsed = retry_after_delay(Some(&future), MAX_TIMER_DELAY_MS).expect("future");
-        assert!(parsed >= 4000 && parsed <= 5000, "{parsed}");
+        assert!((4000..=5000).contains(&parsed), "{parsed}");
     }
 
     fn format_http_date(ms: u64) -> String {
@@ -1935,6 +1958,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the engine's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_upload_all_sweeps_with_the_gate_and_tallies() {
         let _env = env_lock();
         std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
@@ -1984,6 +2010,9 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    // The process env must stay stable across the engine's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_rate_gate_reports_the_wait_and_serializes() {
         let _env = env_lock();
         std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
@@ -2012,12 +2041,17 @@ mod tests {
         gate.before_request(options.cancel, options.on_upload_delay.as_ref())
             .await
             .expect("the first slot");
-        gate.before_request(None, None).await;
+        gate.before_request(None, None)
+            .await
+            .expect("the second slot");
         assert!(delays.load(Ordering::SeqCst) >= TRACE_UPLOAD_ALL_MIN_REQUEST_INTERVAL_MS - 1000);
         std::env::remove_var("PRIME_AGENT_TRACES_API_KEY");
     }
 
     #[tokio::test]
+    // The process env must stay stable across the engine's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_cancel_stops_the_sweep_between_files() {
         let _env = env_lock();
         std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");

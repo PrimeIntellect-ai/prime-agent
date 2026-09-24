@@ -525,6 +525,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_login_reuses_an_eligible_prime_cli_key() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
@@ -557,6 +560,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_browser_login_completes_the_challenge_round_trip() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
@@ -607,6 +613,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_browser_key_without_traces_access_reports_the_ts_error() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
@@ -629,6 +638,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn an_ineligible_cli_key_falls_through_to_the_browser() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
@@ -667,6 +679,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn an_expired_challenge_reports_the_ts_error() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");

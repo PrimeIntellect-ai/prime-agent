@@ -33,8 +33,9 @@ const FALLBACK_PROMPT: &str = "Paste a Prime API key below:";
 
 /// The login's terminal surface (the TS login dialog's surface): the
 /// progress lines, the auth URL (with the browser open), and the paste
-/// prompt. The seam keeps the flow scriptable in tests.
-pub(crate) trait TracesLoginUi {
+/// prompt. The seam keeps the flow scriptable in tests; `Send + Sync`
+/// because the race's boxed arms are `Send`.
+pub(crate) trait TracesLoginUi: Send + Sync {
     /// TS `onProgress` / `dialog.showProgress`.
     fn progress(&self, message: &str);
     /// TS `dialog.showAuth` (the URL + the code line) and the terminal
@@ -248,7 +249,10 @@ impl TracesLoginUi for TerminalTracesLoginUi {
 async fn read_terminal_line() -> Option<String> {
     use tokio::io::AsyncBufReadExt;
     let mut line = String::new();
-    match tokio::io::stdin().read_line(&mut line).await {
+    match tokio::io::BufReader::new(tokio::io::stdin())
+        .read_line(&mut line)
+        .await
+    {
         Ok(0) => None,
         Ok(_) => Some(line.trim().to_string()),
         Err(_) => None,
@@ -461,6 +465,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_cli_candidate_logs_in_without_a_prompt() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
@@ -504,6 +511,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_manual_key_wins_the_race_and_checks_access() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
@@ -537,6 +547,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_browser_login_completes_when_the_prompt_never_answers() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
@@ -572,6 +585,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn a_denied_manual_key_reports_the_ts_error() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
@@ -598,6 +614,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn a_cancelled_prompt_stays_silent() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
@@ -617,6 +636,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn a_failed_browser_falls_back_to_the_paste_prompt() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");

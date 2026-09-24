@@ -65,7 +65,9 @@ impl ClientTraces {
         let result = upload_trace_file(&options).await;
         TraceUploadReport::new(
             &map_upload_result(result),
-            &agent_traces_log_path(&self.agent_dir).to_string_lossy(),
+            &agent_traces_log_path(&self.agent_dir)
+                .to_string_lossy()
+                .into_owned(),
         )
     }
 }
@@ -103,7 +105,7 @@ fn map_upload_result(result: TraceUploadResult) -> TraceUploadOutcome {
 fn map_preview_result(result: TracePreviewResult) -> TracePreviewOutcome {
     match result {
         TracePreviewResult::Ready(data) => TracePreviewOutcome::Ready(Box::new(TracePreviewInfo {
-            session_file: data.session_file.to_string_lossy(),
+            session_file: data.session_file.to_string_lossy().into_owned(),
             size: data.size,
             max_bytes: data.max_bytes,
             uploadable: data.uploadable,
@@ -231,7 +233,9 @@ impl TracesCommands for ClientTraces {
                 failed: result.failed,
                 skipped: result.skipped,
                 bytes_stored: result.bytes_stored,
-                log_path: agent_traces_log_path(&agent_dir).to_string_lossy(),
+                log_path: agent_traces_log_path(&agent_dir)
+                    .to_string_lossy()
+                    .into_owned(),
             }
         })
     }
@@ -278,6 +282,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_credential_labels_follow_the_ts_precedence() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_API_KEY");
@@ -349,6 +356,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_report_formats_the_engine_rows() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_API_KEY");
