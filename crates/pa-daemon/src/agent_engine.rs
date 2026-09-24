@@ -4681,7 +4681,7 @@ pub(crate) mod tests {
 
         let engine = AgentSessionEngine::new(AgentEngineConfig {
             cwd: dir.path().to_path_buf(),
-            agent_dir: agent_dir,
+            agent_dir,
             // No process-level fallback: the wire flags must be the source.
             provider: None,
             model: None,
@@ -7244,7 +7244,7 @@ pub(crate) mod tests {
         .unwrap();
         let engine = AgentSessionEngine::new(AgentEngineConfig {
             cwd: dir.path().to_path_buf(),
-            agent_dir: agent_dir,
+            agent_dir,
             provider: None,
             model: None,
             api_key: None,
@@ -7794,7 +7794,7 @@ pub(crate) mod tests {
         .unwrap();
         let engine = AgentSessionEngine::new(AgentEngineConfig {
             cwd: dir.path().to_path_buf(),
-            agent_dir: agent_dir,
+            agent_dir,
             provider: None,
             model: None,
             api_key: None,
