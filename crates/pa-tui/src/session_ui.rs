@@ -4323,9 +4323,9 @@ impl SessionUi {
                         return;
                     }
                 }
-                let tier = match serde_json::from_value::<pa_types::ai::ServiceTier>(
-                    Value::String(value.to_string()),
-                ) {
+                let tier = match serde_json::from_value::<pa_types::ai::ServiceTier>(Value::String(
+                    value.to_string(),
+                )) {
                     Ok(tier) => tier,
                     Err(error) => {
                         self.error_row(&format!("{error:#}"), view);
@@ -4606,9 +4606,9 @@ impl SessionUi {
             );
             return;
         }
-        let Ok(tier) = serde_json::from_value::<pa_types::ai::ServiceTier>(Value::String(
-            requested.clone(),
-        )) else {
+        let Ok(tier) =
+            serde_json::from_value::<pa_types::ai::ServiceTier>(Value::String(requested.clone()))
+        else {
             self.error_row(&format!("Unknown service tier: {requested}"), view);
             return;
         };

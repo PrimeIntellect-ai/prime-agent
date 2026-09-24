@@ -415,7 +415,11 @@ mod tests {
     /// Assemble params with a service tier requested over the base
     /// stream options (the shape the daemon's provider adapter and
     /// `stream_simple` both hand the completions path).
-    fn tiered_params(provider: &str, model_id: &str, tier: Option<crate::types::ServiceTier>) -> Map<String, Value> {
+    fn tiered_params(
+        provider: &str,
+        model_id: &str,
+        tier: Option<crate::types::ServiceTier>,
+    ) -> Map<String, Value> {
         let model = models_generated::get_model(provider, model_id)
             .unwrap_or_else(|| panic!("compiled catalog carries {provider}/{model_id}"));
         let context = Context {
@@ -452,10 +456,7 @@ mod tests {
     #[test]
     fn forwards_service_tier_for_openai_and_openrouter_only() {
         use crate::types::ServiceTier;
-        for (provider, model_id) in [
-            ("openai", "gpt-5.5"),
-            ("openrouter", "openai/gpt-5.5"),
-        ] {
+        for (provider, model_id) in [("openai", "gpt-5.5"), ("openrouter", "openai/gpt-5.5")] {
             let params = tiered_params(provider, model_id, Some(ServiceTier::Priority));
             assert_eq!(
                 params.get("service_tier"),
@@ -468,7 +469,11 @@ mod tests {
                 "{provider}/{model_id}: no tier requested means no field"
             );
         }
-        let gateway = tiered_params("prime-inference", "z-ai/glm-5.3", Some(ServiceTier::Priority));
+        let gateway = tiered_params(
+            "prime-inference",
+            "z-ai/glm-5.3",
+            Some(ServiceTier::Priority),
+        );
         assert!(
             !gateway.contains_key("service_tier"),
             "gateways never receive the field"

@@ -1063,10 +1063,7 @@ pub fn supports_service_tier(model: &Model, tier: ServiceTier) -> bool {
 /// model does not support it. An absent model (a session with no resolved
 /// model) clamps every non-default tier, exactly like the TS
 /// `model == null` arm; an unset (`null`) preference passes through.
-pub fn clamp_service_tier(
-    model: Option<&Model>,
-    tier: Option<ServiceTier>,
-) -> Option<ServiceTier> {
+pub fn clamp_service_tier(model: Option<&Model>, tier: Option<ServiceTier>) -> Option<ServiceTier> {
     match tier {
         None | Some(ServiceTier::Default) => tier,
         Some(tier) => model

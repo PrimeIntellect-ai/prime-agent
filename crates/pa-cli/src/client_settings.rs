@@ -83,10 +83,9 @@ impl ClientSettings for CliClientSettings {
     }
 
     fn set_default_service_tier(&self, tier: &str) -> Result<()> {
-        let parsed: pa_types::ai::ServiceTier = serde_json::from_value(serde_json::Value::String(
-            tier.to_string(),
-        ))
-        .map_err(|error| anyhow::anyhow!("Invalid service tier \"{tier}\": {error}"))?;
+        let parsed: pa_types::ai::ServiceTier =
+            serde_json::from_value(serde_json::Value::String(tier.to_string()))
+                .map_err(|error| anyhow::anyhow!("Invalid service tier \"{tier}\": {error}"))?;
         self.manager()?.set_default_service_tier(parsed)
     }
 

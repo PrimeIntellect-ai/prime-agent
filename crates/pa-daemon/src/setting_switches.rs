@@ -398,9 +398,8 @@ impl Worker {
         let (preference_changed, effective_changed, cwd) = {
             let mut core = self.core.lock().unwrap();
             let preference = core.service_tier;
-            let previous_effective =
-                effective_service_tier(preference, self.engine.as_ref())
-                    .unwrap_or(ServiceTier::Auto);
+            let previous_effective = effective_service_tier(preference, self.engine.as_ref())
+                .unwrap_or(ServiceTier::Auto);
             core.service_tier = Some(tier);
             let effective_changed = previous_effective != effective;
             let preference_changed = preference != Some(tier);

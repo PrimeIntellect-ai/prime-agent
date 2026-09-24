@@ -507,14 +507,13 @@ impl SettingsMenu {
                         "false".into()
                     },
                 }),
-                SettingsSubmenu::ServiceTier => {
-                    SERVICE_TIER_CHOICES.get(sub.selected).cloned().map(|tier| {
-                        SettingsMenuAction::Change {
-                            id: row_id,
-                            value: tier.to_string(),
-                        }
-                    })
-                }
+                SettingsSubmenu::ServiceTier => SERVICE_TIER_CHOICES
+                    .get(sub.selected)
+                    .cloned()
+                    .map(|tier| SettingsMenuAction::Change {
+                        id: row_id,
+                        value: tier.to_string(),
+                    }),
             };
             // TS `done(value)` closes the submenu and updates the row's
             // displayed value; the caller keeps its selected index (the
@@ -1016,7 +1015,9 @@ mod menu_tests {
         assert_eq!(menu.handle_key("enter", &kb()), SettingsMenuAction::None);
         let text = render_text(&menu);
         assert!(text.iter().any(|row| row.contains("Default Service Tier")));
-        assert!(text.iter().any(|row| row.contains("Cheaper, slower, may hit capacity limits")));
+        assert!(text
+            .iter()
+            .any(|row| row.contains("Cheaper, slower, may hit capacity limits")));
         // The submenu preselects the current value (flex is the second
         // option): Enter applies it as the row's change.
         assert_eq!(

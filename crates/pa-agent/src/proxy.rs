@@ -829,7 +829,6 @@ pub fn parse_streaming_json(partial_json: &str) -> serde_json::Value {
     serde_json::Value::Object(serde_json::Map::new())
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -837,7 +836,9 @@ mod tests {
     /// Serve one `POST /api/stream` on a local listener, capture the
     /// request body, and answer with `sse`. Returns the proxy URL base and
     /// the captured body.
-    fn spawn_proxy_stub(sse: &'static str) -> (String, std::sync::mpsc::Receiver<serde_json::Value>) {
+    fn spawn_proxy_stub(
+        sse: &'static str,
+    ) -> (String, std::sync::mpsc::Receiver<serde_json::Value>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind proxy stub");
         let addr = listener.local_addr().expect("proxy stub addr");
         let (tx, rx) = std::sync::mpsc::channel();
@@ -962,18 +963,20 @@ mod tests {
             service_tier: Some(ServiceTier::Flex),
         };
         let value = serde_json::to_value(&options).expect("serialize");
-        let keys: std::collections::BTreeSet<String> = value
-            .as_object()
-            .expect("object")
-            .keys()
-            .cloned()
-            .collect();
+        let keys: std::collections::BTreeSet<String> =
+            value.as_object().expect("object").keys().cloned().collect();
         assert_eq!(
             keys,
-            ["maxTokens", "reasoning", "serviceTier", "sessionId", "temperature"]
-                .into_iter()
-                .map(String::from)
-                .collect::<std::collections::BTreeSet<_>>()
+            [
+                "maxTokens",
+                "reasoning",
+                "serviceTier",
+                "sessionId",
+                "temperature"
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<std::collections::BTreeSet<_>>()
         );
     }
 }
