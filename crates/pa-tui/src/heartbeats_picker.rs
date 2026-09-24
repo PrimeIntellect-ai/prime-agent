@@ -822,8 +822,13 @@ impl HeartbeatsPicker {
         let mut prompt_budget = self
             .viewport_rows
             .saturating_sub(fixed + 1 + pairs_rows + 2);
-        if prompt_budget == 0 && pairs_rows > 0 {
-            pairs_rows = pairs_rows.min(self.viewport_rows.saturating_sub(fixed + 2));
+        // The prompt is the drill-in's content: when the default math
+        // starves it, the pairs shrink first (they summarize — the
+        // documented order) until at least one prompt row renders. A
+        // heartbeat without prompt text never trades pairs away.
+        let has_prompt = !entry.job.prompt.trim().is_empty();
+        if prompt_budget == 0 && pairs_rows > 0 && has_prompt {
+            pairs_rows = pairs_rows.min(self.viewport_rows.saturating_sub(fixed + 4));
             prompt_budget = self
                 .viewport_rows
                 .saturating_sub(fixed + 1 + pairs_rows + 2);
@@ -1808,6 +1813,34 @@ mod tests {
             panic!("header and row status cells: {header:?} {row:?}");
         };
         assert_eq!(h, r, "the status column aligns: {header:?} vs {row:?}");
+    }
+
+    /// The pairs shrink before the prompt starves (the bot-round fix and
+    /// the documented design order): at a viewport that cannot hold both
+    /// the six base pairs and a prompt row, the pairs give rows back so
+    /// the drill-in's primary content always renders.
+    #[test]
+    fn the_pairs_shrink_before_the_prompt_starves() {
+        let mut catalog = entries();
+        catalog[0].job.status = "active".to_string();
+        catalog[0].job.prompt = (1..=20)
+            .map(|n| format!("word-{n:02}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut picker = HeartbeatsPicker::new(catalog, None, None, 19);
+        picker.handle_key("enter", &kb());
+        let frame = picker.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        let joined = text.join(" ");
+        assert!(
+            joined.contains("word-01"),
+            "the prompt's first line renders: {joined}"
+        );
+        assert!(
+            joined.contains("Prompt"),
+            "the prompt block label stays: {joined}"
+        );
+        assert!(frame.len() <= 19, "the pane fits: {}", frame.len());
     }
 
     /// The schedule pair never displaces the error row (the bot-round

@@ -216,10 +216,14 @@ pub fn render_goal_panel(
     lines.push(vec![
         theme.fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width.max(1)))
     ]);
-    lines.push(vec![
-        Span::raw("  "),
-        theme.fg_span(ThemeColor::Text, "Goal".to_string()),
-    ]);
+    lines.push(crate::width::truncate_line(
+        &vec![
+            Span::raw("  "),
+            theme.fg_span(ThemeColor::Text, "Goal".to_string()),
+        ],
+        width,
+        "",
+    ));
     lines.push(Vec::new());
     let objective = goal
         .objective
@@ -234,7 +238,10 @@ pub fn render_goal_panel(
         .chars()
         .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
         .collect();
-    let objective_width = width.saturating_sub(4).max(10);
+    // The wrap width stays inside the frame (2 indent + wrapped text <=
+    // width): at a narrow terminal the objective wraps tighter rather
+    // than rendering rows the frame would silently truncate.
+    let objective_width = width.saturating_sub(4).max(1);
     // The frame's fixed rows outside the objective block: rule, title,
     // two blanks around it, the three fact rows, the hint block's blank,
     // the hint, and the trailing blank (10) — the objective renders in
@@ -577,5 +584,28 @@ mod tests {
             !joined.contains("word-200"),
             "the clipped tail does not render"
         );
+        // A narrow frame wraps the objective inside its width: every
+        // rendered row fits (the bot-round fix — the wrap width follows
+        // the frame, never a floor wider than it).
+        let mut narrow = goal(GoalStatus::Active);
+        narrow.objective = Some("check the narrow wrap path".to_string());
+        for width in [4usize, 5, 8, 12] {
+            let frame = render_goal_panel(
+                &GoalPanel {
+                    goal: narrow.clone(),
+                    viewport_rows: 40,
+                },
+                &theme,
+                width,
+                &kb,
+            );
+            for line in &frame {
+                assert!(
+                    crate::width::spans_width(line) <= width,
+                    "a {width}-wide row fits: {:?}",
+                    line
+                );
+            }
+        }
     }
 }
