@@ -534,6 +534,8 @@ impl DaemonClient {
     /// `list_saved_sessions` carry it, so the caller can attribute the
     /// catalog stream to its own fetch (TS's connection routes the
     /// stream to the originating `listDaemonSavedSessions` callbacks).
+    /// The id must start with `daemon_` - the supervisor reader's
+    /// socket-close failure pass filters by that prefix.
     pub async fn request_supervisor_with_id(
         &self,
         command: DaemonCommand,

@@ -1721,8 +1721,12 @@ fn spawn_saved_catalog_fetch(
 ) -> String {
     let client = client.clone();
     static CATALOG_FETCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    // The id rides the supervisor reader's `daemon_` namespace: the
+    // socket-close failure pass (`fail_pending("daemon_", ..)`) must cover
+    // the fetch too, or a dead connection leaves the long-running scan's
+    // oneshot armed until its whole budget (the exit-hang class of bugs).
     let id = format!(
-        "agents-view-catalog-{}",
+        "daemon_catalog-{}",
         CATALOG_FETCH_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1
     );
     let request_id = id.clone();
@@ -1851,11 +1855,16 @@ async fn run_agents_view_surface(
     // row state, never the client).
     let cwd = mode.options.cwd.clone();
     let session_dir = mode.options.session_dir.clone();
-    let mut catalog_request =
-        spawn_saved_catalog_fetch(&client, ui_tx.clone(), cwd.clone(), session_dir.clone());
     // Broadcast frames that landed on the parked connection while the view
     // was closed (heartbeats): the fresh roster snapshot supersedes them.
+    // The drain runs BEFORE the catalog fetch spawns - the fetch's
+    // `session_list_item` stream is live data now, and a drain after the
+    // spawn could discard its first frames (the entry anchor's row rides
+    // the scan's newest-first head, exactly the rows the wait needs
+    // soonest).
     while events.try_recv().is_ok() {}
+    let mut catalog_request =
+        spawn_saved_catalog_fetch(&client, ui_tx.clone(), cwd.clone(), session_dir.clone());
     let mut pending: Vec<UiInput> = Vec::new();
     let mut last_pulse = tokio::time::Instant::now();
     // The saved-catalog stream's open batch window: the first buffered row
@@ -2275,7 +2284,11 @@ mod tests {
         assert_eq!(mode.saved[0]["path"], "/x/a-moved.jsonl");
         // The final response replaces the catalog wholesale.
         mode.drop_saved_stream();
-        mode.saved = vec![saved_catalog_row("/x/c.jsonl", "c", "the authoritative row")];
+        mode.saved = vec![saved_catalog_row(
+            "/x/c.jsonl",
+            "c",
+            "the authoritative row",
+        )];
         mode.rebuild_rows();
         assert_eq!(mode.saved.len(), 1);
         assert_eq!(mode.saved[0]["id"], "c");
