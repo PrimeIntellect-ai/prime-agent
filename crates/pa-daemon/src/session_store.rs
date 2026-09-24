@@ -1538,6 +1538,86 @@ mod tests {
         assert_eq!(row.fields["message"]["usage"]["totalTokens"], json!(12));
     }
 
+    /// The depth-2 chain (the Macroscope #2671 thread's design pin): a
+    /// child session file carrying its OWN grandchild attributions (the
+    /// child spawned a child) opens FOLDED — the end-of-load fold replaces
+    /// the target assistant row's usage with the newest cumulative
+    /// aggregate — and the observer walk (`child_usage_batches` over the
+    /// OPENED store) reports the FOLDED aggregate to the root: the
+    /// grandchild's billable spend reaches the root parent exactly like
+    /// the TS in-process fold does.
+    #[test]
+    fn the_depth_two_chain_reports_the_folded_aggregate() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("depth-two.jsonl");
+        let row = |id: &str, parent: Option<&str>, message: Value| {
+            json!({
+                "type": "message", "id": id, "parentId": parent,
+                "timestamp": "2026-09-24T00:00:00.000Z",
+                "message": message,
+            })
+            .to_string()
+        };
+        let assistant_usage = json!({
+            "input": 1_000, "output": 40, "cacheRead": 0, "cacheWrite": 0,
+            "totalTokens": 1_040,
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.10 },
+        });
+        let lines = [
+            json!({"type": "session", "version": 3, "id": "child-s1", "timestamp": "2026-09-24T00:00:00.000Z", "cwd": "/tmp"}).to_string(),
+            row("u1", None, json!({"role": "user", "content": "task"})),
+            row(
+                "a1",
+                Some("u1"),
+                json!({
+                    "role": "assistant",
+                    "provider": "prime-inference", "model": "internal/glm-5.3-fast",
+                    "content": [{ "type": "text", "text": "hi" }],
+                    "stopReason": "stop",
+                    "usage": assistant_usage,
+                }),
+            ),
+            // The grandchild's attribution into the child's spawning row: the
+            // cumulative aggregate (raw + grandchild spend) that the fold
+            // installs at load.
+            json!({
+                "type": "child_usage_attributed", "id": "attr1", "parentId": "a1",
+                "timestamp": "2026-09-24T00:00:01.000Z",
+                "targetId": "a1", "origin": "spawn_task",
+                "childUsage": { "input": 500, "output": 10, "cacheRead": 0, "cacheWrite": 0,
+                                "totalTokens": 510,
+                                "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.05 } },
+                "aggregateUsage": { "input": 1_500, "output": 50, "cacheRead": 0, "cacheWrite": 0,
+                                    "totalTokens": 1_040,
+                                    "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0.15 } },
+            })
+            .to_string(),
+        ];
+        std::fs::write(&path, lines.join("\n")).unwrap();
+        // The fold applies at open (TS applyChildUsageAttributions).
+        let store = SessionFile::open(&path).unwrap();
+        let folded = store.entry("a1").expect("the target row");
+        assert_eq!(
+            folded.fields["message"]["usage"]["input"],
+            json!(1_500),
+            "the end-of-load fold installed the cumulative aggregate"
+        );
+        // The observer walk reads the FOLDED store: the depth-2 batch the
+        // root receives carries the grandchild's spend (input 1,500 — the
+        // raw 1,000 would mean the grandchild vanished at depth 2).
+        let (batches, next) = crate::rlm_child_usage::child_usage_batches(store.entries(), 0);
+        assert_eq!(next, store.entries().len(), "the walk consumes the file");
+        let spawn = batches
+            .iter()
+            .find(|(origin, _)| matches!(origin, pa_types::session::ChildUsageOrigin::SpawnTask))
+            .expect("the spawning turn's batch");
+        assert_eq!(
+            spawn.1.input, 1_500,
+            "the folded aggregate rides the report"
+        );
+        assert_eq!(spawn.1.cost.total, pa_types::JsNumber(0.15));
+    }
+
     #[test]
     fn creates_and_loads_a_session() {
         let dir = temp_dir();
