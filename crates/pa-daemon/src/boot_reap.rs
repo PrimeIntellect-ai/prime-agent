@@ -819,8 +819,25 @@ mod tests {
             .env(crate::worker::WORKER_ACTIVE_SESSION_ID_ENV, "6b558be357e3")
             .spawn()
             .expect("spawn stamped sleep");
+        // The stamp is readable only once execve completes: between fork
+        // and exec the child's environment area still holds the parent's
+        // (parallel-test load widens that window), so the read retries a
+        // bounded budget instead of racing the kernel.
+        let stamped_matches = {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if proc_environ_names_active_session(stamped.id(), "6b558be357e3") {
+                    break true;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the stamped environment never matched its abandoned id"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
         assert!(
-            proc_environ_names_active_session(stamped.id(), "6b558be357e3"),
+            stamped_matches,
             "the stamped environment matches its abandoned id"
         );
         assert!(
