@@ -842,7 +842,6 @@ struct Columns {
     command: usize,
     duration: usize,
     pid: usize,
-    status: usize,
 }
 
 impl Columns {
@@ -886,7 +885,6 @@ impl Columns {
             command,
             duration: duration_content,
             pid,
-            status,
         }
     }
 

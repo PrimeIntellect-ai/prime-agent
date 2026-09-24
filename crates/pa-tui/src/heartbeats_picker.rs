@@ -1043,8 +1043,6 @@ pub fn human_schedule(expression: &str) -> String {
 struct Columns {
     interval: usize,
     label: usize,
-    next_run: usize,
-    status: usize,
 }
 
 impl Columns {
@@ -1079,8 +1077,6 @@ impl Columns {
         Self {
             interval: interval_content.min(width.saturating_sub(fixed + label)),
             label,
-            next_run: 16,
-            status,
         }
     }
 
