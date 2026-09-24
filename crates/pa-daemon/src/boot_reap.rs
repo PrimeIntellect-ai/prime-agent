@@ -211,9 +211,15 @@ async fn stop_target(target: &ReapTarget) -> ReapOutcome {
         return ReapOutcome::AlreadyGone;
     }
     let Some(pidfd) = pa_core::platform::process::open_pidfd(target.pid) else {
-        // The kernel-held handle is unavailable (an unsupported platform
-        // or a process that just exited): the conservative default never
-        // signals - a missed reap is recoverable, a wrong one is not.
+        // The kernel-held handle is unavailable (an unsupported platform,
+        // an old kernel, or a process that just exited): the conservative
+        // default never signals - a missed reap is recoverable, a wrong
+        // one is not. A LIVE process behind an unobtainable handle is NOT
+        // gone: the terminal stop keeps its tombstoned descriptor (the
+        // next boot retries), never deletes it behind a false AlreadyGone.
+        if crate::lease::is_process_alive(target.pid).unwrap_or(false) {
+            return ReapOutcome::Survived;
+        }
         return ReapOutcome::AlreadyGone;
     };
     if pa_core::platform::process::pidfd_signal(pidfd, pa_core::platform::process::Signal::Term) {
