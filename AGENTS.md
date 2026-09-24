@@ -83,6 +83,17 @@ Every contributor (human or agent) must read this before working on this repo.
 - Verifiers over self-assessment: tmux user-level tests, differential tests against the TS binary
   on PATH, golden corpora replayed against real captured data. No lane merges without its verifier
   passing, rerun by the reviewer where feasible.
+- Test stability (the TS repo froze 767 wall-clock timers/polls in 130 test files before anyone
+  counted — TS PR #2495; every flake costs the fleet a classification cycle):
+  - No fixed sleep, polling loop, or timeout as a readiness signal; await the concrete event.
+    A timer may bound failure; it must not make a test pass.
+  - No retry-to-green wrappers. A flaky test is made deterministic or deleted, never skipped.
+  - Regressions land in the existing suite of the module that broke (issue number in the test
+    name); one test file per source module. Deleting code deletes its tests.
+  - A change should not add more lines of test than source; a test-only change deletes at least
+    as many test lines as it adds.
+- An inline `#[allow(clippy::...)]` (or lint allow) carries the reason in a comment — the deny.toml
+  pattern: every exception states why.
 
 ## Merge gates
 
