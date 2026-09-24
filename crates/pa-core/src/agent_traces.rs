@@ -1679,6 +1679,13 @@ mod tests {
     async fn the_disabled_requirement_gate_matches_ts() {
         let fixture = Fixture::new();
         let session = fixture.write_session("s.jsonl", "sid");
+        // Sharing defaults ON, so the disabled gate needs an explicit
+        // opt-out on disk; `reload_config` re-reads it before the gate.
+        let mut settings =
+            crate::settings::SettingsManager::create(&fixture.cwd, &fixture.agent_dir);
+        settings
+            .set_agent_traces_enabled(false)
+            .expect("the opt-out write");
         let http = ScriptedTraceHttp::new(vec![]);
         let mut options = fixture.options(&http, Some(&session));
         options.require_enabled = true;

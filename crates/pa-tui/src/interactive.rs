@@ -424,8 +424,12 @@ async fn run_onboarding_phase(
     renderer: &mut Renderer,
     exit_guard: &ExitGuard,
 ) -> Result<bool> {
-    // TS model-ready branch: a user who already opted into traces sees no
-    // flow at all — the flow completes silently and marks itself seen.
+    // Sharing is on unless the user opted out, so a fresh install always
+    // takes this branch: the flow completes silently, nothing is drawn,
+    // and the session screen owns the first frame. The question below
+    // mounts only for a home that explicitly opted out before completing
+    // onboarding (TS parity: `askOnboardingTraceOptIn` skips when already
+    // enabled).
     if task.sink.agent_traces_enabled() {
         let _ = task.sink.mark_onboarding_complete();
         return Ok(false);
@@ -883,8 +887,10 @@ async fn run_interactive_surface(
     // switch) returns to the editor when its chat reopens.
     session.restore_prompt_stash_on_open(&mut view);
     // First-run onboarding owns the pane before the session screen (TS
-    // `runStartupOnboarding`, model-ready branch: splash + trace question).
-    // Headless harness runs have no terminal to draw it on and skip it.
+    // `runStartupOnboarding`, model-ready branch). A fresh install ships
+    // trace sharing pre-configured, so this completes silently without
+    // drawing; only an explicit opt-out that never completed onboarding
+    // mounts the splash + trace question.
     if let Some(task) = options.onboarding.clone() {
         let exit_requested =
             run_onboarding_phase(&task, &mut view, &mut ui_rx, &mut renderer, &exit_guard).await?;
