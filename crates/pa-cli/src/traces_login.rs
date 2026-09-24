@@ -432,7 +432,12 @@ mod tests {
             self.prompt_seen.lock().unwrap().push(prompt.to_string());
             // The answer pops synchronously (a Mutex is not clonable into
             // the future).
-            let answer = self.pastes.lock().unwrap().pop_front();
+            let answer = self
+                .pastes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("a scripted paste is queued");
             let wait_forever = self.wait_forever.load(Ordering::SeqCst);
             Box::pin(async move {
                 if wait_forever {
@@ -649,7 +654,7 @@ mod tests {
             (
                 "https://api.primeintellect.ai/api/v1/auth_challenge/generate",
                 503,
-                String::new(),
+                "",
             ),
             // The pasted fallback key's access check.
             whoami_ok(),

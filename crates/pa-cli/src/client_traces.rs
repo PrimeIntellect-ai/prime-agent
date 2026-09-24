@@ -65,9 +65,7 @@ impl ClientTraces {
         let result = upload_trace_file(&options).await;
         TraceUploadReport::new(
             &map_upload_result(result),
-            &agent_traces_log_path(&self.agent_dir)
-                .to_string_lossy()
-                .into_owned(),
+            &agent_traces_log_path(&self.agent_dir).to_string_lossy(),
         )
     }
 }
