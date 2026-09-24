@@ -706,6 +706,35 @@ impl SessionManager {
         })
     }
 
+    /// The branch's newest un-resumed quota park, reachable without
+    /// hydration (TS `_restoreQuotaPark`'s scan, newest first): the
+    /// loaded active branch entries first, then — for a windowed store —
+    /// the window's pre-boundary metadata records.
+    pub fn latest_quota_park(
+        &self,
+    ) -> Option<crate::session_engine::provider_park::PersistedQuotaPark> {
+        use crate::session_engine::provider_park::{scan_quota_park_entries, BranchParkScan};
+        match scan_quota_park_entries(self.active_branch_entries()) {
+            BranchParkScan::Park(park) => return Some(park),
+            // A newer resume entry ends the episode; older records cannot
+            // restore a park behind it.
+            BranchParkScan::Resumed => return None,
+            BranchParkScan::None => {}
+        }
+        let window = self.window.as_ref()?;
+        for line in window.metadata_entries().iter().rev() {
+            let Ok(entry) = serde_json::from_str::<FileEntry>(line) else {
+                continue;
+            };
+            match scan_quota_park_entries(std::slice::from_ref(&entry)) {
+                BranchParkScan::Park(park) => return Some(park),
+                BranchParkScan::Resumed => return None,
+                BranchParkScan::None => continue,
+            }
+        }
+        None
+    }
+
     /// Newest `git_state` reachable without hydration: the loaded active
     /// branch first, then the window's pre-boundary metadata (newest first).
     pub(crate) fn latest_git_context(&self) -> Option<pa_types::session::GitContext> {

@@ -18,6 +18,7 @@ use std::future::Future;
 use pa_agent::abort::AbortSignal;
 use pa_agent::types::{AssistantMessage, StopReason};
 
+use super::provider_park::ParkDecisionCallback;
 use super::provider_retry::{
     is_agent_lifecycle_failure, is_context_overflow_failure, is_faux_provider_queue_exhausted,
     is_permanent_provider_failure_kind, is_unsupported_tool_failure, jittered_delay_ms,
@@ -68,6 +69,13 @@ pub enum AutoRetryEvent {
 /// happen; `wait` sleeps one delay (returning `false` aborts the loop, like
 /// the TS abort controller). Returns the final assistant message — error or
 /// not — so the caller renders it like every other outcome.
+///
+/// `park` is the quota-park seam (TS #2375): consulted when a
+/// server-requested wait exceeds the policy cap (this port's
+/// `reset-too-far`). A `Some` outcome parks the session — the chain
+/// surfaces the parked status as the final `auto_retry_end` instead of
+/// the give-up — and `None` keeps the immediate give-up.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_turn_with_auto_retry<A, AF, E, EF, W, WF>(
     policy: &ProviderRetryPolicy,
     context_window: u64,
@@ -75,6 +83,7 @@ pub async fn run_turn_with_auto_retry<A, AF, E, EF, W, WF>(
     mut attempt: A,
     mut emit: E,
     mut wait: W,
+    mut park: Option<ParkDecisionCallback<'_>>,
 ) -> anyhow::Result<AssistantMessage>
 where
     A: FnMut() -> AF,
@@ -156,16 +165,32 @@ where
                 jittered_delay_ms(delay_ms, retry_jitter_rand01())
             }
             ProviderRetryDelay::ExceedsCap { retry_after_ms } => {
+                // The give-up sentence of this arm is the park's abort
+                // message (the TS wait loop's `reset-too-far` analogue).
+                let abort = format!(
+                    "Provider requested a {}s wait before retrying (above retry.provider.maxRetryDelayMs={}ms)",
+                    retry_after_ms.div_ceil(1000),
+                    policy.max_retry_delay_ms,
+                );
+                let parked = match park.as_deref_mut() {
+                    Some(park) => park(message.clone(), &abort).await,
+                    None => None,
+                };
+                let final_error = match parked {
+                    // The turn settles as the park's pause, not its death:
+                    // the parked status replaces the give-up (TS
+                    // `_finishQuotaParkedTurn`'s `finalError`).
+                    Some(outcome) => outcome.status_message,
+                    None => format!(
+                        "{abort}: {}",
+                        message.error_message.as_deref().unwrap_or("unknown error"),
+                    ),
+                };
                 emit(AutoRetryEvent::End {
                     success: false,
                     attempt: retries_performed - 1,
                     restored_model: None,
-                    final_error: Some(format!(
-                        "Provider requested a {}s wait before retrying (above retry.provider.maxRetryDelayMs={}ms): {}",
-                        retry_after_ms.div_ceil(1000),
-                        policy.max_retry_delay_ms,
-                        message.error_message.as_deref().unwrap_or("unknown error"),
-                    )),
+                    final_error: Some(final_error),
                 })
                 .await?;
                 return Ok(message);
@@ -307,6 +332,7 @@ mod tests {
                 }
             },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
@@ -381,6 +407,7 @@ mod tests {
                 }
             },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
@@ -424,6 +451,7 @@ mod tests {
                 }
             },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
@@ -466,6 +494,7 @@ mod tests {
                 }
             },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
@@ -495,6 +524,7 @@ mod tests {
                 }
             },
             |_| async { false },
+            None,
         )
         .await
         .unwrap();
@@ -523,6 +553,7 @@ mod tests {
             || async { Ok(error_message(Some("server_error"), None, None)) },
             |_| async { Ok(()) },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
@@ -553,6 +584,7 @@ mod tests {
                 }
             },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
@@ -603,6 +635,7 @@ mod tests {
                 }
             },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
@@ -620,6 +653,7 @@ mod tests {
             || async { Err(anyhow::anyhow!("turn crashed")) },
             |_| async { Ok(()) },
             |_| async { true },
+            None,
         )
         .await
         .unwrap_err();
@@ -656,6 +690,7 @@ mod tests {
                 }
             },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();

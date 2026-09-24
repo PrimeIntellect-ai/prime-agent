@@ -124,6 +124,14 @@ pub struct ProviderWaitSettings {
     pub max_delay_ms: Option<u64>,
     pub max_attempts: Option<u64>,
     pub max_wait_ms: Option<u64>,
+    /// Park sessions for provider-reported resets beyond the bounded
+    /// wait (TS #2375 `pauseUntilReset`; default true).
+    pub pause_until_reset: Option<bool>,
+    /// Maximum single park duration (TS `maxPauseMs`; default 24h,
+    /// clamped to 7d).
+    pub max_pause_ms: Option<u64>,
+    /// Maximum parks per quota episode (TS `maxParks`; default 8).
+    pub max_parks: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

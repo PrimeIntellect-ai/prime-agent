@@ -272,8 +272,8 @@ async fn run_stream(
                         .as_ref()
                         .map(tokio_util::sync::CancellationToken::is_cancelled)
                         .unwrap_or(false);
-                    // Only reset the chain while nothing was streamed yet:
-                    // after the first event the retry would duplicate
+                    // Only reset the chain before visible output starts:
+                    // retrying after content events would duplicate
                     // "start"/content events.
                     if !aborted
                         && !websocket_started
@@ -281,6 +281,11 @@ async fn run_stream(
                         && is_stale_codex_continuation_error(&error)
                     {
                         chain_reset_retried = true;
+                        // A failed attempt may have supplied response
+                        // metadata before rejecting the continuation. Do
+                        // not retain that dead anchor (TS #2374
+                        // `delete output.responseId`).
+                        output.response_id = None;
                         continue;
                     }
                     if aborted || error.is_non_transport_error() {
@@ -373,6 +378,26 @@ async fn run_stream(
     Ok(())
 }
 
+/// Whether one parsed Codex WebSocket event can produce assistant output
+/// consumed by the shared responses processor (TS #2374
+/// `isCodexVisibleResponseEvent`): the terminal families plus the output,
+/// reasoning, content, refusal, and function streams. Lifecycle
+/// (`response.created`/`response.in_progress`), telemetry, and vendor
+/// metadata cannot, so they stay internal and never mark the attempt as
+/// user-visible.
+fn is_codex_visible_response_event(event: &Value) -> bool {
+    let Some(event_type) = event.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    event_type == "response.completed"
+        || event_type == "response.incomplete"
+        || event_type.starts_with("response.output_")
+        || event_type.starts_with("response.reasoning_")
+        || event_type.starts_with("response.content_")
+        || event_type.starts_with("response.refusal.")
+        || event_type.starts_with("response.function_")
+}
+
 /// One WebSocket attempt (port of the websocket branch of `streamOpenAICodexResponses`).
 #[allow(clippy::too_many_arguments)]
 async fn run_websocket_attempt(
@@ -444,7 +469,11 @@ async fn run_websocket_attempt(
         while let Some(event) = events.recv().await {
             match event {
                 websocket::WorkerEvent::Event(event) => {
-                    if !start_emitted {
+                    // Codex can emit lifecycle, telemetry, or vendor metadata
+                    // before rejecting a stale continuation. Keep the attempt
+                    // retryable until an event can produce output consumed by
+                    // the shared processor (TS #2374's visible-event gate).
+                    if !start_emitted && is_codex_visible_response_event(&event) {
                         start_emitted = true;
                         *websocket_started = true;
                         writer.push(AssistantMessageEvent::Start {

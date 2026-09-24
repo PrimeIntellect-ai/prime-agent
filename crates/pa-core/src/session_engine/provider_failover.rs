@@ -39,6 +39,7 @@ use pa_agent::types::{AssistantMessage, StopReason};
 use pa_types::ai::Model;
 
 use super::auto_retry::{run_turn_with_auto_retry, AutoRetryEvent, RetryStartReason};
+use super::provider_park::ParkDecisionCallback;
 use super::provider_retry::{
     is_agent_lifecycle_failure, is_context_overflow_failure, is_faux_provider_queue_exhausted,
     is_permanent_provider_failure_kind, is_unsupported_tool_failure, jittered_delay_ms,
@@ -144,6 +145,7 @@ pub async fn run_turn_with_provider_failover<A, AF, E, EF, W, WF, S, SF, R, RF>(
     mut wait: W,
     mut switch: S,
     mut restore: R,
+    mut park: Option<ParkDecisionCallback<'_>>,
 ) -> anyhow::Result<AssistantMessage>
 where
     A: FnMut() -> AF,
@@ -158,8 +160,16 @@ where
     RF: Future<Output = anyhow::Result<Option<String>>>,
 {
     if !failover.enabled || candidates.is_empty() {
-        return run_turn_with_auto_retry(quick_policy, context_window, signal, attempt, emit, wait)
-            .await;
+        return run_turn_with_auto_retry(
+            quick_policy,
+            context_window,
+            signal,
+            attempt,
+            emit,
+            wait,
+            park.as_deref_mut(),
+        )
+        .await;
     }
     let mut total_retries = 0u32;
     let mut retries_on_provider = 0u32;
@@ -293,15 +303,31 @@ where
                 if switched {
                     let _ = restore().await?;
                 }
+                // The give-up sentence of this arm is the park's abort
+                // message (the TS wait loop's `reset-too-far` analogue).
+                let abort = format!(
+                    "Provider requested a {}s wait before retrying (above retry.provider.maxRetryDelayMs={}ms)",
+                    retry_after_ms.div_ceil(1000),
+                    quick_policy.max_retry_delay_ms,
+                );
+                let parked = match park.as_deref_mut() {
+                    Some(park) => park(message.clone(), &abort).await,
+                    None => None,
+                };
+                let final_error = match parked {
+                    // The turn settles as the park's pause, not its death:
+                    // the parked status replaces the give-up (TS
+                    // `_finishQuotaParkedTurn`'s `finalError`).
+                    Some(outcome) => outcome.status_message,
+                    None => format!(
+                        "{abort}: {}",
+                        message.error_message.as_deref().unwrap_or("unknown error"),
+                    ),
+                };
                 emit(AutoRetryEvent::End {
                     success: false,
                     attempt: total_retries - 1,
-                    final_error: Some(format!(
-                        "Provider requested a {}s wait before retrying (above retry.provider.maxRetryDelayMs={}ms): {}",
-                        retry_after_ms.div_ceil(1000),
-                        quick_policy.max_retry_delay_ms,
-                        message.error_message.as_deref().unwrap_or("unknown error"),
-                    )),
+                    final_error: Some(final_error),
                     restored_model: None,
                 })
                 .await?;
@@ -518,6 +544,7 @@ mod tests {
                     }
                 }
             },
+            None,
         )
         .await
         .unwrap();
