@@ -791,6 +791,20 @@ pub struct Worker {
     /// session build (TS `createAgentSessionFromServices` parity — the
     /// kernel prewarm starts at create) runs through the concrete handle.
     pub(crate) agent_engine: Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>>,
+    /// The supervisor link the command arms push roster deltas over (the
+    /// same link the turn runner's busy-flip pushes use; stateless, so
+    /// each request dials its own socket).
+    roster_link: std::sync::Arc<crate::supervisor_link::SupervisorLink>,
+    /// The supervisor-issued worker token authenticating roster pushes.
+    worker_token: String,
+    /// The monotonic roster-delta counter shared with the turn runner: the
+    /// per-request links deliver pushes unordered, so every delta carries
+    /// the counter's value for the supervisor's stale-delta gate.
+    roster_delta_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The push-order lock shared with the turn runner: the snapshot and
+    /// its sequence stamp are one atomic pair, so sequence order is
+    /// snapshot order.
+    roster_push_order: std::sync::Arc<std::sync::Mutex<()>>,
     pub(crate) work_notify: Arc<Notify>,
     idle_notify: Arc<Notify>,
     pub(crate) events: Arc<EventPump>,
@@ -957,6 +971,18 @@ impl Worker {
         tokio::spawn(async move {
             status_runner.run(status_rx).await;
         });
+        // The supervisor link and worker token for roster pushes: one
+        // construction shared by the turn runner's busy-flip pushes and
+        // the command arms' switch pushes (the same env the runner reads,
+        // so both push over the identical dial path).
+        let roster_link = std::sync::Arc::new(crate::supervisor_link::SupervisorLink::new(
+            std::env::var_os(WORKER_SUPERVISOR_SOCKET_ENV)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default(),
+        ));
+        let worker_token = std::env::var(WORKER_TOKEN_ENV).unwrap_or_default();
+        let roster_delta_sequence = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let roster_push_order = std::sync::Arc::new(std::sync::Mutex::new(()));
         // The session input-pause table (the admission gate): shared by
         // the worker's arms and the turn runner below.
         let input_pauses = crate::session_input_pause::InputPauseTable::new();
@@ -1151,6 +1177,46 @@ impl Worker {
                     );
                 });
                 concrete.set_goal_admission(probe, sink, queue_purge);
+                // The bash-completion wake seam (TS
+                // `_promptInjectedMessage` for `bash.completed` and
+                // `_withdrawAsyncBashCompletionNotice` for
+                // `bash.consumed`): the handler validates and the sink
+                // admits/withdraws through the queue lanes. The engine
+                // reference carries the closed-session gate (the same
+                // refusal `deliver_goal_work` applies).
+                // A weak engine reference: the engine holds the sinks,
+                // so a strong reference here would pin it forever (the
+                // same reason the goal settle hook downgrades).
+                let notice_engine = std::sync::Arc::downgrade(concrete);
+                let notice_core = Arc::clone(&core);
+                let notice_notify = Arc::clone(&work_notify);
+                let notice_recovery = Arc::clone(&recovery);
+                let completion: crate::engine::BashCompletionSink = Arc::new(move |notice| {
+                    let Some(engine) = notice_engine.upgrade() else {
+                        return;
+                    };
+                    if engine.session_is_closed() {
+                        return;
+                    }
+                    admit_bash_completion_notice(
+                        &notice_recovery,
+                        &notice_core,
+                        &notice_notify,
+                        notice,
+                        // Revalidated inside the admission's own lock
+                        // section: the close paths mark the session
+                        // BEFORE clearing the lanes, so a notice that
+                        // slips past the check above is either refused
+                        // here or wiped by the close's clear.
+                        || engine.session_is_closed(),
+                    );
+                });
+                let withdraw_core = Arc::clone(&core);
+                let withdraw_recovery = Arc::clone(&recovery);
+                let consumed: crate::engine::BashConsumedSink = Arc::new(move |notice| {
+                    withdraw_bash_completion_notice(&withdraw_recovery, &withdraw_core, notice);
+                });
+                concrete.set_bash_notice_sinks(completion, consumed);
             }
             let runner = TurnRunner {
                 recovery: Arc::clone(&recovery),
@@ -1163,12 +1229,11 @@ impl Worker {
                 engine: std::sync::Arc::clone(&engine),
                 active_session_id,
                 status_notify: status_notify.clone(),
-                roster_link: std::sync::Arc::new(crate::supervisor_link::SupervisorLink::new(
-                    std::env::var_os(WORKER_SUPERVISOR_SOCKET_ENV)
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_default(),
-                )),
-                worker_token: std::env::var(WORKER_TOKEN_ENV).unwrap_or_default(),
+                roster_link: std::sync::Arc::clone(&roster_link),
+                worker_token: worker_token.clone(),
+                roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
+                roster_push_order: std::sync::Arc::clone(&roster_push_order),
+                worker_instance_id: config.worker_instance_id.clone(),
             };
             tokio::spawn(async move {
                 runner.run().await;
@@ -1222,6 +1287,10 @@ impl Worker {
             core,
             engine,
             agent_engine,
+            roster_link,
+            worker_token,
+            roster_delta_sequence,
+            roster_push_order,
             work_notify,
             idle_notify,
             events,
@@ -2633,6 +2702,27 @@ impl Worker {
             status_label: None,
             summary: None,
             task_state: None,
+            // The worker's roster-delta counter at snapshot time, and the
+            // process instance that read it — the pair is one snapshot:
+            // the supervisor's pull gate orders the summary against the
+            // watermark of the generation that took it, so a delta still
+            // in flight when the pull answered (a sequence at or below
+            // the counter) is dropped instead of overwriting the pull's
+            // fresher state. Both reads run under the caller's core
+            // lock, and every push stamps its snapshot after the state
+            // change it describes and before its counter increment, so
+            // a counter this summary embeds already includes every
+            // change the snapshot reflects. The PRE-first-push stamp of
+            // zero is a sequenced counter (the supervisor gates it like
+            // any other — a delayed pre-push pull never overwrites a
+            // newer delta's state); only a summary that carries no
+            // counter at all is the unsequenced legacy write.
+            roster_delta_sequence: Some(
+                self.roster_delta_sequence
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            ),
+            worker_instance_id: (!self.config.worker_instance_id.is_empty())
+                .then(|| self.config.worker_instance_id.clone()),
             // The engine's resolved model (the agents-view Model column:
             // TS roster summaries carry it; a not-yet-resolved engine
             // reports none).
@@ -2645,6 +2735,24 @@ impl Worker {
 
     pub(crate) fn snapshot_locked(&self, core: &SessionCore) -> SessionActionSnapshot {
         session_snapshot(core)
+    }
+
+    /// Push one roster delta from a command arm (the model/thinking
+    /// switch seams): the same frame the turn runner's busy flips push,
+    /// so a switch reaches the subscribed roster surfaces (the agents
+    /// view) without a turn — the TS roster-flush parity for
+    /// `thinking_level_changed` and the `set_model`/`cycle_model`
+    /// handlers.
+    pub(crate) fn push_roster_delta(&self) {
+        push_roster_delta(
+            &self.core,
+            &self.engine,
+            &self.roster_link,
+            &self.worker_token,
+            &self.config.worker_instance_id,
+            &self.roster_delta_sequence,
+            &self.roster_push_order,
+        );
     }
 
     fn handle_attach(&self, payload: &Value) -> DaemonResponse {
@@ -4922,6 +5030,154 @@ pub(crate) fn admit_goal_follow_up(
     work_notify.notify_one();
 }
 
+/// Admit one detached kernel bash completion notice (TS
+/// `bash.completed` -> `_promptInjectedMessage(message, {
+/// streamingBehavior: "steer", queueIfBusy: true, resumeIfIdle: true })`):
+/// the `[bash-done pid:N exit:M]` row queues on the steering lane — a
+/// busy session keeps a visible steer row, an idle session wakes into
+/// the turn that runs on the row. The admission carries the recovery
+/// busy-evidence checkpoint, so a crash between the notice and its
+/// delivery revives the worker with the row replaying (the wake
+/// survives worker re-adoption and revival).
+pub(crate) fn admit_bash_completion_notice(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
+    core: &Arc<Mutex<SessionCore>>,
+    work_notify: &Arc<Notify>,
+    notice: crate::engine::BashCompletionNotice,
+    session_is_closed: impl Fn() -> bool,
+) {
+    let row = pa_core::session_engine::messages::create_async_bash_completion_message(
+        notice.pid,
+        &notice.command,
+        notice.exit_code,
+        crate::util::now_ms(),
+    );
+    let content = match &row.content {
+        pa_types::ai::UserContent::Text(text) => text.clone(),
+        _ => String::new(),
+    };
+    // TS `queueVisible: visibleQueued` + the schedule's execution policy:
+    // busy sessions queue a visible row, idle sessions wake on an
+    // invisible injected turn. The busy sample and the push share ONE
+    // critical section: a turn starting between a separate sample and
+    // the push would queue an invisible row for a busy session.
+    let mut core_guard = core.lock().unwrap();
+    // The close paths mark the session and then clear the lanes in their
+    // own core section: a notice that raced past the sink's first check
+    // is refused here (the marker is visible by now), or the close's
+    // clear wipes it — never a completion turn for a closed session.
+    if session_is_closed() {
+        return;
+    }
+    let (policy, queue_visible) = if core_guard.busy {
+        (TurnPolicy::Queued, true)
+    } else {
+        (TurnPolicy::Injected, false)
+    };
+    {
+        core_guard.steering.push_back(QueuedItem {
+            // TS `previewLabel` (`injectedMessagePreviewLabel` ->
+            // `ASYNC_BASH_COMPLETION_PREVIEW_LABEL`): the queue strip
+            // reads `Background command finished: <content>` (the TUI's
+            // labeled-preview prefix).
+            preview: Some(format!(
+                "{}: {content}",
+                pa_core::session_engine::messages::ASYNC_BASH_COMPLETION_PREVIEW_LABEL
+            )),
+            message: content,
+            custom_message: Some(crate::session_commands::custom_message_value(&row)),
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible,
+            policy,
+            forced_batch: false,
+        });
+    }
+    // The checkpoint re-locks the core (documented order: recovery lock
+    // first), so the admission's guard must release first.
+    drop(core_guard);
+    // The fire checkpoint (busy=true, TS's steering queue string): the
+    // notice is undelivered live work until its turn settles — the same
+    // evidence the goal/autonomous continuations record.
+    checkpoint_queue_recovery(
+        recovery,
+        core,
+        QueueCheckpoint::Admitted {
+            operation: "steer_queued",
+        },
+    );
+    // `resumeIfIdle`: the runner re-checks the queue at its loop head.
+    work_notify.notify_one();
+}
+
+/// Withdraw one queued bash completion notice (TS `bash.consumed` ->
+/// `_withdrawAsyncBashCompletionNotice`): the kernel read the finished
+/// command's result before the notice delivered, so the undelivered row
+/// cancels — one read withdraws one notice, and pids are reused across
+/// handles, so the command disambiguates (`_isAsyncBashCompletionActionFor`).
+pub(crate) fn withdraw_bash_completion_notice(
+    recovery: &std::sync::Mutex<Option<WorkerRecoveryJournal>>,
+    core: &Arc<Mutex<SessionCore>>,
+    notice: crate::engine::BashConsumedNotice,
+) {
+    let removed = {
+        let mut core_guard = core.lock().unwrap();
+        let before = core_guard.steering.len() + core_guard.follow_up.len();
+        // TS withdraws ONE row per read ("pid reuse can queue an
+        // identical key twice, and the read belongs to the older
+        // handle, which is the earlier notice"): the front-most match
+        // across the two lanes, never the whole set.
+        let mut withdrawn = false;
+        let mut withdraw_one = |item: &QueuedItem| {
+            if !withdrawn && is_bash_completion_notice_for(item, &notice) {
+                withdrawn = true;
+                false
+            } else {
+                true
+            }
+        };
+        core_guard.steering.retain(&mut withdraw_one);
+        core_guard.follow_up.retain(withdraw_one);
+        before != core_guard.steering.len() + core_guard.follow_up.len()
+    };
+    if removed {
+        // The withdrawal refreshes the verdict (and the snapshot) so a
+        // consumed notice cannot keep busy=true promising a revive the
+        // withdrawn row would replay (a mid-turn withdrawal stays busy
+        // through the in-flight turn).
+        checkpoint_queue_recovery(
+            recovery,
+            core,
+            QueueCheckpoint::Settle {
+                operation: "queue_purged",
+            },
+        );
+    }
+}
+
+/// Whether one queued item is the async-bash-completion notice for this
+/// pid+command (TS `_isAsyncBashCompletionActionFor`: the custom row's
+/// details carry both — pids alone are reused).
+fn is_bash_completion_notice_for(
+    item: &QueuedItem,
+    notice: &crate::engine::BashConsumedNotice,
+) -> bool {
+    let Some(row) = item.custom_message.as_ref() else {
+        return false;
+    };
+    if row.get("customType").and_then(Value::as_str)
+        != Some(pa_core::session_engine::messages::ASYNC_BASH_COMPLETION_CUSTOM_TYPE)
+    {
+        return false;
+    }
+    let details = row.get("details").unwrap_or(&Value::Null);
+    details.get("pid").and_then(Value::as_u64) == Some(notice.pid as u64)
+        && details.get("command").and_then(Value::as_str) == Some(notice.command.as_str())
+}
+
 /// Whether one queued item is a minted goal-context turn (TS's
 /// `_clearQueuedGoalContexts` predicate on the injected custom row).
 fn is_goal_context_item(item: &QueuedItem) -> bool {
@@ -4950,6 +5206,18 @@ struct TurnRunner {
     /// agent-messaging link).
     roster_link: std::sync::Arc<crate::supervisor_link::SupervisorLink>,
     worker_token: String,
+    /// The monotonic roster-delta counter shared with the command arms (one
+    /// counter per worker session, so the supervisor's stale-delta gate
+    /// sees a total order over this worker's pushes).
+    roster_delta_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The push-order lock shared with the command arms (snapshot and
+    /// stamp are one atomic pair).
+    roster_push_order: std::sync::Arc<std::sync::Mutex<()>>,
+    /// The worker process instance id riding every roster delta (the
+    /// supervisor's gate keys its watermark by worker id + instance, so a
+    /// replacement process's restarted counter is never compared against
+    /// the predecessor's).
+    worker_instance_id: String,
 }
 
 impl TurnRunner {
@@ -5066,38 +5334,16 @@ impl TurnRunner {
     /// busy flip, so subscribed clients see live status without polling.
     /// Fire-and-forget: a dead link reconnects on the next flip, and a
     /// supervisor restart re-seeds the entry from registration.
-    fn push_roster_delta(&self) {
-        if std::env::var_os("PA_WORKER_DISABLE_ROSTER_PUSH").is_some() {
-            return;
-        }
-        if self.worker_token.is_empty() || self.roster_link.socket_path().as_os_str().is_empty() {
-            return;
-        }
-        let summary = {
-            let core = self.core.lock().unwrap();
-            session_summary(
-                &core,
-                &self
-                    .engine
-                    .effective_thinking_level()
-                    .unwrap_or_else(|| "default".to_string()),
-                self.engine.model_metadata(),
-                self.engine.model_fallback_message(),
-            )
-        };
-        let summary = serde_json::to_value(&summary).unwrap_or(serde_json::Value::Null);
-        let link = std::sync::Arc::clone(&self.roster_link);
-        let worker_token = self.worker_token.clone();
-        tokio::spawn(async move {
-            let command = serde_json::json!({
-                "type": "worker_roster_delta",
-                "workerToken": worker_token,
-                "summary": summary,
-            });
-            let _ = link
-                .request(command, std::time::Duration::from_secs(10))
-                .await;
-        });
+    pub(crate) fn push_roster_delta(&self) {
+        push_roster_delta(
+            &self.core,
+            &self.engine,
+            &self.roster_link,
+            &self.worker_token,
+            &self.worker_instance_id,
+            &self.roster_delta_sequence,
+            &self.roster_push_order,
+        );
     }
 
     /// One delivery: a single item, or the batch the pump gathered (TS
@@ -5852,6 +6098,79 @@ fn active_lifecycle(runtime_kind: &str, messageless: bool, busy: bool) -> &'stat
     }
 }
 
+/// The worker's roster-delta push (the Rust-native form of the TS
+/// `roster_delta` worker frame): the fresh session summary rides the
+/// supervisor link, so subscribed roster surfaces (the agents view) see a
+/// state change without polling. Shared by the turn runner's busy flips
+/// and the worker's command arms (the model/thinking switches). The
+/// supervisor's roster refresh still backstops every push, so this stays
+/// fire-and-forget: a dead link reconnects on the next push, and a
+/// supervisor restart re-seeds the entry from registration.
+///
+/// The TS worker flushes its roster deltas over ONE ordered supervisor
+/// client socket (a coalesced window re-reads the current state), so a
+/// delayed older frame can never overwrite a newer one. The Rust
+/// supervisor link dials an independent socket per request — the pushes
+/// arrive unordered — so every delta carries the worker's monotonic
+/// counter and the supervisor's stale-delta gate drops the delayed older
+/// snapshots.
+fn push_roster_delta(
+    core: &Arc<Mutex<SessionCore>>,
+    engine: &std::sync::Arc<dyn SessionEngine>,
+    roster_link: &std::sync::Arc<crate::supervisor_link::SupervisorLink>,
+    worker_token: &str,
+    worker_instance_id: &str,
+    sequence: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    push_order: &std::sync::Arc<std::sync::Mutex<()>>,
+) {
+    if std::env::var_os("PA_WORKER_DISABLE_ROSTER_PUSH").is_some() {
+        return;
+    }
+    if worker_token.is_empty() || roster_link.socket_path().as_os_str().is_empty() {
+        return;
+    }
+    // The push-order lock holds the snapshot and its sequence stamp
+    // together: a busy-flip push racing a switch push must never let the
+    // older snapshot carry the newer sequence (the supervisor would then
+    // keep the stale row and drop the fresh one), so the pair is atomic
+    // and the pairs themselves order — sequence order is snapshot order.
+    let _order = push_order.lock().unwrap();
+    let mut summary = {
+        let core = core.lock().unwrap();
+        session_summary(
+            &core,
+            &engine
+                .effective_thinking_level()
+                .unwrap_or_else(|| "default".to_string()),
+            engine.model_metadata(),
+            engine.model_fallback_message(),
+        )
+    };
+    // The embedded counter is the pre-stamp value read under the order
+    // lock: every sequence this worker stamped before the snapshot is at
+    // or below it. The supervisor's authoritative pulls raise their
+    // watermark to it, so a delta still in flight when the pull answered
+    // is dropped instead of overwriting the pull's fresher state.
+    summary.roster_delta_sequence = Some(sequence.load(std::sync::atomic::Ordering::SeqCst));
+    let summary = serde_json::to_value(&summary).unwrap_or(serde_json::Value::Null);
+    let link = std::sync::Arc::clone(roster_link);
+    let worker_token = worker_token.to_string();
+    let worker_instance_id = worker_instance_id.to_string();
+    let sequence_value = sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    tokio::spawn(async move {
+        let command = serde_json::json!({
+            "type": "worker_roster_delta",
+            "workerToken": worker_token,
+            "summary": summary,
+            "sequence": sequence_value,
+            "workerInstanceId": worker_instance_id,
+        });
+        let _ = link
+            .request(command, std::time::Duration::from_secs(10))
+            .await;
+    });
+}
+
 fn session_summary(
     core: &SessionCore,
     thinking_level: &str,
@@ -5960,6 +6279,13 @@ fn session_summary(
         status_label: None,
         summary: None,
         task_state: None,
+        // Set by the caller when the snapshot backs a roster push (the
+        // push-order lock reads the pre-stamp counter); authoritative
+        // pulls embed the live counter in `summary_locked` instead.
+        // The push's sending instance rides the frame envelope, so the
+        // summary itself never carries one here.
+        roster_delta_sequence: None,
+        worker_instance_id: None,
         model,
         model_fallback_message,
         runtime_kind: Some(core.runtime_kind.clone()),
@@ -8511,6 +8837,9 @@ mod turn_stream_tests {
             status_notify,
             roster_link: Arc::new(crate::supervisor_link::SupervisorLink::new(PathBuf::new())),
             worker_token: String::new(),
+            roster_delta_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            roster_push_order: Arc::new(std::sync::Mutex::new(())),
+            worker_instance_id: String::new(),
         }
     }
 
@@ -10132,6 +10461,167 @@ mod recovery_verdict_tests {
         .expect("the admission flushed its snapshot");
         assert!(steering.is_empty(), "steering: {steering:?}");
         assert_eq!(follow_up[0].message, "continue the mission");
+        let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+    }
+
+    /// The detached bash completion notice admits through the steering
+    /// lane: an idle session wakes on an invisible injected row, and the
+    /// admission is journal busy evidence (the crash between the notice
+    /// and its delivery revives the worker with the row replaying — the
+    /// wake survives re-adoption and revival alike).
+    #[tokio::test]
+    async fn a_bash_completion_notice_admits_the_steering_lane_with_busy_evidence() {
+        let worker = created_worker_with_journal().await;
+        worker.dispatch("clear_queue", &json!({})).await;
+        let notify = Arc::new(Notify::new());
+        admit_bash_completion_notice(
+            &worker.recovery,
+            &worker.core,
+            &notify,
+            crate::engine::BashCompletionNotice {
+                pid: 4321,
+                command: "sleep 12; echo RW_WAKE_DONE".to_string(),
+                exit_code: 0,
+            },
+            || false,
+        );
+        let core = worker.core.lock().unwrap();
+        let item = core
+            .steering
+            .front()
+            .expect("the notice queues on the steering lane");
+        let row = item.custom_message.as_ref().expect("the injected row");
+        assert_eq!(
+            row.get("customType").and_then(Value::as_str),
+            Some("async_bash_completion"),
+            "the row is the async-bash-completion notice: {row}"
+        );
+        assert_eq!(
+            row["details"]["pid"],
+            json!(4321),
+            "the notice carries its pid: {row}"
+        );
+        assert!(
+            item.message.starts_with("[bash-done pid:4321 exit:0]"),
+            "the turn runs on the notice content: {item:?}"
+        );
+        assert!(
+            item.preview
+                .as_deref()
+                .is_some_and(|preview| preview.starts_with("Background command finished: ")),
+            "the queue row carries the TS preview label: {item:?}"
+        );
+        // TS `queueVisible: visibleQueued`: an idle session's wake is an
+        // invisible injected turn.
+        assert!(!item.queue_visible, "the idle wake stays invisible");
+        drop(core);
+        assert!(
+            WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+            "the notice admission is live work"
+        );
+        let latest = latest_record(&worker);
+        assert_eq!(latest.operation, "steer_queued");
+        let (steering, _) = WorkerRecoveryJournal::read_queue_snapshot(
+            &worker.config.recovery_journal_path,
+            "target-session",
+        )
+        .unwrap()
+        .expect("the admission flushed its snapshot");
+        assert_eq!(
+            steering[0].message,
+            "[bash-done pid:4321 exit:0]\n\nCommand: \"sleep 12; echo RW_WAKE_DONE\""
+        );
+        let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+    }
+
+    /// A busy session queues the notice as a visible steer row (TS
+    /// `queueIfBusy`), the same row with the queued delivery class.
+    #[tokio::test]
+    async fn a_bash_completion_notice_on_a_busy_session_queues_a_visible_steer_row() {
+        let worker = created_worker_with_journal().await;
+        worker.core.lock().unwrap().busy = true;
+        let notify = Arc::new(Notify::new());
+        admit_bash_completion_notice(
+            &worker.recovery,
+            &worker.core,
+            &notify,
+            crate::engine::BashCompletionNotice {
+                pid: 99,
+                command: "make gates".to_string(),
+                exit_code: 2,
+            },
+            || false,
+        );
+        let core = worker.core.lock().unwrap();
+        let item = core.steering.front().expect("the queued notice");
+        assert!(item.queue_visible, "the busy session keeps a visible row");
+        assert_eq!(item.policy, TurnPolicy::Queued);
+        drop(core);
+        let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
+    }
+
+    /// The kernel read the result first: the undelivered notice withdraws
+    /// (pid+command — pids are reused), and the withdrawal settles the
+    /// busy evidence so the journal never promises a replay the row left.
+    #[tokio::test]
+    async fn bash_consumed_withdraws_the_undelivered_notice_and_settles() {
+        let worker = created_worker_with_journal().await;
+        worker.dispatch("clear_queue", &json!({})).await;
+        let notify = Arc::new(Notify::new());
+        admit_bash_completion_notice(
+            &worker.recovery,
+            &worker.core,
+            &notify,
+            crate::engine::BashCompletionNotice {
+                pid: 4321,
+                command: "sleep 12; echo RW_WAKE_DONE".to_string(),
+                exit_code: 0,
+            },
+            || false,
+        );
+        assert!(
+            WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+            "the notice admission is live work"
+        );
+        // A different command under a reused pid must not withdraw (TS
+        // `_isAsyncBashCompletionActionFor` matches both).
+        withdraw_bash_completion_notice(
+            &worker.recovery,
+            &worker.core,
+            crate::engine::BashConsumedNotice {
+                pid: 4321,
+                command: "another command".to_string(),
+            },
+        );
+        assert!(
+            worker.core.lock().unwrap().steering.len() == 1,
+            "the mismatched withdrawal kept the row"
+        );
+        assert!(
+            WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+            "the kept row stays live work"
+        );
+        withdraw_bash_completion_notice(
+            &worker.recovery,
+            &worker.core,
+            crate::engine::BashConsumedNotice {
+                pid: 4321,
+                command: "sleep 12; echo RW_WAKE_DONE".to_string(),
+            },
+        );
+        {
+            let core = worker.core.lock().unwrap();
+            assert!(
+                core.steering.is_empty() && core.follow_up.is_empty(),
+                "the consumed notice withdrew"
+            );
+        }
+        assert!(
+            !WorkerRecoveryJournal::read_interrupted(&worker.config.recovery_journal_path),
+            "the withdrawal settled the busy evidence"
+        );
+        let latest = latest_record(&worker);
+        assert_eq!(latest.operation, "queue_purged");
         let _ = std::fs::remove_dir_all(worker.config.socket_path.parent().unwrap());
     }
 

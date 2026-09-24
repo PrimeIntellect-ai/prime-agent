@@ -78,6 +78,7 @@ pub mod subagents;
 mod suspend;
 mod terminal_image;
 pub mod theme;
+pub mod toast;
 pub mod tool_card;
 pub mod traces;
 pub mod tree_display;
