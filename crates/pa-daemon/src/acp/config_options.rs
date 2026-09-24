@@ -218,7 +218,11 @@ pub(crate) fn acp_model_registry(agent_dir: &Path) -> pa_core::models::ModelRegi
 /// `getAvailableModels`): `Err` carries the discovery failure the
 /// caller reports as "unavailable, try again later".
 pub(crate) fn discover_available_models(agent_dir: &Path) -> anyhow::Result<Vec<Model>> {
-    Ok(acp_model_registry(agent_dir).get_available().to_vec())
+    Ok(acp_model_registry(agent_dir)
+        .get_available()
+        .into_iter()
+        .cloned()
+        .collect())
 }
 
 /// The switchable provider target the in-process session's stream reads

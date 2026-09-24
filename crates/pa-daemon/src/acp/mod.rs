@@ -686,7 +686,7 @@ async fn apply_in_process_model_switch(
     // The request key for the switched model: the same registry resolution
     // the create-time composition ran (TS re-registers the stream with the
     // model's own auth).
-    let registry = tokio::task::spawn_blocking({
+    let mut registry = tokio::task::spawn_blocking({
         let agent_dir = Arc::clone(&mode.agent_dir);
         move || acp_model_registry(&agent_dir)
     })
@@ -714,6 +714,7 @@ async fn apply_in_process_model_switch(
     // The agent's model plus the durable `model_change` row (TS records
     // every switch, even to the current model).
     mode.engine
+        .session
         .set_model(&model, &model.provider, &model.id)
         .await
         .map_err(|error| ConfigOptionError::Internal(format!("model switch failed: {error:#}")))?;
@@ -722,7 +723,7 @@ async fn apply_in_process_model_switch(
     {
         let mut settings =
             pa_core::settings::SettingsManager::create(mode.actual_cwd.as_path(), &mode.agent_dir);
-        let _ = settings.set_default_model_and_provider(&model.provider, &model.id);
+        let _ = settings.set_default_model_and_provider(model.provider.clone(), model.id.clone());
     }
     // The thinking level follows the switch (TS
     // `_getThinkingLevelForModelSwitch` + `setThinkingLevel`): the current
@@ -778,6 +779,7 @@ async fn apply_level_change(
         return Ok(());
     }
     mode.engine
+        .session
         .set_thinking_level(mapped)
         .await
         .map_err(|error| {
