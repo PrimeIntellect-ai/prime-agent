@@ -134,7 +134,11 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
     // The crossing turn is the last one (index FATTENING_TURNS + 1, after
     // the seed turn): its usage crosses the seeded reserve.
     let crossing = index == FATTENING_TURNS + 1;
-    let usage = if crossing { crossing_usage() } else { small_usage() };
+    let usage = if crossing {
+        crossing_usage()
+    } else {
+        small_usage()
+    };
     let reply = if crossing {
         "crossing reply".to_string()
     } else {
@@ -402,12 +406,17 @@ fn mega_session_threshold_compaction_phase_measurement() {
     );
     let crossed = client.read_response("px");
     let crossing_total = crossing_started.elapsed();
-    assert_eq!(crossed["success"], true, "crossing prompt failed: {crossed}");
+    assert_eq!(
+        crossed["success"], true,
+        "crossing prompt failed: {crossed}"
+    );
 
     // The trace table.
     let trace = read_trace(&trace_path);
     assert!(
-        trace.iter().any(|(phase, _, _)| phase == "auto.threshold_start_emitted"),
+        trace
+            .iter()
+            .any(|(phase, _, _)| phase == "auto.threshold_start_emitted"),
         "no threshold compaction trace lines: {trace_path:?} had {} lines",
         trace.len()
     );
@@ -416,9 +425,7 @@ fn mega_session_threshold_compaction_phase_measurement() {
     for (phase, elapsed, detail) in &trace {
         let delta = elapsed - previous;
         previous = *elapsed;
-        println!(
-            "PHASE {phase:>32} elapsed={elapsed:>9}us delta={delta:>9}us {detail}"
-        );
+        println!("PHASE {phase:>32} elapsed={elapsed:>9}us delta={delta:>9}us {detail}");
     }
 
     // The wire view: the loader window a client sees.
@@ -426,19 +433,14 @@ fn mega_session_threshold_compaction_phase_measurement() {
     let mut notice_gap = None;
     for (index, (event, at)) in client.events.iter().enumerate() {
         if event.get("type").and_then(Value::as_str) == Some("compaction_start") {
-            if let Some((_, end_at)) = client
-                .events
-                .iter()
-                .find(|(event, _)| event.get("type").and_then(Value::as_str) == Some("compaction_end"))
-            {
+            if let Some((_, end_at)) = client.events.iter().find(|(event, _)| {
+                event.get("type").and_then(Value::as_str) == Some("compaction_end")
+            }) {
                 loader_window = Some(end_at.duration_since(*at));
-                if let Some((_, notice_at)) = client.events[index..]
-                    .iter()
-                    .find(|(event, _)| {
-                        event.get("type").and_then(Value::as_str) == Some("message_end")
-                            && event["message"]["customType"] == "ipython_state"
-                    })
-                {
+                if let Some((_, notice_at)) = client.events[index..].iter().find(|(event, _)| {
+                    event.get("type").and_then(Value::as_str) == Some("message_end")
+                        && event["message"]["customType"] == "ipython_state"
+                }) {
                     notice_gap = Some(notice_at.duration_since(*at));
                 }
             }
@@ -458,7 +460,9 @@ fn mega_session_threshold_compaction_phase_measurement() {
         .map(|entry| entry.path())
         .find(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
         .expect("session file");
-    let session_bytes = std::fs::metadata(&session_file).expect("session file metadata").len();
+    let session_bytes = std::fs::metadata(&session_file)
+        .expect("session file metadata")
+        .len();
     println!("session file bytes after compaction: {session_bytes}");
     assert!(
         loader_window.is_some(),
@@ -485,10 +489,8 @@ fn mega_session_threshold_compaction_phase_measurement() {
     if let Ok(out_dir) = std::env::var("PA_MEGA_OUT_DIR") {
         let out_dir = PathBuf::from(out_dir);
         std::fs::create_dir_all(&out_dir).expect("artifact dir");
-        std::fs::copy(&trace_path, out_dir.join("compaction-trace.jsonl"))
-            .expect("copy trace");
-        std::fs::copy(&summary_path, out_dir.join("mega-measurement.json"))
-            .expect("copy summary");
+        std::fs::copy(&trace_path, out_dir.join("compaction-trace.jsonl")).expect("copy trace");
+        std::fs::copy(&summary_path, out_dir.join("mega-measurement.json")).expect("copy summary");
         println!("artifacts copied to {out_dir:?}");
     }
 }
