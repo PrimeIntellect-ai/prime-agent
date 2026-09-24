@@ -72,6 +72,34 @@ aarch64-unknown-linux-gnu, and x86_64-unknown-linux-gnu"
     ;;
 esac
 
+# --- glibc floor (Linux) ------------------------------------------------------
+# The continuous workflow builds the GNU/Linux targets inside an
+# ubuntu:22.04 (glibc 2.35) container, so the published Linux binaries
+# require glibc symbols no newer than 2.35. Refuse installs on older
+# glibc (or non-glibc) systems up front with the exact floor instead of
+# installing a payload the dynamic loader will refuse to start.
+if [ "$OS" = "Linux" ]; then
+  ldd_line="$(ldd --version 2>&1 | head -n 1)"
+  case "$ldd_line" in
+    *musl*) die "musl libc is not supported: the Linux builds are GNU (glibc >= 2.35, Ubuntu 22.04 or newer) binaries" ;;
+  esac
+  glibc="${ldd_line##* }"
+  case "$glibc" in
+    [0-9]*.[0-9]*) ;;
+    *) die "could not determine the glibc version from: ${ldd_line}
+the Linux builds require glibc >= 2.35 (Ubuntu 22.04 or newer)" ;;
+  esac
+  glibc_major="$(printf '%s' "${glibc%%.*}" | tr -cd '0-9')"
+  glibc_minor="$(printf '%s' "${glibc#*.}" | tr -cd '0-9')"
+  if [ -z "$glibc_major" ] || [ -z "$glibc_minor" ] \
+     || [ "$glibc_major" -lt 2 ] \
+     || { [ "$glibc_major" -eq 2 ] && [ "$glibc_minor" -lt 35 ]; }; then
+    die "glibc ${glibc} is below the supported floor: the Linux builds are
+compiled against glibc 2.35 (Ubuntu 22.04) and will not start here"
+  fi
+  echo "glibc ${glibc} >= 2.35: supported"
+fi
+
 # --- auth (workflow-artifact downloads require a principal) ----------------
 if command -v gh >/dev/null 2>&1; then
   HAVE_GH=1

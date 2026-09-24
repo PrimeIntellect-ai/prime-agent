@@ -73,6 +73,12 @@ workspace version, the binary inside answers `<version>-continuous.<sha>`):
 | Linux x86_64 | `Linux x86_64` | `x86_64-unknown-linux-gnu` | `artifacts-x86_64-unknown-linux-gnu` |
 | Linux arm64 | `Linux aarch64` | `aarch64-unknown-linux-gnu` | `artifacts-aarch64-unknown-linux-gnu` |
 
+Linux floor: the GNU/Linux artifacts are built inside an Ubuntu 22.04
+(glibc 2.35) container — they start on any glibc >= 2.35, and
+`install-rust.sh` refuses installs on older glibc (or musl) systems with
+the exact floor instead of installing a binary the dynamic loader will
+not start.
+
 No tags, no releases: the repo's release history belongs to the TypeScript
 product, and versioned Rust releases come when the port graduates
 (`prime-agent-design/RELEASE_SECURITY.md`). Artifacts stay downloadable
