@@ -494,7 +494,7 @@ impl McpView {
     pub fn selected_server(&self) -> Option<&str> {
         self.rows
             .get(*self.filtered.get(self.selected)?)
-            .map(|row| row.target())
+            .map(ViewRow::target)
     }
 
     /// One key press (TS `ServiceCatalogPickerComponent.handleInput`):
@@ -644,7 +644,7 @@ impl McpView {
             .filtered
             .get(self.selected)
             .and_then(|index| self.rows.get(*index))
-            .map(|row| row.action_hint());
+            .map(ViewRow::action_hint);
         lines.push(hint_line(theme, width, kb, action));
         lines
     }
@@ -692,7 +692,7 @@ impl McpView {
     fn refilter(&mut self) {
         let query = self.search.value().to_string();
         let query_changed = query != self.last_query;
-        self.last_query = query.clone();
+        self.last_query.clone_from(&query);
         let trimmed = query.trim().to_string();
         self.filtered = if trimmed.is_empty() {
             (0..self.rows.len()).collect()
