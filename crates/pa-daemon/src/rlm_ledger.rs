@@ -540,6 +540,15 @@ impl RlmSpawnLedger {
         usage: &crate::session_usage::SessionUsageSummary,
     ) -> Result<()> {
         let child_path = canonical_session_path(Path::new(child));
+        // The writer never records what the reader refuses: replay
+        // rejects a negative or NaN usage cost outright, which would
+        // make the whole ledger unreadable. A session file may carry
+        // such a cost (the file's own summary read preserves it), so a
+        // snapshot the reader would reject rides as absent - the
+        // tombstone still lands bare (the historical-gap zero).
+        if !(usage.cost.is_finite() && usage.cost >= 0.0) {
+            return self.append_delete(child_id, child, reason);
+        }
         let usage = serde_json::to_value(usage)
             .with_context(|| "serialize the deleted child usage snapshot")?;
         self.append_record(json!({
@@ -1765,6 +1774,57 @@ mod tests {
         assert_eq!(
             ledger.edges(true).unwrap()[0].deleted_usage,
             Some(usage_summary(0.45))
+        );
+    }
+
+    /// The writer never records what the reader refuses: a negative or
+    /// NaN usage cost rides as absent (a bare delete record), so the
+    /// ledger stays readable after deleting a session whose file carried
+    /// a negative cost.
+    #[test]
+    fn append_delete_with_usage_sanitizes_a_rejectable_cost() {
+        let dir = temp_dir("usage-neg");
+        let ledger = ledger_for(&dir);
+        let parent = dir.join("parent.jsonl");
+        let child = dir.join("child.jsonl");
+        fs::write(&parent, "{}").unwrap();
+        fs::write(&child, "{}").unwrap();
+        ledger
+            .append_spawn(RlmSpawnInput {
+                child_id: "neg".into(),
+                parent: parent.to_string_lossy().into(),
+                child: child.to_string_lossy().into(),
+                depth: 1,
+                name: "w".into(),
+            })
+            .unwrap();
+        for bad_cost in [-0.40, f64::NAN, f64::INFINITY] {
+            ledger
+                .append_delete_with_usage(
+                    "neg",
+                    &child.to_string_lossy(),
+                    RlmLedgerDeleteReason::User,
+                    &usage_summary(bad_cost),
+                )
+                .unwrap();
+            let edges = ledger.edges(true).expect("the ledger must stay readable");
+            assert_eq!(
+                edges[0].deleted_usage, None,
+                "a cost the reader would reject rides as absent ({bad_cost})",
+            );
+        }
+        // A valid capture after the sanitized ones still lands.
+        ledger
+            .append_delete_with_usage(
+                "neg",
+                &child.to_string_lossy(),
+                RlmLedgerDeleteReason::User,
+                &usage_summary(0.40),
+            )
+            .unwrap();
+        assert_eq!(
+            ledger.edges(true).unwrap()[0].deleted_usage,
+            Some(usage_summary(0.40))
         );
     }
 
