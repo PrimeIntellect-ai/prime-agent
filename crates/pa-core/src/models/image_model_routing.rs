@@ -164,7 +164,7 @@ mod tests {
     fn routes_image_turns_to_image_model() {
         let session = model("claude-opus-4-7-text-only", false);
         let image_model = model("claude-haiku-4-5", true);
-        let available = vec![session.clone(), image_model.clone()];
+        let available = vec![session.clone(), image_model];
         let inputs = inputs(&session, Some("claude-haiku-4-5"), &available, false);
         let resolved = resolve_image_model_override(&inputs).unwrap().unwrap();
         assert_eq!(resolved.model.id, "claude-haiku-4-5");
@@ -227,7 +227,7 @@ mod tests {
     fn refuses_unauthenticated_image_model() {
         let session = model("claude-opus-4-7-text-only", false);
         let image_model = model("claude-haiku-4-5", true);
-        let available = vec![session.clone(), image_model.clone()];
+        let available = vec![session.clone(), image_model];
         let mut inputs = inputs(&session, Some("claude-haiku-4-5"), &available, false);
         inputs.has_configured_auth = &|model| model.id != "claude-haiku-4-5";
         let error = resolve_image_model_override(&inputs).unwrap_err();
@@ -240,7 +240,7 @@ mod tests {
         let mut image_model = model("gpt-5.4", true);
         image_model.provider = "openai".to_string();
         image_model.api = "openai-responses".to_string();
-        let available = vec![session.clone(), image_model.clone()];
+        let available = vec![session.clone(), image_model];
         let inputs = inputs(&session, Some("openai/gpt-5.4"), &available, false);
         let resolved = resolve_image_model_override(&inputs).unwrap().unwrap();
         assert_eq!(resolved.service_tier, Some(ServiceTier::Priority));
