@@ -113,9 +113,8 @@ pub struct ProviderParkOutcome {
 
 /// The boxed park future: the engine parks async (the session-log append
 /// and the wake-job creation take async locks).
-pub type ParkFuture = std::pin::Pin<
-    Box<dyn std::future::Future<Output = Option<ProviderParkOutcome>> + Send>,
->;
+pub type ParkFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<ProviderParkOutcome>> + Send>>;
 
 /// The park seam the retry chains consult at their give-up: called with
 /// the failed turn's assistant message and the give-up sentence (the
@@ -123,8 +122,7 @@ pub type ParkFuture = std::pin::Pin<
 /// surfaces `outcome.status_message` instead of the give-up — and `None`
 /// keeps the give-up. The callback owns its state clones (the future is
 /// `'static`).
-pub type ParkDecisionCallback<'a> =
-    &'a mut dyn FnMut(AssistantMessage, &str) -> ParkFuture;
+pub type ParkDecisionCallback<'a> = &'a mut dyn FnMut(AssistantMessage, &str) -> ParkFuture;
 
 /// Park decision after a quota failure whose provider-reported reset
 /// exceeds the bounded wait (TS `providerParkDecision`): pure and
@@ -206,8 +204,7 @@ pub fn scan_quota_park_entries(entries: &[pa_types::session::FileEntry]) -> Bran
             continue;
         }
         let data = payload.data.clone().unwrap_or(serde_json::Value::Null);
-        let Some(resume_at_iso) = data.get("resumeAt").and_then(serde_json::Value::as_str)
-        else {
+        let Some(resume_at_iso) = data.get("resumeAt").and_then(serde_json::Value::as_str) else {
             return BranchParkScan::None;
         };
         let Some(resume_at_ms) = crate::cron::parse_iso_millis(resume_at_iso) else {
@@ -250,4 +247,232 @@ pub fn quota_parked_final_error(abort: &str, resume_at_ms: u64, error: &str) -> 
         "{abort}. Session parked until {} and will resume automatically (retry.provider.waitForUsage.pauseUntilReset): {error}",
         crate::session::manager::format_iso(resume_at_ms as i64)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session_engine::provider_retry::provider_stream_failure_details;
+    use pa_agent::types::{
+        AssistantContent, AssistantMessage, AssistantMessageDiagnostic, StopReason, TextContent,
+        Usage,
+    };
+    use pa_types::session::{CustomEntry, EntryBase, FileEntry};
+
+    fn policy() -> ProviderParkPolicy {
+        DEFAULT_PROVIDER_PARK_POLICY
+    }
+
+    fn custom_entry(custom_type: &str, data: Option<serde_json::Value>) -> FileEntry {
+        FileEntry::Custom {
+            payload: CustomEntry {
+                custom_type: custom_type.to_string(),
+                data,
+                rest: pa_types::JsonMap::new(),
+            },
+            base: EntryBase {
+                id: Some("e1".to_string()),
+                parent_id: None,
+                timestamp: None,
+                rest: pa_types::JsonMap::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn parks_at_the_reported_reset_plus_grace() {
+        let decision = provider_park_decision(0, Some(3_600_000), &policy());
+        assert_eq!(
+            decision,
+            ProviderParkDecision::Park {
+                resume_after_ms: 3_600_000 + PROVIDER_RESUME_GRACE_MS
+            }
+        );
+    }
+
+    #[test]
+    fn caps_a_distant_reset_at_max_pause_ms() {
+        let decision = provider_park_decision(0, Some(30 * 86_400_000), &policy());
+        assert_eq!(
+            decision,
+            ProviderParkDecision::Park {
+                resume_after_ms: 86_400_000
+            }
+        );
+    }
+
+    #[test]
+    fn clamps_a_configured_bound_above_one_week() {
+        let mut configured = policy();
+        configured.max_pause_ms = 60 * 86_400_000;
+        let decision = provider_park_decision(0, Some(u64::MAX / 2), &configured);
+        assert_eq!(
+            decision,
+            ProviderParkDecision::Park {
+                resume_after_ms: MAX_PROVIDER_PAUSE_MS
+            }
+        );
+    }
+
+    #[test]
+    fn disabled_keeps_the_immediate_abort() {
+        let mut disabled = policy();
+        disabled.pause_until_reset = false;
+        assert_eq!(
+            provider_park_decision(0, Some(3_600_000), &disabled),
+            ProviderParkDecision::None {
+                reason: NoParkReason::Disabled
+            }
+        );
+    }
+
+    #[test]
+    fn spent_park_budget_aborts() {
+        assert_eq!(
+            provider_park_decision(policy().max_parks, Some(3_600_000), &policy()),
+            ProviderParkDecision::None {
+                reason: NoParkReason::ParkBudget
+            }
+        );
+    }
+
+    #[test]
+    fn no_reported_reset_never_parks() {
+        assert_eq!(
+            provider_park_decision(0, None, &policy()),
+            ProviderParkDecision::None {
+                reason: NoParkReason::NoReset
+            }
+        );
+    }
+
+    fn quota_message(kind: Option<&str>, retry_after_ms: Option<u64>) -> AssistantMessage {
+        let details = serde_json::json!({
+            "kind": kind,
+            "retryAfterMs": retry_after_ms,
+        });
+        AssistantMessage {
+            content: vec![AssistantContent::Text(TextContent {
+                text: String::new(),
+                text_signature: None,
+            })],
+            api: String::new(),
+            provider: "test".to_string(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: Some(vec![AssistantMessageDiagnostic {
+                kind: "provider_stream_failure".to_string(),
+                timestamp: 0,
+                error: None,
+                details: Some(details),
+            }]),
+            usage: Usage::zero(),
+            stop_reason: StopReason::Error,
+            stop_reason_raw: None,
+            error_message: Some("You have hit your usage limit".to_string()),
+            timestamp: 0,
+        }
+    }
+
+    #[test]
+    fn quota_classification_reads_the_rate_limit_kind() {
+        assert!(is_quota_block_failure(&quota_message(
+            Some("rate_limit"),
+            Some(600_000)
+        )));
+        assert!(!is_quota_block_failure(&quota_message(
+            Some("server_error"),
+            Some(600_000)
+        )));
+        assert_eq!(
+            quota_failure_reset_ms(&quota_message(Some("rate_limit"), Some(600_000))),
+            Some(600_000)
+        );
+        // The details accessor stays reachable for the message shape the
+        // engine parks on.
+        assert!(
+            provider_stream_failure_details(&quota_message(Some("rate_limit"), Some(600_000)))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn parked_status_names_the_wake_time() {
+        let message = quota_parked_final_error(
+            "Provider requested a 4363s wait before retrying (above retry.provider.maxRetryDelayMs=60000ms)",
+            1_789_516_800_000,
+            "You have hit your usage limit",
+        );
+        assert!(message.contains(
+            "Session parked until 2026-09-16T00:00:00.000Z and will resume automatically (retry.provider.waitForUsage.pauseUntilReset): You have hit your usage limit"
+        ));
+        assert!(message.starts_with("Provider requested a 4363s wait"));
+    }
+
+    #[test]
+    fn branch_scan_takes_the_newest_park() {
+        let entries = vec![
+            custom_entry(
+                PROVIDER_QUOTA_PARK_ENTRY,
+                Some(serde_json::json!({
+                    "resumeAt": "2026-09-16T01:00:00.000Z",
+                    "parkCount": 1,
+                    "jobId": "job-1",
+                })),
+            ),
+            custom_entry(
+                PROVIDER_QUOTA_PARK_ENTRY,
+                Some(serde_json::json!({
+                    "resumeAt": "2026-09-16T03:00:00.000Z",
+                    "parkCount": 2,
+                    "jobId": "job-2",
+                })),
+            ),
+        ];
+        match scan_quota_park_entries(&entries) {
+            BranchParkScan::Park(park) => {
+                assert_eq!(park.park_count, 2);
+                assert_eq!(park.resume_at_ms, 1_789_516_800_000 + 3 * 3_600_000);
+                assert_eq!(park.job_id.as_deref(), Some("job-2"));
+            }
+            other => panic!("expected a park, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_scan_stops_at_a_newer_resume() {
+        let entries = vec![
+            custom_entry(
+                PROVIDER_QUOTA_PARK_ENTRY,
+                Some(serde_json::json!({
+                    "resumeAt": "2026-09-24T01:00:00.000Z",
+                    "parkCount": 3,
+                })),
+            ),
+            custom_entry(
+                PROVIDER_QUOTA_RESUME_ENTRY,
+                Some(serde_json::json!({
+                    "outcome": "wake",
+                })),
+            ),
+        ];
+        assert_eq!(scan_quota_park_entries(&entries), BranchParkScan::Resumed);
+    }
+
+    #[test]
+    fn branch_scan_ignores_unrelated_entries_and_bad_data() {
+        let entries = vec![
+            custom_entry("after-git-state", Some(serde_json::json!({ "keep": true }))),
+            custom_entry(
+                PROVIDER_QUOTA_PARK_ENTRY,
+                Some(serde_json::json!({
+                    "parkCount": 1,
+                })),
+            ),
+        ];
+        assert_eq!(scan_quota_park_entries(&entries), BranchParkScan::None);
+        let empty: Vec<FileEntry> = Vec::new();
+        assert_eq!(scan_quota_park_entries(&empty), BranchParkScan::None);
+    }
 }

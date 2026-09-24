@@ -6888,13 +6888,21 @@ mod tests {
     fn summary_lifecycle_is_message_based() {
         let empty = SessionCore::test_core(None, "/tmp".to_string());
         assert_eq!(
-            session_summary(&empty, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false).lifecycle,
+            session_summary(
+                &empty, "default", None, None, /*bash_running=*/ false,
+                /*quota_parked=*/ false
+            )
+            .lifecycle,
             "draft"
         );
         let mut subagent = SessionCore::test_core(None, "/tmp".to_string());
         subagent.runtime_kind = "subagent".to_string();
         assert_eq!(
-            session_summary(&subagent, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false).lifecycle,
+            session_summary(
+                &subagent, "default", None, None, /*bash_running=*/ false,
+                /*quota_parked=*/ false
+            )
+            .lifecycle,
             "live"
         );
         // The busy-flip roster delta fires before the store flushes the
@@ -6907,28 +6915,46 @@ mod tests {
         // set (TS `isStreaming && pendingToolCalls.size > 0`): tools in
         // flight read true only while the turn streams.
         assert!(
-            session_summary(&busy, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false).is_running_tools
+            session_summary(
+                &busy, "default", None, None, /*bash_running=*/ false,
+                /*quota_parked=*/ false
+            )
+            .is_running_tools
         );
         busy.running_tool_calls.clear();
         assert!(
-            !session_summary(&busy, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false)
-                .is_running_tools
+            !session_summary(
+                &busy, "default", None, None, /*bash_running=*/ false,
+                /*quota_parked=*/ false
+            )
+            .is_running_tools
         );
         busy.running_tool_calls.insert("call-1".to_string());
         busy.busy = false;
         assert!(
-            !session_summary(&busy, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false)
-                .is_running_tools
+            !session_summary(
+                &busy, "default", None, None, /*bash_running=*/ false,
+                /*quota_parked=*/ false
+            )
+            .is_running_tools
         );
         // The user bash state rides the summary as its own flag (TS
         // `session.isBashRunning`).
         assert_eq!(
-            session_summary(&busy, "default", None, None, /*bash_running=*/ true, /*quota_parked=*/ false).is_bash_running,
+            session_summary(
+                &busy, "default", None, None, /*bash_running=*/ true,
+                /*quota_parked=*/ false
+            )
+            .is_bash_running,
             Some(true)
         );
         busy.busy = true;
         assert_eq!(
-            session_summary(&busy, "default", None, None, /*bash_running=*/ false, /*quota_parked=*/ false).lifecycle,
+            session_summary(
+                &busy, "default", None, None, /*bash_running=*/ false,
+                /*quota_parked=*/ false
+            )
+            .lifecycle,
             "live"
         );
         let dir = std::env::temp_dir().join(format!("pa-worker-lc-{}", uuid::Uuid::new_v4()));

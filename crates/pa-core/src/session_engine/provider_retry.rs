@@ -435,6 +435,14 @@ mod tests {
             0,
             None
         ));
+        // TS #2472: safety filters deterministically reject identical
+        // requests, so they never retry.
+        assert!(is_permanent_provider_failure_kind(Some("safety"), 0, None));
+        assert!(is_permanent_provider_failure_kind(
+            Some("safety"),
+            0,
+            Some(400)
+        ));
         // Auth retries once before it can be marked stale.
         assert!(!is_permanent_provider_failure_kind(
             Some("auth"),

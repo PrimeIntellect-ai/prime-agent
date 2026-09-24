@@ -39,7 +39,7 @@ use pa_agent::types::{AssistantMessage, StopReason};
 use pa_types::ai::Model;
 
 use super::auto_retry::{run_turn_with_auto_retry, AutoRetryEvent, RetryStartReason};
-use super::provider_park::ParkDecisionCallback;
+use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
 use super::provider_retry::{
     is_agent_lifecycle_failure, is_context_overflow_failure, is_faux_provider_queue_exhausted,
     is_permanent_provider_failure_kind, is_unsupported_tool_failure, jittered_delay_ms,
@@ -310,9 +310,16 @@ where
                     retry_after_ms.div_ceil(1000),
                     quick_policy.max_retry_delay_ms,
                 );
-                let parked = match park.as_deref_mut() {
-                    Some(park) => park(message.clone(), &abort).await,
-                    None => None,
+                // The park seam is a quota-failure seam (TS parks only
+                // from the wait path's `usage` arm): other
+                // server-requested waits keep the give-up.
+                let parked = if is_quota_block_failure(&message) {
+                    match park.as_deref_mut() {
+                        Some(park) => park(message.clone(), &abort).await,
+                        None => None,
+                    }
+                } else {
+                    None
                 };
                 let final_error = match parked {
                     // The turn settles as the park's pause, not its death:
