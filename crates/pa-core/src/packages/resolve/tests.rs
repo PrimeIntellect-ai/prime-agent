@@ -39,7 +39,7 @@ impl Fixture {
         let temp_dir = root.path().to_path_buf();
         let settings = SettingsManager::create(&cwd, &agent_dir);
         let manager = PackageManager::with_options(PackageManagerOptions {
-            cwd: cwd,
+            cwd,
             agent_dir: agent_dir.clone(),
             settings,
             bundled_skills_dir: BundledSkillsDir::Disabled,

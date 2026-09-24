@@ -253,7 +253,7 @@ mod tests {
         );
         let result = load_skills(&LoadSkillsOptions {
             cwd: project,
-            agent_dir: agent_dir,
+            agent_dir,
             skill_paths: vec![],
             include_defaults: true,
         });
@@ -280,7 +280,7 @@ mod tests {
         fs::write(&lone, "---\ndescription: a lone skill\n---\nbody").unwrap();
         let result = load_skills(&LoadSkillsOptions {
             cwd: project,
-            agent_dir: agent_dir,
+            agent_dir,
             skill_paths: vec![lone.display().to_string(), "/missing/skill".to_string()],
             include_defaults: false,
         });

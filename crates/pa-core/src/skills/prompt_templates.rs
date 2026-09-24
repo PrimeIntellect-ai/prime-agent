@@ -416,7 +416,7 @@ mod tests {
         .unwrap();
         let templates = load_prompt_templates(&LoadPromptTemplatesOptions {
             cwd: project,
-            agent_dir: agent_dir,
+            agent_dir,
             prompt_paths: vec![],
             include_defaults: true,
         });

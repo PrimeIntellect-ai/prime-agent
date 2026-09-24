@@ -157,8 +157,8 @@ pub fn build_groups(resolved: &ResolvedPaths) -> Vec<ResourceGroup> {
             metadata: resource.metadata.clone(),
             resource_type,
             display_name: display_name(&resource.path, resource_type),
-            group_key: group_key,
-            subgroup_key: subgroup_key,
+            group_key,
+            subgroup_key,
         });
     };
     for resource in &resolved.extensions {

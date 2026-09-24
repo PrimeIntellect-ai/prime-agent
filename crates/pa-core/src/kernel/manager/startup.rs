@@ -255,7 +255,7 @@ impl Inner {
         *lock(&self.child) = Some(ChildHandle {
             pid,
             stdin: stdin.clone(),
-            exit_rx: exit_rx,
+            exit_rx,
         });
 
         if let Some(stdout) = stdout {

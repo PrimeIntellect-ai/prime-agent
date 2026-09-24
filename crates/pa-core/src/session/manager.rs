@@ -375,7 +375,7 @@ fn resolve_dropped_ancestor(
     let mut path: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut current = Some(start.to_string());
-    while let Some(id) = current {
+    while let Some(ref id) = current {
         if let Some(answer) = resolved.get(&id) {
             let answer = answer.clone();
             for node in path {
@@ -386,11 +386,11 @@ fn resolve_dropped_ancestor(
         if !seen.insert(id.clone()) {
             // The first repeated id of THIS walk — the outcome for this
             // child, memoized for no one else.
-            return Some(id);
+            return Some(id.clone());
         }
         match dropped_parent.get(&id) {
             Some(next) => {
-                path.push(id);
+                path.push(id.clone());
                 current.clone_from(next);
             }
             None => {
