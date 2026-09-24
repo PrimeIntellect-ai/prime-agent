@@ -210,10 +210,96 @@ pub struct RlmSpawnInput {
 /// is never fail-closed).
 pub struct RlmSpawnLedger {
     path: PathBuf,
+    agent_dir: PathBuf,
     canonical_sessions_dir: PathBuf,
     seed_attempted: AtomicBool,
     cache: Mutex<Option<ReplaySnapshot>>,
     log: Box<dyn Fn(&str) + Send + Sync>,
+}
+
+/// One `live_edges` liveness pass: a recorded path that stats resolves as
+/// itself; a recorded path whose file moved resolves through its durable
+/// session id (the file-name stem) against the sessions dir and the
+/// session-artifacts tree the port writes. The per-pass cache keeps the
+/// artifact walk to at most one pass per ledger read.
+struct LivePathResolver {
+    agent_dir: PathBuf,
+    sessions_dir: PathBuf,
+    resolved: HashMap<String, Option<PathBuf>>,
+    artifact_index: Option<HashMap<String, PathBuf>>,
+}
+
+impl LivePathResolver {
+    fn new(agent_dir: PathBuf, sessions_dir: PathBuf) -> Self {
+        LivePathResolver {
+            agent_dir,
+            sessions_dir,
+            resolved: HashMap::new(),
+            artifact_index: None,
+        }
+    }
+
+    /// The live session file for one recorded edge path, `None` when the
+    /// session is gone everywhere (the edge endpoint is dead).
+    fn resolve(&mut self, recorded: &str) -> Option<PathBuf> {
+        if let Some(hit) = self.resolved.get(recorded) {
+            return hit.clone();
+        }
+        let live = self.resolve_uncached(recorded);
+        self.resolved.insert(recorded.to_string(), live.clone());
+        live
+    }
+
+    fn resolve_uncached(&mut self, recorded: &str) -> Option<PathBuf> {
+        let recorded_path = Path::new(recorded);
+        if is_file(recorded_path) {
+            return Some(recorded_path.to_path_buf());
+        }
+        let id = recorded_path.file_stem()?.to_string_lossy().to_string();
+        if id.is_empty() {
+            return None;
+        }
+        let sessions_candidate = self.sessions_dir.join(format!("{id}.jsonl"));
+        if is_file(&sessions_candidate) {
+            return Some(sessions_candidate);
+        }
+        let index = self
+            .artifact_index
+            .get_or_insert_with(|| artifact_session_index(&self.agent_dir));
+        index.get(&id).cloned()
+    }
+}
+
+/// The session files under the artifacts tree, keyed by their durable
+/// session id (the file-name stem): `<agent-dir>/session-artifacts/
+/// <parent-session-id>/sub-<id>/<child>.jsonl`, one level per session id.
+/// Non-session `.jsonl` sidecars (semantic edges, harness state) key by
+/// their own stems and never collide with session-id lookups.
+fn artifact_session_index(agent_dir: &Path) -> HashMap<String, PathBuf> {
+    let mut index = HashMap::new();
+    let root = agent_dir.join(crate::context_tree_children::RLM_SESSION_ARTIFACTS_DIR);
+    let Ok(parents) = std::fs::read_dir(&root) else {
+        return index;
+    };
+    for parent in parents.flatten() {
+        let Ok(subs) = std::fs::read_dir(parent.path()) else {
+            continue;
+        };
+        for sub in subs.flatten() {
+            let Ok(files) = std::fs::read_dir(sub.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let path = file.path();
+                if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
+                    if let Some(stem) = path.file_stem() {
+                        index.insert(stem.to_string_lossy().to_string(), path);
+                    }
+                }
+            }
+        }
+    }
+    index
 }
 
 #[derive(Debug)]
@@ -277,6 +363,10 @@ impl RlmSpawnLedger {
     ) -> Self {
         Self {
             path: rlm_ledger_path(agent_dir, sessions_dir),
+            // The artifact tree the path resolver walks anchors to the
+            // canonical agent dir (the same realpath form the sessions
+            // dir takes), so resolved edges carry one path form.
+            agent_dir: canonicalize_dir(agent_dir),
             canonical_sessions_dir: canonicalize_dir(sessions_dir),
             seed_attempted: AtomicBool::new(false),
             cache: Mutex::new(None),
@@ -421,20 +511,60 @@ impl RlmSpawnLedger {
             .collect())
     }
 
-    /// Live edges reconciled by stat: a dead parent or child drops the edge.
+    /// Live edges reconciled by liveness of their recorded endpoints: a
+    /// parent or child whose session file no longer exists drops the
+    /// edge. A recorded path whose file MOVED (a storage-root migration,
+    /// an artifacts re-parenting) resolves through its durable session id
+    /// first — the sessions dir and the session-artifacts tree hold the
+    /// same session under a different root — and the returned edge
+    /// carries the resolved path, so a restart-era child never anchors to
+    /// a stale path. Only a session with no live file anywhere is dead.
     pub fn live_edges(&self) -> Result<Vec<RlmLedgerEdge>> {
         self.seed_once()?;
         let state = self.replay_cached()?;
-        Ok(state
-            .edges
-            .iter()
-            .filter(|edge| {
-                edge.deleted.is_none()
-                    && is_file(Path::new(&edge.child))
-                    && is_file(Path::new(&edge.parent))
+        let mut resolver =
+            LivePathResolver::new(self.agent_dir.clone(), self.canonical_sessions_dir.clone());
+        let mut edges = Vec::with_capacity(state.edges.len());
+        for edge in &state.edges {
+            if edge.deleted.is_some() {
+                continue;
+            }
+            let (Some(child), Some(parent)) = (
+                resolver.resolve(&edge.child),
+                resolver.resolve(&edge.parent),
+            ) else {
+                continue;
+            };
+            edges.push(RlmLedgerEdge {
+                parent: parent.to_string_lossy().to_string(),
+                child: child.to_string_lossy().to_string(),
+                ..edge.clone()
+            });
+        }
+        Ok(edges)
+    }
+
+    /// Whether the given spawn edge is still live (not tombstoned, and
+    /// both its child and parent transcripts present - the same
+    /// reconciliation `live_edges` applies) - the seed arms' per-write
+    /// liveness revalidation: an edge deleted (or a file removed) while
+    /// a seed was mid-read never writes its row. The child id is
+    /// matched together with the child path: ids can be shared by
+    /// edges with different paths, and only the exact edge a seed
+    /// snapshotted counts as live. A broken ledger reads as not-live,
+    /// like every other read here degrades to nothing.
+    pub fn edge_is_live(&self, child_id: &str, child: &str) -> bool {
+        let child = canonical_session_path(Path::new(child));
+        self.seed_once().is_ok()
+            && self.replay_cached().is_ok_and(|state| {
+                state.edges.iter().any(|edge| {
+                    edge.child_id == child_id
+                        && edge.deleted.is_none()
+                        && canonical_session_path(Path::new(&edge.child)) == child
+                        && is_file(Path::new(&edge.child))
+                        && is_file(Path::new(&edge.parent))
+                })
             })
-            .cloned()
-            .collect())
     }
 
     fn seed_once(&self) -> Result<()> {
@@ -918,6 +1048,12 @@ mod tests {
         RlmSpawnLedger::new(dir, &dir.join("sessions"), |_| {})
     }
 
+    /// A ledger over an explicit agent dir and sessions dir (the artifact
+    /// tree roots under the agent dir).
+    fn ledger_over(agent_dir: &Path, sessions_dir: &Path) -> RlmSpawnLedger {
+        RlmSpawnLedger::new(agent_dir, sessions_dir, |_| {})
+    }
+
     #[test]
     fn ledger_path_hashes_the_canonical_sessions_dir() {
         let dir = temp_dir("path");
@@ -970,6 +1106,66 @@ mod tests {
     }
 
     #[test]
+    fn edge_is_live_reflects_tombstones_and_files() {
+        let dir = temp_dir("liveness");
+        let ledger = ledger_for(&dir);
+        let parent = dir.join("p.jsonl");
+        let child = dir.join("c.jsonl");
+        fs::write(&parent, "{}").unwrap();
+        fs::write(&child, "{}").unwrap();
+        let child_path = child.to_string_lossy().into_owned();
+        ledger
+            .append_spawn(RlmSpawnInput {
+                child_id: "sub-1".into(),
+                parent: parent.to_string_lossy().into_owned(),
+                child: child_path.clone(),
+                depth: 1,
+                name: "w".into(),
+            })
+            .unwrap();
+        assert!(ledger.edge_is_live("sub-1", &child_path));
+        // The child file vanishing flips the answer even without a
+        // tombstone.
+        fs::remove_file(&child).unwrap();
+        assert!(!ledger.edge_is_live("sub-1", &child_path));
+        fs::write(&child, "{}").unwrap();
+        assert!(ledger.edge_is_live("sub-1", &child_path));
+        // A dead parent reads as not-live, like `live_edges` drops it.
+        fs::remove_file(&parent).unwrap();
+        assert!(!ledger.edge_is_live("sub-1", &child_path));
+        fs::write(&parent, "{}").unwrap();
+        assert!(ledger.edge_is_live("sub-1", &child_path));
+        // A completed delete tombstones the edge: no resurrection, and
+        // a different edge sharing the child id (a different child
+        // path) cannot keep the deleted edge live.
+        let other_child = dir.join("other.jsonl");
+        fs::write(&other_child, "{}").unwrap();
+        let other_path = other_child.to_string_lossy().into_owned();
+        ledger
+            .append_spawn(RlmSpawnInput {
+                child_id: "sub-1".into(),
+                parent: parent.to_string_lossy().into_owned(),
+                child: other_path,
+                depth: 1,
+                name: "w2".into(),
+            })
+            .unwrap();
+        ledger
+            .append_delete("sub-1", &child_path, RlmLedgerDeleteReason::User)
+            .unwrap();
+        assert!(
+            !ledger.edge_is_live("sub-1", &child_path),
+            "the tombstoned edge stays dead beside a shared-id sibling"
+        );
+        assert!(
+            ledger.edge_is_live("sub-1", &other_child.to_string_lossy()),
+            "the live sibling still reads live"
+        );
+        // An unknown child reads as not-live.
+        assert!(!ledger.edge_is_live("sub-none", &child_path));
+    }
+
+    #[test]
     fn dead_child_or_parent_drops_from_live_edges() {
         let dir = temp_dir("live");
         let ledger = ledger_for(&dir);
@@ -991,6 +1187,70 @@ mod tests {
         assert!(ledger.live_edges().unwrap().is_empty());
         // The edge stays in the raw replay.
         assert_eq!(ledger.edges(false).unwrap().len(), 1);
+    }
+
+    /// A recorded edge path whose file moved (a storage-root migration)
+    /// resolves through its durable session id — the sessions dir or the
+    /// session-artifacts tree — and the returned edge carries the
+    /// resolved path; a session with no file anywhere stays dead.
+    #[test]
+    fn moved_edge_paths_resolve_through_the_session_id() {
+        let agent_dir = temp_dir("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let ledger = ledger_over(&agent_dir, &sessions_dir);
+
+        // The parent moved: recorded under an old root, now resident in
+        // the artifacts tree; the child moved into the sessions dir.
+        let recorded_parent = "/old-root/sessions/sess-p.jsonl";
+        let recorded_child = "/old-root/session-artifacts/sess-p/sub-1/sess-c.jsonl";
+        let live_parent = agent_dir
+            .join("session-artifacts")
+            .join("sess-g")
+            .join("sub-9")
+            .join("sess-p.jsonl");
+        let live_child = sessions_dir.join("sess-c.jsonl");
+        fs::create_dir_all(live_parent.parent().unwrap()).unwrap();
+        fs::write(&live_parent, "{}").unwrap();
+        fs::write(&live_child, "{}").unwrap();
+        ledger
+            .append_spawn(RlmSpawnInput {
+                child_id: "sub-1".into(),
+                parent: recorded_parent.into(),
+                child: recorded_child.into(),
+                depth: 1,
+                name: "w".into(),
+            })
+            .unwrap();
+
+        let edges = ledger.live_edges().unwrap();
+        assert_eq!(edges.len(), 1, "{edges:?}");
+        // The resolved paths are canonicalized (the sessions dir the
+        // resolver anchors to is canonical).
+        let canonical = |path: &Path| -> String {
+            crate::lease::canonical_session_path(path)
+                .to_string_lossy()
+                .to_string()
+        };
+        assert_eq!(
+            edges[0].parent,
+            canonical(&live_parent),
+            "the parent edge resolves to the migrated path"
+        );
+        assert_eq!(
+            edges[0].child,
+            canonical(&live_child),
+            "the child edge resolves to the migrated path"
+        );
+
+        // A session with no file anywhere is dead: the edge drops.
+        fs::remove_file(&live_child).unwrap();
+        assert!(ledger.live_edges().unwrap().is_empty());
+        // The raw replay keeps the recorded paths untouched.
+        let raw = ledger.edges(false).unwrap();
+        assert_eq!(raw.len(), 1);
+        assert_eq!(raw[0].parent, recorded_parent);
+        assert_eq!(raw[0].child, recorded_child);
     }
 
     #[test]

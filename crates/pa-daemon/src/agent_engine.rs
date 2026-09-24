@@ -124,6 +124,37 @@ struct RestoredSessionModel {
     fallback_message: Option<String>,
 }
 
+/// The daemon-side adapter onto the engine's attribution producer: the
+/// children registry's observation sites deliver per-origin batches
+/// through this sink (pa-core owns the target row and the durable
+/// append).
+struct ProducerUsageSink(
+    std::sync::Arc<pa_core::session_engine::rlm_usage::RlmChildUsageAttributions>,
+);
+
+impl pa_core::session_engine::rlm_usage::RlmChildUsageSink for ProducerUsageSink {
+    fn record(
+        &self,
+        report: pa_core::session_engine::rlm_usage::RlmChildUsageReport,
+    ) -> std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        let producer = std::sync::Arc::clone(&self.0);
+        Box::pin(async move {
+            producer.record_child_usage(report).await;
+        })
+    }
+
+    fn forget(
+        &self,
+        rlm_child_id: &str,
+    ) -> std::pin::Pin<std::boxed::Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        let producer = std::sync::Arc::clone(&self.0);
+        let rlm_child_id = rlm_child_id.to_string();
+        Box::pin(async move {
+            producer.forget_child(&rlm_child_id).await;
+        })
+    }
+}
+
 /// A [`SessionEngine`] running real agent turns.
 pub struct AgentSessionEngine {
     pub(crate) runtime: crate::async_safe_runtime::AsyncSafeRuntime,
@@ -159,6 +190,14 @@ pub struct AgentSessionEngine {
     /// `_clearQueuedGoalContexts`): invoked by the pause/clear/start
     /// session commands and the kernel `goal.complete` host request.
     pub(crate) goal_queue_purge: std::sync::Mutex<Option<std::sync::Arc<dyn Fn() + Send + Sync>>>,
+    /// The worker's bash-completion queue seams (TS
+    /// `_promptInjectedMessage`/`_withdrawAsyncBashCompletionNotice`):
+    /// the `bash.completed` notice admits through the steering lane
+    /// (queue-if-busy, resume-if-idle) and the `bash.consumed` notice
+    /// withdraws its undelivered row. Set by the worker at construction;
+    /// `None` outside a daemon worker (no queue to admit into).
+    pub(crate) bash_completion_sink: std::sync::Mutex<Option<crate::engine::BashCompletionSink>>,
+    pub(crate) bash_consumed_sink: std::sync::Mutex<Option<crate::engine::BashConsumedSink>>,
     /// The session's live agent handle (TS `AgentSession.agent`): the eager
     /// turn-abort funnel's target. Mirrored from the core session at build
     /// time for the same reason as the goal runtime handles — a running
@@ -255,6 +294,14 @@ pub struct AgentSessionEngine {
     link: Arc<crate::supervisor_link::SupervisorLink>,
     /// Supervisor-backed RLM children; `None` for standalone workers.
     pub(crate) children: Option<Arc<SupervisorChildSessions>>,
+    /// The attribution producer the children registry's sink last got:
+    /// the session's live children outlive an engine rebuild, and their
+    /// spawn registrations live on the producer of the build that
+    /// spawned them — every rebuild adopts them forward before the new
+    /// sink starts observing.
+    usage_producer: std::sync::Mutex<
+        Option<std::sync::Arc<pa_core::session_engine::rlm_usage::RlmChildUsageAttributions>>,
+    >,
     /// This worker's own session summary (worker-pushed at create/rename),
     /// read by the kernel messaging controller to render sender identity.
     own_summary: std::sync::Arc<std::sync::Mutex<Option<Value>>>,
@@ -481,6 +528,8 @@ impl AgentSessionEngine {
             goal_budget_crossed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             goal_input_probe: std::sync::Mutex::new(None),
             goal_admission_sink: std::sync::Mutex::new(None),
+            bash_completion_sink: std::sync::Mutex::new(None),
+            bash_consumed_sink: std::sync::Mutex::new(None),
             goal_queue_purge: std::sync::Mutex::new(None),
             turn_agent: std::sync::Mutex::new(None),
             queue_modes,
@@ -501,6 +550,7 @@ impl AgentSessionEngine {
             )),
             link,
             children,
+            usage_producer: std::sync::Mutex::new(None),
             autonomous_driver,
             autonomous_driver_default: std::sync::atomic::AtomicBool::new(true),
             held_autonomous_continuation: std::sync::Mutex::new(None),
@@ -609,6 +659,29 @@ impl AgentSessionEngine {
         // The in-run autonomous continuation hook (the natural mint rides
         // the agent loop; the goal seam keeps its own boundary mint).
         self.install_autonomous_continuation_hook_on(built.session.agent());
+        // The children registry's usage observation feeds the engine's
+        // attribution producer (TS `flushPendingChildUsageAttribution`'s
+        // Rust seam): one sink per build. The session's live children are
+        // separate worker processes that OUTLIVE the rebuild — their
+        // spawns were registered on the previous build's producer, so
+        // adopt those registrations forward before the new sink starts
+        // observing, or the first post-swap report drops against a
+        // producer that never saw the spawn.
+        if let Some(children) = &self.children {
+            let retired = self
+                .usage_producer
+                .lock()
+                .expect("usage producer lock")
+                .take();
+            if let Some(retired) = retired {
+                built.rlm_usage.adopt_registrations(&retired).await;
+            }
+            children.set_usage_sink(std::sync::Arc::new(ProducerUsageSink(
+                std::sync::Arc::clone(&built.rlm_usage),
+            )));
+            *self.usage_producer.lock().expect("usage producer lock") =
+                Some(std::sync::Arc::clone(&built.rlm_usage));
+        }
         // The eager-abort target rides the same mirror (see
         // [`Self::turn_agent`]).
         *self.turn_agent.lock().expect("turn agent lock") =
@@ -1247,10 +1320,16 @@ impl AgentSessionEngine {
             Arc::clone(&self.own_summary),
             self.children.clone(),
         ));
-        let observer = Arc::new(LinkAgentObserveController::new(Arc::clone(&self.link)));
+        let observer = Arc::new(LinkAgentObserveController::new(
+            Arc::clone(&self.link),
+            config.active_session_id.clone(),
+            Arc::clone(&self.own_summary),
+            self.children.clone(),
+        ));
         let mut handlers = HostRequestHandlers::default();
         register_agent_message_host_handlers(sender, &mut handlers);
         register_agent_observe_host_handlers(observer, &mut handlers);
+        self.register_bash_notice_host_handlers(&mut handlers);
         Some(handlers)
     }
 

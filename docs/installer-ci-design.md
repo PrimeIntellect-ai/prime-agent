@@ -136,12 +136,28 @@ future install.sh port both expect that):
 ```
 prime-agent-<version>-<target>.tar.gz
 ├── prime-agent              # the release binary (exec bit set)
+├── models.bundled.json      # bundled catalog assets (catalog spec §3.2 layer 2:
+│                            # generated at build time, never committed; the
+│                            # runtime's no-cold-start chain serves them beside
+│                            # the executable)
+├── mcp-services.bundled.json
 ├── prime-agent-runtime/     # Python kernel sidecar (pyproject.toml, src/rlm, uv.lock)
 ├── skills/                  # bundled built-in skills (repo `skills/`)
 ├── docs/                    # product docs (package-dir `docs_path()`)
 ├── LICENSE
 └── README.md
 ```
+
+Bundled catalog assets: `scripts/release/bundle_catalog.py` generates them
+right before assembly. CI uses the offline `--fixture` snapshot (builds never
+depend on the catalog repo being reachable; it still passes the full
+validation gates — models `schemaVersion == 1` with ≥ 42 distinct
+`(provider, api, baseUrl)` transport tuples, plugins `version == 2` with
+≥ 68 services). The live fetch (`--network`) and a local catalog checkout
+(`--catalog-dir`) exist for packaging parity and catalog maintenance. The
+packer (`assemble_artifacts.py`, `package_release.py`) and the verifier
+(`verify_release.py`) share the same validation functions and hard-fail
+without validated assets.
 
 Naming: `prime-agent-<version>-<rust-target-triple>.tar.gz`, e.g.
 `prime-agent-0.1.0-aarch64-apple-darwin.tar.gz`. Target triples map 1:1 to CI and to
@@ -281,11 +297,23 @@ New Makefile targets (existing `make check` unchanged):
 - `make release-dry-run [RUNTIME_DIR=<path>] [VERSION=<x.y.z>]` — the release verifier,
   host-only:
   1. `cargo build --release --locked` (workspace version vs requested version asserted).
-  2. Assemble the host-target tarball via the same `scripts/release/assemble_artifacts.py`
-     the CI build jobs run (deterministic tar, checksums, manifest).
-  3. Verify, from a scratch cwd with `PI_PACKAGE_DIR` **unset**: staged `prime-agent
-     --version` == workspace version; tar listing matches §5 exactly.
-  4. Recompute the archive sha256 and diff against SHA256SUMS.
+  2. Generate the bundled catalog assets (offline `--fixture`, the same mode
+     the CI build jobs use; `CATALOG_ASSETS_MODE=network` switches to the
+     live-catalog fetch).
+  3. Assemble the host-target tarball via the same `scripts/release/assemble_artifacts.py`
+     the CI build jobs run (deterministic tar, checksums, manifest); assembly
+     hard-fails without validated catalog assets.
+  4. Verify, from a scratch cwd with `PI_PACKAGE_DIR` **unset**: staged `prime-agent
+     --version` == workspace version; tar listing matches §5 exactly; the
+     extracted tarball carries both validated catalog assets.
+  5. Recompute the archive sha256 and diff against SHA256SUMS.
+- `make catalog-assets` — generate the bundled catalog assets from the live
+  catalog repo (network fetch); `make catalog-assets-fixture` — the offline
+  synthetic snapshot the CI build jobs use; `make catalog-assets-gates` — the bundler/packer test
+  battery (`scripts/release/test_catalog_assets.py`): the fixture passes the
+  full validation gates, the packer hard-fails on missing/invalid assets,
+  the network mode is verified against a local HTTP server, and the assets
+  land in the tarball layout the installer expects.
 - `make audit-build` — release build through `cargo auditable` (optional hardening).
 
 Verifier for the lane (objective, runs on this box): `make release-dry-run RUNTIME_DIR=<kernel-packaging

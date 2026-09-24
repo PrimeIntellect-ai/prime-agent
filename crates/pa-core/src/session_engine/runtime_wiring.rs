@@ -92,6 +92,9 @@ pub struct SessionKernelWiring {
     pub runtime: Arc<SessionRuntime>,
     /// The RLM bridge: progress-note state the daemon roster reads.
     pub rlm: Arc<RlmHostBridge>,
+    /// The child-usage attribution producer the daemon's children
+    /// registry drives after the engine is built.
+    pub rlm_usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
 }
 
 /// Build the session runtime and register the `goal.*`, `rlm_heartbeat.*`,
@@ -172,13 +175,21 @@ pub fn wire_session_runtime(
         registry.load_private_authorization_from_cache();
         Arc::new(registry)
     });
-    let rlm_bridge = Arc::new(RlmHostBridge::new(model_registry, rlm.subagent_host));
+    let rlm_usage = Arc::new(super::rlm_usage::RlmChildUsageAttributions::new(
+        session.clone(),
+    ));
+    let rlm_bridge = Arc::new(RlmHostBridge::new(
+        model_registry,
+        rlm.subagent_host,
+        rlm_usage.clone(),
+    ));
     register_rlm_host_handlers(&mut handlers, &rlm_bridge);
     SessionKernelWiring {
         session,
         handlers,
         runtime,
         rlm: rlm_bridge,
+        rlm_usage,
     }
 }
 

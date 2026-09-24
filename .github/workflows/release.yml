@@ -85,6 +85,11 @@ jobs:
           bin="target/${{ matrix.target }}/release/prime-agent"
           out="$("${bin}" --version)"
           [[ "${out}" == "${RELEASE_VERSION#v}" ]]             || { echo "binary reports '${out}', expected '${RELEASE_VERSION#v}'"; exit 1; }
+      - name: Generate bundled catalog assets (fixture, offline-safe)
+        run: |
+          set -euo pipefail
+          python3 scripts/release/bundle_catalog.py generate --fixture \
+            --out "target/${{ matrix.target }}/catalog-assets"
       - name: Assemble tarball + checksums + manifest
         run: |
           set -euo pipefail
@@ -93,6 +98,7 @@ jobs:
             --version "${RELEASE_VERSION#v}" \
             --target "${{ matrix.target }}" \
             --binary "target/${{ matrix.target }}/release/prime-agent" \
+            --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
             --out-dir "target/${{ matrix.target }}/dist"
           cat "target/${{ matrix.target }}/dist/manifest.json"
       - name: Upload artifacts

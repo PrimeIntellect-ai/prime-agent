@@ -700,6 +700,10 @@ async fn run_interactive_surface(
     // The `/reload` task reports here; the loop folds the client-side
     // re-reads (keybindings, theme) and the outcome row.
     let (reload_tx, mut reload_rx) = mpsc::unbounded_channel::<crate::session_ui::ReloadNote>();
+    // The `/traces upload-all` sweep reports here; the loop folds the live
+    // progress into the status row and the settled summary.
+    let (traces_upload_tx, mut traces_upload_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::TracesUploadNote>();
     // The background model-catalog refresh (`get_model_catalog`) reports
     // here; the loop folds it into the picker catalog and any open picker.
     let (catalog_tx, mut catalog_rx) =
@@ -773,6 +777,7 @@ async fn run_interactive_surface(
         compaction_abort_tx,
         share_tx,
         reload_tx,
+        traces_upload_tx,
         catalog_tx,
         crate::session_ui::ActivityUpdates {
             heartbeats: heartbeats_tx,
@@ -1053,6 +1058,14 @@ async fn run_interactive_surface(
                             session.run_terminal_login(&mut view).await?;
                             renderer.resume()?;
                         }
+                        // A parked `/traces login` (or the enable arm's
+                        // login-first step): the flow prompts on the plain
+                        // terminal, like the provider logins.
+                        if session.pending_traces_login() {
+                            renderer.suspend(&mut view)?;
+                            session.run_traces_login(&mut view).await?;
+                            renderer.resume()?;
+                        }
                         // A `/update` run: the child processes own the plain
                         // terminal, and a successful self-update replaces this
                         // process with the updated CLI (never returns).
@@ -1143,6 +1156,16 @@ async fn run_interactive_surface(
                         if session.pending_update() {
                             renderer.suspend(&mut view)?;
                             session.run_update(&mut view).await?;
+                            renderer.resume()?;
+                        }
+                        // A parked `/traces login` (or the enable arm's
+                        // login-first step): the flow prompts on the plain
+                        // terminal, like the provider logins (the Submit
+                        // path needs the same handoff the Key path has —
+                        // headless plans drive commands as submissions).
+                        if session.pending_traces_login() {
+                            renderer.suspend(&mut view)?;
+                            session.run_traces_login(&mut view).await?;
                             renderer.resume()?;
                         }
                     }
@@ -1238,6 +1261,7 @@ async fn run_interactive_surface(
             && !session.dirty
             && !session.share_pending()
             && !session.reload_pending()
+            && !session.traces_upload_pending()
         {
             break;
         }
@@ -1388,6 +1412,11 @@ async fn run_interactive_surface(
             maybe_reload = reload_rx.recv() => {
                 if let Some(outcome) = maybe_reload {
                     session.apply_reload_outcome(outcome, &mut view).await;
+                }
+            }
+            maybe_traces_upload = traces_upload_rx.recv() => {
+                if let Some(note) = maybe_traces_upload {
+                    session.apply_traces_upload_note(note, &mut view);
                 }
             }
             maybe_catalog = catalog_rx.recv() => {
@@ -1626,6 +1655,13 @@ async fn run_interactive_surface(
         } else if hint_painted {
             session.dirty = true;
             hint_painted = false;
+        }
+
+        // The action toasts auto-dismiss on their TTL: once one goes, the
+        // overlay repaints away (the same tick-driven repaint the exit
+        // hint's expiry uses).
+        if view.toasts.prune_expired(Instant::now()) {
+            session.dirty = true;
         }
 
         // The tray override row (the Ctrl+C exit hint, or the streaming

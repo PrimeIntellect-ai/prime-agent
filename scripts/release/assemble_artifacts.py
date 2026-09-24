@@ -11,7 +11,15 @@ platform alias).
 Usage:
     python3 scripts/release/assemble_artifacts.py \
         --repo-root <repo> --version <x.y.z> --target <triple> \
-        [--binary <path>] [--runtime-dir <dir>] [--out-dir <dir>] [--sha <commit>]
+        [--binary <path>] [--runtime-dir <dir>] [--out-dir <dir>] [--sha <commit>] \
+        [--catalog-assets <dir>]
+
+`--catalog-assets` is the directory holding the generated bundled catalog
+assets (`models.bundled.json` + `mcp-services.bundled.json`); the packer
+hard-fails without VALIDATED assets (version gates + >= 42 transport tuples +
+>= 68 services — see scripts/release/bundle_catalog.py, the catalog spec §3.2
+no-cold-start layer 2). CI generates them from the live catalog repo; offline
+builds use `bundle_catalog.py generate --fixture`.
 
 `--binary` defaults to `<repo>/target/<target>/release/prime-agent` (cross builds)
 and falls back to `<repo>/target/release/prime-agent` (host builds).
@@ -39,6 +47,9 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+# The bundled-catalog validation gate (same release-scripts directory).
+from bundle_catalog import BUNDLED_CATALOG_FILES, validate_bundled_catalog_dir
+
 # Tarball-root payload order mirrors the TS `binaryAssets` list so the
 # installer lane can extract both distributions identically.
 STAGED_ENTRIES = [
@@ -48,6 +59,11 @@ STAGED_ENTRIES = [
     "docs",
     "LICENSE",
     "README.md",
+    # The bundled catalog assets (spec §3.2 layer 2): staged at the tarball
+    # root beside the binary — the runtime resolves <packageDir>/<name> (the
+    # TS binaryAssets ship them the same way).
+    "models.bundled.json",
+    "mcp-services.bundled.json",
 ]
 
 # Rust target triple -> TS release-platform alias (the v1 installer schema).
@@ -95,6 +111,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sha", default=None,
                         help="full commit SHA to stamp into the binary's "
                              "version manifest (continuous builds)")
+    parser.add_argument("--catalog-assets", type=Path, default=None,
+                        help="directory with models.bundled.json + "
+                             "mcp-services.bundled.json (see "
+                             "scripts/release/bundle_catalog.py)")
     return parser.parse_args()
 
 
@@ -169,6 +189,21 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
         else:
             shutil.copy2(source, target_path)
     os.chmod(staging / "prime-agent", 0o755)
+    # The bundled catalog assets gate (spec §3.9): the release packer FAILS
+    # without validated assets — generate them first (network for CI, a local
+    # catalog checkout, or the offline --fixture snapshot) via
+    # scripts/release/bundle_catalog.py.
+    if args.catalog_assets is None:
+        fail(
+            "missing bundled catalog assets: run "
+            "`python3 scripts/release/bundle_catalog.py generate "
+            "--catalog-dir <prime-agent-catalog>` (CI: --network; offline "
+            "builds: --fixture) and pass --catalog-assets <dir>"
+        )
+    catalog_assets = Path(args.catalog_assets)
+    catalog_facts = validate_bundled_catalog_dir(catalog_assets)
+    for name in BUNDLED_CATALOG_FILES:
+        shutil.copyfile(catalog_assets / name, staging / name)
     payload = list(STAGED_ENTRIES)
     if stamped_version is not None:
         manifest = {
@@ -184,6 +219,7 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
     return {
         "executable_sha256": sha256_file(staging / "prime-agent"),
         "payload": payload,
+        "catalog_assets": catalog_facts,
     }
 
 
@@ -259,6 +295,10 @@ def main() -> int:
         archive_sha256 = sha256_file(archive_path)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+
+    # The validated asset counts (models / transport tuples / services) ride
+    # the build log; the manifest entry below stays the installer schema.
+    print(f"bundled catalog assets: {json.dumps(facts['catalog_assets'])}")
 
     entry = {
         "version": f"v{args.version}",

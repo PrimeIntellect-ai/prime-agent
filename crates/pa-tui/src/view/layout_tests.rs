@@ -38,7 +38,7 @@ fn windows_match_uncached_reference_with_variable_height_and_hidden_entries() {
                     entry,
                     width,
                     index == 0,
-                    index > 0 && matches!(view.chat[index - 1], ChatEntry::Tool(_)),
+                    index > 0 && view.is_compact_neighbor(&view.chat[index - 1]),
                 ));
             }
             assert_eq!(layout.total, reference.len());
@@ -444,7 +444,7 @@ fn height_cache_tracks_mutations_and_spacing_in_all_details() {
                     entry,
                     width,
                     index == 0,
-                    index > 0 && matches!(view.chat[index - 1], ChatEntry::Tool(_)),
+                    index > 0 && view.is_compact_neighbor(&view.chat[index - 1]),
                 ));
             }
             assert_eq!(layout.total, reference.len());
