@@ -5934,9 +5934,9 @@ impl SessionUi {
                 self.dirty = true;
             } else if !event.press {
                 view.clear_selection();
-                self.dispatch_fullscreen_click(event, row, col, left_release_was_drag, view);
+                self.dispatch_fullscreen_click(&event, row, col, left_release_was_drag, view);
             }
-            self.clear_pressed_click(event);
+            self.clear_pressed_click(&event);
             return;
         }
         if left_press && !event.motion {
@@ -5960,9 +5960,9 @@ impl SessionUi {
         } else if !event.press {
             self.stop_selection_auto_scroll();
             view.clear_selection();
-            self.dispatch_fullscreen_click(event, row, col, left_release_was_drag, view);
+            self.dispatch_fullscreen_click(&event, row, col, left_release_was_drag, view);
         }
-        self.clear_pressed_click(event);
+        self.clear_pressed_click(&event);
     }
 
     /// Fire the click surfaces on a clean left release (TS

@@ -462,6 +462,7 @@ mod tests {
         pane.bash.as_mut().unwrap().exit_code = Some(3);
         let joined: Vec<String> = pane
             .render(&theme, 0, false, "Esc/Ctrl+C", 80)
+            .0
             .iter()
             .map(&text)
             .collect();

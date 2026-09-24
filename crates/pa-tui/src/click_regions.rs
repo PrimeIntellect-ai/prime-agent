@@ -76,6 +76,12 @@ pub(crate) struct EditorClickMap {
     /// Frame column the first line's text starts at (the leading pad,
     /// the prompt prefix, the inner pad).
     pub text_col: usize,
+    /// Dock row of the first content row (TS `getContentLineOffset`
+    /// shifts the region with the editor's own header rows): the surface
+    /// row plus the parked-message header pair, moved to dock
+    /// coordinates by `render_dock`, mapped through the dock crop by the
+    /// frame compose.
+    pub first_dock_row: usize,
 }
 
 /// The click surfaces and hyperlinks of the last composed frame

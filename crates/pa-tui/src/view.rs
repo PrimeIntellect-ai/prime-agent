@@ -2983,7 +2983,7 @@ mod tests {
                 ..crate::bash_card::BashExecutionCard::new_running("b1", "echo hi", false)
             })),
             ChatEntry::AgentMessage(Box::new(crate::custom_message::AgentMessageRow {
-                direction: crate::custom_message::AgentMessageDirection::FromParent,
+                direction: crate::custom_message::AgentMessageDirection::Received,
                 participant: "parent session".to_string(),
                 message: "the body text".to_string(),
             })),
