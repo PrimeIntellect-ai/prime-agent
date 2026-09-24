@@ -177,5 +177,25 @@ mod tests {
         let code = build_rlm_bootstrap_code(&skills);
         assert!(code.contains(r#"for _prime_agent_skill_name in ["edit"]"#));
         assert!(code.contains("_PrimeAgentUnavailableSkill"));
+        // Failed imports report through the marker line (TS #2381): the
+        // host scans the bootstrap cell's stdout for the marker + JSON of
+        // the import errors, and an empty exception message falls back to
+        // the exception type name (the parser drops empty errors).
+        assert!(code.contains(PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER));
+        assert!(
+            code.contains("print("),
+            "the marker report prints after the import loop"
+        );
+        assert!(
+            code.contains("_prime_agent_skill_error_text = ("),
+            "empty exception messages fall back to the type name"
+        );
+        assert!(
+            code.contains("if _PRIME_AGENT_SKILL_IMPORT_ERRORS:"),
+            "the report prints only when something failed"
+        );
+        // No skills: no marker machinery at all.
+        let bare = build_rlm_bootstrap_code(&[]);
+        assert!(!bare.contains(PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER));
     }
 }

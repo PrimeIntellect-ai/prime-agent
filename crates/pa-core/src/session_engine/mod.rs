@@ -687,6 +687,11 @@ impl AgentSession {
         prompt_messages.extend(self.take_next_turn_rows().await);
         let custom_row = session_message_to_loop(&SessionAgentMessage::Custom(message.clone()))
             .ok_or_else(|| anyhow::anyhow!("injected custom message conversion failed"))?;
+        // The dispatch-time routing decision fires for every dispatched
+        // turn (TS `_startPreparedTurnActions` runs it per prepared turn
+        // action): an injected row never carries images, so it clears a
+        // route left behind by the previous dispatched turn.
+        self.apply_image_model_routing(&[], &[]).await?;
         prompt_messages.push(custom_row);
         self.agent
             .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
