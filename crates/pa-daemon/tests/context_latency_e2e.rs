@@ -36,13 +36,15 @@ const CONTEXT_RESPONSE_CEILING: Duration = Duration::from_millis(750);
 /// the walk is a bounded disk read of the seeded tree).
 const CACHE_FILL_DEADLINE: Duration = Duration::from_secs(30);
 
-/// The seeded tree: enough child session bytes (~150MB) that an inline
+/// The seeded tree: enough child session bytes (~300MB) that an inline
 /// walk blows the ceiling by a wide margin (the pre-cache code parsed
-/// every child file per request; calibrated on the gate VM at
-/// ~1.5s/61MB), while the seeded write stays a bounded test-setup cost.
+/// every child file per request; observed 0.8-1.7s at 160MB on the gate
+/// VM across runs — the seed keeps the pristine-run RED well clear of
+/// VM variance), while the seeded write stays a bounded test-setup
+/// cost.
 const SEEDED_CHILDREN: usize = 60;
 const SEEDED_MESSAGES_PER_CHILD: usize = 800;
-const SEEDED_ASSISTANT_CONTENT_KB: usize = 6;
+const SEEDED_ASSISTANT_CONTENT_KB: usize = 12;
 
 struct Daemon {
     child: Child,

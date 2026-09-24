@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 
 use crate::daemon_client::DaemonClient;
@@ -1607,7 +1607,7 @@ async fn run_interactive_surface(
                                     DaemonClient,
                                     mpsc::UnboundedReceiver<DaemonClientEvent>,
                                 )>,
-                                tokio::sync::oneshot::Canceled,
+                                tokio::sync::oneshot::error::RecvError,
                             >,
                         >()
                         .await
