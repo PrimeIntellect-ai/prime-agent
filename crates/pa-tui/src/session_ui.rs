@@ -18,7 +18,7 @@ use crate::chat::{
 use crate::daemon_client::{DaemonClient, DaemonClientEvent};
 use crate::effort_picker::{self, EffortPickerAction};
 use crate::export_share::{self, GhAuthStatus, GistOutcome};
-use crate::goal_surface::{format_goal_status, tray_goal_label, GoalView};
+use crate::goal_surface::{format_goal_status, tray_goal_label, GoalPanel, GoalView};
 use crate::heartbeats_picker::{
     parse_heartbeats, scope_heartbeats, sort_heartbeats, HeartbeatAction, HeartbeatEntry,
     HeartbeatsPicker, HeartbeatsPickerAction,
@@ -1062,11 +1062,12 @@ impl SessionUi {
 
         let goal = &self.goal_view.goal;
         // The dock carries the goal only while it is actively being
-        // pursued: a completed goal's token totals are stale bookkeeping,
-        // not a live activity (the tray's TS label still covers the
-        // paused and budget-limited states).
-        let goal_tokens = (goal.status == pa_types::goal::GoalStatus::Active)
-            .then_some((goal.tokens_used, goal.token_budget));
+        // pursued, and its row reads the elapsed time (the operator's
+        // 2026-09-24 directive: "make it 'Pursuing goal (time)'"): the
+        // token budget lives inside the goal panel the row opens, not on
+        // the bar. A completed goal's bookkeeping is not a live activity.
+        let goal_label = (goal.status == pa_types::goal::GoalStatus::Active)
+            .then(|| tray_goal_label(goal));
         // The dock's bash indicator counts only runs actively running
         // right now (operator scoping): finished runs stay as rows inside
         // the bash view, never in the indicator. The feed is the
@@ -1089,7 +1090,7 @@ impl SessionUi {
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             bash_running,
             bash_total: bash_rows.len(),
-            goal_tokens,
+            goal_label,
             selected: self.activity_group,
             focused: self.subagents_focused,
         };
@@ -1102,6 +1103,7 @@ impl SessionUi {
                 crate::chrome::ActivityGroup::Subagents,
                 crate::chrome::ActivityGroup::Heartbeats,
                 crate::chrome::ActivityGroup::Bash,
+                crate::chrome::ActivityGroup::Goal,
             ]
             .into_iter()
             .find(|group| self.activity_selectable(*group))
@@ -1138,6 +1140,12 @@ impl SessionUi {
             crate::chrome::ActivityGroup::Bash => {
                 !crate::bash_view::parse_bash_activities(&self.bash_activities).is_empty()
             }
+            // The goal group rides the dock's `Pursuing goal` row: it
+            // stays selectable exactly while that row renders (an active
+            // goal — the same gate as the row itself).
+            crate::chrome::ActivityGroup::Goal => {
+                self.goal_view.goal.status == pa_types::goal::GoalStatus::Active
+            }
         }
     }
 
@@ -1156,6 +1164,7 @@ impl SessionUi {
                 crate::chrome::ActivityGroup::Subagents,
                 crate::chrome::ActivityGroup::Heartbeats,
                 crate::chrome::ActivityGroup::Bash,
+                crate::chrome::ActivityGroup::Goal,
             ]
             .into_iter()
             .find(|group| self.activity_selectable(*group)) else {
@@ -1353,9 +1362,14 @@ impl SessionUi {
         let Ok(goal) = serde_json::from_value::<pa_types::goal::GoalState>(goal) else {
             return;
         };
-        let announce = self.goal_view.apply_update(goal);
+        let announce = self.goal_view.apply_update(goal.clone());
         if announce {
             self.announce_goal_status(view);
+        }
+        // An open goal panel rides the live state, never a stale
+        // snapshot of the objective it was opened to show.
+        if let Some(panel) = view.goal_panel.as_mut() {
+            panel.goal = goal;
         }
         self.sync_goal_tray(view);
     }
@@ -1382,14 +1396,11 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// The tray goal label follows the current goal state (TS
-    /// `syncGoalTray`; the label itself is `getTrayGoalLabel`).
+    /// The goal's dock row follows the current goal state (the tray's
+    /// TS `getTrayGoalLabel` cluster is deliberately not ported — the
+    /// operator's 2026-09-24 directive moves "Pursuing goal" off the
+    /// line below the prompt bar; the dock's row below carries it).
     pub(crate) fn sync_goal_tray(&mut self, view: &mut AgentView) {
-        let label = tray_goal_label(&self.goal_view.goal);
-        if view.chrome.goal_label != label {
-            view.chrome.goal_label = label;
-            self.dirty = true;
-        }
         let previous = view.chrome.activity.clone();
         self.update_subagent_summary(view);
         if previous != view.chrome.activity {
@@ -5841,6 +5852,7 @@ impl SessionUi {
         let overlay_focused = view.model_picker.is_some()
             || view.effort_picker.is_some()
             || view.heartbeats_picker.is_some()
+            || view.goal_panel.is_some()
             || view.bash_view.is_some()
             || view.tree_selector.is_some()
             || view.fork_selector.is_some()
@@ -6002,8 +6014,9 @@ impl SessionUi {
         }
         // The bash view owns the whole frame while open (like its key
         // dispatch): a paste never lands in the hidden editor prompt,
-        // where a later Enter would submit it unedited.
-        if view.bash_view.is_some() {
+        // where a later Enter would submit it unedited. The read-only
+        // goal panel consumes it the same way.
+        if view.bash_view.is_some() || view.goal_panel.is_some() {
             self.dirty = true;
             return;
         }
@@ -6224,7 +6237,42 @@ impl SessionUi {
                 self.emit_activity_opened("bash");
                 self.open_bash_view(view);
             }
+            crate::chrome::ActivityGroup::Goal => {
+                self.emit_activity_opened("goal");
+                self.open_goal_panel(view);
+            }
         }
+    }
+
+    /// The dock's goal row opens the read-only goal panel (the
+    /// operator's 2026-09-24 directive: selecting the `Pursuing goal`
+    /// row shows "what the goal prompt is").
+    fn open_goal_panel(&mut self, view: &mut AgentView) {
+        view.goal_panel = Some(GoalPanel {
+            goal: self.goal_view.goal.clone(),
+        });
+        self.subagents_focused = false;
+        self.update_subagent_summary(view);
+        self.dirty = true;
+    }
+
+    /// The goal panel owns the frame while open: the close and back
+    /// keys dismiss it; every other key is consumed (a read-only view).
+    async fn handle_goal_panel_key(
+        &mut self,
+        key: KeyEvent,
+        view: &mut AgentView,
+    ) -> Result<()> {
+        let Some(id) = key_event_to_id(&key) else {
+            return Ok(());
+        };
+        if view.editor.keybindings().matches(&id, "tui.select.cancel")
+            || view.editor.keybindings().matches(&id, "app.modal.back")
+        {
+            view.goal_panel = None;
+            self.dirty = true;
+        }
+        Ok(())
     }
 
     /// Fetch one bash activity's output tail off the key loop (a stalled
@@ -7179,6 +7227,10 @@ impl SessionUi {
         if view.bash_view.is_some() {
             return self.handle_bash_view_key(key, view).await;
         }
+        // The read-only goal panel owns the frame the same way.
+        if view.goal_panel.is_some() {
+            return self.handle_goal_panel_key(key, view).await;
+        }
         // The `/tree` and `/fork` selectors own the frame the same way.
         if view.tree_selector.is_some() {
             return self.handle_tree_selector_key(key, view).await;
@@ -7287,6 +7339,7 @@ impl SessionUi {
                     crate::chrome::ActivityGroup::Subagents,
                     crate::chrome::ActivityGroup::Heartbeats,
                     crate::chrome::ActivityGroup::Bash,
+                    crate::chrome::ActivityGroup::Goal,
                 ];
                 let current = groups
                     .iter()

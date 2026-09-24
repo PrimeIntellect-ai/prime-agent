@@ -172,6 +172,112 @@ pub fn format_goal_elapsed(seconds: u64) -> String {
     format!("{hours}h {remaining_minutes:02}m")
 }
 
+/// The read-only goal panel (the operator's 2026-09-24 directive: the
+/// dock's `Pursuing goal` row opens "what the goal prompt is"): the
+/// objective text wrapped over the frame, the status facts beneath it,
+/// and the same bottom-shortcuts shape as the docked panes — the hint,
+/// one blank line below it, no rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GoalPanel {
+    pub goal: GoalState,
+}
+
+/// The status word for the panel's facts row (`Active`/`Paused`/...).
+fn goal_status_word(status: GoalStatus) -> &'static str {
+    match status {
+        GoalStatus::Idle => "idle",
+        GoalStatus::Active => "active",
+        GoalStatus::Paused => "paused",
+        GoalStatus::BudgetLimited => "budget limited",
+        GoalStatus::Complete => "complete",
+        GoalStatus::Error => "error",
+    }
+}
+
+/// Render the goal panel's frame: rule, title, the wrapped objective,
+/// the status facts (status, elapsed, token budget), the hint, and one
+/// blank below it.
+pub fn render_goal_panel(
+    panel: &GoalPanel,
+    theme: &crate::theme::Theme,
+    width: usize,
+    kb: &crate::keybindings::KeybindingsManager,
+) -> Vec<crate::Line> {
+    use crate::theme::ThemeColor;
+    use crate::{Line, Span};
+
+    let goal = &panel.goal;
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(vec![theme.fg_span(
+        ThemeColor::BorderMuted,
+        "\u{2500}".repeat(width.max(1)),
+    )]);
+    lines.push(vec![
+        Span::raw("  "),
+        theme.fg_span(ThemeColor::Text, "Goal".to_string()),
+    ]);
+    lines.push(Vec::new());
+    let objective = goal
+        .objective
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or("No objective recorded");
+    // Non-newline control characters scrub before the wrap: an escape
+    // sequence in an objective can never execute terminal control
+    // operations when rendered.
+    let objective: String = objective
+        .chars()
+        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
+        .collect();
+    let objective_width = width.saturating_sub(4).max(10);
+    for line in crate::width::wrap_text(&objective, objective_width) {
+        let mut row: Line = vec![Span::raw("  ")];
+        row.extend(line.iter().cloned());
+        lines.push(crate::width::truncate_line(&row, width, ""));
+    }
+    lines.push(Vec::new());
+    let facts: Vec<(&str, String)> = vec![
+        ("status", goal_status_word(goal.status).to_string()),
+        ("elapsed", format_goal_elapsed(goal.time_used_seconds)),
+        (
+            "tokens",
+            match (goal.tokens_used, goal.token_budget) {
+                (used, Some(budget)) => format!("{used} / {budget} tokens"),
+                (used, None) => format!("{used} tokens"),
+            },
+        ),
+    ];
+    let label_width = facts
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    for (label, value) in &facts {
+        lines.push(crate::width::truncate_line(
+            &vec![
+                Span::raw("  "),
+                theme.fg_span(ThemeColor::Dim, format!("{label:<label_width$}  ")),
+                theme.fg_span(ThemeColor::Muted, value.clone()),
+            ],
+            width,
+            "",
+        ));
+    }
+    let close = kb
+        .first_key("tui.select.cancel")
+        .map(|key| crate::keybindings::format_key_text(&key))
+        .unwrap_or_else(|| "Esc".to_string());
+    lines.push(Vec::new());
+    lines.push(crate::menu_panel::hint_row(
+        theme,
+        width,
+        &format!("{close} close"),
+    ));
+    lines.push(Vec::new());
+    lines
+}
+
 /// The session view's goal state (the current `goal_update` payload) and
 /// its announcement bookkeeping.
 #[derive(Debug, Default)]
@@ -325,5 +431,59 @@ mod tests {
             tray_goal_label(&elapsed).as_deref(),
             Some("Pursuing goal (1h 01m)")
         );
+    }
+
+    /// The read-only goal panel (the operator's 2026-09-24 directive):
+    /// the dock's `Pursuing goal` row opens "what the goal prompt is" —
+    /// the wrapped objective over the frame, the status facts beneath
+    /// it, the close hint, and one blank line below the hint (never a
+    /// rule — the docked panes' shared shortcuts shape).
+    #[test]
+    fn the_goal_panel_renders_the_objective_and_facts() {
+        let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor);
+        let kb = crate::keybindings::KeybindingsManager::new();
+        let mut state = goal(GoalStatus::Active);
+        state.objective = Some("ship the rust port\nwith all batteries green".to_string());
+        state.time_used_seconds = 125;
+        state.tokens_used = 18_000;
+        state.token_budget = Some(40_000);
+        let frame = render_goal_panel(
+            &GoalPanel { goal: state },
+            &theme,
+            60,
+            &kb,
+        );
+        let text: Vec<String> = frame
+            .iter()
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .collect();
+        let joined = text.join("\n");
+        assert!(text.iter().any(|row| row.trim() == "Goal"), "the title: {joined}");
+        // The objective wraps, never single-lines.
+        assert!(joined.contains("ship the rust port"));
+        assert!(joined.contains("with all batteries green"));
+        // The status facts.
+        assert!(joined.contains("status"), "{joined}");
+        assert!(joined.contains("active"), "{joined}");
+        assert!(joined.contains("2m 05s"), "{joined}");
+        assert!(joined.contains("18000 / 40000 tokens"), "{joined}");
+        // The hint, then exactly one blank below it — no rule.
+        let hint = text
+            .iter()
+            .position(|row| row.contains("close"))
+            .expect("the hint row");
+        assert!(text[hint].trim() != "\u{2500}");
+        assert_eq!(text.len() - hint - 1, 1, "one blank below the hint: {text:?}");
+        assert!(text.last().expect("the last row").trim().is_empty());
+        // A goal without an objective degrades to the placeholder.
+        let mut bare = goal(GoalStatus::Active);
+        bare.objective = None;
+        let frame = render_goal_panel(&GoalPanel { goal: bare }, &theme, 60, &kb);
+        let joined: String = frame
+            .iter()
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("No objective recorded"), "{joined}");
     }
 }

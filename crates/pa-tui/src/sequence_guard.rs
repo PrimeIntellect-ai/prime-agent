@@ -1627,4 +1627,63 @@ mod tests {
             ))]
         );
     }
+
+    /// A split kitty shift+enter (`CSI 13;2u`) reassembles into exactly
+    /// the Enter+SHIFT event the unsplit parse delivers, at every read
+    /// boundary — the operator's 2026-09-24 shift+enter directive rides
+    /// the same seam every kitty key does.
+    #[test]
+    fn a_split_kitty_shift_enter_arrives_as_the_shift_enter_key() {
+        for split in [1usize, 2, 5, 8] {
+            let events = read_projection(b"\x1b[13;2u", &[split]);
+            let outputs = run_guard(events.clone());
+            assert_eq!(
+                leaks(&outputs),
+                vec![Event::Key(KeyEvent::new(
+                    KeyCode::Enter,
+                    KeyModifiers::SHIFT
+                ))],
+                "split at {split}: {events:?} as {outputs:?}"
+            );
+        }
+        // The unsplit form passes through untouched (the guard is
+        // invisible): crossterm's own parse of `CSI 13;2u` is the same
+        // event.
+        let outputs = run_guard(vec![Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::SHIFT,
+        ))]);
+        assert_eq!(
+            leaks(&outputs),
+            vec![Event::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::SHIFT
+            ))]
+        );
+    }
+
+    /// The composed seam: a split kitty shift+enter reassembles through
+    /// the guard, decodes to the `shift+enter` key id, and lands in the
+    /// editor as a newline — never a submit.
+    #[test]
+    fn a_split_shift_enter_inserts_a_newline_in_the_editor() {
+        let outputs = run_guard(read_projection(b"\x1b[13;2u", &[1]));
+        let key = leaks(&outputs)
+            .into_iter()
+            .find_map(|event| match event {
+                Event::Key(key) => Some(key),
+                _ => None,
+            })
+            .expect("the shift+enter key");
+        let id = crate::keys::key_event_to_id(&key).expect("the key id");
+        assert_eq!(id, "shift+enter");
+        let mut editor = crate::editor::Editor::new();
+        editor.handle_input("a");
+        editor.handle_input(&id);
+        assert_eq!(editor.get_lines(), vec!["a", ""]);
+        assert!(
+            editor.take_events().is_empty(),
+            "the newline press never submits"
+        );
+    }
 }

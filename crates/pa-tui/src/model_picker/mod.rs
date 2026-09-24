@@ -1157,6 +1157,10 @@ mod tests {
             rows[16],
             " \u{2191}/\u{2193} model \u{b7} \u{2190}/\u{2192} effort \u{b7} Enter select \u{b7} Esc close"
         );
+        // One blank line of spacing below the shortcuts (the operator's
+        // 2026-09-24 directive), never a rule.
+        assert_eq!(rows.len(), 18, "the frame ends on the blank: {rows:?}");
+        assert_eq!(rows[17], "");
     }
 
     #[test]

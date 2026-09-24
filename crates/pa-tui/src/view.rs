@@ -1251,6 +1251,15 @@ impl AgentView {
             let mut dock = prompt_context;
             dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
             Some(dock)
+        } else if let Some(panel) = &self.goal_panel {
+            let mut dock = prompt_context;
+            dock.extend(crate::goal_surface::render_goal_panel(
+                panel,
+                &self.theme,
+                width,
+                self.editor.keybindings(),
+            ));
+            Some(dock)
         } else if let Some(view) = self.bash_view.as_ref() {
             let mut dock = prompt_context;
             dock.extend(view.render(&self.theme, width, self.editor.keybindings()));
@@ -1456,6 +1465,7 @@ impl AgentView {
             || self.model_picker.is_some()
             || self.effort_picker.is_some()
             || self.heartbeats_picker.is_some()
+            || self.goal_panel.is_some()
             || self.bash_view.is_some()
             || self.tree_selector.is_some()
             || self.fork_selector.is_some()
