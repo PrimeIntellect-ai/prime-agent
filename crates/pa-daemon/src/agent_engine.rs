@@ -8295,6 +8295,326 @@ pub(crate) mod tests {
         });
         assert_eq!(engine.effective_thinking_level().as_deref(), Some("low"));
     }
+    // Image-model routing (TS #2453's `settings.imageModel`): a
+    // text-only session model + an image-attaching batch routes to the
+    // configured image model, or the turn fails with the actionable
+    // refusal. The battery pair: a text-only session model and a
+    // vision-capable image model, both on a models.json provider whose
+    // api the faux registry serves.
+
+    fn write_image_pair_models_json(agent_dir: &std::path::Path) {
+        std::fs::create_dir_all(agent_dir).unwrap();
+        std::fs::write(
+            agent_dir.join("models.json"),
+            serde_json::json!({
+                "providers": {
+                    "battery": {
+                        "api": "mock-battery",
+                        "baseUrl": "http://127.0.0.1:9",
+                        "apiKey": "sk-battery",
+                        "models": [
+                            {
+                                "id": "mock-1",
+                                "name": "Mock 1",
+                                "api": "mock-battery",
+                                "contextWindow": 128_000,
+                                "maxTokens": 4096
+                            },
+                            {
+                                "id": "mock-vision",
+                                "name": "Mock Vision",
+                                "api": "mock-battery",
+                                "contextWindow": 128_000,
+                                "maxTokens": 4096,
+                                "input": ["text", "image"]
+                            }
+                        ]
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    fn write_image_settings(dir: &std::path::Path, settings: serde_json::Value) {
+        std::fs::create_dir_all(dir.join("agent")).unwrap();
+        std::fs::write(
+            dir.join("agent").join("settings.json"),
+            settings.to_string(),
+        )
+        .unwrap();
+    }
+
+    /// The engine battery pair: models.json with the text-only session
+    /// model pinned by the create config and the vision image model.
+    fn image_route_engine(
+        dir: &std::path::Path,
+        settings: serde_json::Value,
+    ) -> AgentSessionEngine {
+        let agent_dir = dir.join("agent");
+        write_image_pair_models_json(&agent_dir);
+        write_image_settings(dir, settings);
+        let engine = AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.to_path_buf(),
+            agent_dir,
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: None,
+            supervisor_link: None,
+            telemetry_disabled: None,
+            cron_store: None,
+            queued_steering_probe: None,
+            image_model_router: None,
+        })
+        .unwrap();
+        engine.configure_model(EngineModelSelection {
+            provider: Some("battery".to_string()),
+            model: Some("mock-1".to_string()),
+            api_key: None,
+            thinking: None,
+        });
+        engine
+    }
+
+    fn one_image() -> Vec<pa_agent::types::ImageContent> {
+        vec![pa_agent::types::ImageContent {
+            data: "aGk=".to_string(),
+            mime_type: "image/png".to_string(),
+        }]
+    }
+
+    #[test]
+    fn image_route_resolves_the_configured_image_model() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = image_route_engine(
+            dir.path(),
+            serde_json::json!({ "imageModel": "battery/mock-vision" }),
+        );
+        let route = engine
+            .resolve_image_turn_route(true)
+            .expect("the configured reference routes");
+        let route = route.expect("the text-only session model routes");
+        assert_eq!(route.model.id, "mock-vision");
+        assert_eq!(route.model.provider, "battery");
+        // An image-free batch never routes.
+        let none = engine
+            .resolve_image_turn_route(false)
+            .expect("image-free batches stay on the session model");
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn image_route_refusals_name_the_setting() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // Without imageModel the turn fails with the TS refusal naming the
+        // setting and the session model.
+        let engine = image_route_engine(dir.path(), serde_json::json!({}));
+        let error = engine
+            .resolve_image_turn_route(true)
+            .expect_err("no imageModel configured");
+        assert!(
+            format!("{error}").contains("does not accept image input"),
+            "{error}"
+        );
+        assert!(format!("{error}").contains("battery/mock-1"), "{error}");
+        assert!(
+            format!("{error}").contains("Set imageModel in settings.json"),
+            "{error}"
+        );
+        // An unusable reference refuses with its own message.
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = image_route_engine(
+            dir.path(),
+            serde_json::json!({ "imageModel": "nope/nothere" }),
+        );
+        let error = engine
+            .resolve_image_turn_route(true)
+            .expect_err("the reference must resolve");
+        assert!(
+            format!("{error}").contains("could not be resolved"),
+            "{error}"
+        );
+        // `images.blockImages` disables routing: no refusal, no route.
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = image_route_engine(
+            dir.path(),
+            serde_json::json!({
+                "imageModel": "battery/mock-vision",
+                "images": { "blockImages": true }
+            }),
+        );
+        let none = engine
+            .resolve_image_turn_route(true)
+            .expect("blocked images disable routing");
+        assert!(none.is_none());
+    }
+
+    /// The end-to-end routed episode: an image-attaching prompt on the
+    /// text-only session model serves on the configured image model (the
+    /// settled assistant row tags it), and the episode's settle restores
+    /// the session target and clears the agent override (TS: the next
+    /// dispatch re-evaluates the routing against the session model).
+    #[test]
+    fn image_turn_serves_on_the_image_model_and_restores() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("mock-battery".to_string()),
+                provider: Some("battery".to_string()),
+                models: Some(vec![
+                    pa_ai::faux::FauxModelDefinition {
+                        id: "mock-1".to_string(),
+                        name: Some("Mock 1".to_string()),
+                        reasoning: Some(false),
+                        input: Some(vec![pa_types::ai::ModelInput::Text]),
+                        cost: None,
+                        context_window: Some(128_000),
+                        max_tokens: Some(4096),
+                    },
+                    pa_ai::faux::FauxModelDefinition {
+                        id: "mock-vision".to_string(),
+                        name: Some("Mock Vision".to_string()),
+                        reasoning: Some(false),
+                        input: Some(vec![
+                            pa_types::ai::ModelInput::Text,
+                            pa_types::ai::ModelInput::Image,
+                        ]),
+                        cost: None,
+                        context_window: Some(128_000),
+                        max_tokens: Some(4096),
+                    },
+                ]),
+                ..Default::default()
+            });
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+            pa_ai::faux::faux_assistant_text_message(
+                "vision reply",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+        )]);
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = image_route_engine(
+            dir.path(),
+            serde_json::json!({ "imageModel": "battery/mock-vision" }),
+        );
+        let mut events = Vec::new();
+        engine.run_prompt(
+            0,
+            PromptRequest {
+                batch: Vec::new(),
+                images: one_image(),
+                message: "describe this".to_string(),
+                source: "user".to_string(),
+                agent_message_id: None,
+                custom_message: None,
+            },
+            &|| false,
+            &mut |event| {
+                events.push(event);
+                true
+            },
+        );
+        let turn_end = events
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::TurnEnd { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("the routed turn settled");
+        // The routed run's assistant row tags the image model that served
+        // it (TS: run failures and assistant attribution follow the
+        // override model, never the session model).
+        assert_eq!(turn_end["model"], serde_json::json!("mock-vision"));
+        assert_eq!(turn_end["provider"], serde_json::json!("battery"));
+        // The episode's settle restored the session target and cleared the
+        // agent override: the next image-free turn serves mock-1 again.
+        assert_eq!(engine.session_model().unwrap().id, "mock-1");
+        let agent = engine
+            .turn_agent
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .expect("session built by the routed turn");
+        assert!(agent.model_override().is_none());
+        registration.unregister();
+    }
+
+    /// Without `imageModel`, the image-attaching turn fails at dispatch
+    /// with the actionable refusal (no silent image downgrade): the run
+    /// ends with `Done(Err(refusal))` and no assistant row ran.
+    #[test]
+    fn image_turn_without_image_model_fails_with_the_refusal() {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let registration =
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+                api: Some("mock-battery".to_string()),
+                provider: Some("battery".to_string()),
+                models: Some(vec![pa_ai::faux::FauxModelDefinition {
+                    id: "mock-1".to_string(),
+                    name: Some("Mock 1".to_string()),
+                    reasoning: Some(false),
+                    input: Some(vec![pa_types::ai::ModelInput::Text]),
+                    cost: None,
+                    context_window: Some(128_000),
+                    max_tokens: Some(4096),
+                }]),
+                ..Default::default()
+            });
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Message(
+            pa_ai::faux::faux_assistant_text_message(
+                "should not run",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            ),
+        )]);
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = image_route_engine(dir.path(), serde_json::json!({}));
+        let mut events = Vec::new();
+        engine.run_prompt(
+            0,
+            PromptRequest {
+                batch: Vec::new(),
+                images: one_image(),
+                message: "describe this".to_string(),
+                source: "user".to_string(),
+                agent_message_id: None,
+                custom_message: None,
+            },
+            &|| false,
+            &mut |event| {
+                events.push(event);
+                true
+            },
+        );
+        let refusal = events
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::Done(Err(error)) => Some(error.clone()),
+                _ => None,
+            })
+            .expect("the turn fails at dispatch");
+        assert!(refusal.contains("does not accept image input"), "{refusal}");
+        assert!(
+            refusal.contains("Set imageModel in settings.json"),
+            "{refusal}"
+        );
+        // No assistant row ran: the provider never saw the turn.
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, EngineEvent::TurnEnd { .. })),
+            "the refused turn produced no model turn"
+        );
+        registration.unregister();
+    }
 }
 
 /// Register the faux provider from a script and return its model. Scripts

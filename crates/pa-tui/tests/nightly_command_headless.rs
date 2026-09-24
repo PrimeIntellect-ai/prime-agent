@@ -217,6 +217,9 @@ impl pa_tui::client_settings::ClientSettings for StubSettings {
     fn set_block_images(&self, _blocked: bool) -> Result<()> {
         Ok(())
     }
+    fn image_model(&self) -> Option<String> {
+        None
+    }
     fn enable_skill_commands(&self) -> bool {
         true
     }

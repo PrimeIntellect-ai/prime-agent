@@ -1004,4 +1004,25 @@ mod tests {
         manager.global.session_archive_max_sessions = Some(serde_json::json!(50));
         assert_eq!(manager.get_session_archive_policy().max_sessions, Some(50));
     }
+
+    /// TS `getImageModel`: the `imageModel` reference reads trimmed, and
+    /// malformed values (empty/whitespace) behave as unset.
+    #[test]
+    fn image_model_reads_trimmed_or_unset() {
+        let manager = SettingsManager::in_memory(Settings {
+            image_model: Some("  battery/mock-vision  ".to_string()),
+            ..Settings::default()
+        });
+        assert_eq!(
+            manager.get_image_model().as_deref(),
+            Some("battery/mock-vision")
+        );
+        let manager = SettingsManager::in_memory(Settings {
+            image_model: Some("   ".to_string()),
+            ..Settings::default()
+        });
+        assert_eq!(manager.get_image_model(), None);
+        let manager = SettingsManager::in_memory(Settings::default());
+        assert_eq!(manager.get_image_model(), None);
+    }
 }

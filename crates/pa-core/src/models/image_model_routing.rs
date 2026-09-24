@@ -157,14 +157,6 @@ mod tests {
         }
     }
 
-    fn resolved_ok(inputs: &ImageModelRoutingInputs<'_>) -> Option<String> {
-        match resolve_image_model_override(inputs) {
-            Ok(Some(resolved)) => Some(resolved.model.id),
-            Ok(None) => None,
-            Err(message) => Some(format!("ERR:{message}")),
-        }
-    }
-
     // The TS table (test/image-model-override.test.ts): routes image turns
     // to imageModel; a vision session model serves image turns natively;
     // blocked images stay on the session model; refusals name the setting.

@@ -423,6 +423,44 @@ mod tests {
     }
 
     #[test]
+    fn python_skills_unavailable_row_decodes_and_renders() {
+        // The wire row decodes into the unavailable-skills kind with its
+        // skill list, the header renders the muted label + dim skills, and
+        // the collapsed row expands to the full report (TS
+        // `InjectedPromptMessageComponent`'s `python_skills_unavailable`).
+        let row = decoded_row(serde_json::json!({
+            "role": "custom",
+            "customType": "python_skills_unavailable",
+            "content": "[python-skills-unavailable]\n\nThese installed Python skill modules failed to import into the Python kernel, so calling them raises an error:\n- websearch: No module named 'websearch'",
+            "display": true,
+            "details": { "skills": ["websearch", "edit"] },
+        }));
+        assert_eq!(
+            row.kind,
+            InjectedPromptKind::PythonSkillsUnavailable {
+                skills: vec!["websearch".to_string(), "edit".to_string()],
+            }
+        );
+        let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 60);
+        assert_eq!(
+            flat(&rows[1]).trim_end(),
+            "Python skills unavailable \u{b7} websearch, edit"
+        );
+        assert!(row.body.is_some(), "the row expands to the report");
+        // Missing details fall back to the bare label.
+        let row = decoded_row(serde_json::json!({
+            "role": "custom",
+            "customType": "python_skills_unavailable",
+            "content": "[python-skills-unavailable]",
+            "display": true,
+        }));
+        assert_eq!(
+            row.kind,
+            InjectedPromptKind::PythonSkillsUnavailable { skills: Vec::new() }
+        );
+    }
+
+    #[test]
     fn heartbeat_header_and_schedule_forms() {
         assert_eq!(
             heartbeat_schedule(&Some("every 10m".to_string())),
