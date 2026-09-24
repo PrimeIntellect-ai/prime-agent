@@ -2201,7 +2201,7 @@ impl Supervisor {
                                 ClientRouting::Broadcast => true,
                                 ClientRouting::BroadcastExcept {
                                     connection_id: excluded,
-                                } => excluded != connection_id,
+                                } => excluded.as_str() != connection_id.as_str(),
                                 ClientRouting::AttachedSession { active_session_id } => {
                                     attached.lock().unwrap().iter().any(|id| id == active_session_id)
                                 }
