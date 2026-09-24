@@ -214,9 +214,10 @@ the same daemon, so this build cannot open the file while that process holds it.
             match id {
                 Some(id) => {
                     lines.push(format!("  prime-agent --resume {id}"));
-                    lines
-                        .push("  (switch to the TypeScript product — its daemon owns this session)"
-                            .to_string());
+                    lines.push(
+                        "  (switch to the TypeScript product — its daemon owns this session)"
+                            .to_string(),
+                    );
                 }
                 None => {
                     lines.push("  prime-agent --resume".to_string());
@@ -374,12 +375,15 @@ Session: ts01ab";
     fn the_footer_reads_the_session_name_and_the_path_fallback() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let file = dir.path().join("session.jsonl");
-        std::fs::write(&file, concat!(
-            "{\"type\":\"session\",\"version\":3,\"id\":\"sess01\",\n",
-            "\"timestamp\":\"2026-09-24T00:00:00Z\",\"cwd\":\"/w\"}\n",
-            "{\"type\":\"session_info\",\"id\":\"e1\",\n",
-            "\"timestamp\":\"2026-09-24T00:00:01Z\",\"name\":\"lane work\"}\n"
-        ))
+        std::fs::write(
+            &file,
+            concat!(
+                "{\"type\":\"session\",\"version\":3,\"id\":\"sess01\",\n",
+                "\"timestamp\":\"2026-09-24T00:00:00Z\",\"cwd\":\"/w\"}\n",
+                "{\"type\":\"session_info\",\"id\":\"e1\",\n",
+                "\"timestamp\":\"2026-09-24T00:00:01Z\",\"name\":\"lane work\"}\n"
+            ),
+        )
         .expect("write session file");
         let hold = HoldIdentity {
             pid: Some(4242),
