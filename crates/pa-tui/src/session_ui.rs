@@ -11,6 +11,7 @@ use pa_types::slash_commands::{SlashCommandExecution, SlashCommandRegistry};
 use serde_json::Value;
 
 use crate::bash_view::{BashView, BashViewAction};
+use crate::runs_view::{RunsView, RunsViewAction};
 use crate::chat::{
     ChatEntry, CompactionReason, CompactionState, MessageBlock, RetryState, StatusKind,
     ToolResultView, WorkingState,
@@ -1204,6 +1205,7 @@ impl SessionUi {
         // stats and clears the readout left over from the previous session.
         if matches!(kind, RebuildKind::Rebind) {
             view.bash_view = None;
+            view.runs_view = None;
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }
@@ -5855,8 +5857,9 @@ impl SessionUi {
         }
         // The bash view owns the whole frame while open (like its key
         // dispatch): a paste never lands in the hidden editor prompt,
-        // where a later Enter would submit it unedited.
-        if view.bash_view.is_some() {
+        // where a later Enter would submit it unedited. The runs view
+        // owns the frame the same way.
+        if view.bash_view.is_some() || view.runs_view.is_some() {
             self.dirty = true;
             return;
         }
@@ -6078,6 +6081,46 @@ impl SessionUi {
                 self.open_bash_view(view);
             }
         }
+    }
+
+    /// Open the condensed tool runs view (the drill-in pane for the
+    /// collapsed transcript's condensed blocks): the pane reads the
+    /// view's own transcript - no wire requests, no state beyond the
+    /// cursor and the scroll.
+    fn open_runs_view(&mut self, view: &mut AgentView) {
+        let runs = view.condensed_runs();
+        view.runs_view = Some(RunsView::new(
+            picker_viewport_rows(view.terminal_rows()),
+            &runs,
+        ));
+        self.dirty = true;
+    }
+
+    /// One key press while the condensed tool runs view is open: the view
+    /// owns the frame the same way as the bash view; its only action is
+    /// closing (the pane is pure presentation).
+    async fn handle_runs_view_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
+        let Some(id) = key_event_to_id(&key) else {
+            return Ok(());
+        };
+        if id == "ctrl+c" {
+            self.exit_guard.note_ctrl_c_handled();
+        }
+        let runs = view.condensed_runs();
+        let kb = view.editor.keybindings().clone();
+        let action = view
+            .runs_view
+            .as_mut()
+            .map(|runs_view| runs_view.handle_key(&id, &kb, &runs))
+            .unwrap_or(RunsViewAction::None);
+        match action {
+            RunsViewAction::Close => {
+                view.runs_view = None;
+            }
+            RunsViewAction::None => {}
+        }
+        self.dirty = true;
+        Ok(())
     }
 
     /// Fetch one bash activity's output tail off the key loop (a stalled
@@ -7041,6 +7084,10 @@ impl SessionUi {
         if view.bash_view.is_some() {
             return self.handle_bash_view_key(key, view).await;
         }
+        // The condensed tool runs view owns the frame the same way.
+        if view.runs_view.is_some() {
+            return self.handle_runs_view_key(key, view).await;
+        }
         // The `/tree` and `/fork` selectors own the frame the same way.
         if view.tree_selector.is_some() {
             return self.handle_tree_selector_key(key, view).await;
@@ -7365,6 +7412,21 @@ impl SessionUi {
             if let Some(pane) = view.side_pane.as_mut() {
                 pane.expanded = view.detail == crate::chat::Detail::All;
             }
+            self.dirty = true;
+            return Ok(());
+        }
+        // `app.transcript.runs` (default alt+t): the condensed tool runs
+        // view opens over the editor dock (the drill-in pane for the
+        // collapsed transcript's condensed blocks); with no condensed
+        // runs the key opens the same pane with its empty note - the
+        // affordance stays discoverable.
+        if view
+            .editor
+            .keybindings()
+            .matches(&id, "app.transcript.runs")
+        {
+            self.emit_activity_opened("runs");
+            self.open_runs_view(view);
             self.dirty = true;
             return Ok(());
         }

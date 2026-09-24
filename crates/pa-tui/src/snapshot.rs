@@ -82,6 +82,10 @@ impl Reconstructed {
 struct ToolResultReplay {
     tool_call_id: String,
     view: crate::chat::ToolResultView,
+    /// The message's wire `timestamp` (Unix milliseconds; 0 when absent):
+    /// reading an existing field for the condensed runs' wall-clock - no
+    /// schema change.
+    timestamp: u64,
 }
 
 /// Decode a `role: "toolResult"` message into its replay view; `None` for
@@ -108,6 +112,7 @@ fn tool_result_message_view(message: &Value) -> Option<ToolResultReplay> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         },
+        timestamp: message.get("timestamp").and_then(Value::as_u64).unwrap_or(0),
     })
 }
 
@@ -115,7 +120,7 @@ fn tool_result_message_view(message: &Value) -> Option<ToolResultReplay> {
 /// (the TS `renderedPendingTools` replay: results land on the card, never
 /// as a new transcript row).
 fn apply_tool_result(chat: &mut [ChatEntry], result: ToolResultReplay) {
-    let ToolResultReplay { tool_call_id, view } = result;
+    let ToolResultReplay { tool_call_id, view, timestamp } = result;
     for entry in chat.iter_mut() {
         if let ChatEntry::Tool(card) = entry {
             if card.id == tool_call_id && card.result.is_none() {
@@ -126,6 +131,7 @@ fn apply_tool_result(chat: &mut [ChatEntry], result: ToolResultReplay) {
                 let now = std::time::Instant::now();
                 card.started_at = Some(now);
                 card.ended_at = Some(now);
+                card.ended_ms = (timestamp > 0).then_some(timestamp);
                 card.result = Some(view);
                 card.result_partial = false;
                 return;
@@ -209,7 +215,7 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
             }
         }
     }
-    for ToolResultReplay { tool_call_id, view } in tool_results {
+    for ToolResultReplay { tool_call_id, view, timestamp } in tool_results {
         let Some(index) = card_index.get(&tool_call_id).copied() else {
             continue;
         };
@@ -222,6 +228,7 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
                 let now = std::time::Instant::now();
                 card.started_at = Some(now);
                 card.ended_at = Some(now);
+                card.ended_ms = (timestamp > 0).then_some(timestamp);
                 card.result = Some(view);
                 card.result_partial = false;
             }
@@ -1058,12 +1065,17 @@ pub fn assistant_value_to_entries(message: &Value) -> Vec<ChatEntry> {
             aborted: error.as_ref().is_some_and(|row| row.aborted),
         })));
     }
+    let started_ms = message
+        .get("timestamp")
+        .and_then(Value::as_u64)
+        .filter(|ms| *ms > 0);
     for (id, name, args) in tool_calls {
         entries.push(ChatEntry::Tool(Box::new(ToolCallCard {
             id,
             name,
             args,
             started: false,
+            started_ms,
             ..Default::default()
         })));
     }
