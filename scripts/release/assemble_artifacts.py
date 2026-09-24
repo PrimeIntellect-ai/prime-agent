@@ -31,6 +31,14 @@ installer parity: it is one of NATIVE_RELEASE_ASSETS) whose `version` is
 `<version>-continuous.<sha>`, so the shipped binary reports the exact commit it
 was built from via `--version`; the manifest records the commit too. The
 archive name keeps the bare `<version>` so rolling releases overwrite assets.
+
+Archive naming: `prime-agent-<version>-<platform-alias>.tar.gz` (TS
+`assemble-release-archives.mjs` parity, e.g.
+`prime-agent-0.1.0-linux-x64.tar.gz`) — the name the update flow's channel
+manifest requires: `pa-core::update::release` keeps a row only when its `file`
+is exactly `prime-agent-<version>-<platform>.tar.gz`, and the promoted
+latest.json/beta.json reference these assets verbatim. The target triple stays
+in the manifest entry's `target` field (provenance, SBOM keying).
 """
 
 from __future__ import annotations
@@ -289,7 +297,9 @@ def main() -> int:
     staging = Path(tempfile.mkdtemp(prefix="prime-agent-archive-"))
     try:
         facts = stage_tree(staging, args, stamped_version)
-        archive_name = f"prime-agent-{args.version}-{args.target}.tar.gz"
+        archive_name = (
+            f"prime-agent-{args.version}-{TARGET_ALIASES[args.target]}.tar.gz"
+        )
         archive_path = out_dir / archive_name
         pack_tarball(staging, archive_path, facts["payload"])
         archive_sha256 = sha256_file(archive_path)
