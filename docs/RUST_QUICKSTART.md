@@ -12,8 +12,23 @@ parity tracker, not this page.
 
 ## Install
 
-The one-liner. The repo is private, so authentication is mandatory:
-`gh auth login` once, or export a `GITHUB_TOKEN`:
+The safe path: download the installer, verify it against the release's
+`SHA256SUMS`, inspect it, then run it. The repo is private, so
+authentication is mandatory: `gh auth login` once, or export a
+`GITHUB_TOKEN`:
+
+```bash
+gh release download rust-v0.1.0 --repo PrimeIntellect-ai/prime-agent \
+  --pattern 'install-rust.sh' --pattern 'SHA256SUMS' --dir /tmp/pa
+cd /tmp/pa
+grep ' install-rust.sh$' SHA256SUMS | shasum -a 256 -c   # verify the script
+less install-rust.sh                                     # inspect what you run
+sh install-rust.sh
+```
+
+The convenience one-liner (internal use — it pipes the script straight
+from the release into `sh`, so you are trusting the release channel
+instead of verifying the download; prefer the safe path when in doubt):
 
 ```bash
 curl -fsSL -H "Authorization: Bearer $(gh auth token)" \
@@ -57,7 +72,9 @@ tag):
 | Linux x86_64 | `Linux x86_64` | `x86_64-unknown-linux-gnu` | `prime-agent-0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
 
 Before a tag is cut, every push to the `rust` branch also produces downloadable
-artifacts on the rust-release workflow's run page — the early-adopter channel.
+artifacts on the continuous workflow's run page (the commit-stamped
+`-continuous.<sha>` channel) — the early-adopter path; the rust-release
+workflow itself is tag-only (`rust-v*` publishes).
 
 ## Run
 
