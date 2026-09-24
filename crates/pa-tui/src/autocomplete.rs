@@ -1056,6 +1056,57 @@ mod tests {
         );
     }
 
+    /// TS #2144 `getServiceTierCompletions`: the `/tier` argument position
+    /// offers the injected items, filtered by the typed term, with the
+    /// current tier marked in the description; other commands fall
+    /// through to path completion.
+    #[test]
+    fn tier_argument_completions_list_filter_and_mark_current() {
+        let mut provider = provider("/tmp");
+        let tier_items = |current: &str| {
+            ["default", "flex", "priority", "auto"]
+                .iter()
+                .map(|tier| CompletionItem {
+                    value: tier.to_string(),
+                    label: tier.to_string(),
+                    description: Some(if *tier == current {
+                        "tier (current)".to_string()
+                    } else {
+                        "tier".to_string()
+                    }),
+                    argument_hint: None,
+                    source_tag: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        provider.set_argument_completions("tier", tier_items("flex"));
+        // No term: every tier lists, the current one marked.
+        let suggestions =
+            provider.get_suggestions(&["/tier ".to_string()], 0, 6, false);
+        let items = suggestions.expect("tier suggestions").items;
+        assert_eq!(
+            items.iter().map(|item| item.value.as_str()).collect::<Vec<_>>(),
+            ["default", "flex", "priority", "auto"]
+        );
+        assert!(items
+            .iter()
+            .any(|item| item.description.as_deref() == Some("tier (current)")));
+        // A term filters by prefix.
+        let suggestions =
+            provider.get_suggestions(&["/tier pr".to_string()], 0, 8, false);
+        let items = suggestions.expect("tier suggestions").items;
+        assert_eq!(
+            items.iter().map(|item| item.value.as_str()).collect::<Vec<_>>(),
+            ["priority"]
+        );
+        // No match falls through to path completion (None here).
+        assert!(
+            provider
+                .get_suggestions(&["/tier zz".to_string()], 0, 8, false)
+                .is_none()
+        );
+    }
+
     #[test]
     fn slash_completion_applies_separator_by_argument() {
         let provider = provider("/tmp");

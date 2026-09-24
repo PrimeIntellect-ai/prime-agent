@@ -854,6 +854,34 @@ mod tests {
         assert_eq!(str_width(&text), 120);
     }
 
+    /// The tray's tier badge (TS footer badge, #2144): `fast` for the
+    /// priority tier, the tier name for any other non-default tier, and
+    /// nothing for `default` or an unset tier.
+    #[test]
+    fn tray_service_tier_badge_follows_the_ts_shape() {
+        let state = |tier: Option<&str>| ChromeState {
+            model_id: Some("gpt-5.5".to_string()),
+            service_tier: tier.map(str::to_string),
+            ..Default::default()
+        };
+        let badge = |tier: Option<&str>| {
+            let line = render_tray(&state(tier), &theme(), 120);
+            line.iter().map(|s| s.content.as_str()).collect::<String>()
+        };
+        assert!(
+            badge(Some("priority")).contains("gpt-5.5 \u{00b7} fast"),
+            "priority renders the fast token"
+        );
+        assert!(
+            badge(Some("flex")).contains("gpt-5.5 \u{00b7} flex"),
+            "a non-default tier renders its name"
+        );
+        for tier in [Some("default"), None] {
+            let text = badge(tier);
+            assert!(!text.contains(" \u{00b7} "), "{tier:?} renders no badge");
+        }
+    }
+
     /// The tray's goal label joins the context label first (TS
     /// `getTrayContextLabel`: `[goalLabel, ..., modelContextLabel]`).
     #[test]

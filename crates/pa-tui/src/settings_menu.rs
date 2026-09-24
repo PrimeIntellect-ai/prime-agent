@@ -947,8 +947,9 @@ mod menu_tests {
     #[test]
     fn enter_opens_the_thinking_submenu_and_selection_applies() {
         let mut menu = menu();
-        // Walk to the thinking row (the 21st).
-        for _ in 0..20 {
+        // Walk to the thinking row (the 22nd; the default-service-tier row
+        // sits between transport and mermaid like TS).
+        for _ in 0..21 {
             menu.handle_key("down", &kb());
         }
         assert_eq!(menu.handle_key("enter", &kb()), SettingsMenuAction::None);
