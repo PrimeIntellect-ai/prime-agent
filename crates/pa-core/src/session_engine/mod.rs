@@ -1329,7 +1329,10 @@ mod tests {
             "the delivered custom row carries its state fingerprint"
         );
         assert!(rows[0].0.contains("Resume test memory"));
-        // The delivered row persisted with its fingerprint.
+        // The delivered row persisted with its fingerprint. The persisted
+        // transcript keeps every copy (TS #2394: the newest digest remains
+        // authoritative), so the retained row plus the fresh one ride the
+        // file while the live context carries exactly one.
         let persisted: Vec<String> = refreshed
             .entries()
             .await
@@ -1349,8 +1352,10 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(persisted.len(), 1);
-        assert_ne!(persisted[0], first_fingerprint);
+        assert_eq!(persisted.len(), 2);
+        assert_eq!(persisted[0], first_fingerprint);
+        assert_ne!(persisted[1], first_fingerprint);
+        assert_eq!(Some(persisted[1].as_str()), rows[0].1.as_deref());
     }
 
     /// The digest body of the newest digest custom entry (fixture lookup).
