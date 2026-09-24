@@ -2811,7 +2811,6 @@ mod tests {
             joined[header_row + 2]
         );
     }
-}
     // ------------------------------------------------------------------
     // Condensed tool runs (the collapsed-view condensing, tool_runs.rs)
     // ------------------------------------------------------------------
@@ -3015,6 +3014,7 @@ mod tests {
         );
     }
 
+}
 #[cfg(test)]
 mod chunk_selection_tests {
     use super::chunk_selection;
