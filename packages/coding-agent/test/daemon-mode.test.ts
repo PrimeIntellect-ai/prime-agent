@@ -4228,3 +4228,61 @@ describe("session replacement binding", () => {
 		expect(broadcasts).toEqual(["session_replaced"]);
 	});
 });
+
+describe("image model pin ordering", () => {
+	/** A daemon bound to one fake session, driven through its command handler. */
+	function makeImageModelDaemon(session: object) {
+		const directory = mkdtempSync(join(tmpdir(), "prime-agent-image-model-order-"));
+		const daemon = new AgentDaemon(join(directory, "worker.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory, sessionDir: join(directory, "sessions") },
+			worker: { authenticationToken: "token" },
+			createRuntime: async () => {
+				throw new Error("unexpected runtime creation");
+			},
+		} as never) as unknown as {
+			sessions: Map<string, object>;
+			handleCommand(client: object, command: object): Promise<{ success: boolean; data?: unknown }>;
+		};
+		daemon.sessions.set("s1", { activeSessionId: "s1", runtime: { session } });
+		return { daemon, directory };
+	}
+
+	it("lets a clear land after the pin it followed, so the pin cannot undo it", async () => {
+		const applied: Array<string | undefined> = [];
+		const pinned = { provider: "anthropic", id: "claude-haiku-4-5" };
+		let releaseRefresh: (() => void) | undefined;
+		const session = {
+			modelRegistry: {
+				refreshAvailableModels: vi.fn(() => new Promise<void>((resolve) => (releaseRefresh = resolve))),
+				waitForPendingModelRefreshes: vi.fn(async () => {}),
+			},
+			setImageModelOverride: vi.fn((reference: string | undefined) => {
+				applied.push(reference);
+				return reference ? pinned : undefined;
+			}),
+		};
+		const { daemon, directory } = makeImageModelDaemon(session);
+		try {
+			// The pin parks inside its catalog refresh, exactly where the handler
+			// used to apply it after a clear had already been acknowledged.
+			const pin = daemon.handleCommand(
+				{},
+				{ id: "1", type: "set_image_model", activeSessionId: "s1", imageModel: "anthropic/claude-haiku-4-5" },
+			);
+			await new Promise((resolve) => setImmediate(resolve));
+			const clear = daemon.handleCommand(
+				{},
+				{ id: "2", type: "set_image_model", activeSessionId: "s1", imageModel: null },
+			);
+			releaseRefresh?.();
+			const [pinResponse, clearResponse] = await Promise.all([pin, clear]);
+
+			expect(applied).toEqual(["anthropic/claude-haiku-4-5", undefined]);
+			expect(pinResponse).toMatchObject({ success: true, data: pinned });
+			// The clear is the last word: the override it acknowledged stays cleared.
+			expect(clearResponse).toMatchObject({ success: true, data: null });
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+});
