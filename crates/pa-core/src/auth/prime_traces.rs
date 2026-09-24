@@ -5,9 +5,7 @@
 //! The interactive surface (the URL display, the paste fallback) lives in
 //! the composition root; this module owns the protocol.
 
-use std::future::Future;
 use std::path::Path;
-use std::pin::Pin;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -30,10 +28,10 @@ pub const DEFAULT_POLL_INTERVAL_MS: u64 = 5_000;
 /// TS `resolvePrimeAgentTracesBaseUrl`: the override (or the env key)
 /// normalized, else the platform default.
 pub fn resolve_prime_agent_traces_base_url(base_url: Option<&str>) -> String {
-    normalize_base_url(match base_url {
-        Some(url) => Some(url.to_string()),
-        None => std::env::var("PRIME_AGENT_TRACES_BASE_URL").ok(),
-    })
+    let override_url = base_url
+        .map(str::to_string)
+        .or_else(|| std::env::var("PRIME_AGENT_TRACES_BASE_URL").ok());
+    normalize_base_url(override_url.as_deref())
 }
 
 /// TS `resolvePrimeAgentTracesChallengeConfig`: the challenge runs
@@ -95,10 +93,10 @@ pub struct PrimeAgentTracesLoginOptions<'a> {
     pub request_timeout_ms: Option<u64>,
 }
 
-impl PrimeAgentTracesLoginOptions<'_> {
+impl<'a> PrimeAgentTracesLoginOptions<'a> {
     /// TS the default options object (`{}`): the prime-cli reuse is on,
     /// the path and the timing come from the caller's inputs.
-    pub fn new(prime_cli_config_path: Option<&Path>) -> Self {
+    pub fn new(prime_cli_config_path: Option<&'a Path>) -> Self {
         PrimeAgentTracesLoginOptions {
             prime_cli_config_path,
             use_prime_cli_config: prime_cli_config_path.is_some(),
@@ -253,7 +251,7 @@ async fn run_prime_browser_login(
             .finish()
     );
     auth_url.push_str("&scope=agent_traces");
-    callbacks.on_auth(&PrimeAuthInfo {
+    (callbacks.on_auth)(&PrimeAuthInfo {
         url: auth_url,
         instructions: format!("Code: {}", challenge.challenge),
     });
@@ -335,6 +333,8 @@ mod tests {
     use super::*;
     use rsa::pkcs8::DecodePublicKey;
     use std::collections::VecDeque;
+    use std::future::Future;
+    use std::pin::Pin;
     use std::sync::Mutex;
 
     type PrimeHttpResponse = super::super::prime_inference::PrimeHttpResponse;
@@ -369,7 +369,9 @@ mod tests {
         fn pop(&self, url: &str) -> Option<(u16, String)> {
             let mut queue = self.queue.lock().unwrap();
             let position = queue.iter().position(|(expected, _, _)| expected == url)?;
-            let (_, status, body) = queue.remove(position);
+            let (_, status, body) = queue
+                .remove(position)
+                .expect("the scripted response was queued");
             self.served.lock().unwrap().push(url.to_string());
             Some((status, body))
         }
@@ -445,12 +447,16 @@ mod tests {
         }
     }
 
-    fn whoami_ok(scope_write: bool) -> (&'static str, u16, String) {
-        let write = if scope_write { "true" } else { "false" };
+    fn whoami_ok(scope_write: bool) -> (&'static str, u16, &'static str) {
+        let body = if scope_write {
+            r#"{"data":{"scope":{"agent_traces":{"write":true}}}}"#
+        } else {
+            r#"{"data":{"scope":{"agent_traces":{"write":false}}}}"#
+        };
         (
             "https://api.primeintellect.ai/api/v1/user/whoami",
             200,
-            format!(r#"{{"data":{{"scope":{{"agent_traces":{{"write":{write}}}}}}}}"#),
+            body,
         )
     }
 

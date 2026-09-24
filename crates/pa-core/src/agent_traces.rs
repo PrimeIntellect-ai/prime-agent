@@ -407,7 +407,11 @@ fn active_git_context(
         {
             continue;
         }
-        let id = parsed.get("id").and_then(Value::as_str).to_string();
+        let id = parsed
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         let entry = Entry {
             parent_id: parsed
                 .get("parentId")
@@ -838,8 +842,8 @@ fn parse_http_date(value: &str) -> Option<u64> {
     let y = if month <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
-    let mp = (month + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
+    let mp = ((month + 9) % 12) as i64;
+    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
     if days < 0 {
@@ -1078,7 +1082,7 @@ async fn fetch_with_retry(
         if let Some(gate) = before_request {
             // A cancelled wait ends the upload (TS the signal aborts the
             // queued gate slot).
-            gate.before_request(options.cancel, options.on_upload_delay.as_deref())
+            gate.before_request(options.cancel, options.on_upload_delay.as_ref())
                 .await?;
         }
         if options.cancel.is_some_and(|cancel| cancel.is_cancelled()) {
@@ -1951,7 +1955,7 @@ mod tests {
         let names = [
             "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
         ];
-        let weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][(days + 4) % 7 as usize];
+        let weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][((days + 4) % 7) as usize];
         format!(
             "{weekday}, {d:02} {} {y} {hour:02}:{minute:02}:{second:02} GMT",
             names[(m - 1) as usize]
@@ -2033,7 +2037,7 @@ mod tests {
             })),
         };
         // The first slot arms the interval; the second waits it out.
-        gate.before_request(options.cancel, options.on_upload_delay.as_deref())
+        gate.before_request(options.cancel, options.on_upload_delay.as_ref())
             .await
             .expect("the first slot");
         gate.before_request(None, None).await;

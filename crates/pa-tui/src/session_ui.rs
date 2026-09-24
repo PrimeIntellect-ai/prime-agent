@@ -3636,15 +3636,16 @@ impl SessionUi {
                 }
                 let notes = self.traces_upload_notes.clone();
                 let cancel = crate::traces::TraceUploadCancel::new();
+                let run_cancel = cancel.clone();
                 let handle = traces.clone();
                 let task = tokio::spawn(async move {
                     let report = handle
                         .0
-                        .upload_all(session_dir.as_deref(), notes.clone(), cancel.clone())
+                        .upload_all(session_dir.as_deref(), notes.clone(), run_cancel)
                         .await;
                     let _ = notes.send(crate::traces::TraceUploadAllNote::Done {
                         result: report,
-                        cancelled: cancel.is_cancelled(),
+                        cancelled: run_cancel.is_cancelled(),
                     });
                 });
                 self.trace_upload = Some(TraceUploadAllRun { task, cancel });

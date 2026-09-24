@@ -296,7 +296,9 @@ mod tests {
         fn pop(&self, url: &str) -> Option<(u16, String)> {
             let mut queue = self.queue.lock().unwrap();
             let position = queue.iter().position(|(expected, _, _)| expected == url)?;
-            let (_, status, body) = queue.remove(position);
+            let (_, status, body) = queue
+                .remove(position)
+                .expect("the scripted response was queued");
             self.served.lock().unwrap().push(url.to_string());
             Some((status, body))
         }
@@ -420,24 +422,25 @@ mod tests {
             prompt: &str,
         ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
             self.prompt_seen.lock().unwrap().push(prompt.to_string());
-            let pastes = self.pastes.clone();
+            // The answer pops synchronously (a Mutex is not clonable into
+            // the future).
+            let answer = self.pastes.lock().unwrap().pop_front();
             let wait_forever = self.wait_forever.load(Ordering::SeqCst);
             Box::pin(async move {
                 if wait_forever {
-                    std::future::pending::<()>().await;
+                    std::future::pending::<Option<String>>().await;
                     unreachable!("a pending paste never answers");
                 }
-                let value = pastes.lock().unwrap().pop_front();
-                value
+                answer
             })
         }
     }
 
-    fn whoami_ok() -> (&'static str, u16, String) {
+    fn whoami_ok() -> (&'static str, u16, &'static str) {
         (
             "https://api.primeintellect.ai/api/v1/user/whoami",
             200,
-            r#"{"data":{"scope":{"agent_traces":{"write":true}}}}"#.to_string(),
+            r#"{"data":{"scope":{"agent_traces":{"write":true}}}}"#,
         )
     }
 
@@ -572,7 +575,7 @@ mod tests {
         let http = ScriptedHttp::new(vec![(
             "https://api.primeintellect.ai/api/v1/user/whoami",
             403,
-            r#"{"error":{"message":"forbidden"}}"#.to_string(),
+            r#"{"error":{"message":"forbidden"}}"#,
         )]);
         let ui = Arc::new(ScriptedUi::new(vec![Some("bad-key".to_string())]));
         let inputs = TracesLoginInputs {
