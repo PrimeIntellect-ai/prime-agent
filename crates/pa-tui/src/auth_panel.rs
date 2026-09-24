@@ -27,7 +27,7 @@ use crate::fuzzy::fuzzy_filter;
 use crate::hyperlinks::{osc8_open, OSC8_CLOSE};
 use crate::keybindings::KeybindingsManager;
 use crate::menu_panel::{
-    hint_row, menu_row, no_match_row, scroll_row, search_field_lines, MenuSegment,
+    hint_row, menu_row, no_match_row, scroll_row, scrub_controls, search_field_lines, MenuSegment,
 };
 use crate::provider_auth::ProviderAuthOutcome;
 use crate::search_input::SearchInput;
@@ -284,7 +284,7 @@ impl AuthPanel {
     /// (TS `showAuthPanel` mounts the dialog the moment the flow starts).
     pub fn new(title: impl Into<String>) -> Self {
         AuthPanel {
-            title: title.into(),
+            title: scrub_controls(&title.into()),
             subtitle: None,
             progress: Vec::new(),
             auth_url: None,
@@ -300,7 +300,9 @@ impl AuthPanel {
         if self.progress.is_empty() {
             self.progress.push("Preparing authentication".to_string());
         }
-        self.progress.push(message);
+        // The flow's lines can quote provider text: the same control
+        // character hygiene every daemon-supplied row carries.
+        self.progress.push(scrub_controls(&message));
     }
 
     /// TS `showAuth`: the URL block replaces the content (the paste
@@ -323,7 +325,7 @@ impl AuthPanel {
         reply: oneshot::Sender<Option<String>>,
     ) {
         self.input = PanelInput::Paste {
-            prompt,
+            prompt: scrub_controls(&prompt),
             style,
             field: SearchInput::new(),
             reply: Some(reply),
@@ -427,6 +429,21 @@ impl AuthPanel {
         }
     }
 
+    /// One paste payload while the panel owns the frame (TS the dialog's
+    /// field and the selector's search accept pasted text): the payload
+    /// lands in the mounted input — the paste field or the picker's
+    /// search — never in the hidden editor behind the panel.
+    pub fn handle_paste(&mut self, text: &str) {
+        match &mut self.input {
+            PanelInput::Working => {}
+            PanelInput::Paste { field, .. } => field.paste(text),
+            PanelInput::Teams { picker, .. } => {
+                picker.search.paste(text);
+                picker.refilter();
+            }
+        }
+    }
+
     /// Esc/Ctrl+C on the mounted input: the paste prompt answers `None`
     /// (the flow cancels), the picker answers `Cancelled` (the stored
     /// selection stays, TS `onCancel`); no input means nothing to
@@ -472,12 +489,18 @@ impl AuthPanel {
             ]);
         }
         if let Some(url) = &self.auth_url {
-            // TS `showAuth` wraps the URL in OSC 8 when the terminal is
-            // known to implement hyperlinks, else prints it plain.
+            // The URL and the instructions are provider-supplied: control
+            // characters can never execute terminal control operations
+            // when rendered (the same hygiene every daemon-supplied row
+            // carries); a URL is additionally single-line, so newlines
+            // drop. TS `showAuth` wraps the URL in OSC 8 (the URL is the
+            // link's own display text) when the terminal is known to
+            // implement hyperlinks, else prints it plain.
+            let safe = scrub_controls(url).replace('\n', "");
             let linked = if crate::hyperlinks::hyperlinks_enabled() {
-                format!("{}{OSC8_CLOSE}", osc8_open(url))
+                format!("{}{safe}{OSC8_CLOSE}", osc8_open(&safe))
             } else {
-                url.clone()
+                safe
             };
             lines.push(vec![
                 theme.fg_span(ThemeColor::Accent, format!("  {linked}"))
@@ -485,6 +508,7 @@ impl AuthPanel {
             let instructions = self
                 .auth_instructions
                 .clone()
+                .map(|text| scrub_controls(&text))
                 .unwrap_or_else(|| BROWSER_DEFAULT_INSTRUCTIONS.to_string());
             lines.push(vec![
                 theme.fg_span(ThemeColor::Text, format!("  {instructions}"))
@@ -635,20 +659,23 @@ impl PrimeTeamPicker {
         let Some(team) = self.teams.get(row - 1) else {
             return (Vec::new(), Vec::new());
         };
+        // The team fields are provider-supplied: the same control
+        // character hygiene every daemon-supplied row carries.
+        let name = scrub_controls(&team.name);
         let role = team
             .role
             .as_deref()
-            .map(str::to_lowercase)
+            .map(|role| scrub_controls(role).to_lowercase())
             .unwrap_or_else(|| "member".to_string());
         let detail = match &team.slug {
-            Some(slug) => format!("slug: {slug}, role: {role}"),
+            Some(slug) => format!("slug: {}, role: {role}", scrub_controls(slug)),
             None => format!("role: {role}"),
         };
         let mut trailing = vec![PickerSegment::Muted(detail)];
         if self.current.as_deref() == Some(team.team_id.as_str()) {
             trailing.push(PickerSegment::Current);
         }
-        (vec![Span::raw(team.name.clone())], trailing)
+        (vec![Span::raw(name)], trailing)
     }
 
     /// TS confirm on the selected row: the personal row answers the
@@ -1019,5 +1046,78 @@ mod tests {
             handle.select_team(vec![acme()], None).await,
             PrimeTeamPick::Cancelled
         );
+    }
+
+    /// A paste payload lands in the mounted field (never the hidden
+    /// editor): the pasted value submits through the oneshot.
+    #[test]
+    fn a_paste_payload_lands_in_the_mounted_field() {
+        let (mut panel, mut answer) = mount_paste();
+        panel.handle_paste("  sk-pasted-key  ");
+        panel.handle_key("enter", &kb());
+        assert_eq!(answer.try_recv(), Ok(Some("sk-pasted-key".to_string())));
+        // The picker's search accepts pasted text too (TS `MenuSearchInput`).
+        let (mut panel, mut answer) = mount_teams(vec![acme()], None);
+        panel.handle_paste("acme");
+        panel.handle_key("enter", &kb());
+        assert_eq!(answer.try_recv(), Ok(PrimeTeamPick::Team(acme())));
+    }
+
+    /// Provider-supplied text can never execute terminal control
+    /// operations: the panel scrubs control characters out of the title,
+    /// the URL block, the instructions, the paste prompt, and the team
+    /// rows (the URL is additionally single-line for the OSC 8 wrap).
+    #[test]
+    fn provider_text_is_scrubbed_never_a_terminal_sequence() {
+        let mut panel = AuthPanel::new("Login to \u{1b}]8;;https://evil.example\u{7}Evil");
+        panel.push_progress("Loading\u{1b}[2J teams...".to_string());
+        panel.show_auth_url(
+            "https://a.example/\u{1b}]8;;https://evil.example\u{7}link\u{1b}\\\u{1b}]8;;\u{1b}\\"
+                .to_string(),
+            Some("Open\r\nhttps://evil".to_string()),
+        );
+        let rows = frame_text(&mut panel);
+        let joined = rows.join("\n");
+        assert!(
+            !joined.contains("\u{1b}]8;;https://evil.example"),
+            "the escape never renders: {joined:?}"
+        );
+        assert!(
+            !joined.contains("\u{1b}[2J"),
+            "the clear never renders: {joined:?}"
+        );
+        assert!(!joined.contains("\u{1b}]8;;"));
+
+        let (mut panel, mut _answer) = mount_teams(
+            vec![PrimeTeamOption {
+                team_id: "t".to_string(),
+                name: "A\u{1b}[2J Corp".to_string(),
+                slug: Some("s\u{7}".to_string()),
+                role: Some("Owner\u{1b}".to_string()),
+                created_at: None,
+            }],
+            None,
+        );
+        let rows = frame_text(&mut panel);
+        let joined = rows.join("\n");
+        assert!(!joined.contains("\u{1b}"), "no escapes render: {joined:?}");
+        assert!(joined.contains("A"), "the scrubbed name still renders");
+    }
+
+    /// The OSC 8 link carries the URL as its own display text (an empty
+    /// link region would paint an empty row on hyperlink terminals).
+    #[test]
+    fn the_auth_url_link_carries_the_url_as_display_text() {
+        let mut panel = AuthPanel::new("Login to Linear");
+        panel.show_auth_url("https://fixture.example/authorize".to_string(), None);
+        let rows = frame_text(&mut panel);
+        let linked = rows
+            .iter()
+            .find(|row| row.contains("https://fixture.example/authorize"))
+            .expect("the URL row");
+        // The plain URL renders (hyperlinks off in the test env renders it
+        // unlinked; the hyperlink path wraps the same text inside the
+        // sequence pair).
+        assert!(linked.contains("https://fixture.example/authorize"));
     }
 }

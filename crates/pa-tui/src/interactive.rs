@@ -1118,7 +1118,14 @@ async fn run_interactive_surface(
                     }
                     UiInput::Paste(text) => {
                         session.stop_selection_auto_scroll();
-                        session.handle_paste(&text, &mut view);
+                        // The inline auth panel owns the frame: the paste
+                        // lands in its field, never in the editor behind
+                        // it.
+                        if view.auth_panel.is_some() {
+                            session.paste_to_auth_panel(&text, &mut view);
+                        } else {
+                            session.handle_paste(&text, &mut view);
+                        }
                     }
                     // A mouse report reaches the transcript scroll dispatch
                     // (TS `handleFullscreenInput`'s wheel branch); non-wheel
@@ -1264,6 +1271,12 @@ async fn run_interactive_surface(
             && !session.share_pending()
             && !session.reload_pending()
             && !session.traces_upload_pending()
+            // An inline auth flow is work like an upload: the harness
+            // must not finish before its settled outcome lands (a live
+            // terminal never ends the run on its own).
+            && view.auth_panel.is_none()
+            && !session.pending_traces_login()
+            && !session.pending_mcp_auth()
         {
             break;
         }

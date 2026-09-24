@@ -334,8 +334,12 @@ pub(crate) struct SessionUi {
     traces_upload_notes: mpsc::UnboundedSender<crate::traces::TraceUploadAllNote>,
     /// A parked `/traces login` (or the enable arm's credential-less
     /// entry): the run loop mounts the inline auth panel and spawns the
-    /// flow; the enable intent survives until the settle.
+    /// flow once; the parked intent leaves with the spawn.
     pending_traces_login: Option<TracesLoginIntent>,
+    /// The in-flight traces login's enable intent: taken from the park
+    /// when the flow spawns (so a later key cannot spawn a second flow
+    /// over the same panel), consumed by the settle.
+    traces_login_run: Option<TracesLoginIntent>,
     /// Where the background catalog refresh delivers `get_model_catalog`
     /// responses (the run loop folds them into the picker catalog).
     catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
@@ -683,6 +687,7 @@ impl SessionUi {
             trace_upload: None,
             traces_upload_notes,
             pending_traces_login: None,
+            traces_login_run: None,
             pasted_images: Default::default(),
             next_image_marker_id: 1,
             pending_snapshot: None,
@@ -3601,6 +3606,17 @@ impl SessionUi {
         }
     }
 
+    /// One paste payload while the inline auth panel owns the frame: the
+    /// payload lands in the panel's mounted input (the paste field or
+    /// the picker's search) — never in the hidden editor behind the
+    /// panel, where a later Enter could submit the secret as a prompt.
+    pub(crate) fn paste_to_auth_panel(&mut self, text: &str, view: &mut AgentView) {
+        if let Some(panel) = view.auth_panel.as_mut() {
+            panel.handle_paste(text);
+        }
+        self.dirty = true;
+    }
+
     /// One request from a login flow driving the inline auth panel (the
     /// run loop's channel arm folds it in): the render requests mount
     /// into the panel (a request with no mounted panel cancels its flow
@@ -3944,12 +3960,15 @@ impl SessionUi {
     /// it; the settled outcome folds in through the panel channel and
     /// continues the enable intent (TS's `on` arm).
     pub(crate) fn run_traces_login(&mut self, view: &mut AgentView) {
-        let Some(_intent) = self.pending_traces_login.as_ref() else {
+        // The park is consumed here (the intent moves to the in-flight
+        // run): the key-path check spawns the flow exactly once.
+        let Some(intent) = self.pending_traces_login.take() else {
             return;
         };
         let Some(traces) = self.traces.clone() else {
             return;
         };
+        self.traces_login_run = Some(intent);
         view.auth_panel = Some(crate::auth_panel::AuthPanel::new(
             "Login to Prime Agent Traces",
         ));
@@ -3967,7 +3986,7 @@ impl SessionUi {
         outcome: crate::traces::TraceLoginOutcome,
         view: &mut AgentView,
     ) {
-        let intent = self.pending_traces_login.take();
+        let intent = self.traces_login_run.take();
         let Some(traces) = self.traces.clone() else {
             return;
         };
