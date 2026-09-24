@@ -316,7 +316,16 @@ impl AgentMessageController for LinkAgentMessageController {
                     || ((!session_id.is_empty()) && child.session_id.as_deref() == Some(session_id))
             }) {
                 let child = children.swap_remove(position);
-                child_members.push(child_member(&child, name));
+                let mut member = child_member(&child, name);
+                // A worker replacement keeps the durable ids but swaps the
+                // live one: the roster row carries the CURRENT active id
+                // while the registry record holds the id from spawn. The
+                // member keys on the row's live id so role-addressed sends
+                // target the live worker, never the replaced id.
+                if active_session_id != child.active_session_id {
+                    member.id = active_session_id.clone();
+                }
+                child_members.push(member);
                 continue;
             }
             // The session that spawned this worker (when this worker is a
