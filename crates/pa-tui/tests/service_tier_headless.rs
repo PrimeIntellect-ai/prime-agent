@@ -319,13 +319,16 @@ fn tier_command_shows_applies_and_rejects() {
         all.contains("Service tier: default (available: default, flex, priority)"),
         "the show note rendered:\n{all}"
     );
-    // `scale` is not a user-facing choice: the TS error lists the
-    // available tiers.
+    // `scale` is not a user-facing choice: the TS error names the tier and
+    // lists the available ones (the rendered row wraps the list at the
+    // frame width, so the assertion stays on the single-line head).
     assert!(
-        all.contains(
-            "Service tier 'scale' is not available for the current model. Available: default, flex, priority"
-        ),
+        all.contains("Service tier 'scale' is not available for the current model"),
         "the unsupported error rendered:\n{all}"
+    );
+    assert!(
+        all.contains("Available: default, flex,"),
+        "the error lists the available tiers:\n{all}"
     );
     // `flex` applies through the daemon switch; the state refresh reports
     // the applied tier and the tray badge shows it.
