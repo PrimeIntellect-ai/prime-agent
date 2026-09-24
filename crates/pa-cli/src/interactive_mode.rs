@@ -1192,7 +1192,7 @@ mod tests {
         );
 
         // Same mtime granularity as the write: nudge the candidate forward.
-        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let future = std::time::SystemTime::now() + std::time::Duration::from_mins(1);
         let handle = std::fs::File::options()
             .append(true)
             .open(&candidate)

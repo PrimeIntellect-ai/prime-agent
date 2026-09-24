@@ -292,7 +292,7 @@ async fn assert_roster_with_tools(socket: &Path, dir: &Path) {
     // runtime install on a cold machine), so both the request deadline and
     // the kernel-open window can expire on early polls; retry both inside
     // the overall deadline.
-    let deadline = Instant::now() + Duration::from_secs(420);
+    let deadline = Instant::now() + Duration::from_mins(7);
     let mut last_error = String::new();
     let data = loop {
         assert!(
