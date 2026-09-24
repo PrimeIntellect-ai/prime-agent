@@ -1482,10 +1482,13 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
             }),
         );
         let (response, prompt_updates) = client.wait_response(prompt, TIMEOUT);
-        let refused = response["error"].is_object()
-            && response["error"]["message"]
-                .as_str()
-                .is_some_and(|message| message.contains("already running"));
+        // ACP `internal_error` carries the refusal text in `data.details`
+        // (`Internal error` is the generic message) — match both fields.
+        let refusal_text = response["error"]["data"]["details"]
+            .as_str()
+            .or_else(|| response["error"]["message"].as_str())
+            .unwrap_or_default();
+        let refused = response["error"].is_object() && refusal_text.contains("already running");
         if !refused {
             break (response, prompt_updates);
         }

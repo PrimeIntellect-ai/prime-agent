@@ -1116,15 +1116,23 @@ async fn run_interactive_surface(
                         match session.handle_key(key, &mut view, &mut running).await {
                             Ok(()) => {}
                             // A daemon refusal answered this key's request
-                            // (the connection stays healthy): the TS
-                            // `showError` row surfaces it and the loop keeps
-                            // running with the editor state preserved — a
-                            // refused request never exits the client.
-                            Err(error) if crate::daemon_client::is_daemon_rejection(&error) => {
+                            // (the connection stays healthy), or the
+                            // connection could not carry it at all (a
+                            // timeout on a sent request, a down or
+                            // reconnecting daemon): the TS `showError` row
+                            // surfaces it and the loop keeps running with
+                            // the editor state preserved — a failed request
+                            // never exits the client while the reconnect
+                            // driver owns the recovery (the operator's
+                            // kicked-out class).
+                            Err(error)
+                                if crate::daemon_client::is_daemon_rejection(&error)
+                                    || crate::daemon_client::is_daemon_unreachable(&error) =>
+                            {
                                 session.error_row(&format!("{error:#}"), &mut view);
                             }
-                            // Everything else (dead socket, timeout,
-                            // protocol corruption) stays fatal.
+                            // Everything else (protocol corruption) stays
+                            // fatal.
                             Err(error) => return Err(error),
                         }
                         // TS `handleCtrlZ` (`app.suspend`, default ctrl+z):

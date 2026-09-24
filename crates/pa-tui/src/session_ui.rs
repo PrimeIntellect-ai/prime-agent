@@ -2394,18 +2394,33 @@ impl SessionUi {
                             continue;
                         }
                     }
+                    if crate::daemon_client::is_daemon_timeout(&error) {
+                        // Sent but unanswered: the submission was on the
+                        // wire, so the turn may already be admitted and
+                        // running — restoring the draft would invite a
+                        // duplicate submission. The error row names the
+                        // uncertainty; the transcript's live turn (or the
+                        // next daemon answer) settles the truth.
+                        self.error_row(
+                            &format!(
+                                "{rendered} — the request was sent; the turn may still be in flight"
+                            ),
+                            view,
+                        );
+                        return Ok(());
+                    }
                     if crate::daemon_client::is_daemon_rejection(&error)
                         || crate::daemon_client::is_daemon_unreachable(&error)
                     {
                         // TS `onSubmit`'s prompt catch: the daemon answered
                         // with a refusal for THIS request (admission, queue
                         // capacity, a superseded session the rebind could
-                        // not recover, ...), or the connection could not
-                        // carry the submission at all (a down or
-                        // reconnecting daemon) — the `⚠ Error` row surfaces
-                        // it and the draft returns to the editor; a failed
-                        // prompt never exits the UI (the reconnect driver
-                        // owns the connection's recovery).
+                        // not recover), or the connection refused the send
+                        // (nothing reached the daemon) — the `⚠ Error` row
+                        // surfaces it and the draft returns to the editor
+                        // (the submission never landed); a failed prompt
+                        // never exits the UI (the reconnect driver owns
+                        // the connection's recovery).
                         self.error_row(&rendered, view);
                         view.editor.set_text(text);
                         return Ok(());
