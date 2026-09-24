@@ -4878,7 +4878,7 @@ fn emit_refinement_row(core: &Arc<Mutex<SessionCore>>, events: &Arc<EventPump>, 
     emit_worker_event_with(
         core,
         events,
-        json!({ "type": "message_start", "message": message.clone() }),
+        json!({ "type": "message_start", "message": message }),
     );
     emit_worker_event_with(
         core,
