@@ -72,6 +72,13 @@ const MAX_MESSAGE_BYTES = 1_048_576;
 const CONNECT_TIMEOUT_MS = 15_000;
 const CLOSE_LINGER_MS = 500;
 
+/** RFC 6455 close payload: 2-byte code then UTF-8 reason. */
+function decodeCloseReason(payload: Buffer): string | undefined {
+	if (payload.byteLength < 2) return undefined;
+	const reason = payload.subarray(2).toString("utf8");
+	return reason.length > 0 ? reason : undefined;
+}
+
 class WsTunnelConnection implements CloudTunnelConnection {
 	private readonly decoder = new WsFrameDecoder({ expectMasked: false, maxPayloadBytes: MAX_MESSAGE_BYTES });
 	private socket: Socket | undefined;
@@ -143,7 +150,7 @@ class WsTunnelConnection implements CloudTunnelConnection {
 						// Already closing.
 					}
 				}
-				this.onClosed();
+				this.onClosed(decodeCloseReason(frame.payload));
 				return;
 			}
 			if (frame.opcode === WS_OPCODE.ping) {
@@ -203,13 +210,17 @@ class WsTunnelConnection implements CloudTunnelConnection {
 		handler(error);
 	}
 
-	private onClosed(): void {
+	private onClosed(remoteReason?: string): void {
 		// Fires exactly once for every terminal outcome, including the close
 		// handshake this side initiated; callers await it to finish shutdown.
 		this.closed = true;
 		const handler = this.closeHandler;
 		if (handler === undefined) return;
 		this.closeHandler = undefined;
+		if (remoteReason !== undefined) {
+			handler(new CloudTunnelTransportError("closed", remoteReason));
+			return;
+		}
 		handler(
 			this.decoder.endedIncomplete()
 				? new CloudTunnelTransportError("closed", "connection closed mid-frame")

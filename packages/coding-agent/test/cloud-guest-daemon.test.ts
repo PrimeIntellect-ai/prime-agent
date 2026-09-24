@@ -8,6 +8,7 @@ import {
 	type CloudEvent,
 	type CloudMessage,
 	type CloudSessionState,
+	cloudEventProblem,
 	cloudRequestDigest,
 	parseCloudMessage,
 } from "../src/core/cloud/protocol.js";
@@ -1219,12 +1220,18 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 				timestamp: Date.now(),
 			} as AssistantMessage;
 			writeFileSync(responsesPath, `${JSON.stringify(response)}\n`, { mode: 0o600 });
+			const answerReady = new Promise<void>((resolve) => {
+				const unsubscribe = daemon.rootSession!.subscribe((event) => {
+					if (event.type === "message_end" && event.message.role === "assistant") {
+						unsubscribe();
+						resolve();
+					}
+				});
+			});
 			await client.waitForSnapshot();
 			client.submit("cmd_tail", { kind: "prompt", text: "produce the tail" });
-			// Wait only for the admission receipt, NOT for the mirror tick.
-			await client.waitFor((_events, messages) => messages.some((line) => line.includes('"commandId":"cmd_tail"')));
-			// Release immediately: the forced final mirror must still land the
-			// assistant entry in the durable log, or /cloud stop loses the tail.
+			await answerReady;
+			// The answer exists in the session; release must make its final entry durable.
 			await daemon.release("stopped");
 			const eventsFile = join(daemonEnv(root).stateDir, `${SESSION_ID}.g1`, "event-outbox", "outbox-events.ndjson");
 			const entries = readFileSync(eventsFile, "utf8")
@@ -1258,6 +1265,50 @@ describe("guest daemon protocol hardening (in-process, faux provider)", () => {
 			await closed;
 			await flood.close();
 		} finally {
+			await server.stop();
+		}
+	});
+
+	it("reaps silent authenticated clients so a full table never blinds new connections", async () => {
+		const root = cloudTemp("cloud-guest-daemon-test-");
+		const dispatchErrors: string[] = [];
+		const nonce = Math.random().toString(16).slice(2, 8);
+		const server = new CloudProtocolServer({
+			socketPath: join(root, `s${nonce}k.sock`),
+			stateDirectory: join(root, `st${nonce}`),
+			sessionId: SESSION_ID,
+			generation: 1,
+			callbacks: {
+				...serverCallbacks(),
+				onDispatchError: (message) => dispatchErrors.push(message),
+			},
+			authenticatedSilenceReapMs: 150,
+			clientReapIntervalMs: 50,
+		});
+		await server.start();
+		const socketPath = (server as unknown as { socketPath: string }).socketPath;
+		const silent: LoopClient[] = [];
+		try {
+			// Fill the table with authenticated clients that then go silent:
+			// a vanished supervisor the tunnel edge did not relay a close for.
+			for (let index = 0; index < 4; index++) {
+				const client = new LoopClient(socketPath);
+				client.hello();
+				await client.waitForSnapshot();
+				silent.push(client);
+			}
+			// Deterministic: the reap sweep itself is the readiness signal, never a clock.
+			for (;;) {
+				if (dispatchErrors.some((message) => message.includes("reaped a silent bridge connection"))) break;
+				await new Promise((resolve) => setImmediate(resolve));
+			}
+			const reaper = new LoopClient(socketPath);
+			reaper.hello();
+			await reaper.waitForSnapshot();
+			expect(dispatchErrors.some((message) => message.includes("reaped a silent bridge connection"))).toBe(true);
+			await reaper.close();
+		} finally {
+			for (const client of silent) await client.close().catch(() => undefined);
 			await server.stop();
 		}
 	});
@@ -1698,25 +1749,14 @@ describe("brokered guest inference (cloud-broker relay)", () => {
 			const seenBeforeTimeoutTurn = client.messages.length;
 			client.submit("cmd_brokered_timeout", { kind: "prompt", text: "never answered" });
 			await nextInferenceRequest(client, seenBeforeTimeoutTurn);
-			// No response frames arrive: the bounded wait errors the stream.
-			// The deadline only bounds failure; the timeout path itself is
-			// the behavior under test.
-			const settled = await Promise.race([
-				client
-					.waitFor((events) =>
-						events.some(
-							(event) =>
-								event.kind === "session_entry" &&
-								JSON.stringify(event.entry).includes("cloud inference broker did not respond"),
-						),
-					)
-					.then(() => true),
-				new Promise<boolean>((resolve) => {
-					const timer = setTimeout(() => resolve(false), 5_000);
-					timer.unref?.();
-				}),
-			]);
-			expect(settled).toBe(true);
+			// No response frames arrive; the guest reports the broker deadline.
+			await client.waitFor((events) =>
+				events.some(
+					(event) =>
+						event.kind === "session_entry" &&
+						JSON.stringify(event.entry).includes("cloud inference broker did not respond"),
+				),
+			);
 			await client.close();
 		} finally {
 			await daemon.stop().catch(() => undefined);
@@ -1764,7 +1804,57 @@ describe("brokered guest inference (cloud-broker relay)", () => {
 	});
 });
 
+it("applies broker metadata when an already-open guest has the same boot model selector", async () => {
+	const root = cloudTemp("cloud-guest-daemon-test-");
+	const env = daemonEnv(root);
+	env.model = "openai-codex/gpt-5.5";
+	const daemon = await CloudGuestDaemon.start(env, { createRuntime: createFauxRuntimeFactory });
+	try {
+		await daemon.openSession({});
+		expect(daemon.rootSession?.model?.reasoning).toBe(false);
+		const result = await daemon.dispatch(
+			{
+				kind: "open_session",
+				cwd: env.workspaceDir,
+				model: env.model,
+				thinking: "low",
+				modelMetadata: { name: "GPT-5.5", contextWindow: 272_000, maxTokens: 128_000, reasoning: true },
+			},
+			"cmd_broker_metadata",
+		);
+		expect(result.state).toBe("completed");
+		expect(daemon.rootSession?.model).toMatchObject({ reasoning: true, contextWindow: 272_000 });
+		expect(daemon.rootSession?.thinkingLevel).toBe("low");
+	} finally {
+		await daemon.release("stopped");
+	}
+});
+
 describe("live session event wire trimming", () => {
+	it.each([
+		{
+			type: "tool_execution_end",
+			result: { content: [{ type: "text", text: "42" }], details: { optional: undefined } },
+		},
+		{ type: "message_start", message: { role: "toolResult", content: [], optional: undefined } },
+		{ type: "turn_end", message: { role: "assistant", content: [], optional: undefined } },
+		{
+			type: "agent_end",
+			toolResults: [{ result: { content: [{ type: "text", text: "42" }], optional: undefined } }],
+		},
+	])("preserves $type on the canonical cloud wire despite optional undefined fields", (event) => {
+		const wire = trimSessionEventForWire(event as never);
+		expect(
+			cloudEventProblem({
+				sequence: 1,
+				kind: "session_event",
+				recordedAt: "2026-01-01T00:00:00Z",
+				sessionId: SESSION_ID,
+				event: wire,
+			}),
+		).toBeUndefined();
+		expect(JSON.stringify(wire)).toContain(event.type);
+	});
 	it("trims oversized tool_execution_end payloads to a bounded tail instead of dropping the event", () => {
 		const hugeText = `${"x".repeat(200_000)}\nfinal line`;
 		const event = {
@@ -1792,23 +1882,33 @@ describe("live session event wire trimming", () => {
 			result: { content: [{ type: "text", text: "42" }] },
 			isError: false,
 		};
-		expect(trimSessionEventForWire(small as never)).toBe(small);
+		expect(trimSessionEventForWire(small as never)).toEqual(small);
 	});
 
-	it("trims agent_end message and tool result payloads for the wire", () => {
+	it("keeps large real completion shapes within the live wire bound", () => {
 		const hugeText = `${"y".repeat(180_000)}\ntail`;
-		const event = {
-			type: "agent_end",
-			message: { role: "assistant", content: [{ type: "text", text: hugeText }] },
-			toolResults: [{ result: { content: [{ type: "text", text: hugeText }] } }],
+		const toolResult = {
+			role: "toolResult",
+			content: [{ type: "text", text: hugeText }],
+			details: { stdout: hugeText, optional: undefined },
 		};
-		const trimmed = trimSessionEventForWire(event as never) as unknown as {
-			message: { content: Array<{ type: string; text: string }> };
-			toolResults: Array<{ result: { content: Array<{ type: string; text: string }> } }>;
-		};
-		expect(trimmed.message.content.find((block) => block.type === "text")?.text?.length ?? 0).toBeLessThan(180_000);
-		expect(
-			trimmed.toolResults[0]?.result.content.find((block) => block.type === "text")?.text?.length ?? 0,
-		).toBeLessThan(180_000);
+		for (const event of [
+			{ type: "tool_execution_end", result: toolResult },
+			{ type: "message_end", message: toolResult },
+			{ type: "turn_end", message: { role: "assistant", content: [] }, toolResults: [toolResult] },
+			{ type: "agent_end", messages: [toolResult] },
+		]) {
+			const wire = trimSessionEventForWire(event as never);
+			expect(
+				cloudEventProblem({
+					sequence: 1,
+					kind: "session_event",
+					recordedAt: "2026-01-01T00:00:00Z",
+					sessionId: SESSION_ID,
+					event: wire,
+				}),
+			).toBeUndefined();
+			expect(JSON.stringify(wire)).toContain("full result follows in the transcript");
+		}
 	});
 });

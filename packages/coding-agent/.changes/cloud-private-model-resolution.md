@@ -1,1 +1,2 @@
 - Fixed cloud sessions failing to open with private Prime Inference models by refreshing the guest's authenticated model catalog, and made resident guests inherit the selected thinking level.
+- Fixed private Prime Inference model selection in new local sessions to honor catalog context and supported thinking levels.

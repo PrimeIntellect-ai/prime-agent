@@ -146,6 +146,8 @@ async function startBridge(
 		daemonArgv?: string[];
 		/** Prepares a pre-existing workspace and returns extra bridge env. */
 		setupWorkspace?: (workspaceDir: string) => Record<string, string>;
+		/** Extra bridge-process env (liveness-bound seams for focused tests). */
+		bridgeEnv?: Record<string, string>;
 	} = {},
 ): Promise<Bridge> {
 	const root = mkdtempSync(join(tmpdir(), "cloud-guest-bridge-test-"));
@@ -196,6 +198,7 @@ async function startBridge(
 			PRIME_AGENT_TEST_FAUX_ECHO: "1",
 			PRIME_API_KEY: "",
 			...workspaceEnv,
+			...options.bridgeEnv,
 		},
 		stdio: ["ignore", "ignore", "pipe"],
 	});
@@ -369,6 +372,30 @@ async function submitAndWait(client: Client, commandId: string, request: CloudCo
 }
 
 describe("guest cloud bridge with the resident guest daemon (end-to-end, faux provider, loopback)", () => {
+	it("closes a client whose hello parks behind a dead daemon socket instead of going silent", async () => {
+		// The daemon argv never serves the socket: the bridge holds the hello
+		// while its daemon reconnect retries. The held-frame bound must close
+		// the tunnel client honestly, below the supervisor's hello deadline.
+		const bridge = await startBridge({
+			bridgeEnv: { PRIME_AGENT_CLOUD_BRIDGE_HELD_FRAME_TIMEOUT_MS: "1500" },
+			daemonArgv: ["/bin/sleep", "30"],
+		});
+		let client: Client | undefined;
+		try {
+			client = await connect(bridge);
+			sendHello(client.connection);
+			const closeError = await new Promise<string>((resolve) => {
+				client!.connection.onClose((error) => resolve(error?.message ?? ""));
+			});
+			expect(closeError).toContain("guest daemon unavailable");
+			expect(closeError).toContain("frames held past");
+		} finally {
+			bridge.process.kill("SIGKILL");
+			client?.connection.close("test done");
+			children.delete(bridge.process);
+		}
+	});
+
 	it("authenticates hello, mirrors a persistent conversation, and never accepts a v1 hello", async () => {
 		const bridge = await startBridge();
 		try {

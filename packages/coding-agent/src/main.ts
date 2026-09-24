@@ -60,6 +60,7 @@ import { installFileLogSink, setLogContext } from "./core/logging.js";
 import type { ModelRegistry } from "./core/model-registry.js";
 import { findInitialModel, resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.js";
+import { isPrivatePrimeInferenceModel } from "./core/prime-inference-models.js";
 import type { CreateAgentSessionOptions } from "./core/sdk.js";
 import {
 	formatMissingSessionCwdPrompt,
@@ -772,6 +773,17 @@ export function createDefaultRuntimeFactory(
 		});
 		const { services, sessionOptions, diagnostics } = prepared;
 		const resolvedSessionOptions = resolveRuntimeSessionOptions(sessionOptions, runtimeSessionOptions);
+		if (resolvedSessionOptions.model && isPrivatePrimeInferenceModel(resolvedSessionOptions.model)) {
+			const selected = resolvedSessionOptions.model;
+			const authorized = await services.modelRegistry.resolveAuthorizedPrivatePrimeInferenceModel(selected);
+			if (!authorized) {
+				throw new Error(`Model "${selected.provider}/${selected.id}" is not available for the current Prime team.`);
+			}
+			resolvedSessionOptions.model = authorized;
+			resolvedSessionOptions.scopedModels = resolvedSessionOptions.scopedModels?.map((scoped) =>
+				modelsAreEqual(scoped.model, selected) ? { ...scoped, model: authorized } : scoped,
+			);
+		}
 
 		const created = await createAgentSessionFromServices({
 			services,

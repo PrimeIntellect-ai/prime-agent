@@ -163,7 +163,10 @@ describe("WsTunnelTransport close semantics", () => {
 		mini?.sendCloseFrame();
 		await closed;
 		expect(onClose).toHaveBeenCalledTimes(1);
-		expect(onClose.mock.calls[0]?.[0]).toBeUndefined();
+		// The peer's close-frame reason now surfaces instead of arriving
+		// reason-less: silent closes masked guest-side failures.
+		const error = onClose.mock.calls[0]?.[0] as { message?: string } | undefined;
+		expect(error?.message).toBe("server closing");
 		await bridge.close();
 	});
 

@@ -2244,6 +2244,17 @@ export class DaemonSupervisor {
 					cwd: summary.cwd,
 					...(summary.sessionName ? { sessionName: summary.sessionName } : {}),
 					...(summary.model ? { model: canonicalCloudModelSelector(summary.model) } : {}),
+					...(summary.model && summary.model.provider !== "prime-inference"
+						? {
+								modelMetadata: {
+									name: summary.model.name,
+									contextWindow: summary.model.contextWindow,
+									maxTokens: summary.model.maxTokens,
+									reasoning: summary.model.reasoning,
+								},
+							}
+						: {}),
+					...(summary.thinkingLevel ? { thinking: summary.thinkingLevel } : {}),
 					...(command.timeoutMinutes ? { timeoutMinutes: command.timeoutMinutes } : {}),
 				});
 				return success(command.id, command.type, { session });

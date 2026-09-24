@@ -68,6 +68,12 @@ const CLOSE_POLICY = 1008;
 const CLOSE_TOO_BIG = 1009;
 const HELLO_TIMEOUT_MS = 15000;
 const PING_INTERVAL_MS = 30000;
+// A client that misses this many ping rounds is dead: the tunnel edge does not
+// always relay a close, and an un-reaped client holds its daemon socket.
+const MISSED_PONG_ROUNDS = Number(env("PRIME_AGENT_CLOUD_BRIDGE_MISSED_PONG_ROUNDS", "3"));
+// Frames held while the daemon socket is connecting must surface before the
+// supervisor's 30s hello deadline, never park behind a stuck connect.
+const HELD_FRAME_TIMEOUT_MS = Number(env("PRIME_AGENT_CLOUD_BRIDGE_HELD_FRAME_TIMEOUT_MS", "20000"));
 const DEFAULT_PORT = 8740;
 const MAX_CLIENTS = 4;
 const DAEMON_START_TIMEOUT_MS = 60000;
@@ -585,10 +591,20 @@ class WsClient {
 		this.daemonAttempt = 0;
 		this.daemonDeadline = Date.now() + DAEMON_START_TIMEOUT_MS;
 		this.pendingFrames = [];
+		this.pendingSince = 0;
+		this.heldFrameTimer = null;
+		this.lastPongAt = Date.now();
 		this.helloTimer = setTimeout(() => {
 			if (!this.authenticated) this.closeSoon(CLOSE_POLICY, "hello timeout");
 		}, HELLO_TIMEOUT_MS);
-		this.pingTimer = setInterval(() => this.sendFrame(9, Buffer.alloc(0)), PING_INTERVAL_MS);
+		this.pingTimer = setInterval(() => {
+			this.sendFrame(9, Buffer.alloc(0));
+			// Pong liveness: the edge may leave a half-open client behind when
+			// the supervisor dies; a client that never answers pings is dead.
+			if (Date.now() - this.lastPongAt > MISSED_PONG_ROUNDS * PING_INTERVAL_MS) {
+				this.closeSoon(CLOSE_POLICY, "tunnel client missed pongs");
+			}
+		}, PING_INTERVAL_MS);
 		clients.add(this);
 		socket.on("data", (chunk) => this.onData(chunk));
 		socket.on("error", () => this.destroy());
@@ -605,6 +621,10 @@ class WsClient {
 		daemonSocket.setNoDelay(true);
 		daemonSocket.on("connect", () => {
 			this.daemonConnected = true;
+			if (this.heldFrameTimer !== null) {
+				clearTimeout(this.heldFrameTimer);
+				this.heldFrameTimer = null;
+			}
 			// Flush frames that arrived while the daemon socket was still
 			// connecting (the daemon boots after the bridge starts listening).
 			for (const frame of this.pendingFrames) daemonSocket.write(frame);
@@ -628,7 +648,12 @@ class WsClient {
 			}, 100);
 		});
 		daemonSocket.on("close", () => {
-			if (this.daemonConnected && !this.closed) this.closeSoon(CLOSE_NORMAL, "guest daemon connection closed");
+			// Reset always: frames racing the close must never be written to a
+			// destroyed socket (they queue honestly instead). Only a
+			// mid-session close drops the client; a boot-time failure retries.
+			const wasConnected = this.daemonConnected;
+			this.daemonConnected = false;
+			if (wasConnected && !this.closed) this.closeSoon(CLOSE_NORMAL, "guest daemon connection closed");
 		});
 	}
 
@@ -651,7 +676,10 @@ class WsClient {
 				this.sendFrame(10, frame.payload);
 				continue;
 			}
-			if (frame.opcode === 10) continue;
+			if (frame.opcode === 10) {
+				this.lastPongAt = Date.now();
+				continue;
+			}
 			if (frame.opcode === 1) {
 				if (frame.fin) {
 					this.onMessage(frame.payload);
@@ -745,7 +773,16 @@ class WsClient {
 		}
 		if (!this.daemonConnected) {
 			// The daemon is still starting (or restarting): hold the frame
-			// until its socket connects instead of failing the client.
+			// until its socket connects instead of failing the client - but
+			// never longer than the supervisor's hello deadline, so a stuck
+			// daemon socket surfaces as an honest close instead of silence.
+			if (this.pendingFrames.length === 0) {
+				this.pendingSince = Date.now();
+				this.heldFrameTimer = setTimeout(() => {
+					if (this.closed || this.daemonConnected || this.pendingFrames.length === 0) return;
+					this.closeSoon(CLOSE_NORMAL, "guest daemon unavailable: frames held past " + HELD_FRAME_TIMEOUT_MS + "ms");
+				}, HELD_FRAME_TIMEOUT_MS);
+			}
 			this.pendingFrames.push(text + "\n");
 			return;
 		}
@@ -799,6 +836,10 @@ class WsClient {
 		this.destroyed = true;
 		clearTimeout(this.helloTimer);
 		clearInterval(this.pingTimer);
+		if (this.heldFrameTimer !== null) {
+			clearTimeout(this.heldFrameTimer);
+			this.heldFrameTimer = null;
+		}
 		try {
 			if (this.daemonSocket !== null) this.daemonSocket.destroy();
 		} catch {

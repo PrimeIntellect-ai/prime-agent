@@ -111,6 +111,8 @@ interface ClientConnection {
 	subscribed: boolean;
 	closed: boolean;
 	lastSentSequence: number;
+	/** Receive time of the last frame; silent authenticated peers are reaped. */
+	lastSeenAt: number;
 	/** Raw bytes; a line decodes only once its \n byte arrived, so a multibyte UTF-8 sequence split across TCP chunks stays intact. */
 	received: Buffer;
 	/** Unauthenticated connections are dropped on a deadline like the bridge. */
@@ -118,6 +120,10 @@ interface ClientConnection {
 }
 
 const HELLO_TIMEOUT_MS = 15_000;
+/** An authenticated client silent this long is dead: a vanished peer that no close was relayed for must never hold a client slot. */
+const AUTHENTICATED_SILENCE_REAP_MS = 5 * 60_000;
+/** Liveness sweep cadence for silent authenticated clients. */
+const CLIENT_REAP_INTERVAL_MS = 15_000;
 
 const MAX_CLIENTS = 4;
 const MAX_BATCH_BYTES = 524_288;
@@ -134,6 +140,10 @@ export interface CloudProtocolServerOptions {
 	callbacks: CloudProtocolServerCallbacks;
 	/** Optional test seam for the outbox bounds. */
 	maxOutboxRecords?: number;
+	/** Test seam: silence bound before an authenticated client is reaped. */
+	authenticatedSilenceReapMs?: number;
+	/** Test seam: liveness sweep cadence. */
+	clientReapIntervalMs?: number;
 }
 
 export class CloudProtocolServer {
@@ -142,6 +152,8 @@ export class CloudProtocolServer {
 	private readonly journal: CloudCommandJournal;
 	private readonly outbox: DurableCloudEventOutbox;
 	private stopping = false;
+	/** Liveness sweep for silent authenticated clients. */
+	private clientReapTimer: NodeJS.Timeout | undefined;
 	private stalled = false;
 
 	constructor(private readonly options: CloudProtocolServerOptions) {
@@ -190,11 +202,37 @@ export class CloudProtocolServer {
 		});
 		// 0700: only the same VM user (the bridge) can reach the guest sessions.
 		chmodSync(socketPath, 0o700);
+		this.clientReapTimer = setInterval(
+			() => this.reapSilentClients(),
+			this.options.clientReapIntervalMs ?? CLIENT_REAP_INTERVAL_MS,
+		);
+		this.clientReapTimer.unref?.();
 		void this.dispatchLoop();
+	}
+
+	/**
+	 * Reap authenticated clients whose peer went silent. The bridge relays a
+	 * close within milliseconds when it sees one; a peer that vanished
+	 * without a relayed close (tunnel edge state loss) would otherwise hold
+	 * its slot and blind new connections until the sandbox ends.
+	 */
+	private reapSilentClients(): void {
+		const deadline = Date.now() - (this.options.authenticatedSilenceReapMs ?? AUTHENTICATED_SILENCE_REAP_MS);
+		for (const client of this.clients.values()) {
+			if (!client.authenticated || client.lastSeenAt >= deadline) continue;
+			this.options.callbacks.onDispatchError?.(
+				`reaped a silent bridge connection: ${client.id} (no frames for ${AUTHENTICATED_SILENCE_REAP_MS / 1000}s)`,
+			);
+			this.dropClient(client);
+		}
 	}
 
 	async stop(): Promise<void> {
 		this.stopping = true;
+		if (this.clientReapTimer !== undefined) {
+			clearInterval(this.clientReapTimer);
+			this.clientReapTimer = undefined;
+		}
 		for (const client of this.clients.values()) {
 			// The stopping status is durable in the outbox; a reconnecting
 			// client sees it in replay. Nothing is promised to a live socket.
@@ -311,6 +349,9 @@ export class CloudProtocolServer {
 
 	private acceptConnection(socket: Socket): void {
 		if (this.clients.size >= MAX_CLIENTS) {
+			this.options.callbacks.onDispatchError?.(
+				`rejected a bridge connection: the client table is full (${this.clients.size})`,
+			);
 			socket.destroy();
 			return;
 		}
@@ -321,6 +362,7 @@ export class CloudProtocolServer {
 			subscribed: false,
 			closed: false,
 			lastSentSequence: 0,
+			lastSeenAt: Date.now(),
 			received: Buffer.alloc(0),
 			helloTimer: setTimeout(() => {
 				if (!client.authenticated) this.dropClient(client);
@@ -328,6 +370,9 @@ export class CloudProtocolServer {
 		};
 		this.clients.set(client.id, client);
 		socket.setNoDelay(true);
+		// Detect a vanished peer even when no close is ever relayed: a
+		// half-open client otherwise holds its slot until reconnect gives up.
+		socket.setKeepAlive(true, 60_000);
 		socket.on("data", (chunk: Buffer) => this.onClientData(client, chunk));
 		socket.on("error", () => this.dropClient(client));
 		socket.on("close", () => this.dropClient(client));
@@ -354,6 +399,7 @@ export class CloudProtocolServer {
 
 	private onClientData(client: ClientConnection, chunk: Buffer): void {
 		if (client.closed) return;
+		client.lastSeenAt = Date.now();
 		client.received = Buffer.concat([client.received, chunk]);
 		// An unbounded line is a memory-exhaustion vector: a pre-auth client
 		// that never sends a newline is dropped once it exceeds one frame.

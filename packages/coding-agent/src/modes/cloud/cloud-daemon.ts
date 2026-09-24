@@ -444,9 +444,17 @@ export class CloudGuestDaemon {
 		if (session.model?.provider === provider && session.model.id === modelId) {
 			return completed();
 		}
-		// A brokered stub's id is the selector itself: a duplicate open of
-		// the same brokered model stays idempotent.
-		if (session.model?.api === CLOUD_BROKER_API && session.model.id === model) {
+		// The boot model selector has no local catalog metadata. A later
+		// open_session with the same selector must still apply the brokered
+		// model's reasoning and limits before setting its thinking level.
+		if (
+			session.model?.api === CLOUD_BROKER_API &&
+			session.model.id === model &&
+			(modelMetadata === undefined ||
+				(session.model.reasoning === modelMetadata.reasoning &&
+					session.model.contextWindow === modelMetadata.contextWindow &&
+					session.model.maxTokens === modelMetadata.maxTokens))
+		) {
 			return completed();
 		}
 		const resolved = await resolveGuestOrBrokerModel(state.runtime.services.modelRegistry, selector, modelMetadata);
@@ -856,6 +864,7 @@ export class CloudGuestDaemon {
 	}
 
 	async stop(): Promise<void> {
+		this.released = true;
 		if (this.mirrorTimer) {
 			clearInterval(this.mirrorTimer);
 			this.mirrorTimer = undefined;
@@ -2121,45 +2130,45 @@ export function trimSessionEventForWire(event: Record<string, unknown> & { type:
 	const trimPayload = (payload: unknown): Record<string, unknown> | undefined => {
 		if (payload === null || typeof payload !== "object") return undefined;
 		const record = payload as Record<string, unknown>;
-		if (Array.isArray(record.content)) {
-			const anyOversize = record.content.some((block) => {
-				if (block === null || typeof block !== "object") return false;
-				const text = (block as Record<string, unknown>).text;
-				return typeof text === "string" && text.length > CLOUD_WIRE_EVENT_TEXT_TAIL_CHARS;
-			});
-			if (!anyOversize) return undefined;
-			return { ...record, content: trimWireContentBlocks(record.content) };
-		}
-		return undefined;
+		const content = Array.isArray(record.content) ? trimWireContentBlocks(record.content) : undefined;
+		const details = record.details;
+		const trimmedDetails =
+			details !== null && typeof details === "object" && !Array.isArray(details)
+				? Object.fromEntries(
+						Object.entries(details).map(([key, value]) => [
+							key,
+							typeof value === "string" ? trimWireText(value) : value,
+						]),
+					)
+				: undefined;
+		if (content === undefined && trimmedDetails === undefined) return undefined;
+		return {
+			...record,
+			...(content !== undefined ? { content } : {}),
+			...(trimmedDetails !== undefined ? { details: trimmedDetails } : {}),
+		};
 	};
 	const clones: Record<string, unknown> = { ...event };
-	let trimmed = false;
-	const payloadFields: [string, string][] = [
-		["tool_execution_end", "result"],
-		["tool_execution_update", "partialResult"],
-		["agent_end", "message"],
-	];
-	for (const [type, field] of payloadFields) {
-		if (event.type === type) {
-			const payload = trimPayload(clones[field]);
-			if (payload !== undefined) {
-				clones[field] = payload;
-				trimmed = true;
-			}
-		}
-	}
-	if (event.type === "agent_end" && Array.isArray(clones.toolResults)) {
-		const trimmedResults = (clones.toolResults as Array<Record<string, unknown>>).map((entry) => {
-			const payload = trimPayload(entry.result);
-			return payload === undefined ? entry : { ...entry, result: payload };
+	const directPayload =
+		event.type === "tool_execution_end" || event.type === "tool_execution_update"
+			? event.type === "tool_execution_end"
+				? "result"
+				: "partialResult"
+			: "message";
+	const trimmedDirect = trimPayload(clones[directPayload]);
+	if (trimmedDirect !== undefined) clones[directPayload] = trimmedDirect;
+	for (const field of ["toolResults", "messages"] as const) {
+		if (!Array.isArray(clones[field])) continue;
+		clones[field] = (clones[field] as Array<Record<string, unknown>>).map((entry) => {
+			const payload = trimPayload(entry);
+			const result = trimPayload(entry.result);
+			return result !== undefined ? { ...(payload ?? entry), result } : (payload ?? entry);
 		});
-		if (trimmedResults.some((entry, index) => entry !== (clones.toolResults as unknown[])[index])) {
-			clones.toolResults = trimmedResults;
-			trimmed = true;
-		}
 	}
-	if (!trimmed) return event;
-	return clones as Record<string, unknown> & { type: string };
+	// Local session events can contain undefined optional fields; the daemon's
+	// JSON wire omits those fields, while the cloud outbox requires canonical JSON.
+	// Normalize at the same boundary before validating and persisting the event.
+	return JSON.parse(JSON.stringify(clones)) as Record<string, unknown> & { type: string };
 }
 
 function emptySnapshotState(cwd: string): CloudSessionState {

@@ -105,7 +105,7 @@ function makeCallbacks(overrides: Partial<CloudTunnelAttachmentCallbacks> = {}):
 function makeAttachment(
 	transport: CloudTunnelTransport,
 	callbacks: CloudTunnelAttachmentCallbacks,
-	options: { reconnectDelayMs?: number; maxConsecutiveFailures?: number } = {},
+	options: { reconnectDelayMs?: number; maxConsecutiveFailures?: number; handshakeTimeoutMs?: number } = {},
 ): CloudTunnelAttachment {
 	return new CloudTunnelAttachment({
 		sessionId: "sess_att_1",
@@ -116,6 +116,7 @@ function makeAttachment(
 		maxReconnectDelayMs: 20,
 		checkTunnelAfterFailures: 2,
 		submitWaitMs: 500,
+		handshakeTimeoutMs: options.handshakeTimeoutMs ?? 60_000,
 		...(options.maxConsecutiveFailures !== undefined
 			? { maxConsecutiveFailures: options.maxConsecutiveFailures }
 			: {}),
@@ -158,6 +159,49 @@ describe("CloudTunnelAttachment", () => {
 	});
 	afterEach(() => {
 		vi.useRealTimers();
+	});
+
+	it("keeps a healthy connection past the handshake deadline once the snapshot arrived", async () => {
+		const transport = new FakeTransport();
+		const callbacks = makeCallbacks({ onAttached: vi.fn() });
+		const attachment = makeAttachment(transport, callbacks, { handshakeTimeoutMs: 100 });
+		attachment.start();
+		await vi.advanceTimersByTimeAsync(0);
+		const connection = transport.connections[0] as FakeConnection;
+		expect(connection.sent.length).toBe(1);
+		// The snapshot answers the hello: the handshake is satisfied and the
+		// attachment is live - idle guests never push a session_meta frame.
+		connection.receive(snapshotWith([statusEvent]));
+		await vi.advanceTimersByTimeAsync(1);
+		expect(attachment.attached).toBe(true);
+		expect(callbacks.onAttached).toHaveBeenCalledTimes(1);
+		// The deadline would have fired here and killed the healthy connection.
+		await vi.advanceTimersByTimeAsync(200);
+		expect(connection.closed).toBe(false);
+		expect(callbacks.onAttachmentError).not.toHaveBeenCalled();
+		await attachment.stop();
+	});
+
+	it("closes and retries when the bridge accepts the upgrade but never answers hello", async () => {
+		const transport = new FakeTransport();
+		const callbacks = makeCallbacks();
+		const attachment = makeAttachment(transport, callbacks, { handshakeTimeoutMs: 100 });
+		attachment.start();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(transport.connections.length).toBe(1);
+		const silent = transport.connections[0] as FakeConnection;
+		expect(silent.sent.length).toBe(1);
+		expect(silent.closed).toBe(false);
+		// The deadline fires: the silent connection is closed, the failure is
+		// surfaced, and the loop reconnects instead of parking forever.
+		await vi.advanceTimersByTimeAsync(100);
+		expect(silent.closed).toBe(true);
+		expect(callbacks.onAttachmentError).toHaveBeenCalledWith(
+			expect.stringContaining("never answered hello within 100ms"),
+		);
+		await vi.advanceTimersByTimeAsync(10);
+		expect(transport.connections.length).toBe(2);
+		await attachment.stop();
 	});
 
 	it("authenticates, subscribes, mirrors events, and acks strictly after the local flush", async () => {

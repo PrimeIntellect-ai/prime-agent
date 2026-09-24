@@ -976,6 +976,11 @@ describe("CloudSessionRegistry (fake transport, real guest daemon)", () => {
 				connectivity: "stopped",
 				status: "stopped",
 			});
+			// The roster-row id still resolves to the stopped record: a
+			// post-stop import addressed by the row id must not trip the
+			// store's session-id validation.
+			const byRowId = harness.registry.recordForSelector(record.activeSessionId!);
+			expect(byRowId?.sessionId).toBe(info.sessionId);
 		} finally {
 			await harness.registry.dispose().catch(() => undefined);
 			await daemon.stop().catch(() => undefined);
@@ -1231,7 +1236,7 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 		// cloud frame source.
 		const cloud = parityRecorder();
 		const harness = buildRegistry(root, join(root, "guest.sock"), {
-			writeSessionEvent: (activeSessionId, event, meta) => {
+			writeSessionEvent: (_activeSessionId, event, _meta) => {
 				cloud.onEvent(event as unknown as ParityEvent);
 				return false;
 			},
@@ -1282,7 +1287,7 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 			}
 		}
 		expect(cloudNormalized).toEqual(localNormalized);
-	}, 120_000);
+	});
 
 	it("refuses prompts against a disconnected session with actionable guidance", async () => {
 		const root = temp();
@@ -1516,6 +1521,7 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 		const supervisor = supervisorForRegistry(harness.registry, {
 			...localSummaryFixture(root),
 			model: modelFixture("prime-inference", "internal/glm-5.3-fast"),
+			thinkingLevel: "low",
 		});
 		let daemonOne: Awaited<ReturnType<typeof startGuestDaemon>> | undefined;
 		let daemonTwo: Awaited<ReturnType<typeof startGuestDaemon>> | undefined;
@@ -1548,7 +1554,9 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 					openSessionSubmits(harness.transport).length === 1 &&
 					daemonOne?.rootSession?.model?.id === "internal/glm-5.3-fast",
 			);
-			expect(openSessionSubmits(harness.transport)[0].model).toBe("prime-inference/internal/glm-5.3-fast");
+			const open = openSessionSubmits(harness.transport)[0] as { model?: string; thinking?: string };
+			expect(open.model).toBe("prime-inference/internal/glm-5.3-fast");
+			expect(open.thinking).toBe("low");
 			expect(daemonOne?.rootSession?.model).toMatchObject({
 				provider: "prime-inference",
 				id: "internal/glm-5.3-fast",
@@ -1593,6 +1601,35 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 			await harness.registry.dispose().catch(() => undefined);
 			await daemonOne?.stop().catch(() => undefined);
 			await daemonTwo?.stop().catch(() => undefined);
+		}
+	});
+
+	it("inherits brokered model reasoning metadata and thinking on conversion", async () => {
+		const root = cloudTemp("cloud-session-registry-test-");
+		const harness = buildRegistry(root, join(root, "guest.sock"));
+		const supervisor = supervisorForRegistry(harness.registry, {
+			...localSummaryFixture(root),
+			model: { ...modelFixture("openai-codex", "gpt-5.5"), reasoning: true },
+			thinkingLevel: "low",
+		});
+		let daemon: Awaited<ReturnType<typeof startGuestDaemon>> | undefined;
+		try {
+			const created = (await supervisor.handleCommand(makeDaemonClient(), {
+				id: "cmd-broker-model",
+				type: "cloud_session_create",
+				activeSessionId: "active-local",
+			})) as { success?: boolean; data?: { session?: { sessionId?: string } } };
+			expect(created.success).toBe(true);
+			const sessionId = created.data?.session?.sessionId;
+			expect(sessionId).toBeDefined();
+			daemon = await startGuestDaemon(root, 1, sessionId!);
+			await waitFor(() => daemon?.rootSession?.model?.id === "openai-codex/gpt-5.5");
+			const open = openSessionSubmits(harness.transport)[0] as { modelMetadata?: { reasoning?: boolean } };
+			expect(open.modelMetadata?.reasoning).toBe(true);
+			expect(daemon.rootSession?.thinkingLevel).toBe("low");
+		} finally {
+			await harness.registry.dispose().catch(() => undefined);
+			await daemon?.stop().catch(() => undefined);
 		}
 	});
 });

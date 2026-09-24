@@ -89,6 +89,8 @@ export interface CloudTunnelAttachmentCallbacks {
 	onAttachmentError(message: string): void;
 	/** The tunnel is unrecoverable; the supervisor stops itself. */
 	onTerminal(reason: string): void;
+	/** The first snapshot arrived: the attachment is live and answering. */
+	onAttached?(): void;
 	/**
 	 * Run one guest brokered-inference request against the local model
 	 * catalog; responses ride back through `sendInferenceResponse`.
@@ -110,11 +112,18 @@ export interface CloudTunnelAttachmentOptions {
 	maxConsecutiveFailures?: number;
 	/** Wait for a submit receipt before reporting the command as queued. */
 	submitWaitMs?: number;
+	/** Deadline for the guest's first snapshot after hello; a silent bridge reconnects instead of parking. */
+	handshakeTimeoutMs?: number;
+	/** Bound on the tunnel liveness probe; a wedged API call never parks the loop. */
+	tunnelProbeTimeoutMs?: number;
 	/** Injectable sleep for tests. */
 	sleepFn?: (ms: number) => Promise<void>;
 }
 
 export type CloudSteerOutcome = { state: "acknowledged"; receipt: CloudCommandReceipt } | { state: "queued" };
+
+/** Bound on the tunnel liveness probe before it is treated as transient. */
+const TUNNEL_PROBE_TIMEOUT_MS = 15_000;
 
 interface PendingSubmit {
 	commandId: string;
@@ -136,6 +145,8 @@ export class CloudTunnelAttachment {
 
 	private connection: CloudTunnelConnection | undefined;
 	private connectionClosed: (() => void) | undefined;
+	/** Resolved when the current connection delivers its first snapshot. */
+	private firstSnapshotArrived: (() => void) | undefined;
 	private readonly pending = new Map<string, PendingSubmit>();
 	private guestSequence = 0;
 	/**
@@ -155,6 +166,9 @@ export class CloudTunnelAttachment {
 	private terminal = false;
 	private consecutiveFailures = 0;
 	private readonly maxConsecutiveFailures: number;
+	private readonly handshakeTimeoutMs: number;
+	private readonly tunnelProbeTimeoutMs: number;
+	private handshakeTimer: ReturnType<typeof setTimeout> | undefined;
 	private wake: (() => void) | undefined;
 
 	constructor(options: CloudTunnelAttachmentOptions) {
@@ -170,6 +184,8 @@ export class CloudTunnelAttachment {
 		this.checkTunnelAfterFailures = positiveInt(options.checkTunnelAfterFailures ?? 3, "checkTunnelAfterFailures");
 		this.maxConsecutiveFailures = positiveInt(options.maxConsecutiveFailures ?? 120, "maxConsecutiveFailures");
 		this.submitWaitMs = positiveInt(options.submitWaitMs ?? 20_000, "submitWaitMs");
+		this.handshakeTimeoutMs = positiveInt(options.handshakeTimeoutMs ?? 30_000, "handshakeTimeoutMs");
+		this.tunnelProbeTimeoutMs = positiveInt(options.tunnelProbeTimeoutMs ?? 15_000, "tunnelProbeTimeoutMs");
 		this.sleepFn = options.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 	}
 
@@ -194,6 +210,12 @@ export class CloudTunnelAttachment {
 	async stop(): Promise<void> {
 		if (this.stopped) return;
 		this.stopped = true;
+		if (this.handshakeTimer !== undefined) {
+			clearTimeout(this.handshakeTimer);
+			this.handshakeTimer = undefined;
+		}
+		this.firstSnapshotArrived?.();
+		this.firstSnapshotArrived = undefined;
 		this.connection?.close("attachment stopped");
 		this.connection = undefined;
 		for (const pending of this.pending.values()) this.resolvePending(pending, { state: "queued" });
@@ -323,12 +345,23 @@ export class CloudTunnelAttachment {
 	}
 
 	private async probeTunnelAlive(): Promise<boolean> {
+		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
-			return await this.callbacks.checkTunnelAlive();
+			// The probe must never wedge the reconnect loop: a platform API
+			// that accepts the request but never answers is treated as the
+			// transient case, not an infinite park.
+			return await Promise.race([
+				this.callbacks.checkTunnelAlive(),
+				new Promise<boolean>((resolve) => {
+					timer = setTimeout(() => resolve(true), TUNNEL_PROBE_TIMEOUT_MS);
+				}),
+			]);
 		} catch (error) {
 			// A transient REST failure says nothing about the tunnel.
 			this.callbacks.onAttachmentError(`tunnel liveness probe failed: ${errorMessage(error)}`);
 			return true;
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
 		}
 	}
 
@@ -365,6 +398,9 @@ export class CloudTunnelAttachment {
 		// tail: a bounded snapshot may not carry the whole backlog, and the
 		// replay plus sequence deduplication keeps mirroring complete.
 		this.subscribeFromSequence = this.guestSequence;
+		const firstSnapshot = new Promise<void>((resolve) => {
+			this.firstSnapshotArrived = resolve;
+		});
 		connection.send(
 			JSON.stringify({
 				type: "hello",
@@ -378,6 +414,34 @@ export class CloudTunnelAttachment {
 					: {}),
 			}),
 		);
+		// A bridge that accepts the upgrade but never answers hello parks this
+		// connection forever without a deadline; close it and let the reconnect
+		// loop surface the failure honestly instead.
+		try {
+			await Promise.race([
+				closed,
+				firstSnapshot.then(() => new Promise<never>(() => undefined)),
+				new Promise<never>((_resolve, reject) => {
+					this.handshakeTimer = setTimeout(() => {
+						reject(
+							new Error(
+								`guest bridge accepted the tunnel connection but never answered hello within ${this.handshakeTimeoutMs}ms`,
+							),
+						);
+					}, this.handshakeTimeoutMs);
+				}),
+			]);
+		} catch (error) {
+			this.firstSnapshotArrived = undefined;
+			clearTimeout(this.handshakeTimer);
+			this.handshakeTimer = undefined;
+			connection.close("hello handshake timed out");
+			throw error;
+		} finally {
+			clearTimeout(this.handshakeTimer);
+			this.handshakeTimer = undefined;
+		}
+		this.firstSnapshotArrived = undefined;
 		await closed;
 	}
 
@@ -391,6 +455,18 @@ export class CloudTunnelAttachment {
 		const value = parsed.message as CloudMessage;
 		try {
 			if (value.type === "snapshot") {
+				this.firstSnapshotArrived?.();
+				this.firstSnapshotArrived = undefined;
+				// The handshake succeeded: a rejection from the settled race's
+				// still-running deadline would close a healthy connection.
+				if (this.handshakeTimer !== undefined) {
+					clearTimeout(this.handshakeTimer);
+					this.handshakeTimer = undefined;
+				}
+				// The first snapshot proves the guest answers on this
+				// connection; an idle guest may never push a session_meta
+				// frame, so connectivity flips here, not on meta.
+				this.callbacks.onAttached?.();
 				const firstContact = this.guestGeneration === 0;
 				const epochChanged = value.generation !== this.guestGeneration;
 				if (epochChanged && !firstContact) {

@@ -144,6 +144,10 @@ export interface DirectCloudServiceOptions {
 	tunnels?: CloudDelegationTunnelClient;
 	/** Durable per-session tunnel secrets; defaults to a 0600 store. */
 	tunnelSecrets?: CloudTunnelSecretStore;
+	/** Bound on the status probe's process reconnect; tests lower it. */
+	vmProcessStatusConnectTimeoutMs?: number;
+	/** Permit plain http:// loopback gateways for the process client (mirrors PrimeSandboxClient); default off. */
+	vmProcessAllowInsecureLocalhost?: boolean;
 	/** WebSocket transport for tunnel attachments; defaults to the real client. */
 	tunnelTransport?: CloudTunnelTransport;
 	/** Bounded retry for idempotent workspace uploads on transient platform failures. */
@@ -401,12 +405,17 @@ interface TrackedProcess {
 	stream?: VmProcessStream;
 }
 
+/** Bound on the status probe's process reconnect; recovery must never wedge. */
+const DEFAULT_VM_PROCESS_STATUS_CONNECT_TIMEOUT_MS = 10_000;
+
 class ConcreteVmProcesses implements CloudDelegationVmProcessClient {
 	private readonly tracked = new Map<string, TrackedProcess>();
 
 	constructor(
 		private readonly platform: PrimeSandboxClient,
 		private readonly store: CloudSessionStore,
+		private readonly statusConnectTimeoutMs: number = DEFAULT_VM_PROCESS_STATUS_CONNECT_TIMEOUT_MS,
+		private readonly allowInsecureLocalhost = false,
 	) {}
 
 	async start(request: CloudDelegationVmProcessStartRequest): Promise<CloudDelegationVmProcessHandle> {
@@ -439,12 +448,42 @@ class ConcreteVmProcesses implements CloudDelegationVmProcessClient {
 		if (existing !== undefined && existing.state.state !== "unknown") return existing.state;
 		const sandboxId = this.sandboxIdFor(sessionUuid);
 		if (sandboxId === undefined) return { state: "unknown" };
+		const connect = this.client(sandboxId).connect(sessionUuid);
+		// The losing side of the race must not surface as an unhandled
+		// rejection when the deadline wins; the untracked stream stops
+		// reading once its event backlog fills, so dropping it is safe.
+		connect.catch(() => undefined);
 		try {
-			const stream = await this.client(sandboxId).connect(sessionUuid);
+			const stream = await this.withStatusDeadline(connect);
 			this.track(sessionUuid, stream);
 			return this.tracked.get(sessionUuid)?.state ?? { state: "running" };
 		} catch (error) {
+			if (error instanceof VmProcessError && error.code === "timeout") return { state: "unknown" };
 			return isMissing(error) ? { state: "lost" } : Promise.reject(error);
+		}
+	}
+
+	/** Race the reconnect against the status deadline; a wedged gateway is unknown, never lost, never fatal. */
+	private async withStatusDeadline(stream: Promise<VmProcessStream>): Promise<VmProcessStream> {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				stream,
+				new Promise<never>((_resolve, reject) => {
+					timer = setTimeout(
+						() =>
+							reject(
+								new VmProcessError(
+									"timeout",
+									`resident process status reconnect timed out after ${this.statusConnectTimeoutMs}ms`,
+								),
+							),
+						this.statusConnectTimeoutMs,
+					);
+				}),
+			]);
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
 		}
 	}
 
@@ -466,6 +505,7 @@ class ConcreteVmProcesses implements CloudDelegationVmProcessClient {
 					return cached;
 				},
 			},
+			allowInsecureLocalhost: this.allowInsecureLocalhost,
 		});
 	}
 
@@ -1018,7 +1058,14 @@ export class DirectCloudService {
 				baseUrl: options.baseUrl ?? DEFAULT_BASE_URL,
 				teamId: this.teamId,
 			});
-		this.process = options.process ?? new ConcreteVmProcesses(this.platform, this.store);
+		this.process =
+			options.process ??
+			new ConcreteVmProcesses(
+				this.platform,
+				this.store,
+				options.vmProcessStatusConnectTimeoutMs ?? DEFAULT_VM_PROCESS_STATUS_CONNECT_TIMEOUT_MS,
+				options.vmProcessAllowInsecureLocalhost === true,
+			);
 		this.workspace = options.workspace ?? new ConcreteWorkspaceTransfer(this.platform);
 		const results = options.results ?? new ConcreteResults(this.platform, this.store, this.resultStore);
 		this.results = new PersistingResults(results, this.outputStore);

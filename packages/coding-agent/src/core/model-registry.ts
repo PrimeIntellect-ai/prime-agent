@@ -1238,6 +1238,20 @@ export class ModelRegistry {
 		);
 	}
 
+	/** Resolve a private model against the current team's authorization, not an unrelated bundled template. */
+	async resolveAuthorizedPrivatePrimeInferenceModel(
+		model: Pick<Model<Api>, "provider" | "id">,
+	): Promise<Model<Api> | undefined> {
+		if (!isPrivatePrimeInferenceModel(model)) return undefined;
+		// A prior cache may have the right id and limits but predate the live
+		// route's reasoning controls. Re-read the entitled catalog before a
+		// new session commits the model, rather than selecting stale metadata.
+		await this.runSerializedEntitlementRefresh(() => this.refreshPrivatePrimeInferenceAuthorization({ force: true }));
+		return this.getAvailable().find(
+			(candidate) => candidate.provider === model.provider && candidate.id === model.id,
+		);
+	}
+
 	async getExecutableModels(options?: { forcePrivatePrimeInferenceRefresh?: boolean }): Promise<Model<Api>[]> {
 		await this.runSerializedEntitlementRefresh(() =>
 			this.refreshPrivatePrimeInferenceAuthorization({ force: options?.forcePrivatePrimeInferenceRefresh }),

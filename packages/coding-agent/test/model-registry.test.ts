@@ -8,6 +8,7 @@ import { getOAuthProvider, registerOAuthProvider } from "@earendil-works/pi-ai/o
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.js";
+import { resolveCliModel } from "../src/core/model-resolver.js";
 
 describe("ModelRegistry", () => {
 	let tempDir: string;
@@ -373,15 +374,17 @@ describe("ModelRegistry", () => {
 		test("restores cached private metadata only for matching credentials and team", async () => {
 			vi.stubEnv("PI_OFFLINE", "0");
 			const privateRoute = {
-				id: "vendor/model:deployment",
+				id: "internal/glm-5.3-fast",
 				display_name: "Private Deployment",
 				pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 },
 				specs: {
-					context_window: 200_000,
-					max_output_tokens: 20_000,
+					context_window: 1_048_576,
+					max_output_tokens: 131_072,
 					modalities: { input: ["text"], output: ["text"] },
-					supports_reasoning: false,
+					supports_reasoning: true,
 				},
+				reasoning: { supported_efforts: ["low", "high", "max"], mandatory: true },
+				supported_parameters: ["reasoning_effort"],
 			};
 			const credential = {
 				type: "api_key" as const,
@@ -399,9 +402,41 @@ describe("ModelRegistry", () => {
 				),
 			);
 			const firstRegistry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const selected = resolveCliModel({
+				cliProvider: "prime-inference",
+				cliModel: privateRoute.id,
+				modelRegistry: firstRegistry,
+			}).model!;
+			expect(selected.contextWindow).toBe(400000);
+			const resolved = await firstRegistry.resolveAuthorizedPrivatePrimeInferenceModel(selected);
+			expect(resolved).toMatchObject({
+				contextWindow: 1_048_576,
+				compat: { supportsReasoningEffort: true },
+				thinkingLevelMap: { off: null, low: "low", medium: null, high: "high", max: "max" },
+			});
 			expect(
 				(await firstRegistry.refreshAvailableModels()).find((model) => model.id === privateRoute.id),
-			).toMatchObject({ name: "Private Deployment", contextWindow: 200_000 });
+			).toMatchObject({ name: "Private Deployment", contextWindow: 1_048_576 });
+
+			// A cache written before reasoning controls existed persists raw
+			// catalog entries only: no supported_parameters, no reasoning
+			// efforts. Selecting from that degraded cache must lose to the
+			// entitled catalog's live controls.
+			const staleCachePath = join(tempDir, "prime-inference-private-models.json");
+			const cached = JSON.parse(readFileSync(staleCachePath, "utf8")) as {
+				data: Array<Record<string, unknown>>;
+			};
+			const stale = cached.data.find((model) => model.id === privateRoute.id)!;
+			stale.specs = { ...(stale.specs as Record<string, unknown>), context_window: 400_000 };
+			delete stale.reasoning;
+			delete stale.supported_parameters;
+			writeFileSync(staleCachePath, JSON.stringify(cached));
+			const staleRegistry = ModelRegistry.create(AuthStorage.create(join(tempDir, "auth.json")), modelsJsonPath);
+			expect(await staleRegistry.resolveAuthorizedPrivatePrimeInferenceModel(selected)).toMatchObject({
+				contextWindow: 1_048_576,
+				compat: { supportsReasoningEffort: true },
+				thinkingLevelMap: { off: null, low: "low", medium: null, high: "high", max: "max" },
+			});
 
 			vi.stubGlobal(
 				"fetch",
@@ -413,7 +448,7 @@ describe("ModelRegistry", () => {
 			const restoredRegistry = ModelRegistry.create(AuthStorage.create(join(tempDir, "auth.json")), modelsJsonPath);
 			expect(
 				(await restoredRegistry.refreshAvailableModels()).find((model) => model.id === privateRoute.id),
-			).toMatchObject({ name: "Private Deployment", contextWindow: 200_000 });
+			).toMatchObject({ name: "Private Deployment", contextWindow: 1_048_576 });
 
 			for (const changed of [
 				{ ...credential, key: "different-prime-key" },

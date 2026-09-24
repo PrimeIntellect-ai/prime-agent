@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -7,6 +8,7 @@ import {
 	type CloudTunnelTransport,
 	CloudTunnelTransportError,
 } from "../src/core/cloud/bridge/tunnel-transport.js";
+import { CloudSessionStore } from "../src/core/cloud/cloud-session-store.js";
 import {
 	CLOUD_DELEGATION_BOOTSTRAP_SCRIPT,
 	CLOUD_GUEST_RESULTS_DIR,
@@ -23,6 +25,8 @@ import {
 	resolveCloudInferenceCredential,
 } from "../src/core/cloud/direct-cloud-service.js";
 import {
+	type PrimeSandbox,
+	type PrimeSandboxAuth,
 	type PrimeSandboxClient,
 	PrimeSandboxError,
 	type PrimeSandboxVmCreateRequest,
@@ -1062,6 +1066,79 @@ describe("DirectCloudService Prime Tunnel bridge", () => {
 			expect(cloudTeamOverride({})).toBeUndefined();
 		} finally {
 			delete process.env.PRIME_AGENT_CLOUD_TEAM_ID;
+		}
+	});
+});
+
+describe("resident process status recovery", () => {
+	it("treats a wedged resident-process reconnect as unknown so refresh never hangs", async () => {
+		const root = cloudTemp("direct-cloud-status-wedge-");
+		const stateDirectory = join(root, "state");
+		// A gateway that accepts TCP connections but never answers the RPC:
+		// the status probe must give up at its deadline, not wedge recovery.
+		const gateway = createServer();
+		const sockets = new Set<Socket>();
+		gateway.on("connection", (socket) => {
+			sockets.add(socket);
+			socket.on("close", () => sockets.delete(socket));
+		});
+		const port: number = await new Promise((resolve) =>
+			gateway.listen(0, "127.0.0.1", () => resolve((gateway.address() as { port: number }).port)),
+		);
+		const store = new CloudSessionStore(join(stateDirectory, "sessions"));
+		store.create({
+			sessionId: "sess_status_wedge",
+			parentSessionId: "parent-1",
+			residentProcessUuid: "bfdf566d-4980-49e7-8a0c-809957ca25a2",
+		});
+		store.setSandbox("sess_status_wedge", "sandbox-1", "RUNNING");
+		store.setObservedLifecycle("sess_status_wedge", "running");
+		const sandbox: PrimeSandbox = {
+			id: "sandbox-1",
+			name: "wedge",
+			dockerImage: "example/cloud:1",
+			cpuCores: 1,
+			memoryGb: 1,
+			diskSizeGb: 10,
+			gpuCount: 0,
+			vm: true,
+			status: "RUNNING",
+			timeoutMinutes: 60,
+			labels: [],
+			createdAt: "2026-01-01T00:00:00Z",
+			updatedAt: "2026-01-01T00:00:00Z",
+		};
+		const auth: PrimeSandboxAuth = {
+			sandboxId: "sandbox-1",
+			gatewayUrl: `http://127.0.0.1:${port}`,
+			userNamespace: "ns",
+			jobId: "job",
+			token: "t".repeat(32),
+			expiresAt: "2100-01-01T00:00:00Z",
+		};
+		const platform = {
+			getSandbox: async () => sandbox,
+			getSandboxAuth: async () => auth,
+		} as unknown as PrimeSandboxClient;
+		const service = new DirectCloudService({
+			stateDirectory,
+			apiKey: "platform-key",
+			dockerImage: "example/cloud:1",
+			vmProcessStatusConnectTimeoutMs: 250,
+			vmProcessAllowInsecureLocalhost: true,
+			platform,
+			store,
+			results: { fetch: async () => undefined, save: async () => undefined },
+		});
+		try {
+			const record = store.get("sess_status_wedge")!;
+			await service.refreshResident(record);
+			// The reconnect wedged; the record stays live and recovery can continue.
+			expect(store.get("sess_status_wedge")?.observedLifecycle).toBe("running");
+			expect(store.get("sess_status_wedge")?.sandboxStatus).toBe("RUNNING");
+		} finally {
+			for (const socket of sockets) socket.destroy();
+			await new Promise<void>((resolve) => gateway.close(() => resolve()));
 		}
 	});
 });

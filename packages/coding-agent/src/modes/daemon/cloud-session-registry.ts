@@ -37,11 +37,11 @@ import {
 	type CloudCommandRequest,
 	type CloudEvent,
 	type CloudFamilyRow,
-	type CloudModelMetadata,
 	type CloudInferenceEnd,
 	type CloudInferenceError,
 	type CloudInferenceEvent,
 	type CloudInferenceRequest,
+	type CloudModelMetadata,
 	type CloudRosterRow,
 	type CloudSessionStatus,
 	isTerminalCloudCommandState,
@@ -513,6 +513,7 @@ export class CloudSessionRegistry {
 		sessionName?: string;
 		/** Canonical resolved-model selector `provider/modelId`; the guest splits it at the first slash. */
 		model?: string;
+		modelMetadata?: CloudModelMetadata;
 		thinking?: string;
 		timeoutMinutes?: number;
 	}): Promise<DaemonCloudSessionInfo> {
@@ -547,13 +548,13 @@ export class CloudSessionRegistry {
 		const session = this.registerResidentSession(record);
 		this.writeRootShadow(session, record);
 		try {
-			const brokered = this.brokeredModelMetadata(input.model);
+			const modelMetadata = input.modelMetadata ?? this.brokeredModelMetadata(input.model)?.modelMetadata;
 			await this.submitResident(session, `open_${randomUUID()}`, {
 				kind: "open_session",
 				cwd: input.cwd,
 				...(input.model ? { model: input.model } : {}),
 				...(input.thinking ? { thinking: input.thinking } : {}),
-				...(brokered?.modelMetadata ? { modelMetadata: brokered.modelMetadata } : {}),
+				...(modelMetadata ? { modelMetadata } : {}),
 			});
 			session.opened = true;
 			if (input.sessionName) {
@@ -886,7 +887,12 @@ export class CloudSessionRegistry {
 	recordForSelector(selector: string): CloudSessionRecord | undefined {
 		const target = this.resolveActive(selector);
 		if (target !== undefined) return target.record;
-		return this.store.get(selector);
+		// The store is keyed by cloud session ids and rejects other keys
+		// outright, so a roster-row id resolves through the durable records
+		// (a stopped row keeps its record; its live-row resolution is gone).
+		return this.store
+			.list()
+			.find((candidate) => candidate.activeSessionId === selector || candidate.sessionId === selector);
 	}
 
 	/**
@@ -994,9 +1000,7 @@ export class CloudSessionRegistry {
 					kind: "open_session",
 					cwd,
 					...(model ? { model } : {}),
-					...(reprovisionBrokered?.modelMetadata
-						? { modelMetadata: reprovisionBrokered.modelMetadata }
-						: {}),
+					...(reprovisionBrokered?.modelMetadata ? { modelMetadata: reprovisionBrokered.modelMetadata } : {}),
 					...(spawn
 						? {
 								family: {
@@ -1628,6 +1632,7 @@ export class CloudSessionRegistry {
 					if (this.store.get(session.sessionId)) this.service.store.setLastError(session.sessionId, message);
 					this.updateConnectivity(session, "reconnecting");
 				},
+				onAttached: () => this.updateConnectivity(session, "connected"),
 				onTerminal: (reason) => {
 					const record = this.currentRecord(session);
 					this.service.store.setLastError(session.sessionId, `tunnel bridge stopped: ${reason}`);
