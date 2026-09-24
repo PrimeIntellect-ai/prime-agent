@@ -179,7 +179,7 @@ impl AcpSession {
         assistant: &AssistantMessage,
         goal_queue: ThresholdGoalQueue,
     ) -> (CompactionCheckRun, Option<pa_types::session::CustomMessage>) {
-        let Some(model) = mode.model.clone() else {
+        let Some(model) = mode.current_model().await else {
             // TS reads `this.model?.contextWindow ?? 0`: a session
             // without a resolvable model never crosses a threshold.
             return (CompactionCheckRun::Proceed, None);
@@ -231,7 +231,7 @@ impl AcpSession {
     /// so a failed run is not silently re-run on the next boundary. The
     /// outcomes publish like the `/refine` command events.
     pub(super) async fn consume_requested_refine(&self, mode: &AcpModeState) {
-        let Some(model) = mode.model.clone() else {
+        let Some(model) = mode.current_model().await else {
             return;
         };
         let Some(refinement) = mode
@@ -437,7 +437,7 @@ impl AcpSession {
         assistant: &AssistantMessage,
     ) -> OverflowAttempt {
         let engine = &mode.engine;
-        let Some(model) = mode.model.clone() else {
+        let Some(model) = mode.current_model().await else {
             return OverflowAttempt::Continue;
         };
         // TS `sameModel`: a model switch must not compact for the old

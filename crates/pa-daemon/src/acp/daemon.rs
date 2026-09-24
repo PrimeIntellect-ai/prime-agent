@@ -12,6 +12,11 @@
 //! wire mapping (wire_events.rs), and the autonomous accounting rides the
 //! `wait_for_headless_completion` response into the completion envelope
 //! and the stop reason (TS `waitForHeadlessCompletion` + `acpStopReason`).
+//!
+//! The model and effort pickers (TS #2455) ride the worker's own wire
+//! commands: `get_connection_state` for the live model/level,
+//! `get_available_models` for discovery, `set_model` /
+//! `set_thinking_level` for the applied selection.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -25,6 +30,10 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+use super::config_options::{
+    config_options_value, model_value, publish_config_options, session_config_options, PickerModel,
+    SessionConfigOption,
+};
 use super::jsonrpc::{self, Incoming};
 use super::meta::{self, PrimeAgentEventPhase, PrimeAgentOutcome, PrimeAgentSessionMeta};
 use super::producer::{self, UpdateProducer};
@@ -197,6 +206,9 @@ struct HostedSession {
     acp_session_id: String,
     daemon_active_session_id: String,
     producer: Arc<UpdateProducer>,
+    /// The picker state (TS `AcpSessionEntry`'s configOptions/models) and
+    /// the serialized config queue (`configTask`).
+    config: Arc<HostedConfig>,
     mcp_owner_id: String,
     mcp_server_names: Vec<String>,
     cancel_requested: bool,
@@ -224,6 +236,15 @@ struct DaemonAcpState {
     session: Option<HostedSession>,
     session_new_in_flight: bool,
     session_close_in_flight: bool,
+}
+
+/// The hosted session's picker state: the published options, the
+/// discovered models, and the serialized queue every config operation
+/// runs through (TS `enqueueConfig`/`configTask`).
+struct HostedConfig {
+    queue: tokio::sync::Mutex<()>,
+    published: tokio::sync::Mutex<Vec<SessionConfigOption>>,
+    models: tokio::sync::Mutex<Vec<pa_types::ai::Model>>,
 }
 
 /// Serve the daemon-attached ACP mode until stdin closes. The caller
@@ -265,37 +286,69 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                 match frame {
                     LinkFrame::Event(frame) => {
                         let event = frame.get("event").cloned().unwrap_or(Value::Null);
-                        let mut guard = state.lock().await;
-                        let Some(current) = guard.session.as_mut() else {
-                            continue;
-                        };
-                        if let Some(stop) = wire_events::assistant_stop(&event) {
-                            current.assistant_stop_reason = stop.stop_reason;
-                        }
-                        // The worker's post-turn marker: the settlement
-                        // waiting on it may resume once every agent run of
-                        // the turn ended (a retried or continued run
-                        // restarts with its own `agent_start`, so the LAST
-                        // `agent_end` is the marker — an early one leaves
-                        // the trailing retry frames behind the settlement).
-                        match event.get("type").and_then(Value::as_str) {
-                            Some("agent_start") => current.agent_runs_started += 1,
-                            Some("agent_end") => {
-                                current.agent_runs_ended += 1;
-                                if current.agent_runs_ended >= current.agent_runs_started.max(1) {
-                                    if let Some(emitted) = current.turn_emitted.take() {
-                                        let _ = emitted.send(());
+                        // The picker refresh triggers (TS refreshes on
+                        // `agent_end`, `auto_retry_start`, and
+                        // `auto_retry_end` — the runs that can restore a
+                        // failover model or clamp a level): captured under
+                        // the guard, spawned once it is released.
+                        let mut refresh: Option<(Arc<HostedConfig>, Arc<UpdateProducer>, String)> =
+                            None;
+                        {
+                            let mut guard = state.lock().await;
+                            let Some(current) = guard.session.as_mut() else {
+                                continue;
+                            };
+                            if let Some(stop) = wire_events::assistant_stop(&event) {
+                                current.assistant_stop_reason = stop.stop_reason;
+                            }
+                            // The worker's post-turn marker: the settlement
+                            // waiting on it may resume once every agent run of
+                            // the turn ended (a retried or continued run
+                            // restarts with its own `agent_start`, so the LAST
+                            // `agent_end` is the marker — an early one leaves
+                            // the trailing retry frames behind the settlement).
+                            match event.get("type").and_then(Value::as_str) {
+                                Some("agent_start") => current.agent_runs_started += 1,
+                                Some("agent_end") => {
+                                    current.agent_runs_ended += 1;
+                                    if current.agent_runs_ended >= current.agent_runs_started.max(1)
+                                    {
+                                        if let Some(emitted) = current.turn_emitted.take() {
+                                            let _ = emitted.send(());
+                                        }
                                     }
                                 }
+                                _ => {}
                             }
-                            _ => {}
+                            let turn_id = current.producer.active_prompt_turn().await;
+                            for update in wire_events::wire_updates(&event, &mut mapping) {
+                                let _ = current
+                                    .producer
+                                    .publish(&update, turn_id, PrimeAgentEventPhase::Event, None)
+                                    .await;
+                            }
+                            if matches!(
+                                event.get("type").and_then(Value::as_str),
+                                Some("agent_end")
+                                    | Some("auto_retry_start")
+                                    | Some("auto_retry_end")
+                            ) {
+                                refresh = Some((
+                                    Arc::clone(&current.config),
+                                    Arc::clone(&current.producer),
+                                    current.daemon_active_session_id.clone(),
+                                ));
+                            }
                         }
-                        let turn_id = current.producer.active_prompt_turn().await;
-                        for update in wire_events::wire_updates(&event, &mut mapping) {
-                            let _ = current
-                                .producer
-                                .publish(&update, turn_id, PrimeAgentEventPhase::Event, None)
-                                .await;
+                        if let Some((config, producer, daemon_session_id)) = refresh {
+                            let link = Arc::clone(&link);
+                            tokio::spawn(async move {
+                                // Serialized like every config operation
+                                // (TS `enqueueConfig`).
+                                let _guard = config.queue.lock().await;
+                                refresh_wire_config(&link, &daemon_session_id, &config, &producer)
+                                    .await;
+                            });
                         }
                     }
                     LinkFrame::Response(response) => {
@@ -407,6 +460,9 @@ async fn handle_request(
         "session/cancel" => {
             let _ = session_cancel(params, link, state).await;
             let _ = tx.send(jsonrpc::response(id, json!({})));
+        }
+        "session/set_config_option" => {
+            handle_set_config_option(id, params, link, state, tx).await;
         }
         "session/close" => {
             handle_session_close(id, params, link, state, tx).await;
@@ -561,11 +617,27 @@ async fn handle_session_new(
 
     let acp_session_id = uuid::Uuid::new_v4().to_string();
     let producer = UpdateProducer::new(acp_session_id.clone(), tx.clone());
+    // The pickers ride the worker's own state and discovery seams: neither
+    // fetch may fail the admission (TS catches discovery failures to an
+    // empty list, and a state fetch failure degrades to no options).
+    let (state_value, models) = (
+        fetch_connection_state(link, &daemon_active_session_id).await,
+        fetch_available_models(link, &daemon_active_session_id)
+            .await
+            .unwrap_or_default(),
+    );
+    let published = picker_options_from_state(&state_value, &models);
+    let config = Arc::new(HostedConfig {
+        queue: tokio::sync::Mutex::new(()),
+        published: tokio::sync::Mutex::new(published),
+        models: tokio::sync::Mutex::new(models),
+    });
     let mcp_owner_id = uuid::Uuid::new_v4().to_string();
     let mut hosted = HostedSession {
         acp_session_id: acp_session_id.clone(),
         daemon_active_session_id,
         producer,
+        config,
         mcp_owner_id,
         mcp_server_names: Vec::new(),
         cancel_requested: false,
@@ -598,7 +670,10 @@ async fn handle_session_new(
         .collect();
 
     // Queue the admission response before opening the producer gate.
-    let mut result = json!({ "sessionId": acp_session_id });
+    let mut result = json!({
+        "sessionId": acp_session_id,
+        "configOptions": *hosted.config.published.lock().await,
+    });
     if let Some(requested) = params.cwd.as_deref().filter(|cwd| !cwd.is_empty()) {
         let actual = options.actual_cwd.display().to_string();
         if !super::same_cwd(Path::new(requested), &options.actual_cwd) {
@@ -983,6 +1058,9 @@ async fn handle_session_close(
     if !hosted.mcp_server_names.is_empty() {
         let _ = replace_session_servers(link, &hosted, &[]).await;
     }
+    // The serialized config work settles before the producer fences (TS
+    // `await configTask` in `session/close`).
+    let _ = hosted.config.queue.lock().await;
     hosted.producer.close().await;
     let _ = link
         .request(
@@ -999,12 +1077,313 @@ async fn handle_session_close(
     guard.session_close_in_flight = false;
 }
 
+/// `session/set_config_option`: apply one picker selection through the
+/// worker's wire commands and answer the refreshed options (TS #2455).
+/// Config work is serialized through the session's queue, so selections
+/// and the event-driven refreshes observe one another in arrival order.
+async fn handle_set_config_option(
+    id: Value,
+    params: Value,
+    link: &Arc<DaemonLink>,
+    state: &Arc<Mutex<DaemonAcpState>>,
+    tx: producer::FrameSink,
+) {
+    let params = types::SetConfigOptionParams::parse(&params);
+    // The session resolves before the queue (TS reads `session?.id`).
+    let resolved = {
+        let guard = state.lock().await;
+        guard
+            .session
+            .as_ref()
+            .filter(|hosted| hosted.acp_session_id == params.session_id)
+            .map(|hosted| {
+                (
+                    hosted.daemon_active_session_id.clone(),
+                    Arc::clone(&hosted.config),
+                    Arc::clone(&hosted.producer),
+                )
+            })
+    };
+    let Some((daemon_session_id, config, producer)) = resolved else {
+        let _ = tx.send(jsonrpc::error_response(
+            id,
+            jsonrpc::INVALID_PARAMS,
+            "Invalid params",
+            Some(json!({ "reason": format!("Unknown ACP session: {}", params.session_id) })),
+        ));
+        return;
+    };
+    // One config operation at a time (TS `enqueueConfig`).
+    let _guard = config.queue.lock().await;
+    // The queue can outlive the session: a close admitted between the
+    // resolution and the run refuses further config work (TS
+    // `sessionCloseInFlight`).
+    let live = {
+        let guard = state.lock().await;
+        !guard.session_close_in_flight
+            && guard
+                .session
+                .as_ref()
+                .is_some_and(|hosted| hosted.acp_session_id == params.session_id)
+    };
+    let outcome = if live {
+        apply_wire_config(
+            link,
+            &daemon_session_id,
+            &config,
+            &params.config_id,
+            params.value.as_str(),
+        )
+        .await
+    } else {
+        Err(WireConfigError::invalid_params(
+            "ACP session is closed or closing",
+        ))
+    };
+    if let Err(error) = outcome {
+        let _ = tx.send(error.response(id));
+        return;
+    }
+    let options = refresh_wire_config(link, &daemon_session_id, &config, &producer).await;
+    let _ = tx.send(jsonrpc::response(id, config_options_value(&options)));
+}
+
+/// One failed wire config operation: the TS handler's `RequestError`
+/// shapes.
+enum WireConfigError {
+    InvalidParams(String),
+    Internal(String),
+}
+
+impl WireConfigError {
+    fn invalid_params(reason: impl Into<String>) -> WireConfigError {
+        WireConfigError::InvalidParams(reason.into())
+    }
+
+    fn internal(details: impl Into<String>) -> WireConfigError {
+        WireConfigError::Internal(details.into())
+    }
+
+    /// The JSON-RPC error frame (the TS `invalidParams` data shape).
+    fn response(self, id: Value) -> Value {
+        match self {
+            WireConfigError::InvalidParams(reason) => jsonrpc::error_response(
+                id,
+                jsonrpc::INVALID_PARAMS,
+                "Invalid params",
+                Some(json!({ "reason": reason })),
+            ),
+            WireConfigError::Internal(details) => jsonrpc::error_response(
+                id,
+                jsonrpc::INTERNAL_ERROR,
+                "Internal error",
+                Some(json!({ "details": details })),
+            ),
+        }
+    }
+}
+
+/// Apply one selection (TS `session/set_config_option`'s handler body):
+/// validate against the worker's live state, apply through the worker's
+/// `set_model` / `set_thinking_level` commands.
+async fn apply_wire_config(
+    link: &Arc<DaemonLink>,
+    daemon_session_id: &str,
+    config: &Arc<HostedConfig>,
+    config_id: &str,
+    value: Option<&str>,
+) -> Result<(), WireConfigError> {
+    match (config_id, value) {
+        ("model", Some(value)) => {
+            let state = fetch_connection_state(link, daemon_session_id).await;
+            let current = state
+                .as_ref()
+                .and_then(|state| PickerModel::from_connection_state(&state["model"]));
+            if current
+                .as_ref()
+                .map(|model| model_value(&model.provider, &model.id))
+                .as_deref()
+                == Some(value)
+            {
+                // The current model re-selected: the caller refreshes
+                // without discovery (a resync during a discovery outage
+                // still answers).
+                return Ok(());
+            }
+            let models = fetch_available_models(link, daemon_session_id)
+                .await
+                .map_err(|_| {
+                    WireConfigError::invalid_params(
+                        "Model discovery is unavailable; try again later",
+                    )
+                })?;
+            let model = models
+                .iter()
+                .find(|model| model_value(&model.provider, &model.id) == value)
+                .cloned()
+                .ok_or_else(|| {
+                    WireConfigError::invalid_params(format!("Unavailable model: {value}"))
+                })?;
+            let response = link
+                .request(
+                    DaemonCommand::SetModel {
+                        id: None,
+                        active_session_id: daemon_session_id.to_string(),
+                        provider: model.provider.clone(),
+                        model_id: model.id.clone(),
+                        rest: Default::default(),
+                    },
+                    TURN_TIMEOUT_MS,
+                )
+                .await
+                .map_err(|error| WireConfigError::internal(error.to_string()))?;
+            if !response.success {
+                return Err(WireConfigError::internal(
+                    response
+                        .error
+                        .unwrap_or_else(|| "the model switch failed".to_string()),
+                ));
+            }
+            *config.models.lock().await = models;
+            Ok(())
+        }
+        ("thought_level", Some(value)) => {
+            let state = fetch_connection_state(link, daemon_session_id).await;
+            let model = state
+                .as_ref()
+                .and_then(|state| PickerModel::from_connection_state(&state["model"]));
+            let levels: Vec<String> = state
+                .as_ref()
+                .and_then(|state| state.get("availableThinkingLevels"))
+                .cloned()
+                .and_then(|value| serde_json::from_value(value).ok())
+                .unwrap_or_default();
+            let supported = model.as_ref().is_some_and(|model| model.reasoning)
+                && levels.iter().any(|level| level == value);
+            if !supported {
+                return Err(WireConfigError::invalid_params(format!(
+                    "Unsupported reasoning effort: {value}"
+                )));
+            }
+            let response = link
+                .request(
+                    DaemonCommand::SetThinkingLevel {
+                        id: None,
+                        active_session_id: daemon_session_id.to_string(),
+                        level: value.to_string(),
+                        rest: Default::default(),
+                    },
+                    TURN_TIMEOUT_MS,
+                )
+                .await
+                .map_err(|error| WireConfigError::internal(error.to_string()))?;
+            if !response.success {
+                return Err(WireConfigError::internal(
+                    response
+                        .error
+                        .unwrap_or_else(|| "the thinking level switch failed".to_string()),
+                ));
+            }
+            Ok(())
+        }
+        _ => Err(WireConfigError::invalid_params(format!(
+            "Invalid configuration option: {config_id}"
+        ))),
+    }
+}
+
+/// Fetch the worker's live connection state (TS `getState`): the model
+/// metadata, the effective thinking level, and the supported levels.
+async fn fetch_connection_state(link: &Arc<DaemonLink>, active_session_id: &str) -> Option<Value> {
+    let response = link
+        .request(
+            DaemonCommand::GetConnectionState {
+                id: None,
+                active_session_id: active_session_id.to_string(),
+                rest: Default::default(),
+            },
+            REQUEST_TIMEOUT_MS,
+        )
+        .await
+        .ok()?;
+    if !response.success {
+        return None;
+    }
+    response.data
+}
+
+/// Fetch the worker's available models (TS `getAvailableModels`).
+async fn fetch_available_models(
+    link: &Arc<DaemonLink>,
+    active_session_id: &str,
+) -> anyhow::Result<Vec<pa_types::ai::Model>> {
+    let response = link
+        .request(
+            DaemonCommand::GetAvailableModels {
+                id: None,
+                active_session_id: active_session_id.to_string(),
+                rest: Default::default(),
+            },
+            REQUEST_TIMEOUT_MS,
+        )
+        .await?;
+    if !response.success {
+        anyhow::bail!(response
+            .error
+            .unwrap_or_else(|| "model discovery failed".to_string()));
+    }
+    let models = response
+        .data
+        .and_then(|data| data.get("models").cloned())
+        .unwrap_or(Value::Null);
+    Ok(serde_json::from_value(models).unwrap_or_default())
+}
+
+/// Build the pickers from one connection state (the shared computation's
+/// wire-side input adapter).
+fn picker_options_from_state(
+    state: &Option<Value>,
+    models: &[pa_types::ai::Model],
+) -> Vec<SessionConfigOption> {
+    let Some(state) = state else {
+        return Vec::new();
+    };
+    let model = PickerModel::from_connection_state(&state["model"]);
+    let thinking_level = state
+        .get("thinkingLevel")
+        .and_then(Value::as_str)
+        .unwrap_or("off")
+        .to_string();
+    let levels: Vec<String> = state
+        .get("availableThinkingLevels")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    session_config_options(model, &thinking_level, &levels, models)
+}
+
+/// Recompute the options from the worker's live state and publish the
+/// change (TS `refreshConfig`).
+async fn refresh_wire_config(
+    link: &Arc<DaemonLink>,
+    daemon_session_id: &str,
+    config: &Arc<HostedConfig>,
+    producer: &Arc<UpdateProducer>,
+) -> Vec<SessionConfigOption> {
+    let state = fetch_connection_state(link, daemon_session_id).await;
+    let options = picker_options_from_state(&state, &config.models.lock().await);
+    publish_config_options(producer, &config.published, options.clone()).await;
+    options
+}
+
 /// Stop everything after stdin closes (TS dispose semantics).
 async fn teardown(link: &Arc<DaemonLink>, state: &Arc<Mutex<DaemonAcpState>>) {
     let hosted = state.lock().await.session.take();
     let Some(hosted) = hosted else {
         return;
     };
+    // The serialized config work settles before the producer fences.
+    let _ = hosted.config.queue.lock().await;
     let _ = link
         .request(
             DaemonCommand::Abort {

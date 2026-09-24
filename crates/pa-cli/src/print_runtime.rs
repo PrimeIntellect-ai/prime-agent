@@ -13,7 +13,7 @@ use pa_types::ai::Model;
 use crate::headless_autonomous::{autonomous_runtime_config, HeadlessAutonomous};
 use crate::mode::{AppMode, MissingSubsystem, RunOptions};
 use pa_core::session_engine::provider_adapter::{
-    json_round_trip, map_thinking_level, real_stream_fn,
+    json_round_trip, map_thinking_level, switchable_stream_fn, ProviderTarget,
 };
 
 /// The runtime: implements the print (text) mode against the merged session
@@ -112,6 +112,7 @@ async fn acp_mode_main(options: &RunOptions) -> Result<i32, String> {
         model: Some(engine.model),
         api_key: engine.api_key,
         agent_dir: config.agent_dir.clone(),
+        provider_target: engine.provider_target,
         autonomous_config: options
             .config
             .autonomous
@@ -200,6 +201,10 @@ async fn print_mode_main(options: &RunOptions) -> Result<i32, String> {
 /// resolution, session persistence, and the engine facade. The faux-script
 /// seam (`PRIME_AGENT_FAUX_SCRIPT`) drives the same assembly without the
 /// network; verification harness only, never set by the product.
+/// The switchable provider target the session's stream reads per call
+/// (shared with the ACP mode, whose picker model switches swap it live).
+pub type ProviderTargetSlot = std::sync::Arc<std::sync::RwLock<Option<ProviderTarget>>>;
+
 /// The assembled headless engine plus the model and request auth it runs
 /// on, so host transports can drive session-command executors
 /// (compact/refine) with the session's own model.
@@ -207,6 +212,10 @@ struct HeadlessEngine {
     engine: pa_core::session_engine::engine::SessionEngine,
     model: Model,
     api_key: Option<String>,
+    /// The live provider target: the stream reads it per call, and the
+    /// ACP mode's picker switches swap it (TS `setModel`'s stream
+    /// re-registration).
+    provider_target: ProviderTargetSlot,
 }
 
 async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEngine, String> {
@@ -229,7 +238,15 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
     // Resolve request auth once (single-shot mode).
     let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
 
-    let stream_fn = real_stream_fn(resolved.api_key.clone(), model.clone());
+    // The stream reads the provider target per call (the switchable seam
+    // the ACP pickers swap on a model switch).
+    let provider_target: ProviderTargetSlot =
+        std::sync::Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
+            api_key: resolved.api_key.clone(),
+            model: model.clone(),
+            service_tier: None,
+        })));
+    let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&provider_target));
     let agent_model: AgentModel = json_round_trip(&model).ok_or("model conversion failed")?;
 
     let session_manager = if options.session.no_session {
@@ -335,6 +352,7 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
         engine,
         model,
         api_key: resolved.api_key,
+        provider_target,
     })
 }
 
@@ -1195,8 +1213,15 @@ async fn build_faux_engine_parts(
         .get("contextWindow")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(100_000);
+    // The stable faux identity (`api: "faux"`, `provider: "faux"`) the
+    // daemon's scripted engine registers under: verification fixtures can
+    // declare faux-provider models in models.json, and the ACP pickers'
+    // in-process discovery then resolves them like real auth-configured
+    // models.
     let registration =
         pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions {
+            api: Some("faux".to_string()),
+            provider: Some("faux".to_string()),
             models: Some(vec![pa_ai::faux::FauxModelDefinition {
                 id: "faux-1".to_string(),
                 name: Some("Faux Model".to_string()),
@@ -1211,7 +1236,13 @@ async fn build_faux_engine_parts(
     registration.set_responses(response_steps);
     let model = registration.get_model();
     let agent_model = json_round_trip(&model).ok_or("model conversion failed")?;
-    let stream_fn = real_stream_fn(None, model.clone());
+    let provider_target: ProviderTargetSlot =
+        std::sync::Arc::new(std::sync::RwLock::new(Some(ProviderTarget {
+            api_key: None,
+            model: model.clone(),
+            service_tier: None,
+        })));
+    let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&provider_target));
     // The faux path shares the session-manager wiring (persist / --no-session
     // / --resume / --continue) with the real provider path so binary-level
     // tests can verify persistence without the network.
@@ -1266,6 +1297,7 @@ async fn build_faux_engine_parts(
         engine,
         model,
         api_key: None,
+        provider_target,
     })
 }
 

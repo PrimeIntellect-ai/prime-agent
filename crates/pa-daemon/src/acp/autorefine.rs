@@ -57,7 +57,7 @@ impl AcpSession {
     /// `RefineFailed` mapping (TS emits `refine_failed` on the wire for
     /// a failed serialized round). A declined review stays silent.
     pub(super) async fn consume_compact_auto_refine(&self, mode: &AcpModeState) {
-        let Some(model) = mode.model.clone() else {
+        let Some(model) = mode.current_model().await else {
             return;
         };
         let outcome = self
@@ -74,7 +74,7 @@ impl AcpSession {
     /// round is best-effort like the TS drain — close proceeds even
     /// when the review fails.
     pub(super) async fn drain_compact_auto_refine_at_close(&self, mode: &AcpModeState) {
-        let Some(model) = mode.model.clone() else {
+        let Some(model) = mode.current_model().await else {
             return;
         };
         let outcome = self
