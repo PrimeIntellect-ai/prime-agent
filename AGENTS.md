@@ -16,14 +16,17 @@ Every contributor (human or agent) must read this before working on this repo.
 
 ## Style and structure
 
-- Workspace crates are prefixed `pa-`. See ARCHITECTURE.md for the hard ownership rules: one owned
-  area per crate, pa-types is the only shared crate, cycle-free dependency direction,
-  minimal public APIs, no god-modules.
+- Workspace crates are prefixed `pa-`. The hard ownership rules: one owned area per crate,
+  pa-types is the only shared crate, cycle-free dependency direction, minimal public APIs,
+  no god-modules. The dependency direction is pinned in the Crates table below; each crate's
+  README.md states its scope, non-goals, and public API surface.
 - Prefer private modules with an explicitly exported public crate API. Internals are `pub(crate)`.
-- Avoid large modules. Target Rust modules under 500 LoC excluding tests. Past ~800 LoC, put new
-  functionality in a new module unless there is a strong documented reason not to. Be hardest on
-  high-touch orchestration files (session engine, daemon supervisor, TUI app): those attract
-  unrelated changes, so split early.
+- Avoid large modules — and this is enforced, not aspirational (see the LOC ratchet below).
+  New `.rs` files stay under 500 whole-file lines (tests included); if in-file tests would push a
+  module over, put the tests in a dedicated test module or `tests/` file instead. Past ~800 lines,
+  put new functionality in a new module unless there is a strong documented reason not to. Be
+  hardest on high-touch orchestration files (session engine, daemon supervisor, TUI app): those
+  attract unrelated changes, so split early.
 - When extracting code from a large module, move the related tests and docs with it so invariants
   stay close to the owning code.
 - Inline format args: always prefer `format!("{x}")` over positional.
@@ -48,6 +51,30 @@ Every contributor (human or agent) must read this before working on this repo.
 - Cache-prefix stability is first-class: never adopt a pattern without checking its effect on the
   cacheable prompt prefix (cross-check against ~/codex).
 
+### LOC ratchet (enforced: `make loc` / `.github/workflows/codebase-health.yml`)
+
+- The metric is the whole-file physical line count of every tracked `.rs` file
+  (what you see when you open it); `scripts/loc-baseline.json` is the state.
+- New files are held to the 500-line default ceiling. Files that were already
+  over 500 when the ratchet landed (2026-09-24, tip bfc297b5a) are frozen at
+  their measured size: the entry can only go DOWN. A PR that shrinks a frozen
+  file re-records the win with `python3 scripts/check_loc.py --update-baseline`
+  (the check fails on an unrecorded win, so the improvement becomes the new
+  ceiling and cannot be given back). When a file drops to the default ceiling
+  or below, its entry retires and the default governs it again.
+- Raising a ceiling or landing a new over-ceiling file is a hand-edited
+  `loc-baseline.json` diff that must carry a `reason` (CI fails entries without
+  one). That diff is the review surface: reviewers challenge raises.
+- Splitting a frozen file is always a win: extract a module (move its tests
+  with it), re-run `--update-baseline`; the new file starts under the default
+  ceiling or needs its own justified entry.
+- Design precedent: the TS repo's frozen test-policy debt baseline — counts
+  only go down, wins get recorded, exceptions are justified inline. It exists
+  so the port does not repeat the TS repo's giant-file era, where high-touch
+  files accreted features until cleanup cost more than the features; the
+  2026-09-24 tip already holds worker.rs at 10,992, agent_engine.rs at 9,838
+  and session_ui.rs at 9,442 lines.
+
 ## Tests
 
 - Prefer whole-object equality comparisons over field-by-field checks.
@@ -62,7 +89,8 @@ Every contributor (human or agent) must read this before working on this repo.
 - `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace` must pass before every merge. Run `make check` — the local mirror of
   the same gates; CI runs on the org's billing (`.github/workflows/continuous.yml` + `release.yml`
-  on the `rust` branch).
+  on the `rust` branch). `make loc` (the LOC ratchet) must also pass — it is part of the
+  `codebase-health.yml` workflow and takes seconds.
 - **Parity-diff evidence is a merge gate** (the port's definition, not optional polish): every PR
   that touches a user-visible surface must include a "parity-diff evidence" section in its
   description showing the TS-binary comparison for what it changed: (1) rendered output —
