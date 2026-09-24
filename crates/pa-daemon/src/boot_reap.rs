@@ -514,8 +514,10 @@ pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> boo
 
 /// Whether the path is a unix socket file (the reap's endpoint unlink
 /// removes endpoints only - a regular file at a matching name is never
-/// touched).
-#[cfg(target_os = "linux")]
+/// touched). UNIX-wide on purpose (the caller is unconditional): the
+/// std `os::unix` socket-file probe compiles on every unix - darwin
+/// included.
+#[cfg(unix)]
 fn is_unix_socket_file(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
     std::fs::symlink_metadata(path)
@@ -606,7 +608,10 @@ fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
 /// leftover carries), so a leftover whose inherited spelling differs
 /// (`/a/b/../c/daemon.sock` vs `/a/c/daemon.sock`, a symlinked tmpdir)
 /// is still a same-socket predecessor - its lease is held either way.
-#[cfg(target_os = "linux")]
+/// Pure `std` (canonicalize + components): it compiles on every unix -
+/// darwin included, which the unconditional `supervisor_argv_names_socket`
+/// (the argv-only view the supervisor census normalizes with) requires.
+#[cfg(unix)]
 pub(crate) fn normalize_socket_spelling(path: &Path) -> String {
     if let Ok(canonical) = path.canonicalize() {
         return canonical.to_string_lossy().to_string();
@@ -698,6 +703,10 @@ mod tests {
     /// own child (the same contract the CLI stop test uses) dies inside the
     /// TERM grace and reports Term. The signal rides the kernel-held pidfd
     /// (the open itself proves the handle is available on this kernel).
+    /// LINUX ONLY: the stop is real only where the pidfd opens - elsewhere
+    /// `stop_target` is the never-signal no-op, and the live `sleep` child
+    /// would never exit for the wait.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_real_process_stops_inside_the_term_grace() {
         let mut child = std::process::Command::new("sleep")
@@ -705,7 +714,6 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         let pid = child.id();
-        #[cfg(target_os = "linux")]
         assert!(
             pa_core::platform::process::open_pidfd(pid).is_some(),
             "the kernel-held handle opens"
