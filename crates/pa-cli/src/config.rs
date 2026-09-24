@@ -33,6 +33,7 @@ pub fn resolve_daemon_socket_path(daemon_socket: Option<&str>) -> PathBuf {
         .or_else(|| {
             std::env::var_os(ENV_DAEMON_SOCKET)
                 .filter(|value| !value.is_empty())
+                .as_deref()
                 .map(expand_tilde_path_os)
         })
         .unwrap_or_else(pa_daemon::socket::default_daemon_socket_path)
