@@ -721,9 +721,21 @@ mod tests {
         assert!(rows
             .iter()
             .any(|r| flat(r) == " one two three four five six seven"));
-        // Expanded (`Detail::All`): the raw text.
+        // Expanded (`Detail::All`): the raw summary hangs on the branch
+        // grammar — the first row carries the dim `╰─ ` gutter,
+        // the newline-joined source rows the matching continuation indent.
         let rows = render_refinement_outcome(&row, Detail::All, &theme(), 60);
-        assert!(rows.iter().any(|r| flat(r) == " one   two"));
+        assert_eq!(
+            flat(&rows[2]),
+            format!(" {}one   two", crate::branch::BRANCH_GUTTER)
+        );
+        // The empty source-line segment renders as an indented blank row,
+        // the wrapped content after it.
+        assert_eq!(flat(&rows[3]), crate::branch::BRANCH_INDENT.to_string());
+        assert_eq!(
+            flat(&rows[4]),
+            format!("{}three four five six seven", crate::branch::BRANCH_INDENT)
+        );
     }
 
     #[test]
@@ -759,36 +771,52 @@ mod tests {
                 ],
             }],
         };
-        let rows = render_refinement_outcome(&row, Detail::All, &theme(), 60);
+        let rows = render_refinement_outcome(&row, Detail::All, &theme(), 80);
         let text: Vec<String> = rows
             .iter()
             .map(|r| flat(r).trim_end().to_string())
             .collect();
+        // The expanded block hangs on the branch grammar: the meta row
+        // and every edit-section row sit on the continuation indent, each
+        // edit section's label row re-branches with the `\u{2570}\u{2500} `
+        // gutter.
         let meta = text
             .iter()
             .position(|r| {
-                r == " Harness refined \u{b7} 1 memory created \u{b7} Refinement r1 \u{b7} local"
+                r.trim()
+                    == "Harness refined \u{b7} 1 memory created \u{b7} Refinement r1 \u{b7} local"
+                    && r.starts_with(crate::branch::BRANCH_INDENT)
             })
             .expect("meta row");
         let label = text
             .iter()
-            .position(|r| r == " Created local memory `mission`")
+            .position(|r| {
+                r.strip_prefix(&format!(" {}", crate::branch::BRANCH_GUTTER))
+                    .is_some_and(|rest| rest == "Created local memory `mission`")
+            })
             .expect("edit label");
         let field_label = text
             .iter()
-            .position(|r| r == " Title")
+            .position(|r| r.trim() == "Title" && r.starts_with(crate::branch::BRANCH_INDENT))
             .expect("field label");
         let added = text
             .iter()
             .position(|r| r.contains(" + Mission"))
             .expect("+ added row");
+        assert!(
+            text[added].starts_with(crate::branch::BRANCH_INDENT),
+            "the diff block sits on the continuation indent: {:?}",
+            text[added]
+        );
         let value = text
             .iter()
-            .position(|r| r == " Keep going")
+            .position(|r| r.trim() == "Keep going" && r.starts_with(crate::branch::BRANCH_INDENT))
             .expect("value row");
         let reason = text
             .iter()
-            .position(|r| r == " Reason: durable")
+            .position(|r| {
+                r.trim() == "Reason: durable" && r.starts_with(crate::branch::BRANCH_INDENT)
+            })
             .expect("reason row");
         assert!(meta < label && label < field_label && field_label < added);
         assert!(added < value && value < reason);
