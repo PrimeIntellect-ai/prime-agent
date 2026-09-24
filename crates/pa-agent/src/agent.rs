@@ -565,23 +565,24 @@ impl AgentInner {
     {
         let controller = AbortController::new();
         let (idle_tx, _idle_rx) = watch::channel(false);
+        // The model that serves the run when it starts tags its failures
+        // (TS `ActiveRun.model`); even a mid-run override change cannot
+        // re-attribute an in-flight request to a model that never saw it.
+        // Read before taking the run lock: the shared lock awaits, and a
+        // std guard must never ride it.
+        let run_model = {
+            let shared = self.shared.lock().await;
+            self.model_override
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map_or_else(|| shared.state.model.clone(), |routed| routed.model.clone())
+        };
         {
             let mut run = self.run.lock().unwrap();
             if run.is_some() {
                 anyhow::bail!("Agent is already processing.");
             }
-            // The model that serves the run when it starts tags its
-            // failures (TS `ActiveRun.model`); even a mid-run override
-            // change cannot re-attribute an in-flight request to a model
-            // that never saw it.
-            let run_model = {
-                let shared = self.shared.lock().await;
-                self.model_override
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .map_or_else(|| shared.state.model.clone(), |routed| routed.model.clone())
-            };
             *run = Some(ActiveRun {
                 controller: controller.clone(),
                 idle_tx,
@@ -1130,5 +1131,174 @@ mod tests {
         let removed = queue.remove_where(&|m| matches!(m, AgentMessage::Standard(crate::types::Message::User(u)) if matches!(&u.content, crate::types::UserContent::Text(t) if t.contains("drop"))));
         assert_eq!(removed.len(), 1);
         assert!(queue.has_items());
+    }
+
+    // The per-run model override (TS `Agent.modelOverride`): the stream's
+    // requested model + reasoning follow the override while the state keeps
+    // the session model (TS: `state.model` identifies the session, the
+    // override serves the run).
+    #[tokio::test]
+    async fn model_override_serves_the_run_and_keeps_the_session_model() {
+        use std::sync::Mutex as StdMutex;
+
+        fn model(id: &str) -> Model {
+            Model {
+                id: id.to_string(),
+                name: id.to_string(),
+                api: "anthropic-messages".to_string(),
+                provider: "anthropic".to_string(),
+                base_url: String::new(),
+                reasoning: true,
+                cost: crate::types::UsageCost::default(),
+                context_window: 200_000,
+                max_tokens: 8_192,
+            }
+        }
+
+        let stream_requested = std::sync::Arc::new(StdMutex::new(Vec::<(
+            String,
+            crate::types::ThinkingLevel,
+        )>::new()));
+        let stream_fn: crate::stream::StreamFn = {
+            let stream_requested = std::sync::Arc::clone(&stream_requested);
+            std::sync::Arc::new(
+                move |requested: Model,
+                      _context: crate::stream::LlmContext,
+                      options: crate::stream::StreamRequestOptions| {
+                    stream_requested
+                        .lock()
+                        .unwrap()
+                        .push((requested.id.clone(), options.reasoning));
+                    let message = crate::types::AssistantMessage {
+                        content: vec![crate::types::AssistantContent::Text(
+                            crate::types::TextContent {
+                                text: "ok".to_string(),
+                                text_signature: None,
+                            },
+                        )],
+                        api: requested.api,
+                        provider: requested.provider,
+                        model: requested.id,
+                        response_model: None,
+                        response_id: None,
+                        diagnostics: None,
+                        usage: Usage::zero(),
+                        stop_reason: crate::types::StopReason::Stop,
+                        error_message: None,
+                        stop_reason_raw: None,
+                        timestamp: 0,
+                    };
+                    Box::pin(async move {
+                        let (handle, consumer) = crate::stream::event_stream();
+                        handle.push(crate::stream::AssistantMessageEvent::Done {
+                            reason: crate::types::StopReason::Stop,
+                            message: message.clone(),
+                        });
+                        handle.end(Some(message));
+                        Ok(Box::new(consumer) as Box<dyn crate::stream::ModelStream>)
+                    })
+                },
+            )
+        };
+
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentInitialState {
+                model: Some(model("session-model")),
+                thinking_level: Some(crate::types::ThinkingLevel::Off),
+                system_prompt: Some("s".to_string()),
+                ..Default::default()
+            },
+            stream_fn: Some(stream_fn),
+            ..Default::default()
+        });
+
+        agent.set_model_override(Some(AgentModelOverride {
+            model: model("image-model"),
+            thinking_level: crate::types::ThinkingLevel::High,
+        }));
+        agent
+            .prompt(AgentPromptInput::text("hi"))
+            .await
+            .expect("run");
+        agent.wait_for_idle().await;
+
+        let calls = stream_requested.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![("image-model".to_string(), crate::types::ThinkingLevel::High)]
+        );
+        let state = agent.state().await;
+        assert_eq!(state.model.id, "session-model");
+
+        // Clearing the override returns the next run to the session model
+        // with the state's thinking level (TS: the next dispatch
+        // re-evaluates the override).
+        agent.set_model_override(None);
+        agent
+            .prompt(AgentPromptInput::text("again"))
+            .await
+            .expect("run");
+        agent.wait_for_idle().await;
+        let calls = stream_requested.lock().unwrap().clone();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].0, "session-model");
+        assert_eq!(calls[1].1, crate::types::ThinkingLevel::Off);
+    }
+
+    // A run that fails while an override is armed attributes its failure to
+    // the override model (TS `ActiveRun.model` in `handleRunFailure`).
+    #[tokio::test]
+    async fn failed_run_tags_the_override_model() {
+        fn model(id: &str) -> Model {
+            Model {
+                id: id.to_string(),
+                name: id.to_string(),
+                api: "anthropic-messages".to_string(),
+                provider: "anthropic".to_string(),
+                base_url: String::new(),
+                reasoning: true,
+                cost: crate::types::UsageCost::default(),
+                context_window: 200_000,
+                max_tokens: 8_192,
+            }
+        }
+
+        let stream_fn: crate::stream::StreamFn = std::sync::Arc::new(
+            |_requested: Model,
+             _context: crate::stream::LlmContext,
+             _options: crate::stream::StreamRequestOptions| {
+                Box::pin(async { Err(anyhow::anyhow!("provider exploded")) })
+            },
+        );
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentInitialState {
+                model: Some(model("session-model")),
+                thinking_level: Some(crate::types::ThinkingLevel::Off),
+                system_prompt: Some("s".to_string()),
+                ..Default::default()
+            },
+            stream_fn: Some(stream_fn),
+            ..Default::default()
+        });
+        agent.set_model_override(Some(AgentModelOverride {
+            model: model("image-model"),
+            thinking_level: crate::types::ThinkingLevel::Off,
+        }));
+        let result = agent.prompt(AgentPromptInput::text("hi")).await;
+        assert!(result.is_err(), "the failing provider errors the run");
+        let state = agent.state().await;
+        let failure = state
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                crate::types::AgentMessage::Standard(crate::types::Message::Assistant(a)) => {
+                    Some(a.clone())
+                }
+                _ => None,
+            })
+            .expect("the failure assistant row");
+        assert_eq!(failure.model, "image-model");
+        assert_eq!(failure.stop_reason, crate::types::StopReason::Error);
     }
 }

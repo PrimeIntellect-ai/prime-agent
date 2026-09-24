@@ -1502,6 +1502,10 @@ impl AgentSessionEngine {
             // the stop hooks (a queued steer cuts the run at the next
             // turn boundary; the runner delivers it as the next turn).
             queued_steering_probe: self.config.queued_steering_probe.clone(),
+            // The daemon worker owns image-model routing itself (its turn
+            // dispatch arms, applies, and restores the route around the
+            // episode), so the core session installs no router seam.
+            image_model_router: None,
             // TS `sdk.ts` seeds the Agent's queue modes from the settings
             // manager; the worker create reads the same settings (the
             // engine-level queues drain per the mode at the loop
@@ -3067,10 +3071,7 @@ impl SessionEngine for AgentSessionEngine {
     /// model-turn attempt so retries and post-compaction continuations
     /// keep serving it. A text-only session model with an unusable or
     /// missing `settings.imageModel` returns the actionable refusal.
-    fn arm_image_turn_route(
-        &self,
-        carries_images: bool,
-    ) -> Result<(), String> {
+    fn arm_image_turn_route(&self, carries_images: bool) -> Result<(), String> {
         let route = self
             .resolve_image_turn_route(carries_images)
             .map_err(|error| format!("{error:#}"))?;
@@ -4918,6 +4919,7 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap();
         // The explicit selection from the session's create config is
@@ -4956,6 +4958,7 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap()
     }
@@ -4994,6 +4997,7 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap();
         (engine, dir)
@@ -5098,6 +5102,7 @@ pub(crate) mod tests {
                 telemetry_disabled: None,
                 cron_store: None,
                 queued_steering_probe: None,
+                image_model_router: None,
             })
             .unwrap(),
         );
@@ -5240,6 +5245,7 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap();
         // The recovery turn builds the session; the build adopts the
@@ -5407,6 +5413,7 @@ pub(crate) mod tests {
                 telemetry_disabled: None,
                 cron_store: None,
                 queued_steering_probe: None,
+                image_model_router: None,
             })
             .unwrap(),
         );
@@ -5691,6 +5698,7 @@ pub(crate) mod tests {
                 telemetry_disabled: None,
                 cron_store: None,
                 queued_steering_probe: None,
+                image_model_router: None,
             })
             .unwrap(),
         );
@@ -6179,6 +6187,7 @@ pub(crate) mod tests {
                 telemetry_disabled: None,
                 cron_store: None,
                 queued_steering_probe: None,
+                image_model_router: None,
             })
             .unwrap()
         };
@@ -6361,6 +6370,7 @@ pub(crate) mod tests {
                 telemetry_disabled: None,
                 cron_store: None,
                 queued_steering_probe: None,
+                image_model_router: None,
             })
             .unwrap()
         };
@@ -6801,6 +6811,7 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap();
         let mut events: Vec<EngineEvent> = Vec::new();
@@ -7156,6 +7167,7 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap();
         let mut events: Vec<EngineEvent> = Vec::new();
@@ -7250,6 +7262,7 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap();
         let model = engine.resolve_registry_model().expect("resolved model");
@@ -7446,6 +7459,7 @@ pub(crate) mod tests {
             telemetry_disabled: Some(true),
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .expect("engine")
     }
@@ -7480,6 +7494,7 @@ pub(crate) mod tests {
             telemetry_disabled: Some(true),
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap();
         let error = engine
@@ -8030,6 +8045,7 @@ pub(crate) mod tests {
             telemetry_disabled: Some(true),
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap();
         let model = engine.resolve_registry_model().expect("resolved model");
@@ -8085,6 +8101,7 @@ pub(crate) mod tests {
             telemetry_disabled: Some(true),
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap();
         let children = engine
@@ -8128,6 +8145,7 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap();
         // A create config with only a model keeps the provider and key.
@@ -8184,6 +8202,7 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap();
         let mut events: Vec<EngineEvent> = Vec::new();
@@ -8255,6 +8274,7 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap();
         // Without an explicit flag the TS default applies (medium, clamped).
@@ -8321,6 +8341,7 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
+        image_model_router: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -8609,6 +8630,7 @@ fn retried_run_restarts_with_its_own_agent_frames() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
+        image_model_router: None,
     })
     .unwrap();
     let mut events: Vec<EngineEvent> = Vec::new();
@@ -8726,6 +8748,7 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
+        image_model_router: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -8972,6 +8995,7 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
+        image_model_router: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -9053,6 +9077,7 @@ fn run_prompts(
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
+        image_model_router: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -9119,6 +9144,7 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap();
         let engine = std::sync::Arc::new(engine);
@@ -9476,6 +9502,7 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
+        image_model_router: None,
     })
     .unwrap();
     let start = std::time::Instant::now();
@@ -9757,6 +9784,7 @@ fn autonomous_gate_pass_and_failure_drive_the_loop() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap(),
     );
@@ -9863,6 +9891,7 @@ fn the_turn_loop_is_driven_by_the_driver_trait() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
         })
         .unwrap(),
     );
@@ -9949,6 +9978,7 @@ fn agent_engine_streams_updates_and_final_message() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
+        image_model_router: None,
     })
     .unwrap();
     let mut events: Vec<EngineEvent> = Vec::new();

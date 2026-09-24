@@ -88,8 +88,9 @@ pub type RestoreCallback = Arc<dyn Fn(&RestoreResult) + Send + Sync>;
 /// freshly started kernel (skill import name -> import error), so the
 /// session can tell the model before it wastes turns calling them (TS
 /// `IpythonToolOptions.onUnavailableSkills`).
-pub type UnavailableSkillsCallback =
-    Arc<dyn Fn(&crate::session_engine::python_skills_notice::UnavailablePythonSkills) + Send + Sync>;
+pub type UnavailableSkillsCallback = Arc<
+    dyn Fn(&crate::session_engine::python_skills_notice::UnavailablePythonSkills) + Send + Sync,
+>;
 
 /// Outcome of one full kernel bootstrap (spawn + handshake + namespace
 /// restore + runtime bootstrap), reported once per actual boot.
@@ -730,7 +731,10 @@ async fn start_kernel_impl(
             // Broken skills stay importable-looking placeholders; report them
             // so the model learns before its first call, not from the
             // placeholder's error (TS startKernel parses the same marker).
-            if let Some(errors) = crate::session_engine::python_skills_notice::parse_unavailable_python_skills(&bootstrap.stdout)
+            if let Some(errors) =
+                crate::session_engine::python_skills_notice::parse_unavailable_python_skills(
+                    &bootstrap.stdout,
+                )
             {
                 if let Some(on_unavailable_skills) = &inner.options.on_unavailable_skills {
                     on_unavailable_skills(&errors);

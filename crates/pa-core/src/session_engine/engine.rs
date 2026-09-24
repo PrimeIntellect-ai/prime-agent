@@ -446,7 +446,8 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(row);
             },
-        ) as crate::kernel::provisioner::UnavailableSkillsCallback)
+        )
+            as crate::kernel::provisioner::UnavailableSkillsCallback)
     };
     let provisioner = super::runtime_wiring::kernel_provisioner(
         session_id,
@@ -918,6 +919,7 @@ mod tests {
         let engine = create_session(SessionEngineConfig {
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
             steering_mode: None,
             follow_up_mode: None,
             cwd: cwd.clone(),
@@ -1021,6 +1023,7 @@ mod tests {
         let engine = create_session(SessionEngineConfig {
             cron_store: None,
             queued_steering_probe: None,
+            image_model_router: None,
             steering_mode: None,
             follow_up_mode: None,
             cwd: cwd.clone(),
@@ -1087,6 +1090,7 @@ mod tests {
             SessionEngineConfig {
                 cron_store: None,
                 queued_steering_probe: None,
+                image_model_router: None,
                 steering_mode: None,
                 follow_up_mode: None,
                 cwd: cwd.to_path_buf(),

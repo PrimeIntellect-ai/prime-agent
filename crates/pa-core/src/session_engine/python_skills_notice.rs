@@ -108,7 +108,24 @@ mod tests {
         assert_eq!(
             parsed,
             Some(
-                [("websearch".to_string(), "No module named 'websearch'".to_string())]
+                [(
+                    "websearch".to_string(),
+                    "No module named 'websearch'".to_string()
+                )]
+                .into_iter()
+                .collect()
+            )
+        );
+    }
+
+    #[test]
+    fn parses_after_noise() {
+        let parsed =
+            parse_unavailable_python_skills(&format!("noise\n{MARKER}{{\"edit\":\"boom\"}}"));
+        assert_eq!(
+            parsed,
+            Some(
+                [("edit".to_string(), "boom".to_string())]
                     .into_iter()
                     .collect()
             )
@@ -116,19 +133,11 @@ mod tests {
     }
 
     #[test]
-    fn parses_after_noise() {
-        let parsed = parse_unavailable_python_skills(&format!(
-            "noise\n{MARKER}{{\"edit\":\"boom\"}}"
-        ));
-        assert_eq!(
-            parsed,
-            Some([("edit".to_string(), "boom".to_string())].into_iter().collect())
-        );
-    }
-
-    #[test]
     fn missing_marker_is_none() {
-        assert_eq!(parse_unavailable_python_skills("some unrelated kernel output"), None);
+        assert_eq!(
+            parse_unavailable_python_skills("some unrelated kernel output"),
+            None
+        );
     }
 
     #[test]
@@ -141,7 +150,10 @@ mod tests {
 
     #[test]
     fn empty_dict_is_none() {
-        assert_eq!(parse_unavailable_python_skills(&format!("{MARKER}{{}}")), None);
+        assert_eq!(
+            parse_unavailable_python_skills(&format!("{MARKER}{{}}")),
+            None
+        );
     }
 
     #[test]
@@ -152,14 +164,21 @@ mod tests {
         ));
         assert_eq!(
             parsed,
-            Some([("edit".to_string(), "boom".to_string())].into_iter().collect())
+            Some(
+                [("edit".to_string(), "boom".to_string())]
+                    .into_iter()
+                    .collect()
+            )
         );
     }
 
     #[test]
     fn notice_row_lists_skills_and_errors() {
         let errors: UnavailablePythonSkills = [
-            ("websearch".to_string(), "No module named 'websearch'".to_string()),
+            (
+                "websearch".to_string(),
+                "No module named 'websearch'".to_string(),
+            ),
             ("edit".to_string(), "boom".to_string()),
         ]
         .into_iter()

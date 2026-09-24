@@ -92,8 +92,7 @@ pub fn resolve_image_model_override(
     };
     let image_model = find_exact_model_reference_match(reference, inputs.available_models)
         .ok_or_else(|| format_image_model_unusable_message(reference))?;
-    let usable =
-        takes_image_input(image_model) && (inputs.has_configured_auth)(image_model);
+    let usable = takes_image_input(image_model) && (inputs.has_configured_auth)(image_model);
     if !usable {
         return Err(format_image_model_unusable_message(reference));
     }
@@ -117,7 +116,7 @@ mod tests {
         Model {
             id: id.to_string(),
             name: id.to_string(),
-            api: pa_types::ai::Api::AnthropicMessages,
+            api: "anthropic-messages".to_string(),
             provider: "anthropic".to_string(),
             base_url: "https://x".to_string(),
             reasoning: true,
@@ -204,10 +203,7 @@ mod tests {
         let available = vec![session.clone()];
         let inputs = inputs(&session, None, &available, false);
         let error = resolve_image_model_override(&inputs).unwrap_err();
-        assert!(
-            error.contains("does not accept image input"),
-            "{error}"
-        );
+        assert!(error.contains("does not accept image input"), "{error}");
         assert!(error.contains("Set imageModel in settings.json"), "{error}");
     }
 
@@ -225,7 +221,12 @@ mod tests {
         let session = model("claude-opus-4-7-text-only", false);
         let backup = model("deepseek-v4-pro", false);
         let available = vec![session.clone(), backup];
-        let inputs = inputs(&session, Some("deepseek/deepseek-v4-pro"), &available, false);
+        let inputs = inputs(
+            &session,
+            Some("deepseek/deepseek-v4-pro"),
+            &available,
+            false,
+        );
         let error = resolve_image_model_override(&inputs).unwrap_err();
         assert!(error.contains("could not be resolved"), "{error}");
     }
@@ -246,7 +247,7 @@ mod tests {
         let session = model("claude-opus-4-7-text-only", false);
         let mut image_model = model("gpt-5.4", true);
         image_model.provider = "openai".to_string();
-        image_model.api = pa_types::ai::Api::OpenAiResponses;
+        image_model.api = "openai-responses".to_string();
         let available = vec![session.clone(), image_model.clone()];
         let inputs = inputs(&session, Some("openai/gpt-5.4"), &available, false);
         let resolved = resolve_image_model_override(&inputs).unwrap().unwrap();

@@ -229,7 +229,10 @@ impl AgentSession {
     /// Install the image-model routing host seam (the headless surfaces'
     /// settings + registry + pinned stream target); `None` keeps image
     /// turns on the session model.
-    pub fn set_image_model_router(&mut self, router: Option<image_model_routing::ImageModelRouter>) {
+    pub fn set_image_model_router(
+        &mut self,
+        router: Option<image_model_routing::ImageModelRouter>,
+    ) {
         self.image_model_router = router;
     }
 
@@ -251,27 +254,23 @@ impl AgentSession {
         let Some(router) = self.image_model_router.as_ref() else {
             return Ok(());
         };
-        let carries_images =
-            !images.is_empty() || batch.iter().any(|row| !row.images.is_empty());
+        let carries_images = !images.is_empty() || batch.iter().any(|row| !row.images.is_empty());
         let state = self.agent.state().await;
         let route = (router.decide)(carries_images, &state.model, state.thinking_level)
             .map_err(anyhow::Error::msg)?;
         match &route {
             Some(resolved) => {
                 (router.swap_target)(Some(resolved));
-                let agent_model = crate::session_engine::provider_adapter::json_round_trip(
-                    &resolved.model,
-                )
-                .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
-                self.agent.set_model_override(Some(
-                    pa_agent::agent::AgentModelOverride {
+                let agent_model =
+                    crate::session_engine::provider_adapter::json_round_trip(&resolved.model)
+                        .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
+                self.agent
+                    .set_model_override(Some(pa_agent::agent::AgentModelOverride {
                         model: agent_model,
-                        thinking_level:
-                            crate::session_engine::provider_adapter::map_thinking_level(
-                                resolved.thinking_level,
-                            ),
-                    },
-                ));
+                        thinking_level: crate::session_engine::provider_adapter::map_thinking_level(
+                            resolved.thinking_level,
+                        ),
+                    }));
             }
             None => {
                 (router.swap_target)(None);
@@ -783,7 +782,8 @@ impl AgentSession {
             // batch routes to the host's configured image model or fails
             // with the actionable refusal, never silently downgrading the
             // images to placeholders.
-            self.apply_image_model_routing(&images, &options.batch).await?;
+            self.apply_image_model_routing(&images, &options.batch)
+                .await?;
             // The turn's prompt messages (TS preparedMessages): the deferred
             // first-turn harness digest rides first when one is due, so the
             // loop streams its message pair ahead of the user prompt and

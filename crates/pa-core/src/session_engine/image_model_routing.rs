@@ -23,8 +23,11 @@ pub struct ImageModelRouter {
     /// `resolveImageModelOverride` over the host's settings + registry):
     /// `Ok(None)` when the batch does not route, `Err` the actionable
     /// refusal that fails the turn.
-    pub decide:
-        Arc<dyn Fn(bool, &Model, ThinkingLevel) -> Result<Option<ResolvedImageModel>, String> + Send + Sync>,
+    pub decide: Arc<
+        dyn Fn(bool, &Model, ThinkingLevel) -> Result<Option<ResolvedImageModel>, String>
+            + Send
+            + Sync,
+    >,
     /// Swap the host's serving target to the routed image model, or
     /// restore the session target (`None`). Called with the fresh decision
     /// of every admitted batch, so a stale route never outlives the next

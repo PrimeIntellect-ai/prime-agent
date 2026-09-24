@@ -10,7 +10,8 @@ use super::KernelPythonSkill;
 /// JSON object of `{importName: error}`. The host scans the bootstrap
 /// cell's stdout for this line so unavailable skills reach the model
 /// instead of failing only on first call.
-pub const PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER: &str = "__PRIME_AGENT_PYTHON_SKILL_IMPORT_ERRORS__";
+pub const PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER: &str =
+    "__PRIME_AGENT_PYTHON_SKILL_IMPORT_ERRORS__";
 
 const RLM_BOOTSTRAP_HEADER_CODE: &str =
     "import asyncio\nimport os as _prime_agent_os\n\n_prime_agent_os.environ[\"NO_COLOR\"] = \"1\"";
