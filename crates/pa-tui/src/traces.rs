@@ -410,10 +410,10 @@ pub trait TracesCommands: Send + Sync {
         progress: TraceUploadAllNoteSender,
         cancel: TraceUploadCancel,
     ) -> TracesFuture<TraceUploadAllReport>;
-    /// TS `runPrimeAgentTracesLogin` (the terminal login: the prime-cli
+    /// TS `runPrimeAgentTracesLogin` (the login flow: the prime-cli
     /// reuse, the browser challenge, the paste fallback, the credential
-    /// write). Runs with the terminal handed over.
-    fn login(&self) -> TracesFuture<TraceLoginOutcome>;
+    /// write) driven against the inline auth panel.
+    fn login(&self, panel: crate::auth_panel::AuthPanelHandle) -> TracesFuture<TraceLoginOutcome>;
 }
 
 /// The handle the interactive options carry.
