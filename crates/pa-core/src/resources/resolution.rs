@@ -82,7 +82,7 @@ pub(crate) fn find_source_info(
     for (key, info) in index {
         if *key == normalized {
             return Some(SkillSourceInfo {
-                path: normalized.clone(),
+                path: normalized,
                 ..info.clone()
             });
         }
@@ -90,7 +90,7 @@ pub(crate) fn find_source_info(
     for (key, info) in index {
         if normalized.starts_with(&format!("{key}/")) {
             return Some(SkillSourceInfo {
-                path: normalized.clone(),
+                path: normalized,
                 ..info.clone()
             });
         }

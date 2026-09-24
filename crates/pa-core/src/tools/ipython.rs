@@ -486,7 +486,7 @@ pub async fn execute_ipython(
 pub fn create_ipython_tool_definition(_cwd: &str, options: IpythonToolOptions) -> ToolDefinition {
     let options = Arc::new(options);
     let execute: crate::tools::tool_definition::ExecuteFn = {
-        let options = options.clone();
+        let options = options;
         Arc::new(move |_tool_call_id, params, signal, on_update| {
             let options = options.clone();
             Box::pin(async move {

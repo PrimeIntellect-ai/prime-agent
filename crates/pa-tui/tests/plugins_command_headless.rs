@@ -288,16 +288,15 @@ fn plugins_argument_prefills_the_search() {
     ];
     let frames = run_plan(steps);
     assert!(!frames.is_empty(), "frames were captured");
-    let all = frames.join("\n");
-    assert!(
-        all.contains("Search MCP connections"),
-        "the catalog view's search field rendered:\n{all}"
-    );
     let filtered = frames
         .iter()
         .rev()
         .find(|frame| frame.contains("Linear"))
         .expect("the matching service row rendered");
+    assert!(
+        filtered.contains(" > lin"),
+        "the catalog search is prefilled with the query:\n{filtered}"
+    );
     assert!(
         filtered.contains("Linear"),
         "the matching row stayed after the prefilled search:\n{filtered}"

@@ -378,7 +378,7 @@ impl AgentSessionEngine {
 /// the TS prepared-turn primary record).
 fn goal_prompt_request(message: &pa_types::session::CustomMessage) -> PromptRequest {
     PromptRequest {
-        message: message.content.text().to_string(),
+        message: message.content.text(),
         images: Vec::new(),
         source: "user".to_string(),
         agent_message_id: None,

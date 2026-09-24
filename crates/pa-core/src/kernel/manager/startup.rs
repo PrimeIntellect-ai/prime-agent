@@ -255,7 +255,7 @@ impl Inner {
         *lock(&self.child) = Some(ChildHandle {
             pid,
             stdin: stdin.clone(),
-            exit_rx: exit_rx.clone(),
+            exit_rx,
         });
 
         if let Some(stdout) = stdout {
@@ -266,7 +266,7 @@ impl Inner {
             // a dropped session leaked its live kernel until the runtime's
             // owner watchdog reaped it, if ever).
             let inner = Arc::downgrade(self);
-            let stdin_for_error = stdin.clone();
+            let stdin_for_error = stdin;
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stdout);
                 let mut line = String::new();
@@ -302,7 +302,7 @@ impl Inner {
             let log = self.open_stderr_log();
             // Keep the host-side handle so teardown drops its reference; the
             // reader task's handle closes the file when the stream ends.
-            *lock(&self.stderr_log) = log.clone();
+            (*lock(&self.stderr_log)).clone_from(&log);
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stderr);
                 let mut pending: Vec<u8> = Vec::new();

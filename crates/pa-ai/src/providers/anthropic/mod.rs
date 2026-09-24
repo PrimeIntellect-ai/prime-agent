@@ -58,7 +58,7 @@ pub(crate) fn to_claude_code_name(name: &str) -> String {
     CLAUDE_CODE_TOOLS
         .iter()
         .find(|tool| tool.eq_ignore_ascii_case(name))
-        .map(|tool| tool.to_string())
+        .map(std::string::ToString::to_string)
         .unwrap_or_else(|| name.to_string())
 }
 
@@ -257,7 +257,7 @@ fn map_thinking_level_to_effort(
     let mapped = effective.and_then(|level| {
         model
             .thinking_level_map_value(level)
-            .and_then(|value| value.cloned())
+            .and_then(Option::<&String>::cloned)
     });
     if let Some(mapped) = mapped {
         return match mapped.as_str() {
@@ -372,11 +372,7 @@ pub(crate) fn build_request_headers(
             if let Some(beta) = &beta_header {
                 headers.insert("anthropic-beta".into(), json!(beta));
             }
-            merge_headers(&[
-                Some(headers),
-                model_headers.clone(),
-                options_headers_json.clone(),
-            ])
+            merge_headers(&[Some(headers), model_headers, options_headers_json])
         }
         "github-copilot" => {
             let mut headers = Map::new();
@@ -388,11 +384,7 @@ pub(crate) fn build_request_headers(
             if let Some(beta) = &beta_header {
                 headers.insert("anthropic-beta".into(), json!(beta));
             }
-            merge_headers(&[
-                Some(headers),
-                model_headers.clone(),
-                options_headers_json.clone(),
-            ])
+            merge_headers(&[Some(headers), model_headers, options_headers_json])
         }
         _ => {
             let mut headers = Map::new();
@@ -419,11 +411,7 @@ pub(crate) fn build_request_headers(
             } else if let Some(beta) = &beta_header {
                 headers.insert("anthropic-beta".into(), json!(beta));
             }
-            merge_headers(&[
-                Some(headers),
-                model_headers.clone(),
-                options_headers_json.clone(),
-            ])
+            merge_headers(&[Some(headers), model_headers, options_headers_json])
         }
     };
 

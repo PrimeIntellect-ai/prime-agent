@@ -438,7 +438,7 @@ impl ModelRegistry {
             }) = cached
             {
                 if cached_fingerprint == fingerprint {
-                    self.authorized_private_models = models.clone();
+                    self.authorized_private_models.clone_from(&models);
                     self.authorized_private_ids =
                         models.iter().map(|model| model.id.clone()).collect();
                     self.authorized_team_id = Some(team_id.clone());
@@ -476,7 +476,7 @@ impl ModelRegistry {
         match fetched {
             Ok(models) => {
                 self.authorized_private_ids = models.iter().map(|model| model.id.clone()).collect();
-                self.authorized_private_models = models.clone();
+                self.authorized_private_models.clone_from(&models);
                 self.authorized_team_id = Some(team_id);
                 self.load_models();
                 if let Some(cache_path) = self.models_json_path.clone() {
@@ -525,7 +525,7 @@ impl ModelRegistry {
             return;
         }
         self.authorized_private_ids = models.iter().map(|model| model.id.clone()).collect();
-        self.authorized_private_models = models.clone();
+        self.authorized_private_models.clone_from(&models);
         self.authorized_team_id = Some(team_id);
         self.load_models();
         write_private_prime_authorization_cache(
@@ -592,7 +592,7 @@ impl ModelRegistry {
         let stored = self
             .auth
             .get_api_key_with_source_token(&model.provider, false);
-        let mut api_key = stored.api_key.clone();
+        let mut api_key = stored.api_key;
         let provider_config = self.provider_request_configs.get(&model.provider).cloned();
         if api_key.is_none() {
             if let Some(config) = &provider_config {

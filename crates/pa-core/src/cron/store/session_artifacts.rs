@@ -27,7 +27,7 @@ impl AgentCronJobStore {
         let mut files = self
             .session_artifact_files
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if files.get(session_id) == Some(&path) {
             return false;
         }
@@ -40,7 +40,7 @@ impl AgentCronJobStore {
         let files = self
             .session_artifact_files
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         files.clone().into_iter().collect()
     }
 
@@ -67,7 +67,7 @@ impl AgentCronJobStore {
         let artifact_files = self
             .session_artifact_files
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let registered: std::collections::HashSet<String> =
             artifact_files.keys().cloned().collect();

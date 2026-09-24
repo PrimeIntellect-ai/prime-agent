@@ -224,6 +224,6 @@ mod tests {
         );
         assert_eq!(sanitize_version("   ".into()), UNKNOWN);
         let long = "a".repeat(MAX_VERSION_LENGTH + 10);
-        assert_eq!(sanitize_version(long.clone()).len(), MAX_VERSION_LENGTH);
+        assert_eq!(sanitize_version(long).len(), MAX_VERSION_LENGTH);
     }
 }

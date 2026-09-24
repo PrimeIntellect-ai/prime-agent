@@ -454,7 +454,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(|signal| signal.is_cancelled())
+        .map(tokio_util::sync::CancellationToken::is_cancelled)
         .unwrap_or(false)
     {
         return Err(ProviderError::Aborted);
@@ -692,7 +692,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(|signal| signal.is_cancelled())
+        .map(tokio_util::sync::CancellationToken::is_cancelled)
         .unwrap_or(false)
     {
         return Err(ProviderError::Aborted);
@@ -781,7 +781,7 @@ pub fn stream_simple_bedrock(
         };
 
         let clamped_level = clamp_reasoning(reasoning.expect("checked above"));
-        let mut budgets = thinking_budgets.clone().unwrap_or_default();
+        let mut budgets = thinking_budgets.unwrap_or_default();
         match clamped_level {
             ModelThinkingLevel::Minimal => budgets.minimal = Some(adjusted.1),
             ModelThinkingLevel::Low => budgets.low = Some(adjusted.1),

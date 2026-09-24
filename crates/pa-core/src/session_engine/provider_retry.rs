@@ -744,7 +744,7 @@ mod tests {
             "404 No endpoints found that support tool use. Try disabling \"ipython\".".to_string(),
         );
         assert!(is_unsupported_tool_failure(&unsupported));
-        let mut upper = unsupported.clone();
+        let mut upper = unsupported;
         upper.error_message = Some("404 NO ENDPOINTS FOUND THAT SUPPORT TOOL USE".to_string());
         assert!(is_unsupported_tool_failure(&upper));
         let mut blip = error_message(Some("invalid_request"), Some(404), None);

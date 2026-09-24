@@ -388,7 +388,7 @@ mod tests {
     async fn threshold_compaction_consumes_the_trigger_at_the_checkpoint() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Probe: the seed turn's usage.
         let mut probe =
             acp_autorefine_bed(json!({ "responses": [{ "text": "seed reply" }] }), 1).await;
@@ -463,7 +463,7 @@ mod tests {
     async fn an_approving_checkpoint_round_publishes_the_refinement_meta() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Probe: the seed turn's usage.
         let mut probe =
             acp_autorefine_bed(json!({ "responses": [{ "text": "seed reply" }] }), 1).await;
@@ -535,7 +535,7 @@ mod tests {
     async fn session_close_drains_an_armed_trigger() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let review = r#"{"shouldRefine": true, "rationale": "the turn shows a reusable tactic"}"#;
         let plan = r#"{"summary":"note the tactic","rationale":"repeated","expectedOutcome":"recall","edits":[{"action":"create","kind":"memory","id":"m1","title":"Tactic","content":"Use tactic A"}]}"#;
         let mut bed = acp_autorefine_bed(

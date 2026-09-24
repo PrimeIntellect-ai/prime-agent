@@ -207,13 +207,13 @@ fn build_params(
             let effort = match options.reasoning_effort {
                 Some(effort) => model
                     .thinking_level_map_value(effort)
-                    .and_then(|value| value.cloned())
+                    .and_then(Option::<&String>::cloned)
                     .unwrap_or_else(|| effort.wire_name().to_string()),
                 None => "medium".to_string(),
             };
             let summary = options
                 .reasoning_summary
-                .map(|summary| summary.as_str())
+                .map(super::openai_responses_hooks::ReasoningSummary::as_str)
                 .unwrap_or("auto");
             params.insert(
                 "reasoning".into(),
@@ -228,7 +228,7 @@ fn build_params(
             if !off_null {
                 let off_value = model
                     .thinking_level_map_value(ModelThinkingLevel::Off)
-                    .and_then(|value| value.cloned())
+                    .and_then(Option::<&String>::cloned)
                     .unwrap_or_else(|| "none".to_string());
                 params.insert("reasoning".into(), json!({ "effort": off_value }));
             }
@@ -419,7 +419,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(|signal| signal.is_cancelled())
+        .map(tokio_util::sync::CancellationToken::is_cancelled)
         .unwrap_or(false)
     {
         return Err(ProviderError::Aborted);

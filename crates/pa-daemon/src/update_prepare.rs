@@ -323,7 +323,7 @@ impl PrepareCoordinator {
 
     /// `Draining -> Fenced` for the named transaction.
     pub(crate) fn drain_complete(&self, update_id: &UpdateId) -> PrepareOp {
-        self.apply(update_id, |transaction| transaction.drain_complete())
+        self.apply(update_id, PrepareTransaction::drain_complete)
     }
 
     /// `Fenced -> Snapshotted` for the named transaction; the caller wrote
@@ -341,7 +341,7 @@ impl PrepareCoordinator {
 
     /// `Snapshotted -> Prepared` for the named transaction.
     pub(crate) fn prepare_acked(&self, update_id: &UpdateId) -> PrepareOp {
-        self.apply(update_id, |transaction| transaction.prepare_acked())
+        self.apply(update_id, PrepareTransaction::prepare_acked)
     }
 
     /// `Prepared -> Stopping` for the named transaction; idempotent while
@@ -400,7 +400,11 @@ impl PrepareCoordinator {
 
     /// The state of the active transaction, if any.
     pub(crate) fn active_state(&self) -> Option<PrepareState> {
-        self.inner.lock().unwrap().as_ref().map(|t| t.state())
+        self.inner
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(PrepareTransaction::state)
     }
 
     /// The active transaction's update id, if any.

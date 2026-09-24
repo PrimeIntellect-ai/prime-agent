@@ -574,7 +574,7 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Args {
-        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
         parse_args(&args)
     }
 

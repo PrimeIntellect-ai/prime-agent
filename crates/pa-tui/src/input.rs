@@ -720,7 +720,7 @@ mod tests {
     fn kitty_printable_duplicates_collapse_within_a_chunk() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(true);
         // `CSI 64u` + `@` (the TS regression case): one press.
         let filtered = filter_enhanced_key_events(vec![press('@'), press('@')]);
@@ -779,7 +779,7 @@ mod tests {
     fn plain_terminals_keep_identical_pairs() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(false);
         let filtered = filter_enhanced_key_events(vec![press('a'), press('a')]);
         assert_eq!(filtered.len(), 2);
@@ -875,7 +875,7 @@ mod tests {
     fn wrapped_meta_escape_rebuilds_alt_arrows() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(false);
         let merged = merge_legacy_meta_escapes(vec![
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -900,7 +900,7 @@ mod tests {
     fn wrapped_modifier_parameters_decode_like_ts() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(false);
         let wrapped = |body: &[char]| {
             let mut events = vec![Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))];
@@ -942,7 +942,7 @@ mod tests {
     fn wrapped_rxvt_modifier_rows_decode() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(false);
         let wrapped = |body: &[char]| {
             let mut events = vec![Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))];
@@ -972,13 +972,13 @@ mod tests {
     fn typed_escapes_survive_the_repair() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(false);
         let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(merge_legacy_meta_escapes(vec![esc.clone()]).len(), 1);
         let mixed = merge_legacy_meta_escapes(vec![esc.clone(), press('x')]);
         assert_eq!(ids_of(&mixed), vec!["escape".to_string(), "x".to_string()]);
-        let incomplete = merge_legacy_meta_escapes(vec![esc.clone(), press('[')]);
+        let incomplete = merge_legacy_meta_escapes(vec![esc, press('[')]);
         assert_eq!(incomplete.len(), 2);
         assert!(matches!(incomplete[0], Event::Key(ref k) if k.code == KeyCode::Esc));
     }
@@ -989,7 +989,7 @@ mod tests {
     fn kitty_mode_disables_the_meta_repair() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(true);
         let chunk = vec![
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -1011,7 +1011,7 @@ mod tests {
     fn the_wrapped_meta_form_passes_the_guard_with_alt_kept() {
         let _state = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(false);
         let write = vec![
             Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
@@ -1045,7 +1045,7 @@ mod tests {
     fn a_split_sequence_survives_the_repair_for_the_guard() {
         let _state = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(false);
         let mut guard = SequenceGuard::default();
         let now = Instant::now();

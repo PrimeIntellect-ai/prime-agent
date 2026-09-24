@@ -72,7 +72,7 @@ impl HttpResponse {
         if self
             .signal
             .as_ref()
-            .map(|signal| signal.is_cancelled())
+            .map(tokio_util::sync::CancellationToken::is_cancelled)
             .unwrap_or(false)
         {
             return Err(ProviderError::Aborted);
@@ -100,7 +100,7 @@ impl HttpResponse {
         if self
             .signal
             .as_ref()
-            .map(|signal| signal.is_cancelled())
+            .map(tokio_util::sync::CancellationToken::is_cancelled)
             .unwrap_or(false)
         {
             return Err(ProviderError::Aborted);
@@ -197,7 +197,7 @@ pub async fn send(request: RequestOptions) -> Result<HttpResponse, ProviderError
     let signal = request.signal.clone();
     if signal
         .as_ref()
-        .map(|signal| signal.is_cancelled())
+        .map(tokio_util::sync::CancellationToken::is_cancelled)
         .unwrap_or(false)
     {
         return Err(ProviderError::Aborted);

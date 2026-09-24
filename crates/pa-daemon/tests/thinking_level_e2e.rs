@@ -330,7 +330,7 @@ fn setup(name: &str, thinking: Option<&str>) -> Harness {
     assert_eq!(attached["success"], true, "attach failed: {attached}");
     Harness {
         dir,
-        agent_dir: agent_dir.clone(),
+        agent_dir,
         session_dir,
         mock,
         supervisor,

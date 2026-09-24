@@ -494,7 +494,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
             .join(&child_id);
         let file = std::fs::read_dir(&child_dir)
             .expect("child session dir")
-            .filter_map(|entry| entry.ok())
+            .filter_map(std::result::Result::ok)
             .map(|entry| entry.path())
             .find(|path| path.extension().and_then(|extension| extension.to_str()) == Some("jsonl"))
             .expect("one child session file");
@@ -520,7 +520,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
         (response["success"] == true
             && response["data"]["children"]
                 .as_array()
-                .is_some_and(|children| children.is_empty()))
+                .is_some_and(std::vec::Vec::is_empty))
         .then_some(())
     });
 
@@ -542,7 +542,7 @@ fn sigkill_closes_the_spawned_child_and_passivates_the_row() {
     let ledger_dir = agent_dir.join(pa_daemon::rlm_ledger::RLM_LEDGER_DIR);
     let ledger = std::fs::read_dir(&ledger_dir)
         .expect("ledger dir")
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
         .find(|content| content.contains(&child_id))
         .expect("the spawn ledger holds the child edge");
@@ -632,7 +632,7 @@ fn sigkill_keeps_a_created_root_session_running() {
         (response["success"] == true
             && response["data"]["children"]
                 .as_array()
-                .is_some_and(|children| children.is_empty()))
+                .is_some_and(std::vec::Vec::is_empty))
         .then_some(())
     });
 

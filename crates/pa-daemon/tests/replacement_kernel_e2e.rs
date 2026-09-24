@@ -54,7 +54,7 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 fn test_lock() -> MutexGuard<'static, ()> {
     TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The kernel Python with prime-agent-runtime installed; set

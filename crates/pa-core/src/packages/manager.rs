@@ -562,7 +562,7 @@ impl PackageManager {
     fn run_npm_command(&mut self, args: &[&str], cwd: Option<&Path>) -> Result<()> {
         let (program, configured) = npm::npm_command(self.settings.settings().npm_command.as_ref());
         let mut full_args: Vec<String> = configured;
-        full_args.extend(args.iter().map(|a| a.to_string()));
+        full_args.extend(args.iter().map(std::string::ToString::to_string));
         super::process::run_command(
             &program,
             &full_args.iter().map(String::as_str).collect::<Vec<_>>(),

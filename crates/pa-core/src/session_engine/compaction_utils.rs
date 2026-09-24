@@ -103,8 +103,7 @@ fn truncate_for_summary(text: &str, max_chars: usize) -> String {
     }
     let chars: Vec<char> = text.chars().collect();
     let marker = format!(
-        "[... {} characters truncated; first {} and last {} kept ...]",
-        char_count, max_chars, TOOL_RESULT_TAIL_CHARS
+        "[... {char_count} characters truncated; first {max_chars} and last {TOOL_RESULT_TAIL_CHARS} kept ...]",
     );
     let marker_max = marker.chars().count();
     let head_chars = max_chars.saturating_sub(TOOL_RESULT_TAIL_CHARS + marker_max + 4);

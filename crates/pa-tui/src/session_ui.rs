@@ -887,8 +887,8 @@ impl SessionUi {
                 .await;
         }
         self.session_id = reconstructed.session_id;
-        self.session_name = reconstructed.session_name.clone();
-        self.service_tier = reconstructed.service_tier.clone();
+        self.session_name.clone_from(&reconstructed.session_name);
+        self.service_tier.clone_from(&reconstructed.service_tier);
         self.session_file = attach
             .snapshot
             .get("state")
@@ -3247,7 +3247,7 @@ impl SessionUi {
             Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
             _ => std::env::current_exe()
                 .ok()
-                .and_then(|exe| exe.parent().map(|parent| parent.to_path_buf()))
+                .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
                 .unwrap_or_else(|| PathBuf::from(".")),
         };
         package_dir.join("CHANGELOG.md")
@@ -4048,7 +4048,7 @@ impl SessionUi {
         // ships the builtins).
         values.available_themes = pa_types::themes::BUILTIN_THEME_NAMES
             .iter()
-            .map(|name| name.to_string())
+            .map(ToString::to_string)
             .collect();
         let rows = crate::settings_menu::settings_menu_rows(&values);
         view.settings_menu = Some(crate::settings_menu::SettingsMenu::new(rows));
@@ -4866,7 +4866,7 @@ impl SessionUi {
         if data
             .get("flatNodes")
             .and_then(Value::as_array)
-            .is_none_or(|nodes| nodes.is_empty())
+            .is_none_or(Vec::is_empty)
         {
             self.note("No entries in session", view);
             return Ok(());
@@ -6335,7 +6335,7 @@ impl SessionUi {
         } else {
             let mut heartbeats = self.scope_heartbeats(update.heartbeats);
             sort_heartbeats(&mut heartbeats);
-            self.heartbeat_catalog = heartbeats.clone();
+            self.heartbeat_catalog.clone_from(&heartbeats);
             if let Some(picker) = view.heartbeats_picker.as_mut() {
                 picker.apply_catalog(heartbeats, None);
             }
@@ -8196,8 +8196,8 @@ impl SessionUi {
                     bash.exit_code = exit_code;
                     bash.cancelled = cancelled;
                     bash.truncated = truncated;
-                    bash.full_output_path = full_output_path.clone();
-                    bash.error_message = error_message.clone();
+                    bash.full_output_path.clone_from(&full_output_path);
+                    bash.error_message.clone_from(&error_message);
                 }
                 if run.seed_transcript && !cancelled && error_message.is_none() {
                     let raw = pane
@@ -8213,7 +8213,7 @@ impl SessionUi {
                         truncated || tail_truncated,
                         full_output_path.as_deref(),
                     );
-                    pane.extra_seeds.push((run.input.clone(), answer));
+                    pane.extra_seeds.push((run.input, answer));
                 }
             }
         }
@@ -8246,12 +8246,9 @@ impl SessionUi {
                 if let Some(card) = view.pending_bash.iter_mut().find(|card| card.id == card_id) {
                     match &error_message {
                         Some(message) => card.set_failed(message),
-                        None => card.set_complete(
-                            exit_code,
-                            cancelled,
-                            truncated,
-                            full_output_path.clone(),
-                        ),
+                        None => {
+                            card.set_complete(exit_code, cancelled, truncated, full_output_path)
+                        }
                     }
                 }
             }
@@ -8836,7 +8833,7 @@ async fn describe_session_open_failure(
     )
     .await
     .ok()
-    .and_then(|result| result.ok())
+    .and_then(Result::ok)
     .map(|data| crate::session_open_error::roster_rows(&data).to_vec())
     .unwrap_or_default();
     // The path-keyed lookup first; the refusal's own holder id is the

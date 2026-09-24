@@ -252,8 +252,8 @@ mod tests {
             "project beta",
         );
         let result = load_skills(&LoadSkillsOptions {
-            cwd: project.clone(),
-            agent_dir: agent_dir.clone(),
+            cwd: project,
+            agent_dir,
             skill_paths: vec![],
             include_defaults: true,
         });
@@ -279,8 +279,8 @@ mod tests {
         let lone = project.join("lone.md");
         fs::write(&lone, "---\ndescription: a lone skill\n---\nbody").unwrap();
         let result = load_skills(&LoadSkillsOptions {
-            cwd: project.clone(),
-            agent_dir: agent_dir.clone(),
+            cwd: project,
+            agent_dir,
             skill_paths: vec![lone.display().to_string(), "/missing/skill".to_string()],
             include_defaults: false,
         });

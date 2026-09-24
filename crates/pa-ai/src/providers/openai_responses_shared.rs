@@ -186,7 +186,7 @@ pub fn convert_responses_messages(
                             crate::types::UserBlockPayload::Image { data, mime_type } => json!({
                                 "type": "input_image",
                                 "detail": "auto",
-                                "image_url": format!("data:{};base64,{}", mime_type, data),
+                                "image_url": format!("data:{mime_type};base64,{data}"),
                             }),
                             crate::types::UserBlockPayload::Opaque(json) => json!({
                                 "type": "input_text",

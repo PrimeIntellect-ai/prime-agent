@@ -94,7 +94,7 @@ impl Inner {
             }
         }
         if lock(&self.guarded).active_execution.is_some() {
-            return Err(anyhow!("{}", KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE));
+            return Err(anyhow!("{KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE}"));
         }
         Ok(())
     }
@@ -192,8 +192,7 @@ impl Inner {
             buffers.background_output_chars = 0;
             if buffers.background_output_truncated {
                 background_output.push_str(&format!(
-                    "\n[... background output truncated at {} chars ...]",
-                    MAX_BACKGROUND_OUTPUT_CHARS
+                    "\n[... background output truncated at {MAX_BACKGROUND_OUTPUT_CHARS} chars ...]",
                 ));
             }
             let done_fields = buffers.done_fields.take();

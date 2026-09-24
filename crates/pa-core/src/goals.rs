@@ -120,7 +120,10 @@ pub fn is_persisted_goal_state(value: &serde_json::Value) -> bool {
     else {
         return false;
     };
-    if !record.get("active").is_some_and(|value| value.is_boolean()) {
+    if !record
+        .get("active")
+        .is_some_and(serde_json::Value::is_boolean)
+    {
         return false;
     }
     let status_ok = matches!(
@@ -385,7 +388,7 @@ mod tests {
         assert_eq!(response.remaining_tokens, Some(600));
         assert_eq!(response.completion_budget_report, None);
         // Completion report only for complete goals on request.
-        let mut done = goal.clone();
+        let mut done = goal;
         done.status = GoalStatus::Complete;
         done.tokens_used = 900;
         let done_response = goal_host_response(&done, true);
@@ -441,7 +444,7 @@ mod tests {
         assert!(!escaped_text.contains("</objective><inject>"));
         assert!(escaped_text.contains("&lt;/objective&gt;&lt;inject&gt;"));
         // No objective -> error.
-        let mut bare = goal.clone();
+        let mut bare = goal;
         bare.objective = None;
         assert!(create_goal_context_message(&bare, GoalContextKind::Continuation).is_err());
     }
@@ -453,7 +456,7 @@ mod tests {
             format_goal_usage(&goal).as_deref(),
             Some("400 / 1000 tokens")
         );
-        let mut unbudgeted = goal.clone();
+        let mut unbudgeted = goal;
         unbudgeted.token_budget = None;
         assert_eq!(format_goal_usage(&unbudgeted).as_deref(), Some("120s"));
         unbudgeted.time_used_seconds = 0;

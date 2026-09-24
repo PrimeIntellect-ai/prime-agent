@@ -154,7 +154,6 @@ impl Supervisor {
                     child.worker_id,
                     response
                         .error
-                        .clone()
                         .unwrap_or_else(|| "worker refused the close".to_string())
                 ));
                 false

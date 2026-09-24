@@ -769,7 +769,7 @@ mod tests {
             json!({"type": "message", "id": "e2", "parentId": "e1", "timestamp": "2026-09-22T00:00:02.000Z", "message": {"role": "assistant", "content": [{ "type": "text", "text": "hello" }], "provider": "prime-inference", "model": "internal/glm-5.3-fast", "usage": usage}}),
         ]
         .iter()
-        .map(|value| value.to_string())
+        .map(std::string::ToString::to_string)
         .collect::<Vec<_>>()
         .join("\n");
         std::fs::write(&session_file, content).unwrap();
@@ -795,7 +795,7 @@ mod tests {
                 dir.join(format!("{session}.jsonl")),
                 lines
                     .iter()
-                    .map(|v| v.to_string())
+                    .map(std::string::ToString::to_string)
                     .collect::<Vec<_>>()
                     .join("\n"),
             )

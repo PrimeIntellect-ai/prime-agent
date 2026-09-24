@@ -63,7 +63,7 @@ pub(crate) async fn stream_assistant_response(
     match result {
         Ok(message) => Ok(message),
         Err(error) => {
-            if signal.map(|s| s.is_aborted()).unwrap_or(false) && is_abort_error(&error) {
+            if signal.map(AbortSignal::is_aborted).unwrap_or(false) && is_abort_error(&error) {
                 return Ok(finish_aborted_message!());
             }
             Err(error)
@@ -188,7 +188,7 @@ async fn stream_assistant_response_inner(
                 match race_with_abort(response.result(), signal).await {
                     Ok(result_message) => final_message = result_message,
                     Err(error) => {
-                        let aborted = signal.map(|s| s.is_aborted()).unwrap_or(false);
+                        let aborted = signal.map(AbortSignal::is_aborted).unwrap_or(false);
                         if !(aborted && is_abort_error(&error)) {
                             return Err(error);
                         }

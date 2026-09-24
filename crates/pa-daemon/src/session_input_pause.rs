@@ -56,7 +56,7 @@ impl InputPauseTable {
         !self
             .pauses
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty()
     }
 
@@ -68,7 +68,7 @@ impl InputPauseTable {
         let mut pauses = self
             .pauses
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (pause_id, entry) in pauses.iter() {
             if entry.active_session_id == active_session_id
                 && entry.owner_client_id == owner_client_id
@@ -101,7 +101,7 @@ impl InputPauseTable {
         let mut pauses = self
             .pauses
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(entry) = pauses.get(pause_id) else {
             return ReleaseOutcome::Unknown;
         };
@@ -119,7 +119,7 @@ impl InputPauseTable {
         let mut pauses = self
             .pauses
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = pauses.len();
         pauses.retain(|_, entry| entry.owner_client_id != owner_client_id);
         before != pauses.len()

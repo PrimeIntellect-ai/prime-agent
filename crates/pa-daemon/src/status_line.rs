@@ -736,7 +736,7 @@ mod tests {
             })
         );
         // A working refresh (no verdict) omits the task state entirely.
-        let mut without_state = wire.clone();
+        let mut without_state = wire;
         without_state.task_state = None;
         let value = serde_json::to_value(&without_state).unwrap();
         assert!(value.get("taskState").is_none());

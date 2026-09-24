@@ -494,7 +494,7 @@ mod tests {
         let registration = {
             let _guard = FAUX_LOCK
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             pa_ai::faux::register_faux_provider(Default::default())
         };
         let model = registration.get_model();

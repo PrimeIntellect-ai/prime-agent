@@ -151,7 +151,7 @@ impl AgentCronJobStore {
                     }
                     None => {}
                 }
-                next.updated_at = now_iso.clone();
+                next.updated_at.clone_from(&now_iso);
                 updated = Some(next.clone());
                 next
             })

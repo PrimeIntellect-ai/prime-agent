@@ -33,7 +33,7 @@ pub struct RefinementPlan {
 /// Mint a refinement id in the canonical `refine_<timestamp>` format.
 pub fn generate_refinement_id() -> String {
     let iso = crate::session::manager::format_iso_now();
-    let digits: String = iso.chars().filter(|c| c.is_ascii_digit()).collect();
+    let digits: String = iso.chars().filter(char::is_ascii_digit).collect();
     format!("refine_{}", &digits[..digits.len().min(17)])
 }
 
@@ -327,7 +327,7 @@ fn parse_auto_refine_review(text: &str) -> anyhow::Result<AutoRefineReview> {
         instructions: record
             .get("instructions")
             .and_then(|value| value.as_str())
-            .map(|text| text.to_string()),
+            .map(std::string::ToString::to_string),
     })
 }
 
@@ -403,7 +403,7 @@ mod tests {
     fn seam(text: &str) -> RefinerFn {
         let text = text.to_string();
         Box::new(move |_model, _system, _prompt| {
-            let text = text.clone();
+            let text = text;
             Box::pin(async move { Ok(text_message(&text)) })
         })
     }
@@ -451,7 +451,7 @@ mod tests {
         let reply = r#"{"summary":"s","edits":[]}"#.to_string();
         let plan_call: RefinerFn = Box::new(move |_model, system, _prompt| {
             plan_recorder.lock().unwrap().push(system);
-            let reply = reply.clone();
+            let reply = reply;
             Box::pin(async move { Ok(text_message(&reply)) })
         });
         let state = super::super::empty_harness_state();

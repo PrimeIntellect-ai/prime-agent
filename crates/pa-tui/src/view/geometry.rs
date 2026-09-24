@@ -66,7 +66,7 @@ impl AgentView {
             }
             ChatEntry::ClientMarkdown { text } => {
                 let mut style = crate::markdown::MarkdownStyle::from_theme(&self.theme);
-                style.code_block_indent = self.code_block_indent.clone();
+                style.code_block_indent.clone_from(&self.code_block_indent);
                 3 + crate::markdown::markdown_row_count(
                     text.trim(),
                     width.saturating_sub(2).max(1),

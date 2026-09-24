@@ -531,7 +531,7 @@ fn modifier_params(body: &[u8]) -> (KeyModifiers, KeyEventKind) {
         let mask = first
             .bytes()
             .next_back()
-            .filter(|b| b.is_ascii_digit())
+            .filter(u8::is_ascii_digit)
             .map(|b| b - b'0')
             .unwrap_or(1);
         return (parse_modifiers(mask), KeyEventKind::Press);

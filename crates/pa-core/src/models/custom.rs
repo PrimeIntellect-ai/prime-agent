@@ -273,7 +273,7 @@ fn compat_from_value(value: Option<&serde_json::Value>) -> Option<ModelCompat> {
 pub fn merge_compat(base: Option<&ModelCompat>, over: Option<ModelCompat>) -> Option<ModelCompat> {
     let over = over?;
     let mut merged = base.map(|compat| compat.raw.clone()).unwrap_or_default();
-    for (key, value) in over.raw.clone() {
+    for (key, value) in over.raw {
         // Routing sub-objects merge instead of replacing.
         if matches!(key.as_str(), "openRouterRouting" | "vercelGatewayRouting") {
             if let (Some(existing), Some(incoming)) = (
@@ -297,7 +297,7 @@ pub fn merge_compat(base: Option<&ModelCompat>, over: Option<ModelCompat>) -> Op
 pub fn apply_model_override(model: &Model, over: &ModelOverride) -> Model {
     let mut result = model.clone();
     if let Some(name) = &over.name {
-        result.name = name.clone();
+        result.name.clone_from(name);
     }
     if let Some(reasoning) = over.reasoning {
         result.reasoning = reasoning;

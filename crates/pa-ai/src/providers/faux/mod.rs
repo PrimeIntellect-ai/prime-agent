@@ -67,7 +67,7 @@ pub fn faux_tool_call(
 ) -> AssistantContent {
     AssistantContent::ToolCall(ToolCall {
         id: id
-            .map(|s| s.to_string())
+            .map(std::string::ToString::to_string)
             .unwrap_or_else(|| random_id("tool")),
         name: name.to_string(),
         arguments: arguments.as_object().cloned().unwrap_or_default(),
@@ -438,7 +438,10 @@ async fn stream_with_deltas(
 ) {
     let mut partial = message.clone();
     partial.content = Vec::new();
-    if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
+    if signal
+        .map(tokio_util::sync::CancellationToken::is_cancelled)
+        .unwrap_or(false)
+    {
         let aborted = create_aborted_message(&partial);
         writer.push(AssistantMessageEvent::Error {
             reason: ErrorStopReason::Aborted,
@@ -453,7 +456,10 @@ async fn stream_with_deltas(
     });
 
     for index in 0..message.content.len() {
-        if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
+        if signal
+            .map(tokio_util::sync::CancellationToken::is_cancelled)
+            .unwrap_or(false)
+        {
             let aborted = create_aborted_message(&partial);
             writer.push(AssistantMessageEvent::Error {
                 reason: ErrorStopReason::Aborted,
@@ -485,7 +491,10 @@ async fn stream_with_deltas(
                     max_token_size,
                 ) {
                     schedule_chunk(&chunk, tokens_per_second).await;
-                    if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
+                    if signal
+                        .map(tokio_util::sync::CancellationToken::is_cancelled)
+                        .unwrap_or(false)
+                    {
                         let aborted = create_aborted_message(&partial);
                         writer.push(AssistantMessageEvent::Error {
                             reason: ErrorStopReason::Aborted,
@@ -525,7 +534,10 @@ async fn stream_with_deltas(
                     split_string_by_token_size(&text_block.text, min_token_size, max_token_size)
                 {
                     schedule_chunk(&chunk, tokens_per_second).await;
-                    if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
+                    if signal
+                        .map(tokio_util::sync::CancellationToken::is_cancelled)
+                        .unwrap_or(false)
+                    {
                         let aborted = create_aborted_message(&partial);
                         writer.push(AssistantMessageEvent::Error {
                             reason: ErrorStopReason::Aborted,
@@ -567,7 +579,10 @@ async fn stream_with_deltas(
                     split_string_by_token_size(&arguments_text, min_token_size, max_token_size)
                 {
                     schedule_chunk(&chunk, tokens_per_second).await;
-                    if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
+                    if signal
+                        .map(tokio_util::sync::CancellationToken::is_cancelled)
+                        .unwrap_or(false)
+                    {
                         let aborted = create_aborted_message(&partial);
                         writer.push(AssistantMessageEvent::Error {
                             reason: ErrorStopReason::Aborted,
@@ -583,7 +598,7 @@ async fn stream_with_deltas(
                     });
                 }
                 if let Some(AssistantContent::ToolCall(content)) = partial.content.get_mut(index) {
-                    content.arguments = tool_call_block.arguments.clone();
+                    content.arguments.clone_from(&tool_call_block.arguments);
                 }
                 writer.push(AssistantMessageEvent::ToolcallEnd {
                     content_index: index as u64,
@@ -840,7 +855,7 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
 
     let stream_impl = FauxStream {
         api: api.clone(),
-        provider: provider_name.clone(),
+        provider: provider_name,
         state: state.clone(),
         min_token_size: min,
         max_token_size: max,

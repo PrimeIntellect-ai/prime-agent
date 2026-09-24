@@ -47,18 +47,18 @@ const ANTHROPIC_MESSAGE_EVENTS: [&str; 6] = [
 fn anthropic_sse_error(data: &str, request_id: Option<&str>) -> StreamFailureError {
     let mut error_type: Option<String> = None;
     let mut detail: Option<String> = None;
-    let mut request_id = request_id.map(|id| id.to_string());
+    let mut request_id = request_id.map(std::string::ToString::to_string);
     match parse_json_with_repair(data) {
         Ok(parsed) => {
             if let Some(error) = parsed.get("error") {
                 error_type = error
                     .get("type")
                     .and_then(|value| value.as_str())
-                    .map(|text| text.to_string());
+                    .map(std::string::ToString::to_string);
                 detail = error
                     .get("message")
                     .and_then(|value| value.as_str())
-                    .map(|text| text.to_string());
+                    .map(std::string::ToString::to_string);
             }
             if let Some(id) = parsed.get("request_id").and_then(|value| value.as_str()) {
                 request_id = Some(id.to_string());
@@ -655,7 +655,7 @@ async fn run_stream(
     if base_options
         .signal
         .as_ref()
-        .map(|signal| signal.is_cancelled())
+        .map(tokio_util::sync::CancellationToken::is_cancelled)
         .unwrap_or(false)
     {
         return Err(ProviderError::Aborted);
@@ -676,7 +676,7 @@ async fn run_stream(
 }
 
 fn sync_blocks(output: &mut AssistantMessage, blocks: &IndexedBlocks) {
-    output.content = blocks.blocks.clone();
+    output.content.clone_from(&blocks.blocks);
 }
 
 fn recalculate_cost(model: &Model, output: &mut AssistantMessage, cache_write_cost: Option<f64>) {
@@ -716,7 +716,7 @@ where
                 ),
                 info: StreamFailureInfo {
                     kind: StreamFailureKind::MalformedResponse,
-                    request_id: request_id.map(|id| id.to_string()),
+                    request_id: request_id.map(std::string::ToString::to_string),
                     raw: Some(truncate_raw_payload(&sse.data)),
                     ..StreamFailureInfo::unknown()
                 },

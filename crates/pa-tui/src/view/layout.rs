@@ -233,7 +233,7 @@ impl AgentView {
             tail.push(Vec::new());
             tail.push(Vec::new());
             let mut md = crate::markdown::MarkdownStyle::from_theme(&self.theme);
-            md.code_block_indent = self.code_block_indent.clone();
+            md.code_block_indent.clone_from(&self.code_block_indent);
             tail.extend(crate::chat::render_markdown_block(
                 guide,
                 &md,

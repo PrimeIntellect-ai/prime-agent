@@ -291,7 +291,7 @@ fn main_impl(args: Vec<String>, runtime: &dyn mode::Runtime) -> Result<i32, Stri
         verbose: parsed.verbose,
         offline: parsed.offline,
         agents_view_requested: public_command.explicit_agents_view,
-        attach_agent: public_command.attach_agent.clone(),
+        attach_agent: public_command.attach_agent,
     };
 
     match runtime.run(&options) {

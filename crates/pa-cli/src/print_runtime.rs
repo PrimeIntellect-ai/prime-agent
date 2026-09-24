@@ -1171,7 +1171,6 @@ async fn build_faux_engine_parts(
                             debug_assert!(steps.next().is_none());
                             first
                         })
-                        .map_err(|error| error.to_string())
                     }
                     _ => Ok(pa_ai::faux::FauxResponseStep::Message(
                         pa_ai::faux::faux_assistant_text_message(
@@ -1419,8 +1418,7 @@ mod tests {
             assert_eq!(
                 assistant_message_event_json(&event).as_ref(),
                 Some(&expected),
-                "wire shape of {:?}",
-                event
+                "wire shape of {event:?}"
             );
         }
         // Terminal events never ride a message_update.
@@ -1597,7 +1595,7 @@ mod tests {
             serde_json::json!({
                 "mcpCatalogSources": sources
                     .iter()
-                    .map(|path| path.to_string())
+                    .map(std::string::ToString::to_string)
                     .collect::<Vec<_>>()
             })
             .to_string()
