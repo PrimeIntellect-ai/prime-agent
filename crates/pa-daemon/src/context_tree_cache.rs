@@ -53,6 +53,10 @@ pub(crate) const REFRESH_TTL: Duration = Duration::from_secs(1);
 #[derive(Debug, Clone)]
 pub(crate) struct CachedWalk {
     pub(crate) computed_at: Instant,
+    /// The durable session id the walk resolved against: a replaced
+    /// session (fork/switch) invalidates the snapshot on read — the old
+    /// session's children must never leak into the new session's tree.
+    session_id: String,
     /// Live-child nodes keyed by the registry's child id (the walk's
     /// file-derived body with the refresh-time identity overlay; serve
     /// re-overlays the fresh identity).
@@ -83,12 +87,22 @@ impl ContextTreeCache {
     /// went live since the refresh is dropped, because its live row
     /// already shows. A cold cache yields the live rows alone (the disk
     /// tree fills on the next read after the warm/poked walk lands).
-    pub(crate) fn serve_children(&self, snapshots: &[Value]) -> Vec<Value> {
+    pub(crate) fn serve_children(
+        &self,
+        current_session_id: Option<&str>,
+        snapshots: &[Value],
+    ) -> Vec<Value> {
         let cached = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+            .clone()
+            .filter(|walk| {
+                // A snapshot from a previous session (fork/switch) is not
+                // this session's tree: serve the live rows alone and let
+                // the poke refresh the new session.
+                Some(walk.session_id.as_str()) == current_session_id
+            });
         let mut children = Vec::with_capacity(
             snapshots.len() + cached.as_ref().map_or(0, |walk| walk.persisted.len()),
         );
@@ -181,6 +195,7 @@ impl ContextTreeCache {
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     *state = Some(CachedWalk {
                         computed_at: Instant::now(),
+                        session_id,
                         live_nodes,
                         persisted,
                     });

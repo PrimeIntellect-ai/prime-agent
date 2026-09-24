@@ -97,7 +97,7 @@ impl Worker {
         // a grown store. The artifact-tree walk (the multi-second disk
         // part) is the cache's background refresh (`context_tree_cache`),
         // never the request path.
-        let (label, context_usage, own_usage, total_usage) = {
+        let (label, context_usage, own_usage, total_usage, session_id) = {
             let core = self.core.lock().unwrap();
             let store = core.store.as_ref();
             let label = store
@@ -106,6 +106,7 @@ impl Worker {
             let context_usage = store.and_then(|store| {
                 crate::session_stats::store_context_usage(store, self.engine.model_context_window())
             });
+            let session_id = store.map(|store| store.session_id().to_string());
             let (own_usage, total_usage) = match store {
                 Some(store) => {
                     let branch = store.branch_bridged();
@@ -114,7 +115,7 @@ impl Worker {
                 }
                 None => (empty_usage(), empty_usage()),
             };
-            (label, context_usage, own_usage, total_usage)
+            (label, context_usage, own_usage, total_usage, session_id)
         };
         let model = self.engine.model_metadata().and_then(|model| {
             Some(json!({
@@ -127,7 +128,9 @@ impl Worker {
         // identity and status over the cached bodies; the background walk
         // in `context_tree_cache` keeps them as fresh as its last
         // refresh) — the walk itself never blocks this response.
-        let children = self.context_tree.serve_children(&snapshots);
+        let children = self
+            .context_tree
+            .serve_children(session_id.as_deref(), &snapshots);
         // Re-arm the background refresh for the next read.
         self.poke_context_tree_refresh();
         let mut tree = json!({
