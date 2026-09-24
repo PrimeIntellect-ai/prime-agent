@@ -415,6 +415,135 @@ pub struct AgentSessionEngine {
 }
 
 impl AgentSessionEngine {
+    /// TS `_imageModelOverrideForTurns` + `resolveImageModelOverride`: the
+    /// routing decision for one dispatched turn batch. `carries_images` is
+    /// the batch's delivered image blocks (the primary prompt's plus the
+    /// batched rows'). `Ok(None)` when the batch does not route (no
+    /// images, a vision session model, or `images.blockImages`); `Err` is
+    /// the actionable refusal that fails the turn.
+    fn resolve_image_turn_route(
+        &self,
+        carries_images: bool,
+    ) -> anyhow::Result<Option<pa_core::models::ResolvedImageModel>> {
+        if !carries_images {
+            return Ok(None);
+        }
+        let session_model = self.session_model()?;
+        let settings =
+            pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
+        let image_model_reference = settings.get_image_model();
+        let block_images = settings.get_block_images();
+        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
+        let mut registry =
+            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
+        registry.load_private_authorization_from_cache();
+        let available: Vec<pa_types::ai::Model> =
+            registry.get_available().into_iter().cloned().collect();
+        let route = pa_core::models::resolve_image_model_override(
+            &pa_core::models::ImageModelRoutingInputs {
+                session_model: &session_model,
+                thinking_level: self.effective_thinking(),
+                service_tier: *self.service_tier.read().expect("service tier lock"),
+                image_model_reference: image_model_reference.as_deref(),
+                available_models: &available,
+                has_configured_auth: &|model| registry.has_configured_auth(model),
+                block_images,
+            },
+        )
+        .map_err(anyhow::Error::msg)?;
+        Ok(route)
+    }
+
+    /// Arm (or clear) the dispatched batch's image-model route: the
+    /// resolved image model becomes the episode's serving target (the
+    /// provider slot + the agent's per-run override), applied at every
+    /// model-turn attempt so retries and post-compaction continuations
+    /// keep serving it. A text-only session model with an unusable or
+    /// missing `settings.imageModel` returns the actionable refusal.
+    fn arm_image_turn_route(&self, carries_images: bool) -> Result<(), String> {
+        let route = self
+            .resolve_image_turn_route(carries_images)
+            .map_err(|error| format!("{error:#}"))?;
+        let armed = route.map(|resolved| {
+            let agent_model = json_round_trip(&resolved.model)
+                .ok_or_else(|| "model conversion failed".to_string())?;
+            ImageRoute {
+                target: ProviderTarget {
+                    service_tier: resolved.service_tier,
+                    api_key: self.resolve_request_api_key(&resolved.model),
+                    model: resolved.model.clone(),
+                },
+                agent_override: pa_agent::agent::AgentModelOverride {
+                    thinking_level: map_thinking_level(resolved.thinking_level),
+                    model: agent_model,
+                },
+            }
+        });
+        *self
+            .image_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = armed?;
+        Ok(())
+    }
+
+    /// Apply the armed route to a model turn (after the session build, so
+    /// the build-time target cannot clobber it): the stream's provider
+    /// target and the agent's per-run model override swap to the routed
+    /// image model for the episode.
+    fn apply_armed_image_route(&self, agent: &std::sync::Arc<pa_agent::agent::Agent>) {
+        let route = self
+            .image_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(route) = route else {
+            return;
+        };
+        agent.set_model_override(Some(route.agent_override));
+        *self.provider_target.write().expect("provider target lock") = Some(route.target);
+    }
+
+    /// Clear the armed route and restore the session's serving target (a
+    /// fresh resolution, so a mid-episode model switch is honored): the
+    /// next dispatched batch re-evaluates the routing against it (TS
+    /// `_clearModelOverrideWhenIdle` + the next-dispatch re-evaluation).
+    fn clear_image_route(&self) {
+        let route = self
+            .image_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(route) = route else {
+            return;
+        };
+        // The agent override clears even when the session target cannot be
+        // rebuilt (an auth/read failure): the next run must not silently
+        // serve on the routed image model.
+        let agent = self.turn_agent.lock().expect("turn agent lock").clone();
+        if let Some(agent) = agent {
+            agent.set_model_override(None);
+        }
+        let _ = route; // the session target recompute does not read the route
+        let Ok(model) = self.resolve_model() else {
+            return;
+        };
+        *self.provider_target.write().expect("provider target lock") = Some(ProviderTarget {
+            service_tier: *self.service_tier.read().expect("service tier lock"),
+            api_key: self.resolve_request_api_key(&model),
+            model,
+        });
+    }
+
+    /// Whether an image-model route is armed for the running episode (the
+    /// failover primary capture keys off it: a routed episode's failover
+    /// restores the routed target, not the session model).
+    fn armed_image_route(&self) -> Option<ImageRoute> {
+        self.image_route
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     pub fn new(config: AgentEngineConfig) -> anyhow::Result<Self> {
         let runtime = crate::async_safe_runtime::AsyncSafeRuntime::new_multi_thread()?;
         let session_file = std::sync::Mutex::new(config.session_file.clone());
@@ -3027,134 +3156,6 @@ impl SessionEngine for AgentSessionEngine {
         Ok(result)
     }
 
-    /// TS `_imageModelOverrideForTurns` + `resolveImageModelOverride`: the
-    /// routing decision for one dispatched turn batch. `carries_images` is
-    /// the batch's delivered image blocks (the primary prompt's plus the
-    /// batched rows'). `Ok(None)` when the batch does not route (no
-    /// images, a vision session model, or `images.blockImages`); `Err` is
-    /// the actionable refusal that fails the turn.
-    fn resolve_image_turn_route(
-        &self,
-        carries_images: bool,
-    ) -> anyhow::Result<Option<pa_core::models::ResolvedImageModel>> {
-        if !carries_images {
-            return Ok(None);
-        }
-        let session_model = self.session_model()?;
-        let settings =
-            pa_core::settings::SettingsManager::create(self.cwd(), &self.config.agent_dir);
-        let image_model_reference = settings.get_image_model();
-        let block_images = settings.get_block_images();
-        let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
-        let mut registry =
-            pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
-        registry.load_private_authorization_from_cache();
-        let available: Vec<pa_types::ai::Model> =
-            registry.get_available().into_iter().cloned().collect();
-        let route = pa_core::models::resolve_image_model_override(
-            &pa_core::models::ImageModelRoutingInputs {
-                session_model: &session_model,
-                thinking_level: self.effective_thinking(),
-                service_tier: *self.service_tier.read().expect("service tier lock"),
-                image_model_reference: image_model_reference.as_deref(),
-                available_models: &available,
-                has_configured_auth: &|model| registry.has_configured_auth(model),
-                block_images,
-            },
-        )?;
-        Ok(route)
-    }
-
-    /// Arm (or clear) the dispatched batch's image-model route: the
-    /// resolved image model becomes the episode's serving target (the
-    /// provider slot + the agent's per-run override), applied at every
-    /// model-turn attempt so retries and post-compaction continuations
-    /// keep serving it. A text-only session model with an unusable or
-    /// missing `settings.imageModel` returns the actionable refusal.
-    fn arm_image_turn_route(&self, carries_images: bool) -> Result<(), String> {
-        let route = self
-            .resolve_image_turn_route(carries_images)
-            .map_err(|error| format!("{error:#}"))?;
-        let armed = route.map(|resolved| {
-            let agent_model = json_round_trip(&resolved.model)
-                .ok_or_else(|| "model conversion failed".to_string())?;
-            ImageRoute {
-                target: ProviderTarget {
-                    service_tier: resolved.service_tier,
-                    api_key: self.resolve_request_api_key(&resolved.model),
-                    model: resolved.model.clone(),
-                },
-                agent_override: pa_agent::agent::AgentModelOverride {
-                    thinking_level: map_thinking_level(resolved.thinking_level),
-                    model: agent_model,
-                },
-            }
-        });
-        *self
-            .image_route
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = armed?;
-        Ok(())
-    }
-
-    /// Apply the armed route to a model turn (after the session build, so
-    /// the build-time target cannot clobber it): the stream's provider
-    /// target and the agent's per-run model override swap to the routed
-    /// image model for the episode.
-    fn apply_armed_image_route(&self, agent: &std::sync::Arc<pa_agent::agent::Agent>) {
-        let route = self
-            .image_route
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let Some(route) = route else {
-            return;
-        };
-        agent.set_model_override(Some(route.agent_override));
-        *self.provider_target.write().expect("provider target lock") = Some(route.target);
-    }
-
-    /// Clear the armed route and restore the session's serving target (a
-    /// fresh resolution, so a mid-episode model switch is honored): the
-    /// next dispatched batch re-evaluates the routing against it (TS
-    /// `_clearModelOverrideWhenIdle` + the next-dispatch re-evaluation).
-    fn clear_image_route(&self) {
-        let route = self
-            .image_route
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        let Some(route) = route else {
-            return;
-        };
-        // The agent override clears even when the session target cannot be
-        // rebuilt (an auth/read failure): the next run must not silently
-        // serve on the routed image model.
-        let agent = self.turn_agent.lock().expect("turn agent lock").clone();
-        if let Some(agent) = agent {
-            agent.set_model_override(None);
-        }
-        let _ = route; // the session target recompute does not read the route
-        let Ok(model) = self.resolve_model() else {
-            return;
-        };
-        *self.provider_target.write().expect("provider target lock") = Some(ProviderTarget {
-            service_tier: *self.service_tier.read().expect("service tier lock"),
-            api_key: self.resolve_request_api_key(&model),
-            model,
-        });
-    }
-
-    /// Whether an image-model route is armed for the running episode (the
-    /// failover primary capture keys off it: a routed episode's failover
-    /// restores the routed target, not the session model).
-    fn armed_image_route(&self) -> Option<ImageRoute> {
-        self.image_route
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
-    }
-
     fn run_prompt(
         &self,
         _prompt_index: usize,
@@ -4919,7 +4920,6 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap();
         // The explicit selection from the session's create config is
@@ -4958,7 +4958,6 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap()
     }
@@ -4997,7 +4996,6 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap();
         (engine, dir)
@@ -5102,7 +5100,6 @@ pub(crate) mod tests {
                 telemetry_disabled: None,
                 cron_store: None,
                 queued_steering_probe: None,
-                image_model_router: None,
             })
             .unwrap(),
         );
@@ -5245,7 +5242,6 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap();
         // The recovery turn builds the session; the build adopts the
@@ -5413,7 +5409,6 @@ pub(crate) mod tests {
                 telemetry_disabled: None,
                 cron_store: None,
                 queued_steering_probe: None,
-                image_model_router: None,
             })
             .unwrap(),
         );
@@ -5698,7 +5693,6 @@ pub(crate) mod tests {
                 telemetry_disabled: None,
                 cron_store: None,
                 queued_steering_probe: None,
-                image_model_router: None,
             })
             .unwrap(),
         );
@@ -6187,7 +6181,6 @@ pub(crate) mod tests {
                 telemetry_disabled: None,
                 cron_store: None,
                 queued_steering_probe: None,
-                image_model_router: None,
             })
             .unwrap()
         };
@@ -6370,7 +6363,6 @@ pub(crate) mod tests {
                 telemetry_disabled: None,
                 cron_store: None,
                 queued_steering_probe: None,
-                image_model_router: None,
             })
             .unwrap()
         };
@@ -6811,7 +6803,6 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap();
         let mut events: Vec<EngineEvent> = Vec::new();
@@ -7167,7 +7158,6 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap();
         let mut events: Vec<EngineEvent> = Vec::new();
@@ -7262,7 +7252,6 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap();
         let model = engine.resolve_registry_model().expect("resolved model");
@@ -7459,7 +7448,6 @@ pub(crate) mod tests {
             telemetry_disabled: Some(true),
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .expect("engine")
     }
@@ -7494,7 +7482,6 @@ pub(crate) mod tests {
             telemetry_disabled: Some(true),
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap();
         let error = engine
@@ -8045,7 +8032,6 @@ pub(crate) mod tests {
             telemetry_disabled: Some(true),
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap();
         let model = engine.resolve_registry_model().expect("resolved model");
@@ -8101,7 +8087,6 @@ pub(crate) mod tests {
             telemetry_disabled: Some(true),
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap();
         let children = engine
@@ -8145,7 +8130,6 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap();
         // A create config with only a model keeps the provider and key.
@@ -8202,7 +8186,6 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap();
         let mut events: Vec<EngineEvent> = Vec::new();
@@ -8274,7 +8257,6 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap();
         // Without an explicit flag the TS default applies (medium, clamped).
@@ -8369,7 +8351,6 @@ pub(crate) mod tests {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap();
         engine.configure_model(EngineModelSelection {
@@ -8661,7 +8642,6 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        image_model_router: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -8950,7 +8930,6 @@ fn retried_run_restarts_with_its_own_agent_frames() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        image_model_router: None,
     })
     .unwrap();
     let mut events: Vec<EngineEvent> = Vec::new();
@@ -9068,7 +9047,6 @@ fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        image_model_router: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -9315,7 +9293,6 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        image_model_router: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -9397,7 +9374,6 @@ fn run_prompts(
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        image_model_router: None,
     })
     .unwrap();
     let engine = std::sync::Arc::new(engine);
@@ -9464,7 +9440,6 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap();
         let engine = std::sync::Arc::new(engine);
@@ -9822,7 +9797,6 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        image_model_router: None,
     })
     .unwrap();
     let start = std::time::Instant::now();
@@ -10104,7 +10078,6 @@ fn autonomous_gate_pass_and_failure_drive_the_loop() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap(),
     );
@@ -10211,7 +10184,6 @@ fn the_turn_loop_is_driven_by_the_driver_trait() {
             telemetry_disabled: None,
             cron_store: None,
             queued_steering_probe: None,
-            image_model_router: None,
         })
         .unwrap(),
     );
@@ -10298,7 +10270,6 @@ fn agent_engine_streams_updates_and_final_message() {
         telemetry_disabled: None,
         cron_store: None,
         queued_steering_probe: None,
-        image_model_router: None,
     })
     .unwrap();
     let mut events: Vec<EngineEvent> = Vec::new();
