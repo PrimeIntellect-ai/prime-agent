@@ -99,7 +99,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -286,8 +286,7 @@ impl Harness {
                 event.get("type").and_then(Value::as_str) == Some("message_end")
                     && event["message"]["customType"]
                         .as_str()
-                        .map(|custom| custom.starts_with("session_slash_command"))
-                        .unwrap_or(false)
+                        .is_some_and(|custom| custom.starts_with("session_slash_command"))
             })
             .filter_map(|event| event["message"]["content"].as_str().map(str::to_string))
             .find(|text| text.starts_with("Goal") || text.starts_with("No active goal"));
@@ -364,8 +363,10 @@ impl Harness {
                     && node["entry"]["message"]["role"] == "user"
                     && message_text(&node["entry"]["message"]["content"]).as_deref() == Some(text)
             })
-            .map(|node| node["entry"]["id"].as_str().expect("entry id").to_string())
-            .unwrap_or_else(|| panic!("the user message node: {nodes:?}"))
+            .map_or_else(
+                || panic!("the user message node: {nodes:?}"),
+                |node| node["entry"]["id"].as_str().expect("entry id").to_string(),
+            )
     }
 
     /// The tree\'s current leaf id.

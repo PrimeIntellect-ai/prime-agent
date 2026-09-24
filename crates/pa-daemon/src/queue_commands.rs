@@ -32,6 +32,10 @@ impl Worker {
     /// `{ status }`); only a malformed request (bad lane/index/mutation
     /// shape) fails the command.
     pub(crate) fn handle_mutate_queued_message(&self, payload: &Value) -> DaemonResponse {
+        // The delete error the rejected waiter sees (TS
+        // `QueuedMessageError`); a prompt_and_wait caller surfaces it as
+        // the command failure.
+        const DELETED: &str = crate::worker::QUEUED_PROMPT_DELETED;
         if let Err(response) = self.require_created("mutate_queued_message") {
             return response;
         }
@@ -75,10 +79,6 @@ impl Worker {
                 None,
             );
         }
-        // The delete error the rejected waiter sees (TS
-        // `QueuedMessageError`); a prompt_and_wait caller surfaces it as
-        // the command failure.
-        const DELETED: &str = crate::worker::QUEUED_PROMPT_DELETED;
         let index = index as usize;
         let (status, queue_changed): (&'static str, bool) = {
             let mut core = self.core.lock().unwrap();
@@ -100,9 +100,7 @@ impl Worker {
                     DELETED,
                 ),
             };
-            if status != "applied" {
-                (status, false)
-            } else {
+            if status == "applied" {
                 // A replace onto another lane moves the item to the back of
                 // the target lane (TS `moveQueued(item, targetPolicy,
                 // ...length)`). The non-overlapping direction pairs only -
@@ -125,6 +123,8 @@ impl Worker {
                     }
                 }
                 (status, true)
+            } else {
+                (status, false)
             }
         };
         // Every applied mutation resumes the suspension (TS
