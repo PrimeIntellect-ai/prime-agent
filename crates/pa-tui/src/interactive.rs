@@ -1513,7 +1513,21 @@ async fn run_interactive_surface(
                     // reconnect driver when the direct link later dies.
                     if session.client.direct_session_id().is_some() {
                         supervisor_lost = true;
-                    } else if reconnect.is_none() && session_reconnect.is_none() {
+                    } else if session_reconnect.is_some() {
+                        // The direct link already died and the session-plane
+                        // driver is retrying through the NOW-DEAD supervisor:
+                        // hand the recovery to the full driver (client
+                        // replacement + durable-id reattach) instead of
+                        // letting it keep riding a dead client.
+                        session_reconnect = None;
+                        session.note_as(
+                            "the daemon connection closed — reconnecting…",
+                            crate::chat::StatusKind::Warning,
+                            &mut view,
+                        );
+                        reconnect = Some(ReconnectLoop::start_lost());
+                        session.dirty = true;
+                    } else if reconnect.is_none() {
                         session.note_as(
                             "the daemon connection closed — reconnecting…",
                             crate::chat::StatusKind::Warning,

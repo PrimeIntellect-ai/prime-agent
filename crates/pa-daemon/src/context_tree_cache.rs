@@ -119,6 +119,23 @@ impl ContextTreeCache {
                 // the poke refresh the new session.
                 Some(walk.session_id.as_str()) == current_session_id
             });
+        // Deletions recorded since the last walk stored hide immediately —
+        // even if an in-flight walk (which filtered the set before the
+        // deletion landed) publishes a snapshot that still carries the
+        // child, the row must not come back between that publish and the
+        // next walk.
+        let invalidated = {
+            let invalidated = self
+                .invalidated
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            invalidated.clone()
+        };
+        let deleted = |node: &Value| {
+            node.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| invalidated.contains(id))
+        };
         let mut children = Vec::with_capacity(
             snapshots.len() + cached.as_ref().map_or(0, |walk| walk.persisted.len()),
         );
@@ -129,6 +146,11 @@ impl ContextTreeCache {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             live_ids.insert(id.to_string());
+            if invalidated.contains(id) {
+                // A deletion that outran the roster removal (the record
+                // is closing): the row must not come back.
+                continue;
+            }
             let mut node = cached
                 .as_ref()
                 .and_then(|walk| walk.live_nodes.get(id))
@@ -154,11 +176,13 @@ impl ContextTreeCache {
                 node.get("id")
                     .and_then(Value::as_str)
                     .is_some_and(|id| !live_ids.contains(id))
+                    && !deleted(node)
             }));
             children.extend(walk.persisted.into_iter().filter(|node| {
                 node.get("id")
                     .and_then(Value::as_str)
                     .is_none_or(|id| !live_ids.contains(id))
+                    && !deleted(node)
             }));
         }
         children
@@ -565,6 +589,28 @@ mod tests {
         assert!(
             children.is_empty(),
             "deleted children must leave the tree immediately: {children:?}"
+        );
+        // A stale snapshot published after the invalidation (an in-flight
+        // walk that filtered the set before the deletion landed) must not
+        // bring the child back at serve time.
+        *cache.state.lock().unwrap() = Some(CachedWalk {
+            computed_at: Instant::now(),
+            session_id: "session-a".to_string(),
+            live_nodes: [(
+                "child-live".to_string(),
+                json!({ "id": "child-live", "totalUsage": empty_usage() }),
+            )]
+            .into_iter()
+            .collect(),
+            persisted: vec![json!({
+                "id": "child-disk",
+                "totalUsage": empty_usage(),
+            })],
+        });
+        let children = cache.serve_children(Some("session-a"), &[]);
+        assert!(
+            children.is_empty(),
+            "a stale walk's publish must not resurrect a deleted child: {children:?}"
         );
     }
 
