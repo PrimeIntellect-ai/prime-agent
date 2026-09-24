@@ -1998,6 +1998,11 @@ mod tests {
             json!({
                 "v": 1, "op": "delete", "at": "2026-01-01T00:00:01Z",
                 "childId": "x1", "child": child.to_string_lossy(), "reason": "user",
+                // The captured snapshot rides the tombstone (the
+                // post-settlement amendment): a claim with real spend is
+                // observable in the bucket, so the first-writer-wins
+                // claim pins the parent by VALUE, not just by presence.
+                "usage": {"inputTokens": 1000, "outputTokens": 100, "cost": 0.15},
             }),
             json!({
                 "v": 1, "op": "spawn", "at": "2026-01-01T00:00:02Z",
@@ -2028,6 +2033,10 @@ mod tests {
             bucket.contains_key(&key_a),
             "the first tombstone claims the path"
         );
+        let claimed = &bucket[&key_a];
+        assert_eq!(claimed.input_tokens, 1000);
+        assert_eq!(claimed.output_tokens, 100);
+        assert!((claimed.cost - 0.15).abs() < 1e-9);
         assert!(
             !bucket.contains_key(&key_b),
             "the second parent never bills the same path"
