@@ -845,17 +845,21 @@ fn plain_boot_revives_only_journal_busy_workers() {
     );
 
     // Shutdown takes the restarted supervisor and the relaunched worker
-    // down (the relaunch persisted the new pid in the descriptor).
+    // down (the relaunch persisted the new pid in the descriptor). The
+    // relaunched worker replays the restored queue's turn too, so the
+    // shutdown's flush barrier rides out the scripted delay before its
+    // reply - the budgets below absorb the whole stop pass (the barrier
+    // wait, then the terminal escalation), never a fixed fast exit.
     let relaunched = load_worker_descriptor(&agent_dir, &socket, &busy_session);
     client2.send_command("sd", json!({ "type": "shutdown" }));
     let shutdown = client2.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(45);
     while daemon2.child.try_wait().expect("try wait").is_none() {
         assert!(Instant::now() < deadline, "restarted supervisor exited");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(45);
     while process_alive(relaunched.pid) {
         assert!(
             Instant::now() < deadline,
