@@ -570,6 +570,7 @@ mod tests {
         let mut loose = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(true)
             .open(&path)
             .expect("loose log");
         #[cfg(unix)]
