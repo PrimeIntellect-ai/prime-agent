@@ -274,7 +274,10 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
 /// tray badge shows it.
 #[test]
 fn tier_command_shows_applies_and_rejects() {
+    // The leading settle (the sibling harnesses' pattern): the attach
+    // must land its model + provider before the first submit reads them.
     let steps = vec![
+        HeadlessStep::WaitMs(400),
         HeadlessStep::Submit("/tier".to_string()),
         HeadlessStep::WaitMs(200),
         HeadlessStep::Submit("/tier scale".to_string()),
