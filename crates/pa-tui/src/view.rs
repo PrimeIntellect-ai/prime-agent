@@ -131,6 +131,9 @@ pub struct AgentView {
     /// `HeartbeatManagerComponent`, inline-picker style): while set, it
     /// owns the editor dock like the `/model` and `/effort` pickers.
     pub heartbeats_picker: Option<crate::heartbeats_picker::HeartbeatsPicker>,
+    /// The read-only goal panel (the dock's `Pursuing goal` row): while
+    /// `Some`, the panel owns the frame exactly like the docked pickers.
+    pub goal_panel: Option<crate::goal_surface::GoalPanel>,
     /// The dedicated bash view (the dock's Bash group's destination):
     /// while set, it owns the editor dock like the inline pickers.
     pub bash_view: Option<crate::bash_view::BashView>,
@@ -302,6 +305,7 @@ impl AgentView {
             effort_picker: None,
             mcp_view: None,
             heartbeats_picker: None,
+            goal_panel: None,
             bash_view: None,
             share_loader: None,
             reload_box: None,
