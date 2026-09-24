@@ -418,10 +418,15 @@ pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> boo
             .find(|pair| pair[0] == flag)
             .map(|pair| pair[1].as_str())
     };
+    // Both spellings normalize: the caller passes this daemon's socket in
+    // its normalized form, and a predecessor's argv token may carry the
+    // symlink or `..` spelling of the very same socket.
+    let names_socket = |named: &str| normalize_socket_spelling(Path::new(named)) == socket;
     match after_flag("--daemon-socket") {
-        Some(named) => named == socket && argv.iter().any(|arg| arg == "daemon"),
+        Some(named) => names_socket(named) && argv.iter().any(|arg| arg == "daemon"),
         None => {
-            after_flag("--socket") == Some(socket) && argv.iter().any(|arg| arg == "supervisor")
+            after_flag("--socket").is_some_and(names_socket)
+                && argv.iter().any(|arg| arg == "supervisor")
         }
     }
 }
@@ -495,7 +500,14 @@ fn read_proc_environ(pid: u32) -> Option<Vec<String>> {
 fn exe_is_product_binary(pid: u32) -> bool {
     std::fs::read_link(format!("/proc/{pid}/exe"))
         .ok()
-        .and_then(|exe| exe.to_str().map(is_product_binary))
+        // The kernel appends " (deleted)" to a replaced binary's exe link
+        // (an in-place upgrade while the worker lives) - the product
+        // binary is still the product binary.
+        .map(|exe| {
+            let name = exe.to_string_lossy();
+            let name = name.trim_end_matches(" (deleted)");
+            is_product_binary(name)
+        })
         .unwrap_or(false)
 }
 
@@ -672,6 +684,60 @@ mod tests {
         );
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// The replaced-binary gate: the kernel appends " (deleted)" to an
+    /// in-place-upgraded binary's exe link - the product binary is still
+    /// the product binary (a leftover of the replaced build is still a
+    /// leftover worker of this socket).
+    #[test]
+    fn the_exe_gate_accepts_replaced_binaries() {
+        // The predicate is the basename check the gate reads; simulate the
+        // kernel's deleted-suffix spelling.
+        let replaced = "/opt/prime-agent/bin/prime-agent (deleted)";
+        assert!(
+            is_product_binary(replaced.trim_end_matches(" (deleted)")),
+            "the deleted-suffix spelling still identifies the product binary"
+        );
+    }
+
+    /// The supervisor socket match normalizes BOTH spellings: a
+    /// predecessor started with a `..` or symlink spelling of this very
+    /// socket is still a wedged same-socket predecessor.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_supervisor_match_normalizes_both_spellings() {
+        let direct = [
+            "/usr/bin/prime-agent",
+            "--mode",
+            "daemon",
+            "--daemon-socket",
+            "/tmp/x/daemon.sock",
+        ]
+        .iter()
+        .map(|arg| arg.to_string())
+        .collect::<Vec<_>>();
+        assert!(supervisor_argv_names_socket(
+            &direct,
+            &normalize_socket_spelling(Path::new("/tmp/x/daemon.sock"))
+        ));
+        let dotted = [
+            "/usr/bin/prime-agent",
+            "--mode",
+            "daemon",
+            "--daemon-socket",
+            "/tmp/x/y/../daemon.sock",
+        ]
+        .iter()
+        .map(|arg| arg.to_string())
+        .collect::<Vec<_>>();
+        assert!(
+            supervisor_argv_names_socket(
+                &dotted,
+                &normalize_socket_spelling(Path::new("/tmp/x/daemon.sock"))
+            ),
+            "the .. spelling of the same socket still matches"
+        );
     }
 
     /// The endpoint gate: only this supervisor's deterministic worker-socket
