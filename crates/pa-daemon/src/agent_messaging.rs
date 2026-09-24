@@ -9,9 +9,9 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use pa_core::session_engine::agent_messaging::{
-    AgentFamilyMember, AgentFamilyRelationship, AgentMessageController, AgentMessageDeliveryStatus,
-    AgentMessageReceipt, AgentMessageSendInput, AgentObserveController, AgentObserveMessagePreview,
-    AgentObserveSummary,
+    AgentFamilyMember, AgentFamilyRelationship, AgentFamilyStatus, AgentMessageController,
+    AgentMessageDeliveryStatus, AgentMessageReceipt, AgentMessageSendInput, AgentObserveActivity,
+    AgentObserveController, AgentObserveMessagePreview, AgentObserveSummary,
 };
 
 use crate::supervisor_link::SupervisorLink;
@@ -869,6 +869,58 @@ fn summaries_from_roster(
                 .and_then(|actions| actions.get("queuedCount"))
                 .and_then(Value::as_u64)
                 .unwrap_or_default() as usize;
+            let is_streaming = session
+                .get("isStreaming")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let is_compacting = session
+                .get("isCompacting")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let is_session_active = session
+                .get("isSessionActive")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let is_running_tools = session
+                .get("isRunningTools")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let attached_clients = session
+                .get("attachedClients")
+                .and_then(Value::as_u64)
+                .unwrap_or_default() as usize;
+            // TS #2493 `classifyAgentStatus`: every roster row is a
+            // resident session, so the family status is the busy verdict
+            // (`activity === "working" || isSessionActive`) split into
+            // `running`/`idle` — never the mixed `inactive` a quiet row
+            // used to map to. `Inactive` stays reserved for family members
+            // with no live session, which the live-roster path never
+            // returns.
+            let status = if session.get("activity").and_then(Value::as_str) == Some("working")
+                || is_session_active
+            {
+                AgentFamilyStatus::Running
+            } else {
+                AgentFamilyStatus::Idle
+            };
+            // TS #2493 `createAgentObserveSummary`: the live activity is
+            // its own axis (streaming tool work, streaming model work,
+            // compaction, queued/accepted work, an attached human, or
+            // quiet). The row's `isSessionActive` covers the session's own
+            // work; delegated child work is not a roster-row field.
+            let activity = if is_streaming && is_running_tools {
+                AgentObserveActivity::Tool
+            } else if is_streaming {
+                AgentObserveActivity::Model
+            } else if is_compacting {
+                AgentObserveActivity::Compacting
+            } else if is_session_active {
+                AgentObserveActivity::Busy
+            } else if attached_clients > 0 {
+                AgentObserveActivity::User
+            } else {
+                AgentObserveActivity::Idle
+            };
             Some(AgentObserveSummary {
                 active_session_id: Some(active_session_id),
                 session_id: session
@@ -883,29 +935,14 @@ fn summaries_from_roster(
                     .map(str::to_string),
                 relationship,
                 runtime_kind: Some(runtime_kind),
-                status: if session.get("activity").and_then(Value::as_str) == Some("idle") {
-                    "inactive".to_string()
-                } else {
-                    "running".to_string()
-                },
+                status,
+                activity: Some(activity),
                 is_current,
-                is_streaming: session
-                    .get("isStreaming")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                is_compacting: session
-                    .get("isCompacting")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-                attached_clients: session
-                    .get("attachedClients")
-                    .and_then(Value::as_u64)
-                    .unwrap_or_default() as usize,
+                is_streaming,
+                is_compacting,
+                attached_clients,
                 queued_count: queued,
-                is_session_active: session
-                    .get("isSessionActive")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
+                is_session_active,
             })
         })
         .collect()
@@ -1513,6 +1550,70 @@ mod controller_tests {
 
     /// A root caller's observe roster lists the other root sessions as
     /// siblings, never another family's subagents, and marks its own row.
+    /// TS #2493: observe rows carry the typed family status (the busy
+    /// verdict: `running` while work is in flight, `idle` for a
+    /// resident-but-quiet session) plus the separate live activity axis —
+    /// a quiet row is `idle`, never the pre-fix `inactive` the coarse
+    /// activity mapping produced.
+    #[test]
+    fn summaries_carry_the_typed_status_and_activity() {
+        let identity = FamilyIdentity {
+            active_session_id: "me000".to_string(),
+            session_id: Some("sess-me".to_string()),
+            session_file: Some("/agent/sessions/sess-me.jsonl".to_string()),
+            parent_active_session_id: Some("ppp00".to_string()),
+            parent_session_id: Some("sess-p".to_string()),
+            parent_session_path: Some("/agent/sessions/sess-p.jsonl".to_string()),
+        };
+        let sessions = vec![
+            // The current session streams a tool call: running, tool work.
+            json!({
+                "activeSessionId": "me000", "sessionId": "sess-me", "runtimeKind": "top-level",
+                "activity": "working", "isStreaming": true, "isCompacting": false,
+                "isSessionActive": true, "isRunningTools": true, "attachedClients": 1,
+            }),
+            // The parent sits quiet with a client attached: idle, a user.
+            json!({
+                "activeSessionId": "ppp00", "sessionId": "sess-p", "runtimeKind": "top-level",
+                "activity": "idle", "isStreaming": false, "isCompacting": false,
+                "isSessionActive": false, "isRunningTools": false, "attachedClients": 1,
+            }),
+            // A child mid-compaction: running, compacting.
+            json!({
+                "activeSessionId": "ch111", "sessionId": "sess-ch", "runtimeKind": "subagent",
+                "activity": "working", "isStreaming": false, "isCompacting": true,
+                "isSessionActive": true, "isRunningTools": false, "attachedClients": 0,
+                "parentActiveSessionId": "me000", "parentSessionId": "sess-me",
+            }),
+            // A quiet child with no client: idle, idle.
+            json!({
+                "activeSessionId": "ch222", "sessionId": "sess-ch2", "runtimeKind": "subagent",
+                "activity": "idle", "isStreaming": false, "isCompacting": false,
+                "isSessionActive": false, "isRunningTools": false, "attachedClients": 0,
+                "parentActiveSessionId": "me000", "parentSessionId": "sess-me",
+            }),
+        ];
+        let summaries = summaries_from_roster(sessions, &identity, &[]);
+        assert_eq!(summaries.len(), 4, "{summaries:?}");
+        let row = |id: &str| {
+            summaries
+                .iter()
+                .find(|s| s.active_session_id.as_deref() == Some(id))
+                .unwrap_or_else(|| panic!("missing row {id}: {summaries:?}"))
+        };
+        assert_eq!(row("me000").status, AgentFamilyStatus::Running);
+        assert_eq!(row("me000").activity, Some(AgentObserveActivity::Tool));
+        assert_eq!(row("ppp00").status, AgentFamilyStatus::Idle);
+        assert_eq!(row("ppp00").activity, Some(AgentObserveActivity::User));
+        assert_eq!(row("ch111").status, AgentFamilyStatus::Running);
+        assert_eq!(
+            row("ch111").activity,
+            Some(AgentObserveActivity::Compacting)
+        );
+        assert_eq!(row("ch222").status, AgentFamilyStatus::Idle);
+        assert_eq!(row("ch222").activity, Some(AgentObserveActivity::Idle));
+    }
+
     #[test]
     fn summaries_label_root_siblings_and_never_foreign_children() {
         let identity = FamilyIdentity {

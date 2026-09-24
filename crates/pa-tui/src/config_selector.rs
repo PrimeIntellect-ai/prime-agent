@@ -4,7 +4,7 @@
 //! module owns rendering, filtering, selection, and the terminal loop.
 
 use anyhow::Result;
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyEvent};
 use crossterm::terminal::{self};
 use ratatui::Terminal;
 use std::time::{Duration, Instant};
@@ -36,7 +36,8 @@ pub enum SelectorRow {
 pub enum SelectorAction {
     /// Esc: close the view.
     Close,
-    /// Ctrl+C: exit the process.
+    /// `app.clear`: exit the process (TS #2493 makes the exit key
+    /// remappable instead of a literal ctrl+c).
     Exit,
     /// Space/Enter on an item: the caller should persist `enabled` for
     /// `key`; the selector has already flipped its row.
@@ -181,7 +182,7 @@ impl ConfigSelector {
         if kb.matches(key, "tui.select.cancel") {
             return Some(SelectorAction::Close);
         }
-        if key == "ctrl+c" {
+        if kb.matches(key, "app.clear") {
             return Some(SelectorAction::Exit);
         }
         if key == " " || kb.matches(key, "tui.select.confirm") {
@@ -603,11 +604,10 @@ fn handle_key_event(
     key: KeyEvent,
     kb: &KeybindingsManager,
 ) -> Option<SelectorAction> {
-    // Ctrl+C arrives through the keybindings table ("tui.select.cancel"
-    // includes it), but the TS selector treats it as exit, not close.
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-        return Some(SelectorAction::Exit);
-    }
+    // TS #2493: ctrl+c is a keybinding, not a literal - the exit rides
+    // `app.clear` and the close rides `tui.select.cancel` (whose default
+    // includes ctrl+c), so remapping either re-routes the key here too
+    // instead of leaving a hard-coded ctrl+c exit ahead of the table.
     let id = key_event_to_id(&key)?;
     selector.handle_key(&id, kb)
 }
@@ -616,5 +616,105 @@ fn selector_query_insert(selector: &mut ConfigSelector, text: &str) {
     for c in text.chars() {
         let id = c.to_string();
         selector.handle_key(&id, &KeybindingsManager::new());
+    }
+}
+
+#[cfg(test)]
+mod keybind_tests {
+    use super::*;
+    use crate::keybindings::KeybindingsConfig;
+
+    fn selector() -> ConfigSelector {
+        ConfigSelector::new(vec![SelectorRow::Item {
+            key: "0".to_string(),
+            label: "resource one".to_string(),
+            checked: false,
+            type_label: "mcp".to_string(),
+            path: "/tmp/one".to_string(),
+        }])
+    }
+
+    fn manager(entries: &[(&str, &[&str])]) -> KeybindingsManager {
+        let mut bindings = KeybindingsConfig::new();
+        for (id, keys) in entries {
+            bindings.insert(
+                (*id).to_string(),
+                keys.iter().map(|k| (*k).to_string()).collect(),
+            );
+        }
+        KeybindingsManager::with_user_bindings(bindings)
+    }
+
+    /// TS #2493: with the default bindings ctrl+c rides
+    /// `tui.select.cancel` (its default includes the key), so the
+    /// selector CLOSES on it exactly like the TS component — the exit
+    /// branch sits behind the cancel check, in the TS order.
+    #[test]
+    fn default_bindings_close_on_ctrl_c() {
+        let mut selector = selector();
+        let kb = KeybindingsManager::new();
+        assert_eq!(
+            selector.handle_key("ctrl+c", &kb),
+            Some(SelectorAction::Close),
+            "the cancel default owns ctrl+c first, like TS"
+        );
+        assert_eq!(
+            selector.handle_key("escape", &kb),
+            Some(SelectorAction::Close)
+        );
+    }
+
+    /// TS #2493: the exit is a real keybinding — remap `tui.select.cancel`
+    /// away from ctrl+c and the freed key now reaches `app.clear` and
+    /// EXITS instead of closing (the pre-fix literal ignored the table).
+    #[test]
+    fn a_remapped_cancel_routes_ctrl_c_to_the_exit_binding() {
+        let mut selector = selector();
+        let kb = manager(&[("tui.select.cancel", &["escape"])]);
+        assert_eq!(
+            selector.handle_key("ctrl+c", &kb),
+            Some(SelectorAction::Exit),
+            "the freed ctrl+c now rides app.clear and exits"
+        );
+        assert_eq!(
+            selector.handle_key("escape", &kb),
+            Some(SelectorAction::Close)
+        );
+    }
+
+    /// A remapped `app.clear` exits on its own key while ctrl+c keeps
+    /// closing through the cancel default.
+    #[test]
+    fn a_remapped_app_clear_exits_on_its_own_key() {
+        let mut selector = selector();
+        let kb = manager(&[("app.clear", &["ctrl+q"])]);
+        assert_eq!(
+            selector.handle_key("ctrl+q", &kb),
+            Some(SelectorAction::Exit),
+            "the remapped app.clear key exits"
+        );
+        assert_eq!(
+            selector.handle_key("ctrl+c", &kb),
+            Some(SelectorAction::Close),
+            "the cancel default still owns ctrl+c"
+        );
+    }
+
+    /// With both bindings remapped away from ctrl+c the key is a plain
+    /// no-op (a control character never edits the filter): nothing
+    /// hard-codes it anymore.
+    #[test]
+    fn ctrl_c_is_a_noop_once_both_bindings_move_off_it() {
+        let mut selector = selector();
+        let kb = manager(&[
+            ("tui.select.cancel", &["escape"]),
+            ("app.clear", &["ctrl+q"]),
+        ]);
+        assert_eq!(
+            selector.handle_key("ctrl+c", &kb),
+            None,
+            "ctrl+c matches no binding and never reaches the filter"
+        );
+        assert_eq!(selector.query(), "", "the control key edited nothing");
     }
 }
