@@ -276,13 +276,13 @@ fn identity_match_score(text: &str, token: &str) -> Option<f64> {
     if haystack == *token {
         return Some(SCORE_EXACT);
     }
-    if let Some(rest) = haystack.strip_prefix(token.as_str()) {
+    if let Some(rest) = haystack.strip_prefix(token) {
         return Some(SCORE_PREFIX + rest.chars().count() as f64 * 0.01);
     }
     if words(&haystack).iter().any(|word| word.starts_with(token)) {
         return Some(SCORE_WORD_START);
     }
-    if let Some(at) = haystack.find(token.as_str()) {
+    if let Some(at) = haystack.find(token) {
         return Some(SCORE_SUBSTRING + at as f64 * 0.01);
     }
     subsequence_match_score(&haystack, token)
@@ -334,7 +334,7 @@ fn description_match_score(text: &str, token: &str) -> Option<f64> {
         return Some(SCORE_DESCRIPTION_WORD_START);
     }
     haystack
-        .find(token.as_str())
+        .find(token)
         .map(|at| SCORE_DESCRIPTION_SUBSTRING + at as f64 * 0.01)
 }
 
