@@ -258,10 +258,7 @@ impl GoalDriver {
         let budget_reached = next_goal
             .token_budget
             .is_some_and(|budget| next_goal.tokens_used >= budget);
-        let outcome = if !budget_reached {
-            self.set_state(session, next_goal)?;
-            UsageOutcome::Accounted
-        } else {
+        let outcome = if budget_reached {
             let token_budget = next_goal.token_budget;
             let budget_reason = token_budget
                 .map(|budget| format!("Reached {budget} token goal budget"))
@@ -277,6 +274,9 @@ impl GoalDriver {
                 },
             )?;
             UsageOutcome::BudgetReached
+        } else {
+            self.set_state(session, next_goal)?;
+            UsageOutcome::Accounted
         };
         // Account the message only after the durable write lands.
         self.accounted_messages.insert(message_id.to_string());
@@ -376,29 +376,25 @@ impl GoalDriver {
         stop_reason: pa_types::ai::StopReason,
         error_message: Option<&str>,
     ) -> anyhow::Result<()> {
+        use pa_types::ai::StopReason;
         if self.state.status != GoalStatus::Active {
             return Ok(());
         }
-        use pa_types::ai::StopReason;
-        match stop_reason {
-            StopReason::Aborted => {}
-            StopReason::Error => {
-                let reason = error_message
-                    .filter(|message| !message.is_empty())
-                    .unwrap_or("Assistant response failed");
-                let goal = self.with_accounted_wall_clock();
-                self.set_state(
-                    session,
-                    GoalState {
-                        active: false,
-                        status: GoalStatus::Error,
-                        last_reason: Some(reason.to_string()),
-                        last_error: Some(reason.to_string()),
-                        ..goal
-                    },
-                )?;
-            }
-            _ => {}
+        if let StopReason::Error = stop_reason {
+            let reason = error_message
+                .filter(|message| !message.is_empty())
+                .unwrap_or("Assistant response failed");
+            let goal = self.with_accounted_wall_clock();
+            self.set_state(
+                session,
+                GoalState {
+                    active: false,
+                    status: GoalStatus::Error,
+                    last_reason: Some(reason.to_string()),
+                    last_error: Some(reason.to_string()),
+                    ..goal
+                },
+            )?;
         }
         Ok(())
     }

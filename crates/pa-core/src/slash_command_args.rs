@@ -300,10 +300,9 @@ fn format_count(value: u64) -> String {
 /// `_formatAutonomousStatus`: the `[autonomous-status: ...]` block.
 pub fn format_autonomous_status(status: &AgentAutonomousStatus) -> String {
     let state = if status.enabled { "on" } else { "off" };
-    let elapsed_seconds = status
-        .started_at
-        .map(|started_at| now_millis().saturating_sub(started_at) / 1000)
-        .unwrap_or(0);
+    let elapsed_seconds = status.started_at.map_or(0, |started_at| {
+        now_millis().saturating_sub(started_at) / 1000
+    });
     let gate_summary = if status.gates.commands.is_empty() {
         "none".to_string()
     } else {

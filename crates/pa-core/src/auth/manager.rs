@@ -749,8 +749,7 @@ impl AuthStorage {
                         AuthCredential::Oauth { expires, .. } => {
                             let now_ms = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis() as i64)
-                                .unwrap_or(i64::MAX);
+                                .map_or(i64::MAX, |d| d.as_millis() as i64);
                             if now_ms >= *expires {
                                 // Refresh under the backend lock.
                                 if let Some(refreshed) = self.refresh_oauth(provider_id) {
@@ -839,8 +838,7 @@ impl AuthStorage {
             };
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(i64::MAX);
+                .map_or(i64::MAX, |d| d.as_millis() as i64);
             if now_ms < *expires {
                 refreshed = Some(credential);
                 return Ok(((), None));
@@ -1014,12 +1012,7 @@ mod tests {
         fn key_names(&self, provider: &str) -> Option<Vec<String>> {
             let names = pa_ai::env_api_keys::get_api_key_env_vars(provider)?
                 .into_iter()
-                .filter(|name| {
-                    self.0
-                        .get(*name)
-                        .map(|value| !value.is_empty())
-                        .unwrap_or(false)
-                })
+                .filter(|name| self.0.get(*name).is_some_and(|value| !value.is_empty()))
                 .map(str::to_string)
                 .collect::<Vec<_>>();
             (!names.is_empty()).then_some(names)
