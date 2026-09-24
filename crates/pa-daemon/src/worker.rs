@@ -433,7 +433,11 @@ pub(crate) struct SessionCore {
     /// `priority` to `default` on models without fast mode.
     pub(crate) service_tier: Option<pa_types::ai::ServiceTier>,
     /// The queue delivery modes (TS `agent.steeringMode` / `followUpMode`):
-    /// `"all"` or `"one-at-a-time"`.
+    /// `"all"` or `"one-at-a-time"`. The steering default is `"all"`
+    /// (every queued steer co-delivers as ONE turn at the next
+    /// tool-call boundary; `"one-at-a-time"` stays selectable via the
+    /// setting). The follow-up default is `"one-at-a-time"` (follow-ups
+    /// drain when the session goes idle, one per turn).
     pub(crate) steering_mode: String,
     pub(crate) follow_up_mode: String,
     /// The one-shot forced steering batch (TS `_forcedAllSteeringActionIds`
@@ -511,7 +515,7 @@ impl SessionCore {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
-            steering_mode: "one-at-a-time".to_string(),
+            steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
             scoped_models: Vec::new(),
@@ -908,7 +912,7 @@ impl Worker {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
-            steering_mode: "one-at-a-time".to_string(),
+            steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
             scoped_models: Vec::new(),
@@ -5385,6 +5389,13 @@ impl TurnRunner {
             // that end without a model turn (session commands, pre-model
             // failures).
             let mut engine_turn_ended = false;
+            // The last error of the active retry episode (the
+            // `auto_retry_start` errorMessage): the episode's durable
+            // outcome row names it on success too — the final event
+            // carries no error then (SANCTIONED DIVERGENCE, operator
+            // ruling 2026-09-23: one outcome row replaces the per-attempt
+            // error rows TS keeps).
+            let mut last_retry_error: Option<String> = None;
             let mut emit = |mut event: EngineEvent| -> bool {
                 // Sequence + persist under the core lock, then broadcast.
                 // The abort flag lives on the session core (`abort`
@@ -5674,6 +5685,10 @@ impl TurnRunner {
                         error_message,
                         reason,
                     } => {
+                        // The episode remembers its latest error so the
+                        // outcome row can name it on success (the end event
+                        // carries no error then).
+                        last_retry_error = Some(error_message.clone());
                         let mut event = json!({
                             "type": "auto_retry_start",
                             "attempt": attempt,
@@ -5703,13 +5718,46 @@ impl TurnRunner {
                             "success": success,
                             "attempt": attempt,
                         });
-                        if let Some(final_error) = final_error {
+                        if let Some(final_error) = &final_error {
                             event["finalError"] = json!(final_error);
                         }
                         if let Some(restored_model) = restored_model {
                             event["restoredModel"] = json!(restored_model);
                         }
-                        vec![event]
+                        // The episode's ONE durable outcome row (SANCTIONED
+                        // DIVERGENCE, operator ruling 2026-09-23): the
+                        // chat keeps a single resolved/terminal line for
+                        // the whole episode — live, through the message
+                        // pair below, and rebuilt, through the session
+                        // transcript — instead of one error row per failed
+                        // attempt. On success the row names the error the
+                        // starts reported (the end event carries none).
+                        let error = final_error
+                            .clone()
+                            .or_else(|| last_retry_error.take())
+                            .unwrap_or_else(|| "Unknown error".to_string());
+                        last_retry_error = None;
+                        let outcome = pa_core::session_engine::messages::
+                            create_provider_retry_outcome_message(success, attempt, &error);
+                        let outcome = crate::session_commands::custom_message_value(&outcome);
+                        if outcome.is_object() {
+                            if let Some(store) = core.store.as_mut() {
+                                let _ = store.persist_entry(
+                                    "custom_message",
+                                    json!({
+                                        "customType": outcome.get("customType").cloned().unwrap_or(Value::Null),
+                                        "content": outcome.get("content").cloned().unwrap_or(Value::Null),
+                                        "display": outcome.get("display").cloned().unwrap_or(Value::Bool(true)),
+                                        "details": outcome.get("details").cloned().unwrap_or(Value::Null),
+                                    }),
+                                );
+                            }
+                        }
+                        vec![
+                            event,
+                            json!({ "type": "message_start", "message": outcome }),
+                            json!({ "type": "message_end", "message": outcome }),
+                        ]
                     }
                 };
                 // Verification seam: dump the emitted session events for
@@ -8614,7 +8662,7 @@ mod turn_stream_tests {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
-            steering_mode: "one-at-a-time".to_string(),
+            steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
             scoped_models: Vec::new(),
@@ -8842,8 +8890,58 @@ mod turn_stream_tests {
         );
     }
 
-    /// Queue mode "one-at-a-time" (the TS default): each queued steer is
-    /// its own turn — one reply each, delivered in order.
+    /// The product default: with no explicit mode set, the steering
+    /// lane co-delivers the queued same-class prefix as ONE batched turn
+    /// at the boundary.
+    #[tokio::test]
+    async fn the_default_mode_co_delivers_the_queued_steering_prefix() {
+        let engine: Arc<dyn SessionEngine> = Arc::new(
+            ScriptedEngine::from_value(json!({ "responses": ["batched reply"] }))
+                .unwrap_or_default(),
+        );
+        let runner = burst_runner(Arc::clone(&engine));
+        {
+            let mut core = runner.core.lock().unwrap();
+            assert_eq!(core.steering_mode, "all", "the default is the batched mode");
+            core.steering
+                .push_back(queued_prompt("steer one", TurnPolicy::Queued));
+            core.steering
+                .push_back(queued_prompt("steer two", TurnPolicy::Queued));
+            core.steering
+                .push_back(queued_prompt("steer three", TurnPolicy::Queued));
+        }
+        let mut subscription = runner.events.subscribe();
+        let core = std::sync::Arc::clone(&runner.core);
+        let work_notify = std::sync::Arc::clone(&runner.work_notify);
+        let running = tokio::spawn(async move { runner.run().await });
+        drain_pump(&core, &work_notify).await;
+        running.abort();
+
+        let events = runner_events(&mut subscription);
+        let starts = events
+            .iter()
+            .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+            .count();
+        assert_eq!(
+            starts, 1,
+            "the default batches the whole prefix: {events:?}"
+        );
+        let rows = delivered_rows(&events);
+        assert_eq!(
+            rows,
+            vec![
+                ("user".to_string(), "steer one".to_string()),
+                ("user".to_string(), "steer two".to_string()),
+                ("user".to_string(), "steer three".to_string()),
+                ("assistant".to_string(), "batched reply".to_string()),
+            ],
+            "the default mode co-delivers every parked steer: {rows:?}"
+        );
+    }
+
+    /// Queue mode "one-at-a-time" (selectable via the `steeringMode`
+    /// setting; the product default is "all"): each queued steer is its
+    /// own turn — one reply each, delivered in order.
     #[tokio::test]
     async fn one_at_a_time_delivers_each_queued_steer_as_its_own_turn() {
         // The burst harness has no session store, so the scripted engine
@@ -8857,6 +8955,7 @@ mod turn_stream_tests {
         let runner = burst_runner(Arc::clone(&engine));
         {
             let mut core = runner.core.lock().unwrap();
+            core.steering_mode = "one-at-a-time".to_string();
             core.steering
                 .push_back(queued_prompt("steer one", TurnPolicy::Queued));
             core.steering
@@ -8890,8 +8989,9 @@ mod turn_stream_tests {
 
     /// The forced steering batch (TS `abortAndSendQueued`'s
     /// `_forcedAllSteeringActionIds`): the armed prefix co-delivers as ONE
-    /// turn even under queue mode "one-at-a-time"; an item queued after
-    /// the arm stays out of the batch and delivers next.
+    /// turn even under queue mode "one-at-a-time" (pinned explicitly —
+    /// the product default is "all"); an item queued after the arm stays
+    /// out of the batch and delivers next.
     #[tokio::test]
     async fn forced_batch_delivers_the_armed_prefix_as_one_turn() {
         // (The burst harness serves the first scripted response for every
@@ -8902,6 +9002,7 @@ mod turn_stream_tests {
         let runner = burst_runner(Arc::clone(&engine));
         {
             let mut core = runner.core.lock().unwrap();
+            core.steering_mode = "one-at-a-time".to_string();
             core.steering
                 .push_back(queued_prompt("armed one", TurnPolicy::Queued));
             core.steering
@@ -9037,9 +9138,10 @@ mod turn_stream_tests {
     /// abort of a streaming turn, ALL visible queued plain-user steering
     /// messages send together as the next batched turn — the follow-up
     /// lane stays queued behind it (never discarded, never merged), then
-    /// runs in order once the session goes idle; the default queue mode
-    /// ("one-at-a-time") is unchanged, and with nothing armable queued the
-    /// abort runs abort-only (the queue parks behind the suspension).
+    /// runs in order once the session goes idle; the arm co-delivers
+    /// under any mode (the product default is "all"), and with nothing
+    /// armable queued the abort runs abort-only (the queue parks behind
+    /// the suspension).
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
     async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups() {
@@ -9117,7 +9219,8 @@ mod turn_stream_tests {
         assert!(follow.success, "follow_up failed: {follow:?}");
         // The funnel (the wire command's body — #2599's handler calls it):
         // arm the visible plain-user steering, abort the run, resume the
-        // pump. The default queue mode stays "one-at-a-time".
+        // pump. The arm carries the batch under any mode; the default
+        // itself is asserted below (the product default "all").
         let sent = worker.abort_and_send_queued();
         assert!(sent, "the armed steering batch sent with the abort");
         let idle = tokio::time::timeout(
@@ -9210,8 +9313,8 @@ mod turn_stream_tests {
                 "both lanes drained in order"
             );
             assert_eq!(
-                core.steering_mode, "one-at-a-time",
-                "the default mode is untouched"
+                core.steering_mode, "all",
+                "the default mode is the batched-at-the-boundary product default"
             );
         }
         let _ = std::fs::remove_dir_all(&dir);

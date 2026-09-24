@@ -35,11 +35,22 @@ impl ClientUpdate {
 impl UpdateCommands for ClientUpdate {
     /// One CLI child run with inherited stdio (TS `spawnSync` with
     /// `stdio: "inherit"`): the updater's own output owns the terminal
-    /// while it runs.
+    /// while it runs. The self-update child (`update ...`) carries the
+    /// interactive-child marker (TS sets it for `includesSelf` runs), so
+    /// the child's cancelled/no-change exits use the not-attempted code
+    /// and the client can skip the relaunch.
     fn run_cli_child(&self, args: Vec<String>) -> UpdateChildFuture {
         Box::pin(async move {
             let cli = Self::cli_path();
-            let status = tokio::process::Command::new(&cli)
+            let interactive_child = args.first().is_some_and(|arg| arg == "update");
+            let mut command = tokio::process::Command::new(&cli);
+            if interactive_child {
+                command.env(
+                    crate::public_command::SELF_UPDATE_INTERACTIVE_CHILD_ENV,
+                    "1",
+                );
+            }
+            let status = command
                 .args(&args)
                 .stdin(Stdio::inherit())
                 .stdout(Stdio::inherit())

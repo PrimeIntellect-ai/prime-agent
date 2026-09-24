@@ -215,8 +215,11 @@ pub(crate) fn client_event_from_value(value: &Value) -> Option<DaemonClientEvent
 /// Connection state shared between the request side and the reader task.
 #[derive(Default)]
 pub(crate) struct Shared {
-    /// Pending requests keyed by envelope id.
-    pending: Mutex<HashMap<String, oneshot::Sender<DaemonResponse>>>,
+    /// Pending requests keyed by envelope id. `Ok` is a daemon answer
+    /// (including a `success: false` refusal); `Err` is a transport
+    /// failure — the two must stay distinguishable, because a refusal is
+    /// recoverable UI data while a dead connection is fatal.
+    pending: Mutex<HashMap<String, oneshot::Sender<Result<DaemonResponse, anyhow::Error>>>>,
 }
 
 impl Shared {
@@ -224,11 +227,11 @@ impl Shared {
         let mut pending = self.pending.lock().unwrap();
         pending
             .remove(id)
-            .is_some_and(|tx| tx.send(response).is_ok())
+            .is_some_and(|tx| tx.send(Ok(response)).is_ok())
     }
 
     /// Fail every pending request whose id starts with `prefix` with a
-    /// synthetic error response: the connection that carried them died.
+    /// transport error: the connection that carried them died.
     ///
     /// This is what keeps a dead supervisor or worker from leaving the UI
     /// waiting out the full request timeout — the exit-hang class of bugs:
@@ -236,7 +239,10 @@ impl Shared {
     /// socket peer was already gone. The reader task of each connection
     /// calls this when its socket closes (supervisor reader fails the
     /// `daemon_`-routed requests, a direct worker pump the `direct_` ones,
-    /// so a live link keeps serving its own in-flight requests).
+    /// so a live link keeps serving its own in-flight requests). The
+    /// failure resolves on the `Err` half of the channel — never as a
+    /// synthetic response — so a dead connection can never be mistaken
+    /// for a daemon refusal.
     pub(crate) fn fail_pending(&self, prefix: &str, error: &str) {
         let mut pending = self.pending.lock().unwrap();
         let dead: Vec<String> = pending
@@ -246,14 +252,7 @@ impl Shared {
             .collect();
         for id in dead {
             if let Some(tx) = pending.remove(&id) {
-                let _ = tx.send(DaemonResponse {
-                    id: Some(id),
-                    command: String::new(),
-                    success: false,
-                    data: None,
-                    error: Some(error.to_string()),
-                    error_info: None,
-                });
+                let _ = tx.send(Err(anyhow!(error.to_string())));
             }
         }
     }
@@ -525,26 +524,28 @@ impl DaemonClient {
             command,
         };
         let line = serde_json::to_string(&envelope)?;
-        let (tx, rx) = oneshot::channel::<DaemonResponse>();
+        let (tx, rx) = oneshot::channel::<Result<DaemonResponse>>();
         self.shared.pending.lock().unwrap().insert(id.clone(), tx);
         self.writer
             .send(line)
             .map_err(|_| anyhow!("the daemon connection is closed"))?;
-        tokio::time::timeout(Duration::from_millis(timeout_ms), rx)
-            .await
-            .map_err(|_| {
+        match tokio::time::timeout(Duration::from_millis(timeout_ms), rx).await {
+            // The daemon answered (its response says whether it was happy).
+            Ok(Ok(result)) => result,
+            // The reader task died before resolving this request: the
+            // connection was already gone.
+            Ok(Err(_)) => Err(anyhow!(
+                "Connection to the Prime Agent daemon closed. Socket: {}.",
+                self.socket_path.display()
+            )),
+            Err(_) => {
                 self.shared.pending.lock().unwrap().remove(&id);
-                anyhow!(
+                Err(anyhow!(
                     "Timed out after {timeout_ms}ms waiting for the Prime Agent daemon response. Socket: {}.",
                     self.socket_path.display()
-                )
-            })?
-            .map_err(|_| {
-                anyhow!(
-                    "Connection to the Prime Agent daemon closed. Socket: {}.",
-                    self.socket_path.display()
-                )
-            })
+                ))
+            }
+        }
     }
 
     /// Send a command and require `success: true`, surfacing the daemon error
@@ -595,7 +596,7 @@ impl DaemonClient {
             pa_types::daemon::framing::DEFAULT_PRIVATE_FRAME_LIMITS,
         )
         .map_err(|_| DirectRequestError::NotSent)?;
-        let (reply_tx, reply_rx) = oneshot::channel::<DaemonResponse>();
+        let (reply_tx, reply_rx) = oneshot::channel::<Result<DaemonResponse>>();
         self.shared
             .pending
             .lock()
@@ -606,7 +607,10 @@ impl DaemonClient {
             return Err(DirectRequestError::NotSent);
         }
         match tokio::time::timeout(Duration::from_millis(timeout_ms), reply_rx).await {
-            Ok(Ok(response)) => Ok(response),
+            // The worker answered (its response says whether it was happy).
+            Ok(Ok(Ok(response))) => Ok(response),
+            // The worker link died: a transport failure, never a refusal.
+            Ok(Ok(Err(error))) => Err(DirectRequestError::Wait(error)),
             Ok(Err(_)) => Err(DirectRequestError::Wait(anyhow!(
                 "the direct session connection closed. Socket: {}.",
                 link.socket_path
@@ -716,16 +720,51 @@ enum DirectRequestError {
     Wait(anyhow::Error),
 }
 
-/// Unwrap a settled response into its `data`, surfacing the daemon error
-/// string on failure.
+/// The daemon answered with `success: false` for one request: the daemon
+/// is alive and healthy — it refused THIS request ("Prompt cannot be
+/// empty", a queue/admission refusal, an unknown session selector, a
+/// model the allowlist refuses, ...). Rejections carry data about the
+/// request, never about the connection: the interactive loop renders
+/// them inline and keeps running, while transport failures (dead
+/// socket, timeout, closed connection) stay fatal.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RequestRejected {
+    /// Wire `type` of the refused command, for the rendered message.
+    pub command: String,
+    /// The daemon's raw error string.
+    pub message: String,
+}
+
+impl std::fmt::Display for RequestRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the daemon rejected the {} request: {}",
+            self.command, self.message
+        )
+    }
+}
+
+impl std::error::Error for RequestRejected {}
+
+/// Whether the error is (or wraps) a daemon refusal, not a transport
+/// failure: the daemon answered and refused the request itself.
+pub fn is_daemon_rejection(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<RequestRejected>().is_some())
+}
+
+/// Unwrap a settled response into its `data`, surfacing the daemon
+/// refusal as a typed [`RequestRejected`] on failure.
 fn response_data_or_error(name: &str, response: DaemonResponse) -> Result<Value> {
     if !response.success {
-        return Err(anyhow!(
-            "the daemon rejected the {name} request: {}",
-            response
+        return Err(anyhow::Error::new(RequestRejected {
+            command: name.to_string(),
+            message: response
                 .error
-                .unwrap_or_else(|| "unknown error".to_string())
-        ));
+                .unwrap_or_else(|| "unknown error".to_string()),
+        }));
     }
     Ok(response.data.unwrap_or(Value::Null))
 }
@@ -899,6 +938,56 @@ mod tests {
         assert!(error
             .to_string()
             .contains(socket.display().to_string().as_str()));
+        // A transport failure is never a rejection.
+        assert!(!is_daemon_rejection(&error));
+    }
+
+    #[test]
+    fn failed_response_is_a_typed_rejection() {
+        let response = DaemonResponse {
+            id: None,
+            command: "prompt".to_string(),
+            success: false,
+            data: None,
+            error: Some("Prompt cannot be empty".to_string()),
+            error_info: None,
+        };
+        let error = response_data_or_error("prompt", response).unwrap_err();
+        assert!(is_daemon_rejection(&error));
+        let rejection = error
+            .downcast_ref::<RequestRejected>()
+            .expect("typed rejection");
+        assert_eq!(rejection.command, "prompt");
+        assert_eq!(rejection.message, "Prompt cannot be empty");
+        // The rendered message is byte-identical to the pre-typed string.
+        assert_eq!(
+            rejection.to_string(),
+            "the daemon rejected the prompt request: Prompt cannot be empty"
+        );
+    }
+
+    #[test]
+    fn plain_errors_are_not_rejections() {
+        let error = anyhow!("the daemon connection is closed");
+        assert!(!is_daemon_rejection(&error));
+    }
+
+    #[test]
+    fn fail_pending_resolves_a_transport_failure_not_a_refusal() {
+        // The reader task's dead-connection failure must stay on the
+        // transport half of the pending channel: a closed socket can never
+        // masquerade as a daemon refusal and keep the UI alive.
+        let shared = Shared::default();
+        let (tx, rx) = oneshot::channel();
+        shared
+            .pending
+            .lock()
+            .unwrap()
+            .insert("daemon_1".to_string(), tx);
+        shared.fail_pending("daemon_", "the daemon connection closed");
+        let error = rx.blocking_recv().unwrap().unwrap_err();
+        assert!(!is_daemon_rejection(&error));
+        assert_eq!(error.to_string(), "the daemon connection closed");
     }
 
     /// A scripted worker socket for the direct-link tests: hello frame,
@@ -1167,6 +1256,9 @@ mod tests {
             error.to_string().contains("the daemon connection closed"),
             "unexpected error: {error}"
         );
+        // The dead-connection failure is transport, never a daemon
+        // refusal: the interactive loop must still exit on it.
+        assert!(!is_daemon_rejection(&error));
         client.close();
         let _ = handle.await;
     }

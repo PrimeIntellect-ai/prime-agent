@@ -5,6 +5,9 @@
 //!   and history navigation behave like the interactive product.
 //! - `--frame WxH`: render one 80x24-style frame as plain text to stdout
 //!   (headless structural dump for the tmux verifier).
+//! - `--panic-exit`: panic mid-loop after the first paint (the exit-restore
+//!   verifier's driver: a real unwind on a live surface must still leave
+//!   the terminal whole — alt screen left, cooked tty, no mode leaks).
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -33,6 +36,10 @@ struct Args {
     /// Show thinking blocks in the transcript dump.
     #[arg(long, default_value_t = false)]
     show_thinking: bool,
+    /// Panic mid-loop after the first paint (the exit-restore verifier's
+    /// panic-path driver: a real unwind on the live surface).
+    #[arg(long, default_value_t = false)]
+    panic_exit: bool,
 }
 
 fn newest_session() -> Result<std::path::PathBuf> {
@@ -87,6 +94,7 @@ fn main() -> Result<()> {
 
     let options = AppOptions {
         theme: args.theme.clone(),
+        panic_after_frame: args.panic_exit,
         ..Default::default()
     };
     run_app(

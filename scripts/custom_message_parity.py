@@ -40,12 +40,15 @@ so the normalization can be dropped.
 Second documented divergence (Kevin directive 2026-09-23, product
 improvement BEYOND TS): the RLM child rows render the
 `\u25c6 Subagent <name> finished|failed|cancelled` diamond rows on the Rust
-side (accent diamond, semantic label colors, the failure error and the
+side (the diamond marker carries the row's semantic color — the same style
+the label renders in, success green / error red / cancelled yellow, per the
+same directive's icon-follows-text rule — plus the failure error and the
 cancellation reason as the expandable body, no reply-preview anywhere),
 where the TS binary still shows the generic muted `RLM child status` label
 over the full content markdown. The diff drops the RLM child rows from
 BOTH frames and the run separately asserts the Rust diamond rows ARE
-present (collapsed labels, expanded reason bodies, no preview) and the TS
+present (collapsed labels, expanded reason bodies, no preview, and the
+diamond sharing the label's exact SGR color run per outcome) and the TS
 frames show the old generic label (the baseline the TS team is expected to
 adopt).
 
@@ -55,6 +58,23 @@ Heartbeats group icon — on the Rust side, where the TS binary still
 renders the `\u2665` heart. The diff canonicalizes the row's glyph on both
 frames (the label and schedule still diff) and the run separately asserts
 each side's glyph (Rust clock, TS heart baseline).
+
+
+Third documented divergence (Kevin/Sebastian directive 2026-09-23, product
+improvement BEYOND TS): the expanded refinement outcome hangs on the
+branch grammar — the expanded content carries the dim `╰─ `
+gutter on the first row hanging off the `◆` header and a
+four-space continuation indent after, instead of the TS
+`ExpandableEventMessage`'s plain one-column chat inset (the same grammar
+the expanded ipython cells and the agent-message bodies use). The diff
+drops the refinement row's expanded rows from BOTH frames (the collapsed
+row keeps byte-parity), but the dropped rows do not leave the comparison:
+their visible content must match word for word (whitespace collapsed, the
+gutter glyphs dropped — the intended divergence is the indentation and
+the wrap points it forces, never the Title/Description/section values
+themselves). The run separately asserts the Rust expanded rows carry the
+branch and the TS frames keep the plain-inset baseline (the shape the TS
+team is expected to adopt).
 
 tmux rules: default socket only (`env -u TMUX`), cmparity-* session names,
 no kill-server; sessions are killed individually at the end.
@@ -376,6 +396,31 @@ def normalize(frame, root):
     # glyph.
     frame = frame.replace("\u2665", "<HBICON>")
     frame = frame.replace("\u25f7", "<HBICON>")
+    # The TS product's ripgrep notice (a startup environment notice when
+    # rg is missing under PI_OFFLINE; the Rust build has no equivalent
+    # row yet) is box environment, not transcript parity.
+    kept = []
+    notice = False
+    for line in frame.split("\n"):
+        if any(
+            needle in line
+            for needle in (
+                "ripgrep (rg) is an optional search helper",
+                "Install it with: brew install ripgrep",
+                "Automatic installation was skipped because PI_OFFLINE",
+                "and subagents remain available.",
+            )
+        ):
+            # The notice's trailing blank row drops with it (the block
+            # is notice + one blank on the TS side).
+            notice = True
+            continue
+        if notice and line.strip() == "":
+            notice = False
+            continue
+        notice = False
+        kept.append(line)
+    frame = "\n".join(kept)
     pulses = "".join("\u25f4\u25f7\u25f6\u25f5\u25cb\u25f8\u25fb\u25fc")
     frame = re.sub("[" + pulses + "]", "<PULSE>", frame)
     frame = re.sub("\x1b\[39m\n", "\n", frame)
@@ -539,6 +584,63 @@ def assert_rlm_child_rows(side, collapsed, expanded):
             assert f"Subagent {name}" not in collapsed, "ts: diamond row rendered"
 
 
+
+def _sgr_fg_color(run):
+    """The foreground color parameter inside one SGR run (truecolor
+    `38;2;r;g;b` or 256-color `38;5;N`), None when the run sets no fg."""
+    found = re.search(r"38;2;\d+;\d+;\d+|38;5;\d+", run or "")
+    return found.group(0) if found else None
+
+
+def _row_header_runs(frame, label):
+    """The SGR runs directly before the diamond marker and the label text
+    of one rendered `◆ <label>` header row (the escape-bearing frame):
+    (icon_run, label_run) or None when the row never renders."""
+    for line in frame.split("\n"):
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        if f"\u25c6 {label}" in plain:
+            icon = re.search(r"((?:\x1b\[[0-9;]*m)+)\u25c6", line)
+            text = re.search(r"((?:\x1b\[[0-9;]*m)+)" + re.escape(label), line)
+            if icon and text:
+                return icon.group(1), text.group(1)
+    return None
+
+
+def assert_rlm_child_icon_colors(frames):
+    """The icon-follows-text color contract for the Rust RLM child rows
+    (Kevin directive 2026-09-23, same directive as the row divergence):
+    the diamond marker renders in the row's semantic color — the exact fg
+    run the label uses — so the icon no longer stays on the fixed accent.
+    The kernel-restored row in the same fixture keeps its accent diamond
+    (TS parity), which doubles as the accent baseline the three semantic
+    colors must differ from."""
+    for state in ("a_collapsed", "b_expanded"):
+        frame = frames[state]
+        kernel = _row_header_runs(frame, "Restored Python kernel state")
+        assert kernel, f"rust: kernel-restored header missing in {state}"
+        accent_fg = _sgr_fg_color(kernel[0])
+        assert accent_fg, f"rust: kernel diamond carries no fg color in {state}"
+        icon_fgs = {}
+        for name, outcome in RLM_CHILD_LABELS:
+            label = f"Subagent {name} {outcome}"
+            runs = _row_header_runs(frame, label)
+            assert runs, f"rust: diamond header for {label!r} missing in {state}"
+            icon_fg = _sgr_fg_color(runs[0])
+            label_fg = _sgr_fg_color(runs[1])
+            assert icon_fg, f"rust: {label} diamond carries no fg color in {state}"
+            assert label_fg, f"rust: {label} label carries no fg color in {state}"
+            assert icon_fg == label_fg, (
+                f"rust: {label} diamond fg {icon_fg} != label fg {label_fg} in {state}"
+            )
+            assert icon_fg != accent_fg, (
+                f"rust: {label} diamond still on the accent color in {state}"
+            )
+            icon_fgs[label] = icon_fg
+        assert len(set(icon_fgs.values())) == len(RLM_CHILD_LABELS), (
+            f"rust: the three RLM child outcomes share one icon color in {state}: {icon_fgs}"
+        )
+
+
 def assert_sent_reach(side, collapsed, expanded):
     """The Ctrl+O contract for this fixture: collapsed frames show the
     agent-message and sent-receipt summaries only; the expanded frames show
@@ -573,6 +675,134 @@ def assert_skill_reach(side, collapsed, expanded):
     assert SKILL_ARGS in expanded, f"{side}: skill args missing expanded"
 
 
+# The refinement row's expanded content (the third carried divergence, see
+# the module docstring): the needles cover the expanded block's rows —
+# the expanded summary, the meta, the edit section (label, fields, diff
+# content) — all unique to the expanded state; the collapsed rows carry no
+# branch geometry and stay in the byte diff.
+REFINEMENT_EXPANSION_NEEDLES = [
+    "Create one local memory.",  # the expanded summary (branch-guttered Rust)
+    "Refinement refine_cmparity",  # the meta row
+    "cmparity-memory",  # the edit-section label
+    "Parity memory",  # the Title diff content
+    "The harness stays green.",  # the Description value
+]
+
+
+def split_refinement_expansion(frame, state):
+    """Split the refinement row's expanded rows out of the frame,
+    returning `(kept, removed)`.
+
+    The kept rows byte-diff (the expanded state's rows hang on the
+    branch grammar on the Rust side — the carried indent divergence; the
+    collapsed state is untouched). The removed rows do NOT leave the
+    comparison: `assert_refinement_content` matches their visible
+    content word for word, so a truncated, omitted, or changed
+    Title/Description/section value fails the run instead of vanishing
+    from the byte diff. The field-label rows match by exact stripped
+    text (an indented `Title` on the Rust side, a plain-inset `Title` on
+    the TS side)."""
+    if state != "b_expanded":
+        return frame, []
+    kept, removed = [], []
+    for line in frame.split("\n"):
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        if any(needle in plain for needle in REFINEMENT_EXPANSION_NEEDLES):
+            removed.append(line)
+            continue
+        if plain.strip() in ("Title", "Description"):
+            removed.append(line)
+            continue
+        kept.append(line)
+    return "\n".join(kept), removed
+
+
+def assert_refinement_content(ts_removed, rust_removed):
+    """The removed expansion rows' visible content must match between the
+    products: ANSI-stripped, the branch gutter glyphs dropped, whitespace
+    collapsed. The intended divergence is the indentation and the wrap
+    points the narrower branch content width forces — never the values
+    themselves, so the comparison is over words, not bytes. A frame that
+    never rendered the block fails loudly (the removed set is empty)."""
+
+    def collapsed_content(rows):
+        text = capture_plain_text("\n".join(rows))
+        return re.sub(r"\s+", " ", text.replace("╰─", " ")).strip()
+
+    ts = collapsed_content(ts_removed)
+    rust = collapsed_content(rust_removed)
+    assert ts, "ts: the refinement expansion rows are missing from the frame"
+    assert rust, "rust: the refinement expansion rows are missing from the frame"
+    assert ts == rust, (
+        "the refinement expansion content differs:\n"
+        f"  ts:   {ts}\n"
+        f"  rust: {rust}"
+    )
+
+
+def assert_refinement_branch(side, collapsed, expanded):
+    """The third carried divergence: the Rust expanded refinement block
+    hangs on the branch grammar (the `╰─ ` gutter off the
+    `◆` header, four-space continuation indent); the TS binary keeps
+    the plain one-column chat inset (the baseline)."""
+    summary = "Create one local memory."
+    meta = "Harness refined · 1 memory created · Refinement refine_cmparity · local"
+    gutter = "╰─ "
+    indent = "    "
+    if side == "rust":
+        # Collapsed keeps the TS shape: plain inset, no branch.
+        assert " " + summary in collapsed, f"rust: summary missing collapsed"
+        assert gutter + summary not in collapsed, "rust: branch rendered collapsed"
+        # Expanded hangs the summary on the gutter, the meta on the
+        # continuation indent, the edit section re-branches.
+        assert " " + gutter + summary in expanded, "rust: expanded summary missing the branch gutter"
+        assert indent + meta in expanded, "rust: meta missing the continuation indent"
+        assert " " + gutter + "Created local memory `cmparity-memory`" in expanded, (
+            "rust: edit-section label missing the branch gutter"
+        )
+        assert indent + "Compacted" not in expanded
+    else:
+        assert " " + summary in expanded, "ts: summary missing expanded (baseline)"
+        assert gutter + summary not in expanded, "ts: unexpectedly renders the branch"
+        assert " " + meta in expanded, "ts: meta missing expanded (baseline)"
+        assert " " + "Created local memory `cmparity-memory`" in expanded, (
+            "ts: edit-section label missing expanded (baseline)"
+        )
+
+
+def align_frame_tops(left, right):
+    """Trim the scroll-leak rows a bottom-pinned viewport shows, and only
+    those.
+
+    The compared frames are bottom-pinned viewport windows; a row-count
+    delta anywhere in the content shifts one window's top over the
+    other's — the longer frame's top rows are rows the shorter side
+    scrolled off, a window artifact, not a row-shape divergence. The
+    bottom is the anchor: the trailing rows are the same pane tail on
+    both sides, so a proven common suffix must cover the whole length
+    difference before any top row is dropped, and then only the length
+    difference itself comes off the longer frame's top. No row is ever
+    dropped because it exists somewhere in the other frame — a real
+    top-of-screen regression still diffs."""
+    left_rows, right_rows = left.split("\n"), right.split("\n")
+    n, m = len(left_rows), len(right_rows)
+    if n == m:
+        return left, right
+    longer, shorter = (left_rows, right_rows) if n > m else (right_rows, left_rows)
+    delta = abs(n - m)
+    # Prove the bottoms correspond: count the longest common suffix.
+    suffix = 0
+    while suffix < min(n, m) and longer[len(longer) - 1 - suffix] == shorter[len(shorter) - 1 - suffix]:
+        suffix += 1
+    if suffix < delta:
+        # No proven bottom anchor covering the leak: leave both frames
+        # whole so the diff surfaces every differing row.
+        return left, right
+    if n > m:
+        return "\n".join(left_rows[delta:]), right
+    return left, "\n".join(right_rows[delta:])
+
+
 def diff_lines(left, right):
     return "\n".join(
         difflib.unified_diff(left.split("\n"), right.split("\n"), fromfile="ts", tofile="rust", lineterm="", n=1)
@@ -586,6 +816,28 @@ def wait_for(session, needle, timeout):
             return
         time.sleep(0.3)
     raise TimeoutError(f"session {session} never showed {needle!r}")
+
+
+def mode_label(session):
+    """The conversation-detail label in the prompt-context row
+    (Collapsed / Details / Expanded)."""
+    match = re.search(r"(Collapsed|Details|Expanded) mode \(Ctrl\+O", capture_plain(session))
+    return match.group(1) if match else None
+
+
+def press_until_mode(session, target, max_presses=4):
+    """Ctrl+O until the conversation-detail label reads `target`.
+
+    The two products' resume detail levels differ (the TS resume starts
+    at details, the Rust replay at overview), so fixed press counts
+    desync the compared states: drive both sides to the same label
+    instead."""
+    for _ in range(max_presses):
+        if mode_label(session) == target:
+            return True
+        tmux("send-keys", "-t", session, "C-o")
+        time.sleep(1.2)
+    return mode_label(session) == target
 
 
 def find_runtime_package_dir():
@@ -603,7 +855,24 @@ def find_runtime_package_dir():
 def run_ts(session_path, sandbox, size, out_dir):
     session = f"cmparity-ts-{size[0]}x{size[1]}"
     tmux("kill-session", "-t", session, check=False)
-    tmux("new-session", "-d", "-s", session, "-x", size[0], "-y", size[1], "-c", sandbox["cwd"])
+    tmux(
+        "new-session",
+        "-d",
+        "-s",
+        session,
+        "-x",
+        size[0],
+        "-y",
+        size[1],
+        "-c",
+        sandbox["cwd"],
+        # A plain shell: the box tmux default-shell is herdr's prime-agent
+        # launcher (every new pane boots a live agent TUI, hijacking the
+        # harness's send-keys contract). herdr's documented opt-out keeps
+        # the pane a plain interactive shell.
+        "-e",
+        "HERDR_PLAIN_SHELL=1",
+    )
     env = (
         f"HOME={sandbox['home']} "
         f"TMPDIR={sandbox['tmp']} "
@@ -620,11 +889,15 @@ def run_ts(session_path, sandbox, size, out_dir):
     tmux("send-keys", "-t", session, command, "Enter")
     wait_for(session, MARKER_TEXT, timeout=60)
     time.sleep(1.5)
+    # Label-driven states: both sides park at Collapsed for the first
+    # capture, then drive to Expanded for the second (fixed press counts
+    # desync: the TS resume starts at details, the Rust at overview).
+    if not press_until_mode(session, "Collapsed"):
+        raise TimeoutError(f"session {session} never reached Collapsed mode")
     frames = {"a_collapsed": capture(session)}
-    # Ctrl+O twice: all mode (expanded bodies and shell output).
-    tmux("send-keys", "-t", session, "C-o")
-    tmux("send-keys", "-t", session, "C-o")
-    time.sleep(1.5)
+    if not press_until_mode(session, "Expanded"):
+        raise TimeoutError(f"session {session} never reached Expanded mode")
+    time.sleep(0.5)
     frames["b_expanded"] = capture(session)
     tmux("kill-session", "-t", session, check=False)
     for state, frame in frames.items():
@@ -636,7 +909,24 @@ def run_ts(session_path, sandbox, size, out_dir):
 def run_rust(session_path, sandbox, size, out_dir):
     session = f"cmparity-rust-{size[0]}x{size[1]}"
     tmux("kill-session", "-t", session, check=False)
-    tmux("new-session", "-d", "-s", session, "-x", size[0], "-y", size[1], "-c", sandbox["cwd"])
+    tmux(
+        "new-session",
+        "-d",
+        "-s",
+        session,
+        "-x",
+        size[0],
+        "-y",
+        size[1],
+        "-c",
+        sandbox["cwd"],
+        # A plain shell: the box tmux default-shell is herdr's prime-agent
+        # launcher (every new pane boots a live agent TUI, hijacking the
+        # harness's send-keys contract). herdr's documented opt-out keeps
+        # the pane a plain interactive shell.
+        "-e",
+        "HERDR_PLAIN_SHELL=1",
+    )
     rust = os.environ.get(
         "PA_RUST_REPLAY",
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "target", "debug", "pa-tui-replay"),
@@ -646,10 +936,12 @@ def run_rust(session_path, sandbox, size, out_dir):
     tmux("send-keys", "-t", session, command, "Enter")
     wait_for(session, MARKER_TEXT, timeout=60)
     time.sleep(1.5)
+    if not press_until_mode(session, "Collapsed"):
+        raise TimeoutError(f"session {session} never reached Collapsed mode")
     frames = {"a_collapsed": capture(session)}
-    tmux("send-keys", "-t", session, "C-o")
-    tmux("send-keys", "-t", session, "C-o")
-    time.sleep(1.5)
+    if not press_until_mode(session, "Expanded"):
+        raise TimeoutError(f"session {session} never reached Expanded mode")
+    time.sleep(0.5)
     frames["b_expanded"] = capture(session)
     tmux("kill-session", "-t", session, check=False)
     for state, frame in frames.items():
@@ -723,12 +1015,26 @@ def main():
                 assert_rlm_child_rows(side, collapsed, expanded)
                 assert_heartbeat_row(side, collapsed, expanded)
                 assert_skill_reach(side, collapsed, expanded)
+                assert_refinement_branch(side, collapsed, expanded)
+                # The icon-follows-text color contract (the same directive as
+                # the row divergence): the escape-bearing Rust frames carry
+                # it; the TS frames have no icon to check (the generic label).
+                assert_rlm_child_icon_colors(rust_frames)
             for state in ("a_collapsed", "b_expanded"):
-                ts_norm = normalize(strip_rlm_child_rows(ts_frames[state]), base)
-                rust_norm = normalize(
-                    strip_rlm_child_rows(strip_rust_agent_message_preview(rust_frames[state])),
-                    base,
+                ts_kept, ts_removed = split_refinement_expansion(
+                    strip_rlm_child_rows(ts_frames[state]), state
                 )
+                rust_kept, rust_removed = split_refinement_expansion(
+                    strip_rlm_child_rows(strip_rust_agent_message_preview(rust_frames[state])),
+                    state,
+                )
+                # The expanded block's rows leave the byte diff (the
+                # carried indent divergence) but not the comparison: their
+                # content must match word for word.
+                if state == "b_expanded":
+                    assert_refinement_content(ts_removed, rust_removed)
+                ts_norm = normalize(ts_kept, base)
+                rust_norm = normalize(rust_kept, base)
                 # The carried divergence: the Rust header shows the
                 # collapsed preview; the TS binary does not (yet).
                 rust_plain = capture_plain_text(rust_frames[state])
@@ -739,6 +1045,7 @@ def main():
                     ts_frames[state]
                 ), f"ts unexpectedly renders the preview in {state}"
                 name = f"{state}-{size[0]}x{size[1]}"
+                ts_norm, rust_norm = align_frame_tops(ts_norm, rust_norm)
                 if ts_norm == rust_norm:
                     print(f"PASS {name}")
                 else:

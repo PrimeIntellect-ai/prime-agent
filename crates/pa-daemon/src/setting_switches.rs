@@ -616,8 +616,10 @@ mod tests {
     }
 
     /// The connection state carries the settings-seeded switches: the TS
-    /// default service tier ("default", not the old hard-coded "auto") and
-    /// the queue modes.
+    /// default service tier ("default", not the old hard-coded "auto")
+    /// and the queue modes. The steering default is "all" (every queued
+    /// steer co-delivers as ONE turn at the next tool-call boundary);
+    /// the follow-up default is "one-at-a-time".
     #[tokio::test]
     async fn connection_state_seeds_the_settings_switches() {
         let worker = created_worker().await;
@@ -629,9 +631,16 @@ mod tests {
             .await;
         let data = response.data.expect("data");
         assert_eq!(data["serviceTier"], json!("default"));
-        // TS settings defaults: both queue modes start "one-at-a-time".
-        assert_eq!(data["steeringMode"], json!("one-at-a-time"));
-        assert_eq!(data["followUpMode"], json!("one-at-a-time"));
+        assert_eq!(
+            data["steeringMode"],
+            json!("all"),
+            "the product default batches the parked steering prefix"
+        );
+        assert_eq!(
+            data["followUpMode"],
+            json!("one-at-a-time"),
+            "the follow-up default keeps the TS one-per-turn behavior"
+        );
         assert_eq!(data["scopedModels"], json!([]));
     }
 

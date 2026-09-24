@@ -454,7 +454,57 @@ pub(crate) fn parse_chunk_usage(
             })
             .as_ref(),
     );
+    // OpenRouter reports billing truth in usage, already priced by the endpoint
+    // and service tier that served the request
+    // (https://openrouter.ai/docs/api-reference/overview). Trust it over the
+    // catalog-rate estimate, scaling the component breakdown to match.
+    let reported_cost = if model.provider == "openrouter" {
+        openrouter_reported_cost(raw_usage)
+    } else {
+        None
+    };
+    if let Some(reported_cost) = reported_cost {
+        if usage.cost.total.as_f64() > 0.0 {
+            let scale = reported_cost / usage.cost.total.as_f64();
+            usage.cost.input = (usage.cost.input.as_f64() * scale).into();
+            usage.cost.output = (usage.cost.output.as_f64() * scale).into();
+            usage.cost.cache_read = (usage.cost.cache_read.as_f64() * scale).into();
+            usage.cost.cache_write = (usage.cost.cache_write.as_f64() * scale).into();
+        } else if usage.total_tokens > 0 {
+            // No catalog rates to apportion by: attribute by token counts instead.
+            let total_tokens = usage.total_tokens as f64;
+            usage.cost.input = (reported_cost * usage.input as f64 / total_tokens).into();
+            usage.cost.output = (reported_cost * usage.output as f64 / total_tokens).into();
+            usage.cost.cache_read = (reported_cost * usage.cache_read as f64 / total_tokens).into();
+            usage.cost.cache_write =
+                (reported_cost * usage.cache_write as f64 / total_tokens).into();
+        }
+        usage.cost.total = reported_cost.into();
+    }
     usage
+}
+
+/// The user's real spend for an OpenRouter request, or `None` to keep the
+/// catalog estimate. `usage.cost` only carries what OpenRouter charged the
+/// account's credits: for BYOK requests that is just OpenRouter's fee, so
+/// real spend is the upstream provider's bill plus that fee. A cost of 0 can
+/// mean not-billed-via-credits (e.g. `:free` endpoints) rather than free, so
+/// it keeps the catalog estimate.
+fn openrouter_reported_cost(raw_usage: &Value) -> Option<f64> {
+    let credits = raw_usage
+        .get("cost")
+        .and_then(Value::as_f64)
+        .filter(|cost| *cost > 0.0);
+    if raw_usage.get("is_byok").and_then(Value::as_bool) == Some(true) {
+        let upstream = raw_usage
+            .get("cost_details")
+            .and_then(|details| details.get("upstream_inference_cost"))
+            .and_then(Value::as_f64);
+        return upstream
+            .filter(|upstream| *upstream > 0.0)
+            .map(|upstream| upstream + credits.unwrap_or(0.0));
+    }
+    credits
 }
 
 pub(crate) fn map_stop_reason(reason: &str) -> (StopReason, Option<String>) {
@@ -474,5 +524,110 @@ pub(crate) fn map_stop_reason(reason: &str) -> (StopReason, Option<String>) {
             StopReason::Error,
             Some(format!("Provider finish_reason: {other}")),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ModelCost, ModelInput};
+    use pa_types::JsNumber;
+
+    fn model(provider: &str, input: f64, output: f64) -> Model {
+        Model {
+            id: "m".into(),
+            name: "m".into(),
+            api: "openai-completions".into(),
+            provider: provider.into(),
+            base_url: "http://localhost".into(),
+            reasoning: false,
+            thinking_level_map: None,
+            input: vec![ModelInput::Text],
+            cost: ModelCost {
+                input: JsNumber::from(input),
+                output: JsNumber::from(output),
+                cache_read: JsNumber::from(0.0),
+                cache_write: JsNumber::from(0.0),
+            },
+            context_window: 128_000,
+            max_tokens: 8192,
+            featured: None,
+            headers: None,
+            compat: None,
+        }
+    }
+
+    enum ByokBilling {
+        NotByok,
+        FeeOnly,
+        WithUpstreamBill(f64),
+    }
+
+    fn raw_usage(cost: f64, byok: ByokBilling) -> Value {
+        let mut raw = json!({
+            "prompt_tokens": 50_000,
+            "completion_tokens": 50_000,
+            "total_tokens": 100_000,
+            "cost": cost,
+        });
+        match byok {
+            ByokBilling::NotByok => {}
+            ByokBilling::FeeOnly => raw["is_byok"] = json!(true),
+            ByokBilling::WithUpstreamBill(upstream) => {
+                raw["is_byok"] = json!(true);
+                raw["cost_details"] = json!({ "upstream_inference_cost": upstream });
+            }
+        }
+        raw
+    }
+
+    #[test]
+    fn openrouter_zero_reported_cost_keeps_catalog_estimate() {
+        let model = model("openrouter", 0.5, 0.5);
+        // A cost of 0 can mean not-billed-via-credits (:free endpoints)
+        // rather than free, so the catalog estimate stays.
+        let usage = parse_chunk_usage(&raw_usage(0.0, ByokBilling::NotByok), &model, None);
+        assert!((usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn openrouter_byok_without_upstream_keeps_catalog_estimate() {
+        let model = model("openrouter", 0.5, 0.5);
+        // BYOK credits are only OpenRouter's fee; without the upstream bill
+        // the real spend is unknown, so the catalog estimate stays.
+        let usage = parse_chunk_usage(&raw_usage(0.003, ByokBilling::FeeOnly), &model, None);
+        assert!((usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn openrouter_byok_upstream_cost_replaces_catalog_estimate() {
+        let model = model("openrouter", 0.5, 0.5);
+        // Credits charged by OpenRouter plus the upstream provider's bill.
+        let usage = parse_chunk_usage(
+            &raw_usage(0.003, ByokBilling::WithUpstreamBill(0.2)),
+            &model,
+            None,
+        );
+        assert!((usage.cost.input.as_f64() - 0.1015).abs() < 1e-9);
+        assert!((usage.cost.output.as_f64() - 0.1015).abs() < 1e-9);
+        assert!((usage.cost.total.as_f64() - 0.203).abs() < 1e-9);
+    }
+
+    #[test]
+    fn openrouter_reported_cost_apportioned_by_tokens_without_rates() {
+        let model = model("openrouter", 0.0, 0.0);
+        let raw = json!({"prompt_tokens": 40_000, "completion_tokens": 10_000, "total_tokens": 50_000, "cost": 0.15});
+        let usage = parse_chunk_usage(&raw, &model, None);
+        assert!((usage.cost.input.as_f64() - 0.12).abs() < 1e-9);
+        assert!((usage.cost.output.as_f64() - 0.03).abs() < 1e-9);
+        assert!((usage.cost.cache_read.as_f64() - 0.0).abs() < 1e-9);
+        assert!((usage.cost.total.as_f64() - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn non_openrouter_provider_ignores_reported_cost() {
+        let model = model("zai", 0.5, 0.5);
+        let usage = parse_chunk_usage(&raw_usage(0.07, ByokBilling::NotByok), &model, None);
+        assert!((usage.cost.total.as_f64() - 0.05).abs() < 1e-9);
     }
 }

@@ -7,6 +7,7 @@
 //! external tooling read the same files.
 
 use anyhow::{anyhow, Context, Result};
+use pa_types::ai::Usage;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -935,6 +936,11 @@ pub struct SessionInfo {
     pub all_messages_text: String,
     /// The latest `agent_status` recap (`summary` is searchable).
     pub agent_status: Option<Value>,
+    /// TS `SessionInfo.usage`: the own-usage summary — assistant
+    /// aggregates plus summarization calls, minus every attributed child
+    /// block (`session_usage::UsageScan`; the child's own row carries the
+    /// child spend). `None` when the session recorded no billable work.
+    pub usage: Option<crate::session_usage::SessionUsageSummary>,
 }
 
 /// TS `SESSION_LIST_SEARCH_TEXT_MAX_CHARS`: the transcript search-text cap.
@@ -1018,6 +1024,10 @@ struct SessionInfoMessage {
     model: Option<Value>,
     #[serde(default)]
     timestamp: Option<Value>,
+    /// The lenient scan-side shape ([`crate::session_usage::ScanUsage`]):
+    /// a partial persisted block must not reject the row.
+    #[serde(default)]
+    usage: Option<crate::session_usage::ScanUsage>,
 }
 
 #[derive(Deserialize)]
@@ -1026,7 +1036,7 @@ struct SessionInfoEntry {
     #[serde(rename = "type")]
     type_: String,
     #[serde(rename = "id")]
-    _id: String,
+    id: String,
     #[serde(rename = "timestamp")]
     _timestamp: String,
     #[serde(default, rename = "parentId")]
@@ -1045,6 +1055,16 @@ struct SessionInfoEntry {
     status: Option<Value>,
     #[serde(default)]
     message: Option<SessionInfoMessage>,
+    /// `child_usage_attributed`: the parent entry the aggregate folds into.
+    #[serde(default)]
+    target_id: Option<String>,
+    #[serde(default)]
+    child_usage: Option<crate::session_usage::ScanUsage>,
+    #[serde(default)]
+    aggregate_usage: Option<crate::session_usage::ScanUsage>,
+    /// `compaction`/`branch_summary`: the summarization call's own usage.
+    #[serde(default)]
+    usage: Option<crate::session_usage::ScanUsage>,
 }
 
 pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
@@ -1072,6 +1092,7 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
     let mut first_message = String::new();
     let mut all_messages_text = String::new();
     let mut agent_status: Option<Value> = None;
+    let mut usage_scan = crate::session_usage::UsageScan::default();
     let mut last_activity_ms: Option<u64> = None;
     let mut reader = std::io::BufReader::new(file);
     let mut line = String::new();
@@ -1129,10 +1150,21 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
                 }
             }
             "agent_status" => agent_status = entry.status,
+            "child_usage_attributed" => {
+                usage_scan.fold_child_attribution(
+                    entry.target_id.as_deref(),
+                    entry.child_usage.map(Usage::from),
+                    entry.aggregate_usage.map(Usage::from),
+                );
+            }
+            "compaction" | "branch_summary" => {
+                usage_scan.fold_summarization(entry.usage.map(Usage::from));
+            }
             "message" => {
                 message_count += 1;
                 if let Some(message) = entry.message {
                     let role = message.role.as_ref().and_then(Value::as_str);
+                    usage_scan.fold_message(&entry.id, role, message.usage.map(Usage::from));
                     if role == Some("assistant") {
                         if let (Some(provider), Some(model_id)) = (
                             message.provider.as_ref().and_then(Value::as_str),
@@ -1174,6 +1206,7 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
             _ => {}
         }
     }
+    let usage = usage_scan.summary();
     let header = header?;
     let modified_ms = last_activity_ms.unwrap_or(0);
     let modified = if modified_ms > 0 {
@@ -1206,6 +1239,7 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
         },
         all_messages_text,
         agent_status,
+        usage,
     };
     // A concurrent append/replacement must never certify stale metadata.
     // The legacy no-timestamp fallback is now(), not a durable file value.
@@ -1602,6 +1636,121 @@ mod tests {
                 "summary": "login fix landed", "basedOnMessageCount": 2
             }))
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The saved-row usage summary folds like the TS scan: raw assistant
+    /// usage keyed by entry id, the latest attribution aggregate replacing
+    /// the raw block, every child block accumulating, summarization usage
+    /// added, and the child spend subtracted — the child's own row carries
+    /// it, so rollups never double count. `session_usage`'s tests pin the
+    /// fold unit-by-unit; this pins the listing scan's wiring.
+    #[test]
+    fn scan_folds_the_saved_row_usage_summary() {
+        let dir = temp_dir();
+        let mut session = SessionFile::create("/tmp", None, 0);
+        let path = dir.join(session_file_name(session.session_id()));
+        session.set_path(path.clone());
+        let assistant_id = session.append_message(json!({
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "run it" }],
+            "provider": "p", "model": "m", "timestamp": 1u64,
+            "usage": {
+                "input": 100, "output": 10, "cacheRead": 20, "cacheWrite": 0,
+                "totalTokens": 130,
+                "cost": { "input": 0.0, "output": 0.5, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.5 }
+            }
+        }));
+        session.append_entry(
+            "child_usage_attributed",
+            json!({
+                "targetId": assistant_id, "origin": "spawn_task",
+                "childUsage": {
+                    "input": 30, "output": 3, "cacheRead": 0, "cacheWrite": 0,
+                    "totalTokens": 33,
+                    "cost": { "input": 0.0, "output": 0.125, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.125 }
+                },
+                "aggregateUsage": {
+                    "input": 130, "output": 13, "cacheRead": 20, "cacheWrite": 0,
+                    "totalTokens": 163,
+                    "cost": { "input": 0.0, "output": 0.5, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.5 }
+                }
+            }),
+        );
+        session.append_entry(
+            "compaction",
+            json!({
+                "summary": "kept", "firstKeptEntryId": assistant_id, "tokensBefore": 100,
+                "usage": {
+                    "input": 50, "output": 5, "cacheRead": 0, "cacheWrite": 0,
+                    "totalTokens": 55,
+                    "cost": { "input": 0.0, "output": 0.25, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.25 }
+                }
+            }),
+        );
+        session.rewrite().unwrap();
+
+        let info = read_session_info(&path).unwrap();
+        // Own: aggregate (150 in + 20 cache, 13 out, $0.5) + compaction
+        // (50, 5, $0.25) - child (30, 3, $0.125).
+        assert_eq!(
+            info.usage,
+            Some(crate::session_usage::SessionUsageSummary {
+                input_tokens: 170,
+                output_tokens: 15,
+                cost: 0.625
+            })
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A persisted partial usage object (`{input, output, totalTokens}`
+    /// without `cacheRead`/`cacheWrite`/`cost`) must not reject the whole
+    /// entry: TS `JSON.parse` keeps the row, so the count, model, search
+    /// text, and every present usage field survive.
+    #[test]
+    fn scan_keeps_messages_with_partial_usage_objects() {
+        let dir = temp_dir();
+        let mut session = SessionFile::create("/tmp", None, 0);
+        let path = dir.join(session_file_name(session.session_id()));
+        session.set_path(path.clone());
+        session.append_message(json!({"role": "user", "content": "run it", "timestamp": 1u64}));
+        session.append_message(json!({
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "done" }],
+            "provider": "p", "model": "m", "timestamp": 2u64,
+            "usage": { "input": 5, "output": 1, "totalTokens": 6 }
+        }));
+        session.rewrite().unwrap();
+
+        let info = read_session_info(&path).unwrap();
+        assert_eq!(info.message_count, 2);
+        assert_eq!(info.model, Some(("p".to_string(), "m".to_string())));
+        assert!(info.all_messages_text.contains("done"));
+        assert_eq!(
+            info.usage,
+            Some(crate::session_usage::SessionUsageSummary {
+                input_tokens: 5,
+                output_tokens: 1,
+                cost: 0.0
+            })
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A session with no billable work publishes no usage field (TS
+    /// `sessionUsageSummaryFrom` returns undefined).
+    #[test]
+    fn scan_omits_usage_without_billable_work() {
+        let dir = temp_dir();
+        let mut session = SessionFile::create("/tmp", None, 0);
+        let path = dir.join(session_file_name(session.session_id()));
+        session.set_path(path.clone());
+        session.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+        session.rewrite().unwrap();
+
+        let info = read_session_info(&path).unwrap();
+        assert_eq!(info.usage, None);
         let _ = fs::remove_dir_all(&dir);
     }
 
