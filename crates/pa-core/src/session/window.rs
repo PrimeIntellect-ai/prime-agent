@@ -320,7 +320,7 @@ impl WindowedSessionStore {
                         value.get("targetId").and_then(serde_json::Value::as_str),
                         value
                             .get("aggregateUsage")
-                            .filter(serde_json::Value::is_object),
+                            .filter(|aggregate| aggregate.is_object()),
                     ) {
                         older_aggregates
                             .entry(target.to_owned())
