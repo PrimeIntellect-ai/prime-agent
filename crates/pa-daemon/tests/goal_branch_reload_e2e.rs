@@ -438,7 +438,7 @@ fn navigate_tree_moves_follow_the_branchs_goal_state() {
     // can trail the navigate response (TS `_emitGoalUpdate` fires after
     // the branch state loads); drain the wire before asserting on the
     // announced statuses, or the announcement may not be collected yet.
-    harness.drain_events(Duration::from_millis(150));
+    harness.client.drain_events(Duration::from_millis(150));
     assert!(
         harness.announced_goal_statuses()[statuses_before.len()..]
             .iter()
