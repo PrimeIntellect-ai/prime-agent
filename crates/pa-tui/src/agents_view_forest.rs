@@ -1246,10 +1246,18 @@ mod tests {
             1,
             "the parent is the only agent row: {rows:?}"
         );
+        let parent_row = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Agent)
+            .expect("the parent row");
+        assert_eq!(
+            parent_row.descendant_count, 1,
+            "the opened child rides the parent's aggregate: {rows:?}"
+        );
         assert!(
             rows.iter()
-                .any(|row| row.kind == RowKind::SubagentSummary && row.descendant_count == 1),
-            "the opened child rides the parent's aggregate: {rows:?}"
+                .any(|row| row.kind == RowKind::SubagentSummary && row.title == "1 subagent"),
+            "the parent's summary row labels the aggregate: {rows:?}"
         );
         let rows = rows_for(&roster, None, &["file:/x/parent.jsonl"]);
         let child = rows
