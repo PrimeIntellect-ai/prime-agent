@@ -7462,18 +7462,30 @@ impl SessionUi {
                     // instantly), so it keeps the synchronous platform
                     // chain and its captured OSC sink stays verifiable.
                     if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-                        use base64::Engine;
                         use std::io::Write;
-                        let encoded =
-                            base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
-                        let mut out = std::io::stdout();
-                        match out.write_all(format!("\x1b]52;c;{encoded}\x07").as_bytes()) {
-                            Ok(()) => {
-                                let _ = out.flush();
-                                self.toast("Copied selection to clipboard", view);
+                        // The sequence goes through `osc52::sequence`, so
+                        // the encoded-payload cap applies to this path
+                        // like every other OSC 52 write: an oversized
+                        // sequence desynchronizes the terminal, so the
+                        // copy reports failure instead of writing it.
+                        match crate::osc52::sequence(&text) {
+                            Some(sequence) => {
+                                let mut out = std::io::stdout();
+                                match out.write_all(sequence.as_bytes()) {
+                                    Ok(()) => {
+                                        let _ = out.flush();
+                                        self.toast("Copied selection to clipboard", view);
+                                    }
+                                    Err(error) => {
+                                        self.error_row(
+                                            &format!("Failed to copy selection: {error}"),
+                                            view,
+                                        );
+                                    }
+                                }
                             }
-                            Err(error) => {
-                                self.error_row(&format!("Failed to copy selection: {error}"), view);
+                            None => {
+                                self.error_row("Failed to copy selection to clipboard", view);
                             }
                         }
                     } else {
