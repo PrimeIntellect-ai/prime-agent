@@ -505,7 +505,7 @@ mod tests {
     /// prompt or Cmd+Backspace deleting a character would be surprising.
     #[test]
     fn super_modified_special_keys_keep_their_identity() {
-        crate::enhanced_keys::TEST_STATE_LOCK
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         crate::enhanced_keys::set_kitty_active_for_tests(false);
