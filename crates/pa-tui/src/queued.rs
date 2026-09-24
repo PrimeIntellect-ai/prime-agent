@@ -14,7 +14,11 @@
 //! Kevin 2026-09-24, queue-condensed-display): TS renders every internal
 //! prompt as its own preview row too; Rust renders one summed-count row -
 //! "x agent messages, heartbeats, and other internal prompts queued" -
-//! so the visual queue prioritizes human-inserted prompts. The
+//! so the visual queue prioritizes human-inserted prompts. The classifier
+//! is TS `isLabeledQueuedPreview` on the preview string (the wire carries
+//! no provenance), so a human-typed prompt that begins with one of the
+//! internal labels condenses too - it still delivers, and the browse
+//! affordance walks and shows it. The
 //! browse/edit affordances TS gives the strip (TS `QueueSelection`,
 //! alt+up/alt+down to pick a parked message, ctrl+alt+arrows to reorder,
 //! Enter to steer the edit, the follow-up key to park it) still walk every
