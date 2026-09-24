@@ -164,7 +164,7 @@ fn kept_region_messages(store: &SessionFile) -> (Vec<&Value>, Option<usize>) {
                 .get("firstKeptEntryId")
                 .and_then(Value::as_str)
                 .and_then(|id| chain.iter().find(|position| entries[**position].id == id))
-                .unwrap_or(*compaction)
+                .unwrap_or(compaction)
         });
     let messages = chain
         .iter()
@@ -175,7 +175,7 @@ fn kept_region_messages(store: &SessionFile) -> (Vec<&Value>, Option<usize>) {
         .filter(|position| entries[**position].type_ == "message")
         .filter_map(|position| entries[*position].fields.get("message"))
         .collect();
-    (messages, boundary)
+    (messages, boundary.copied())
 }
 
 /// `contextUsage` for one whole store (the `get_context_tree` root node):
