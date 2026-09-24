@@ -433,9 +433,10 @@ mod tests {
         // The selection moved the cursor to the line start, so the yanked
         // word inserts there (a stale anchor would splice `keep ` away).
         assert_eq!(e.get_text(), "dropkeep ");
-        // Typing after a yank never replaces a stale range.
+        // Typing after a yank never replaces a stale range (the cursor
+        // sits after the yanked word).
         e.handle_input("!");
-        assert_eq!(e.get_text(), "dropkeep !");
+        assert_eq!(e.get_text(), "drop!keep ");
     }
 
     /// An empty paste payload (control-only bytes) is a full no-op: the
