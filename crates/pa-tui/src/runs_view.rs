@@ -124,7 +124,7 @@ impl RunsView {
                 if self.detail_region_rows.get() == 0 {
                     return;
                 }
-                self.scroll_from_end = self.scroll_from_end.saturating_add_signed(delta).max(0);
+                self.scroll_from_end = self.scroll_from_end.saturating_add_signed(delta);
             }
         }
     }
@@ -190,7 +190,8 @@ impl RunsView {
         if runs.is_empty() {
             lines.push(vec![
                 Span::raw("  "),
-                view.theme.fg_span(ThemeColor::Muted, "No condensed runs".to_string()),
+                view.theme
+                    .fg_span(ThemeColor::Muted, "No condensed runs".to_string()),
             ]);
         } else {
             let visible = self.visible_items(runs.len());
@@ -230,14 +231,11 @@ impl RunsView {
         let mut row: Line = vec![Span::raw(format!(" {glyph} "))];
         // The summary row leads with its own one-column chat margin; the
         // list row already carried the indent, so the margin drops.
-        row.extend(render_summary_row(
-            &summary,
-            view.pulse_frame,
-            &view.theme,
-            width,
-        )
-        .into_iter()
-        .skip(1));
+        row.extend(
+            render_summary_row(&summary, view.pulse_frame, &view.theme, width)
+                .into_iter()
+                .skip(1),
+        );
         if selected {
             row = row
                 .into_iter()
@@ -278,20 +276,13 @@ impl RunsView {
         for index in run.start..run.end {
             let entry = &view.chat[index];
             let preceded = index > 0 && view.is_compact_neighbor(&view.chat[index - 1]);
-            rows.extend(view.render_entry_uncondensed(
-                index,
-                entry,
-                width,
-                index == 0,
-                preceded,
-            ));
+            rows.extend(view.render_entry_uncondensed(index, entry, width, index == 0, preceded));
         }
         let budget = self.viewport_rows.saturating_sub(DETAIL_FRAME_ROWS);
         let mut lines = Vec::new();
-        lines.push(vec![
-            view.theme
-                .fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width.max(1))),
-        ]);
+        lines.push(vec![view
+            .theme
+            .fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width.max(1)))]);
         lines.push(detail_header(view, width, &summary));
         lines.push(Vec::new());
         if budget == 0 {
@@ -425,9 +416,7 @@ fn pane_header_lines(
         }
     }
     vec![
-        vec![
-            theme.fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width.max(1))),
-        ],
+        vec![theme.fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width.max(1)))],
         truncate_line(&title_row, width, ""),
         Vec::new(),
     ]
@@ -447,5 +436,3 @@ fn pane_footer(theme: &Theme, width: usize, hint: &str) -> Vec<Line> {
         ),
     ]
 }
-
-

@@ -11,7 +11,6 @@ use pa_types::slash_commands::{SlashCommandExecution, SlashCommandRegistry};
 use serde_json::Value;
 
 use crate::bash_view::{BashView, BashViewAction};
-use crate::runs_view::{RunsView, RunsViewAction};
 use crate::chat::{
     ChatEntry, CompactionReason, CompactionState, MessageBlock, RetryState, StatusKind,
     ToolResultView, WorkingState,
@@ -35,6 +34,7 @@ use crate::model_picker::{CurrentModel, ModelPicker, ModelPickerAction, ModelPic
 use crate::prompt_stash::PromptStash;
 use crate::provider_auth::{AuthSelectorAction, AuthSelectorKind};
 use crate::queued::{QueueBrowseDirection, QueueLane};
+use crate::runs_view::{RunsView, RunsViewAction};
 use crate::snapshot::{
     assistant_message_parts, attach_data_from_response, event_to_update, reconstruct, TurnUpdate,
 };

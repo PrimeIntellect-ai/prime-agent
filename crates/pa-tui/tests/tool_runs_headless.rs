@@ -133,9 +133,7 @@ impl MockSupervisor {
 /// `calls` ipython tool calls, the execution lifecycle for each call, the
 /// turn end, and the agent drain.
 fn serve_turn(writer: &mut UnixStream, prompt: &str) {
-    let event = |payload: Value| {
-        json!({ "type": "session_event", "activeSessionId": "s1", "event": payload })
-    };
+    let event = |payload: Value| json!({ "type": "session_event", "activeSessionId": "s1", "event": payload });
     let calls = if prompt.contains("short") { 4 } else { 6 };
     let tool_calls: Vec<Value> = (0..calls)
         .map(|index| {
@@ -495,10 +493,7 @@ fn the_drill_in_opens_expands_and_walks_back_out() {
     );
     // Esc returns to the transcript: the final frame has no pane rows.
     let last = frames.last().expect("a final frame");
-    assert!(
-        !last.contains("Tool runs"),
-        "the pane closed: {last}"
-    );
+    assert!(!last.contains("Tool runs"), "the pane closed: {last}");
 }
 
 #[test]

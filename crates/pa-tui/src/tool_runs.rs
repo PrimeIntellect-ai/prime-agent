@@ -73,13 +73,10 @@ pub fn is_run_glue(entry: &ChatEntry) -> bool {
         ChatEntry::Assistant(message) => {
             !message.aborted
                 && message.error.is_none()
-                && message
-                    .blocks
-                    .iter()
-                    .all(|block| match block {
-                        crate::chat::MessageBlock::Thinking(_) => true,
-                        crate::chat::MessageBlock::Text(text) => text.trim().is_empty(),
-                    })
+                && message.blocks.iter().all(|block| match block {
+                    crate::chat::MessageBlock::Thinking(_) => true,
+                    crate::chat::MessageBlock::Text(text) => text.trim().is_empty(),
+                })
         }
         _ => false,
     }
@@ -259,10 +256,7 @@ pub fn run_summary(chat: &[ChatEntry], run: ToolRun) -> RunSummary {
 /// the settled check otherwise.
 fn status_glyph(summary: &RunSummary, frame: usize) -> (&'static str, ThemeColor) {
     if summary.live {
-        (
-            crate::chat::working_icon_frame(frame),
-            ThemeColor::BashMode,
-        )
+        (crate::chat::working_icon_frame(frame), ThemeColor::BashMode)
     } else if summary.failed {
         ("\u{2717}", ThemeColor::Error)
     } else {
@@ -332,10 +326,7 @@ fn breakdown_rows(text: &str, theme: &Theme, width: usize) -> Vec<Line> {
     for (index, line) in wrapped.into_iter().enumerate() {
         let mut row: Line = vec![Span::raw(" ")];
         if index == 0 {
-            row.push(Span::styled(
-                crate::branch::BRANCH_GUTTER.to_string(),
-                dim,
-            ));
+            row.push(Span::styled(crate::branch::BRANCH_GUTTER.to_string(), dim));
         } else {
             row.push(Span::raw(crate::branch::BRANCH_CONTINUATION.to_string()));
         }
@@ -356,7 +347,11 @@ pub fn render_run_block(
 ) -> Vec<Line> {
     let mut rows = Vec::with_capacity(2);
     rows.push(render_summary_row(summary, frame, theme, width));
-    rows.extend(breakdown_rows(&breakdown_text(summary, expand_hint), theme, width));
+    rows.extend(breakdown_rows(
+        &breakdown_text(summary, expand_hint),
+        theme,
+        width,
+    ));
     rows
 }
 

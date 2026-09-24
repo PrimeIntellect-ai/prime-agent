@@ -21,7 +21,10 @@ fn thinking_assistant() -> ChatEntry {
 
 fn text_assistant() -> ChatEntry {
     ChatEntry::Assistant(Box::new(AssistantMessage {
-        blocks: vec![MessageBlock::Thinking("planning".to_string()), MessageBlock::Text("the answer".to_string())],
+        blocks: vec![
+            MessageBlock::Thinking("planning".to_string()),
+            MessageBlock::Text("the answer".to_string()),
+        ],
         has_tool_calls: false,
         streaming: false,
         error: None,
@@ -70,10 +73,28 @@ fn five_calls_condense_four_do_not() {
         .map(|index| settled_card(&format!("c{index}"), "ipython"))
         .collect();
     let map = run_map(&five);
-    assert_eq!(map.slot(0), Some(RunSlot::Start(ToolRun { start: 0, end: 5, calls: 5 })));
+    assert_eq!(
+        map.slot(0),
+        Some(RunSlot::Start(ToolRun {
+            start: 0,
+            end: 5,
+            calls: 5
+        }))
+    );
     assert_eq!(map.slot(4), Some(RunSlot::Member));
-    assert_eq!(map.run_at(0), Some(ToolRun { start: 0, end: 5, calls: 5 }));
-    assert_eq!(map.block_owner(3), Some(0), "a member finds its block owner");
+    assert_eq!(
+        map.run_at(0),
+        Some(ToolRun {
+            start: 0,
+            end: 5,
+            calls: 5
+        })
+    );
+    assert_eq!(
+        map.block_owner(3),
+        Some(0),
+        "a member finds its block owner"
+    );
 }
 
 #[test]
@@ -83,7 +104,11 @@ fn hidden_thinking_binds_visible_text_breaks() {
     chat.push(thinking_assistant());
     chat.push(settled_card("c2", "bash"));
     let map = run_map(&chat);
-    assert_eq!(map.slot(0), Some(RunSlot::Solo), "three calls never qualify");
+    assert_eq!(
+        map.slot(0),
+        Some(RunSlot::Solo),
+        "three calls never qualify"
+    );
     // Same shape above the threshold: the glue binds.
     let mut chat = vec![settled_card("c0", "bash"), settled_card("c1", "bash")];
     chat.push(thinking_assistant());
@@ -93,7 +118,11 @@ fn hidden_thinking_binds_visible_text_breaks() {
     let map = run_map(&chat);
     assert_eq!(
         map.run_at(0),
-        Some(ToolRun { start: 0, end: 7, calls: 6 }),
+        Some(ToolRun {
+            start: 0,
+            end: 7,
+            calls: 6
+        }),
         "the hidden thinking binds between cards"
     );
     assert_eq!(
@@ -120,13 +149,25 @@ fn hidden_thinking_binds_visible_text_breaks() {
         chat.push(settled_card(&format!("c{index}"), "ipython"));
     }
     let map = run_map(&chat);
-    assert_eq!(map.slot(0), Some(RunSlot::Solo), "two cards before the message");
+    assert_eq!(
+        map.slot(0),
+        Some(RunSlot::Solo),
+        "two cards before the message"
+    );
     assert_eq!(
         map.run_at(3),
-        Some(ToolRun { start: 3, end: 8, calls: 5 }),
+        Some(ToolRun {
+            start: 3,
+            end: 8,
+            calls: 5
+        }),
         "the five cards after the message form one run"
     );
-    assert_eq!(map.slot(2), Some(RunSlot::Solo), "the message itself stays solo");
+    assert_eq!(
+        map.slot(2),
+        Some(RunSlot::Solo),
+        "the message itself stays solo"
+    );
 }
 
 #[test]
@@ -142,7 +183,11 @@ fn trailing_hidden_assistant_stays_solo() {
     let map = run_map(&chat);
     assert_eq!(
         map.run_at(0),
-        Some(ToolRun { start: 0, end: 5, calls: 5 }),
+        Some(ToolRun {
+            start: 0,
+            end: 5,
+            calls: 5
+        }),
         "the run ends at the trailing glue"
     );
     assert_eq!(map.slot(5), Some(RunSlot::Solo), "the glue stays solo");
@@ -213,7 +258,10 @@ fn bash_cells_classify_as_bash() {
     let summary = run_summary(&chat, map.run_at(0).expect("qualifies"));
     assert_eq!(
         summary.classes,
-        vec![ClassCount { label: "bash".to_string(), count: 5 }]
+        vec![ClassCount {
+            label: "bash".to_string(),
+            count: 5
+        }]
     );
 }
 
@@ -242,7 +290,10 @@ fn wall_clock_prefers_the_wire_timestamps() {
     }
     let summary = run_summary(&chat, map.run_at(0).expect("qualifies"));
     assert!(summary.live, "a card without a result runs");
-    assert!(summary.wall_ms.unwrap_or(0) < 60_000, "the live wall clock moves from now");
+    assert!(
+        summary.wall_ms.unwrap_or(0) < 60_000,
+        "the live wall clock moves from now"
+    );
 }
 
 #[test]
@@ -280,7 +331,9 @@ fn block_rows_read_like_the_grammar() {
         text[0]
     );
     assert!(
-        text[1].trim_start().starts_with("\u{2570}\u{2500} 6 python"),
+        text[1]
+            .trim_start()
+            .starts_with("\u{2570}\u{2500} 6 python"),
         "the breakdown row hangs on the branch gutter: {:?}",
         text[1]
     );
@@ -325,7 +378,11 @@ fn a_live_run_renders_the_working_icon() {
     assert!(summary.failed);
     let rows = render_run_block(&summary, 0, "", &theme, 80);
     let text = flat(&rows);
-    assert!(text[0].contains("\u{2717}"), "the error glyph wins: {:?}", text[0]);
+    assert!(
+        text[0].contains("\u{2717}"),
+        "the error glyph wins: {:?}",
+        text[0]
+    );
 }
 
 #[test]
@@ -342,6 +399,10 @@ fn rebuild_from_keeps_the_prefix() {
     assert_eq!(map.slot(0), Some(RunSlot::Solo), "the prefix stays");
     assert_eq!(
         map.run_at(1),
-        Some(ToolRun { start: 1, end: 7, calls: 6 })
+        Some(ToolRun {
+            start: 1,
+            end: 7,
+            calls: 6
+        })
     );
 }

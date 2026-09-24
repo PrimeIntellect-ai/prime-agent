@@ -112,7 +112,10 @@ fn tool_result_message_view(message: &Value) -> Option<ToolResultReplay> {
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
         },
-        timestamp: message.get("timestamp").and_then(Value::as_u64).unwrap_or(0),
+        timestamp: message
+            .get("timestamp")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
     })
 }
 
@@ -120,7 +123,11 @@ fn tool_result_message_view(message: &Value) -> Option<ToolResultReplay> {
 /// (the TS `renderedPendingTools` replay: results land on the card, never
 /// as a new transcript row).
 fn apply_tool_result(chat: &mut [ChatEntry], result: ToolResultReplay) {
-    let ToolResultReplay { tool_call_id, view, timestamp } = result;
+    let ToolResultReplay {
+        tool_call_id,
+        view,
+        timestamp,
+    } = result;
     for entry in chat.iter_mut() {
         if let ChatEntry::Tool(card) = entry {
             if card.id == tool_call_id && card.result.is_none() {
@@ -215,7 +222,12 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
             }
         }
     }
-    for ToolResultReplay { tool_call_id, view, timestamp } in tool_results {
+    for ToolResultReplay {
+        tool_call_id,
+        view,
+        timestamp,
+    } in tool_results
+    {
         let Some(index) = card_index.get(&tool_call_id).copied() else {
             continue;
         };

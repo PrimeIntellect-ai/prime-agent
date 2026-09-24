@@ -2974,7 +2974,10 @@ mod tests {
         }
         view.mark_entry_stale(index);
         let settled = transcript_text(&mut view, 80);
-        assert!(settled.contains("\u{2713} 5 tool calls"), "the settled glyph: {settled}");
+        assert!(
+            settled.contains("\u{2713} 5 tool calls"),
+            "the settled glyph: {settled}"
+        );
     }
 
     #[test]
@@ -3013,7 +3016,6 @@ mod tests {
             "a fresh view renders the same block (the wall clock may move)"
         );
     }
-
 }
 #[cfg(test)]
 mod chunk_selection_tests {
@@ -3048,5 +3050,4 @@ mod chunk_selection_tests {
         let range = chunk_selection(sel, 0, 5, "01234");
         assert_eq!(range, None, "the selection starts after this chunk ends");
     }
-
 }
