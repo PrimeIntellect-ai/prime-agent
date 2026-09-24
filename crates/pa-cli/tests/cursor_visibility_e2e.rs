@@ -143,11 +143,19 @@ fn cursor_stays_hidden_and_positioned_across_mount_picker_and_suspend() {
     harness.write(b"/model\r");
     harness.wait_from(mark_picker, "Search models", "the model picker mounts");
     harness.write(&[0x1b]);
+    // The end-of-frame bracket (hide, hidden caret MoveTo, sync release)
+    // is the editor-owns-the-frame marker: while the picker is open the
+    // frames end at the bare hide with no caret write, so a mid-frame
+    // cell paint cannot false-match this needle.
     harness.wait_from(
         mark_picker,
-        "\x1b[22;5H",
+        "\x1b[?25l\x1b[22;5H\x1b[?2026l",
         "the closed picker returns the caret to the empty editor",
     );
+    // Let the escape settle before the next key: a byte written hot on
+    // the escape's heels reads as one alt-modified key (ESC then ctrl+z
+    // would become Alt+ctrl+z), and the suspend cycle would never arm.
+    harness.drain_until_quiet(6);
 
     // Ctrl+Z: the app.suspend cycle hands the plain terminal to the
     // shell — the one place the stream shows the cursor (TS `TUI.stop`'s
