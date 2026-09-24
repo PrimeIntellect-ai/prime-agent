@@ -21,11 +21,10 @@ Every contributor (human or agent) must read this before working on this repo.
   README.md states its scope, non-goals, and public API surface.
 - Prefer private modules with an explicitly exported public crate API. Internals are `pub(crate)`.
 - Avoid large modules (see the LOC soft ratchet below). Aim new `.rs` files under 500 whole-file
-  lines (tests included) — the repo's original published target and the operator's stated
-  500-600 comfort band; if in-file tests would push a module over, put the tests in a dedicated
+  lines (tests included); if in-file tests would push a module over, put the tests in a dedicated
   test module or `tests/` file instead. Well past that, put new functionality in a new module
   unless there is a strong documented reason not to. Be hardest on high-touch orchestration
-  files (session engine, daemon supervisor, TUI app): those attract unrelated changes, so split
+  files (session engine, daemon worker, TUI app): those attract unrelated changes, so split
   early.
 - One concern per module: a file's doc comment states its single responsibility. New work lands
   in the module that owns the concern — a new concern gets a new module, not new lines in an old
@@ -76,13 +75,8 @@ Every contributor (human or agent) must read this before working on this repo.
   ratchet wins surface as PR annotations and in `make loc`'s output. The size
   signal is guidance for review — the humans and agents reviewing the change
   decide; a legitimate large file gets a justified `loc-baseline.json` entry.
-- New files aim under the 500-line default ceiling — the repo's original
-  published target and the operator's stated 500-600 comfort band (for
-  reference: the exemplar distributions sit lower — gitoxide p75=301, redis
-  median=252, kernel median=357, tokio p90=539 — and our own median file is
-  386 lines, so 500 leaves the ordinary contributor off the ledger and bites
-  only the accretion trend). Files above the ceiling when the ratchet landed
-  (2026-09-24, tip d8bb6c57b)
+- New files aim under the 500-line default ceiling. Files above the ceiling
+  when the ratchet landed (2026-09-24, tip d8bb6c57b)
   are frozen at their measured size: frozen ceilings only go DOWN. A PR that
   shrinks a frozen file records the win with
   `python3 scripts/check_loc.py --update-baseline` (the check reports
@@ -157,8 +151,8 @@ Every contributor (human or agent) must read this before working on this repo.
   Rust shows it identically; if Rust shows something TS does not, that is also a parity bug.
 - PRs must state ownership compliance (crate README scope/non-goals/public API, dependency
   direction) and classify the change: internals, new `pub` surface, or a new
-  dependency/cross-crate re-export. The latter two are architectural changes (rust-analyzer's
-  taxonomy): "adding an innocent-looking `pub use` is a very simple way to break encapsulation."
+  dependency/cross-crate re-export. The latter two are architectural changes — an innocent-looking
+  `pub use` is a very simple way to break encapsulation.
 - Generated data plumbing is edited via its generator, never by hand
   (`crates/pa-ai/src/models_generated.rs` regenerates via `scripts/generate-models.py`; the
   module-size rules do not apply to it because its size tracks the TS catalog, not logic).
@@ -193,31 +187,35 @@ EXPLICIT EXCEPTION: wire-protocol identifiers that must stay byte-compatible wit
 
 ## Crates
 
-| crate | role |
-|---|---|
-| `pa-types` | shared wire & domain types, protocol messages |
-| `pa-telemetry` | event schema, queueing/batching, sinks |
-| `pa-ai` | providers, model registry, streaming |
-| `pa-models` | live model catalog: fetch, no-cold-start chain, transport pinning |
-| `pa-agent` | agent loop |
-| `pa-core` | session engine: tools, skills, prompts, compaction, refinement, kernel/RLM manager, subagents, session manager, settings |
-| `pa-daemon` | supervisor + per-session worker processes, wire protocol, cloud sandbox attach |
-| `pa-tui` | terminal UI (ratatui) |
-| `pa-cli` | binary `prime-agent` |
-
-Dependency direction (hard rule, cycle-free, enforced in Cargo.toml and at review):
+One owned area per crate; `pa-types` is the only shared vocabulary crate.
+Dependencies flow ONE direction only — never circular, never sideways between
+layers. The direction is what Cargo.toml pins and what review checks:
 
 ```
-pa-types  <-- shared vocabulary, nothing else is shared
-pa-telemetry <-- telemetry library; depends on no workspace crate
-pa-ai (providers/registry)
-pa-models (catalog) --> depends on pa-ai
-pa-agent (agent loop) --> depends on pa-ai, pa-types
-pa-core (session engine) --> depends on pa-agent, pa-ai, pa-models, pa-types, pa-telemetry
-pa-daemon (supervisor/workers) --> depends on pa-core
-pa-tui (terminal UI) --> depends on pa-types, pa-core (session wire)
-pa-cli (binary) --> depends on everything, the composition root
+no workspace deps        pa-types          shared wire/domain types, protocol messages
+                         pa-telemetry      event schema, queueing/batching, sinks
+                         pa-agent          the agent loop (provider-agnostic; talks pa-types shapes)
+
+pa-types                 pa-ai             provider APIs, model registry, streaming
+pa-ai, pa-types          pa-models         live model catalog: fetch, no-cold-start chain, transport pinning
+all of the above         pa-core           session engine: tools, skills, prompts, compaction,
+                                           refinement, kernel/RLM manager, subagents, session
+                                           manager, settings
+pa-core + leaves          pa-daemon        supervisor + per-session worker processes, wire
+                                           protocol, cloud sandbox attach
+pa-types                  pa-tui           terminal UI (ratatui) — speaks the daemon wire
+                                           protocol, does NOT link pa-core
+everything               pa-cli           the `prime-agent` binary, the composition root
 ```
+
+Layering rules:
+
+- A lower crate must never reference a higher one (that is the cycle rule; the table above is
+  the order). New shared vocabulary goes in `pa-types`; new behavior goes in the crate that
+  owns the area — if two crates need the same new thing, it belongs one layer down or in
+  `pa-types`, not duplicated.
+- `pa-tui` renders from wire types and events; it does not link the session engine.
+- `pa-cli` is a composition root: it wires crates together and contains no business logic.
 
 ## Reliability model
 
