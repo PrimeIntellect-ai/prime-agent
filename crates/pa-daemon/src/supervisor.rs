@@ -15,9 +15,9 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use futures::future::join_all;
 use pa_types::daemon::{
-    DaemonCommand, DaemonErrorInfo, DaemonOutbound, DaemonWorkerDescriptor, DaemonWorkerLifecycle,
-    DurableDaemonCreateCommand, SnapshotPurpose, UpdateId, UpdatePreparedMarker,
-    UpdateTimeoutBudget,
+    DaemonCommand, DaemonErrorInfo, DaemonOutbound, DaemonSessionLifecycle, DaemonWorkerDescriptor,
+    DaemonWorkerLifecycle, DurableDaemonCreateCommand, SnapshotPurpose, UpdateId,
+    UpdatePreparedMarker, UpdateTimeoutBudget,
 };
 use pa_types::platform::transport::{bind_transport, connect_transport, TransportStream};
 use serde_json::{json, Value};
@@ -148,6 +148,12 @@ pub struct Supervisor {
     /// The supervisor's agent roster (classified entries; the roster arms
     /// live in `supervisor_roster.rs`).
     pub(crate) roster: std::sync::Mutex<crate::agent_roster::AgentRoster>,
+    /// In-flight registration-seed tasks (each `worker_register`'s
+    /// background family walk). A `roster_subscribe` drains and awaits
+    /// them before building its snapshot: a seeded row's push must
+    /// never overtake the snapshot answer (a client that applies the
+    /// push first and then the snapshot would lose the rows).
+    pub(crate) pending_registration_seeds: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// In-flight saved-session renames (TS `pendingSessionNames`): one
     /// reservation per `[depth, parent, name]` scope, so a concurrent
     /// rename of the same name fails the second caller.
@@ -281,6 +287,7 @@ impl Supervisor {
             registry: SessionRegistry::new(),
             events,
             roster: std::sync::Mutex::new(crate::agent_roster::AgentRoster::new()),
+            pending_registration_seeds: std::sync::Mutex::new(Vec::new()),
             pending_session_names: std::sync::Mutex::new(std::collections::HashSet::new()),
             shutting_down: AtomicBool::new(false),
             shutdown_started: AtomicBool::new(false),
@@ -760,6 +767,14 @@ impl Supervisor {
                 failed,
             );
         }
+        // The boot roster seed runs exactly once, in the background, now
+        // that adoption settled: the registry's residents are the seed
+        // roots. TS awaits its seed before adoption; the Rust daemon
+        // deliberately accepts before and during adoption, so the seed
+        // follows the pass and its one `roster_update` publish carries
+        // the rows to early subscribers. Tests drain the pending-seed
+        // barrier for completion.
+        self.spawn_roster_boot_seed();
     }
 
     /// Adopt one persisted worker descriptor. Serialized against worker
@@ -1043,14 +1058,17 @@ impl Supervisor {
                 resident.note_retired();
                 self.registry.remove(&resident.worker_id).await;
                 self.registry.forget(&resident.worker_id).await;
-                self.remove_roster_worker(&resident.worker_id);
+                // The give-up settles the dead worker's rows exactly like
+                // a stop (a subagent under a surviving root passivates and
+                // keeps its model/thinking/cwd; everything else is
+                // removed). No ledger reseed, no transcript read.
+                let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();
+                self.passivate_roster_worker(&resident.worker_id, ephemeral)
+                    .await;
                 self.log_line(&format!(
                     "session worker {} failed after {failures} consecutive failures",
                     resident.worker_id
                 ));
-                // The dead worker's transcript stays a passive family row
-                // while any resident root anchors it (the seed walk).
-                self.seed_roster_ledger().await;
                 return;
             }
             let backoff_ms = (BASE_BACKOFF_MS << (failures - 1).min(7)).min(MAX_BACKOFF_MS);
@@ -3504,6 +3522,24 @@ impl Supervisor {
         // Registration rebuilt the resident: refresh its roster entry from
         // the live worker so the roster reflects the re-registered state.
         self.refresh_roster_entry(&resident).await;
+        // A worker that registers after the boot seed (a supervisor
+        // restart's re-registration, a mid-tree resume, a wakened ledger
+        // child) publishes its passive ledger family in the background:
+        // TS reseeds the family when the worker's first roster snapshot
+        // applies (`applyWorkerRosterSnapshot`), and this port's workers
+        // push only their own summary, so the daemon walks the family
+        // here instead. Registration answers on the client's open path -
+        // the seed never blocks it.
+        let family_root = {
+            let descriptor = resident.descriptor.lock().await;
+            descriptor
+                .session_file
+                .clone()
+                .or_else(|| descriptor.create_command.session_path.clone())
+        };
+        if let Some(root) = family_root {
+            self.spawn_roster_registration_seed(Path::new(&root));
+        }
         response_success(
             Some(command_id),
             type_name,
@@ -3980,7 +4016,26 @@ impl Supervisor {
         {
             self.assert_session_name_available(name).await?;
         }
-        let (resident, create_summary) = self.launch_worker(command, Some(client_id)).await?;
+        // TS daemon-supervisor.ts: only a `client_owned`-lifecycle create
+        // is client-owned (`ownerClientId = command.lifecycle ===
+        // "client_owned" ? clientId : undefined`); unspecified and
+        // `Resident` lifecycles are unowned. Every RLM child spawn
+        // declares `Resident`, so a spawned child never inherits the
+        // spawning client's ownership: passivation deletes an owned
+        // worker's rows, and a stopped child under a surviving root must
+        // passivate instead (the walk e2e asserts the passive row
+        // survives the kill). A `None`-lifecycle create being owner-
+        // marked would hide its live session from every other client
+        // (`assertWorkerAccessibleToClient`), so it stays unowned too.
+        let create_lifecycle = match command {
+            DaemonCommand::Create { lifecycle, .. } => *lifecycle,
+            _ => None,
+        };
+        let owner_client_id = match create_lifecycle {
+            Some(DaemonSessionLifecycle::ClientOwned) => Some(client_id),
+            _ => None,
+        };
+        let (resident, create_summary) = self.launch_worker(command, owner_client_id).await?;
         // The launch registered its worker (the registry insert precedes
         // the spawn). The single-flight stays held through the spawn
         // admission below: an admission failure tears the resident down,
@@ -4028,12 +4083,27 @@ impl Supervisor {
         // stale-delta watermark for the resident.
         self.write_roster_summary_for_resident(&resident, &summary)
             .await;
-        // The spawn append is a ledger-append moment: the new edge can be
-        // the first time this family is live in the roster (a resumed
-        // parent, a supervisor restart), so the seed runs here too - after
-        // the fresh child's own row, so it only touches genuinely passive
-        // descendants (TS `seedRosterLedger` skips present rows).
-        self.seed_roster_ledger().await;
+        // The new root's passive family renders immediately from the
+        // ledger edges - no transcript read on the event path - then one
+        // bounded background hydration fills each newly seeded row's
+        // durable display fields (cwd, model, thinking level) and
+        // publishes them as one update. A fresh session has no family;
+        // the guards skip every row another surface already seeded. The
+        // root is the CREATE response's session file (the authoritative
+        // durable path, exactly what admission reads): a get_state that
+        // answers mid-replay without its session file must not skip a
+        // resume's family, and a live get_state file that differs is
+        // still the same session.
+        if let Some(root) = summary
+            .get("sessionFile")
+            .and_then(Value::as_str)
+            .or_else(|| create_summary.get("sessionFile").and_then(Value::as_str))
+        {
+            let seeded = self.seed_roster_family_edges(Path::new(&root)).await;
+            if !seeded.is_empty() {
+                self.spawn_seeded_hydration(seeded);
+            }
+        }
         Ok(summary)
     }
 
@@ -4597,18 +4667,19 @@ impl Supervisor {
         // scheduled jobs die with the registration
         // (`cancelEphemeralWorkerScheduledJobs`) — every remove-descriptor
         // stop of an owned worker, including the degraded-create cleanups.
-        if resident.descriptor.lock().await.owner_client_id.is_some() {
+        let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();
+        if ephemeral {
             self.finalize_owned_stop(resident).await;
         }
         self.registry.remove(&resident.worker_id).await;
         self.registry.forget(&resident.worker_id).await;
-        self.remove_roster_worker(&resident.worker_id);
-        // A plain stop carries no ledger tombstone: the child's passive
-        // row must survive the stop for subscribers (TS keeps the
-        // passivated row in the worker's roster push; the Rust
-        // equivalent reseeds it from the ledger here). A tombstoned
-        // child no longer has a live edge, so the seed skips it.
-        self.seed_roster_ledger().await;
+        // TS `flipWorkerRosterEntriesInactive`: the stopped worker's rows
+        // settle in place (a subagent under a surviving root passivates
+        // and keeps its model/thinking/cwd; a tombstoned child, a queued
+        // child, an ephemeral worker's rows, and the top-level row
+        // itself are removed). No ledger reseed, no transcript read.
+        self.passivate_roster_worker(&resident.worker_id, ephemeral)
+            .await;
     }
 
     /// Run the one terminal stop pass, whichever connection first reaches it.
@@ -5107,6 +5178,107 @@ mod tests {
             .expect("a live worker socket satisfies the probe");
         let _ = std::fs::remove_file(&socket);
         drop(listener);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The boot roster seed runs exactly once, in the background, once
+    /// adoption settles: the adoption pass hands back the seed task's
+    /// handle, and the seed roots are the registry's residents. An empty
+    /// descriptor dir adopts nothing; the pre-registered root anchors the
+    /// family the seed must publish.
+    #[tokio::test]
+    async fn adoption_settles_then_seeds_the_roster_once() {
+        let dir = std::env::temp_dir().join(format!("pa-adopt-seed-{}", uuid::Uuid::new_v4()));
+        let agent_dir = dir.join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let root_file = sessions_dir.join("root-1.jsonl");
+        let child_file = sessions_dir.join("sub-9.jsonl");
+        for path in [&root_file, &child_file] {
+            std::fs::write(
+                path,
+                "{\"type\":\"session\",\"version\":3,\"id\":\"persisted-id\",\"timestamp\":\"t\",\"cwd\":\"/the/real/cwd\"}\n{\"type\":\"model_change\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"t\",\"provider\":\"p\",\"modelId\":\"m\"}\n{\"type\":\"thinking_level_change\",\"id\":\"t1\",\"parentId\":\"m1\",\"timestamp\":\"t\",\"thinkingLevel\":\"high\"}\n",
+            )
+            .unwrap();
+        }
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .unwrap(),
+        );
+        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
+        ledger
+            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+                child_id: "sub-9".to_string(),
+                parent: root_file.to_string_lossy().to_string(),
+                child: child_file.to_string_lossy().to_string(),
+                depth: 1,
+                name: "lane".to_string(),
+            })
+            .unwrap();
+        let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
+            version: 1,
+            worker_id: "w-root".to_string(),
+            pid: 4242,
+            process_start_id: None,
+            socket_path: "/tmp/none.sock".to_string(),
+            recovery_journal_path: "/tmp/none.jsonl".to_string(),
+            orphan_process_journal_path: None,
+            supervisor_socket_path: "/tmp/none.sock".to_string(),
+            authentication_token: "root-token".to_string(),
+            worker_instance_id: None,
+            root_active_session_id: "w-root".to_string(),
+            owner_client_id: None,
+            root_session_id: None,
+            session_file: Some(root_file.to_string_lossy().to_string()),
+            session_dir: Some(sessions_dir.to_string_lossy().to_string()),
+            telemetry_disabled: Some(true),
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+            lifecycle: DaemonWorkerLifecycle::Ready,
+            create_command: pa_types::daemon::DurableDaemonCreateCommand {
+                session_path: None,
+                no_session: None,
+                rest: Default::default(),
+            },
+            consecutive_failures: 0,
+            stop_requested_at: None,
+            archive_on_stop: None,
+            last_failure_at: None,
+            last_error: None,
+            rest: Default::default(),
+        };
+        supervisor
+            .registry
+            .insert(ResidentWorker::new(
+                "w-root".to_string(),
+                descriptor,
+                root_file.with_extension("descriptor.json"),
+            ))
+            .await;
+
+        // Adoption adopts nothing (the descriptor dir is empty) and hands
+        // back the boot seed task; the seed publishes the anchored family.
+        supervisor
+            .adopt_persisted_workers(AdoptionBoot::PlainStartup)
+            .await;
+        crate::supervisor_roster_seed::tests::drain_pending_seeds_for_tests(&supervisor).await;
+        let row = supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .entries()
+            .into_iter()
+            .find(|entry| entry.summary.get("rlmChildId").and_then(Value::as_str) == Some("sub-9"))
+            .expect("the boot seed hydrated the family");
+        assert_eq!(row.summary["cwd"], "/the/real/cwd");
+        assert_eq!(
+            row.summary["model"],
+            json!({ "provider": "p", "modelId": "m" })
+        );
+        assert_eq!(row.summary["thinkingLevel"], json!("high"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
