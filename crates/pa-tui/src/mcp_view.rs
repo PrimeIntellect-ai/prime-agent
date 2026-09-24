@@ -1415,7 +1415,7 @@ mod tests {
             .map(|span| span.content.as_str())
             .collect::<String>();
         assert_eq!(
-            crate::width::str_width(&text.trim_end()),
+            crate::width::str_width(text.trim_end()),
             24,
             "the row stays exactly the width: {text:?}"
         );
