@@ -33,9 +33,21 @@ class DaemonProbe:
         self.s.settimeout(timeout)
         self.s.connect(sock)
         self.buf = b""
+        self.deadline = None
 
     def read_line(self):
+        # One deadline spans the whole command: a wedged request (a steady
+        # stream of non-response event frames) still fails the trace
+        # instead of waiting a socket-timeout per recv forever.
+        if self.deadline is not None and time.monotonic() > self.deadline:
+            raise TimeoutError("trace deadline exceeded for the pending response")
         while b"\n" not in self.buf:
+            remaining = None
+            if self.deadline is not None:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("trace deadline exceeded for the pending response")
+            self.s.settimeout(remaining)
             chunk = self.s.recv(1 << 20)
             if not chunk:
                 raise EOFError("socket closed")
@@ -43,17 +55,67 @@ class DaemonProbe:
         line, self.buf = self.buf.split(b"\n", 1)
         return json.loads(line)
 
-    def command(self, cmd, rid, timeout=None):
+    def command(self, cmd, rid, timeout=90.0):
         env = {"type": "command", "id": rid, "protocol": PROTOCOL, "command": cmd}
+        self.deadline = time.monotonic() + timeout
         t0 = time.time()
         self.s.sendall((json.dumps(env) + "\n").encode())
-        while True:
-            msg = self.read_line()
-            if msg.get("id") == rid and msg.get("type") == "response":
-                return {"wall_ms": (time.time() - t0) * 1000.0, "response": msg}
+        try:
+            while True:
+                msg = self.read_line()
+                if msg.get("id") == rid and msg.get("type") == "response":
+                    return {"wall_ms": (time.time() - t0) * 1000.0, "response": msg}
+        finally:
+            self.deadline = None
 
     def close(self):
         self.s.close()
+
+
+def kitty_probe_timing(budget_s=2.5):
+    """The terminal enhanced-key query latency, measured on THIS process's
+    tty (run the trace from inside the interactive terminal being
+    compared): the TUI's surface start blocks input-blind on this answer
+    for up to 2s when the terminal does not answer (an SSH pipe often
+    does not; a local terminal answers in milliseconds) — the
+    per-switch, terminal-dependent stall that stacks with the request
+    chain."""
+    import select
+    import sys
+    if not sys.stdout.isatty():
+        return {"available": False, "reason": "no tty on this process"}
+    fd = sys.stdout.fileno()
+    old = None
+    try:
+        import termios
+        old = termios.tcgetattr(fd)
+        import tty
+        tty.setraw(fd)
+    except Exception:
+        old = None
+    t0 = time.time()
+    answered = False
+    try:
+        os.write(fd, b"\x1b[?u")  # the kitty keyboard-protocol query
+        deadline = t0 + budget_s
+        while time.time() < deadline:
+            ready, _, _ = select.select([fd], [], [], deadline - time.time())
+            if ready:
+                os.read(fd, 65536)
+                answered = True
+                break
+    finally:
+        if old is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            except Exception:
+                pass
+    return {
+        "available": True,
+        "answered": answered,
+        "answer_ms": round((time.time() - t0) * 1000.0, 1),
+        "note": "answered in answer_ms; unanswered means the TUI's kitty probe waits out its 2s budget per surface start (input-blind) — the terminal-dependent per-switch stall",
+    }
 
 
 def command_timing(probe, cmd, rid, label):
@@ -161,9 +223,10 @@ def main():
         run({"type": "get_context_tree", "activeSessionId": active}, "/context: context tree")
         run({"type": "get_messages", "activeSessionId": active}, "messages read")
 
-        # 3. The concurrency decomposition: a lightweight request fired at
-        #    the same instant as the heavy one, on SEPARATE connections —
-        #    the lightweight one's inflation over its solo baseline is the
+        # 3. The concurrency decomposition: a lightweight request fired
+        #    only AFTER the heavy request is on the wire (an event
+        #    synchronized on the send), on SEPARATE connections — the
+        #    lightweight one's inflation over its solo baseline is the
         #    queueing/head-of-line measure of this daemon under its live
         #    load.
         solo = command_timing(p, {"type": "get_session_stats", "activeSessionId": active}, "solo-baseline", "solo baseline")
@@ -172,13 +235,23 @@ def main():
         p2 = DaemonProbe(args.socket)
         p2.read_line()
         result_box = {}
+        sent = threading.Event()
 
         def fire_heavy():
-            result_box["heavy"] = command_timing(p2, heavy, "concurrent-heavy", "concurrent heavy (/context)")
+            env = {"type": "command", "id": "concurrent-heavy", "protocol": PROTOCOL, "command": heavy}
+            p2.deadline = time.monotonic() + 90.0
+            t0 = time.time()
+            p2.s.sendall((json.dumps(env) + "\n").encode())
+            sent.set()
+            while True:
+                msg = p2.read_line()
+                if msg.get("id") == "concurrent-heavy" and msg.get("type") == "response":
+                    result_box["heavy"] = {"wall_ms": (time.time() - t0) * 1000.0}
+                    return
 
         th = threading.Thread(target=fire_heavy)
         th.start()
-        time.sleep(0.002)
+        sent.wait(timeout=5.0)
         light = command_timing(p, {"type": "get_session_stats", "activeSessionId": active}, "concurrent-light", "concurrent light (stats)")
         th.join()
         trace["concurrency"] = {
@@ -187,6 +260,7 @@ def main():
             "light_wall_ms": round(light["wall_ms"], 2),
             "light_solo_wall_ms": round(solo["wall_ms"], 2),
             "light_inflation_ms": round(light["wall_ms"] - solo["wall_ms"], 2),
+            "sync": "the light request fires after the heavy request is on the wire",
         }
         p2.close()
 
@@ -196,9 +270,38 @@ def main():
         p3.read_line()
         attach = command_timing(p3, {"type": "attach", "activeSessionId": active, "clientId": "latency-trace"}, "attach-fresh", "fresh-client attach (the Esc-handoff surface)")
         trace["steps"].append(attach)
-        detach = command_timing(p3, {"type": "detach", "activeSessionId": active, "clientId": "latency-trace"}, "detach", "detach")
-        trace["steps"].append(detach)
+
+        # 5. The client-side view-switch CHAIN: the requests the TUI's
+        #    switch awaits SEQUENTIALLY on one connection, summed — the
+        #    felt round trip's request component (each step inflates
+        #    under fleet contention; the sum is the bound the operator
+        #    feels stacked with the terminal probe below).
+        chain_steps = [
+            ({"type": "attach", "activeSessionId": active, "clientId": "latency-trace-chain"}, "chain: attach"),
+            ({"type": "roster_subscribe", "activeSessionId": active}, "chain: roster subscribe"),
+            ({"type": "get_session_stats", "activeSessionId": active}, "chain: session stats"),
+            ({"type": "get_state", "activeSessionId": active}, "chain: state read"),
+            ({"type": "get_rlm_children", "activeSessionId": active}, "chain: rlm children"),
+            ({"type": "detach", "activeSessionId": active, "clientId": "latency-trace-chain"}, "chain: detach"),
+        ]
+        chain = []
+        chain_t0 = time.time()
+        for cmd, label in chain_steps:
+            chain.append(command_timing(p3, cmd, "chain-step", label))
+        chain_total = (time.time() - chain_t0) * 1000.0
+        trace["switch_chain"] = {
+            "note": "the sequential request chain a view switch awaits on one connection (the client-side request component of the felt round trip)",
+            "steps": chain,
+            "total_wall_ms": round(chain_total, 2),
+        }
         p3.close()
+
+    # 6. The terminal enhanced-key probe timing (run the trace from inside
+    #    the interactive terminal being compared): the surface start
+    #    blocks input-blind on this answer for up to 2s when the terminal
+    #    does not answer — the terminal-dependent per-switch stall that
+    #    stacks with the request chain.
+    trace["kitty_probe"] = kitty_probe_timing()
 
     p.close()
     with open(args.out, "w") as f:
