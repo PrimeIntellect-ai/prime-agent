@@ -430,10 +430,12 @@ mod tests {
         assert!(e.has_selection());
         e.handle_input("ctrl+y");
         assert!(!e.has_selection(), "yank collapses the stale selection");
-        assert_eq!(e.get_text(), "keep drop");
+        // The selection moved the cursor to the line start, so the yanked
+        // word inserts there (a stale anchor would splice `keep ` away).
+        assert_eq!(e.get_text(), "dropkeep ");
         // Typing after a yank never replaces a stale range.
         e.handle_input("!");
-        assert_eq!(e.get_text(), "keep drop!");
+        assert_eq!(e.get_text(), "dropkeep !");
     }
 
     /// An empty paste payload (control-only bytes) is a full no-op: the
@@ -465,7 +467,9 @@ mod tests {
         assert!(e.has_selection());
         e.handle_input("ctrl+t");
         assert!(!e.has_selection(), "transpose collapses the selection");
-        assert_eq!(e.get_text(), "abcd");
+        // The selection left the cursor at col 1: transpose swaps the a/b
+        // pair around it.
+        assert_eq!(e.get_text(), "badc");
     }
 
     /// The selection anchor floors at the hidden bang prefix: extending
@@ -483,9 +487,10 @@ mod tests {
             panic!("selection expected");
         };
         assert_eq!((line, col), (0, 1), "the anchor sits past the prefix");
-        // Replacing the selection keeps the prefix.
+        // Replacing the selection keeps the prefix (the selection's tail
+        // stays: `cm` replaced by `X` leaves the trailing `d`).
         e.handle_input("X");
-        assert_eq!(e.get_text(), "!X", "the bang prefix survived the replace");
+        assert_eq!(e.get_text(), "!Xd", "the bang prefix survived the replace");
         assert_eq!(e.bash_prompt_prefix(), Some("! "));
     }
 

@@ -2684,11 +2684,18 @@ mod chunk_selection_tests {
         // A chunk the selection ends before does not highlight.
         let range = chunk_selection(sel, 2, 6, "fgh");
         assert_eq!(range, None);
-        // The starting line clips at its start column (a selection
-        // starting exactly at a chunk's end leaves it empty).
+        // The starting line clips at its start column: a chunk that
+        // begins exactly where the selection does is fully covered, and a
+        // chunk the selection starts AFTER stays clear.
         let range = chunk_selection(sel, 0, 0, "01234567890123456789");
         assert_eq!(range, Some((10, 20)));
         let range = chunk_selection(sel, 0, 10, "0123456789");
-        assert_eq!(range, None, "the selection starts at this chunk's end");
+        assert_eq!(
+            range,
+            Some((0, 10)),
+            "the selection starts at this chunk's start"
+        );
+        let range = chunk_selection(sel, 0, 5, "01234");
+        assert_eq!(range, None, "the selection starts after this chunk ends");
     }
 }
