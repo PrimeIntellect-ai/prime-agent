@@ -974,12 +974,9 @@ async fn family_edges_never_cross_families_end_to_end() {
     if let Ok(error) = std::fs::read_to_string(receipts_dir.join("kid-broadcast.error")) {
         panic!("kid kernel cell failed: {error}");
     }
-    // The child's broadcast reaches its own family - the parent, and
-    // per the TS family-roster broadcast semantics its own spawned
-    // children too when they exist at send time - never a sibling,
-    // never another family's session. The grandkid's presence in the
-    // receipt set depends on the turn interleaving (the broadcast cell
-    // and the grandkid spawn are independent queue events), so pin the
+    // The TS broadcast ("all") reaches the family roster, which for a
+    // subagent includes its own children; the grandkid's presence
+    // depends on the broadcast-versus-spawn interleaving, so pin the
     // isolation, not the exact set.
     let kid_broadcast = read_recorded(&receipts_dir, "kid-broadcast.json");
     let kid_targets: Vec<&str> = kid_broadcast["receipts"]
