@@ -41,6 +41,7 @@ use crate::protocol::{
     TypedCreateRejection, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
 };
 use crate::registry::{ResidentWorker, SessionRegistry, WorkerRegistration, WorkerRequest};
+use crate::saved_session_commands::{name_unavailable_error, reservation_key, NameScope};
 use crate::session_store::list_sessions;
 use crate::snapshot_stream::{attach_client_capabilities, stream_attach, wants_chunked};
 use crate::update_prepare::{
@@ -154,9 +155,11 @@ pub struct Supervisor {
     /// never overtake the snapshot answer (a client that applies the
     /// push first and then the snapshot would lose the rows).
     pub(crate) pending_registration_seeds: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
-    /// In-flight saved-session renames (TS `pendingSessionNames`): one
-    /// reservation per `[depth, parent, name]` scope, so a concurrent
-    /// rename of the same name fails the second caller.
+    /// In-flight name reservations (TS `pendingSessionNames`): one
+    /// reservation per `[depth, parent, name]` scope, shared by the
+    /// saved-session rename ladder and the subagent spawn admission (TS
+    /// #2396 `createRlmSubagentRuntime`), so a concurrent rename or spawn
+    /// of the same name in the same scope fails the second caller.
     pub(crate) pending_session_names: std::sync::Mutex<std::collections::HashSet<String>>,
     shutting_down: AtomicBool,
     /// Whether some path has taken ownership of the one terminal stop pass.
@@ -251,6 +254,27 @@ enum AdoptionOutcome {
     Stopped,
     /// Adoption or relaunch failed.
     Failed,
+}
+
+/// One spawn-name reservation held across a fresh-launch create (TS
+/// `createRlmSubagentRuntime`'s `pendingSessionNames` hold, #2396): the
+/// reservation is the only cross-create serializer for a same-name
+/// admission (the per-file single-flight below cannot see a different
+/// session file), and the guard releases the key when the create ends,
+/// whatever its outcome.
+struct CreateNameReservation {
+    supervisor: Arc<Supervisor>,
+    key: String,
+}
+
+impl Drop for CreateNameReservation {
+    fn drop(&mut self) {
+        self.supervisor
+            .pending_session_names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+    }
 }
 
 impl Supervisor {
@@ -4151,6 +4175,15 @@ impl Supervisor {
         {
             return Ok(summary);
         }
+        // TS `createRlmSubagentRuntime` (#2396): the sibling name is held
+        // under a daemon-wide reservation for the whole fresh-launch
+        // admission and re-asserted at this boundary, so a same-name
+        // sibling that lands mid-admission fails closed before the durable
+        // ledger edge is appended. TS reserves names only on the subagent
+        // admission path (a named open of a live session reuses it above,
+        // and a root create keeps the plain live check), so only a
+        // `kind: "subagent"` create reserves.
+        let name_reservation = self.reserve_subagent_create_name(command)?;
         if let DaemonCommand::Create {
             name: Some(name), ..
         } = command
@@ -4380,6 +4413,67 @@ impl Supervisor {
             }
         }
         Ok(())
+    }
+
+    /// Reserve a subagent spawn's name for the whole fresh-launch admission
+    /// (TS #2396 `createRlmSubagentRuntime`): the reservation spans the
+    /// availability re-assert, the worker launch, and the durable ledger
+    /// admission, and the guard releases the key when the create ends,
+    /// whatever its outcome. Creates that do not reserve - a root create,
+    /// or an open that reuses a live worker above - answer `None` and keep
+    /// the plain live check (TS reserves names only on the subagent
+    /// admission path); a racing same-name admission of the same parent
+    /// scope fails the create with the TS unavailability error.
+    fn reserve_subagent_create_name(
+        self: &Arc<Self>,
+        command: &DaemonCommand,
+    ) -> Result<Option<CreateNameReservation>> {
+        let DaemonCommand::Create {
+            name,
+            runtime_metadata,
+            ..
+        } = command
+        else {
+            return Ok(None);
+        };
+        let (Some(name), Some(metadata)) = (name, runtime_metadata) else {
+            return Ok(None);
+        };
+        if metadata.get("kind").and_then(Value::as_str) != Some("subagent") {
+            return Ok(None);
+        }
+        // The child's scope keys the reservation exactly like a rename's
+        // (TS `sessionNameReservationKey`): `[depth, parent, name]`, the
+        // parent keyed by its session file when it has one.
+        let scope = NameScope {
+            id: String::new(),
+            name: name.clone(),
+            depth: metadata
+                .get("rlmDepth")
+                .and_then(Value::as_u64)
+                .unwrap_or(1) as u32,
+            parent_session_id: metadata
+                .get("parentSessionId")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            parent_session_path: metadata
+                .get("parentSessionFile")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        };
+        let key = reservation_key(&scope);
+        let reserved = self
+            .pending_session_names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone());
+        if !reserved {
+            bail!(name_unavailable_error(name, scope.depth));
+        }
+        Ok(Some(CreateNameReservation {
+            supervisor: Arc::clone(self),
+            key,
+        }))
     }
 
     pub(crate) async fn route_client_command(

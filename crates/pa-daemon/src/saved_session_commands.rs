@@ -32,7 +32,7 @@ use crate::worker::Worker;
 
 /// The session-name-unavailability error (TS
 /// `formatAgentSessionNameUnavailable`).
-fn name_unavailable_error(name: &str, depth: u32) -> String {
+pub(crate) fn name_unavailable_error(name: &str, depth: u32) -> String {
     format!(
         "Agent name \"{name}\" is unavailable: an agent of that name already exists at depth {depth} under this parent"
     )
@@ -41,7 +41,7 @@ fn name_unavailable_error(name: &str, depth: u32) -> String {
 /// The reservation key (TS `sessionNameReservationKey`): the JSON-encoded
 /// `[depth, parentType, parentValue, name]` tuple - the parent keyed by
 /// its path, its persisted id, or the root scope.
-fn reservation_key(scope: &NameScope) -> String {
+pub(crate) fn reservation_key(scope: &NameScope) -> String {
     let (parent_type, parent_value) = match (
         scope.depth,
         scope.parent_session_path.as_deref(),
@@ -61,13 +61,16 @@ fn reservation_key(scope: &NameScope) -> String {
 }
 
 /// The TS name scope a rename target carries into the availability check.
-struct NameScope {
+/// Shared with the create path: a spawn admission reserves its child's name
+/// under the same `[depth, parent, name]` key (TS #2396
+/// `createRlmSubagentRuntime`).
+pub(crate) struct NameScope {
     /// The renamed session's own id (the availability check ignores it).
-    id: String,
-    name: String,
-    depth: u32,
-    parent_session_id: Option<String>,
-    parent_session_path: Option<String>,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) depth: u32,
+    pub(crate) parent_session_id: Option<String>,
+    pub(crate) parent_session_path: Option<String>,
 }
 
 /// One family-catalog row (TS `AgentFamilyCatalogEntry`): the fields the
