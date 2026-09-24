@@ -1,1 +1,1 @@
-- Fixed the conversation detail level resetting to Details every time you open, resume, or attach to a chat: chats now start collapsed (overview) by default, and the level you pick with Ctrl+O is saved as the `chatDetail` setting and reused for every chat until you change it.
+- Fixed the conversation detail level resetting to Details every time you open, resume, or attach to a chat: the level you pick with Ctrl+O is now saved as the `chatDetail` setting and reused for every chat until you change it. Chats with no saved choice still start at Details.

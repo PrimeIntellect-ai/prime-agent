@@ -255,7 +255,7 @@ export interface Settings {
 	images?: ImageSettings;
 	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default: "user-only"
-	chatDetail?: ChatDetail; // Default: "overview"
+	chatDetail?: ChatDetail; // Default: "details"
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
 	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
 	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
@@ -1493,7 +1493,7 @@ export class SettingsManager {
 
 	getChatDetail(): ChatDetail {
 		const detail = this.settings.chatDetail;
-		return detail === "details" || detail === "all" ? detail : "overview";
+		return detail === "overview" || detail === "all" ? detail : "details";
 	}
 
 	setChatDetail(detail: ChatDetail): void {

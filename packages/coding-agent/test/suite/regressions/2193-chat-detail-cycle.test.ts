@@ -132,8 +132,6 @@ describe("conversation detail cycle", () => {
 		const source = JSON.stringify(context.messages);
 		const mode = createMode(harness);
 		await mode.renderSessionContext(context);
-		assertMode(mode, "overview");
-		cycle(mode);
 		assertMode(mode, "details");
 		cycle(mode);
 		assertMode(mode, "all");
@@ -196,7 +194,7 @@ describe("conversation detail cycle", () => {
 		const reopened = createMode(harness);
 		await reopened.renderSessionContext(context);
 		for (const mode of [live, reopened]) {
-			for (const detail of ["overview", "details", "all"] as const) {
+			for (const detail of ["details", "all", "overview"] as const) {
 				const text = render(mode);
 				expect(text).toContain("Work before notification.");
 				expect(text).toContain("Work after notification.");
@@ -223,7 +221,6 @@ describe("conversation detail cycle", () => {
 			}
 			expect(render(mode)).not.toContain("[bash-done pid:42 exit:0]");
 			cycle(mode);
-			cycle(mode);
 			expect(render(mode).match(/\[bash-done pid:42 exit:0\]/g)).toHaveLength(1);
 		}
 		expect(JSON.stringify(context.messages)).toBe(source);
@@ -245,7 +242,6 @@ describe("conversation detail cycle", () => {
 		]);
 		await harness.session.prompt("Stream the fixture");
 		const mode = createMode(harness);
-		cycle(mode);
 		for (const event of harness.events) {
 			if (
 				event.type === "message_start" ||
@@ -289,7 +285,6 @@ describe("conversation detail cycle", () => {
 		await mode.handleEvent({ type: "message_start", message });
 		expect(render(mode)).not.toContain("LIVE_AGENT_BODY");
 		expect(render(mode)).toContain("Agent message received");
-		cycle(mode);
 		expect(render(mode)).toContain("Agent message received");
 		cycle(mode);
 		expect(render(mode)).toContain("LIVE_AGENT_BODY");
@@ -328,7 +323,6 @@ describe("conversation detail cycle", () => {
 		Object.assign(mode, { sideQuestionComponent: side, pendingBashComponents: [pendingBash] });
 		const bashText = () => stripAnsi([...side.render(120), ...pendingBash.render(120)].join("\n"));
 		expect(bashText()).not.toContain("HIDDEN_BASH_HEAD");
-		cycle(mode);
 		expect(bashText()).not.toContain("HIDDEN_BASH_HEAD");
 		cycle(mode);
 		expect(bashText().match(/HIDDEN_BASH_HEAD/g)).toHaveLength(2);
