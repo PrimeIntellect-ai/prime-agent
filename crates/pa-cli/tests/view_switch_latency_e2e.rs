@@ -327,6 +327,10 @@ async fn agents_view_round_trip_reattaches_under_the_ceiling() {
     .await
     .expect("second interactive run");
     let elapsed = started.elapsed();
+    eprintln!(
+        "view-switch latency guard: the Esc-handoff re-attach round trip took {elapsed:?} \
+         (ceiling {VIEW_SWITCH_CEILING:?})"
+    );
     assert!(
         elapsed <= VIEW_SWITCH_CEILING,
         "the agents-view Esc round trip took {elapsed:?} (ceiling {VIEW_SWITCH_CEILING:?}) — \

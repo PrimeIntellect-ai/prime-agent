@@ -308,13 +308,18 @@ fn get_context_tree_answers_from_memory_on_a_grown_store() {
         );
         let (elapsed, tree) = client.read_response(&id);
         assert_eq!(tree["success"], true, "get_context_tree failed: {tree}");
+        let children = tree["data"]["children"].as_array().expect("children");
+        eprintln!(
+            "context-latency guard: read #{reads} took {elapsed:?} ({} children), \
+             seeded tree {seeded_bytes} bytes",
+            children.len()
+        );
         assert!(
             elapsed <= CONTEXT_RESPONSE_CEILING,
             "get_context_tree read #{reads} took {elapsed:?} (ceiling {CONTEXT_RESPONSE_CEILING:?}) — \
              the inline artifact walk is back (the operator's 10s /context timeout class); \
              seeded tree: {seeded_bytes} bytes",
         );
-        let children = tree["data"]["children"].as_array().expect("children");
         if children.len() >= SEEDED_CHILDREN {
             // The persisted rows carry the seeded files' real usage (the
             // background walk parsed them, not the request path).
