@@ -638,12 +638,20 @@ fn refused_saved_session_create_names_the_holder_and_next_steps() {
         "the notice keeps the daemon's refusal line verbatim: {notice}"
     );
     assert!(
-        notice.contains("Holder: session 245ddb974b6d (not answering on this daemon right now"),
+        notice.contains("Holder: session 245ddb974b6d (no worker on this daemon serves it"),
         "the notice names the unreachable holder: {notice}"
     );
     assert!(
-        notice.contains("prime-agent --resume 245ddb974b6d"),
-        "the notice suggests the attach next step: {notice}"
+        notice.contains("Restarting this daemon reaps same-socket leftovers"),
+        "the notice suggests the daemon-restart next step: {notice}"
+    );
+    assert!(
+        notice.contains("The file unlocks when that process exits"),
+        "the notice names the holder's exit as the other way around: {notice}"
+    );
+    assert!(
+        !notice.contains("retry shortly"),
+        "the false retry promise is gone from the ghost-holder arm: {notice}"
     );
     assert!(
         !notice.contains('\n'),

@@ -570,6 +570,18 @@ impl Supervisor {
         self.log
             .append(&format!("supervisor started pid {}", std::process::id()));
 
+        // The boot reap (the operator's same-socket predecessor rule): this
+        // daemon now owns the socket's lineage, so leftover worker processes
+        // of a dead predecessor - alive, still holding their runtime session
+        // leases, unreachable through any descriptor or registration - die
+        // here, and a wedged predecessor supervisor dies with them. Daemons
+        // and workers on OTHER sockets are never touched (the scan matches
+        // the socket path alone). The reap precedes the adoption pass and
+        // the first client: a create racing a leftover holder would answer
+        // the lease refusal this pass exists to clear. Bounded by
+        // construction (every target shares one escalation window).
+        crate::boot_reap::reap_predecessors(&self).await;
+
         // Update boot (spec §6): consume the roster from the spawn env
         // BEFORE the sweep deletes the file it points at, sweep this
         // socket's update scratch dir unconditionally (invariant I2 by
@@ -661,6 +673,12 @@ impl Supervisor {
 
     pub(crate) fn log_line(&self, message: &str) {
         self.log.append(&format!("[{}] {message}", util::now_iso()));
+    }
+
+    /// This socket's descriptor directory (the boot reap's protected-pid
+    /// census; every other reader lives in this module).
+    pub(crate) fn descriptor_dir(&self) -> std::path::PathBuf {
+        self.descriptor_dir.clone()
     }
 
     /// The spawn ledger for one sessions dir (TS `rlmSpawnLedgerFor`): the
@@ -4766,7 +4784,35 @@ impl Supervisor {
             let _ = self
                 .route_command(&resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
                 .await;
-            let _ = std::fs::remove_file(&resident.descriptor_path);
+            // The terminal stop deletes the descriptor ONLY after the
+            // worker's process is provably gone (TS `stopWorkerUntracked`'s
+            // contract). A worker that missed the routed shutdown (a dead
+            // connection, a wedged socket, a flush outlasting the route
+            // budget) gets the identity-gated SIGTERM -> SIGKILL
+            // escalation; one that survives even that keeps its descriptor
+            // WITH the stop tombstone, so the next boot's adoption pass
+            // finishes the stop. Deleting the descriptor of a live worker
+            // orphans it: nothing on any later daemon can adopt or reap it
+            // through its identity, while it keeps holding its runtime
+            // session lease - every open of its session then refuses with
+            // `Session is already active in <its id>`.
+            let (pid, start_id) = {
+                let descriptor = resident.descriptor.lock().await;
+                (descriptor.pid as u32, descriptor.process_start_id.clone())
+            };
+            match crate::boot_reap::stop_process(pid, start_id).await {
+                crate::boot_reap::ReapOutcome::Survived => {
+                    if self.persist_stop_tombstone(&resident).await.is_ok() {
+                        self.log_line(&format!(
+                            "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",
+                            resident.worker_id
+                        ));
+                    }
+                }
+                _ => {
+                    let _ = std::fs::remove_file(&resident.descriptor_path);
+                }
+            }
         }
         self.registry.clear().await;
         // The workers are all stopped now, so the accept loop may exit;
