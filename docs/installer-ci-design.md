@@ -199,7 +199,10 @@ exactly one channel manifest per tag —
 - a plain `vX.Y.Z` tag publishes `latest.json` (the stable channel);
 - a `vX.Y.Z-beta.N` tag publishes `beta.json` (the nightly channel); any other prerelease
   is refused at tag-check (the read side would treat it as a stable-channel pre-release and
-  skip it);
+  skip it); the nightly release attaches as a GitHub **prerelease** so it never takes the
+  Latest pointer — the stable channel's download base
+  `.../releases/latest/download/` keeps serving the latest stable release's
+  `latest.json` (Bugbot: beta tags steal GitHub Latest);
 
 shaped as `{"version": "v<ver>", "binaries": [...], "binaries_v2": [...]}` where each row is
 `{"platform", "file", "sha256"}` and the file names are the alias-named archives above. The

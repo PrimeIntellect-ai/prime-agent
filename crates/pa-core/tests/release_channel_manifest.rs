@@ -57,6 +57,8 @@ struct Step {
 struct With {
     #[serde(default)]
     files: Option<String>,
+    #[serde(default)]
+    prerelease: Option<String>,
 }
 
 fn load_workflow() -> (String, Workflow) {
@@ -237,6 +239,19 @@ fn the_workflow_wires_the_channel_manifest_producer() {
     assert!(
         files.contains("release-out/*.json"),
         "the attach list must carry the channel manifest via a json glob"
+    );
+    // A -beta* tag attaches as a GitHub PRE-RELEASE so the nightly can never
+    // take the Latest pointer; the stable channel's download base
+    // (.../releases/latest/download/) keeps serving the last stable
+    // release's latest.json (Bugbot: beta tags steal GitHub Latest).
+    let prerelease = attach_step
+        .with
+        .as_ref()
+        .and_then(|with| with.prerelease.as_deref())
+        .expect("the attach step must decide prerelease-ness");
+    assert_eq!(
+        prerelease, "${{ contains(github.ref_name, '-') }}",
+        "the attach step must mark prerelease-tag releases as prereleases"
     );
 }
 

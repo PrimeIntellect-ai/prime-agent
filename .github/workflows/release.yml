@@ -284,6 +284,12 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
+          # A -beta* tag publishes the nightly channel as a GitHub PRE-RELEASE:
+          # prereleases never take the Latest pointer, so the stable channel's
+          # download base (.../releases/latest/download/) keeps serving the
+          # latest stable release's latest.json (Bugbot: beta tags steal
+          # GitHub Latest).
+          prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true
           files: |
             release-out/prime-agent-*.tar.gz
