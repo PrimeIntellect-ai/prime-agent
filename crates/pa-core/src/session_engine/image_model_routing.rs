@@ -16,23 +16,24 @@ use pa_agent::types::{Model, ThinkingLevel};
 
 use crate::models::ResolvedImageModel;
 
+/// The routing decision for one dispatched batch (TS
+/// `resolveImageModelOverride` over the host's settings + registry):
+/// `Ok(None)` when the batch does not route, `Err` the actionable refusal
+/// that fails the turn.
+pub type ImageRouteDecisionFn = Arc<
+    dyn Fn(bool, &Model, ThinkingLevel) -> Result<Option<ResolvedImageModel>, String> + Send + Sync,
+>;
+
+/// Swap the host's serving target to the routed image model, or restore
+/// the session target (`None`). Called with the fresh decision of every
+/// admitted batch, so a stale route never outlives the next dispatch.
+pub type ImageRouteTargetSwapFn = Arc<dyn Fn(Option<&ResolvedImageModel>) + Send + Sync>;
+
 /// The host seam for image-model routing.
 #[derive(Clone)]
 pub struct ImageModelRouter {
-    /// The routing decision for one dispatched batch (TS
-    /// `resolveImageModelOverride` over the host's settings + registry):
-    /// `Ok(None)` when the batch does not route, `Err` the actionable
-    /// refusal that fails the turn.
-    pub decide: Arc<
-        dyn Fn(bool, &Model, ThinkingLevel) -> Result<Option<ResolvedImageModel>, String>
-            + Send
-            + Sync,
-    >,
-    /// Swap the host's serving target to the routed image model, or
-    /// restore the session target (`None`). Called with the fresh decision
-    /// of every admitted batch, so a stale route never outlives the next
-    /// dispatch.
-    pub swap_target: Arc<dyn Fn(Option<&ResolvedImageModel>) + Send + Sync>,
+    pub decide: ImageRouteDecisionFn,
+    pub swap_target: ImageRouteTargetSwapFn,
 }
 
 impl std::fmt::Debug for ImageModelRouter {

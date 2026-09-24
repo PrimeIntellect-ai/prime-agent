@@ -256,7 +256,7 @@ fn prompt_header(row: &InjectedPromptRow, detail: Detail, theme: &Theme) -> Line
                 vec![Span::styled("Python skills unavailable".to_string(), muted)];
             if !skills.is_empty() {
                 spans.push(Span::styled(" \u{b7} ".to_string(), dim));
-                spans.push(Span::styled(skills.join(", ").to_string(), dim));
+                spans.push(Span::styled(skills.join(", "), dim));
             }
             spans
         }
