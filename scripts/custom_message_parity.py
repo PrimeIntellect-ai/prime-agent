@@ -3,7 +3,7 @@
 against the installed TS prime-agent binary rendering the SAME session
 transcript containing every decorated custom-message row:
 
-  - a received agent message (diamond + participant + preview + body),
+  - a received agent message (icon + participant + preview + body),
   - an ipython cell that sent an agent message (the sent receipt rows
     render below the code, body in the expanded view),
   - a heartbeat prompt (pulse + schedule),
@@ -59,8 +59,19 @@ renders the `\u2665` heart. The diff canonicalizes the row's glyph on both
 frames (the label and schedule still diff) and the run separately asserts
 each side's glyph (Rust clock, TS heart baseline).
 
+Fourth documented divergence (Kevin directive 2026-09-24): the
+agent-message rows render the `\u2709` mail envelope as the row icon — the
+a2a rows read as agent mail — on the Rust side (the received transcript
+rows and the ipython sent/queued receipt rows share the one summary
+line), where the TS binary still renders the `\u25c6` diamond. The diff
+canonicalizes the row's glyph on both frames (the label and participant
+still diff; the glyph sits in its own accent SGR run, so the
+canonicalization spans the escapes between the glyph and the label) and
+the run separately asserts each side's glyph (Rust envelope, TS diamond
+baseline).
 
-Third documented divergence (Kevin/Sebastian directive 2026-09-23, product
+
+Fifth documented divergence (Kevin/Sebastian directive 2026-09-23, product
 improvement BEYOND TS): the expanded refinement outcome hangs on the
 branch grammar — the expanded content carries the dim `╰─ `
 gutter on the first row hanging off the `◆` header and a
@@ -396,6 +407,19 @@ def normalize(frame, root):
     # glyph.
     frame = frame.replace("\u2665", "<HBICON>")
     frame = frame.replace("\u25f7", "<HBICON>")
+    # Fourth carried divergence (see the module docstring): the
+    # agent-message rows' icon — Rust renders the ✉ mail envelope, TS the
+    # ◆ diamond. The diamond ALSO fronts the refinement header row (and
+    # the dropped RLM child rows), so the canonicalization is scoped to
+    # the agent-message compositions: the glyph followed by its SGR runs
+    # and the margin space up to the row label (received/sent/queued all
+    # start `Agent message`). The label and participant still diff; the
+    # run separately asserts each side's glyph.
+    frame = re.sub(
+        "[\u25c6\u2709]((?:\x1b\[[0-9;]*m| )*)Agent message",
+        r"<AMICON>\1Agent message",
+        frame,
+    )
     # The TS product's ripgrep notice (a startup environment notice when
     # rg is missing under PI_OFFLINE; the Rust build has no equivalent
     # row yet) is box environment, not transcript parity.
@@ -559,6 +583,29 @@ def assert_heartbeat_row(side, collapsed, expanded):
         assert "\u2665" + row in expanded, "ts: heart row missing expanded (baseline)"
         assert "\u25f7" + row not in collapsed, "ts: clock glyph rendered"
         assert "\u25f7" + row not in expanded, "ts: clock glyph rendered expanded"
+
+
+def assert_agent_message_rows(side, collapsed, expanded):
+    """The agent-message row contract per side (the Kevin-directed
+    2026-09-24 divergence): the Rust frames render the \u2709 mail
+    envelope on every agent-message row (the received transcript row and
+    the sent receipt row); the TS frames render the \u25c6 diamond (the
+    baseline the divergence moves away from). The \u25c6 stays correct on
+    the OTHER diamond rows (the refinement header renders on both sides)."""
+    received = "Agent message received \u00b7 from child model-probe"
+    sent = "Agent message sent \u00b7 to parent Worker"
+    if side == "rust":
+        assert "\u2709 " + received in collapsed, (
+            "rust: envelope received row missing collapsed"
+        )
+        assert "\u2709 " + sent in collapsed, "rust: envelope sent row missing collapsed"
+        assert "\u25c6 " + received not in collapsed, "rust: diamond received row rendered"
+        assert "\u25c6 " + sent not in collapsed, "rust: diamond sent row rendered"
+    else:
+        assert "\u25c6 " + received in collapsed, "ts: diamond received row missing (baseline)"
+        assert "\u25c6 " + sent in collapsed, "ts: diamond sent row missing (baseline)"
+        assert "\u2709 " not in collapsed, "ts: envelope glyph rendered"
+        assert "\u2709 " not in expanded, "ts: envelope glyph rendered expanded"
 
 
 def assert_rlm_child_rows(side, collapsed, expanded):
@@ -1014,6 +1061,7 @@ def main():
                 assert_sent_reach(side, collapsed, expanded)
                 assert_rlm_child_rows(side, collapsed, expanded)
                 assert_heartbeat_row(side, collapsed, expanded)
+                assert_agent_message_rows(side, collapsed, expanded)
                 assert_skill_reach(side, collapsed, expanded)
                 assert_refinement_branch(side, collapsed, expanded)
                 # The icon-follows-text color contract (the same directive as
