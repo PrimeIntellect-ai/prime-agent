@@ -289,13 +289,14 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
 
     // The dock renders at attach as the one-line activity row (unfocused,
     // hint-free by design; Enter is the direct launcher). The count is
-    // live-only (the operator's dead-registry fix): the passivated child
-    // is finished, so the segment reads zero live — the dock stays
-    // mounted and selectable because the child remains browsable history.
+    // the live running count only (the operator's running-count
+    // directive): the passivated child is finished, so the segment reads
+    // zero — the dock stays mounted and selectable because the child
+    // remains browsable history.
     let attached = first_frame_of(&parent_run.frames, "subagent");
     assert!(
         attached.contains("\u{25c6} 0 subagents"),
-        "the unfocused dock shows the live-only subagent count:\n{attached}"
+        "the unfocused dock shows the running-only subagent count:\n{attached}"
     );
     // The single Enter opened the scoped agents view directly: no
     // grouped panel frame ever renders.

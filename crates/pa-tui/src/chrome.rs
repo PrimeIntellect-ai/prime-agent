@@ -99,16 +99,11 @@ pub enum ActivityGroup {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivityDock {
-    /// The session's LIVE descendant subagents (the whole tree —
-    /// subagents of subagents count): running and idle only; dead
-    /// registry rows (passivated children the ledger still seeds)
-    /// never bloat the indicator (operator directive 2026-09-23).
-    pub subagents: usize,
-    /// How many of those descendants are actively running.
+    /// The count of actively-running descendants right now (the whole
+    /// tree — subagents of subagents count): the dock's rendered
+    /// `x subagents` count. Idle and dead registry rows never count —
+    /// they render in the scoped agents view.
     pub subagents_running: usize,
-    /// How many of the live descendants sit idle (the dock's `◐ K idle`
-    /// count, the operator's status-dot vocabulary).
-    pub subagents_idle: usize,
     /// Every descendant, finished ones included: this keeps the dock
     /// mounted and its Subagents group selectable while any subagent
     /// history remains browsable (the rendered count stays live-only).
@@ -136,8 +131,7 @@ pub struct ActivityDock {
 
 impl ActivityDock {
     pub fn visible(&self) -> bool {
-        self.subagents > 0
-            || self.subagents_total > 0
+        self.subagents_total > 0
             || self.heartbeats > 0
             || self.bash_total > 0
             || self.goal_tokens.is_some()
@@ -517,44 +511,35 @@ fn truncate_spans_to_width(spans: &[crate::Span], width: usize) -> Vec<crate::Sp
 /// with the same muted `─` rule that frames the pickers' search fields,
 /// not an accent box.
 ///
-/// The row differentiates active from idle: subagents trail
-/// `N running` and heartbeats trail `M paused` (the tray carries no
-/// heartbeat label; the dock owns the count).
+/// The subagents segment is the live running count, as `x subagents`;
+/// no category breakdown rides the prompt bar. Heartbeats trail
+/// `M paused` (the tray carries no heartbeat label; the dock owns the
+/// count).
 pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) -> Option<Vec<Line>> {
     if !dock.visible() || width == 0 {
         return None;
     }
-    // The status-dot vocabulary rides the count clusters (TS
-    // `subagent-summary-line`'s `● running / ◐ idle / ○ inactive`, the
-    // operator's 2026-09-23 directive): the filled circle marks live
-    // work, the half circle waiting work. Dead rows never count (the
-    // live-only indicator), so the open circle has no cluster here.
+    // The status-dot vocabulary rides the remaining count cluster (TS
+    // `subagent-summary-line`'s `● running / ◐ idle / ○ inactive`): the
+    // half circle marks waiting work. Only the heartbeat pause keeps a
+    // dot.
     let cluster = |text: &str, color: ThemeColor| {
         vec![
             theme.fg_span(ThemeColor::Dim, " · ".to_string()),
             theme.fg_span(color, text.to_string()),
         ]
     };
-    let mut subagents = vec![theme.fg_span(
+    // The live-only number: the count of actively-running subagents
+    // right now. Idle and finished descendants stay out of the
+    // indicator; they render in the scoped agents view.
+    let subagents = vec![theme.fg_span(
         ThemeColor::Muted,
         format!(
             "◆ {} subagent{}",
-            dock.subagents,
-            if dock.subagents == 1 { "" } else { "s" }
+            dock.subagents_running,
+            if dock.subagents_running == 1 { "" } else { "s" }
         ),
     )];
-    if dock.subagents > 0 {
-        subagents.extend(cluster(
-            &format!("● {} running", dock.subagents_running),
-            ThemeColor::Success,
-        ));
-    }
-    if dock.subagents_idle > 0 {
-        subagents.extend(cluster(
-            &format!("◐ {} idle", dock.subagents_idle),
-            ThemeColor::Warning,
-        ));
-    }
     let mut heartbeats = vec![theme.fg_span(
         ThemeColor::Muted,
         format!(
@@ -650,9 +635,7 @@ mod tests {
     fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
         let dock = ActivityDock {
-            subagents: 95,
             subagents_running: 2,
-            subagents_idle: 93,
             heartbeats: 3,
             heartbeats_paused: 1,
             bash_running: 1,
@@ -660,8 +643,8 @@ mod tests {
             goal_tokens: Some((18_000, Some(40_000))),
             ..ActivityDock::default()
         };
-        // The dot clusters widen the row: the fixture renders at 120 so
-        // the full line (and the goal readout) stays untruncated.
+        // The heartbeat cluster and the goal readout widen the row: the
+        // fixture renders at 120 so the full line stays untruncated.
         let frame = render_activity_dock(&dock, &theme, 120).unwrap();
         assert_eq!(frame.len(), 2, "a muted separator rule plus the row");
         let rule = frame[0]
@@ -676,13 +659,12 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             text,
-            " ◆ 95 subagents · ● 2 running · ◐ 93 idle  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  goal 18k/40k"
+            " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  goal 18k/40k"
         );
         // A running count of zero still renders: a long idle roster must
         // read as quiet, not as uniformly busy.
         let dock = ActivityDock {
-            subagents: 2,
-            subagents_idle: 2,
+            subagents_total: 2,
             heartbeats: 1,
             bash_total: 3,
             ..ActivityDock::default()
@@ -692,13 +674,10 @@ mod tests {
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
-        assert_eq!(
-            text,
-            " ◆ 2 subagents · ● 0 running · ◐ 2 idle  ·  ◷ 1 heartbeat  ·  ▸ 0 shells"
-        );
+        assert_eq!(text, " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells");
         // A dead-only roster keeps the dock mounted and its Subagents
         // group selectable (finished subagents are browsable history):
-        // the rendered count stays live-only and reads zero.
+        // the rendered count stays running-only and reads zero.
         let dock = ActivityDock {
             subagents_total: 154,
             ..ActivityDock::default()
@@ -726,6 +705,48 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("▸ 0 shells"));
         assert!(render_activity_dock(&ActivityDock::default(), &theme, 100).is_none());
+    }
+
+    /// The prompt bar's subagent segment is the running count only:
+    /// the readout renders exactly `x subagents` with `x` the live
+    /// running count, and no category breakdown rides the row.
+    #[test]
+    fn prompt_bar_subagent_segment_is_the_running_count_only() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        // Two running among seven descendants: the readout is the
+        // running count, not the descendant total and not a category
+        // breakdown.
+        let dock = ActivityDock {
+            subagents_running: 2,
+            subagents_total: 7,
+            ..ActivityDock::default()
+        };
+        let frame = render_activity_dock(&dock, &theme, 80).unwrap();
+        let text = frame[1]
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert_eq!(text, " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
+        assert!(!text.contains("running"), "no category breakdown: {text}");
+        assert!(!text.contains("idle"), "no category breakdown: {text}");
+        assert!(
+            !text.contains("●"),
+            "no status dot rides the segment: {text}"
+        );
+        // A single running descendant renders the singular form (the
+        // running row is one of the subtree's descendants, so the total
+        // mounts the dock).
+        let dock = ActivityDock {
+            subagents_running: 1,
+            subagents_total: 1,
+            ..ActivityDock::default()
+        };
+        let frame = render_activity_dock(&dock, &theme, 80).unwrap();
+        let text = frame[1]
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert_eq!(text, " ◆ 1 subagent  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
     }
 
     /// The `/speed` footer row (TS `FooterComponent::render`): one dim row
