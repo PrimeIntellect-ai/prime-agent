@@ -673,8 +673,9 @@ async fn start_kernel_impl(
     // Revive a prior session's namespace before the bootstrap, so the
     // bootstrap then overwrites live handles (rlm, skills) on top of anything restored.
     let mut pending_restore: Option<RestoreResult> = None;
+    let mut snapshot_existed = false;
     if let Some(dir) = &snapshot_dir {
-        let snapshot_existed = snapshot_path_in(dir).exists();
+        snapshot_existed = snapshot_path_in(dir).exists();
         emit_startup_progress(inner, on_progress, "Restoring Python state...");
         let restore = manager.restore_state().await;
         if snapshot_existed {
@@ -715,7 +716,15 @@ async fn start_kernel_impl(
                 .await;
             return Err(anyhow!("Kernel provisioner disposed during startup"));
         }
-        Ok(bootstrap) if bootstrap.status == ExecuteStatus::Ok => {}
+        Ok(bootstrap) if bootstrap.status == ExecuteStatus::Ok => {
+            if snapshot_existed {
+                // The just-restored namespace is fresh: the debounced
+                // auto-snapshot the bootstrap scheduled would rewrite identical
+                // content — or, after a failed restore, clobber the healthy
+                // on-disk payload with a skills-only namespace.
+                manager.mark_restored_namespace_fresh();
+            }
+        }
         Ok(bootstrap) => {
             let details = [bootstrap.stderr.clone()]
                 .into_iter()

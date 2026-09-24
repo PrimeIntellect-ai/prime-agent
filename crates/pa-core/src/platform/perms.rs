@@ -122,6 +122,38 @@ pub fn is_readable(path: &Path) -> Result<(), std::io::Error> {
     std::fs::File::open(path).map(|_| ())
 }
 
+/// Set the private mode on an already-open file (`fchmod`): exact bits despite
+/// the umask, and tightens a pre-existing loose file. Callers decide whether a
+/// failure is fatal.
+#[cfg(unix)]
+pub fn restrict_open_file(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(std::fs::Permissions::from_mode(PRIVATE_FILE_MODE))
+}
+
+#[cfg(not(unix))]
+pub fn restrict_open_file(_file: &std::fs::File) -> std::io::Result<()> {
+    // Windows: inherited ACLs apply; see the ACL note above.
+    Ok(())
+}
+
+/// Create directories recursively with the private dir mode on platforms with
+/// mode bits; existing directories are left untouched (mkdir semantics).
+#[cfg(unix)]
+pub fn create_dir_all_private(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(PRIVATE_DIR_MODE)
+        .recursive(true)
+        .create(path)
+}
+
+#[cfg(not(unix))]
+pub fn create_dir_all_private(path: &Path) -> std::io::Result<()> {
+    // Windows: inherited ACLs apply; see the ACL note above.
+    std::fs::create_dir_all(path)
+}
+
 #[cfg(all(test, windows))]
 mod windows_tests {
     use super::*;

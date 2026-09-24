@@ -82,13 +82,19 @@ impl Inner {
 
     /// Revive a previously snapshotted namespace into the kernel.
     /// `None` when no snapshot is configured or the restore failed.
-    /// Repair restores bypass the repair gate and are bounded so a stalled
-    /// kernel cannot wedge it.
+    /// Repair restores bypass the repair gate; every restore is bounded so a
+    /// wedged kernel cannot stall start()/worker recovery forever.
     pub(crate) async fn perform_restore(
         self: &Arc<Self>,
         protocol_repair: bool,
     ) -> Option<RestoreResult> {
         let cfg = self.options.snapshot.clone()?;
+        // Before the attempt, so a failed or timed-out restore still arms the
+        // skip; repair retries (reprovision after a failed first restore) keep
+        // the non-repair stat.
+        if !protocol_repair {
+            lock(&self.guarded).restored_manifest_stat = Some(manifest_stat_of(&cfg.manifest_path));
+        }
         let request = Request::Restore {
             path: cfg.path.to_string_lossy().to_string(),
         };
@@ -101,7 +107,11 @@ impl Inner {
                     protocol_repair,
                     ..ExecuteOptions::default()
                 },
-                protocol_repair.then_some(REPAIR_STEP_TIMEOUT_MS),
+                Some(if protocol_repair {
+                    REPAIR_STEP_TIMEOUT_MS
+                } else {
+                    RESTORE_EXECUTION_TIMEOUT_MS
+                }),
             )
             .await;
         match result {
@@ -127,12 +137,59 @@ impl Inner {
                     },
                     describe_failure(&r.result),
                 ));
+                // The namespace never got the saved state, so the on-disk
+                // payload must stay the fresher copy.
+                if !protocol_repair {
+                    lock(&self.guarded).pending_restore = true;
+                }
                 None
             }
             Err(error) => {
                 self.append_diagnostic(&format!("state restore error: {error:#}"));
+                if !protocol_repair {
+                    lock(&self.guarded).pending_restore = true;
+                }
                 None
             }
+        }
+    }
+
+    /// Arm the one-shot post-restore snapshot skip: the bootstrap-scheduled
+    /// snapshot would rewrite identical content, or after a failed restore
+    /// clobber the healthy on-disk copy with a skills-only payload. Call after
+    /// the bootstrap succeeds — its own settled execution must not defeat the
+    /// arm.
+    pub(crate) fn mark_restored_namespace_fresh(self: &Arc<Self>) {
+        let mut g = lock(&self.guarded);
+        // No attempted non-repair restore to match.
+        let Some(manifest_stat) = g.restored_manifest_stat.take() else {
+            return;
+        };
+        g.restored_namespace_skip = Some(RestoredNamespaceSkip {
+            manifest_stat,
+            completed_executions: g.completed_executions,
+        });
+    }
+
+    /// One-shot: consumed whether or not it fires. The skip holds only when no
+    /// execution settled since the arm AND the manifest stat still matches the
+    /// one recorded before the restore attempt.
+    fn consume_restored_snapshot_skip(self: &Arc<Self>) -> bool {
+        let skip = lock(&self.guarded).restored_namespace_skip.take();
+        let Some(skip) = skip else {
+            return false;
+        };
+        if lock(&self.guarded).completed_executions != skip.completed_executions {
+            return false;
+        }
+        let Some(cfg) = self.options.snapshot.as_ref() else {
+            return false;
+        };
+        let stat = manifest_stat_of(&cfg.manifest_path);
+        match (stat, skip.manifest_stat) {
+            (Some(current), Some(armed)) => current == armed,
+            (None, None) => true,
+            _ => false,
         }
     }
 
@@ -159,6 +216,13 @@ impl Inner {
         *timer = Some(tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(debounce)).await;
             if let Some(inner) = inner.upgrade() {
+                // The bootstrap that followed a restore schedules this flush;
+                // while the namespace is unchanged, rewriting the just-restored
+                // payload (or clobbering a still-valid one after a failed
+                // restore) is the one write that must not happen.
+                if inner.consume_restored_snapshot_skip() {
+                    return;
+                }
                 inner
                     .capture_snapshot(Some(SNAPSHOT_EXECUTION_TIMEOUT_MS), false)
                     .await;
@@ -237,6 +301,14 @@ impl Inner {
         // Reset: a superseding start() can revive this kernel for new work.
         lock(&self.guarded).flushing_snapshot_for_dispose = false;
     }
+}
+
+/// File-stat identity of a snapshot manifest; `None` when it cannot be stated.
+fn manifest_stat_of(path: &std::path::Path) -> Option<ManifestStat> {
+    std::fs::metadata(path).ok().map(|m| ManifestStat {
+        mtime: m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+        size: m.len(),
+    })
 }
 
 fn as_string_array(fields: &Value, key: &str) -> Vec<String> {

@@ -142,6 +142,7 @@ impl Inner {
         let mut buffers = lock(&execution.buffers);
         if !buffers.settled {
             buffers.settled = true;
+            lock(&self.guarded).completed_executions += 1;
             if let Some(callback) = execution.opts.on_late_sent_agent_message.clone() {
                 self.register_late_sent_agent_message_handler(&execution.request_id, callback);
             }
