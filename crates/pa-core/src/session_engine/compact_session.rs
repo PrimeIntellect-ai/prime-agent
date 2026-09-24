@@ -2108,14 +2108,7 @@ mod tests {
         let model = registration.get_model();
         let tmp = tempfile::tempdir().unwrap();
         let aux = aux_context(tmp.path(), Some("faux/compact-m"));
-        let mut session = SessionManager::in_memory(tmp.path());
-        session
-            .append_message(AgentMessage::User(pa_types::ai::UserMessage {
-                content: UserContent::Text("one turn to compact".to_string()),
-                timestamp: 0,
-                rest: Default::default(),
-            }))
-            .unwrap();
+        let mut session = session_with_turns(tmp.path(), 3);
         let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
         let recorder = seen_models.clone();
         registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
@@ -2139,7 +2132,7 @@ mod tests {
                 api_key: None,
                 custom_instructions: None,
                 settings: super::super::compaction::CompactionSettings {
-                    keep_recent_tokens: 1,
+                    keep_recent_tokens: 20,
                     ..Default::default()
                 },
                 abort: None,
@@ -2162,14 +2155,7 @@ mod tests {
         let model = registration.get_model();
         let tmp = tempfile::tempdir().unwrap();
         let aux = aux_context(tmp.path(), Some("testaux/missing-model"));
-        let mut session = SessionManager::in_memory(tmp.path());
-        session
-            .append_message(AgentMessage::User(pa_types::ai::UserMessage {
-                content: UserContent::Text("one turn to compact".to_string()),
-                timestamp: 0,
-                rest: Default::default(),
-            }))
-            .unwrap();
+        let mut session = session_with_turns(tmp.path(), 3);
         let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
         let recorder = seen_models.clone();
         registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
@@ -2193,7 +2179,7 @@ mod tests {
                 api_key: None,
                 custom_instructions: None,
                 settings: super::super::compaction::CompactionSettings {
-                    keep_recent_tokens: 1,
+                    keep_recent_tokens: 20,
                     ..Default::default()
                 },
                 abort: None,
