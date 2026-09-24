@@ -13,7 +13,7 @@
 use serde_json::Value;
 
 use crate::keybindings::{format_key_text, KeybindingsManager};
-use crate::menu_panel::{hug_row, menu_list_layout, status_dot};
+use crate::menu_panel::{hug_row, menu_list_layout, plain_cell, status_dot};
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line, wrap_text};
 use crate::{Line, Span};
@@ -21,10 +21,6 @@ use crate::{Line, Span};
 /// The preferred visible rows of the list (TS
 /// `PREFERRED_VISIBLE_HEARTBEATS`).
 const PREFERRED_VISIBLE: usize = 8;
-
-/// The detail pane's prompt-line budget floor: a short viewport renders
-/// at least this many wrapped prompt lines when any fit.
-const MIN_PROMPT_LINES: usize = 1;
 
 /// Rows the list reserves outside its items (the inline geometry: rule,
 /// title, blank, column header, scroll indicator, blank, hint, rule).
@@ -636,6 +632,13 @@ impl HeartbeatsPicker {
             } else {
                 0
             };
+        // The shared layout floors at one row so a picker never reads
+        // empty; this view must never render past its viewport, so a
+        // frame too short for any row renders none (the scroll
+        // indicator follows: nothing to scroll).
+        if self.viewport_rows <= reserved {
+            return 0;
+        }
         menu_list_layout(
             Some(self.viewport_rows),
             PREFERRED_VISIBLE,
@@ -681,7 +684,7 @@ impl HeartbeatsPicker {
                 let is_selected = start + index == selected;
                 lines.push(columns.entry_row(theme, width, entry, is_selected));
             }
-            if start > 0 || end < self.heartbeats.len() {
+            if visible > 0 && (start > 0 || end < self.heartbeats.len()) {
                 lines.push(vec![
                     Span::raw("  "),
                     theme.fg_span(
@@ -785,8 +788,8 @@ impl HeartbeatsPicker {
             ]);
             let mut shown = wrapped.len().min(prompt_budget);
             let mut clipped = false;
-            if wrapped.len() > shown {
-                shown = shown.max(MIN_PROMPT_LINES) - 1;
+            if wrapped.len() > shown && shown > 1 {
+                shown -= 1;
                 clipped = true;
             }
             for line in wrapped[..shown].iter() {
@@ -992,12 +995,15 @@ impl Columns {
         row.push(
             theme.fg_span(
                 ThemeColor::Muted,
-                entry
-                    .job
-                    .next_run_at
-                    .as_deref()
-                    .map(format_timestamp)
-                    .unwrap_or_else(|| "\u{2014}".to_string()),
+                plain_cell(
+                    &entry
+                        .job
+                        .next_run_at
+                        .as_deref()
+                        .map(format_timestamp)
+                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                    16,
+                ),
             ),
         );
         row.push(Span::raw("  "));
@@ -1026,16 +1032,6 @@ fn action_row(theme: &Theme, width: usize, label: &str, description: &str, selec
         selected,
         width,
     )
-}
-
-/// One plain-text cell truncated to its column budget (no ellipsis: the
-/// table stays aligned; the detail drill-in carries the full text).
-fn plain_cell(text: &str, width: usize) -> String {
-    let mut cell: String = text.chars().take(width).collect();
-    if cell.chars().count() < width {
-        cell.push_str(&" ".repeat(width - cell.chars().count()));
-    }
-    cell
 }
 
 /// The pane's header block: a muted separator rule, then the title row —
@@ -1544,6 +1540,52 @@ mod tests {
         let joined = text.join(" ");
         assert!(joined.contains("word-01"));
         assert!(!joined.contains("word-40"));
+    }
+
+    /// A missing next-run pads its cell like the header: the status
+    /// column stays under its header when the `—` placeholder renders.
+    #[test]
+    fn a_missing_next_run_keeps_the_columns_aligned() {
+        let mut catalog = entries();
+        catalog[0].job.next_run_at = None;
+        let picker = HeartbeatsPicker::new(catalog, None, None, 24);
+        let frame = picker.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        let row = text
+            .iter()
+            .find(|row| row.contains("every 10m"))
+            .expect("the row");
+        // The status cell sits at the same offset as the header's
+        // (the selected row's half-circle dot starts the cell).
+        let header = text
+            .iter()
+            .find(|row| row.contains("Interval") && row.contains("Next run"))
+            .expect("the header");
+        let (Some(h), Some(r)) = (header.find("Status"), row.find("\u{25d0}")) else {
+            panic!("header and row status cells: {header:?} {row:?}");
+        };
+        assert_eq!(h, r, "the status column aligns: {header:?} vs {row:?}");
+    }
+
+    /// The prompt block never degrades to a lone marker: a budget of one
+    /// renders the first prompt line instead.
+    #[test]
+    fn a_one_row_prompt_budget_renders_the_first_line() {
+        let mut catalog = entries();
+        catalog[0].job.prompt = (1..=12)
+            .map(|n| format!("word-{n:02}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut picker = HeartbeatsPicker::new(catalog, None, None, 19);
+        picker.handle_key("enter", &kb());
+        let frame = picker.render(&theme(), 70, &kb());
+        assert!(frame.len() <= 19, "the drill-in fits: {}", frame.len());
+        let text = frame_text(&frame);
+        assert!(text.join(" ").contains("word-01"), "a prompt line renders");
+        assert!(
+            text.iter().filter(|row| row.trim() == "\u{2026}").count() == 0,
+            "no lone marker: {text:?}"
+        );
     }
 
     #[test]

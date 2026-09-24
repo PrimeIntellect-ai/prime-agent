@@ -12,7 +12,7 @@
 use serde_json::Value;
 
 use crate::keybindings::{format_key_text, KeybindingsManager};
-use crate::menu_panel::{hug_row, menu_list_layout, status_dot};
+use crate::menu_panel::{hug_row, menu_list_layout, plain_cell, status_dot};
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line, wrap_text};
 use crate::{Line, Span};
@@ -151,6 +151,9 @@ impl BashView {
     /// A landed registry refresh: replace the rows, keep the selection on
     /// the surviving id, and drop a detail pane whose row vanished.
     pub fn apply_activities(&mut self, activities: Vec<BashActivity>) {
+        // A landed snapshot supersedes any shown error: a retried kill or
+        // the next 2s poll proves the failure gone.
+        self.error = None;
         self.activities = activities;
         let selected = self.selected_id.clone();
         let exists = selected
@@ -181,7 +184,7 @@ impl BashView {
         self.output_tail = Some((id.to_string(), lines));
     }
 
-    fn detail_id(&self) -> Option<String> {
+    pub(crate) fn detail_id(&self) -> Option<String> {
         match &self.mode {
             Mode::Detail { id, .. } => Some(id.clone()),
             Mode::List => None,
@@ -314,6 +317,13 @@ impl BashView {
     /// The list's visible-row budget (the inline shape).
     fn visible_items(&self) -> usize {
         let reserved = LIST_FRAME_ROWS + if self.error.is_some() { 2 } else { 0 };
+        // The shared layout floors at one row so a picker never reads
+        // empty; this view must never render past its viewport, so a
+        // frame too short for any row renders none (the scroll
+        // indicator follows: nothing to scroll).
+        if self.viewport_rows <= reserved {
+            return 0;
+        }
         menu_list_layout(
             Some(self.viewport_rows),
             PREFERRED_VISIBLE,
@@ -362,7 +372,7 @@ impl BashView {
                 let is_selected = start + index == selected;
                 lines.push(columns.activity_row(theme, width, activity, is_selected));
             }
-            if start > 0 || end < self.activities.len() {
+            if visible > 0 && (start > 0 || end < self.activities.len()) {
                 lines.push(vec![
                     Span::raw("  "),
                     theme.fg_span(
@@ -399,6 +409,10 @@ impl BashView {
             return lines;
         };
         let name = single_line(&activity.command);
+        // The drill-in's command block is the EXACT command (the raw
+        // string: embedded newlines and spacing stay verbatim); only the
+        // title cell single-lines for the identity row.
+        let command_exact = activity.command.clone();
         let subtitle = if activity.running() {
             "running".to_string()
         } else {
@@ -435,10 +449,17 @@ impl BashView {
         // renders only when its label and at least one line fit beside
         // the output block's own minimum.
         let command_width = width.saturating_sub(4).max(10);
-        let command_wrapped = wrap_text(&name, command_width);
+        let command_wrapped = wrap_text(&command_exact, command_width);
         let mut command_rows = 0usize;
+        let mut command_clipped = false;
         if left >= 4 {
             command_rows = (left - 3).min(command_wrapped.len());
+            if command_wrapped.len() > command_rows {
+                // The leading marker rides inside the block's own budget:
+                // the clip never overspends the viewport.
+                command_rows = command_rows.saturating_sub(1).max(1);
+                command_clipped = true;
+            }
             left -= 2 + command_rows;
         }
         let output_rows = left.saturating_sub(2).max(if left >= 3 { 1 } else { 0 });
@@ -448,16 +469,16 @@ impl BashView {
                 Span::raw("  "),
                 theme.fg_span(ThemeColor::Dim, "Command".to_string()),
             ]);
-            for line in command_wrapped[..command_rows].iter() {
-                let mut row = vec![Span::raw("  ")];
-                row.extend(line.iter().cloned());
-                lines.push(truncate_line(&row, width, ""));
-            }
-            if command_rows < command_wrapped.len() {
+            if command_clipped {
                 lines.push(vec![
                     Span::raw("  "),
                     theme.fg_span(ThemeColor::Dim, "\u{2026}".to_string()),
                 ]);
+            }
+            for line in command_wrapped[..command_rows].iter() {
+                let mut row = vec![Span::raw("  ")];
+                row.extend(line.iter().cloned());
+                lines.push(truncate_line(&row, width, ""));
             }
         }
         if pairs_rows > 0 {
@@ -478,8 +499,22 @@ impl BashView {
                 .filter(|(tail_id, _)| tail_id == id);
             match tail {
                 Some((_, output)) if !output.is_empty() => {
-                    let shown = output.len().min(output_rows);
-                    for line in output[..shown].iter() {
+                    // The fetched tail is already the newest window: a
+                    // short viewport drops the OLDEST lines (the leading
+                    // marker says so), never the newest output.
+                    let mut shown = output.len().min(output_rows);
+                    let mut clipped = false;
+                    if output.len() > shown {
+                        shown = shown.saturating_sub(1).max(1);
+                        clipped = true;
+                    }
+                    if clipped {
+                        lines.push(vec![
+                            Span::raw("  "),
+                            theme.fg_span(ThemeColor::Dim, "\u{2026}".to_string()),
+                        ]);
+                    }
+                    for line in output[output.len() - shown..].iter() {
                         lines.push(truncate_line(
                             &vec![
                                 Span::raw("  "),
@@ -488,12 +523,6 @@ impl BashView {
                             width,
                             "",
                         ));
-                    }
-                    if shown < output.len() {
-                        lines.push(vec![
-                            Span::raw("  "),
-                            theme.fg_span(ThemeColor::Dim, "\u{2026}".to_string()),
-                        ]);
                     }
                 }
                 Some((_, _)) => lines.push(vec![
@@ -763,30 +792,20 @@ fn detail_block_lines(theme: &Theme, width: usize, pairs: &[(&'static str, Strin
         .collect()
 }
 
-/// One plain-text cell truncated to its column budget (no ellipsis: the
-/// table stays aligned; the detail drill-in carries the full text).
-fn plain_cell(text: &str, width: usize) -> String {
-    let mut cell: String = text.chars().take(width).collect();
-    if cell.chars().count() < width {
-        cell.push_str(&" ".repeat(width - cell.chars().count()));
-    }
-    cell
-}
-
 /// `single_line`: collapse all whitespace runs to single spaces.
 fn single_line(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Keep every row one line and inert as terminal text: process-provided
-/// strings never forward control characters into the UI.
+/// Keep every fetched line inert as terminal text: process-provided
+/// strings never forward control characters into the UI — but the
+/// line's own leading and trailing spacing stays exactly as the kernel
+/// wrote it (indented logs and fixed-width rows keep their shape).
 fn clean_line(value: &str) -> String {
     value
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
         .collect::<String>()
-        .trim()
-        .to_string()
 }
 
 /// The duration cell: whole milliseconds read as a compact human word
@@ -1115,6 +1134,54 @@ mod tests {
         assert!(frame.len() <= 12, "detail pane fits: {}", frame.len());
         let text = frame_text(&frame);
         assert!(text.iter().any(|row| row.contains("Cancel command")));
+    }
+
+    /// The clipped tail drops the OLDEST lines: the newest output always
+    /// renders, with a leading marker for the hidden head.
+    #[test]
+    fn a_clipped_tail_keeps_the_newest_lines() {
+        let mut catalog = activities();
+        catalog[0].command = "run"; // short command, long output
+        let mut view = BashView::new(catalog, 20);
+        view.handle_key("enter", &kb());
+        let tail: Vec<String> = (1..=30).map(|n| format!("line-{n:02}")).collect();
+        view.set_output("a", &tail.join("\n"));
+        let frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        assert!(frame.len() <= 20, "the drill-in fits: {}", frame.len());
+        let joined = text.join(" ");
+        assert!(joined.contains("line-30"), "the newest line renders");
+        assert!(!joined.contains("line-01"), "the oldest drops first");
+    }
+
+    /// The exact command renders verbatim: repeated spaces and embedded
+    /// newlines stay (the drill-in is the full text, not the summary).
+    #[test]
+    fn the_detail_renders_the_exact_command_verbatim() {
+        let mut catalog = activities();
+        catalog[0].command = "echo  a\nls  --all".to_string();
+        let mut view = BashView::new(catalog, 40);
+        view.handle_key("enter", &kb());
+        let frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        let joined = text.join(" ");
+        assert!(joined.contains("echo  a"), "repeated spaces stay: {joined}");
+        assert!(joined.contains("ls  --all"), "the second line stays");
+    }
+
+    /// Fetched output keeps its own leading spacing (indented logs keep
+    /// their shape); only control characters scrub.
+    #[test]
+    fn fetched_output_keeps_its_leading_spacing() {
+        let mut view = BashView::new(activities(), 40);
+        view.handle_key("enter", &kb());
+        view.set_output("a", "    indented line\nplain line");
+        let frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        assert!(
+            text.iter().any(|row| row.contains("    indented line")),
+            "leading spacing stays: {text:?}"
+        );
     }
 
     #[test]

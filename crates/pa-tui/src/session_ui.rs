@@ -141,12 +141,14 @@ pub(crate) enum BashActivityUpdate {
     /// A background action settled; re-issue the list from the main loop so
     /// the request carries a fresh epoch (one issued mid-action must not
     /// supersede the post-action snapshot).
-    Refresh {
-        session: String,
-    },
+    Refresh { session: String },
     Error {
         session: String,
         message: String,
+        /// The activity the failed request was about (a tail or kill for
+        /// one row): a late failure lands only on that row's open detail
+        /// pane, never on whichever row the user switched to.
+        activity_id: Option<String>,
     },
 }
 
@@ -5535,11 +5537,24 @@ impl SessionUi {
                     bash_view.set_output(&activity_id, &tail);
                 }
             }
-            BashActivityUpdate::Error { message, .. } => {
+            BashActivityUpdate::Error {
+                message,
+                activity_id,
+                ..
+            } => {
                 // An in-view action's failure surfaces in the open bash
-                // view; with no view open the transcript row carries it.
-                if let Some(bash_view) = view.bash_view.as_mut() {
-                    bash_view.set_error(message);
+                // view — and only when the failed request's row is the
+                // open detail (a late failure for another row's request
+                // never lands on it); with no view open the transcript
+                // row carries it.
+                let detail_matches = match (&view.bash_view, &activity_id) {
+                    (Some(bash_view), Some(id)) => bash_view.detail_id().as_deref() == Some(id),
+                    _ => true,
+                };
+                if view.bash_view.is_some() && detail_matches {
+                    if let Some(bash_view) = view.bash_view.as_mut() {
+                        bash_view.set_error(message);
+                    }
                 } else {
                     self.error_row(&message, view);
                 }
@@ -5658,6 +5673,7 @@ impl SessionUi {
                             let _ = tx.send(BashActivityUpdate::Error {
                                 session,
                                 message: format!("Bash output: {error:#}"),
+                                activity_id: Some(response_id),
                             });
                         }
                     }
@@ -5668,6 +5684,7 @@ impl SessionUi {
                 let session = self.active_session_id.clone();
                 let tx = self.bash_updates.clone();
                 tokio::spawn(async move {
+                    let error_id = id.clone();
                     let result = client
                         .request_ok(DaemonCommand::KillKernelBash {
                             id: None,
@@ -5686,6 +5703,7 @@ impl SessionUi {
                             let _ = tx.send(BashActivityUpdate::Error {
                                 session,
                                 message: format!("Could not kill bash command: {error:#}"),
+                                activity_id: Some(error_id),
                             });
                         }
                     }

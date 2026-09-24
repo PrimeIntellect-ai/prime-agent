@@ -117,6 +117,25 @@ fn finish_menu_row(theme: &Theme, row: Line, width: usize, selected: bool) -> Li
     row
 }
 
+/// One plain-text cell truncated and padded to its column budget by
+/// display width (wide glyphs never overflow into the next column; no
+/// ellipsis — the tables stay aligned, and the detail drill-ins carry
+/// the full text).
+pub(crate) fn plain_cell(text: &str, width: usize) -> String {
+    let mut cell = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let char_width = crate::width::char_width(ch);
+        if used + char_width > width {
+            break;
+        }
+        cell.push(ch);
+        used += char_width;
+    }
+    cell.push_str(&" ".repeat(width - used));
+    cell
+}
+
 /// The status-dot vocabulary (the operator's 2026-09-23 directive; TS
 /// `subagent-summary-line`'s counts box `● running / ◐ idle /
 /// ○ inactive`): the filled circle rides the live states (running,
