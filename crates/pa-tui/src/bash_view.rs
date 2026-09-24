@@ -2129,7 +2129,11 @@ mod tests {
         );
         view.set_output("a", "line two", reopened);
         assert!(!view.open_retry);
-        assert!(view.error.is_none(), "the landing clears the fetch error");
+        // The kill error survives the landing — its lifecycle is the
+        // registry refresh, never a fetch success.
+        assert!(view.error.is_some());
+        view.clear_error();
+        assert!(view.error.is_none());
     }
 
     /// A one-row output region (the designed minimum under a long
