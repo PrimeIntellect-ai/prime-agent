@@ -239,12 +239,27 @@ impl Supervisor {
         worker_id: &str,
         ephemeral: bool,
     ) {
-        let owned: Vec<AgentRosterEntry> = {
+        let (owned, unowned_at_start) = {
             let mut roster = self.roster.lock().unwrap();
             let owned: Vec<AgentRosterEntry> = roster
                 .entries_for_worker(worker_id)
                 .into_iter()
                 .cloned()
+                .collect();
+            // The unowned rows this pass may settle, snapshotted where
+            // `owned` is: a family whose root registers while this pass
+            // awaits (its registration seed writes fresh unowned rows)
+            // is missing from the pass's roots/ledger view, so a sweep
+            // over the LIVE roster would read those just-seeded rows as
+            // unanchored and drop a live resident family's display. The
+            // snapshot scopes the sweep to the rows that existed when
+            // the stop began - the only rows whose anchors this stop can
+            // have changed - and the revalidation below still settles
+            // rows a later pass owns.
+            let unowned_at_start: Vec<AgentRosterEntry> = roster
+                .entries()
+                .into_iter()
+                .filter(|entry| entry.worker_id.is_none())
                 .collect();
             // The sequence slot dies with the rows' snapshot, BEFORE the
             // ledger/roots awaits: a stop that awaits first races a
@@ -256,7 +271,7 @@ impl Supervisor {
             // first lock also bounds the slot map on every stop, even
             // when the worker owns no roster rows.
             roster.forget_worker_sequences(worker_id);
-            owned
+            (owned, unowned_at_start)
         };
         // The stopping worker's family view - live edges and the
         // surviving resident roots (the caller removed the worker from
@@ -360,12 +375,21 @@ impl Supervisor {
             // a subagent row whose family walk no longer reaches a
             // surviving resident root returns to the saved catalog
             // alone (the dead family stays resumable there), while the
-            // anchored passivated rows keep their display. The sweep
-            // needs the ledger view the pass already read; a failed
-            // read leaves the display rows untouched.
+            // anchored passivated rows keep their display. The sweep is
+            // scoped to the unowned rows snapshotted at the pass's start
+            // (rows seeded while this pass awaits belong to a family
+            // this stop never anchored - their own registration proved
+            // the root resident), and each row is revalidated under this
+            // lock: a row that vanished, or a worker claimed since the
+            // snapshot, is not this pass's to settle. The sweep needs
+            // the ledger view the pass already read; a failed read
+            // leaves the display rows untouched.
             if ledger_view.is_ok() {
-                for entry in roster.entries() {
-                    if entry.worker_id.is_some() {
+                for entry in &unowned_at_start {
+                    if !roster
+                        .get(&entry.agent_id)
+                        .is_some_and(|current| current.worker_id.is_none())
+                    {
                         continue;
                     }
                     let subagent = entry
@@ -388,7 +412,7 @@ impl Supervisor {
                             .unwrap_or(false);
                     if !anchored {
                         roster.delete(&entry.agent_id);
-                        removed.push(entry.agent_id);
+                        removed.push(entry.agent_id.clone());
                     }
                 }
             }
