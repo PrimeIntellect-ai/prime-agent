@@ -50,7 +50,11 @@ pub fn holder_from_roster(rows: &[Value], session_path: &Path) -> Option<Session
             // Live roster rows carry `model` as `{id, provider}` (the
             // worker's `get_state` summary); a display string is accepted
             // for the mock/older shapes.
-            model: row.get("model").and_then(model_label).map(single_line),
+            model: row
+                .get("model")
+                .and_then(model_label)
+                .as_deref()
+                .map(single_line),
         })
     })
 }
