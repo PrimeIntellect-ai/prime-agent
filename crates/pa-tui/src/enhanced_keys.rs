@@ -83,7 +83,7 @@ static EXIT_RELEASE: AtomicBool = AtomicBool::new(false);
 fn lock_modes() -> std::sync::MutexGuard<'static, ()> {
     MODE_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Mark the terminal released for process exit (the force-quit restore
@@ -327,7 +327,9 @@ mod tests {
     /// The state flags are process-global, so every test serializes
     /// through one lock (the mouse-tracking module's pattern).
     fn lock_state() -> std::sync::MutexGuard<'static, ()> {
-        TEST_STATE_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+        TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn reset_state() {

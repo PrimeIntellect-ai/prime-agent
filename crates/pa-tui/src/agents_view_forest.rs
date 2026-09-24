@@ -1017,7 +1017,7 @@ pub fn ancestor_session_ids(rows: &[AgentsViewRow], parent_identity: Option<&str
                 .unwrap_or_default()
                 .to_string(),
         );
-        parent = row.parent_identity.clone();
+        parent.clone_from(&row.parent_identity);
     }
     ancestors
 }
@@ -1088,7 +1088,7 @@ pub fn resolve_selection(
         return bounded;
     }
     rows.iter()
-        .position(|row| row.selectable())
+        .position(AgentsViewRow::selectable)
         .unwrap_or(bounded)
 }
 
@@ -1138,7 +1138,7 @@ mod tests {
     ) -> Vec<AgentsViewRow> {
         let records = reconcile_unified_sessions(roster, &[]);
         let rollups = compute_rollups(&records);
-        let expanded: HashSet<String> = expanded.iter().map(|id| id.to_string()).collect();
+        let expanded: HashSet<String> = expanded.iter().map(ToString::to_string).collect();
         build_rows(&records, scope, &expanded, &rollups, None)
     }
 

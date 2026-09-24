@@ -631,7 +631,7 @@ impl CombinedAutocompleteProvider {
             .iter()
             .map(|command| SlashCommandEntry {
                 name: command.name.to_string(),
-                aliases: command.aliases.iter().map(|a| a.to_string()).collect(),
+                aliases: command.aliases.iter().map(ToString::to_string).collect(),
                 description: Some(command.description.to_string()),
                 argument_hint: command.argument_hint.map(str::to_string),
                 takes_argument: command.takes_argument,

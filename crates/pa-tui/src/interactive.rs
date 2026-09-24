@@ -1829,7 +1829,7 @@ async fn run_interactive_surface(
 /// Seed the static chrome state for a fresh interactive run: splash
 /// version/cwd, top-bar name, and the `manage` hint for persisted sessions.
 fn apply_startup_chrome(view: &mut AgentView, options: &InteractiveOptions) {
-    view.chrome.version = options.version.clone();
+    view.chrome.version.clone_from(&options.version);
     view.chrome.cwd = options.cwd.to_string_lossy().to_string();
     view.chrome.chat_name = crate::chrome::display_name(&view.chrome.cwd);
     view.chrome.show_manage = !options.no_session;
@@ -1856,8 +1856,8 @@ async fn check_tmux_keyboard_setup() -> Option<String> {
         )
         .await
         .ok()
-        .and_then(|joined| joined.ok())
-        .and_then(|output| output.ok())
+        .and_then(Result::ok)
+        .and_then(Result::ok)
         .and_then(|output| {
             if output.status.success() {
                 Some(String::from_utf8_lossy(&output.stdout).trim().to_string())

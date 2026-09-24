@@ -26,7 +26,7 @@ pub(crate) fn refinement_outcome_entries(message: &Value, details: &Value) -> Ve
     let edits = details.get("edits").and_then(Value::as_array);
     let valid = message
         .get("content")
-        .map(|c| c.is_string())
+        .map(Value::is_string)
         .unwrap_or(false)
         && summary.is_some()
         && scope_ok

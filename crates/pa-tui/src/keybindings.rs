@@ -768,7 +768,7 @@ impl KeybindingsManager {
                             })
                         })
                     })
-                    .map(|k| k.to_string())
+                    .map(ToString::to_string)
                     .collect(),
             };
             self.resolved.insert(id.to_string(), keys);
@@ -916,7 +916,7 @@ mod tests {
             .map(|(id, keys)| {
                 (
                     id.to_string(),
-                    keys.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
+                    keys.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 )
             })
             .collect()

@@ -55,7 +55,7 @@ pub(crate) fn user_block_row_count(
     width: usize,
 ) -> usize {
     let mut md = MarkdownStyle::from_theme(theme);
-    md.code_block_indent = code_block_indent.to_owned();
+    code_block_indent.clone_into(&mut md.code_block_indent);
     let mask = user_mask(text);
     markdown_row_count(&mask.text, width.saturating_sub(4).max(1), &md).max(1) + 2
 }
@@ -71,7 +71,7 @@ pub(crate) fn assistant_row_count(
     let blocks = visible_blocks(message, detail);
     let mut count = usize::from(!blocks.is_empty());
     let mut md = MarkdownStyle::from_theme(theme);
-    md.code_block_indent = code_block_indent.to_owned();
+    code_block_indent.clone_into(&mut md.code_block_indent);
     let content_width = width.saturating_sub(2).max(1);
     for (index, block) in blocks.iter().enumerate() {
         match block {
