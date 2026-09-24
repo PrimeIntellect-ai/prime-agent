@@ -99,12 +99,10 @@ pub enum ActivityGroup {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivityDock {
-    /// How many of the session's descendants are actively running right
-    /// now (the whole tree — subagents of subagents count): the dock's
-    /// rendered `x subagents` count, the live-only number (operator
-    /// directive 2026-09-24: the prompt bar carries the running count
-    /// only, not the category breakdown). Idle and dead registry rows
-    /// never bloat the indicator — they render in the scoped agents view.
+    /// The count of actively-running descendants right now (the whole
+    /// tree — subagents of subagents count): the dock's rendered
+    /// `x subagents` count. Idle and dead registry rows never count —
+    /// they render in the scoped agents view.
     pub subagents_running: usize,
     /// Every descendant, finished ones included: this keeps the dock
     /// mounted and its Subagents group selectable while any subagent
@@ -513,10 +511,8 @@ fn truncate_spans_to_width(spans: &[crate::Span], width: usize) -> Vec<crate::Sp
 /// with the same muted `─` rule that frames the pickers' search fields,
 /// not an accent box.
 ///
-/// The subagents segment carries the running count only, as
-/// `x subagents` (operator directive 2026-09-24: "prompt bar should just
-/// have # of running subagents as `x subagents`, not the 3 categories")
-/// — no category breakdown rides the prompt bar. Heartbeats trail
+/// The subagents segment is the live running count, as `x subagents`;
+/// no category breakdown rides the prompt bar. Heartbeats trail
 /// `M paused` (the tray carries no heartbeat label; the dock owns the
 /// count).
 pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) -> Option<Vec<Line>> {
@@ -524,11 +520,9 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
         return None;
     }
     // The status-dot vocabulary rides the remaining count cluster (TS
-    // `subagent-summary-line`'s `● running / ◐ idle / ○ inactive`, the
-    // operator's 2026-09-23 directive): the half circle marks waiting
-    // work. The subagent categories left the prompt bar with the
-    // 2026-09-24 running-count directive, so only the heartbeat pause
-    // keeps a dot.
+    // `subagent-summary-line`'s `● running / ◐ idle / ○ inactive`): the
+    // half circle marks waiting work. Only the heartbeat pause keeps a
+    // dot.
     let cluster = |text: &str, color: ThemeColor| {
         vec![
             theme.fg_span(ThemeColor::Dim, " · ".to_string()),
@@ -536,9 +530,8 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
         ]
     };
     // The live-only number: the count of actively-running subagents
-    // right now, in the single `x subagents` form. Idle and finished
-    // descendants stay out of the indicator; they render in the scoped
-    // agents view.
+    // right now. Idle and finished descendants stay out of the
+    // indicator; they render in the scoped agents view.
     let subagents = vec![theme.fg_span(
         ThemeColor::Muted,
         format!(
@@ -714,10 +707,9 @@ mod tests {
         assert!(render_activity_dock(&ActivityDock::default(), &theme, 100).is_none());
     }
 
-    /// The prompt bar's subagent segment is the running count only
-    /// (operator directive 2026-09-24): the readout renders exactly
-    /// `x subagents` with `x` the live running count, and the
-    /// running/idle category breakdown never rides the row.
+    /// The prompt bar's subagent segment is the running count only:
+    /// the readout renders exactly `x subagents` with `x` the live
+    /// running count, and no category breakdown rides the row.
     #[test]
     fn prompt_bar_subagent_segment_is_the_running_count_only() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);

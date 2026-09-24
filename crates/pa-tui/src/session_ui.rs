@@ -1034,11 +1034,10 @@ impl SessionUi {
             .iter()
             .filter(|activity| activity.running())
             .count();
-        // The dock's subagent count is the live running count only
-        // (operator directive 2026-09-24: the prompt bar carries the
-        // running count as `x subagents`): idle and dead registry rows
-        // (passivated children the ledger still seeds) never bloat the
-        // indicator — the categories render in the scoped agents view.
+        // The dock's subagent count is the live running count only:
+        // idle and dead registry rows (passivated children the ledger
+        // still seeds) never bloat the indicator — they render in the
+        // scoped agents view.
         let dock = crate::chrome::ActivityDock {
             subagents_running: counts.running,
             subagents_total: counts.total,
