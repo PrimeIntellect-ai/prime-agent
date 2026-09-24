@@ -270,7 +270,7 @@ fn map_thinking_level_to_effort(
         };
     }
     match effective {
-        Some(ModelThinkingLevel::Minimal) | Some(ModelThinkingLevel::Low) => AnthropicEffort::Low,
+        Some(ModelThinkingLevel::Minimal | ModelThinkingLevel::Low) => AnthropicEffort::Low,
         Some(ModelThinkingLevel::Medium) => AnthropicEffort::Medium,
         Some(ModelThinkingLevel::Xhigh) => AnthropicEffort::Xhigh,
         Some(ModelThinkingLevel::Max) => AnthropicEffort::Max,

@@ -969,7 +969,7 @@ async fn supports_aborting_mid_toolcall_stream_when_paced() {
     message.content = vec![AssistantContent::ToolCall(ToolCall {
         id: "tool-1".into(),
         name: "echo".into(),
-        arguments: serde_json::json!({"text": "abcdefghijklmnopqrstuvwxyz", "count": 123456789})
+        arguments: serde_json::json!({"text": "abcdefghijklmnopqrstuvwxyz", "count": 123_456_789})
             .as_object()
             .cloned()
             .unwrap(),
