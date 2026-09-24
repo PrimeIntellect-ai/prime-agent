@@ -107,9 +107,16 @@ pub fn overlay_toasts(
         let Some(row) = frame.get_mut(start + offset) else {
             break;
         };
+        // The covered row's leading OSC 133 zone markers stay (the
+        // follow-hint composite keeps them the same way): shell
+        // integration's turn-boundary jumps keep working while the toast
+        // is visible over the row.
+        let (markers, _covered) = crate::osc133::split_leading_markers(row);
         let label = format!(" {text} ");
         let col = width.saturating_sub(crate::width::str_width(&label));
-        let mut out: Line = vec![Span::raw(" ".repeat(col)), Span::styled(label, style)];
+        let mut out: Line = markers;
+        out.push(Span::raw(" ".repeat(col)));
+        out.push(Span::styled(label, style));
         out = crate::width::truncate_line(&out, width, "");
         let tail = width.saturating_sub(crate::width::line_width(&out));
         if tail > 0 {
@@ -203,6 +210,23 @@ mod tests {
         let toasts = vec!["one".to_string(), "two".to_string()];
         overlay_toasts(&mut frame, 1, 2, &toasts, 10, Style::default());
         assert!(frame[1].iter().any(|span| span.content.contains("two")));
+    }
+
+    /// A covered row keeps its leading OSC 133 zone markers: shell
+    /// integration's turn-boundary jumps keep working while the toast is
+    /// visible over the row (the follow-hint composite's rule).
+    #[test]
+    fn a_covered_row_keeps_its_zone_markers() {
+        let mut frame = vec![vec![Span::raw("row")]; 2];
+        crate::osc133::mark_start(&mut frame[1]);
+        let toasts = vec!["Copied".to_string()];
+        overlay_toasts(&mut frame, 1, 2, &toasts, 20, Style::default());
+        let row_text: String = frame[1].iter().map(|s| s.content.as_str()).collect();
+        assert!(
+            row_text.contains(crate::osc133::ZONE_START),
+            "the zone marker survives the overlay: {row_text:?}"
+        );
+        assert!(row_text.contains("Copied"));
     }
 
     /// The end bound keeps the overlay inside the transcript window, and a
