@@ -153,7 +153,7 @@ fn serve_turn(writer: &mut UnixStream, prompt: &str) {
         "timestamp": 100u64,
     });
     let message_with_calls = {
-        let mut message = message.clone();
+        let mut message = message;
         if let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) {
             content.extend(tool_calls);
         }
