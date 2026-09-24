@@ -434,6 +434,11 @@ fn navigate_tree_moves_follow_the_branchs_goal_state() {
     // as a `goal_update` by the navigation itself (TS `_emitGoalUpdate`).
     let statuses_before = harness.announced_goal_statuses();
     harness.navigate("n1", &seed_user, false);
+    // The reload's empty-state `goal_update` is an async broadcast that
+    // can trail the navigate response (TS `_emitGoalUpdate` fires after
+    // the branch state loads); drain the wire before asserting on the
+    // announced statuses, or the announcement may not be collected yet.
+    harness.drain_events(Duration::from_millis(150));
     assert!(
         harness.announced_goal_statuses()[statuses_before.len()..]
             .iter()
