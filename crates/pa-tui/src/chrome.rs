@@ -534,9 +534,7 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
         (ActivityGroup::Subagents, subagents),
         (ActivityGroup::Heartbeats, heartbeats),
         // Only live bash runs count in the dock's indicator (operator
-        // scoping); the panel keeps the dimmed finished rows. The dock
-        // segment is a UI label only: the tool name stays `bash` (Kevin
-        // directive, 2026-09-23 — the dock says "shell(s)").
+        // scoping); the panel keeps the dimmed finished rows.
         (
             ActivityGroup::Bash,
             format!(
