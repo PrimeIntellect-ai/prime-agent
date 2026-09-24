@@ -257,7 +257,7 @@ fn map_thinking_level_to_effort(
     let mapped = effective.and_then(|level| {
         model
             .thinking_level_map_value(level)
-            .and_then(std::option::Option::cloned)
+            .and_then(Option::<&String>::cloned)
     });
     if let Some(mapped) = mapped {
         return match mapped.as_str() {

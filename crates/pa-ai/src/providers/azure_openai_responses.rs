@@ -207,7 +207,7 @@ fn build_params(
             let effort = match options.reasoning_effort {
                 Some(effort) => model
                     .thinking_level_map_value(effort)
-                    .and_then(std::option::Option::cloned)
+                    .and_then(Option::<&String>::cloned)
                     .unwrap_or_else(|| effort.wire_name().to_string()),
                 None => "medium".to_string(),
             };
@@ -228,7 +228,7 @@ fn build_params(
             if !off_null {
                 let off_value = model
                     .thinking_level_map_value(ModelThinkingLevel::Off)
-                    .and_then(std::option::Option::cloned)
+                    .and_then(Option::<&String>::cloned)
                     .unwrap_or_else(|| "none".to_string());
                 params.insert("reasoning".into(), json!({ "effort": off_value }));
             }
