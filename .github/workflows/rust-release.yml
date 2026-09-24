@@ -191,18 +191,25 @@ jobs:
           incoming = pathlib.Path("incoming")
           failures = []
           installers = []
+          # The upload artifact keeps the upload paths' shortest common
+          # ancestor, so files may sit nested (target/<t>/dist/...) - every
+          # lookup is a recursive search inside the row's artifact dir.
           for entry_dir in sorted(p for p in incoming.iterdir() if p.is_dir()):
-              manifest = json.loads((entry_dir / "manifest.json").read_text())
+              manifest_path = next(entry_dir.rglob("manifest.json"), None)
+              if manifest_path is None:
+                  failures.append(f"{entry_dir.name}: manifest.json missing")
+                  continue
+              manifest = json.loads(manifest_path.read_text())
               for b in manifest["binaries"]:
-                  tar = entry_dir / b["file"]
-                  if not tar.is_file():
+                  tar = next(entry_dir.rglob(b["file"]), None)
+                  if tar is None:
                       failures.append(f"{b['file']}: missing")
                       continue
                   digest = hashlib.sha256(tar.read_bytes()).hexdigest()
                   if digest != b["sha256"]:
                       failures.append(f"{b['file']}: sha256 mismatch")
-              installer = entry_dir / "install-rust.sh"
-              if not installer.is_file():
+              installer = next(entry_dir.rglob("install-rust.sh"), None)
+              if installer is None:
                   failures.append("install-rust.sh: missing from a build artifact")
               else:
                   installers.append(hashlib.sha256(installer.read_bytes()).hexdigest())
@@ -219,7 +226,7 @@ jobs:
           set -euo pipefail
           mkdir release-out
           find incoming -name 'prime-agent-*.tar.gz' -exec cp {} release-out/ \;
-          cp incoming/*/install-rust.sh release-out/install-rust.sh
+          cp "$(find incoming -name install-rust.sh | head -n 1)" release-out/install-rust.sh
           # Merge the per-target SHA256SUMS + manifest.json (one sorted
           # pair per release) AND cover the installer itself: SHA256SUMS
           # is the single out-of-band integrity file the quickstart
@@ -233,11 +240,11 @@ jobs:
           incoming = pathlib.Path("incoming")
           merged, sums, version = [], [], None
           for entry_dir in sorted(p for p in incoming.iterdir() if p.is_dir()):
-              manifest = json.loads((entry_dir / "manifest.json").read_text())
+              manifest = json.loads(next(entry_dir.rglob("manifest.json")).read_text())
               version = manifest["version"]
               merged.extend(manifest["binaries"])
               sums.extend(line for line in
-                          (entry_dir / "SHA256SUMS").read_text().splitlines()
+                          next(entry_dir.rglob("SHA256SUMS")).read_text().splitlines()
                           if line.strip())
           merged.sort(key=lambda b: b["file"])
           sums.sort(key=lambda line: line.split(None, 1)[1])
