@@ -145,7 +145,7 @@ fn chunk(delta: Value, finish_reason: Option<&str>, usage: Value) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
-        "created": 1750000000,
+        "created": 1_750_000_000,
         "model": "mock-1",
         "choices": [{
             "index": 0,
@@ -166,7 +166,7 @@ fn small_usage() -> Value {
 
 fn crossing_usage() -> Value {
     json!({
-        "prompt_tokens": 126000, "completion_tokens": 10, "total_tokens": 126010,
+        "prompt_tokens": 126_000, "completion_tokens": 10, "total_tokens": 126_010,
         "prompt_tokens_details": {"cached_tokens": 80},
     })
 }
@@ -252,7 +252,7 @@ fn write_sse(stream: &mut TcpStream, reply: String, usage: Value) -> std::io::Re
         json!({
             "id": "chatcmpl-test",
             "object": "chat.completion.chunk",
-            "created": 1750000000,
+            "created": 1_750_000_000,
             "model": "mock-1",
             "choices": [],
             "usage": usage,
@@ -513,7 +513,7 @@ fn write_fixture(agent_dir: &Path, session_dir: &Path, mock_url: &str) {
                             "id": "mock-1",
                             "name": "Mock 1",
                             "api": "openai-completions",
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096,
                         }
                     ]
