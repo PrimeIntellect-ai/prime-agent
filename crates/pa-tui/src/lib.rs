@@ -69,6 +69,7 @@ pub(crate) mod search_input;
 pub mod selection;
 mod sequence_guard;
 pub mod session;
+pub mod session_open_error;
 pub mod session_ui;
 pub mod settings_menu;
 pub mod side_question;
