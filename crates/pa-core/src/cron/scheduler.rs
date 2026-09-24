@@ -313,13 +313,13 @@ impl<H: AgentCronSchedulerHooks + 'static> AgentCronScheduler<H> {
         // respawn. Only a dead task spawns a replacement; the explicit
         // `stop` abort stays (the next `start` recovers the interrupted
         // dispatches).
-        if let Some(previous) = timer.get_mut() {
+        if let Some(previous) = timer.as_ref() {
             if !previous.is_finished() {
                 self.core.wake.notify_waiters();
                 return;
             }
         }
-        self.timer.take();
+        timer.take();
         let core = self.core.clone();
         let handle = tokio::spawn(async move {
             loop {
