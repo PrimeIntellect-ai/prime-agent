@@ -1363,6 +1363,15 @@ impl SessionUi {
         self.note_as(text, StatusKind::Info, view);
     }
 
+    /// Show an ephemeral action toast (the top-right auto-dismiss overlay;
+    /// a sanctioned divergence from TS — see `toast`): the confirmation
+    /// never lands in the transcript, and the frame repaints so the
+    /// overlay appears at once (its expiry repaints it away).
+    pub(crate) fn toast(&mut self, text: &str, view: &mut AgentView) {
+        view.toasts.push(text);
+        self.dirty = true;
+    }
+
     /// A plain appended dim row (TS `chatContainer.addChild(new
     /// Markdown/Text(...))` — `/name` and `/rlm-max-depth` report rows):
     /// unlike `note` it never rewrites the previous status in place, so
@@ -3666,7 +3675,7 @@ impl SessionUi {
             return Ok(());
         };
         match crate::clipboard::copy_to_clipboard(&text, &mut self.osc_sink) {
-            Ok(()) => self.note("Copied last agent message to clipboard", view),
+            Ok(()) => self.toast("Copied last agent message to clipboard", view),
             Err(message) => self.error_row(&message, view),
         }
         Ok(())
@@ -5396,14 +5405,15 @@ impl SessionUi {
     /// through tmux (`set-clipboard`), so the write goes straight to the
     /// terminal; a headless run has no terminal and records the text for
     /// its verifier instead. A successful copy surfaces the
-    /// "Copied selection to clipboard" status row (TS `showStatus`), a
-    /// failed write the failure row (TS `showError`).
+    /// "Copied selection to clipboard" action toast (the ephemeral
+    /// overlay, not the TS `showStatus` chat row — sanctioned divergence),
+    /// a failed write the failure row (TS `showError`).
     fn copy_selection(&mut self, text: &str, view: &mut AgentView) {
         let lines = text.lines().count().max(1);
         self.copies.push(text.to_string());
         self.track_selection(lines);
         if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-            self.note("Copied selection to clipboard", view);
+            self.toast("Copied selection to clipboard", view);
             return;
         }
         use base64::Engine;
@@ -5413,7 +5423,7 @@ impl SessionUi {
         match out.write_all(format!("\x1b]52;c;{encoded}\x07").as_bytes()) {
             Ok(()) => {
                 let _ = out.flush();
-                self.note("Copied selection to clipboard", view);
+                self.toast("Copied selection to clipboard", view);
             }
             Err(error) => {
                 self.error_row(&format!("Failed to copy selection: {error}"), view);
@@ -8424,7 +8434,10 @@ async fn create_session(
         Some(SessionSelection::Resume(path)) => Some(path.to_string_lossy().to_string()),
         _ => None,
     };
-    let data = client
+    // The create consumes the path; a refusal needs it again for the
+    // descriptive error.
+    let refused_path = session_path.clone();
+    let data = match client
         .request_ok(DaemonCommand::Create {
             id: None,
             session_path,
@@ -8442,12 +8455,82 @@ async fn create_session(
             launch_env: None,
             rest: Default::default(),
         })
-        .await?;
+        .await
+    {
+        Ok(data) => data,
+        Err(error) => {
+            return Err(describe_session_open_failure(client, error, refused_path).await);
+        }
+    };
     data.get("activeSessionId")
         .or_else(|| data.get("id"))
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| anyhow!("the daemon did not report a session id for the new session"))
+}
+
+/// A create refusal for a session file another holder already owns
+/// names the holder and the next steps (the operator-directed
+/// descriptive session-open error) instead of stopping at the bare
+/// lease id. Any other failure propagates unchanged.
+async fn describe_session_open_failure(
+    client: &DaemonClient,
+    error: anyhow::Error,
+    session_path: Option<String>,
+) -> anyhow::Error {
+    // Only a typed daemon rejection decorates (transport failures pass
+    // through unchanged), and the RAW rejection message is what gets
+    // decorated — the typed wrapper's own display adds the framing
+    // prefix exactly once.
+    let Some(rejected) = error
+        .downcast_ref::<crate::daemon_client::RequestRejected>()
+        .map(|rejected| rejected.message.clone())
+    else {
+        return error;
+    };
+    let Some(owner) = crate::session_open_error::owner_from_refusal(&rejected) else {
+        return error;
+    };
+    let Some(path) = session_path.map(std::path::PathBuf::from) else {
+        return error;
+    };
+    // The live-roster probe is best-effort and BOUNDED: a stalled `list`
+    // must not hold the refusal for the daemon's full request timeout —
+    // the startup hands off to the agents view promptly either way.
+    let rows: Vec<Value> = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        client.request_ok(DaemonCommand::List {
+            id: None,
+            all: None,
+            cwd: None,
+            session_dir: None,
+            include_client_owned: None,
+            rest: Default::default(),
+        }),
+    )
+    .await
+    .ok()
+    .and_then(|result| result.ok())
+    .map(|data| crate::session_open_error::roster_rows(&data).to_vec())
+    .unwrap_or_default();
+    // The path-keyed lookup first; the refusal's own holder id is the
+    // fallback (a relative resume path can miss the canonical row).
+    let holder = crate::session_open_error::holder_from_roster(&rows, &path)
+        .or_else(|| crate::session_open_error::holder_by_id(&rows, &owner));
+    // The daemon's ORIGINAL refusal line stays verbatim (never
+    // reconstructed from a possibly-relative caller path) and the holder
+    // guidance rides the same line — the agents-view handoff renders the
+    // notice on a single status line, so a multiline decoration would
+    // hide the holder and the next steps.
+    let message =
+        crate::session_open_error::decorate_interactive_refusal(&rejected, holder, &owner);
+    // The refusal stays a typed `RequestRejected`: `is_daemon_rejection`
+    // keeps classifying it (the interactive open hands off to the agents
+    // view with the notice instead of exiting the client).
+    anyhow::Error::new(crate::daemon_client::RequestRejected {
+        command: "create".to_string(),
+        message,
+    })
 }
 
 /// The auth-args subcommands that prompt on the plain terminal: a login
