@@ -646,6 +646,17 @@ pub fn track_catalog_refresh(client: &TelemetryClient, count: usize) {
     client.track("daemon event", properties);
 }
 
+/// Track the saved-session catalog's usage-bearing rows (`daemon event`,
+/// schema v1, kind `saved_sessions_usage`): how many rows a served
+/// `list_saved_sessions` pass publish with a usage summary — the
+/// agents-view spend columns' data. A count only, never session payload.
+pub fn track_saved_sessions_usage(client: &TelemetryClient, count: usize) {
+    let mut properties = base_properties("daemon");
+    properties.set("kind", Value::from("saved_sessions_usage"));
+    properties.set("count", Value::from(count));
+    client.track("daemon event", properties);
+}
+
 /// Track the abort supervision's terminal declaration (`daemon event`,
 /// schema v1, kind `compaction_abort_declared`): the supervisor declared
 /// a wedged worker's compaction aborted after its abort grace expired. A

@@ -105,6 +105,11 @@ pub(crate) fn enable(out: &mut Stdout) -> Result<()> {
         return Ok(());
     }
     let _modes = lock_modes();
+    // A new surface mount re-arms probing: the exit standdown covers only
+    // the dying surface's window — a surface that returns control without
+    // ending the process (the replay run_app is a library call) must not
+    // poison every later surface's keyboard protocol.
+    EXIT_RELEASE.store(false, Ordering::SeqCst);
     if !BRACKETED_PASTE_ACTIVE.swap(true, Ordering::SeqCst) {
         write_all(out, ENABLE_BRACKETED_PASTE)?;
     }
