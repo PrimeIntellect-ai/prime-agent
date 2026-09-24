@@ -223,6 +223,7 @@ const TURN_PACE: Duration = Duration::from_millis(50);
 /// large result, and turn completion. Larger than typical turns on purpose:
 /// any per-frame or per-event retention becomes visible quickly.
 fn stream_turn(writer: &mut UnixStream) {
+    const DELTAS: usize = 30;
     std::thread::sleep(TURN_PACE);
     let event = |payload: Value| json!({ "type": "session_event", "activeSessionId": "s1", "event": payload });
     write_json(writer, &event(json!({ "type": "turn_start" })));
@@ -245,7 +246,6 @@ fn stream_turn(writer: &mut UnixStream) {
             "assistantMessageEvent": { "type": "start" },
         })),
     );
-    const DELTAS: usize = 30;
     for delta in 0..DELTAS {
         let text = format!("chunk {delta} with some content to render. ");
         write_json(
@@ -318,11 +318,11 @@ fn stream_turn(writer: &mut UnixStream) {
 /// per-frame or per-event class may accumulate.
 #[test]
 fn interactive_session_rss_plateaus_over_long_stream() {
+    const TURNS: usize = 40;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
     let supervisor = MockSupervisor::bind(&socket);
 
-    const TURNS: usize = 40;
     let mut steps = Vec::new();
     for turn in 0..TURNS {
         steps.push(HeadlessStep::Submit(format!("prompt {turn}")));

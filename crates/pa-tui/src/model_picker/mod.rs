@@ -532,7 +532,9 @@ impl ModelPicker {
     fn filter_models(&mut self, query: &str) {
         let query_changed = query != self.last_query;
         self.last_query = query.to_string();
-        if !query.trim().is_empty() {
+        if query.trim().is_empty() {
+            self.filtered = (0..self.all_models.len()).collect();
+        } else {
             let mut matches: Vec<(usize, SearchMatch)> = self
                 .all_models
                 .iter()
@@ -545,9 +547,9 @@ impl ModelPicker {
             let pinned =
                 |model: &Model| model.provider == PRIME_INFERENCE_PROVIDER_ID && configured(model);
             matches.sort_by(|(a_index, a_match), (b_index, b_match)| {
+                use std::cmp::Ordering;
                 let a = &self.all_models[*a_index];
                 let b = &self.all_models[*b_index];
-                use std::cmp::Ordering;
                 match (configured(b), configured(a)) {
                     (true, false) => return Ordering::Greater,
                     (false, true) => return Ordering::Less,
@@ -591,8 +593,6 @@ impl ModelPicker {
                 )
             });
             self.filtered = matches.into_iter().map(|(index, _)| index).collect();
-        } else {
-            self.filtered = (0..self.all_models.len()).collect();
         }
         self.selected = if query_changed {
             0
@@ -898,8 +898,7 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
         let end = text
             .char_indices()
             .find(|(_, c)| c.is_ascii_digit() != is_digit)
-            .map(|(index, _)| index)
-            .unwrap_or(text.len());
+            .map_or(text.len(), |(index, _)| index);
         Some((&text[..end], is_digit))
     }
     let mut a_rest = a;

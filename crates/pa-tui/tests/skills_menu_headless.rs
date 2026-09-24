@@ -464,6 +464,7 @@ fn skills_surface_without_a_settings_seam() {
 /// true; off hides them from the autocomplete).
 #[test]
 fn disabled_skill_commands_stay_out_of_the_menu() {
+    use pa_tui::client_settings::ClientSettings;
     std::env::remove_var("TMUX");
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("tui.sock");
@@ -476,7 +477,6 @@ fn disabled_skill_commands_stay_out_of_the_menu() {
         .expect("tokio runtime");
     let mut opts = options(socket);
     let settings = std::sync::Arc::new(StubSettings::default());
-    use pa_tui::client_settings::ClientSettings;
     settings
         .set_enable_skill_commands(false)
         .expect("pin settings");

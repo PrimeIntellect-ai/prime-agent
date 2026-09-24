@@ -151,7 +151,6 @@ fn read_line(reader: &mut BufReader<UnixStream>) -> Option<String> {
             Ok(0) => return None,
             Ok(_) if line.trim().is_empty() => {
                 line.clear();
-                continue;
             }
             Ok(_) => return Some(line),
             Err(error)

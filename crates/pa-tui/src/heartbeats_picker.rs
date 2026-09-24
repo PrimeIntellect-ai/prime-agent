@@ -282,8 +282,7 @@ fn detail_pairs(entry: &HeartbeatEntry) -> Vec<(&'static str, String)> {
                 .job
                 .next_run_at
                 .as_deref()
-                .map(format_timestamp)
-                .unwrap_or_else(|| "\u{2014}".to_string()),
+                .map_or_else(|| "\u{2014}".to_string(), format_timestamp),
         ),
         ("runs", entry.job.run_count.to_string()),
     ];
@@ -761,8 +760,7 @@ impl HeartbeatsPicker {
             .as_deref()
             .map(str::trim)
             .filter(|label| !label.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| default_heartbeat_name(entry).to_string());
+            .map_or_else(|| default_heartbeat_name(entry).to_string(), str::to_string);
         let subtitle = format!(
             "{} \u{b7} {}",
             entry.job.schedule_expression, entry.job.status
@@ -858,8 +856,7 @@ impl HeartbeatsPicker {
     fn list_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| fallback.to_string())
+                .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
         format!(
             "{}/{} move \u{b7} {} open \u{b7} {} close",
@@ -874,8 +871,7 @@ impl HeartbeatsPicker {
     fn detail_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| fallback.to_string())
+                .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
         format!(
             "{}/{} move \u{b7} {} run \u{b7} {} back \u{b7} {} close",
@@ -1021,8 +1017,7 @@ impl Columns {
                         .job
                         .next_run_at
                         .as_deref()
-                        .map(format_timestamp)
-                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                        .map_or_else(|| "\u{2014}".to_string(), format_timestamp),
                     16,
                 ),
             ),

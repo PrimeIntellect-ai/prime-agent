@@ -189,8 +189,7 @@ fn stream_turn(writer: &mut UnixStream) {
     let event = |payload: Value| json!({ "type": "session_event", "activeSessionId": "s1", "event": payload });
     let stream_start_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as i64)
         - 1500;
     write_json(writer, &event(json!({ "type": "turn_start" })));
     write_json(

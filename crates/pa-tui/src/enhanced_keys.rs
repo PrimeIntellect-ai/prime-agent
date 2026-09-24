@@ -168,8 +168,7 @@ fn drain_bounded(out: &mut Stdout, max: Duration) {
                 let _ = crossterm::event::read();
                 last_input = std::time::Instant::now();
             }
-            Ok(false) => break,
-            Err(_) => break,
+            Ok(false) | Err(_) => break,
         }
     }
 }

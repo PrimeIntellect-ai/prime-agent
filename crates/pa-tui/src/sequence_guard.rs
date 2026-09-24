@@ -510,7 +510,6 @@ fn csi_key(payload: &[u8]) -> Option<Event> {
         b'O' => Some(Event::FocusLost),
         // Cursor position and device attributes: crossterm parks these as
         // internal events its `read()` never yields.
-        b'R' | b'c' => None,
         _ => None,
     }
 }
@@ -532,8 +531,7 @@ fn modifier_params(body: &[u8]) -> (KeyModifiers, KeyEventKind) {
             .bytes()
             .next_back()
             .filter(u8::is_ascii_digit)
-            .map(|b| b - b'0')
-            .unwrap_or(1);
+            .map_or(1, |b| b - b'0');
         return (parse_modifiers(mask), KeyEventKind::Press);
     };
     let mut parts = mods_field.split(':');

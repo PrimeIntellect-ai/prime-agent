@@ -163,6 +163,7 @@ mod tests {
 
     #[test]
     fn supported_entry_geometry_matches_rendering() {
+        use crate::custom_message::*;
         let mut view = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
         for text in [
             "",
@@ -198,7 +199,6 @@ mod tests {
                 })));
             }
         }
-        use crate::custom_message::*;
         view.push_entry(ChatEntry::AgentMessage(Box::new(AgentMessageRow {
             direction: AgentMessageDirection::Received,
             participant: "from child".into(),

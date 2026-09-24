@@ -669,10 +669,9 @@ impl AgentView {
             match &self.chat[idx] {
                 ChatEntry::Assistant(message) => {
                     match self.assistant_spacing_content(message) {
-                        SpacingContent::Hidden => continue,
+                        SpacingContent::Hidden => {}
                         SpacingContent::ToolOnly => {
                             tool_separator = true;
-                            continue;
                         }
                         SpacingContent::Visible => {
                             // TS `hasTrailingSpace` on the visible body

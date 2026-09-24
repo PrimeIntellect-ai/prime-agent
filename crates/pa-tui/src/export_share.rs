@@ -246,8 +246,8 @@ case "$1" in
   *) echo "unsupported: $1" >&2; exit 1 ;;
 esac
 "#;
-        std::fs::write(dir.path().join("gh"), stub).expect("write stub");
         use std::os::unix::fs::PermissionsExt;
+        std::fs::write(dir.path().join("gh"), stub).expect("write stub");
         let mut permissions = std::fs::metadata(dir.path().join("gh"))
             .expect("stat")
             .permissions();

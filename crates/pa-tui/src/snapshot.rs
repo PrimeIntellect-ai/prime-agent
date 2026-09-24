@@ -157,18 +157,17 @@ fn order_messages_for_transcript(messages: &[Value]) -> Vec<&Value> {
         .filter(|(index, _)| *index != summary_index)
         .map(|(_, message)| message)
         .collect();
-    let boundary = match summary.get("retainedMessageCount").and_then(Value::as_u64) {
-        Some(retained) => (retained as usize).min(rest.len()),
-        None => {
-            let summary_timestamp = summary.get("timestamp").and_then(Value::as_f64);
-            let retained = rest
-                .iter()
-                .filter(|message| {
-                    message.get("timestamp").and_then(Value::as_f64) < summary_timestamp
-                })
-                .count();
-            retained.min(rest.len())
-        }
+    let boundary = if let Some(retained) =
+        summary.get("retainedMessageCount").and_then(Value::as_u64)
+    {
+        (retained as usize).min(rest.len())
+    } else {
+        let summary_timestamp = summary.get("timestamp").and_then(Value::as_f64);
+        let retained = rest
+            .iter()
+            .filter(|message| message.get("timestamp").and_then(Value::as_f64) < summary_timestamp)
+            .count();
+        retained.min(rest.len())
     };
     rest.insert(boundary, summary);
     rest
@@ -550,7 +549,6 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 Some("custom") if event_type == Some("message_start") => {
                     custom_row_update(&message)
                 }
-                Some("custom") => Some(TurnUpdate::StatusUpdate),
                 _ => Some(TurnUpdate::StatusUpdate),
             }
         }

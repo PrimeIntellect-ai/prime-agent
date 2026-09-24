@@ -122,8 +122,7 @@ impl EffortPicker {
             return EffortPickerAction::Cancel;
         }
         match self.selector.handle_key(key, kb) {
-            Some(SelectorAction::Close) => EffortPickerAction::Cancel,
-            Some(SelectorAction::Exit) => EffortPickerAction::Cancel,
+            Some(SelectorAction::Close | SelectorAction::Exit) => EffortPickerAction::Cancel,
             Some(SelectorAction::Toggle { key, .. }) => {
                 if self.levels.contains(&key) {
                     EffortPickerAction::Apply { level: key }
