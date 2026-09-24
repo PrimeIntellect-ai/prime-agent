@@ -3566,6 +3566,13 @@ impl Supervisor {
             "list_saved_sessions",
             Some(json!({ "sessions": sessions })),
         )));
+        // Telemetry: how many served rows carry a usage summary — the
+        // agents-view spend columns' data (a count only, never session
+        // payload).
+        let rows_with_usage = infos.iter().filter(|info| info.usage.is_some()).count();
+        if let Some(client) = &*self.telemetry.lock().unwrap() {
+            pa_core::session_engine::telemetry::track_saved_sessions_usage(client, rows_with_usage);
+        }
         lines
     }
 
@@ -4626,6 +4633,15 @@ fn saved_session_summary(info: &crate::session_store::SessionInfo) -> Value {
             object.insert("thinkingLevel".to_string(), json!(level));
         }
     }
+    // TS `summaryForInactiveSession` publishes the scan's own-usage
+    // summary: the agents-view roster record reads it before the saved
+    // catalog row's (own cost `daemon.usage ?? saved.usage`). The child's
+    // own row carries the child spend, so rollups never double count.
+    if let Some(usage) = &info.usage {
+        if let Some(object) = row.as_object_mut() {
+            object.insert("usage".to_string(), json!(usage));
+        }
+    }
     row
 }
 
@@ -4684,6 +4700,13 @@ fn saved_session_row(info: &crate::session_store::SessionInfo) -> Value {
             "model".to_string(),
             json!({ "provider": provider, "modelId": model_id }),
         );
+    }
+    // TS `serializeSavedSessionInfo` publishes the scan's own-usage
+    // summary: the agents-view spend columns and the archived-row
+    // keep-condition read `saved.usage.cost`. The child's own row
+    // carries the child spend, so rollups never double count.
+    if let Some(usage) = &info.usage {
+        object.insert("usage".to_string(), json!(usage));
     }
     // The persisted thinking level rides the catalog row too: the TUI merges
     // it into live summaries that lack one (the same enrichment as `model`).
@@ -4831,6 +4854,50 @@ mod tests {
         assert!(saved_session_row(&draft_info)
             .get("thinkingLevel")
             .is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The saved-session surfaces publish the scan's own-usage summary (TS
+    /// `serializeSavedSessionInfo` and `summaryForInactiveSession`): the
+    /// agents-view spend columns and the archived-row keep-condition read
+    /// `usage.cost`; a session with no billable work stays bare, exactly
+    /// like TS's undefined serialization.
+    #[test]
+    fn saved_session_rows_publish_the_own_usage_summary() {
+        let dir = std::env::temp_dir().join(format!("pa-saved-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+        let path = dir.join(format!("{}.jsonl", session.session_id()));
+        session.set_path(path.clone());
+        session.append_message(json!({
+            "role": "assistant", "content": "done", "provider": "p", "model": "m",
+            "timestamp": 1u64,
+            "usage": {
+                "input": 100, "output": 10, "cacheRead": 5, "cacheWrite": 0,
+                "totalTokens": 115,
+                "cost": { "input": 0.0, "output": 0.25, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.25 }
+            }
+        }));
+        session.rewrite().unwrap();
+        let info = crate::session_store::read_session_info(&path).unwrap();
+        let row = saved_session_row(&info);
+        assert_eq!(
+            row["usage"],
+            json!({ "inputTokens": 105, "outputTokens": 10, "cost": 0.25 })
+        );
+        let summary = saved_session_summary(&info);
+        assert_eq!(
+            summary["usage"],
+            json!({ "inputTokens": 105, "outputTokens": 10, "cost": 0.25 })
+        );
+        // A draft with no billable work stays bare on both surfaces.
+        let mut draft = crate::session_store::SessionFile::create("/tmp", None, 0);
+        let draft_path = dir.join(format!("{}.jsonl", draft.session_id()));
+        draft.set_path(draft_path.clone());
+        draft.rewrite().unwrap();
+        let draft_info = crate::session_store::read_session_info(&draft_path).unwrap();
+        assert!(saved_session_row(&draft_info).get("usage").is_none());
+        assert!(saved_session_summary(&draft_info).get("usage").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -1,9 +1,11 @@
 //! End-to-end verifier for the agents-view session search: a fixture
-//! roster (saved-catalog sessions on disk, one archived out of the catalog)
-//! behind a real supervisor, with the headless agents-view plan typing
-//! queries, asserting the roster narrows (name, first-message fuzzy, and
-//! full-transcript matches), that Escape clears the filter and restores the
-//! roster, and that Enter opens the filtered match.
+//! roster (saved-catalog sessions on disk) behind a real supervisor, with
+//! the headless agents-view plan typing queries and asserting the redesigned
+//! picker contract (Kevin's 2026-09-23 directive): queries match the
+//! session NAME, the durable session ID, and the CWD — never first
+//! messages, transcript text, recap summaries, or file paths — and hits
+//! render as one flat, relevance-ranked list. `PA_SEARCH_FRAMES_DIR`
+//! dumps every frame for before/after evidence captures.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -144,19 +146,45 @@ fn frame_of(frames: &[String], marker: &str) -> String {
         .clone()
 }
 
+/// Writes every captured frame under `PA_SEARCH_FRAMES_DIR` when set: the
+/// before/after evidence capture for the search redesign (run the same
+/// driver against the base tree to diff behavior).
+fn dump_frames(label: &str, frames: &[String]) {
+    let Some(dir) = std::env::var("PA_SEARCH_FRAMES_DIR")
+        .ok()
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    std::fs::create_dir_all(&dir).expect("frames dir");
+    for (index, frame) in frames.iter().enumerate() {
+        std::fs::write(
+            std::path::Path::new(&dir).join(format!("{label}-{index:03}.txt")),
+            frame,
+        )
+        .expect("frame dump");
+    }
+}
+
 #[tokio::test]
-async fn search_narrows_the_roster_and_escape_restores_it() {
+async fn search_matches_names_ids_and_cwd_never_transcripts() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
-    let archive_dir = agent_dir.join("sessions-archive");
     std::fs::create_dir_all(&session_dir).expect("session dir");
-    std::fs::create_dir_all(&archive_dir).expect("archive dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // The fixture roster: three saved sessions with distinct names and
-    // transcripts, plus one archived file that must stay out of the
-    // catalog (and therefore out of every search) by construction.
+    // The fixture roster: a named session whose transcript ALSO mentions
+    // the query word, several sibling sessions whose transcripts mention
+    // it but whose names do not, an id-only target (name without the id
+    // fragment), and a session whose transcript text exists nowhere in its
+    // identity fields.
+    let fast_path = write_fixture(
+        &session_dir,
+        "fast-01",
+        "fast lane refactor",
+        &[("make the suite fast", "the gateway deploy is fast")],
+    );
     let gateway_path = write_fixture(
         &session_dir,
         "gateway-01",
@@ -170,19 +198,16 @@ async fn search_narrows_the_roster_and_escape_restores_it() {
         &session_dir,
         "migration-01",
         "migration runner",
-        &[("run the migrations now", "migration 001 applied")],
-    );
-    let cron_path = write_fixture(
-        &session_dir,
-        "cron-01",
-        "cron keeper",
-        &[("audit the cron jobs", "cron audit clean")],
+        &[(
+            "run the migrations now",
+            "migration 001 applied; it was fast",
+        )],
     );
     write_fixture(
-        &archive_dir,
-        "archived-01",
-        "archived gateway trove",
-        &[("old gateway talk", "archived reply")],
+        &session_dir,
+        "probe-01",
+        "alpha probe",
+        &[("probe the endpoint", "alpha probe complete")],
     );
 
     let options = AgentsViewOptions {
@@ -202,21 +227,28 @@ async fn search_narrows_the_roster_and_escape_restores_it() {
     };
     let plan = AgentsHeadlessPlan {
         steps: vec![
-            // Name search narrows to the gateway session.
-            AgentsStep::Type("gateway".to_string()),
+            // A noisy word: transcripts mention it, names mostly do not.
+            AgentsStep::Type("fast".to_string()),
             AgentsStep::WaitSettle { timeout_ms: 300 },
-            // Escape clears the query and restores the full roster.
             AgentsStep::Key("escape".to_string()),
             AgentsStep::WaitSettle { timeout_ms: 300 },
-            // A transcript-only query (no name or first-message hit)
-            // still finds the session that said it.
+            // Transcript-only text: no identity field carries it.
             AgentsStep::Type("backoff".to_string()),
             AgentsStep::WaitSettle { timeout_ms: 300 },
             AgentsStep::Key("escape".to_string()),
             AgentsStep::WaitSettle { timeout_ms: 300 },
-            // Fuzzy partial on the first message narrows to the migration
-            // session, and Enter opens it.
-            AgentsStep::Type("migrat".to_string()),
+            // Fuzzy name fragment ranks the gateway session first.
+            AgentsStep::Type("gtwy".to_string()),
+            AgentsStep::WaitSettle { timeout_ms: 300 },
+            AgentsStep::Key("escape".to_string()),
+            AgentsStep::WaitSettle { timeout_ms: 300 },
+            // Durable-id targeting: the id fragment lives nowhere else.
+            AgentsStep::Type("probe-0".to_string()),
+            AgentsStep::WaitSettle { timeout_ms: 300 },
+            AgentsStep::Key("escape".to_string()),
+            AgentsStep::WaitSettle { timeout_ms: 300 },
+            // Enter opens the filtered match.
+            AgentsStep::Type("gateway".to_string()),
             AgentsStep::WaitSettle { timeout_ms: 300 },
             AgentsStep::Key("enter".to_string()),
         ],
@@ -229,66 +261,138 @@ async fn search_narrows_the_roster_and_escape_restores_it() {
             .expect("agents view run")
             .outcome;
     assert!(!outcome.frames.is_empty(), "frames were captured");
-    let all = outcome.frames.join("\n---frame---\n");
-    assert!(
-        !all.contains("archived gateway trove"),
-        "an archived session never reaches the catalog or the view"
-    );
+    dump_frames("lane", &outcome.frames);
 
-    // Name query: only the gateway row renders.
-    let gateway_frame = frame_of(&outcome.frames, " >  gateway");
+    // Name query: only the named hit renders — the sibling transcripts
+    // that mention "fast" stay hidden (the redesign's headline behavior).
+    let fast_frame = frame_of(&outcome.frames, " >  fast");
     assert!(
-        gateway_frame.contains("gateway worker"),
-        "the gateway row renders under its name query:\n{gateway_frame}"
+        fast_frame.contains("fast lane refactor"),
+        "the named hit renders:\n{fast_frame}"
     );
-    assert!(
-        !gateway_frame.contains("migration runner"),
-        "unrelated rows hide under the query:\n{gateway_frame}"
-    );
-    assert!(
-        !gateway_frame.contains("cron keeper"),
-        "unrelated rows hide under the query:\n{gateway_frame}"
-    );
-
-    // Escape clears the query: the full roster restores.
-    let cleared_frame = frame_of(&outcome.frames, "Search sessions");
-    for name in ["gateway worker", "migration runner", "cron keeper"] {
+    for absent in [
+        "gateway worker",
+        "migration runner",
+        "alpha probe",
+        "Inactive (",
+    ] {
         assert!(
-            cleared_frame.contains(name),
-            "the cleared view lists {name} again:\n{cleared_frame}"
+            !fast_frame.contains(absent),
+            "{absent:?} hides under the query (flat ranked list):\n{fast_frame}"
         );
     }
 
-    // Transcript-only query matches through allMessagesText.
+    // Transcript-only text never matches: content is not a picker filter.
     let backoff_frame = frame_of(&outcome.frames, " >  backoff");
     assert!(
-        backoff_frame.contains("gateway worker"),
-        "a transcript-only query still finds the session:\n{backoff_frame}"
-    );
-    assert!(
-        !backoff_frame.contains("migration runner"),
-        "transcript queries narrow the roster:\n{backoff_frame}"
+        backoff_frame.contains("No sessions match"),
+        "transcript-only queries match nothing:\n{backoff_frame}"
     );
 
-    // Fuzzy partial narrows to the migration row, and Enter opens it.
-    let migration_frame = frame_of(&outcome.frames, " >  migrat");
+    // Fuzzy name fragment: the gateway session is the sole hit.
+    let gtwy_frame = frame_of(&outcome.frames, " >  gtwy");
     assert!(
-        migration_frame.contains("migration runner"),
-        "the fuzzy partial matches the migration row:\n{migration_frame}"
+        gtwy_frame.contains("gateway worker"),
+        "the fuzzy name fragment matches:\n{gtwy_frame}"
     );
     assert!(
-        !migration_frame.contains("gateway worker"),
-        "the fuzzy partial narrows the roster:\n{migration_frame}"
+        !gtwy_frame.contains("migration runner"),
+        "unrelated names hide under the fuzzy query:\n{gtwy_frame}"
     );
+
+    // Id targeting: "probe-0" hits only through the session id.
+    let id_frame = frame_of(&outcome.frames, " >  probe-0");
+    assert!(
+        id_frame.contains("alpha probe"),
+        "the id target renders:\n{id_frame}"
+    );
+    assert!(
+        !id_frame.contains("gateway worker"),
+        "other rows hide under the id query:\n{id_frame}"
+    );
+
+    // Enter opens the filtered match.
     assert_eq!(
         outcome.selection,
-        Some(SessionSelection::Resume(migration_path)),
+        Some(SessionSelection::Resume(gateway_path)),
         "Enter opened the filtered match"
     );
-    assert!(
-        outcome.frames.len() > 3,
-        "the run captured the intermediate keystroke frames"
+    drop((fast_path, migration_path));
+    drop(supervisor);
+}
+
+#[tokio::test]
+async fn ranked_hits_sort_by_relevance_then_recency() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    // Three name-prefix hits for "run": two same-length prefixes (tie on
+    // tier quality, title breaks the tie) and one longer prefix (worse
+    // tier quality ranks it below them).
+    write_fixture(
+        &session_dir,
+        "run-books-01",
+        "run books",
+        &[("start", "done")],
     );
-    drop((gateway_path, cron_path));
+    write_fixture(
+        &session_dir,
+        "run-dials-01",
+        "run dials",
+        &[("start", "done")],
+    );
+    let runway_path = write_fixture(
+        &session_dir,
+        "runway-01",
+        "runway cleanup",
+        &[("start", "done")],
+    );
+
+    let options = AgentsViewOptions {
+        socket_path: supervisor.socket.clone(),
+        cwd: dir.path().to_path_buf(),
+        session_dir: Some(session_dir.clone()),
+        theme: "prime".to_string(),
+        version: "0.0.0".to_string(),
+        anchor_session_id: None,
+        scope: None,
+        query: None,
+        expanded_ancestors: Vec::new(),
+        selected_row_identity: None,
+        selected_key: None,
+        status_message: None,
+        keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+    };
+    let plan = AgentsHeadlessPlan {
+        steps: vec![
+            AgentsStep::Type("run".to_string()),
+            AgentsStep::WaitSettle { timeout_ms: 300 },
+        ],
+        width: 120,
+        height: 36,
+    };
+    let outcome =
+        pa_tui::agents_view::run_agents_view(options, AgentsViewUiMode::Headless(plan), None)
+            .await
+            .expect("agents view run")
+            .outcome;
+    dump_frames("ranked", &outcome.frames);
+    let frame = frame_of(&outcome.frames, " >  run");
+    let positions: Vec<usize> = ["run books", "run dials", "runway cleanup"]
+        .iter()
+        .map(|needle| {
+            frame
+                .find(needle)
+                .unwrap_or_else(|| panic!("row {needle:?} missing from:\n{frame}"))
+        })
+        .collect();
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "same-length prefixes tie by title, the longer prefix ranks last:\n{frame}"
+    );
+    drop(runway_path);
     drop(supervisor);
 }

@@ -7,7 +7,6 @@ use crate::fuzzy::fuzzy_filter;
 use crate::width::str_width;
 use crate::{Line, Span};
 use pa_types::slash_commands::SlashCommandRegistry;
-use ratatui::style::Style;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionItem {
@@ -148,14 +147,6 @@ pub fn get_slash_command_context(
         at_prompt_start: false,
     })
 }
-
-/// Column gap between the primary and description columns (TS
-/// `PRIMARY_COLUMN_GAP`).
-const PRIMARY_COLUMN_GAP: usize = 2;
-
-/// Minimum description width for the inline description column (TS
-/// `MIN_DESCRIPTION_WIDTH`).
-const MIN_DESCRIPTION_WIDTH: usize = 10;
 
 /// Delimiters that end a path token (TS `PATH_DELIMITERS`).
 const PATH_DELIMITERS: [char; 5] = [' ', '\t', '"', '\'', '='];
@@ -368,21 +359,20 @@ impl AutocompleteState {
         first_prefix
     }
 
-    /// Render the dropdown (SelectList port). The slash-command layout
-    /// shows the argument-hint column, directional scroll info, and the
-    /// selected item's full description; the file layout inlines the
-    /// description column.
-    pub fn render(&self, width: usize, styles: &SelectListStyles) -> Vec<Line> {
+    /// Render the dropdown through the inline menu panel: the ONE menu
+    /// component's rows (`›` marker, BOLD primary, soft selection band,
+    /// right-aligned muted trailing), its status rows (the `(n/m)` scroll
+    /// indicator, the no-match row), and the selected slash command's
+    /// description block — the same grammar the `/model` picker and the
+    /// `/mcp` view render with.
+    pub fn render(&self, theme: &crate::theme::Theme, width: usize) -> Vec<Line> {
         if self.items.is_empty() {
-            return vec![vec![Span::styled(
-                "  No matching commands".to_string(),
-                styles.no_match,
-            )]];
+            return vec![crate::menu_panel::no_match_row(
+                theme,
+                width,
+                "No matching commands",
+            )];
         }
-        let slash_layout =
-            self.kind == Some(SuggestionKind::SlashCommand) || self.prefix.starts_with('/');
-        let (min_primary, max_primary) = if slash_layout { (12, 32) } else { (32, 32) };
-        let primary_column_width = primary_column_width(&self.items, min_primary, max_primary);
         let start = self
             .selected_index
             .saturating_sub(self.max_visible / 2)
@@ -392,218 +382,46 @@ impl AutocompleteState {
         for (index, item) in self.items[start..end].iter().enumerate() {
             let index = start + index;
             let selected = index == self.selected_index;
-            lines.push(render_item(
-                item,
-                selected,
+            let trailing = item
+                .argument_hint
+                .as_deref()
+                .map(|hint| vec![crate::menu_panel::MenuSegment::muted(hint)])
+                .unwrap_or_default();
+            lines.push(crate::menu_panel::menu_row(
+                theme,
                 width,
-                primary_column_width,
-                slash_layout,
-                styles,
+                vec![Span::raw(item.label.clone())],
+                &trailing,
+                selected,
             ));
         }
         if start > 0 || end < self.items.len() {
-            let scroll_text = if slash_layout {
-                format!(
-                    "  {}",
-                    directional_scroll_info(start, self.items.len() - end)
-                )
-            } else {
-                format!("  ({}/{})", self.selected_index + 1, self.items.len())
-            };
-            lines.push(vec![Span::styled(
-                truncate_to_width(&scroll_text, width.saturating_sub(2), ""),
-                styles.scroll_info,
-            )]);
+            lines.push(crate::menu_panel::scroll_row(
+                theme,
+                width,
+                self.selected_index + 1,
+                self.items.len(),
+            ));
         }
-        if slash_layout {
-            if let Some(description) = self
-                .items
-                .get(self.selected_index)
-                .and_then(|item| item.description.as_deref())
-                .filter(|d| !d.trim().is_empty())
-            {
-                let indent = if width >= 4 { "  " } else { "" };
-                let content_width = (width.saturating_sub(str_width(indent) + 2)).max(1);
-                lines.push(Vec::new());
-                for line in crate::width::wrap_text(description, content_width) {
-                    let text: String = line.iter().map(|s| s.content.as_str()).collect();
-                    lines.push(vec![Span::styled(
-                        format!("{indent}{text}"),
-                        styles.description,
-                    )]);
-                }
+        if let Some(description) = self
+            .items
+            .get(self.selected_index)
+            .and_then(|item| item.description.as_deref())
+            .filter(|d| !d.trim().is_empty())
+        {
+            let indent = if width >= 4 { "  " } else { "" };
+            let content_width = (width.saturating_sub(str_width(indent) + 2)).max(1);
+            lines.push(Vec::new());
+            for line in crate::width::wrap_text(description, content_width) {
+                let text: String = line.iter().map(|s| s.content.as_str()).collect();
+                lines.push(vec![
+                    Span::raw(indent.to_string()),
+                    theme.fg_span(crate::theme::ThemeColor::Muted, format!("{text} ")),
+                ]);
             }
         }
         lines
     }
-}
-
-/// Select-list colors (TS `SelectListTheme`).
-pub struct SelectListStyles {
-    pub selected_prefix: Style,
-    pub selected_text: Style,
-    pub description: Style,
-    pub argument_hint: Style,
-    pub scroll_info: Style,
-    pub no_match: Style,
-}
-
-/// One item row (TS `SelectList.renderItem`).
-fn render_item(
-    item: &CompletionItem,
-    selected: bool,
-    width: usize,
-    primary_column_width: usize,
-    slash_layout: bool,
-    styles: &SelectListStyles,
-) -> Line {
-    let prefix = if selected { "\u{203a} " } else { "  " };
-    let prefix_width = str_width(prefix);
-    let single_line = |text: &str| -> String {
-        text.chars()
-            .filter(|c| *c != '\n')
-            .collect::<String>()
-            .trim()
-            .to_string()
-    };
-    if slash_layout {
-        return render_metadata_item(
-            item,
-            selected,
-            width,
-            primary_column_width,
-            prefix,
-            prefix_width,
-            styles,
-        );
-    }
-    let description = item.description.as_deref().map(single_line);
-    if let Some(description) = description.filter(|_| width > 40) {
-        let effective_primary = primary_column_width
-            .min(width.saturating_sub(prefix_width + 4))
-            .max(1);
-        let max_primary = effective_primary.saturating_sub(PRIMARY_COLUMN_GAP).max(1);
-        let value = truncate_to_width(&item.label, max_primary, "");
-        let spacing = " ".repeat(effective_primary.saturating_sub(str_width(&value)).max(1));
-        let description_start = prefix_width + str_width(&value) + spacing.len();
-        let remaining = width.saturating_sub(description_start + 2);
-        if remaining > MIN_DESCRIPTION_WIDTH {
-            let description = truncate_to_width(&description, remaining, "\u{2026}");
-            let content = format!("{prefix}{value}{spacing}{description}");
-            if selected {
-                return vec![Span::styled(content, styles.selected_text)];
-            }
-            return vec![
-                Span::raw(format!("{prefix}{value}")),
-                Span::styled(format!("{spacing}{description}"), styles.description),
-            ];
-        }
-    }
-    let max_width = width.saturating_sub(prefix_width + 2);
-    let value = truncate_to_width(&item.label, max_width, "");
-    let content = format!("{prefix}{value}");
-    if selected {
-        vec![Span::styled(content, styles.selected_text)]
-    } else {
-        vec![Span::raw(content)]
-    }
-}
-
-/// The slash-layout row: primary column plus the argument-hint metadata
-/// (TS `renderMetadataItem`).
-#[allow(clippy::too_many_arguments)]
-fn render_metadata_item(
-    item: &CompletionItem,
-    selected: bool,
-    width: usize,
-    primary_column_width: usize,
-    prefix: &str,
-    prefix_width: usize,
-    styles: &SelectListStyles,
-) -> Line {
-    let argument_hint = item
-        .argument_hint
-        .as_deref()
-        .map(|hint| hint.chars().filter(|c| *c != '\n').collect::<String>());
-    let content_width = width.saturating_sub(prefix_width + 2).max(1);
-    let show_metadata = argument_hint.is_some() && content_width > primary_column_width;
-    let effective_primary = if show_metadata {
-        primary_column_width
-    } else {
-        content_width
-    };
-    let max_primary = if show_metadata {
-        effective_primary.saturating_sub(PRIMARY_COLUMN_GAP).max(1)
-    } else {
-        effective_primary
-    };
-    let primary = truncate_to_width(&item.label, max_primary, "");
-    if !show_metadata {
-        let content = format!("{prefix}{primary}");
-        if selected {
-            return vec![Span::styled(content, styles.selected_text)];
-        }
-        return vec![Span::raw(content)];
-    }
-    let spacing = " ".repeat(effective_primary.saturating_sub(str_width(&primary)).max(1));
-    let remaining = width.saturating_sub(prefix_width + str_width(&primary) + spacing.len() + 2);
-    let mut row: Line = Vec::new();
-    if selected {
-        row.push(Span::styled(prefix.to_string(), styles.selected_prefix));
-        row.push(Span::styled(primary.clone(), styles.selected_text));
-    } else {
-        row.push(Span::raw(prefix.to_string()));
-        row.push(Span::raw(primary.clone()));
-    }
-    row.push(Span::raw(spacing));
-    if let Some(hint) = argument_hint.filter(|_| remaining > 0) {
-        row.push(Span::styled(
-            truncate_to_width(&hint, remaining, "\u{2026}"),
-            styles.argument_hint,
-        ));
-    }
-    row
-}
-
-/// The primary column width: widest label plus the gap, clamped.
-fn primary_column_width(items: &[CompletionItem], min: usize, max: usize) -> usize {
-    let widest = items
-        .iter()
-        .map(|item| str_width(&item.label))
-        .max()
-        .unwrap_or(0);
-    (widest + PRIMARY_COLUMN_GAP).clamp(min.max(1), max.max(1))
-}
-
-/// `↑ N more  ↓ M more` (TS `formatDirectionalScrollInfo`).
-fn directional_scroll_info(hidden_above: usize, hidden_below: usize) -> String {
-    let mut indicators = Vec::new();
-    if hidden_above > 0 {
-        indicators.push(format!("\u{2191} {hidden_above} more"));
-    }
-    if hidden_below > 0 {
-        indicators.push(format!("\u{2193} {hidden_below} more"));
-    }
-    indicators.join("  ")
-}
-
-/// Truncate to a display width, optionally marking the cut (TS
-/// `truncateToWidth`).
-fn truncate_to_width(text: &str, width: usize, ellipsis: &str) -> String {
-    let mut out = String::new();
-    let mut w = 0;
-    for c in text.chars() {
-        let cw = crate::width::char_width(c);
-        if w + cw > width {
-            if !ellipsis.is_empty() && w + str_width(ellipsis) <= width && !out.is_empty() {
-                out.push_str(ellipsis);
-            }
-            break;
-        }
-        out.push(c);
-        w += cw;
-    }
-    out
 }
 
 /// File/path completion against the filesystem (the readdir-based
@@ -1143,8 +961,12 @@ mod tests {
         assert!(provider.should_trigger_file_completion(&["path/to".to_string()], 0, 7));
     }
 
+    fn theme() -> crate::theme::Theme {
+        crate::theme::Theme::builtin("prime", crate::theme::ColorMode::TrueColor)
+    }
+
     #[test]
-    fn select_render_shows_metadata_and_scroll_info() {
+    fn render_uses_the_menu_panel_grammar() {
         let items: Vec<CompletionItem> = (0..7)
             .map(|i| CompletionItem {
                 value: format!("cmd{i}"),
@@ -1159,38 +981,63 @@ mod tests {
             "/".to_string(),
             Some(SuggestionKind::SlashCommand),
         );
-        let styles = SelectListStyles {
-            selected_prefix: Style::new(),
-            selected_text: Style::new(),
-            description: Style::new(),
-            argument_hint: Style::new(),
-            scroll_info: Style::new(),
-            no_match: Style::new(),
-        };
-        let lines = state.render(60, &styles);
+        let lines = state.render(&theme(), 60);
         let text = |line: &Line| -> String { line.iter().map(|s| s.content.as_str()).collect() };
         let rendered: Vec<String> = lines.iter().map(text).collect();
-        // 5 visible rows + scroll info + blank + selected description.
+        // The selected row carries the menu marker and the selection band
+        // spans the row (padded to the full width).
         assert!(rendered[0].starts_with("\u{203a} cmd0"));
-        assert!(rendered.iter().any(|l| l.contains("[arg]")));
-        assert!(rendered.iter().any(|l| l.contains("\u{2193} 2 more")));
+        assert_eq!(rendered[0].chars().count(), 60);
+        // The argument hint rides the row's right-aligned trailing cluster.
+        assert!(rendered.iter().any(|l| l.ends_with("[arg]")));
+        // The shared scroll status row (the menu panel's `(n/m)`), not the
+        // old directional `↑ N more` form.
+        assert!(rendered.iter().any(|l| l.trim() == "(1/7)"));
+        // The selected item's description block under the list.
         assert!(rendered.iter().any(|l| l.contains("description 0")));
     }
 
     #[test]
-    fn empty_items_render_no_match() {
+    fn empty_items_render_the_shared_no_match_row() {
         let state = AutocompleteState::new(Vec::new(), 5, String::new(), None);
-        let styles = SelectListStyles {
-            selected_prefix: Style::new(),
-            selected_text: Style::new(),
-            description: Style::new(),
-            argument_hint: Style::new(),
-            scroll_info: Style::new(),
-            no_match: Style::new(),
-        };
-        let lines = state.render(40, &styles);
+        let lines = state.render(&theme(), 40);
         let text: String = lines[0].iter().map(|s| s.content.as_str()).collect();
         assert_eq!(text, "  No matching commands");
+    }
+
+    /// Every overlay row clamps to the render width: the menu rows pad to
+    /// it and the status rows (scroll indicator, no-match) truncate to
+    /// it, so a narrow dropdown never emits a row wider than its dock (the
+    /// overlay renders the rows straight into the editor dock, and an
+    /// unclamped `(n/m)` would overwrite the adjacent terminal cells).
+    #[test]
+    fn narrow_renders_never_exceed_the_frame_width() {
+        let mut described = item("cmd0");
+        described.description = Some("description 0".to_string());
+        let items: Vec<CompletionItem> = std::iter::once(described)
+            .chain((1..7).map(|index| item(&format!("cmd{index}"))))
+            .collect();
+        for width in [4usize, 6, 9, 40] {
+            let state = AutocompleteState::new(
+                items.clone(),
+                5,
+                "/".to_string(),
+                Some(SuggestionKind::SlashCommand),
+            );
+            for line in &state.render(&theme(), width) {
+                assert!(
+                    crate::width::spans_width(line) <= width,
+                    "every row clamps to the frame width {width}: {line:?}"
+                );
+            }
+        }
+        let empty = AutocompleteState::new(Vec::new(), 5, String::new(), None);
+        for line in &empty.render(&theme(), 6) {
+            assert!(
+                crate::width::spans_width(line) <= 6,
+                "the no-match row clamps to the frame width: {line:?}"
+            );
+        }
     }
 
     #[test]
