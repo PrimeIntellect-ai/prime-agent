@@ -46,7 +46,12 @@ pub fn install_id(agent_dir: &Path) -> Result<String> {
     let payload = serde_json::to_vec_pretty(&state)?;
 
     match publish_exclusive(&path, &payload)? {
-        Publish::Won => Ok(installation_id),
+        // Return the id the state file stores now: on the hard-link path the
+        // durable file is this caller's own payload, and on the no-hard-link
+        // fallback a concurrent repairer may have replaced a partial state
+        // while the fallback writer was writing, so every caller converges
+        // on the durable id.
+        Publish::Won => Ok(read_install_id(&path)?.unwrap_or(installation_id)),
         Publish::Lost => {
             // Lost a create race: prefer the winner's id if it is valid,
             // otherwise replace the invalid state atomically. The winner's
