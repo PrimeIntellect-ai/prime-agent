@@ -79,11 +79,8 @@ fn suspend_child_mode() {
 static HARNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Whether this runner is attached to a controlling-terminal session.
-/// The real-signal stop/continue cycle runs in that class; session-less
-/// runner chains — CI hosts (the request workflow) and the VM sandboxes
-/// the fleet gates in — skip loudly there instead of holding the gate
-/// on it, the same shape as the packaged-layout e2e's kernel-python
-/// skip.
+/// The real-signal stop/continue cycle runs in that class; without one
+/// the test skips with a loud note instead of running.
 fn sigtstp_session_runner() -> bool {
     // tcgetpgrp on fd 0 answers "does this runner's stdin sit on a
     // session's controlling terminal": a pipe or /dev/null stdin and a
@@ -106,21 +103,12 @@ fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
     if !sigtstp_session_runner() {
         return;
     }
-    // This runner becomes the leader of a fresh session with no
-    // controlling terminal (a new session gets none until TIOCSCTTY),
-    // and the child (spawn_child) then moves into its own process group
-    // INSIDE that session. Both halves are load-bearing for the cycle:
-    // the child's group needs a parent in a different process group of
-    // its own session — otherwise the group is orphaned and job control
-    // discards the app's SIGTSTP, so the stop never completes; and the
-    // session must have no controlling terminal — otherwise the child
-    // inherits one (the runner's, under a session-attached runner) and
-    // the renderer sizes itself from that terminal's `/dev/tty` instead
-    // of the harness pty, painting 0x0-empty frames. The setsid runs in
-    // the runner: a child-side setsid would create the new session
-    // without this runner in it, leaving the child's group orphaned
-    // again; here the runner leads the child's session from a different
-    // process group, as the job-control parent the stop needs.
+    // The runner leads a fresh session with no controlling terminal (a
+    // new session gets none until TIOCSCTTY), and spawn_child then
+    // moves the child into its own process group inside it. Both are
+    // the harness contract: the stop/continue cycle needs the child's
+    // group parented inside its session, and the renderer needs the
+    // child's terminal to be the harness pty alone.
     match nix::unistd::setsid() {
         Ok(_) => {}
         Err(error) => panic!("the harness could not start a fresh session: {error}"),
@@ -338,19 +326,13 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// A child process group of this very binary, re-executed in child mode
 /// with the pty slave as its terminal and no tmux (the tmux keyboard
-/// check must stay out of the way). The child moves into its own process
-/// group inside the runner's fresh session (the test's setsid): kill(0,
-/// SIGTSTP) then stops the child and not this runner, and its parent —
-/// the runner, the session leader in its own process group — is the
-/// job-control shape a shell gives a real Ctrl+Z. An own-session child
-/// would instead be an ORPHANED process group (job control discards
-/// stop signals generated for an orphaned group under the default
-/// disposition, so the stop would never complete), and a child in a
-/// session with a controlling terminal would size its renderer from
-/// that terminal instead of the harness pty. The child's terminal is
-/// the harness pty, never a controlling terminal, so no
-/// background-group arbitration (SIGTTIN/SIGTTOU) applies to its I/O
-/// across the stop/continue cycle.
+/// check must stay out of the way). The child lives in its own process
+/// group inside the runner's session: kill(0, SIGTSTP) stops the child
+/// and not this runner, and the stop holds — the child's parent, the
+/// session leader, sits in a different process group of the same
+/// session. The child's terminal is the harness pty, never a
+/// controlling terminal, so no background-group arbitration
+/// (SIGTTIN/SIGTTOU) applies to its I/O across the stop/continue cycle.
 fn spawn_child(socket: &std::path::Path, slave: &OwnedFd) -> Child {
     // Runs between fork and exec in the child: setpgid moves it into its
     // own process group, inside the runner's session.
