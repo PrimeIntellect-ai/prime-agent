@@ -1087,15 +1087,16 @@ mod tombstone_usage_tests {
                 name: "w".into(),
             })
             .unwrap();
-        // The delete goes through a final-component symlink to the child.
+        // The delete goes through a final-component symlink to the
+        // child, and the REAL two-phase flow runs the tombstone only
+        // AFTER the delete removed the link: the capture happens while
+        // the link exists, the unlink lands, then phase 2 must still
+        // key the edge at the target the link pointed at.
         let link = sessions_dir.join("link-to-child.jsonl");
         std::os::unix::fs::symlink(&child, &link).unwrap();
-        let captured = tombstone_saved_session_delete(
-            &agent_dir,
-            &sessions_dir,
-            &link.to_string_lossy(),
-            Some("subagent"),
-        );
+        let capture = capture_saved_session_delete(&link.to_string_lossy(), Some("subagent"));
+        std::fs::remove_file(&link).unwrap();
+        let captured = tombstone_saved_session_delete_captured(&agent_dir, &sessions_dir, &capture);
         assert_eq!(
             captured, 1,
             "the pre-unlink key finds the edge the symlink pointed at"
