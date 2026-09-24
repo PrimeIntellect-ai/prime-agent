@@ -321,27 +321,59 @@ impl RlmChildUsageAttributions {
     /// back-pointer, adopts the target and the target's aggregate base,
     /// and attributes from there — a child spawned across the handoff
     /// never loses its report.
-    async fn adopt_from_fallback(&self, rlm_child_id: &str) -> Option<String> {
-        let fallback = self
+    /// The live ancestor chain, newest first (each adoption links one
+    /// Weak back-pointer; a rebuild chain is a line — a cycle cannot form,
+    /// and a dropped producer ends the walk: its registrations died with
+    /// it). The chain walk is what makes a raced registration reachable
+    /// after the SECOND rebuild: the one-hop pointer stops at the middle
+    /// producer, the walk continues to the original.
+    fn fallback_chain(&self) -> Vec<std::sync::Arc<Self>> {
+        let mut chain = Vec::new();
+        let mut link = self
             .fallback
             .lock()
             .expect("rlm usage fallback lock")
             .clone();
-        let fallback = fallback.and_then(|weak| weak.upgrade())?;
-        let target_id = {
-            let retired_children = fallback.children.lock().expect("rlm usage children lock");
-            retired_children.get(rlm_child_id).cloned()?
-        };
+        while let Some(weak) = link {
+            let Some(producer) = weak.upgrade() else {
+                break;
+            };
+            link = producer
+                .fallback
+                .lock()
+                .expect("rlm usage fallback lock")
+                .clone();
+            chain.push(producer);
+        }
+        chain
+    }
+
+    async fn adopt_from_fallback(&self, rlm_child_id: &str) -> Option<String> {
+        let chain = self.fallback_chain();
+        let mut target: Option<String> = None;
+        for producer in &chain {
+            let retired_children = producer.children.lock().expect("rlm usage children lock");
+            if let Some(found) = retired_children.get(rlm_child_id) {
+                target = Some(found.clone());
+                break;
+            }
+        }
+        let target_id = target?;
         {
             let mut children = self.children.lock().expect("rlm usage children lock");
             children
                 .entry(rlm_child_id.to_string())
                 .or_insert_with(|| target_id.clone());
         }
-        let retired_bases = fallback.bases.lock().await;
-        let mut bases = self.bases.lock().await;
-        if let Some(base) = retired_bases.get(&target_id) {
-            bases.entry(target_id.clone()).or_insert(*base);
+        // The newest ancestor carrying the target's base wins (a deeper
+        // hop predates a nearer update).
+        for producer in &chain {
+            let retired_bases = producer.bases.lock().await;
+            if let Some(base) = retired_bases.get(&target_id) {
+                let mut bases = self.bases.lock().await;
+                bases.entry(target_id.clone()).or_insert(*base);
+                break;
+            }
         }
         Some(target_id)
     }
@@ -353,14 +385,13 @@ impl RlmChildUsageAttributions {
     /// lock order is the fallback's bases first, ours second, the same
     /// as [`Self::adopt_from_fallback`].
     async fn fallback_base(&self, target_id: &str) -> Option<Usage> {
-        let fallback = self
-            .fallback
-            .lock()
-            .expect("rlm usage fallback lock")
-            .clone();
-        let fallback = fallback.and_then(|weak| weak.upgrade())?;
-        let retired_bases = fallback.bases.lock().await;
-        retired_bases.get(target_id).copied()
+        for producer in self.fallback_chain() {
+            let retired_bases = producer.bases.lock().await;
+            if let Some(base) = retired_bases.get(target_id) {
+                return Some(*base);
+            }
+        }
+        None
     }
 
     /// Drop one child's registration: the child's final observation
