@@ -1089,6 +1089,9 @@ fn spawn_supervisor_detached(socket_path: &Path, spawn_cwd: &Path, exe: &Path) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The sink's answers flow through the pa-tui trait; the tests call the
+    // trait methods directly (the impl header alone does not import them).
+    use pa_tui::interactive::OnboardingSink;
 
     #[test]
     fn session_flags_map_to_selections() {
