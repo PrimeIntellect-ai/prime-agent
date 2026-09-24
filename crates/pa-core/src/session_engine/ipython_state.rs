@@ -188,7 +188,7 @@ pub async fn capture_notice_content(probe: &dyn CompactionKernelProbe) -> Option
     super::compaction_trace::trace(
         "compact.kernel_pruned",
         serde_json::json!({
-            "pruned": pruned.as_ref().map(|names| names.len()),
+            "pruned": pruned.as_ref().map(std::vec::Vec::len),
         }),
     );
     let signal = crate::kernel::cancellation::AbortSignal::new();
@@ -207,7 +207,7 @@ pub async fn capture_notice_content(probe: &dyn CompactionKernelProbe) -> Option
     super::compaction_trace::trace(
         "compact.kernel_listed",
         serde_json::json!({
-            "names": names.as_ref().map(|names| names.len()),
+            "names": names.as_ref().map(std::vec::Vec::len),
         }),
     );
     if names.is_none() && !probe.has_running_kernel() {
