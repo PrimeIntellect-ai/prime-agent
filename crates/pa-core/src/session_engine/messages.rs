@@ -21,7 +21,23 @@ pub use pa_types::slash_commands::{
 pub const COMPACTION_OUTCOME_CUSTOM_TYPE: &str = "compaction_outcome";
 pub const REFINEMENT_OUTCOME_CUSTOM_TYPE: &str = "refinement_outcome";
 pub const REFINEMENT_NOTICE_CUSTOM_TYPE: &str = "refinement_notice";
+/// The durable single-row disclosure of one provider-retry episode
+/// (SANCTIONED DIVERGENCE from TS, operator ruling 2026-09-23: the TS chat
+/// leaves one error row per failed attempt, which a 429-storm turned into
+/// chat spam): a `provider_retry_outcome` custom message carrying the one
+/// resolved/terminal row of the whole episode, with
+/// `{success, attempts, finalError}` details. Like the compaction outcome
+/// it is a user-facing disclosure, never model context — `convert_to_llm`
+/// drops it.
+pub const PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE: &str = "provider_retry_outcome";
 pub const HEARTBEAT_PROMPT_CUSTOM_TYPE: &str = "heartbeat_prompt";
+/// TS `ASYNC_BASH_COMPLETION_CUSTOM_TYPE`: the durable row a detached
+/// kernel bash completion admits as the woken turn's injected prompt.
+pub const ASYNC_BASH_COMPLETION_CUSTOM_TYPE: &str = "async_bash_completion";
+/// TS `ASYNC_BASH_COMPLETION_PREVIEW_LABEL`: the queue-strip label the
+/// notice's queued row carries (the TUI renders it with its own label,
+/// no lane prefix).
+pub const ASYNC_BASH_COMPLETION_PREVIEW_LABEL: &str = "Background command finished";
 /// The queue-strip preview label for a parked heartbeat fire (TS
 /// `HEARTBEAT_PROMPT_PREVIEW_LABEL`): the queued row reads
 /// `Heartbeat prompt: <content>` instead of the lane-labeled preview.
@@ -79,6 +95,48 @@ fn now_millis() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// The resolved-line text of a retry episode that recovered: the last
+/// error plus how many retries it took. This is the ONE line the episode
+/// leaves in the chat (live and rebuilt), replacing the per-attempt error
+/// rows TS keeps.
+pub fn provider_retry_recovered_text(attempts: u32, last_error: &str) -> String {
+    format!("Recovered after {attempts} retries: {last_error}")
+}
+
+/// The terminal-line text of a retry episode that gave up: the same text
+/// the TS `auto_retry_end` live row carries, so the durable row and the
+/// live one read identically.
+pub fn provider_retry_exhausted_text(attempts: u32, final_error: &str) -> String {
+    format!("\u{26a0} Error: Retry failed after {attempts} attempts: {final_error}")
+}
+
+/// The durable disclosure row of one provider-retry episode (see
+/// [`PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE`]): `content` carries the row text
+/// the chat renders, `details` the structured verdict.
+pub fn create_provider_retry_outcome_message(
+    success: bool,
+    attempts: u32,
+    error: &str,
+) -> pa_types::session::CustomMessage {
+    let content = if success {
+        provider_retry_recovered_text(attempts, error)
+    } else {
+        provider_retry_exhausted_text(attempts, error)
+    };
+    pa_types::session::CustomMessage {
+        custom_type: PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE.to_string(),
+        content: UserContent::Text(content),
+        display: true,
+        details: Some(serde_json::json!({
+            "success": success,
+            "attempts": attempts,
+            "finalError": error,
+        })),
+        timestamp: now_millis(),
+        rest: Default::default(),
+    }
 }
 
 /// The durable disclosure row for an unsuccessful compaction (TS
@@ -146,6 +204,38 @@ pub fn create_heartbeat_prompt_message(
         content: UserContent::Text(content),
         display: true,
         details: Some(serde_json::Value::Object(details)),
+        timestamp,
+        rest: Default::default(),
+    }
+}
+
+/// The detached kernel bash completion notice (TS
+/// `createAsyncBashCompletionMessage`): an `async_bash_completion`
+/// custom message carrying `[bash-done pid:N exit:M]` plus the
+/// JSON-encoded command, with the completion's `{pid, command,
+/// exitCode}` in details. The daemon's `bash.completed` host handler
+/// admits the row as the woken turn's injected prompt (the turn runs on
+/// the row, so the transcript renders the bash-done component); a
+/// later kernel read that reaches the model first withdraws it through
+/// its details (`bash.consumed`).
+pub fn create_async_bash_completion_message(
+    pid: u32,
+    command: &str,
+    exit_code: i64,
+    timestamp: u64,
+) -> pa_types::session::CustomMessage {
+    // TS `JSON.stringify(details.command)`: the quoted, escaped command.
+    let encoded_command = serde_json::to_string(command).unwrap_or_default();
+    let content = format!("[bash-done pid:{pid} exit:{exit_code}]\n\nCommand: {encoded_command}");
+    pa_types::session::CustomMessage {
+        custom_type: ASYNC_BASH_COMPLETION_CUSTOM_TYPE.to_string(),
+        content: UserContent::Text(content),
+        display: true,
+        details: Some(serde_json::json!({
+            "pid": pid,
+            "command": command,
+            "exitCode": exit_code,
+        })),
         timestamp,
         rest: Default::default(),
     }
@@ -243,6 +333,7 @@ pub fn convert_to_llm(messages: &[AgentMessage]) -> Vec<AgentMessage> {
                         | SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE
                         | COMPACTION_OUTCOME_CUSTOM_TYPE
                         | REFINEMENT_OUTCOME_CUSTOM_TYPE
+                        | PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE
                 ) {
                     continue;
                 }
@@ -353,6 +444,44 @@ pub fn engine_convert_to_llm() -> pa_agent::agent_loop::ConvertToLlmFn {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The retry-outcome row (SANCTIONED DIVERGENCE, operator ruling
+    /// 2026-09-23): one durable line per episode — the recovered and
+    /// exhausted texts, the structured details — and never model context.
+    #[test]
+    fn provider_retry_outcome_row_is_the_one_line_and_never_context() {
+        let recovered =
+            create_provider_retry_outcome_message(true, 3, "429 Too many concurrent requests");
+        assert_eq!(recovered.custom_type, PROVIDER_RETRY_OUTCOME_CUSTOM_TYPE);
+        assert_eq!(
+            recovered.content,
+            UserContent::Text(
+                "Recovered after 3 retries: 429 Too many concurrent requests".to_string()
+            )
+        );
+        assert!(recovered.display);
+        assert_eq!(
+            recovered.details,
+            Some(serde_json::json!({
+                "success": true,
+                "attempts": 3,
+                "finalError": "429 Too many concurrent requests",
+            }))
+        );
+        let exhausted = create_provider_retry_outcome_message(false, 2, "provider down");
+        assert_eq!(
+            exhausted.content,
+            UserContent::Text(
+                "\u{26a0} Error: Retry failed after 2 attempts: provider down".to_string()
+            )
+        );
+        // The disclosure never enters the model context.
+        let converted = convert_to_llm(&[AgentMessage::Custom(recovered)]);
+        assert!(
+            converted.is_empty(),
+            "outcome row must not convert to LLM context"
+        );
+    }
 
     #[test]
     fn bash_output_fences_and_status() {
@@ -565,6 +694,36 @@ state
         let details = message.details.unwrap();
         assert_eq!(details["runCount"], 1);
         assert_eq!(details["lastRunAt"], "2026-09-22T00:10:00.000Z");
+    }
+
+    #[test]
+    fn async_bash_completion_message_matches_the_ts_shape() {
+        // TS `createAsyncBashCompletionMessage`: the custom type, the
+        // `[bash-done pid:N exit:M]` header with the JSON-encoded
+        // command, display, and the `{pid, command, exitCode}` details.
+        let message =
+            create_async_bash_completion_message(4321, "sleep 12; echo RW_WAKE_DONE", 0, 1_000);
+        assert_eq!(message.custom_type, "async_bash_completion");
+        assert!(message.display);
+        assert_eq!(message.timestamp, 1_000);
+        assert_eq!(
+            message.content,
+            UserContent::Text(
+                "[bash-done pid:4321 exit:0]\n\nCommand: \"sleep 12; echo RW_WAKE_DONE\""
+                    .to_string()
+            )
+        );
+        let details = message.details.unwrap();
+        assert_eq!(details["pid"], 4321);
+        assert_eq!(details["command"], "sleep 12; echo RW_WAKE_DONE");
+        assert_eq!(details["exitCode"], 0);
+        // A nonzero exit and embedded quotes round the same shape.
+        let message = create_async_bash_completion_message(11, "echo \"done\" && exit 2", 2, 2_000);
+        assert_eq!(message.timestamp, 2_000);
+        assert!(matches!(message.content, UserContent::Text(text)
+            if text.starts_with("[bash-done pid:11 exit:2]\n\nCommand: \"echo \\\"done\\\" && exit 2\"")));
+        let details = message.details.unwrap();
+        assert_eq!(details["exitCode"], 2);
     }
 
     #[test]

@@ -99,6 +99,14 @@ pub trait InteractionTelemetry: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// An actionable activity group was opened; never includes command or goal text.
     fn activity_opened(&self, kind: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// A menu surface opened (event `tui menu opened`): `menu` names the
+    /// surface (`model`, `mcp`), `source` how it opened (`command` — the
+    /// bare slash submission, `tab` — a typed partial + Tab).
+    fn menu_opened(
+        &self,
+        menu: &'static str,
+        source: &'static str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// An image was pasted into the editor from the clipboard (event
     /// `tui image pasted`); `mime_type` is the attachment's sniffed format.
     fn image_pasted(&self, mime_type: &str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
@@ -622,9 +630,56 @@ impl ReconnectLoop {
 
 /// Run the interactive UI until the user exits (terminal) or the plan
 /// completes (headless).
+///
+/// Every error return funnels through the one exit restore: an early `?`
+/// between the surface mount and the deliberate tail teardown (a draw
+/// failure, a key-handler transport error, a suspend/resume failure)
+/// must not hand the shell a terminal still in TUI state — raw mode,
+/// the alternate screen, the enhancement modes armed. The restore is
+/// idempotent, so a return after the tail already ran (the startup
+/// refusal path finishes the surface itself) only re-emits the two
+/// unconditional tail bytes.
 pub async fn run_interactive(
     options: InteractiveOptions,
     ui: UiMode,
+) -> Result<InteractiveOutcome> {
+    // The headless harness drives the same dispatch on plain pipes: it
+    // never owned the terminal, so its error returns must not run a
+    // restore (the mode gates it — the distinction the headless e2e
+    // binaries observe, not `restore_terminal`'s pipe no-op).
+    let owns_terminal = matches!(ui, UiMode::Terminal);
+    // A terminal-mode error that fired BEFORE this surface mounted (the
+    // daemon connection refused at the top) must not tear down whatever
+    // the CALLER had up: the restore runs only once this run's surface
+    // actually mounted.
+    let surface_mounted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mounted = std::sync::Arc::clone(&surface_mounted);
+    match run_interactive_surface(options, ui, mounted).await {
+        Ok(outcome) => Ok(outcome),
+        Err(error) => {
+            // Restore when THIS run changed the terminal state (the flag
+            // arms at the raw-mode entry inside `Renderer::setup`) OR
+            // when it entered on a pane already in TUI state (the
+            // agents-view preserve handoff: the adopting surface owns the
+            // release even when it fails before mounting — the process is
+            // exiting and no other writer remains). A fresh-pane
+            // pre-mount failure (the daemon refused the connect) has
+            // nothing to release and must not tear down the caller.
+            if owns_terminal
+                && (surface_mounted.load(std::sync::atomic::Ordering::SeqCst)
+                    || crate::altscreen::active())
+            {
+                crate::exit_restore::restore_terminal();
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn run_interactive_surface(
+    options: InteractiveOptions,
+    ui: UiMode,
+    surface_mounted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<InteractiveOutcome> {
     // The TS theme emits raw ANSI color codes regardless of NO_COLOR; match
     // that so the same terminal renders the same frames either way.
@@ -689,7 +744,19 @@ pub async fn run_interactive(
     // Headless verification runs capture the OSC 52 clipboard channel
     // instead of writing it to the plain pipes.
     let headless = matches!(ui, UiMode::Headless(_));
-    let mut renderer = Renderer::setup(ui, ui_tx, exit_guard.clone(), options.fullscreen_mouse)?;
+    // A panic anywhere between the mount below and the deliberate
+    // teardown must still hand the terminal back whole: the unwind guard
+    // fires the one exit restore while the frame is dying (a set_hook
+    // cannot carry this — tokio catches task panics and the process
+    // would live on with a half-restored surface).
+    let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
+    let mut renderer = Renderer::setup(
+        ui,
+        ui_tx,
+        exit_guard.clone(),
+        options.fullscreen_mouse,
+        &surface_mounted,
+    )?;
     if !headless {
         // TS `ui.start()` renders once before the session loads: the first
         // frame is the startup chrome (banner, editor, tray). The model
@@ -716,26 +783,26 @@ pub async fn run_interactive(
     {
         Ok(session) => session,
         Err(error) => {
-            // A remembered active id whose session is truly gone (not
-            // rebindable to a live worker): the pane hands off to the
-            // agents view with the failure as its status line instead of
-            // dying to the shell. Every other startup failure (daemon
-            // down, create failure) stays fatal.
+            // A daemon refusal for the startup create/attach/resume (the
+            // daemon is alive and refused THIS request — a remembered id
+            // whose worker is gone, or a saved-session create the daemon
+            // refuses, e.g. "Session is already active in <id>" while
+            // another instance holds the session file): the pane hands off
+            // to the agents view with the failure as its status line —
+            // the session-picker fallback — instead of dying to the
+            // shell. Only transport/protocol failures (daemon down,
+            // unanswerable socket) stay fatal.
             //
-            // The check matches the daemon's RAW refusal exactly - it must
-            // name this attach's own selector - instead of a substring of
-            // the rendered chain: the chain's context lines echo the
-            // user-typed selector, so a selector that happens to contain
-            // the phrase could not forge the refusal into a transport
-            // failure's report (and vice versa).
+            // The unknown-session check matches the daemon's RAW refusal
+            // message exactly - it must name this attach's own selector -
+            // so a selector that happens to contain the phrase could not
+            // forge the refusal (and vice versa).
             let unknown_session_refusal = |selector: &str| {
                 let expected = format!("Unknown active session: {selector}");
                 error.chain().any(|cause| {
                     cause
-                        .to_string()
-                        .strip_prefix("the daemon rejected the ")
-                        .and_then(|rejection| rejection.rsplit_once(" request: "))
-                        .is_some_and(|(_, daemon_error)| daemon_error == expected)
+                        .downcast_ref::<crate::daemon_client::RequestRejected>()
+                        .is_some_and(|rejection| rejection.message == expected)
                 })
             };
             if let SessionSelection::Attach(selector) = &options.session {
@@ -754,6 +821,20 @@ pub async fn run_interactive(
                         ..Default::default()
                     });
                 }
+            }
+            // Any other daemon refusal (a create the daemon refused for a
+            // saved-session open, an admission refusal, ...) gets the same
+            // session-picker fallback: the agents view opens with the
+            // refusal as its status line and the client never exits.
+            if crate::daemon_client::is_daemon_rejection(&error) {
+                exit_guard.cancel();
+                let frames = renderer.finish(&mut view, true);
+                return Ok(InteractiveOutcome {
+                    return_to_agents_view: true,
+                    agents_view_notice: Some(format!("{error:#}")),
+                    frames,
+                    ..Default::default()
+                });
             }
             // The surface is already up: hand the terminal back before the
             // CLI reports the failure on the plain screen (the same
@@ -823,7 +904,9 @@ pub async fn run_interactive(
         }
     }
     if let Some(initial) = &options.initial_message {
-        session.submit_prompt(initial, &mut view).await?;
+        session
+            .submit_prompt(initial, crate::session_ui::SubmitBehavior::Steer, &mut view)
+            .await?;
     }
 
     let mut pending: VecDeque<UiInput> = VecDeque::new();
@@ -938,7 +1021,20 @@ pub async fn run_interactive(
                         // TS stops the selection auto-scroll on every
                         // non-mouse input (`handleFullscreenInput`).
                         session.stop_selection_auto_scroll();
-                        session.handle_key(key, &mut view, &mut running).await?;
+                        match session.handle_key(key, &mut view, &mut running).await {
+                            Ok(()) => {}
+                            // A daemon refusal answered this key's request
+                            // (the connection stays healthy): the TS
+                            // `showError` row surfaces it and the loop keeps
+                            // running with the editor state preserved — a
+                            // refused request never exits the client.
+                            Err(error) if crate::daemon_client::is_daemon_rejection(&error) => {
+                                session.error_row(&format!("{error:#}"), &mut view);
+                            }
+                            // Everything else (dead socket, timeout,
+                            // protocol corruption) stays fatal.
+                            Err(error) => return Err(error),
+                        }
                         // TS `handleCtrlZ` (`app.suspend`, default ctrl+z):
                         // hand the terminal to the shell and stop the process
                         // group; execution continues here once the user
@@ -984,24 +1080,22 @@ pub async fn run_interactive(
                                 }
                             }
                         }
-                        // A selector that resolved to a client command (the
-                        // `/mcp` view's Enter): dispatch it through the same
-                        // submit path as an editor submission, so the
-                        // terminal-suspending auth flows get the identical
-                        // suspend/resume bracket.
-                        if let Some(command) = session.take_pending_client_command() {
-                            let suspended = session.needs_terminal_suspension(&command);
+                        // The `/mcp` view resolved to an auth request (its
+                        // Enter on a connection, or the inline paste panel):
+                        // run the client auth commands directly — the
+                        // typed-command arg path is gone, so the view never
+                        // resolves through a submitted `/mcp <args>` string.
+                        // A login and a paste both hand the terminal over
+                        // (the OAuth flow and the token prompt read the
+                        // plain terminal's stdin).
+                        if let Some(args) = session.take_pending_mcp_auth() {
+                            let suspended = session.mcp_auth_needs_terminal(&args);
                             if suspended {
                                 renderer.suspend(&mut view)?;
                             }
-                            let dispatched = session.submit_prompt(&command, &mut view).await;
+                            session.run_mcp_auth(&args, &mut view).await;
                             if suspended {
                                 renderer.resume()?;
-                            }
-                            if let Err(error) = dispatched {
-                                session.error_row(&format!("{error:#}"), &mut view);
-                                view.editor.set_text(&command);
-                                session.dirty = true;
                             }
                         }
                     }
@@ -1025,16 +1119,16 @@ pub async fn run_interactive(
                     }
                     UiInput::Submit(text) => {
                         session.stop_selection_auto_scroll();
-                        // A terminal-suspending client command (`/mcp login`):
-                        // the auth flow prompts on the plain terminal.
-                        let suspended = session.needs_terminal_suspension(&text);
-                        if suspended {
-                            renderer.suspend(&mut view)?;
-                        }
-                        let dispatched = session.submit_prompt(&text, &mut view).await;
-                        if suspended {
-                            renderer.resume()?;
-                        }
+                        // No submitted text needs the terminal: the
+                        // `/mcp` typed-arg form is gone (its login flow
+                        // resolved through the view's own auth seam above).
+                        let dispatched = session
+                            .submit_prompt(
+                                &text,
+                                crate::session_ui::SubmitBehavior::Steer,
+                                &mut view,
+                            )
+                            .await;
                         if let Err(error) = dispatched {
                             // TS: a rejected submission surfaces the `⚠ Error`
                             // row and keeps the client mounted with the draft
@@ -1534,6 +1628,13 @@ pub async fn run_interactive(
             hint_painted = false;
         }
 
+        // The action toasts auto-dismiss on their TTL: once one goes, the
+        // overlay repaints away (the same tick-driven repaint the exit
+        // hint's expiry uses).
+        if view.toasts.prune_expired(Instant::now()) {
+            session.dirty = true;
+        }
+
         // The tray override row (the Ctrl+C exit hint, or the streaming
         // follow-up hint over a draft) follows the session's hint state on
         // every frame. Refreshed here — after the select, right before
@@ -1785,10 +1886,17 @@ impl Renderer {
         ui_tx: mpsc::UnboundedSender<UiInput>,
         exit_guard: ExitGuard,
         mouse: bool,
+        surface_mounted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Renderer> {
         match ui {
             UiMode::Terminal => {
                 terminal::enable_raw_mode()?;
+                // The terminal state changed: every later setup step is
+                // fallible (the alt-screen enter, the mode enables, the
+                // terminal construction) and an error from any of them
+                // still owns the release. The flag arms here, not at the
+                // end of setup.
+                surface_mounted.store(true, std::sync::atomic::Ordering::SeqCst);
                 // Adopt the alternate screen the previous surface left in
                 // place (TS `pendingAltScreenHandoff`); only the first
                 // surface of the process enters it, so a view switch never
@@ -1960,9 +2068,11 @@ impl Renderer {
     /// Hand the terminal back to the process (raw mode off, alternate
     /// screen left and flushed, cursor visible) so an interactive client
     /// command can prompt on it. Headless verification runs keep their
-    /// plain pipes. The trailing cursor-show leaves the terminal with a
-    /// visible cursor (the TS teardown contract: the shell prompt that
-    /// follows must not sit on a hidden cursor).
+    /// plain pipes. The shared exit tail ends the hand-back — the same
+    /// whole-terminal contract every exit guarantees, so a poisoned
+    /// start cannot leave the client command prompting on a raw tty
+    /// (the TS teardown contract: the shell prompt that follows must
+    /// not sit on a hidden cursor or a broken mode).
     fn suspend(&mut self, view: &mut AgentView) -> Result<()> {
         match self {
             Renderer::Terminal { .. } => {
@@ -1975,8 +2085,7 @@ impl Renderer {
                 // flags popped); `resume` re-enables both.
                 let _ = crate::enhanced_keys::disable(&mut std::io::stdout());
                 self.flush_to_main_screen(view)?;
-                crossterm::execute!(std::io::stdout(), crossterm::cursor::Show)?;
-                terminal::disable_raw_mode()?;
+                crate::exit_restore::terminal_release_tail(&mut std::io::stdout());
                 Ok(())
             }
             Renderer::Headless { .. } => Ok(()),
@@ -2101,6 +2210,14 @@ impl Renderer {
     /// main screen, show the cursor, restore cooked mode — the resume hint
     /// the composition root prints next lands right below the flushed frame.
     fn finish(mut self, view: &mut AgentView, preserve_alt_screen: bool) -> Vec<String> {
+        // The exit that ends the process stands the kitty probe down
+        // FIRST: an answer landing after the pop below would re-arm
+        // CSI-u reporting on the parent shell (the "escape codes while
+        // typing" leak). A handoff (preserve) keeps the process alive
+        // and the next surface's probe — never released here.
+        if !preserve_alt_screen && self.is_terminal() {
+            crate::enhanced_keys::release_for_exit();
+        }
         // In-flight kitty key releases are consumed before the terminal is
         // restored (TS `drainInput` before `stop`): a release that lands
         // after raw mode is off would leak its escape sequence into the
@@ -2127,8 +2244,11 @@ impl Renderer {
                     crate::input::request_reader_stop();
                 } else {
                     let _ = self.flush_to_main_screen(view);
-                    let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
-                    let _ = terminal::disable_raw_mode();
+                    // The shared exit tail ends the parity teardown: the
+                    // synchronized-output release, the SGR reset, the
+                    // cursor show, and the cooked-tty verification end in
+                    // the same terminal state every exit path guarantees.
+                    crate::exit_restore::terminal_release_tail(&mut std::io::stdout());
                 }
                 Vec::new()
             }
@@ -2167,6 +2287,41 @@ fn exit_flush_enabled() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn headless_error_returns_never_touch_the_terminal() {
+        // A socket that never listens: the attach fails and the run
+        // returns Err. The headless harness never owned the terminal —
+        // the wrapper's restore is gated on the terminal ui mode, so a
+        // headless error return must not attempt one (the terminal-mode
+        // restore is the exit-restore e2e's error-exit scenario, driven
+        // on a real terminal).
+        let socket =
+            std::env::temp_dir().join(format!("tui-exit-restore-dead-{}.sock", std::process::id()));
+        let mut opts = options(ModelSelection::default());
+        opts.socket_path = socket;
+        // The attempts counter is process-global and the unwind-guard test
+        // also moves it: this reader holds the shared state lock across
+        // its whole read window.
+        let _state = crate::exit_restore::TEST_STATE_LOCK.lock();
+        let before =
+            crate::exit_restore::RESTORE_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst);
+        let result = run_interactive(
+            opts,
+            UiMode::Headless(HeadlessPlan {
+                steps: Vec::new(),
+                width: 80,
+                height: 24,
+            }),
+        )
+        .await;
+        assert!(result.is_err(), "the dead socket must error the run");
+        assert_eq!(
+            crate::exit_restore::RESTORE_ATTEMPTS.load(std::sync::atomic::Ordering::SeqCst),
+            before,
+            "the headless error return did not attempt a restore"
+        );
+    }
 
     #[test]
     fn flush_rows_write_crlf_and_keep_zone_markers() {

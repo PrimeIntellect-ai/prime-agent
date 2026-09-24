@@ -13,15 +13,9 @@
 //! queue whose single consumer composes the summary fresh at flush time
 //! and ships one `worker_roster_delta` per burst.
 
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Arc;
 
-use serde_json::json;
-
-use crate::engine::SessionEngine;
-use crate::supervisor_link::SupervisorLink;
-use crate::user_bash::UserBash;
-use crate::worker::{session_summary, EventPump, OutboundFrame, SessionCore};
+use crate::worker::{EventPump, OutboundFrame};
 
 /// Disables the worker's roster pushes (tests and local harness runs that
 /// spin workers without a supervisor).
@@ -140,16 +134,10 @@ impl RosterPushQueue {
     /// ships them as `worker_roster_delta` commands over the supervisor
     /// link. Flushes serialize here, so a wedged supervisor delays pushes
     /// but never reorders them.
-    pub(crate) fn spawn(
-        core: Arc<Mutex<SessionCore>>,
-        engine: Arc<dyn SessionEngine>,
-        user_bash: Arc<UserBash>,
-        roster_link: Arc<SupervisorLink>,
-        worker_token: String,
-    ) -> Self {
+    pub(crate) fn spawn(context: crate::worker::RosterPushContext) -> Self {
         if std::env::var_os(ROSTER_PUSH_DISABLE_ENV).is_some()
-            || worker_token.is_empty()
-            || roster_link.socket_path().as_os_str().is_empty()
+            || context.worker_token.is_empty()
+            || context.roster_link.socket_path().as_os_str().is_empty()
         {
             return Self::disabled();
         }
@@ -168,29 +156,7 @@ impl RosterPushQueue {
                 consumer
                     .pending
                     .store(false, std::sync::atomic::Ordering::SeqCst);
-                let summary = {
-                    let core = core.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    session_summary(
-                        &core,
-                        &engine
-                            .effective_thinking_level()
-                            .unwrap_or_else(|| "default".to_string()),
-                        engine.model_metadata(),
-                        engine.model_fallback_message(),
-                        user_bash.is_running(),
-                    )
-                };
-                let summary = serde_json::to_value(&summary).unwrap_or(serde_json::Value::Null);
-                let _ = roster_link
-                    .request(
-                        json!({
-                            "type": "worker_roster_delta",
-                            "workerToken": worker_token,
-                            "summary": summary,
-                        }),
-                        Duration::from_secs(10),
-                    )
-                    .await;
+                crate::worker::push_roster_delta(&context);
             }
         });
         Self { inner: Some(state) }
@@ -229,7 +195,11 @@ pub(crate) fn spawn_roster_activity_watch(events: Arc<EventPump>, queue: RosterP
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::supervisor_link::SupervisorLink;
+    use serde_json::json;
     use serde_json::Value;
+    use std::sync::Mutex;
+    use std::time::Duration;
 
     fn session_event_frame(event: serde_json::Value) -> OutboundFrame {
         let payload = json!({
@@ -372,16 +342,19 @@ mod tests {
         });
         let engine: Arc<dyn crate::engine::SessionEngine> =
             Arc::new(crate::engine::ScriptedEngine::default());
-        let queue = RosterPushQueue::spawn(
-            Arc::new(Mutex::new(crate::worker::SessionCore::test_core(
+        let queue = RosterPushQueue::spawn(crate::worker::RosterPushContext {
+            core: Arc::new(Mutex::new(crate::worker::SessionCore::test_core(
                 None,
                 "/tmp".to_string(),
             ))),
             engine,
-            Arc::new(crate::user_bash::UserBash::new()),
-            Arc::new(SupervisorLink::new(socket)),
-            "token".to_string(),
-        );
+            user_bash: Arc::new(crate::user_bash::UserBash::new()),
+            roster_link: Arc::new(SupervisorLink::new(socket)),
+            worker_token: "token".to_string(),
+            worker_instance_id: "instance".to_string(),
+            roster_delta_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            roster_push_order: Arc::new(Mutex::new(())),
+        });
         for _ in 0..50 {
             queue.push();
         }

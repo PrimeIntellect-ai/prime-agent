@@ -1,4 +1,9 @@
-//! Frozen pre-geometry renderer for full-object differential tests.
+//! Reference renderer for full-object differential tests: a second,
+//! independent implementation of the refinement row whose output must
+//! byte-match the production traversal at every width and detail level.
+//! The expanded block hangs off the `◆` header on the `╰─ ` gutter with
+//! continuation rows at the branch depth (the parity note lives in
+//! `docs/FEATURE_PARITY.md`).
 use super::*;
 
 pub(crate) fn render_refinement_outcome(
@@ -23,7 +28,7 @@ pub(crate) fn render_refinement_outcome(
     };
     // TS `ExpandableEventMessage.addSummary`: the summary follows the
     // component's `setExpanded` state (`toolOutputExpanded`), not the
-    // edit-diffs toggle.
+    // edit-diffs toggle. Expanded hangs on the branch grammar.
     out.extend(event_summary_rows(
         summary,
         detail.tool_output_expanded(),
@@ -33,7 +38,7 @@ pub(crate) fn render_refinement_outcome(
     ));
     if detail.tool_output_expanded() {
         out.push(spacer());
-        out.extend(text_rows(
+        out.extend(continuation_rows_over(
             vec![Span::styled(
                 row.meta.clone(),
                 theme.fg_style(ThemeColor::Dim),
@@ -48,9 +53,9 @@ pub(crate) fn render_refinement_outcome(
     out
 }
 
-/// TS `EventSummary`: wrapped at `width - 1` with a one-column inset; the
-/// collapsed view whitespace-collapses and clamps to two lines (the second
-/// truncated with an ellipsis).
+/// The summary row set: collapsed keeps the TS `EventSummary` shape
+/// (whitespace-collapsed, `width - 1`, one-column inset inside the styled
+/// span, clamped to two lines); expanded hangs on the branch gutter.
 fn event_summary_rows(
     summary: &str,
     expanded: bool,
@@ -58,12 +63,20 @@ fn event_summary_rows(
     theme: &Theme,
     width: usize,
 ) -> Vec<Line> {
-    let content_width = width.saturating_sub(1).max(1);
     let text = if expanded {
         summary.to_string()
     } else {
         summary.split_whitespace().collect::<Vec<_>>().join(" ")
     };
+    if expanded {
+        let rows = branch_rows_over(
+            vec![Span::styled(text, theme.fg_style(color))],
+            theme,
+            width,
+        );
+        return rows;
+    }
+    let content_width = width.saturating_sub(1).max(1);
     let style = theme.fg_style(color);
     let mut lines: Vec<Line> = Vec::new();
     for source in text.split('\n') {
@@ -73,7 +86,7 @@ fn event_summary_rows(
     if lines.is_empty() {
         lines.push(Vec::new());
     }
-    if !expanded && lines.len() > 2 {
+    if lines.len() > 2 {
         lines.truncate(2);
         let second = lines.remove(1);
         let mut joined: Line = second;
@@ -100,16 +113,43 @@ fn event_summary_rows(
         .collect()
 }
 
-/// One edit section (TS `RefinementEditSection`): the label row, then one
-/// muted field-label row per field with plain value rows or -/+ change rows.
+/// The expanded-content row set on the branch grammar: wrap at the branch
+/// content width, first row the dim `╰─ ` gutter, continuation rows the
+/// matching indent, truncated to the full width.
+fn branch_rows_over(line: Line, theme: &Theme, width: usize) -> Vec<Line> {
+    crate::branch::branch_block(line, theme, width)
+}
+
+/// The continuation row set on the branch depth: every row starts four
+/// plain spaces and wraps at the branch content width.
+fn continuation_rows_over(line: Line, width: usize) -> Vec<Line> {
+    let flat: String = line.iter().map(|span| span.content.as_str()).collect();
+    if flat.trim().is_empty() {
+        return Vec::new();
+    }
+    let content_width = crate::branch::branch_content_width(width);
+    let mut rows: Vec<Line> = Vec::new();
+    for source in crate::branch::split_line_on_newlines(&line) {
+        for wrapped in wrap_line(&source, content_width) {
+            let mut row: Line = vec![Span::raw(crate::branch::BRANCH_INDENT.to_string())];
+            row.extend(wrapped);
+            rows.push(truncate_line(&row, width, ""));
+        }
+    }
+    rows
+}
+
+/// One edit section: the label row hangs off the branch, then one muted
+/// field-label row per field with plain value rows or -/+ change rows on
+/// the continuation indent.
 fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize) -> Vec<Line> {
     let mut label: Line = Vec::new();
     for part in &edit.label {
         label.push(label_part(part, theme));
     }
-    let mut out = text_rows(label, width);
+    let mut out = branch_rows_over(label, theme, width);
     for field in &edit.fields {
-        out.extend(text_rows(
+        out.extend(continuation_rows_over(
             vec![Span::styled(
                 field.label.clone(),
                 theme.fg_style(ThemeColor::Muted),
@@ -118,19 +158,30 @@ fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize) -> V
         ));
         match &field.change {
             None => {
-                out.extend(text_rows(vec![Span::raw(field.value.join("\n"))], width));
+                out.extend(continuation_rows_over(
+                    vec![Span::raw(field.value.join("\n"))],
+                    width,
+                ));
             }
             Some((removed, added)) => {
-                for row in rich_change_rows(removed, added, theme, width.saturating_sub(1)) {
-                    let mut inset: Line = vec![Span::raw(" ")];
+                for row in rich_change_rows(
+                    removed,
+                    added,
+                    theme,
+                    crate::branch::branch_content_width(width),
+                ) {
+                    let mut inset: Line = vec![Span::raw(crate::branch::BRANCH_INDENT)];
                     inset.extend(row);
-                    out.push(inset);
+                    // At tiny widths the branch prefix alone outgrows the
+                    // viewport: clip the prefixed row like the production
+                    // traversal does before paint.
+                    out.push(crate::width::truncate_line(&inset, width, ""));
                 }
             }
         }
     }
     if let Some(reason) = &edit.reason {
-        out.extend(text_rows(
+        out.extend(continuation_rows_over(
             vec![Span::styled(
                 format!("Reason: {reason}"),
                 theme.fg_style(ThemeColor::Muted),
@@ -245,8 +296,6 @@ fn rich_change_rows(
                     theme.fg_style(content_color).patch(theme.bg_style(bg)),
                 ));
             }
-            // TS `theme.bg` covers the row's trailing padding too: the
-            // background block reaches the full width.
             rows.push(pad_with(row, width, theme.bg_style(bg)));
         }
     }

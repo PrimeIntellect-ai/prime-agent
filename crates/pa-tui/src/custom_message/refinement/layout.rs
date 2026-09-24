@@ -40,6 +40,85 @@ impl Output {
             }
         }
     }
+
+    /// One expanded-content row set on the branch grammar: the first row
+    /// carries the dim `╰─ ` gutter hanging off the event's header, every
+    /// continuation row the three-space indent — both after the
+    /// one-column chat margin (the same geometry the expanded ipython
+    /// cell code and the agent-message body use).
+    fn branch_text<'a>(
+        &mut self,
+        parts: impl IntoIterator<Item = (&'a str, Option<ThemeColor>)>,
+        theme: &Theme,
+        width: usize,
+    ) {
+        match self {
+            Self::Paint(rows) => {
+                let line: Line = parts
+                    .into_iter()
+                    .map(|(text, color)| match color {
+                        Some(color) => Span::styled(text, theme.fg_style(color)),
+                        None => Span::raw(text),
+                    })
+                    .collect();
+                rows.extend(crate::branch::branch_block(line, theme, width));
+            }
+            Self::Count(count) => {
+                let joined = parts
+                    .into_iter()
+                    .map(|(text, _)| text)
+                    .collect::<Vec<_>>()
+                    .join("");
+                *count += crate::branch::branch_block_count(&joined, width);
+            }
+        }
+    }
+
+    /// One continuation row set on the branch depth: every row starts
+    /// four plain spaces (the chat margin plus the gutter's width) and
+    /// wraps at the branch content width — the expanded block's non-head
+    /// rows (the meta annotation, the edit-section interiors).
+    fn continuation_text<'a>(
+        &mut self,
+        parts: impl IntoIterator<Item = (&'a str, Option<ThemeColor>)>,
+        theme: &Theme,
+        width: usize,
+    ) {
+        let content_width = crate::branch::branch_content_width(width);
+        match self {
+            Self::Paint(rows) => {
+                let line: Line = parts
+                    .into_iter()
+                    .map(|(text, color)| match color {
+                        Some(color) => Span::styled(text, theme.fg_style(color)),
+                        None => Span::raw(text),
+                    })
+                    .collect();
+                let flat: String = line.iter().map(|span| span.content.as_str()).collect();
+                if flat.trim().is_empty() {
+                    return;
+                }
+                for source in crate::branch::split_line_on_newlines(&line) {
+                    for wrapped in crate::width::wrap_line(&source, content_width) {
+                        let mut row: Line =
+                            vec![Span::raw(crate::branch::BRANCH_INDENT.to_string())];
+                        row.extend(wrapped);
+                        rows.push(crate::width::truncate_line(&row, width, ""));
+                    }
+                }
+            }
+            Self::Count(count) => {
+                let joined = parts
+                    .into_iter()
+                    .map(|(text, _)| text)
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !joined.trim().is_empty() {
+                    *count += crate::width::wrapped_text_count(&joined, content_width);
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn render_refinement_outcome(
@@ -101,7 +180,10 @@ fn traverse(
     );
     if detail.tool_output_expanded() {
         out.blank();
-        out.text([(row.meta.as_str(), Some(ThemeColor::Dim))], theme, width);
+        // The expanded block hangs on the branch (the continuation
+        // indent): the meta row, every edit section, and their field rows
+        // all read as content of this one refinement event.
+        out.continuation_text([(row.meta.as_str(), Some(ThemeColor::Dim))], theme, width);
         for edit in &row.edits {
             out.blank();
             edit_section_rows(edit, theme, width, out);
@@ -109,9 +191,12 @@ fn traverse(
     }
 }
 
-/// TS `EventSummary`: wrapped at `width - 1` with a one-column inset; the
-/// collapsed view whitespace-collapses and clamps to two lines (the second
-/// truncated with an ellipsis).
+/// The summary row set: collapsed (TS `EventSummary`) keeps the TS shape —
+/// whitespace-collapsed, wrapped at `width - 1` with the one-column inset
+/// (the inset space colored inside the summary span), clamped to two
+/// lines. Expanded hangs the raw summary on the branch grammar instead
+/// (the product improvement beyond TS): first row `╰─ `, continuation rows
+/// the matching indent.
 fn event_summary_rows(
     summary: &str,
     expanded: bool,
@@ -120,15 +205,19 @@ fn event_summary_rows(
     width: usize,
     out: &mut Output,
 ) {
-    let content_width = width.saturating_sub(1).max(1);
     let text = if expanded {
         summary.to_string()
     } else {
         summary.split_whitespace().collect::<Vec<_>>().join(" ")
     };
+    if expanded {
+        out.branch_text([(text.as_str(), Some(color))], theme, width);
+        return;
+    }
+    let content_width = width.saturating_sub(1).max(1);
     if let Output::Count(count) = out {
         let rows = crate::width::wrapped_text_count(&text, content_width).max(1);
-        *count += if expanded { rows } else { rows.min(2) };
+        *count += rows.min(2);
         return;
     }
     let style = theme.fg_style(color);
@@ -140,7 +229,7 @@ fn event_summary_rows(
     if lines.is_empty() {
         lines.push(Vec::new());
     }
-    if !expanded && lines.len() > 2 {
+    if lines.len() > 2 {
         lines.truncate(2);
         let second = lines.remove(1);
         let mut joined: Line = second;
@@ -170,10 +259,12 @@ fn event_summary_rows(
     }
 }
 
-/// One edit section (TS `RefinementEditSection`): the label row, then one
-/// muted field-label row per field with plain value rows or -/+ change rows.
+/// One edit section (TS `RefinementEditSection`): the label row hangs off
+/// the event's branch (`╰─ ` head), then one muted field-label row per
+/// field with plain value rows or -/+ change rows on the continuation
+/// indent.
 fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize, out: &mut Output) {
-    out.text(
+    out.branch_text(
         edit.label
             .iter()
             .map(|part| (part.text.as_str(), part.color)),
@@ -181,20 +272,23 @@ fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize, out:
         width,
     );
     for field in &edit.fields {
-        out.text(
+        out.continuation_text(
             [(field.label.as_str(), Some(ThemeColor::Muted))],
             theme,
             width,
         );
         match &field.change {
-            None => out.text([(field.value.join("\n").as_str(), None)], theme, width),
+            None => out.continuation_text([(field.value.join("\n").as_str(), None)], theme, width),
             Some((removed, added)) => {
-                rich_change_rows(removed, added, theme, width.saturating_sub(1), out)
+                // The diff block keeps its own row width at the branch
+                // depth: the four-column continuation prefix plus the
+                // block's internal width make the full width.
+                rich_change_rows(removed, added, theme, width, out)
             }
         }
     }
     if let Some(reason) = &edit.reason {
-        out.text(
+        out.continuation_text(
             [(
                 format!("Reason: {reason}").as_str(),
                 Some(ThemeColor::Muted),
@@ -208,7 +302,10 @@ fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize, out:
 /// Full-context line diff rows in the rich-diff row shape (TS
 /// `buildRichDiffLine` over `generateDiffString` with infinite context):
 /// a ` <num> <prefix> ` gutter on the diff backgrounds, wrapped content in
-/// `mdCodeBlock`, continuation rows keep a blank gutter.
+/// `mdCodeBlock`, continuation rows keep a blank gutter. The whole block
+/// sits on the branch continuation indent: the four-column prefix plus
+/// the block's internal width make the caller's full `width`, and at tiny
+/// widths the prefixed row is clipped to the viewport before paint.
 fn rich_change_rows(
     removed: &[String],
     added: &[String],
@@ -216,6 +313,7 @@ fn rich_change_rows(
     width: usize,
     out: &mut Output,
 ) {
+    let block_width = crate::branch::branch_content_width(width);
     let line_num_width = removed.len().max(added.len()).to_string().len();
     let mut old_num = 1usize;
     let mut new_num = 1usize;
@@ -243,7 +341,7 @@ fn rich_change_rows(
         };
         let gutter = format!(" {num:>line_num_width$} {prefix} ");
         let content = line.replace('\t', "   ");
-        let content_width = width.saturating_sub(str_width(&gutter)).max(1);
+        let content_width = block_width.saturating_sub(str_width(&gutter)).max(1);
         if let Output::Count(count) = out {
             *count += crate::width::wrapped_text_count(&content, content_width);
             continue;
@@ -306,9 +404,15 @@ fn rich_change_rows(
                 ));
             }
             // TS `theme.bg` covers the row's trailing padding too: the
-            // background block reaches the full width.
-            let mut inset = vec![Span::raw(" ")];
-            inset.extend(pad_with(row, width, theme.bg_style(bg)));
+            // background block reaches the row's full internal width; the
+            // branch continuation prefix (chat margin + gutter depth)
+            // carries the whole block at the branch depth.
+            let mut inset = vec![Span::raw(crate::branch::BRANCH_INDENT)];
+            inset.extend(pad_with(row, block_width, theme.bg_style(bg)));
+            // At tiny widths the branch prefix alone outgrows the
+            // viewport, so clip before paint: `pad_with` only pads, never
+            // truncates.
+            let inset = crate::width::truncate_line(&inset, width, "");
             if let Output::Paint(rows) = out {
                 rows.push(inset);
             }
@@ -343,17 +447,21 @@ mod tests {
                     .to_string()
             })
             .collect();
-        // Gutter ` <num> <prefix> ` (TS `buildRichDiffLine`), removed
-        // rows on the removed background, added rows on the added one.
+        // Gutter ` <num> <prefix> ` (TS `buildRichDiffLine`) on the branch
+        // continuation indent, removed rows on the removed background,
+        // added rows on the added one.
         assert_eq!(
             text,
             vec![
-                "  1   alpha".to_string(),
-                "  2 - beta".to_string(),
-                "  2 + gamma".to_string(),
+                "     1   alpha".to_string(),
+                "     2 - beta".to_string(),
+                "     2 + gamma".to_string(),
             ],
             "{text:?}"
         );
+        // The row layout is [branch indent, diff gutter, content, ...]:
+        // the gutter spans carry the diff foregrounds on the diff
+        // backgrounds.
         assert_eq!(
             rows[1][1].style,
             theme
@@ -366,5 +474,29 @@ mod tests {
                 .fg_style(ThemeColor::ToolDiffAdded)
                 .patch(theme.bg_style(ThemeBg::ToolDiffAddedBg))
         );
+    }
+
+    /// The four-column branch prefix alone outgrows viewports of a few
+    /// columns: every painted row stays inside the width.
+    #[test]
+    fn change_rows_never_overflow_tiny_viewports() {
+        let theme = Theme::builtin("prime", ColorMode::TrueColor);
+        for width in 0..=8 {
+            let mut out = Output::Paint(Vec::new());
+            rich_change_rows(
+                &["one".to_string()],
+                &["two".to_string()],
+                &theme,
+                width,
+                &mut out,
+            );
+            let Output::Paint(rows) = out else {
+                unreachable!()
+            };
+            for row in &rows {
+                let total: usize = row.iter().map(|s| str_width(&s.content)).sum();
+                assert!(total <= width, "width {width} painted {total}");
+            }
+        }
     }
 }
