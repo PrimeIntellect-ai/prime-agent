@@ -954,11 +954,9 @@ async fn run_interactive_surface(
     // chat hands back to the view, the agents-view status line (the
     // outcome's notice below).
     if waited_for_update_restart {
+        let notice = crate::update_restart_wait::DAEMON_UPDATE_RESTART_WAIT_NOTICE;
         view.push_entry(crate::chat::ChatEntry::Status {
-            text: format!(
-                "\u{26a0} {}",
-                crate::update_restart_wait::DAEMON_UPDATE_RESTART_WAIT_NOTICE
-            ),
+            text: format!("\u{26a0} {notice}"),
             kind: crate::chat::StatusKind::Warning,
         });
         session.dirty = true;
