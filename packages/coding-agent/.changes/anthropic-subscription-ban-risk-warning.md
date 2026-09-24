@@ -1,1 +1,0 @@
-- The Anthropic subscription-auth warning now names the risk: subscription requests identify as Claude Code, which may violate Anthropic's terms and can get the account restricted or banned; an API key avoids the risk.

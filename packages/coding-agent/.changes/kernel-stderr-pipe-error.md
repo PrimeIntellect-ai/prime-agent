@@ -1,1 +1,0 @@
-- Fixed an unhandled error on the kernel child stderr pipe crashing the daemon worker: the stream now records a kernel diagnostic like stdin and stdout instead of reaching the daemon uncaughtException handler and exiting with every hosted session.
