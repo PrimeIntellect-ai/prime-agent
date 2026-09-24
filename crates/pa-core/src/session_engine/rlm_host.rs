@@ -289,15 +289,23 @@ pub struct RlmHostBridge {
     registry: Arc<ModelRegistry>,
     pub notes: Arc<RlmProgressNotes>,
     host: Arc<dyn RlmSubagentHost>,
+    /// The child-usage attribution producer `rlm.spawn` registers into
+    /// and the daemon's child observation drives.
+    pub usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
 }
 
 impl RlmHostBridge {
     /// Build the bridge: an explicit host, or the no-children behavior.
-    pub fn new(registry: Arc<ModelRegistry>, host: Option<Arc<dyn RlmSubagentHost>>) -> Self {
+    pub fn new(
+        registry: Arc<ModelRegistry>,
+        host: Option<Arc<dyn RlmSubagentHost>>,
+        usage: Arc<super::rlm_usage::RlmChildUsageAttributions>,
+    ) -> Self {
         Self {
             registry,
             notes: Arc::new(RlmProgressNotes::default()),
             host: host.unwrap_or_else(|| Arc::new(NoRlmChildren)),
+            usage,
         }
     }
 }
@@ -393,10 +401,12 @@ fn register_progress_note(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHo
 
 fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>) {
     let host = Arc::clone(&bridge.host);
+    let usage = Arc::clone(&bridge.usage);
     handlers.register(
         "rlm.run",
         host_handler(move |payload| {
             let host = Arc::clone(&host);
+            let usage = Arc::clone(&usage);
             Box::pin(async move {
                 let data = &payload.data;
                 let Some(prompt) = data.get("prompt").and_then(Value::as_str) else {
@@ -405,6 +415,11 @@ fn register_run(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmHostBridge>)
                 let mut request = spawn_request_from_payload(prompt, data)?;
                 request.cell_source_code = payload.cell_source_code.clone();
                 let handle = host.spawn(request).await?;
+                // TS `_findLastAssistantMessage` at spawn: the spawning
+                // assistant row (persisted at `message_end` before tool
+                // execution) is the target every child-usage attribution
+                // folds into.
+                usage.register_spawn(&handle.rlm_child_id).await;
                 serde_json::to_value(&handle).map_err(anyhow::Error::new)
             })
         }),

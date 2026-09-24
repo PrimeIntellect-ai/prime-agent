@@ -123,29 +123,35 @@ pub(crate) fn build_params(
                 }
             }
             crate::types::ThinkingFormat::Openrouter => {
-                if let Some(effort) = options.reasoning_effort {
-                    if compat.supports_reasoning_effort {
-                        let mapped = model
-                            .thinking_level_map_value(effort)
-                            .flatten()
-                            .cloned()
-                            .unwrap_or_else(|| effort.wire_name().to_string());
-                        params.insert("reasoning".into(), json!({ "effort": mapped }));
-                    }
+                // OpenRouter distinguishes an omitted reasoning preference (use
+                // the model default), an explicit toggle, and an explicit
+                // effort selection.
+                let declared_effort = options
+                    .reasoning_effort
+                    .filter(|_| compat.supports_reasoning_effort);
+                if let Some(effort) = declared_effort {
+                    let mapped = model
+                        .thinking_level_map_value(effort)
+                        .flatten()
+                        .cloned()
+                        .unwrap_or_else(|| effort.wire_name().to_string());
+                    params.insert("reasoning".into(), json!({ "effort": mapped }));
                 } else if options.reasoning_enabled == Some(true) {
                     params.insert("reasoning".into(), json!({ "enabled": true }));
                 } else if options.reasoning_enabled == Some(false) {
-                    let off_null = model
-                        .thinking_level_map_value(ModelThinkingLevel::Off)
-                        .map(|value| value.is_none())
-                        .unwrap_or(false);
-                    if !off_null {
+                    let off = model
+                        .thinking_level_map
+                        .as_ref()
+                        .and_then(|map| map.get(&ModelThinkingLevel::Off));
+                    // TS `thinkingLevelMap?.off !== null`: only an explicit
+                    // null suppresses the disable; a missing key or map still
+                    // disables reasoning.
+                    if !off.is_some_and(|value| value.is_none()) {
                         if compat.supports_reasoning_effort {
-                            let off_value = model
-                                .thinking_level_map_value(ModelThinkingLevel::Off)
-                                .flatten()
-                                .cloned()
-                                .unwrap_or_else(|| "none".to_string());
+                            let off_value = off
+                                .and_then(|value| value.as_deref())
+                                .unwrap_or("none")
+                                .to_string();
                             params.insert("reasoning".into(), json!({ "effort": off_value }));
                         } else {
                             params.insert("reasoning".into(), json!({ "enabled": false }));
@@ -166,11 +172,18 @@ pub(crate) fn build_params(
                 } else if options.reasoning_enabled == Some(false)
                     && compat.supports_reasoning_effort
                 {
-                    let off = model.thinking_level_map_value(ModelThinkingLevel::Off);
-                    let off_null = off.map(|value| value.is_none()).unwrap_or(false);
-                    if !off_null {
-                        let off_value =
-                            off.flatten().cloned().unwrap_or_else(|| "none".to_string());
+                    let off = model
+                        .thinking_level_map
+                        .as_ref()
+                        .and_then(|map| map.get(&ModelThinkingLevel::Off));
+                    // TS `thinkingLevelMap?.off !== null`: only an explicit
+                    // null suppresses the disable; a missing key or map still
+                    // sends the off value.
+                    if !off.is_some_and(|value| value.is_none()) {
+                        let off_value = off
+                            .and_then(|value| value.as_deref())
+                            .unwrap_or("none")
+                            .to_string();
                         params.insert("reasoning_effort".into(), json!(off_value));
                     }
                 }
@@ -333,4 +346,102 @@ pub(crate) fn build_headers(
     headers.insert(0, ("Authorization".into(), format!("Bearer {api_key}")));
     let _ = conversation_id;
     headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::clamp_thinking_level;
+    use crate::models_generated;
+    use crate::types::{Message, StreamOptions, UserMessage, UserMessageContent};
+
+    /// Assemble params for a compiled catalog model with a reasoning level
+    /// requested. Mirrors `streamSimpleOpenAICompletions`: the requested
+    /// level clamps through the model's thinking-level map, the effort
+    /// rides along as `reasoning_effort` unless clamped to off, and the
+    /// explicit on/off toggle rides along as `reasoning_enabled`.
+    fn reasoning_params(
+        provider: &str,
+        model_id: &str,
+        level: ModelThinkingLevel,
+    ) -> Map<String, Value> {
+        let model = models_generated::get_model(provider, model_id)
+            .unwrap_or_else(|| panic!("compiled catalog carries {provider}/{model_id}"));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage {
+                content: UserMessageContent::Text("Hi".into()),
+                timestamp: 1,
+                rest: Default::default(),
+            })],
+            tools: None,
+        };
+        let clamped = clamp_thinking_level(model, level);
+        let mut options = OpenAICompletionsOptions::from_base(StreamOptions {
+            api_key: Some("test".into()),
+            ..Default::default()
+        });
+        options.reasoning_effort = (clamped != ModelThinkingLevel::Off).then_some(clamped);
+        options.reasoning_enabled = Some(clamped != ModelThinkingLevel::Off);
+        let params = build_params(
+            model,
+            &context,
+            Some(&options),
+            &crate::providers::openai_completions::get_compat(model),
+            CacheRetention::None,
+            None,
+        );
+        match params {
+            Value::Object(map) => map,
+            _ => panic!("build_params returns a JSON object"),
+        }
+    }
+
+    /// Port of the TS regression (#2519, gateway-verified 2026-09-21):
+    /// Prime Inference GLM routes send only the reasoning parameters the
+    /// live catalog declares — glm-5.3 selects `reasoning_effort` values,
+    /// glm-4.7 only the `reasoning` object toggle — and `enable_thinking`
+    /// never reaches a Prime Inference route.
+    #[test]
+    fn sends_only_the_declared_reasoning_parameters_to_prime_inference_glm_routes() {
+        let mut payloads = std::collections::BTreeMap::new();
+        for (model_id, level) in [
+            ("z-ai/glm-5.3", ModelThinkingLevel::High),
+            ("z-ai/glm-5.3", ModelThinkingLevel::Medium),
+            ("z-ai/glm-4.7", ModelThinkingLevel::High),
+            ("z-ai/glm-4.7", ModelThinkingLevel::Off),
+        ] {
+            let params = reasoning_params("prime-inference", model_id, level);
+            for key in ["enable_thinking", "chat_template_kwargs"] {
+                assert!(
+                    !params.contains_key(key),
+                    "{model_id}: request must not carry {key}"
+                );
+            }
+            payloads.insert((model_id, level), params);
+        }
+        let effort = &payloads[&("z-ai/glm-5.3", ModelThinkingLevel::High)];
+        assert_eq!(effort.get("reasoning_effort"), Some(&json!("high")));
+        assert!(!effort.contains_key("reasoning"));
+        // medium is not declared by the route; the clamp sends the nearest level
+        assert_eq!(
+            payloads[&("z-ai/glm-5.3", ModelThinkingLevel::Medium)].get("reasoning_effort"),
+            Some(&json!("high"))
+        );
+        let toggle = &payloads[&("z-ai/glm-4.7", ModelThinkingLevel::High)];
+        assert_eq!(toggle.get("reasoning"), Some(&json!({ "enabled": true })));
+        assert!(!toggle.contains_key("reasoning_effort"));
+        assert_eq!(
+            payloads[&("z-ai/glm-4.7", ModelThinkingLevel::Off)].get("reasoning"),
+            Some(&json!({ "enabled": false }))
+        );
+    }
+
+    /// The direct z.ai routes keep the toggle: their compat still selects the
+    /// zai thinking format, so reasoning requests send `enable_thinking`.
+    #[test]
+    fn keeps_the_zai_thinking_toggle_on_direct_zai_routes() {
+        let params = reasoning_params("zai", "glm-5.3", ModelThinkingLevel::High);
+        assert_eq!(params.get("enable_thinking"), Some(&json!(true)));
+    }
 }

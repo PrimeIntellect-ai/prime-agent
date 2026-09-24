@@ -106,7 +106,7 @@ fn parse_daemon_command(command: &str, args: &[String]) -> Result<ParsedDaemonCo
 }
 
 fn default_socket_path() -> PathBuf {
-    pa_daemon::socket::default_daemon_socket_path()
+    crate::config::resolve_daemon_socket_path(None)
 }
 
 /// `normalizeSocketPath`: lexically resolve against the current directory.

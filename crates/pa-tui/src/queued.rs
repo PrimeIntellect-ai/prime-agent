@@ -1,16 +1,30 @@
 //! The queued-message strip above the prompt dock (TS
-//! `updatePendingMessagesDisplay`): every steering/follow-up message parked
-//! behind the running turn renders as a preview row - dim, with the TS
-//! prompt-highlight styling on top (a leading slash command in accent,
-//! `@path`/`--flag` argument tokens in their own colors) - with one hint
-//! row below them. The strip is empty (renders nothing) when the queue is
-//! empty, so delivered messages make it disappear.
+//! `updatePendingMessagesDisplay`): every human-typed steering/follow-up
+//! message parked behind the running turn renders as a preview row - dim,
+//! with the TS prompt-highlight styling on top (a leading slash command
+//! in accent, `@path`/`--flag` argument tokens in their own colors) - with
+//! one hint row below them. The queued internal prompts (heartbeat fires,
+//! agent messages, goal contexts, background-command notices) condense
+//! into the single counted row instead of preview rows, so the strip
+//! stays about what the user typed (the condensed row renders after the
+//! human previews). The strip is empty (renders nothing) when
+//! the queue is empty, so delivered messages make it disappear.
 //!
-//! The browse/edit affordances TS gives the strip (TS `QueueSelection`,
+//! The condensation is a SANCTIONED DIVERGENCE from TS (operator request,
+//! Kevin 2026-09-24, queue-condensed-display): TS renders every internal
+//! prompt as its own preview row too; Rust renders one summed-count row -
+//! "x agent messages, heartbeats, and other internal prompts queued" -
+//! so the visual queue prioritizes human-inserted prompts. The classifier
+//! is TS `isLabeledQueuedPreview` on the preview string (the wire carries
+//! no provenance), so a human-typed prompt that begins with one of the
+//! internal labels condenses too - it still delivers, and the browse
+//! affordance walks and shows it. The
+//! browse/edit affordances TS gives the strip (TS `QueueSelection`,
 //! alt+up/alt+down to pick a parked message, ctrl+alt+arrows to reorder,
-//! Enter to steer the edit, the follow-up key to park it) live here too:
-//! the selection state is owned by the session UI and projected to the
-//! view as the dimmed browse header.
+//! Enter to steer the edit, the follow-up key to park it) still walk every
+//! queued item, internal prompts included: the selection state is owned by
+//! the session UI and projected to the view as the dimmed browse header,
+//! and only the strip rows condense.
 
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{pad_line, truncate_line};
@@ -36,6 +50,18 @@ fn is_labeled_queued_preview(message: &str) -> bool {
     LABELED_PREVIEW_PREFIXES
         .iter()
         .any(|prefix| message.starts_with(prefix))
+}
+
+/// The summed count of the queued internal prompts across both lanes, or
+/// `None` when every queued message is human-typed.
+fn condensed_count(queue: &QueuedMessages) -> Option<usize> {
+    let count = queue
+        .steering
+        .iter()
+        .chain(queue.follow_ups.iter())
+        .filter(|message| is_labeled_queued_preview(message))
+        .count();
+    (count > 0).then_some(count)
 }
 
 /// TS `formatQueuedMessagePreview`: the lane label plus the message, or
@@ -98,9 +124,10 @@ pub struct QueueSelectionItem {
 }
 
 /// The strip rows (TS `queuedMessagesContainer`): one blank spacer, a
-/// truncated dim preview per queued message, and the queue hint. Empty
-/// input renders no rows at all. `browse_key` is the effective binding
-/// display for `app.message.navigateOlder` (user overrides show).
+/// truncated dim preview per human-typed queued message, the one
+/// condensed internal-prompt row, and the queue hint. Empty input renders
+/// no rows at all. `browse_key` is the effective binding display for
+/// `app.message.navigateOlder` (user overrides show).
 pub fn render_queue(
     theme: &Theme,
     queue: &QueuedMessages,
@@ -111,11 +138,25 @@ pub fn render_queue(
         return Vec::new();
     }
     let mut rows = vec![Vec::new()];
-    for message in &queue.steering {
+    // The human-typed previews (the non-labeled messages) render first
+    // and individually, so what the user parked stays explicit and
+    // prioritized above the condensed row.
+    for message in queue
+        .steering
+        .iter()
+        .filter(|message| !is_labeled_queued_preview(message))
+    {
         rows.push(preview_row(theme, STEERING_LABEL, message, width));
     }
-    for message in &queue.follow_ups {
+    for message in queue
+        .follow_ups
+        .iter()
+        .filter(|message| !is_labeled_queued_preview(message))
+    {
         rows.push(preview_row(theme, FOLLOW_UP_LABEL, message, width));
+    }
+    if let Some(count) = condensed_count(queue) {
+        rows.push(condensed_row(theme, count, width));
     }
     let hint = format!("\u{2570}\u{2500} {browse_key} to browse and edit queued messages");
     let hint_line: crate::Line = vec![
@@ -174,6 +215,23 @@ fn preview_row(theme: &Theme, label: &str, message: &str, width: usize) -> Line 
     // The right pad keeps the row at the full width like TS
     // (`lineWithPadding + paddingNeeded`), so 1 left pad + content cut to
     // `width - 1` leaves the trailing space.
+    pad_line(truncate_line(&line, width.saturating_sub(1), "..."), width)
+}
+
+/// The condensed internal-prompt row (the sanctioned divergence, see the
+/// module docs): one dim line carrying the summed count of every queued
+/// internal prompt - agent messages, heartbeats, goal contexts, and
+/// background-command notices - instead of one preview row each, so the
+/// strip's per-message rows stay about the human prompts. Truncated and
+/// padded like a preview row.
+fn condensed_row(theme: &Theme, count: usize, width: usize) -> Line {
+    let line: crate::Line = vec![
+        crate::Span::raw(" ".repeat(width.min(1))),
+        crate::Span::styled(
+            format!("{count} agent messages, heartbeats, and other internal prompts queued"),
+            theme.fg_style(ThemeColor::Dim),
+        ),
+    ];
     pad_line(truncate_line(&line, width.saturating_sub(1), "..."), width)
 }
 
@@ -472,13 +530,131 @@ mod tests {
             format_queued_message_preview("run tests", FOLLOW_UP_LABEL),
             "Follow-up: run tests"
         );
+        // The strip itself no longer renders internal prompts as their
+        // own rows (the sanctioned divergence): the condensation tests
+        // below own that behavior.
+    }
+
+    #[test]
+    fn internal_prompts_condense_into_one_counted_row() {
         let queue = QueuedMessages {
-            steering: vec!["Goal context: milestone".to_string()],
-            follow_ups: Vec::new(),
+            steering: vec![
+                "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge".to_string(),
+                "Agent message received: the research is done".to_string(),
+            ],
+            follow_ups: vec!["Goal context: milestone".to_string()],
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        assert_eq!(
+            rows.len(),
+            3,
+            "spacer + the one condensed row + hint, no per-prompt rows"
+        );
         let text: String = rows[1].iter().map(|span| span.content.as_str()).collect();
-        assert_eq!(text.trim(), "Goal context: milestone");
+        assert_eq!(
+            text.trim(),
+            "3 agent messages, heartbeats, and other internal prompts queued",
+            "one line sums every queued internal prompt across both lanes"
+        );
+        let joined = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !joined.contains("nudge")
+                && !joined.contains("research")
+                && !joined.contains("milestone"),
+            "the internal prompts' content never reaches the strip: {joined}"
+        );
+    }
+
+    #[test]
+    fn human_prompts_render_before_the_condensed_row() {
+        let queue = QueuedMessages {
+            steering: vec![
+                "Heartbeat prompt: nudge".to_string(),
+                "turn right".to_string(),
+            ],
+            follow_ups: vec![
+                "then summarize".to_string(),
+                "Background command finished: sleep done".to_string(),
+            ],
+        };
+        let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        assert_eq!(
+            rows.len(),
+            5,
+            "spacer + two human previews + condensed + hint"
+        );
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .collect();
+        assert_eq!(texts[1].trim(), "Steering: turn right");
+        assert_eq!(texts[2].trim(), "Follow-up: then summarize");
+        assert_eq!(
+            texts[3].trim(),
+            "2 agent messages, heartbeats, and other internal prompts queued",
+            "the count sums the internal prompts only"
+        );
+        assert!(
+            texts[4]
+                .trim()
+                .starts_with("\u{2570}\u{2500} alt+up to browse"),
+            "the hint stays the strip's last row"
+        );
+    }
+
+    #[test]
+    fn condensed_row_truncates_to_the_width() {
+        let queue = QueuedMessages {
+            steering: vec![
+                "Heartbeat prompt: nudge".to_string(),
+                "Agent message received: done".to_string(),
+            ],
+            follow_ups: vec![],
+        };
+        let rows = render_queue(&theme(), &queue, "alt+up", 30);
+        assert_eq!(rows.len(), 3);
+        let text: String = rows[1].iter().map(|span| span.content.as_str()).collect();
+        assert!(
+            text.trim_end().ends_with("..."),
+            "the condensed row truncates with an ellipsis: {text}"
+        );
+        assert!(
+            crate::width::line_width(&rows[1]) <= 30,
+            "the row fits the width"
+        );
+    }
+
+    #[test]
+    fn internal_prompts_stay_browseable_when_condensed() {
+        let queue = QueuedMessages {
+            steering: vec![
+                "Heartbeat prompt: nudge".to_string(),
+                "turn right".to_string(),
+            ],
+            follow_ups: vec!["then summarize".to_string()],
+        };
+        let mut selection = QueueSelection::default();
+        // Browsing still walks every queued item newest-first, the
+        // condensed internal prompt included (only the strip rows
+        // condense): draft -> follow-up -> steering, newest to oldest.
+        let text = selection.browse(&queue, "draft", QueueBrowseDirection::Older);
+        assert_eq!(text.as_deref(), Some("then summarize"));
+        let text = selection.browse(&queue, "", QueueBrowseDirection::Older);
+        assert_eq!(text.as_deref(), Some("turn right"));
+        let text = selection.browse(&queue, "", QueueBrowseDirection::Older);
+        assert_eq!(text.as_deref(), Some("Heartbeat prompt: nudge"));
     }
 
     #[test]

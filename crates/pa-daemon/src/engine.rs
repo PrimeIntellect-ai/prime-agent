@@ -214,6 +214,35 @@ pub enum GoalTurnEndWork {
 /// suspension owns the next turn boundary, so the goal mint defers.
 pub type SessionInputProbe = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 
+/// One detached kernel bash completion (the `bash.completed` host
+/// request): the finished command's identity and exit code. The worker
+/// queue admission turns it into the woken turn (TS
+/// `createAsyncBashCompletionHostHandler` ->
+/// `_promptInjectedMessage(..., { resumeIfIdle: true })`).
+#[derive(Debug, Clone)]
+pub struct BashCompletionNotice {
+    pub pid: u32,
+    pub command: String,
+    pub exit_code: i64,
+}
+
+/// The queue-admission seam for one completion notice (the worker's
+/// steering lane + runner wake + recovery busy-evidence).
+pub type BashCompletionSink = std::sync::Arc<dyn Fn(BashCompletionNotice) + Send + Sync>;
+
+/// The kernel read a finished command's result before its notice
+/// delivered (the `bash.consumed` host request): the queued notice is
+/// stale and must withdraw (TS
+/// `_withdrawAsyncBashCompletionNotice`).
+#[derive(Debug, Clone)]
+pub struct BashConsumedNotice {
+    pub pid: u32,
+    pub command: String,
+}
+
+/// The queue-withdrawal seam for a consumed notice.
+pub type BashConsumedSink = std::sync::Arc<dyn Fn(BashConsumedNotice) + Send + Sync>;
+
 /// The worker's goal admission sink: the turn runner's queue lanes admit
 /// a minted goal follow-up (the steering lane for the budget steer, the
 /// follow-up lane for the continuation), the `goal_update` surfaces at
@@ -919,6 +948,15 @@ impl SideQuestionOutcome {
 /// `{"responses": ["text one", {"text": "two", "delayMs": 250}],
 /// "sideQuestion": {"responses": [...], "retry": {...}}}`.
 ///
+/// A scripted tool call (the roster-activity fixture):
+/// `{"toolCallId": "call-1", "toolName": "bash", "args": {...},
+/// "result": "listing", "isError": false, "delayMs": 250}` emits the real
+/// loop's tool-call lifecycle around the response's final assistant
+/// message — `tool_execution_start`, the scripted hold,
+/// `tool_execution_end`, the `toolResult` message — so worker tests drive
+/// the in-flight tool-call tracking (the hold lets the roster feed
+/// publish the mid-tool state before the tool settles).
+///
 /// The `compaction` seam scripts compaction results, one scripted result
 /// per run (replayed from the top each run):
 /// `{"summary": "...", "firstKeptEntryId": "...", "tokensBefore": 123,
@@ -1161,13 +1199,13 @@ impl SessionEngine for ScriptedEngine {
     ) {
         let cancelled = || EngineEvent::Done(Err("prompt cancelled".to_string()));
         let scripted = self.responses.get(prompt_index).cloned();
-        let text = match scripted {
+        let text = match &scripted {
             Some(response) => {
-                let delay = Self::response_delay_ms(&response);
+                let delay = Self::response_delay_ms(response);
                 if delay > 0 {
                     std::thread::sleep(std::time::Duration::from_millis(delay));
                 }
-                Self::response_text(&response)
+                Self::response_text(response)
             }
             None => format!("echo: {}", request.message),
         };
@@ -1238,27 +1276,117 @@ impl SessionEngine for ScriptedEngine {
             emit(cancelled());
             return;
         }
-        let final_message = json!({"role": "assistant", "content": text, "provider": "scripted", "model": "faux-1", "usage": usage, "timestamp": crate::util::now_ms()});
+        let scripted_tools = scripted
+            .as_ref()
+            .and_then(|response| response.get("toolCalls"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        // The real engine's assistant message carries its tool calls as
+        // `toolCall` content blocks (session stats count calls from them
+        // and results from the `toolResult` rows); a plain response keeps
+        // the text content unchanged.
+        let final_message = if scripted_tools.is_empty() {
+            json!({"role": "assistant", "content": text, "provider": "scripted", "model": "faux-1", "usage": usage, "timestamp": crate::util::now_ms()})
+        } else {
+            let mut content = vec![json!({ "type": "text", "text": text })];
+            for call in &scripted_tools {
+                if call.get("toolCallId").and_then(Value::as_str).is_some() {
+                    content.push(json!({
+                        "type": "toolCall",
+                        "id": call.get("toolCallId").cloned().unwrap_or(Value::Null),
+                        "name": call.get("toolName").cloned().unwrap_or(json!("scripted_tool")),
+                        "arguments": call.get("args").cloned().unwrap_or(Value::Null),
+                    }));
+                }
+            }
+            json!({"role": "assistant", "content": content, "provider": "scripted", "model": "faux-1", "usage": usage, "timestamp": crate::util::now_ms()})
+        };
         if !emit(EngineEvent::AssistantMessage(final_message.clone())) {
             emit(cancelled());
             return;
         }
+        // The scripted tool calls (the real loop's tool-call lifecycle, in
+        // event order): each entry emits `tool_execution_start`, then
+        // `tool_execution_end` with its settled result, then the
+        // `toolResult` message the session file records (the roster
+        // activity feed keys its `isRunningTools` flag on these frames).
+        let mut tool_results = Vec::with_capacity(scripted_tools.len());
+        for call in scripted_tools {
+            let Some(tool_call_id) = call.get("toolCallId").and_then(Value::as_str) else {
+                continue;
+            };
+            let tool_call_id = tool_call_id.to_string();
+            let tool_name = call
+                .get("toolName")
+                .and_then(Value::as_str)
+                .unwrap_or("scripted_tool")
+                .to_string();
+            let is_error = call
+                .get("isError")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let result_text = call.get("result").cloned().unwrap_or(Value::Null);
+            if !emit(EngineEvent::ToolExecutionStart {
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                args: call.get("args").cloned().unwrap_or(Value::Null),
+            }) {
+                emit(cancelled());
+                return;
+            }
+            // A running tool holds the turn for its scripted duration (the
+            // real loop waits on the tool): the roster activity feed
+            // composes and ships a delta while the tool executes, so the
+            // gap must outlast the feed's round trip.
+            if let Some(delay) = call.get("delayMs").and_then(Value::as_u64) {
+                if delay > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                }
+            }
+            if !emit(EngineEvent::ToolExecutionEnd {
+                tool_call_id: tool_call_id.clone(),
+                result: json!({
+                    "content": [{ "type": "text", "text": result_text.clone() }],
+                    "details": Value::Null,
+                    "isError": is_error,
+                }),
+                is_error,
+            }) {
+                emit(cancelled());
+                return;
+            }
+            let result_message = json!({
+                "role": "toolResult",
+                "toolCallId": tool_call_id,
+                "toolName": tool_name,
+                "content": [{ "type": "text", "text": result_text }],
+                "isError": is_error,
+                "timestamp": crate::util::now_ms(),
+            });
+            if !emit(EngineEvent::ToolResultMessage(result_message.clone())) {
+                emit(cancelled());
+                return;
+            }
+            tool_results.push(result_message);
+        }
         // The loop's terminal frame (TS `turn_end`): the final assistant
-        // message as the payload, no tool results in the scripted shape.
+        // message as the payload, the scripted tool results riding it.
         if !emit(EngineEvent::TurnEnd {
             message: final_message.clone(),
-            tool_results: Vec::new(),
+            tool_results: tool_results.clone(),
         }) {
             emit(cancelled());
             return;
         }
         // The loop's run-end frame (TS `agent_end`): the run's
         // accumulated message set — the accepted rows (the primary plus
-        // every batched row) and the final assistant message in the
-        // scripted shape.
+        // every batched row), the final assistant message, and every tool
+        // result in the scripted shape.
         let mut run_messages = vec![accepted_row];
         run_messages.extend(batch_rows);
         run_messages.push(final_message);
+        run_messages.extend(tool_results);
         if !emit(EngineEvent::AgentEnd {
             messages: run_messages,
         }) {

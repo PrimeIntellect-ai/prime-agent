@@ -1518,20 +1518,23 @@ impl SessionManager {
         aggregate_usage: pa_types::ai::Usage,
         origin: Option<ChildUsageOrigin>,
     ) -> std::io::Result<String> {
-        let target_index = self
-            .by_id
-            .get(target_id)
-            .copied()
-            .filter(|&index| {
-                matches!(
-                    self.file_entries[index],
-                    FileEntry::Message {
-                        message: AgentMessage::Assistant(_),
-                        ..
-                    }
-                )
-            })
-            .unwrap_or_else(|| panic!("Assistant message entry {target_id} not found"));
+        let target_index = self.by_id.get(target_id).copied().filter(|&index| {
+            matches!(
+                self.file_entries[index],
+                FileEntry::Message {
+                    message: AgentMessage::Assistant(_),
+                    ..
+                }
+            )
+        });
+        let target_index = target_index.ok_or_else(|| {
+            // TS `appendChildUsageAttribution` throws the same text; the
+            // caller treats a failed append as recoverable bookkeeping.
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Assistant message entry {target_id} not found"),
+            )
+        })?;
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::ChildUsageAttributed {
