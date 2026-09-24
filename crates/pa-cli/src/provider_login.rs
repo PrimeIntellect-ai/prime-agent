@@ -325,15 +325,36 @@ impl ProviderAuthCommands for ProviderAuth {
     /// their unported state.
     fn login(&self, provider: &ProviderRow, api_key: Option<&str>) -> ProviderAuthFuture {
         let provider_row = provider.clone();
-        let cwd = self.cwd.clone();
         let agent_dir = self.agent_dir.clone();
         let api_key = api_key.map(str::to_string);
         Box::pin(async move {
             // The auth-store writes and the MCP manager locks stay off
-            // the async workers (the terminal is suspended around the
-            // flow).
+            // the async workers.
+            tokio::task::spawn_blocking(move || login_blocking(provider_row, agent_dir, api_key))
+                .await
+                .expect("the login task ran")
+        })
+    }
+
+    /// TS `loginProvider` for the panel-driven flows (the MCP OAuth
+    /// login, the Prime Inference login): the flow drives the inline
+    /// auth panel (progress lines, prompts, the team picker render in
+    /// the TUI; the oneshot replies answer the flow) and never touches
+    /// the terminal.
+    fn login_on_panel(
+        &self,
+        provider: &ProviderRow,
+        panel: pa_tui::auth_panel::AuthPanelHandle,
+    ) -> ProviderAuthFuture {
+        let provider_row = provider.clone();
+        let cwd = self.cwd.clone();
+        let agent_dir = self.agent_dir.clone();
+        Box::pin(async move {
+            // The auth-store writes, the MCP manager locks, and the
+            // panel round-trips stay off the async workers (a prompt's
+            // answer arrives from the TUI loop's thread).
             tokio::task::spawn_blocking(move || {
-                login_blocking(provider_row, cwd, agent_dir, api_key)
+                login_blocking_on_panel(provider_row, cwd, agent_dir, panel)
             })
             .await
             .expect("the login task ran")
@@ -533,65 +554,15 @@ impl ProviderAuth {
 }
 
 /// The login flow body (blocking: the auth store and the MCP manager stay
-/// off the async workers).
+/// off the async workers). The panel-driven rows (the MCP OAuth logins,
+/// the Prime Inference login) route to [`login_blocking_on_panel`]; this
+/// body serves the panel-prompted key store and the unported OAuth
+/// stubs.
 fn login_blocking(
     provider_row: ProviderRow,
-    cwd: PathBuf,
     agent_dir: PathBuf,
     api_key: Option<String>,
 ) -> ProviderAuthOutcome {
-    if let Some(server) = provider_row.id.strip_prefix("mcp:") {
-        let auth = crate::mcp_login::TerminalMcpAuth::new(cwd, agent_dir);
-        // The MCP flow awaits its OAuth transport; drive it to completion
-        // on the dedicated thread (the terminal stays suspended).
-        let outcome = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map(|runtime| {
-                runtime.block_on(pa_tui::client_auth::run_mcp_auth_command(
-                    &auth,
-                    &format!("login {server}"),
-                ))
-            })
-            .unwrap_or_else(|error: std::io::Error| format!("login failed: {error}"));
-        return if outcome.starts_with("Usage:") {
-            ProviderAuthOutcome::Error(outcome)
-        } else {
-            ProviderAuthOutcome::Status(outcome)
-        };
-    }
-    if provider_row.id == PRIME_INFERENCE_PROVIDER_ID {
-        // TS `loginProvider`'s prime-inference dispatch: the terminal
-        // API-key flow (the paste prompt, the whoami check, the team
-        // selection; the browser challenge stays unported). The flow
-        // awaits its transport, so drive it to completion on the
-        // dedicated thread (the terminal stays suspended).
-        return tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map(|runtime| {
-                runtime.block_on(crate::prime_inference_login::run_prime_inference_login(
-                    crate::prime_inference_login::PrimeLoginInputs {
-                        agent_dir: &agent_dir,
-                        provider_name: &provider_row.name,
-                        config: &pa_core::auth::resolve_prime_inference_auth_config(),
-                        http: &pa_core::auth::ReqwestPrimeHttp,
-                        prime_cli_config_path: crate::prime_inference_login::prime_cli_config_path(
-                            &agent_dir,
-                        )
-                        .as_deref(),
-                        prime_team_id: std::env::var("PRIME_TEAM_ID").ok().as_deref(),
-                    },
-                    &crate::prime_inference_login::TerminalPrimeLoginUi,
-                ))
-            })
-            .unwrap_or_else(|error| {
-                ProviderAuthOutcome::Error(format!(
-                    "Failed to login to {}: {error}",
-                    provider_row.name
-                ))
-            });
-    }
     if provider_row.auth_type == AuthType::Oauth {
         return ProviderAuthOutcome::Error(format!(
             "{} subscription login is not available in this build yet.",
@@ -619,6 +590,74 @@ fn login_blocking(
         "Saved API key for {}. Credentials saved to {}",
         provider_row.name,
         agent_dir.join("auth.json").display()
+    ))
+}
+
+/// The login flow body for the panel-driven rows (the MCP OAuth logins,
+/// the Prime Inference login): blocking on the dedicated thread — the
+/// flow awaits its transport AND the panel's prompt/picker replies (the
+/// answers arrive from the TUI loop's thread), and the inline auth panel
+/// carries every surface the plain terminal used to.
+fn login_blocking_on_panel(
+    provider_row: ProviderRow,
+    cwd: PathBuf,
+    agent_dir: PathBuf,
+    panel: pa_tui::auth_panel::AuthPanelHandle,
+) -> ProviderAuthOutcome {
+    if let Some(server) = provider_row.id.strip_prefix("mcp:") {
+        let auth = crate::mcp_login::TerminalMcpAuth::new(cwd, agent_dir);
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(|runtime| {
+                runtime.block_on(pa_tui::client_auth::run_mcp_auth_command(
+                    &auth,
+                    &format!("login {server}"),
+                    panel,
+                ))
+            })
+            .unwrap_or_else(|error: std::io::Error| format!("login failed: {error}"));
+        return if outcome.starts_with("Usage:") {
+            ProviderAuthOutcome::Error(outcome)
+        } else {
+            ProviderAuthOutcome::Status(outcome)
+        };
+    }
+    // TS `loginProvider`'s prime-inference dispatch: the API-key flow
+    // (the paste prompt, the whoami check, the team selection; the
+    // browser challenge stays unported) rendered through the panel.
+    if provider_row.id == PRIME_INFERENCE_PROVIDER_ID {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(|runtime| {
+                runtime.block_on(crate::prime_inference_login::run_prime_inference_login(
+                    crate::prime_inference_login::PrimeLoginInputs {
+                        agent_dir: &agent_dir,
+                        provider_name: &provider_row.name,
+                        config: &pa_core::auth::resolve_prime_inference_auth_config(),
+                        http: &pa_core::auth::ReqwestPrimeHttp,
+                        prime_cli_config_path: crate::prime_inference_login::prime_cli_config_path(
+                            &agent_dir,
+                        )
+                        .as_deref(),
+                        prime_team_id: std::env::var("PRIME_TEAM_ID").ok().as_deref(),
+                    },
+                    &crate::prime_inference_login::PanelPrimeLoginUi::new(panel),
+                ))
+            })
+            .unwrap_or_else(|error| {
+                ProviderAuthOutcome::Error(format!(
+                    "Failed to login to {}: {error}",
+                    provider_row.name
+                ))
+            });
+    }
+    // Any other row that reaches the panel body reports the stub (the
+    // session routes only the panel rows here).
+    ProviderAuthOutcome::Error(format!(
+        "{} subscription login is not available in this build yet.",
+        provider_row.name
     ))
 }
 

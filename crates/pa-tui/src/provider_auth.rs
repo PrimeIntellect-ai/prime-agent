@@ -42,15 +42,15 @@ pub enum AuthCategory {
 }
 
 /// How the login runs: the TUI prompts for the key in the panel, or the
-/// composition root runs the provider's flow on the plain terminal (the
-/// TUI suspends for it). TS splits the same way (`showApiKeyLoginDialog`
-/// vs the OAuth/Prime/Bedrock flows).
+/// composition root runs the provider's flow against the inline auth
+/// panel (TS splits the same way: `showApiKeyLoginDialog` vs the
+/// OAuth/Prime/Bedrock login dialogs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthFlow {
     /// Prompt for the key in the panel (TS `showPrompt("Enter API key:")`).
     ApiKeyPrompt,
-    /// Hand the terminal to the composition root's flow (browser OAuth,
-    /// the Prime login, the MCP device flow).
+    /// Run the flow through the inline auth panel (browser OAuth, the
+    /// Prime login, the MCP device flow).
     TerminalFlow,
 }
 
@@ -111,10 +111,19 @@ pub trait ProviderAuthCommands: Send + Sync {
     /// TS `getLogoutProviderOptions`: one row per stored credential,
     /// sorted by name.
     fn logout_options(&self) -> ProviderRowsFuture;
-    /// TS `loginProvider`: store the key for `ApiKeyPrompt` rows; run the
-    /// flow on the plain terminal for `TerminalFlow` rows (the TUI hands
-    /// the terminal over before calling).
+    /// TS `loginProvider`: store the key for `ApiKeyPrompt` rows; the
+    /// unported OAuth stubs report their error.
     fn login(&self, provider: &ProviderRow, api_key: Option<&str>) -> ProviderAuthFuture;
+    /// TS `loginProvider` for the panel-driven flows (the MCP OAuth
+    /// login, the Prime Inference login): the TUI mounts the inline auth
+    /// panel ([`crate::auth_panel`]) and services the flow's requests
+    /// while it runs in the background; the future settles the flow's
+    /// outcome (the session sends it back through the panel channel).
+    fn login_on_panel(
+        &self,
+        provider: &ProviderRow,
+        panel: crate::auth_panel::AuthPanelHandle,
+    ) -> ProviderAuthFuture;
     /// TS `runLogout`: remove the stored credential.
     fn logout(&self, provider: &ProviderRow) -> ProviderAuthFuture;
     /// TS `getAnthropicSubscriptionAuthWarning`: the composition root
@@ -138,6 +147,11 @@ impl std::fmt::Debug for ProviderAuthCommandsHandle {
     }
 }
 
+/// The Prime Inference provider's id (pa-core's
+/// `PRIME_INFERENCE_PROVIDER_ID`: the row the panel-driven login
+/// serves).
+pub const PRIME_INFERENCE_PROVIDER_ID: &str = "prime-inference";
+
 /// The TS list geometry (`PREFERRED_VISIBLE_PROVIDERS`).
 const PREFERRED_VISIBLE_PROVIDERS: usize = 8;
 
@@ -153,7 +167,7 @@ pub enum AuthSelectorAction {
     /// Esc, ctrl+c: close the selector.
     Cancel,
     /// Enter on a login row: run the provider's flow. `Some(key)` is the
-    /// panel-prompted key; the terminal-suspending flows carry `None`.
+    /// panel-prompted key; the panel-driven flows carry `None`.
     Login {
         provider: ProviderRow,
         api_key: Option<String>,

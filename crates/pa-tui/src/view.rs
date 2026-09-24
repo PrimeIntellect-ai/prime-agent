@@ -114,6 +114,10 @@ pub struct AgentView {
     /// The `/login` / `/logout` provider selector (TS
     /// `OAuthSelectorComponent` inline): owns the frame while open.
     pub provider_auth: Option<crate::provider_auth::ProviderAuthSelector>,
+    /// The inline auth panel (TS `LoginDialogComponent` +
+    /// `PrimeTeamSelectorComponent`): owns the frame while a login flow
+    /// drives it through the panel channel.
+    pub auth_panel: Option<crate::auth_panel::AuthPanel>,
     /// The `/fork` user-message selector.
     pub fork_selector: Option<crate::user_message_selector::UserMessageSelector>,
     /// The `/effort` inline picker (TS `ThinkingSelectorComponent` seam):
@@ -293,6 +297,7 @@ impl AgentView {
             tree_selector: None,
             confirm: None,
             provider_auth: None,
+            auth_panel: None,
             fork_selector: None,
             effort_picker: None,
             mcp_view: None,
@@ -1261,6 +1266,7 @@ impl AgentView {
             || self.share_loader.is_some()
             || self.confirm.is_some()
             || self.provider_auth.is_some()
+            || self.auth_panel.is_some()
             || self.reload_box.is_some()
             || self.settings_menu.is_some()
         {
@@ -1278,6 +1284,8 @@ impl AgentView {
                 dock.extend(confirm.render(&self.theme, width));
             } else if let Some(selector) = self.provider_auth.as_mut() {
                 dock.extend(selector.render(&self.theme, width));
+            } else if let Some(panel) = self.auth_panel.as_mut() {
+                dock.extend(panel.render(&self.theme, width));
             } else if let Some(message) = self.reload_box.as_ref() {
                 dock.extend(self.render_reload_box(message, width));
             } else if let Some(menu) = self.settings_menu.as_ref() {
@@ -1454,6 +1462,7 @@ impl AgentView {
             || self.share_loader.is_some()
             || self.confirm.is_some()
             || self.provider_auth.is_some()
+            || self.auth_panel.is_some()
             || self.reload_box.is_some()
             || self.settings_menu.is_some()
         {
