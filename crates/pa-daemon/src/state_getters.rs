@@ -769,20 +769,31 @@ mod tests {
             .unwrap();
 
         let worker = created_worker_at(&root, &session_file).await;
-        let response = worker
-            .dispatch(
-                "get_context_tree",
-                &json!({ "activeSessionId": "getter-session" }),
-            )
-            .await;
-        assert!(response.success, "failed: {response:?}");
-        let tree = response.data.expect("data");
-        assert_eq!(
-            tree["ownUsage"]["input"],
-            json!(30),
-            "the root usage counts"
-        );
-        let children = tree["children"].as_array().expect("children");
+        // The children come from the background cache refresh (the create
+        // warm armed it): a cold read serves the root from memory
+        // instantly, and the persisted tree fills when the walk lands.
+        let mut children = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let response = worker
+                .dispatch(
+                    "get_context_tree",
+                    &json!({ "activeSessionId": "getter-session" }),
+                )
+                .await;
+            assert!(response.success, "failed: {response:?}");
+            let tree = response.data.expect("data");
+            assert_eq!(
+                tree["ownUsage"]["input"],
+                json!(30),
+                "the root usage counts"
+            );
+            children = tree["children"].as_array().cloned().unwrap_or_default();
+            if children.len() == 1 || std::time::Instant::now() > deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
         assert_eq!(
             children.len(),
             1,
