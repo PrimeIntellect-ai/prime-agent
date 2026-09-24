@@ -2101,6 +2101,7 @@ export class CloudSessionRegistry {
 		const shadowFile =
 			record.shadowSessionFile ?? ShadowSessionWriter.shadowSessionFile(this.options.sessionDir, record.sessionId);
 		if (record.shadowSessionFile === undefined) this.store.setShadowSession(record.sessionId, shadowFile);
+		const spawn = record.location === "spawned-child" ? record.spawn : undefined;
 		const shadow = ShadowSessionWriter.openOrCreate({
 			sessionFile: shadowFile,
 			sessionId: record.sessionId,
@@ -2108,6 +2109,9 @@ export class CloudSessionRegistry {
 			cloudSessionId: record.sessionId,
 			generation: record.generation,
 			...(record.sandboxId ? { sandboxId: record.sandboxId } : {}),
+			// A first-class cloud child's shadow must carry its local lineage,
+			// or the saved-session catalog surfaces it as a top-level agent.
+			...(spawn ? { parentSessionPath: spawn.parentSessionFile, rlmDepth: spawn.depth } : {}),
 			artifactResolver: this.artifactResolver(record),
 		});
 		session.shadows.set(record.sessionId, shadow);

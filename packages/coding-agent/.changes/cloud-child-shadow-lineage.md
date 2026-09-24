@@ -1,0 +1,1 @@
+- Fixed cloud subagents surfacing as top-level agents in the agents view by writing and patching their shadow lineage (parent session and depth) at registry open and recover.

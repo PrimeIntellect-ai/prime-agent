@@ -37,6 +37,60 @@ function artifactFor(payload: string): CloudArtifactRef {
 }
 
 describe("ShadowSessionWriter", () => {
+	it("writes the caller-supplied parent edge and depth into a first-class child shadow header", () => {
+		const root = cloudTemp("shadow-writer-test-");
+		const sessionFile = join(root, "sess_child_lineage.jsonl");
+		const writer = ShadowSessionWriter.openOrCreate({
+			sessionFile,
+			sessionId: "sess_child_lineage",
+			cwd: root,
+			cloudSessionId: "sess_cloud_owner",
+			generation: 1,
+			parentSessionPath: "/local/sessions/parent.jsonl",
+			rlmDepth: 1,
+		});
+		expect(writer.header.parentSession).toBe("/local/sessions/parent.jsonl");
+		expect(writer.header.rlmDepth).toBe(1);
+		const onDisk = parseSessionEntries(readFileSync(sessionFile, "utf8"));
+		expect((onDisk[0] as { parentSession?: string; rlmDepth?: number }).parentSession).toBe(
+			"/local/sessions/parent.jsonl",
+		);
+		expect((onDisk[0] as { rlmDepth?: number }).rlmDepth).toBe(1);
+	});
+
+	it("patches a pre-existing shadow header when the caller supplies missing lineage", () => {
+		const root = cloudTemp("shadow-writer-test-");
+		const sessionFile = join(root, "sess_stale_lineage.jsonl");
+		// The pre-fix shape: a first-class child shadow with rlmDepth 0 and no parent edge.
+		const staleHeader = {
+			type: "session",
+			version: 3,
+			id: "sess_stale_lineage",
+			timestamp: new Date().toISOString(),
+			cwd: root,
+			rlmDepth: 0,
+		};
+		const staleEntry = messageEntry("m_stale", "kept");
+		writeFileSync(sessionFile, `${JSON.stringify(staleHeader)}\n${JSON.stringify(staleEntry)}\n`, {
+			mode: 0o600,
+		});
+		const writer = ShadowSessionWriter.openOrCreate({
+			sessionFile,
+			sessionId: "sess_stale_lineage",
+			cwd: root,
+			cloudSessionId: "sess_cloud_owner",
+			generation: 1,
+			parentSessionPath: "/local/sessions/parent.jsonl",
+			rlmDepth: 1,
+		});
+		expect(writer.header.parentSession).toBe("/local/sessions/parent.jsonl");
+		expect(writer.header.rlmDepth).toBe(1);
+		// The patch keeps every other entry intact and stays parseable.
+		const onDisk = parseSessionEntries(readFileSync(sessionFile, "utf8"));
+		expect(onDisk).toHaveLength(2);
+		expect((onDisk[1] as { id?: string }).id).toBe("m_stale");
+	});
+
 	it("creates the shadow with a header that claims the remote session id and a cloud marker", () => {
 		const root = cloudTemp("shadow-writer-test-");
 		const sessionFile = join(root, "sess_shadow_head_1.jsonl");

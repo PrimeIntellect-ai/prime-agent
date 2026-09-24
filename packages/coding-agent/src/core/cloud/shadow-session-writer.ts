@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import { open as openFileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { writeFileAtomicSync } from "../../utils/atomic-file.js";
 import { canonicalSessionPath } from "../session-lease.js";
 import {
 	CURRENT_SESSION_VERSION,
@@ -193,6 +194,33 @@ export class ShadowSessionWriter {
 	 * from `sessionId` fails closed: the registry never writes into a
 	 * transcript it does not own (split-brain guard).
 	 */
+	/**
+	 * Older registry versions wrote first-class child shadows without their
+	 * local lineage, so the saved-session catalog surfaced them as top-level
+	 * agents. When a caller supplies lineage for an existing shadow, bring
+	 * the stored header up to date in place (the registry owns the file).
+	 */
+	private patchHeaderLineage(options: ShadowSessionWriterOptions): void {
+		const current = this.header;
+		const nextLineage = {
+			...(options.parentSessionPath !== undefined && current.parentSession !== options.parentSessionPath
+				? { parentSession: options.parentSessionPath }
+				: {}),
+			...(options.rlmDepth !== undefined && current.rlmDepth !== options.rlmDepth
+				? { rlmDepth: options.rlmDepth }
+				: {}),
+		};
+		if (nextLineage.parentSession === undefined && nextLineage.rlmDepth === undefined) return;
+		const patched: SessionHeader = { ...current, ...nextLineage };
+		const index = this.entries.findIndex((entry) => entry.type === "session");
+		this.entries[index] = patched;
+		// The registry owns the shadow file; rewrite it atomically so a
+		// partial write never leaves a parseable-but-truncated transcript.
+		writeFileAtomicSync(this.sessionFile, `${this.entries.map((e) => JSON.stringify(e)).join("\n")}\n`, {
+			mode: 0o600,
+		});
+	}
+
 	static openOrCreate(options: ShadowSessionWriterOptions): ShadowSessionWriter {
 		const existing = existsSync(options.sessionFile)
 			? parseSessionEntries(readFileSync(options.sessionFile, "utf8"))
@@ -213,7 +241,11 @@ export class ShadowSessionWriter {
 				header?.id ?? "<missing header>",
 			);
 		}
-		return new ShadowSessionWriter(options, existing, head);
+		const writer = new ShadowSessionWriter(options, existing, head);
+		if (options.parentSessionPath !== undefined || options.rlmDepth !== undefined) {
+			writer.patchHeaderLineage(options);
+		}
+		return writer;
 	}
 
 	private static create(options: ShadowSessionWriterOptions, head: ShadowHeadInfo): ShadowSessionWriter {
