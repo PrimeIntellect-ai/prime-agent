@@ -1,1 +1,0 @@
-- Prime Inference login and agent trace uploads now share one set of HTTP helpers (request timeout, error-body parsing, field readers). A Prime Inference request that is still waiting on its timeout no longer keeps the process alive on its own.

@@ -1,1 +1,0 @@
-- Provider retries now add +/-25% jitter to their computed exponential backoff so concurrent sessions spread out during a shared outage instead of retrying in lockstep; server Retry-After waits are still honored exactly.

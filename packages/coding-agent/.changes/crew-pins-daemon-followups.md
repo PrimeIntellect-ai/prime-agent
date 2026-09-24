@@ -1,3 +1,0 @@
-- Fixed quota parks restored after their wake time: a daemon wake or restart now keeps the park count so `retry.provider.waitForUsage.maxParks` still bounds re-parking, and the stale wake job is settled by the resumed session instead of lingering.
-- Bumped the daemon schema revision for the structured update-restart error info, so mismatched daemon and CLI builds around that change are detected by the self-update checks.
-- Fixed agents-view roster summaries going stale when a session's spawn code changed while every other summary field stayed the same.
