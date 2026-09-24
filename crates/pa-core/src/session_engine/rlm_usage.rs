@@ -307,7 +307,7 @@ impl RlmChildUsageAttributions {
                 .entry(rlm_child_id.to_string())
                 .or_insert_with(|| target_id.clone());
         }
-        let mut retired_bases = fallback.bases.lock().await;
+        let retired_bases = fallback.bases.lock().await;
         let mut bases = self.bases.lock().await;
         if let Some(base) = retired_bases.get(&target_id) {
             bases.entry(target_id.clone()).or_insert(*base);
@@ -331,7 +331,7 @@ impl RlmChildUsageAttributions {
         let Some(fallback) = fallback.and_then(|weak| weak.upgrade()) else {
             return;
         };
-        let mut retired_bases = fallback.bases.lock().await;
+        let retired_bases = fallback.bases.lock().await;
         if let Some(base) = retired_bases.get(target_id) {
             let mut bases = self.bases.lock().await;
             bases.entry(target_id.to_string()).or_insert(*base);

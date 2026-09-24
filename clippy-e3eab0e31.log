@@ -1,0 +1,59 @@
+    Checking pa-core v0.1.0 (/workspace/repo/crates/pa-core)
+error: variable does not need to be mutable
+   --> crates/pa-core/src/session_engine/rlm_usage.rs:308:13
+    |
+308 |         let mut retired_bases = fallback.bases.lock().await;
+    |             ----^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `-D unused-mut` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(unused_mut)]`
+
+error: variable does not need to be mutable
+   --> crates/pa-core/src/session_engine/rlm_usage.rs:332:13
+    |
+332 |         let mut retired_bases = fallback.bases.lock().await;
+    |             ----^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+error: this `MutexGuard` is held across an await point
+   --> crates/pa-core/src/session_engine/rlm_usage.rs:175:31
+    |
+175 |           let target_id = match self
+    |  _______________________________^
+176 | |             .children
+177 | |             .lock()
+178 | |             .expect("rlm usage children lock")
+    | |______________________________________________^
+    |
+    = help: consider using an async-aware `Mutex` type or ensuring the `MutexGuard` is dropped before calling `await`
+note: these are all the await points this lock is held through
+   --> crates/pa-core/src/session_engine/rlm_usage.rs:183:74
+    |
+183 |             None => match self.adopt_from_fallback(&report.rlm_child_id).await {
+    |                                                                          ^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#await_holding_lock
+    = note: `-D clippy::await-holding-lock` implied by `-D warnings`
+    = help: to override `-D warnings` add `#[allow(clippy::await_holding_lock)]`
+
+error: could not compile `pa-core` (lib) due to 3 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: this `MutexGuard` is held across an await point
+   --> crates/pa-core/src/session_engine/rlm_usage.rs:705:13
+    |
+705 |         let mut retired_children = retired.children.lock().expect("children lock");
+    |             ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: consider using an async-aware `Mutex` type or ensuring the `MutexGuard` is dropped before calling `await`
+note: these are all the await points this lock is held through
+   --> crates/pa-core/src/session_engine/rlm_usage.rs:713:14
+    |
+713 |             .await;
+    |              ^^^^^
+714 |         let rows_raced = file_rows(&manager).await;
+    |                                              ^^^^^
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.98.0/index.html#await_holding_lock
+
+error: could not compile `pa-core` (lib test) due to 4 previous errors
