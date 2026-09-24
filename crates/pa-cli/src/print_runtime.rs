@@ -201,6 +201,7 @@ async fn print_mode_main(options: &RunOptions) -> Result<i32, String> {
 /// resolution, session persistence, and the engine facade. The faux-script
 /// seam (`PRIME_AGENT_FAUX_SCRIPT`) drives the same assembly without the
 /// network; verification harness only, never set by the product.
+///
 /// The switchable provider target the session's stream reads per call
 /// (shared with the ACP mode, whose picker model switches swap it live).
 pub type ProviderTargetSlot = std::sync::Arc<std::sync::RwLock<Option<ProviderTarget>>>;
