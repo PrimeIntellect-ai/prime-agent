@@ -647,14 +647,15 @@ mod tests {
             follow_ups: vec!["then summarize".to_string()],
         };
         let mut selection = QueueSelection::default();
-        // Browsing still walks every queued item, the condensed internal
-        // prompt included (only the strip rows condense).
+        // Browsing still walks every queued item newest-first, the
+        // condensed internal prompt included (only the strip rows
+        // condense): draft -> follow-up -> steering, newest to oldest.
         let text = selection.browse(&queue, "draft", QueueBrowseDirection::Older);
         assert_eq!(text.as_deref(), Some("then summarize"));
         let text = selection.browse(&queue, "", QueueBrowseDirection::Older);
-        assert_eq!(text.as_deref(), Some("Heartbeat prompt: nudge"));
-        let text = selection.browse(&queue, "", QueueBrowseDirection::Older);
         assert_eq!(text.as_deref(), Some("turn right"));
+        let text = selection.browse(&queue, "", QueueBrowseDirection::Older);
+        assert_eq!(text.as_deref(), Some("Heartbeat prompt: nudge"));
     }
 
     #[test]
