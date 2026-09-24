@@ -32,8 +32,11 @@ const PREFERRED_VISIBLE: usize = 8;
 /// scroll reservation, never counted twice).
 const LIST_FRAME_ROWS: usize = 7;
 
-/// The detail pane's labeled-pair row budget.
-const MAX_DETAIL_ROWS: usize = 6;
+/// The detail pane's labeled-pair row budget: the seven base pairs
+/// (created, session, delivery, schedule, next run, runs, last error)
+/// all fit — the schedule fact (item 3) must never displace the error
+/// row to the clipped tail.
+const MAX_DETAIL_ROWS: usize = 7;
 
 /// The table's column width caps: the schedule expression and the label
 /// shrink to their content, the timestamp column is the fixed
@@ -305,9 +308,10 @@ fn detail_pairs(entry: &HeartbeatEntry) -> Vec<(&'static str, String)> {
 /// with the raw cron riding beside it whenever the interpretation covers
 /// it (the storage format stays reachable, "every 2 minutes (*/2 * * * *)").
 fn human_schedule_pair(entry: &HeartbeatEntry) -> String {
-    let human = human_schedule(&entry.job.schedule_expression);
-    if human != entry.job.schedule_expression.trim() {
-        format!("{human} ({})", entry.job.schedule_expression)
+    let expression = entry.job.schedule_expression.trim();
+    let human = human_schedule(expression);
+    if human != expression {
+        format!("{human} ({expression})")
     } else {
         human
     }
@@ -995,7 +999,11 @@ pub fn human_schedule(expression: &str) -> String {
     }
     let fields: Vec<&str> = trimmed.split_whitespace().collect();
     if fields.len() != 5 {
-        return expression.to_string();
+        // The passthrough stays the expression itself (a natural-language
+        // schedule already reads), trimmed: a whitespace-padded wire value
+        // must never render its padding into the column (or twice, via
+        // the pair's raw-append fallback).
+        return trimmed.to_string();
     }
     let minute = parse_cron_field(fields[0]);
     let hour = parse_cron_field(fields[1]);
@@ -1003,11 +1011,12 @@ pub fn human_schedule(expression: &str) -> String {
     let month = parse_cron_field(fields[3]);
     let dow = parse_cron_field(fields[4]);
     if month != CronField::Any {
-        return expression.to_string();
+        return trimmed.to_string();
     }
     let at = |h: u32, m: u32| format!("{h:02}:{m:02}");
     if dom == CronField::Any && dow == CronField::Any {
         return match (hour, minute) {
+            (CronField::Any, CronField::Any) => "every minute".to_string(),
             (CronField::Any, CronField::Step(1)) => "every minute".to_string(),
             (CronField::Any, CronField::Step(n)) => format!("every {n} minutes"),
             (CronField::Step(1), CronField::Value(0)) => "hourly".to_string(),
@@ -1015,7 +1024,7 @@ pub fn human_schedule(expression: &str) -> String {
             (CronField::Any, CronField::Value(0)) => "hourly".to_string(),
             (CronField::Any, CronField::Value(m)) => format!("hourly at :{m:02}"),
             (CronField::Value(h), CronField::Value(m)) => format!("daily {}", at(h, m)),
-            _ => expression.to_string(),
+            _ => trimmed.to_string(),
         };
     }
     if dom == CronField::Any {
@@ -1025,7 +1034,7 @@ pub fn human_schedule(expression: &str) -> String {
                 return format!("{day}s {}", at(h, m));
             }
         }
-        return expression.to_string();
+        return trimmed.to_string();
     }
     if dow == CronField::Any {
         if let (CronField::Value(1), CronField::Value(h), CronField::Value(m)) = (dom, hour, minute)
@@ -1033,7 +1042,7 @@ pub fn human_schedule(expression: &str) -> String {
             return format!("monthly {}", at(h, m));
         }
     }
-    expression.to_string()
+    trimmed.to_string()
 }
 
 /// The table's column geometry: the interval, label, next-run, and status
@@ -1488,6 +1497,10 @@ mod tests {
         assert_eq!(human_schedule("*/2 9-17 * * 1-5"), "*/2 9-17 * * 1-5");
         assert_eq!(human_schedule("every 10m"), "every 10m");
         assert_eq!(human_schedule("0 9 * * 8"), "0 9 * * 8");
+        // The bot-round pins: star-only fields read as every-minute, and
+        // whitespace-padded passthroughs trim (never render twice).
+        assert_eq!(human_schedule("* * * * *"), "every minute");
+        assert_eq!(human_schedule(" every 10m "), "every 10m");
 
         // The column renders the interpreted form; the pairs keep the
         // raw cron beside it.
@@ -1795,6 +1808,33 @@ mod tests {
             panic!("header and row status cells: {header:?} {row:?}");
         };
         assert_eq!(h, r, "the status column aligns: {header:?} vs {row:?}");
+    }
+
+    /// The schedule pair never displaces the error row (the bot-round
+    /// fix): a heartbeat carrying both a schedule fact and a last error
+    /// renders every pair — MAX_DETAIL_ROWS covers the seven base pairs.
+    #[test]
+    fn the_schedule_pair_never_hides_the_error_row() {
+        let mut catalog = entries();
+        catalog[0].job.last_error = Some("provider 429".to_string());
+        catalog[0].job.schedule_expression = "*/2 * * * *".to_string();
+        let mut picker = HeartbeatsPicker::new(catalog, None, None, 40);
+        picker.handle_key("enter", &kb());
+        let frame = picker.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        let joined = text.join("\n");
+        assert!(
+            joined.contains("every 2 minutes (*/2 * * * *)"),
+            "the schedule fact rides its pair: {joined}"
+        );
+        assert!(
+            joined.contains("last error"),
+            "the error row stays in the block: {joined}"
+        );
+        assert!(
+            joined.contains("provider 429"),
+            "the error's value renders: {joined}"
+        );
     }
 
     /// The prompt block never degrades to a lone marker: a budget of one

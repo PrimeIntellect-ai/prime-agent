@@ -6251,6 +6251,10 @@ impl SessionUi {
     fn open_goal_panel(&mut self, view: &mut AgentView) {
         view.goal_panel = Some(GoalPanel {
             goal: self.goal_view.goal.clone(),
+            // The panel renders inside this row budget: a multi-screen
+            // objective clips (with a marker) instead of growing the dock
+            // past the frame, which would front-crop the title away.
+            viewport_rows: picker_viewport_rows(view.terminal_rows()),
         });
         self.subagents_focused = false;
         self.update_subagent_summary(view);
@@ -6263,6 +6267,13 @@ impl SessionUi {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };
+        // The panel consumes Ctrl+C (close, not exit): report the handled
+        // press so the force-quit guard can disarm once the whole pair was
+        // consumed with TS semantics (the same discipline as the other
+        // modal handlers).
+        if id == "ctrl+c" {
+            self.exit_guard.note_ctrl_c_handled();
+        }
         if view.editor.keybindings().matches(&id, "tui.select.cancel")
             || view.editor.keybindings().matches(&id, "app.modal.back")
         {

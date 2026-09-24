@@ -388,26 +388,28 @@ impl ModelPicker {
     }
 
     /// The inline list layout for the current width (TS
-    /// `updateResponsiveLayout`, inline shape).
+    /// `updateResponsiveLayout`, inline shape). The frame's trailing
+    /// blank row (the operator's 2026-09-24 spacing directive) rides the
+    /// reserved rows: the list shrinks first on a height-limited
+    /// terminal, never the frame's own head (a front-crop would hide the
+    /// bordered search field).
     pub(crate) fn list_layout(&self) -> usize {
-        let detail_rows = if self.render_width >= 58 { 4 } else { 5 };
-        let detail_rows = if self.viewport_rows >= 5 + detail_rows {
-            detail_rows
-        } else {
-            0
-        };
+        let detail_rows = self.detail_rows();
         crate::menu_panel::menu_list_layout(
             Some(self.viewport_rows),
             8,
             self.filtered.len(),
-            3 + detail_rows,
+            4 + detail_rows,
             1,
         )
     }
 
     pub(crate) fn detail_rows(&self) -> usize {
         let detail_rows = if self.render_width >= 58 { 4 } else { 5 };
-        if self.viewport_rows >= 5 + detail_rows {
+        // The fixed floor is the search field (3), the scroll row (1),
+        // the hint (1), and the trailing blank (1): the detail block
+        // needs that plus its own rows to render at all.
+        if self.viewport_rows >= 6 + detail_rows {
             detail_rows
         } else {
             0

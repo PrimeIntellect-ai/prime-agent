@@ -473,9 +473,14 @@ fn truncate_spans_to_width(spans: &[crate::Span], width: usize) -> Vec<crate::Sp
         }
         let mut text = String::new();
         let mut consumed = 0usize;
+        // The ellipsis reserves its own column up front: a span that
+        // breaks exactly at the frame edge must drop one more character
+        // so the `\u{2026}` lands INSIDE the width (a row that ends on
+        // the ellipsis never renders past the terminal frame).
+        let span_limit = remaining.saturating_sub(1).max(1);
         for ch in span.content.chars() {
             let char_width = crate::width::char_width(ch);
-            if consumed + char_width > remaining {
+            if consumed + char_width > span_limit {
                 break;
             }
             text.push(ch);
@@ -489,6 +494,7 @@ fn truncate_spans_to_width(spans: &[crate::Span], width: usize) -> Vec<crate::Sp
             // The span could not fit whole: the ellipsis replaces the first
             // character that would not fit, and nothing after it renders.
             text.push('\u{2026}');
+            consumed += crate::width::char_width('\u{2026}');
             truncated = true;
         }
         let mut piece = span.clone();
@@ -733,6 +739,34 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("▸ 0 shells"));
         assert!(render_activity_dock(&ActivityDock::default(), &theme, 100).is_none());
+        // An overflowing row (every group plus the goal) truncates INSIDE
+        // the width: the ellipsis reserves its own column, so the row
+        // never renders past the terminal frame (the bot-round fix).
+        let dock = ActivityDock {
+            subagents_running: 3,
+            heartbeats: 4,
+            heartbeats_paused: 2,
+            bash_running: 2,
+            goal_label: Some("Pursuing goal (12m 05s)".to_string()),
+            ..ActivityDock::default()
+        };
+        for width in [26usize, 31, 40] {
+            let frame = render_activity_dock(&dock, &theme, width).unwrap();
+            let row = &frame[1];
+            let used = crate::width::spans_width(row);
+            assert!(
+                used <= width,
+                "the truncated row stays inside {width}: {used}"
+            );
+            let text = row
+                .iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>();
+            assert!(
+                text.ends_with('\u{2026}'),
+                "the truncation carries the ellipsis: {text:?}"
+            );
+        }
     }
 
     /// The dock's subagents segment is the label plus the live running

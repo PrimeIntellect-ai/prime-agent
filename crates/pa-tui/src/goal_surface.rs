@@ -180,6 +180,11 @@ pub fn format_goal_elapsed(seconds: u64) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GoalPanel {
     pub goal: GoalState,
+    /// The panel's row budget (`picker_viewport_rows` at open): the
+    /// objective clips to it instead of growing the dock past the frame
+    /// (a front-crop would hide the title and the prompt's start — the
+    /// content this panel exists to show).
+    pub viewport_rows: usize,
 }
 
 /// The status word for the panel's facts row (`Active`/`Paused`/...).
@@ -230,10 +235,31 @@ pub fn render_goal_panel(
         .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
         .collect();
     let objective_width = width.saturating_sub(4).max(10);
-    for line in crate::width::wrap_text(&objective, objective_width) {
+    // The frame's fixed rows outside the objective block: rule, title,
+    // two blanks around it, the three fact rows, the hint block's blank,
+    // the hint, and the trailing blank (10) — the objective renders in
+    // whatever the viewport budget leaves, clipping with a marker so the
+    // panel never grows past its frame (a multi-screen objective keeps
+    // its title and its first lines instead of front-cropping them away).
+    let fixed = 10;
+    let objective_budget = panel.viewport_rows.saturating_sub(fixed).max(1);
+    let wrapped = crate::width::wrap_text(&objective, objective_width);
+    let mut shown = wrapped.len().min(objective_budget);
+    let mut clipped = false;
+    if wrapped.len() > shown && shown > 1 {
+        shown -= 1;
+        clipped = true;
+    }
+    for line in wrapped[..shown].iter() {
         let mut row: Line = vec![Span::raw("  ")];
         row.extend(line.iter().cloned());
         lines.push(crate::width::truncate_line(&row, width, ""));
+    }
+    if clipped {
+        lines.push(vec![
+            Span::raw("  "),
+            theme.fg_span(ThemeColor::Dim, "\u{2026}".to_string()),
+        ]);
     }
     lines.push(Vec::new());
     let facts: Vec<(&str, String)> = vec![
@@ -274,6 +300,9 @@ pub fn render_goal_panel(
         &format!("{close} close"),
     ));
     lines.push(Vec::new());
+    // The frame never renders past its budget; a terminal shorter than
+    // the pane degrades by truncation, same as the docked pickers.
+    lines.truncate(panel.viewport_rows.max(1));
     lines
 }
 
@@ -446,7 +475,15 @@ mod tests {
         state.time_used_seconds = 125;
         state.tokens_used = 18_000;
         state.token_budget = Some(40_000);
-        let frame = render_goal_panel(&GoalPanel { goal: state }, &theme, 60, &kb);
+        let frame = render_goal_panel(
+            &GoalPanel {
+                goal: state,
+                viewport_rows: 40,
+            },
+            &theme,
+            60,
+            &kb,
+        );
         let text: Vec<String> = frame
             .iter()
             .map(|line| line.iter().map(|span| span.content.as_str()).collect())
@@ -479,7 +516,15 @@ mod tests {
         // A goal without an objective degrades to the placeholder.
         let mut bare = goal(GoalStatus::Active);
         bare.objective = None;
-        let frame = render_goal_panel(&GoalPanel { goal: bare }, &theme, 60, &kb);
+        let frame = render_goal_panel(
+            &GoalPanel {
+                goal: bare,
+                viewport_rows: 40,
+            },
+            &theme,
+            60,
+            &kb,
+        );
         let joined: String = frame
             .iter()
             .map(|line| {
@@ -490,5 +535,47 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("No objective recorded"), "{joined}");
+        // A multi-screen objective clips to the panel's viewport budget
+        // with an ellipsis marker: the title and the prompt's first lines
+        // stay on the frame (the bot-round fix — the read-only panel has
+        // no scrolling, so a front-cropped dock would hide them forever).
+        let mut tall = goal(GoalStatus::Active);
+        tall.objective = Some(
+            (1..=200)
+                .map(|n| format!("word-{n:03}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        let frame = render_goal_panel(
+            &GoalPanel {
+                goal: tall,
+                viewport_rows: 16,
+            },
+            &theme,
+            60,
+            &kb,
+        );
+        let text: Vec<String> = frame
+            .iter()
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .collect();
+        assert!(frame.len() <= 16, "the panel fits: {}", frame.len());
+        assert!(
+            text.iter().any(|row| row.trim() == "Goal"),
+            "the title stays"
+        );
+        assert!(
+            text.iter().any(|row| row.trim() == "\u{2026}"),
+            "the clipped objective carries a marker: {text:?}"
+        );
+        let joined = text.join(" ");
+        assert!(
+            joined.contains("word-001"),
+            "the prompt's start stays visible"
+        );
+        assert!(
+            !joined.contains("word-200"),
+            "the clipped tail does not render"
+        );
     }
 }
