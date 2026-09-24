@@ -36,5 +36,11 @@ crossterm = "0.28"
 nix = { version = "0.29", features = ["term", "signal", "fs"] }
 url = "2"
 
-[lints]
-workspace = true
+[lints.clippy]
+redundant_clone = "warn"
+clone_on_copy = "warn"
+assigning_clones = "warn"
+unnecessary_to_owned = "warn"
+inline_format_args = "warn"
+collapsible_if = "warn"
+redundant_closure_for_method_calls = "warn"
