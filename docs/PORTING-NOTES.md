@@ -1414,3 +1414,25 @@ FRESH session (a parity bug both directions: no resume, no error).
   not the first-listed row.
 - `supervisor_e2e::create_with_continue_recent_is_refused`: the wire
   refusal + the plain-create pass-through.
+
+## Bash timeout-to-background (design note, not implemented; Kevin directive, 2026-09-23)
+
+Kevin wants a 30-second default timeout on `bash()` calls. When a bash
+command runs longer than 30 seconds, the daemon should automatically move
+it to the background, return control to the agent's loop, and notify
+both the agent and the user when it completes. This is a future feature —
+do not implement it yet; this section records the design so it survives
+the port.
+
+- **30-second default timeout** on `bash()` calls; commands that exceed
+  it are auto-converted rather than failed.
+- **Daemon-side conversion**: the daemon owns the timer and moves the
+  long-running command to the background, returning control to the
+  agent's loop (the agent's turn continues without waiting).
+- **Agent + user notification on completion**: both surfaces are told
+  when the backgrounded command finishes.
+- **Kernel-side timeout-to-background is ruled out for now** — the
+  conversion happens in the daemon, not the Python kernel.
+- **FUTURE — not implemented**: nothing in the codebase changes today;
+  the dock's `bash` activity tracking and the `bash()` tool API stay as
+  they are.
