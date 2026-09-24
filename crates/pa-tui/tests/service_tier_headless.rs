@@ -24,6 +24,25 @@ struct MockSupervisor {
     listener: UnixListener,
 }
 
+/// The OpenRouter catalog entry as the daemon's `get_model_catalog` answer
+/// carries it: completions API, so flex and priority are both eligible for
+/// the model. The same json seeds `InteractiveOptions::model_catalog` (the
+/// composition-root snapshot the picker serves before the fetch lands).
+fn openrouter_model_value() -> Value {
+    json!({
+        "id": "openai/gpt-5.5",
+        "name": "OpenAI: GPT-5.5",
+        "api": "openai-completions",
+        "provider": "openrouter",
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "reasoning": true,
+        "input": ["text"],
+        "cost": { "input": 5, "output": 30, "cacheRead": 0.5, "cacheWrite": 0 },
+        "contextWindow": 272_000,
+        "maxTokens": 128_000
+    })
+}
+
 impl MockSupervisor {
     fn bind(socket: &std::path::Path) -> Self {
         MockSupervisor {
@@ -96,6 +115,25 @@ impl MockSupervisor {
                             "command": "set_service_tier",
                             "success": true,
                             "data": {},
+                        }),
+                    );
+                }
+                "get_model_catalog" => {
+                    // The startup fetch (interactive.rs `spawn_model_catalog_refresh`)
+                    // replaces the composition-root catalog with the daemon's
+                    // answer; serve the same OpenRouter entry the eligibility
+                    // reads run against.
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "get_model_catalog",
+                            "success": true,
+                            "data": {
+                                "models": [openrouter_model_value()],
+                                "configuredProviders": ["openrouter"],
+                            },
                         }),
                     );
                 }
@@ -188,23 +226,11 @@ fn attach_data(id: &str) -> Value {
     })
 }
 
-/// The OpenRouter catalog entry: completions API, so flex and priority are
-/// both eligible for the model.
+/// The composition-root catalog seed (the options snapshot).
 fn openrouter_catalog() -> Vec<pa_types::ai::Model> {
-    serde_json::from_value(json!({
-        "id": "openai/gpt-5.5",
-        "name": "OpenAI: GPT-5.5",
-        "api": "openai-completions",
-        "provider": "openrouter",
-        "baseUrl": "https://openrouter.ai/api/v1",
-        "reasoning": true,
-        "input": ["text"],
-        "cost": { "input": 5, "output": 30, "cacheRead": 0.5, "cacheWrite": 0 },
-        "contextWindow": 272_000,
-        "maxTokens": 128_000
-    }))
-    .map(|model| vec![model])
-    .expect("catalog model")
+    serde_json::from_value(openrouter_model_value())
+        .map(|model| vec![model])
+        .expect("catalog model")
 }
 
 fn options(socket: PathBuf) -> InteractiveOptions {
