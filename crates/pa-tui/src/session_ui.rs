@@ -782,10 +782,15 @@ impl SessionUi {
     /// `update_resume.complete` is surfaced as a banner line). The
     /// transcript rebuilds from the attach snapshot - the same machinery
     /// `/switch` uses - and the resumed-work banner lands after it.
+    ///
+    /// `lost` marks the unexpected-loss recovery path (not an update
+    /// restart): no update banner is painted — the caller's single
+    /// recovery row is the note.
     pub(crate) async fn reattach_after_update(
         &mut self,
         client: DaemonClient,
         view: &mut AgentView,
+        lost: bool,
     ) -> Result<()> {
         let hello_resume = client
             .hello()
@@ -810,17 +815,19 @@ impl SessionUi {
         // replaces the transcript from the snapshot, so the banner must come
         // after it to survive the rebuild (§10.5's visible end state).
         self.rebuild_view(view, RebuildKind::Resync);
-        match complete {
-            Some(false) => view.push_entry(crate::chat::ChatEntry::Status {
-                text: "Reconnected — the daemon is finishing its restore; queued work resumes when the session comes up.".to_string(),
-                kind: crate::chat::StatusKind::Info,
-            }),
-            _ => view.push_entry(crate::chat::ChatEntry::Status {
-                text: format!(
-                    "Reconnected to Prime Agent (update {update_id}) — your session and queued work resumed."
-                ),
-                kind: crate::chat::StatusKind::Info,
-            }),
+        if !lost {
+            match complete {
+                Some(false) => view.push_entry(crate::chat::ChatEntry::Status {
+                    text: "Reconnected — the daemon is finishing its restore; queued work resumes when the session comes up.".to_string(),
+                    kind: crate::chat::StatusKind::Info,
+                }),
+                _ => view.push_entry(crate::chat::ChatEntry::Status {
+                    text: format!(
+                        "Reconnected to Prime Agent (update {update_id}) — your session and queued work resumed."
+                    ),
+                    kind: crate::chat::StatusKind::Info,
+                }),
+            }
         }
         self.dirty = true;
         Ok(())

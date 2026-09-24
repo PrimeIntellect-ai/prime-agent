@@ -354,8 +354,11 @@ impl DaemonClient {
             let _ = writer.shutdown().await;
         });
 
-        // Reader task: dispatch every inbound line.
-        tokio::spawn(async move {
+        // Reader task: dispatch every inbound line. The handle is kept so
+        // the handshake-failure paths can abort it: a daemon that accepts
+        // the socket but never greets must not leave a blocked reader task
+        // (and its socket halves) behind per retry attempt.
+        let reader_task = tokio::spawn(async move {
             let mut reader = BufReader::new(reader_half);
             let mut line = String::new();
             let mut hello_tx = Some(hello_tx);
@@ -400,16 +403,21 @@ impl DaemonClient {
         });
 
         // Hello handshake: the supervisor sends daemon_hello immediately on
-        // connect (TS `waitForHello`).
+        // connect (TS `waitForHello`). Every failure path aborts the
+        // blocked reader task so a failed attempt leaks no socket halves.
         let hello = tokio::time::timeout(Duration::from_millis(HELLO_TIMEOUT_MS), hello_rx)
             .await
             .map_err(|_| {
+                reader_task.abort();
                 anyhow!(
                     "Timed out after {HELLO_TIMEOUT_MS}ms waiting for the Prime Agent daemon handshake. Socket: {}.",
                     socket_path.display()
                 )
             })?
-            .map_err(|_| anyhow!("the daemon connection closed before the handshake"))?;
+            .map_err(|_| {
+                reader_task.abort();
+                anyhow!("the daemon connection closed before the handshake")
+            })?;
         let protocol = hello
             .get("protocol")
             .cloned()
@@ -419,6 +427,7 @@ impl DaemonClient {
                 version: DAEMON_PROTOCOL_VERSION,
             });
         if protocol.name != DAEMON_PROTOCOL_NAME {
+            reader_task.abort();
             return Err(anyhow!(
                 "the daemon on {} speaks an unknown protocol \"{}\"",
                 socket_path.display(),

@@ -31,6 +31,14 @@ use crossterm::terminal;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
+/// The in-flight reconnect attempt's connect leg: a spawned task's
+/// bounded `DaemonClient::connect_with_retry` result (fresh client plus
+/// its event receiver), reported back to the interactive loop through a
+/// oneshot.
+type ReconnectConnect = tokio::sync::oneshot::Receiver<
+    anyhow::Result<(DaemonClient, mpsc::UnboundedReceiver<DaemonClientEvent>)>,
+>;
+
 /// Cap on the exit-path telemetry flush: the PostHog sink alone allows up
 /// to 1.5s, so the exit event must be dropped rather than awaited past the
 /// exit-within-1s contract.
@@ -1019,11 +1027,17 @@ async fn run_interactive_surface(
     // so the attempt's connect+hello wait never blocks UI input or the
     // render; the reattach leg runs inline on the loop under its own
     // bound).
-    let mut reconnect_connect: Option<
-        tokio::sync::oneshot::Receiver<
-            anyhow::Result<(DaemonClient, mpsc::UnboundedReceiver<DaemonClientEvent>)>,
-        >,
-    > = None;
+    let mut reconnect_connect: Option<ReconnectConnect> = None;
+    // The reader-death watch is one-shot: once the loss is handled (or
+    // suppressed behind a live direct link), the arm parks so the closed
+    // watch cannot hot-spin the select loop.
+    let mut reader_loss_handled = false;
+    // The supervisor connection died while a live direct link kept serving
+    // the session: the loss is retained (not recovered — replacing the
+    // client would churn the working link) until the direct link itself
+    // dies; then the full reconnect driver owns the recovery instead of
+    // the session-plane retry loop, which would ride a dead supervisor.
+    let mut supervisor_lost = false;
     // Set once the event channel has returned None (a closed connection's
     // recv() resolves None instantly and forever — see the events arm).
     let mut events_closed = false;
@@ -1421,12 +1435,27 @@ async fn run_interactive_surface(
                         // while the driver retries the attach.
                         if session_reconnect.is_none() {
                             if let Some(lost) = session.transport_lost.take() {
-                                session.note_as(
-                                    "Daemon connection lost; reconnecting…",
-                                    crate::chat::StatusKind::Warning,
-                                    &mut view,
-                                );
-                                session_reconnect = Some(SessionReconnect::start(&lost));
+                                // A supervisor loss retained while the direct
+                                // link lived: the supervisor client is dead,
+                                // so the session-plane retry loop could never
+                                // restore it — the full reconnect driver
+                                // replaces the client and reattaches.
+                                if supervisor_lost && reconnect.is_none() {
+                                    session.note_as(
+                                        "the daemon connection closed — reconnecting…",
+                                        crate::chat::StatusKind::Warning,
+                                        &mut view,
+                                    );
+                                    reconnect = Some(ReconnectLoop::start_lost());
+                                    supervisor_lost = false;
+                                } else {
+                                    session.note_as(
+                                        "Daemon connection lost; reconnecting…",
+                                        crate::chat::StatusKind::Warning,
+                                        &mut view,
+                                    );
+                                    session_reconnect = Some(SessionReconnect::start(&lost));
+                                }
                                 session.dirty = true;
                             }
                         }
@@ -1467,17 +1496,25 @@ async fn run_interactive_surface(
                     }
                 }
             }
-            reader_death = reader_dead.changed() => {
+            reader_death = async {
+                // One-shot: after the loss is handled (or suppressed), park
+                // the arm — the watch stays closed for the rest of the run
+                // and a ready arm would hot-spin the select.
+                if reader_loss_handled {
+                    std::future::pending::<()>().await;
+                }
+                reader_dead.changed().await
+            } => {
+                reader_loss_handled = true;
                 if reader_death.is_ok() && *reader_dead.borrow_and_update() {
                     // A supervisor socket loss while a live direct link
                     // still serves the session is not a pane-level loss
-                    // (session-plane commands ride the link; the
-                    // direct-loss driver owns that path) — reconnect only
-                    // for a total loss.
-                    if reconnect.is_none()
-                        && session_reconnect.is_none()
-                        && session.client.direct_session_id().is_none()
-                    {
+                    // (session-plane commands ride the link): retain the
+                    // loss instead of recovering, and hand it to the full
+                    // reconnect driver when the direct link later dies.
+                    if session.client.direct_session_id().is_some() {
+                        supervisor_lost = true;
+                    } else if reconnect.is_none() && session_reconnect.is_none() {
                         session.note_as(
                             "the daemon connection closed — reconnecting…",
                             crate::chat::StatusKind::Warning,
@@ -1597,21 +1634,10 @@ async fn run_interactive_surface(
             maybe_attempt = async {
                 match reconnect_connect.as_mut() {
                     Some(receiver) => receiver.await,
-                    // Nothing in flight: park the arm at the SAME type the
-                    // in-flight receiver resolves with (the tick is the
-                    // only spawner).
-                    None => {
-                        std::future::pending::<
-                            Result<
-                                anyhow::Result<(
-                                    DaemonClient,
-                                    mpsc::UnboundedReceiver<DaemonClientEvent>,
-                                )>,
-                                tokio::sync::oneshot::error::RecvError,
-                            >,
-                        >()
-                        .await
-                    }
+                    // Nothing in flight: park the arm — the type is
+                    // inferred from the in-flight arm, and the tick is the
+                    // only spawner (a plain `None` return would hot-spin).
+                    None => std::future::pending().await,
                 }
             } => {
                 reconnect_connect = None;
@@ -1623,7 +1649,7 @@ async fn run_interactive_surface(
                     Ok(Ok((client, fresh_events))) => {
                         match tokio::time::timeout(
                             Duration::from_secs(RECONNECT_ATTACH_TIMEOUT_S),
-                            session.reattach_after_update(client, &mut view),
+                            session.reattach_after_update(client, &mut view, lost),
                         )
                         .await
                         {

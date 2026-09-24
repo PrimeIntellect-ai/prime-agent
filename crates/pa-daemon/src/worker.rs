@@ -2658,6 +2658,17 @@ impl Worker {
         // fills the cache while the client settles, so an early `/context`
         // answers from it instead of walking the artifact tree inline.
         self.poke_context_tree_refresh();
+        // The delete boundary invalidates the cache's rows for the deleted
+        // child immediately (the next background refresh would otherwise
+        // keep its last row through the settled-children backfill).
+        if let Some(agent_engine) = &self.agent_engine {
+            if let Some(children) = &agent_engine.children {
+                let cache = std::sync::Arc::clone(&self.context_tree);
+                children.set_delete_notifier(std::sync::Arc::new(move |child_id| {
+                    cache.invalidate_child(child_id);
+                }));
+            }
+        }
         let mut data = serde_json::to_value(&summary).unwrap_or(Value::Null);
         if interrupted_compaction_requested {
             data["interruptedCompactionPersisted"] =

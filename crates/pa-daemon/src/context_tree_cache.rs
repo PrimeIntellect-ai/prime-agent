@@ -146,6 +146,22 @@ impl ContextTreeCache {
         children
     }
 
+    /// Drop one child's cached rows (the `delete_subagent` boundary): a
+    /// deleted subagent leaves the tree immediately, not at the next
+    /// refresh (the settled-children backfill would otherwise keep its
+    /// last live row visible until the walk re-files or drops it).
+    pub(crate) fn invalidate_child(&self, child_id: &str) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(walk) = state.as_mut() {
+            walk.live_nodes.remove(child_id);
+            walk.persisted
+                .retain(|node| node.get("id").and_then(Value::as_str) != Some(child_id));
+        }
+    }
+
     /// Re-arm the background walk when the cached snapshot is missing,
     /// older than [`REFRESH_TTL`], or was taken for a DIFFERENT session
     /// (a fork/switch replacement must walk its own tree immediately, not
@@ -188,6 +204,21 @@ impl ContextTreeCache {
             let Ok(_guard) = cache.refresh.try_lock() else {
                 return;
             };
+            // Another task may have completed a fresh walk between this
+            // poke's TTL check and its guard acquisition (a burst of
+            // expired reads): recheck so redundant walks cannot serialize
+            // behind each other.
+            {
+                let state = cache
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if state.as_ref().is_some_and(|walk| {
+                    walk.session_id == session_id && walk.computed_at.elapsed() < REFRESH_TTL
+                }) {
+                    return;
+                }
+            }
             let snapshots = engine.rlm_child_snapshots().await;
             let registry_dir = agent_dir.clone();
             let walk_session_id = session_id.clone();
@@ -410,6 +441,21 @@ mod tests {
         assert_eq!(children.len(), 1);
         assert_eq!(children[0]["status"], json!("working"));
         assert_eq!(children[0]["totalUsage"]["input"], json!(100));
+    }
+
+    /// The `delete_subagent` boundary: the deleted child's cached rows
+    /// leave the tree immediately, from both the live backfill and the
+    /// persisted rows.
+    #[test]
+    fn invalidated_children_leave_the_tree_immediately() {
+        let cache = cache_with_walk("session-a", &[("child-live", 100)], &["child-disk"]);
+        cache.invalidate_child("child-live");
+        cache.invalidate_child("child-disk");
+        let children = cache.serve_children(Some("session-a"), &[]);
+        assert!(
+            children.is_empty(),
+            "deleted children must leave the tree immediately: {children:?}"
+        );
     }
 
     /// A cold cache yields the live rows alone (the disk tree fills on the
