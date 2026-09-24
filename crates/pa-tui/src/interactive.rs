@@ -1032,6 +1032,10 @@ async fn run_interactive_surface(
     // render; the reattach leg runs inline on the loop under its own
     // bound).
     let mut reconnect_connect: Option<ReconnectConnect> = None;
+    // Mirrors `reconnect_connect`'s in-flight state as a plain copy so the
+    // tick arm's future can park without borrowing the attempt receiver
+    // (the attempt arm owns its mutable borrow).
+    let mut reconnect_attempt_in_flight = false;
     // The reader-death watch is one-shot: once the loss is handled (or
     // suppressed behind a live direct link), the arm parks so the closed
     // watch cannot hot-spin the select loop.
@@ -1589,7 +1593,7 @@ async fn run_interactive_surface(
                 // `next_attempt` is in the past (the attempt consumed it),
                 // so an unparked tick would resolve instantly and
                 // busy-spin the loop for the attempt's duration.
-                if reconnect_connect.is_some() {
+                if reconnect_attempt_in_flight {
                     std::future::pending::<()>().await;
                 }
                 match reconnect.as_ref() {
@@ -1630,6 +1634,7 @@ async fn run_interactive_surface(
                 let socket_path = options.socket_path.clone();
                 let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
                 reconnect_connect = Some(attempt_rx);
+                reconnect_attempt_in_flight = true;
                 tokio::spawn(async move {
                     let attempt = tokio::time::timeout(
                         Duration::from_secs(RECONNECT_ATTEMPT_TIMEOUT_S),
@@ -1652,6 +1657,7 @@ async fn run_interactive_surface(
                 }
             } => {
                 reconnect_connect = None;
+                reconnect_attempt_in_flight = false;
                 let lost = match reconnect.as_ref() {
                     Some(state) => state.lost,
                     None => continue,

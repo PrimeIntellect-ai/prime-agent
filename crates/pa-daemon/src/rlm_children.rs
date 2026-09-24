@@ -235,6 +235,11 @@ pub struct SupervisorChildSessions {
     inner: Arc<SupervisorChildSessionsInner>,
 }
 
+/// The `delete_subagent` completion hook (the worker wires its
+/// context-tree cache invalidation): called once per completed delete
+/// with the deleted child's id.
+pub type DeleteNotifier = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 struct SupervisorChildSessionsInner {
     link: Arc<SupervisorLink>,
     agent_dir: PathBuf,
@@ -266,7 +271,7 @@ struct SupervisorChildSessionsInner {
     /// context-tree cache handle): a deleted child must leave the cached
     /// `/context` children immediately, not ride out the next background
     /// refresh.
-    delete_notifier: std::sync::Mutex<Option<std::sync::Arc<dyn Fn(&str) + Send + Sync>>>,
+    delete_notifier: std::sync::Mutex<Option<DeleteNotifier>>,
 }
 
 impl Clone for SupervisorChildSessions {
@@ -304,7 +309,7 @@ impl SupervisorChildSessions {
     /// Wire the delete notification hook (the worker's context-tree cache
     /// invalidation): called once per completed `delete_subagent` with
     /// the deleted child's id.
-    pub fn set_delete_notifier(&self, notifier: std::sync::Arc<dyn Fn(&str) + Send + Sync>) {
+    pub fn set_delete_notifier(&self, notifier: DeleteNotifier) {
         *self
             .inner
             .delete_notifier
