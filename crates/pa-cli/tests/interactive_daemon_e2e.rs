@@ -2652,12 +2652,28 @@ async fn tui_side_question_pane_flow() {
                 needle: "Paris, obviously".to_string(),
                 timeout_ms: 30_000,
             },
+            // The pane's run must SETTLE before the follow-up: TS's
+            // active-run guard drops a follow-up submitted while the run
+            // is still streaming (it keeps the draft and warns). The
+            // settled hint row ("reply to follow up") is the pane's own
+            // idle marker, so wait for it — never a fixed window.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "reply to follow up".to_string(),
+                timeout_ms: 30_000,
+            },
             pa_tui::interactive::HeadlessStep::SettleIdle,
             // The open pane captures a plain reply as a follow-up side
             // question (TS's side-conversation ladder).
             pa_tui::interactive::HeadlessStep::Submit("and its largest city".to_string()),
             pa_tui::interactive::HeadlessStep::WaitRender {
                 needle: "Second answer".to_string(),
+                timeout_ms: 30_000,
+            },
+            // Settle again: an Esc against a still-running pane would
+            // CANCEL the run instead of closing the pane (TS's two-stage
+            // escape), so the close step needs the pane idle too.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "reply to follow up".to_string(),
                 timeout_ms: 30_000,
             },
             pa_tui::interactive::HeadlessStep::SettleIdle,
