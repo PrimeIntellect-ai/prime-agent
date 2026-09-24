@@ -1,18 +1,19 @@
-# Codebase-health gate: the max-LOC ratchet (AGENTS.md).
+# Codebase-health report: the max-LOC soft ratchet (AGENTS.md).
 #
-# Keeps tracked Rust files from accreting past their ceilings: new files are
-# held to the 500-line default ceiling, and every file already over it when
-# the ratchet landed is frozen at its measured size in scripts/loc-baseline.json
-# (a count that can only go down). Runs in seconds on the plain runner image:
-# stdlib-only python3, no toolchain, no cache, no build. The local mirror is
-# `make loc`.
+# Whole-file line counts of tracked Rust files against scripts/loc-baseline.json:
+# new files are compared to the 300-line default ceiling and files frozen in the
+# baseline can only shrink. The check REPORTS and never blocks the build: it
+# emits per-file PR annotations for over-ceiling files and unrecorded ratchet
+# wins (plus a job summary), so reviewers see the size signal at review time -
+# the humans and agents decide what to do. `--update-baseline` records wins and
+# never raises a ceiling. Local mirror: `make loc`.
 #
-# The gate exists to stop the port repeating the TS repo's giant-file failure
-# mode (files that accrete features until they are unreviewable - the TS
-# daemon-session-list / daemon-mode era) at mechanical-enforcement time
-# rather than cleanup time: AGENTS.md's under-500 target predates this check
-# and was never enforced, and the 2026-09-24 tip already holds files 20x
-# over it (worker.rs 10992, agent_engine.rs 9838, session_ui.rs 9442).
+# The ceiling is guidance grounded in the exemplar file-size distributions
+# (gitoxide p75=301, redis median=252, kernel median=357; our own p50=386 already
+# sits above it) - see the PR body for the derivation. It exists so the port
+# does not repeat the TS repo's giant-file failure mode (files that accrete
+# features until they are unreviewable): the 2026-09-24 tip already holds
+# worker.rs 10,992 / agent_engine.rs 9,838 / session_ui.rs 9,442 lines.
 
 name: codebase-health
 
@@ -39,5 +40,5 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: LOC ratchet check
+      - name: LOC guidance report (soft ratchet)
         run: python3 scripts/check_loc.py

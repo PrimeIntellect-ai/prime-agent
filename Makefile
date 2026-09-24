@@ -14,11 +14,12 @@ deny:
 	@command -v cargo-deny >/dev/null 2>&1 || { echo "cargo-deny not installed (cargo install cargo-deny --locked)"; exit 1; }
 	cargo deny --all-features --workspace check advisories licenses
 
-# Codebase-health gate (AGENTS.md LOC ratchet): frozen per-file ceilings in
-# scripts/loc-baseline.json; new files are held to the 500-line default
-# ceiling, frozen ceilings can only go down (wins are re-recorded with
-# scripts/check_loc.py --update-baseline). The local mirror of the
-# .github/workflows/codebase-health.yml job.
+# Codebase-health report (AGENTS.md LOC soft ratchet): frozen per-file
+# ceilings in scripts/loc-baseline.json; new files are compared to the
+# 300-line default ceiling; frozen ceilings can only go down (wins are
+# recorded with scripts/check_loc.py --update-baseline). The check reports
+# and never blocks. The local mirror of the .github/workflows/
+# codebase-health.yml job.
 loc:
 	python3 scripts/check_loc.py
 
