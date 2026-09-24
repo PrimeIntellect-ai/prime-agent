@@ -143,13 +143,15 @@ fn cursor_stays_hidden_and_positioned_across_mount_picker_and_suspend() {
     harness.write(b"/model\r");
     harness.wait_from(mark_picker, "Search models", "the model picker mounts");
     harness.write(&[0x1b]);
-    // The end-of-frame bracket (hide, hidden caret MoveTo, sync release)
-    // is the editor-owns-the-frame marker: while the picker is open the
-    // frames end at the bare hide with no caret write, so a mid-frame
-    // cell paint cannot false-match this needle.
+    // The frame-end hide followed by the hidden caret write is the
+    // editor-owns-the-frame marker: picker-open frames end at the bare
+    // hide (no caret position exists to write), so no picker cell paint
+    // can false-match this pair. The zone-marker writes may trail the
+    // caret MoveTo before the sync release, so the needle stops at the
+    // pair.
     harness.wait_from(
         mark_picker,
-        "\x1b[?25l\x1b[22;5H\x1b[?2026l",
+        "\x1b[?25l\x1b[22;5H",
         "the closed picker returns the caret to the empty editor",
     );
     // Let the escape settle before the next key: a byte written hot on
