@@ -1801,6 +1801,13 @@ mod tests {
         std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
         let fixture = Fixture::new();
         let session = fixture.write_session("s.jsonl", "sid");
+        // The sharing flag gates the run before the cursor: an enabled
+        // setting reaches the unchanged check.
+        let mut settings =
+            crate::settings::SettingsManager::create(&fixture.cwd, &fixture.agent_dir);
+        settings
+            .set_agent_traces_enabled(true)
+            .expect("the enable write");
         let signature = TraceUploadSignature::of(&session).expect("signature");
         record_agent_trace_outbox_upload(&fixture.agent_dir, &session, signature)
             .expect("cursor write");
@@ -1859,7 +1866,9 @@ mod tests {
     #[test]
     fn the_content_preview_splits_head_and_tail() {
         let body = "0123456789abcdef".repeat(2);
-        let (content, truncated) = trace_content_preview(&body, 10);
+        // The marker takes 34 chars of the window; the remaining 6 split
+        // into the head and tail halves.
+        let (content, truncated) = trace_content_preview(&body, 40);
         assert!(truncated);
         let parts: Vec<&str> = content.split("... middle of trace omitted ...").collect();
         assert_eq!(parts.len(), 2);
@@ -2041,7 +2050,7 @@ mod tests {
         gate.before_request(options.cancel, options.on_upload_delay.as_ref())
             .await
             .expect("the first slot");
-        gate.before_request(None, None)
+        gate.before_request(None, options.on_upload_delay.as_ref())
             .await
             .expect("the second slot");
         assert!(delays.load(Ordering::SeqCst) >= TRACE_UPLOAD_ALL_MIN_REQUEST_INTERVAL_MS - 1000);

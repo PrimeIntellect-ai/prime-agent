@@ -1064,6 +1064,16 @@ pub async fn run_interactive(
                             session.run_update(&mut view).await?;
                             renderer.resume()?;
                         }
+                        // A parked `/traces login` (or the enable arm's
+                        // login-first step): the flow prompts on the plain
+                        // terminal, like the provider logins (the Submit
+                        // path needs the same handoff the Key path has —
+                        // headless plans drive commands as submissions).
+                        if session.pending_traces_login() {
+                            renderer.suspend(&mut view)?;
+                            session.run_traces_login(&mut view).await?;
+                            renderer.resume()?;
+                        }
                     }
                     UiInput::HeadlessDone => headless_done = true,
                     UiInput::ScrollTop => {

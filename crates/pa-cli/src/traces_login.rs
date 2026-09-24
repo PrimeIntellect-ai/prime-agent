@@ -56,6 +56,9 @@ pub(crate) struct TracesLoginInputs<'a> {
     pub agent_dir: &'a Path,
     pub http: &'a dyn pa_core::auth::PrimeHttp,
     pub prime_cli_config_path: Option<&'a Path>,
+    /// The challenge poll interval (the product's 5s default; tests use
+    /// milliseconds to keep the browser-completes path short).
+    pub poll_interval_ms: Option<u64>,
 }
 
 /// TS `runPrimeAgentTracesLogin`: the whole flow on the plain terminal
@@ -68,6 +71,7 @@ pub(crate) async fn run_traces_login(agent_dir: &Path) -> TraceLoginOutcome {
         agent_dir,
         http: &http,
         prime_cli_config_path: prime_cli_config_path.as_deref(),
+        poll_interval_ms: None,
     };
     run_traces_login_inner(&inputs, &TerminalTracesLoginUi).await
 }
@@ -76,7 +80,8 @@ async fn run_traces_login_inner(
     inputs: &TracesLoginInputs<'_>,
     ui: &dyn TracesLoginUi,
 ) -> TraceLoginOutcome {
-    let options = PrimeAgentTracesLoginOptions::new(inputs.prime_cli_config_path);
+    let mut options = PrimeAgentTracesLoginOptions::new(inputs.prime_cli_config_path);
+    options.poll_interval_ms = inputs.poll_interval_ms;
     // TS `armManualInput`: the paste prompt arms when the browser URL
     // shows, and again (under the fallback text) when the browser flow
     // fails before it does.
@@ -270,12 +275,16 @@ mod tests {
     type PrimeHttpResponse = pa_core::auth::PrimeHttpResponse;
 
     /// A scripted transport: exact URL -> response, in call order; the
-    /// served requests land in the log. The challenge generate request
-    /// answers dynamically (the status poll encrypts the fixture key
-    /// with the flow's public key).
+    /// served requests land in the log. With `dynamic_generate` (the
+    /// default) the generate POST answers with a fixed challenge and the
+    /// status poll answers pending once, then the encrypted fixture key —
+    /// the flow's poll interval genuinely yields mid-flow, so the armed
+    /// paste wins the race deterministically.
     struct ScriptedHttp {
         queue: Mutex<VecDeque<(String, u16, String)>>,
+        dynamic_generate: bool,
         dynamic_status: Mutex<Option<String>>,
+        status_pending_once: AtomicBool,
         served: Mutex<Vec<String>>,
     }
 
@@ -288,9 +297,17 @@ mod tests {
                         .map(|(url, status, body)| (url.to_string(), status, body.to_string()))
                         .collect(),
                 ),
+                dynamic_generate: true,
                 dynamic_status: Mutex::new(None),
+                status_pending_once: AtomicBool::new(true),
                 served: Mutex::new(Vec::new()),
             }
+        }
+
+        fn without_dynamic(responses: Vec<(&str, u16, &str)>) -> Self {
+            let mut scripted = Self::new(responses);
+            scripted.dynamic_generate = false;
+            scripted
         }
 
         fn requests(&self) -> Vec<String> {
@@ -320,9 +337,18 @@ mod tests {
             self.served.lock().unwrap().push(url.clone());
             let dynamic = self.dynamic_status.lock().unwrap().take();
             let answer = match dynamic {
-                // The status poll answers with the challenge's encrypted
-                // fixture key once the generate request captured the
-                // flow's public key.
+                // The status poll answers pending once (the flow sleeps
+                // its poll interval and yields), then delivers the
+                // encrypted fixture key.
+                Some(cipher)
+                    if url.contains("/api/v1/auth_challenge/status")
+                        && !self.status_pending_once.swap(false, Ordering::SeqCst) =>
+                {
+                    Ok(PrimeHttpResponse {
+                        status: 200,
+                        body: r#"{"pending":true}"#.to_string(),
+                    })
+                }
                 Some(cipher) if url.contains("/api/v1/auth_challenge/status") => {
                     Ok(PrimeHttpResponse {
                         status: 200,
@@ -348,7 +374,7 @@ mod tests {
             let body = body.to_string();
             self.served.lock().unwrap().push(url.clone());
             Box::pin(async move {
-                if url.ends_with("/api/v1/auth_challenge/generate") {
+                if self.dynamic_generate && url.ends_with("/api/v1/auth_challenge/generate") {
                     let parsed: serde_json::Value =
                         serde_json::from_str(&body).expect("the generate body is JSON");
                     let public_pem = parsed
@@ -382,9 +408,10 @@ mod tests {
         }
     }
 
-    /// A scripted UI: the queued paste answers arrive in order (a
-    /// `None` closes the input); progress lines and the auth URL land in
-    /// the log.
+    /// A scripted UI: the queued paste answers arrive in order (a `None`
+    /// closes the input); progress lines and the auth URL land in the
+    /// log. `wait_forever` holds the paste unanswered (the browser login
+    /// completes instead).
     struct ScriptedUi {
         progress: Mutex<Vec<String>>,
         auth: Mutex<Vec<String>>,
@@ -470,9 +497,6 @@ mod tests {
     }
 
     #[tokio::test]
-    // The process env must stay stable across the flow's awaits:
-    // the sync env lock is held for the whole test by design.
-    #[allow(clippy::await_holding_lock)]
     async fn the_cli_candidate_logs_in_without_a_prompt() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
@@ -489,6 +513,7 @@ mod tests {
             agent_dir: &agent,
             http: &http,
             prime_cli_config_path: Some(&config),
+            poll_interval_ms: Some(10),
         };
         let outcome = run_traces_login_inner(&inputs, ui.as_ref()).await;
         assert_eq!(
@@ -516,13 +541,12 @@ mod tests {
     }
 
     #[tokio::test]
-    // The process env must stay stable across the flow's awaits:
-    // the sync env lock is held for the whole test by design.
-    #[allow(clippy::await_holding_lock)]
     async fn the_manual_key_wins_the_race_and_checks_access() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
         let (_dir, agent) = temp_agent();
+        // The browser flow starts (the generate answer arms the prompt),
+        // the pending status poll yields, and the pasted key wins.
         let http = ScriptedHttp::new(vec![whoami_ok()]);
         let ui = ScriptedUi::new(vec![Some("manual-key".to_string()), None]);
         let ui = Arc::new(ui);
@@ -530,6 +554,7 @@ mod tests {
             agent_dir: &agent,
             http: &http,
             prime_cli_config_path: None,
+            poll_interval_ms: None,
         };
         let outcome = run_traces_login_inner(&inputs, ui.as_ref()).await;
         assert_eq!(
@@ -546,27 +571,30 @@ mod tests {
         );
         // The prompt is the TS browser companion text.
         assert_eq!(prompts, vec![BROWSER_PROMPT.to_string()]);
-        // The browser flow's own progress landed before the manual key
-        // overtook it.
-        assert!(http.requests().is_empty() || http.requests()[0].contains("whoami"));
+        // The manual key was stored.
+        let mut storage = AuthStorage::create(&agent);
+        assert_eq!(
+            storage
+                .get_api_key_with_source_token("prime-agent-traces", false)
+                .api_key,
+            Some("manual-key".to_string())
+        );
     }
 
     #[tokio::test]
-    // The process env must stay stable across the flow's awaits:
-    // the sync env lock is held for the whole test by design.
-    #[allow(clippy::await_holding_lock)]
     async fn the_browser_login_completes_when_the_prompt_never_answers() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
         let (_dir, agent) = temp_agent();
         let http = ScriptedHttp::new(vec![whoami_ok()]);
-        let ui = ScriptedUi::new(vec![]);
+        let ui = ScriptedUi::new(vec![Some("never".to_string())]);
         ui.wait_forever.store(true, Ordering::SeqCst);
         let ui = Arc::new(ui);
         let inputs = TracesLoginInputs {
             agent_dir: &agent,
             http: &http,
             prime_cli_config_path: None,
+            poll_interval_ms: Some(10),
         };
         let outcome = run_traces_login_inner(&inputs, ui.as_ref()).await;
         assert!(matches!(outcome, TraceLoginOutcome::Status(_)));
@@ -590,23 +618,30 @@ mod tests {
     }
 
     #[tokio::test]
-    // The process env must stay stable across the flow's awaits:
-    // the sync env lock is held for the whole test by design.
-    #[allow(clippy::await_holding_lock)]
     async fn a_denied_manual_key_reports_the_ts_error() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
         let (_dir, agent) = temp_agent();
-        let http = ScriptedHttp::new(vec![(
-            "https://api.primeintellect.ai/api/v1/user/whoami",
-            403,
-            r#"{"error":{"message":"forbidden"}}"#,
-        )]);
+        // The browser cannot start (the generate answer is down), the
+        // fallback prompt arms, and the pasted key is denied.
+        let http = ScriptedHttp::without_dynamic(vec![
+            (
+                "https://api.primeintellect.ai/api/v1/auth_challenge/generate",
+                503,
+                "",
+            ),
+            (
+                "https://api.primeintellect.ai/api/v1/user/whoami",
+                403,
+                r#"{"error":{"message":"forbidden"}}"#,
+            ),
+        ]);
         let ui = Arc::new(ScriptedUi::new(vec![Some("bad-key".to_string())]));
         let inputs = TracesLoginInputs {
             agent_dir: &agent,
             http: &http,
             prime_cli_config_path: None,
+            poll_interval_ms: None,
         };
         let outcome = run_traces_login_inner(&inputs, ui.as_ref()).await;
         assert_eq!(
@@ -619,19 +654,19 @@ mod tests {
     }
 
     #[tokio::test]
-    // The process env must stay stable across the flow's awaits:
-    // the sync env lock is held for the whole test by design.
-    #[allow(clippy::await_holding_lock)]
     async fn a_cancelled_prompt_stays_silent() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
         let (_dir, agent) = temp_agent();
+        // The browser flow arms the prompt; the closed input cancels the
+        // login (the pending status poll yields first).
         let http = ScriptedHttp::new(vec![]);
         let ui = Arc::new(ScriptedUi::new(vec![None]));
         let inputs = TracesLoginInputs {
             agent_dir: &agent,
             http: &http,
             prime_cli_config_path: None,
+            poll_interval_ms: None,
         };
         let outcome = run_traces_login_inner(&inputs, ui.as_ref()).await;
         assert_eq!(outcome, TraceLoginOutcome::Cancelled);
@@ -641,16 +676,13 @@ mod tests {
     }
 
     #[tokio::test]
-    // The process env must stay stable across the flow's awaits:
-    // the sync env lock is held for the whole test by design.
-    #[allow(clippy::await_holding_lock)]
     async fn a_failed_browser_falls_back_to_the_paste_prompt() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
         let (_dir, agent) = temp_agent();
         // The challenge generate endpoint is down (the browser flow
         // fails before any URL shows).
-        let http = ScriptedHttp::new(vec![
+        let http = ScriptedHttp::without_dynamic(vec![
             (
                 "https://api.primeintellect.ai/api/v1/auth_challenge/generate",
                 503,
@@ -664,15 +696,20 @@ mod tests {
             agent_dir: &agent,
             http: &http,
             prime_cli_config_path: None,
+            poll_interval_ms: None,
         };
         let outcome = run_traces_login_inner(&inputs, ui.as_ref()).await;
-        // The fallback prompt armed, the pasted key was checked (the
-        // whoami answer scripted below the generate failure is missing,
-        // so the check surfaces as the transport's answer).
+        assert!(matches!(outcome, TraceLoginOutcome::Status(_)));
         let (progress, _auth, prompts) = ui.logs();
         assert!(progress.contains(&"Browser sign-in unavailable (Failed to generate Prime login challenge: Service Unavailable).".to_string()));
         assert_eq!(prompts, vec![FALLBACK_PROMPT.to_string()]);
-        // The access check ran against the pasted key.
-        assert!(outcome != TraceLoginOutcome::Cancelled);
+        // The pasted key was stored.
+        let mut storage = AuthStorage::create(&agent);
+        assert_eq!(
+            storage
+                .get_api_key_with_source_token("prime-agent-traces", false)
+                .api_key,
+            Some("fallback-key".to_string())
+        );
     }
 }

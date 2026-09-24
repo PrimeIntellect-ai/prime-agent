@@ -995,7 +995,7 @@ async fn tui_traces_upload_all_sweeps_with_live_progress() {
     // The live counter (TS `showStatus`: the clear-key hint follows the
     // run loop's binding).
     assert!(
-        rendered.contains("Uploading traces: 2/2 (ctrl+c to cancel)"),
+        rendered.contains("Uploading traces: 2/2 (Ctrl+C to cancel)"),
         "the progress row renders:\n{rendered}"
     );
     // The settled summary (TS's parts joined with `; `).
