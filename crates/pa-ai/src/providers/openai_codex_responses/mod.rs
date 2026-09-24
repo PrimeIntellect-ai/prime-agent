@@ -1167,7 +1167,7 @@ mod tests {
             json!({ "type": "response.output_text.delta", "delta": text }),
             json!({
                 "type": "response.output_item.done",
-                "item": { "type": "message", "id": message_id, "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text" }] },
+                "item": { "type": "message", "id": message_id, "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": text }] },
             }),
             json!({
                 "type": "response.completed",
