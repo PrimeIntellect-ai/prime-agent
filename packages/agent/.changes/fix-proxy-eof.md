@@ -1,1 +1,0 @@
-- Proxy streams now fail with a clear "stream truncated" error instead of hanging forever when the connection ends mid-response, and the proxy request body is derived from the shared stream-options type so new options cannot be silently dropped.

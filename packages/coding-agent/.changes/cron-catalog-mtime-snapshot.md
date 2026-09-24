@@ -1,1 +1,0 @@
-- Reduced daemon disk churn: the scheduled-jobs catalog now re-parses only when its file changes, instead of on every heartbeat and agents-view poll and two to three times per mutation.
