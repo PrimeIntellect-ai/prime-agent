@@ -173,6 +173,11 @@ pub struct BashView {
     /// A lazy load-more fetch is in flight: the marker stays and the up
     /// key does not stack a second request.
     loading_more: bool,
+    /// The failed open fetch's retry is in flight (an Up press re-issued
+    /// it): further Ups do not stack duplicates, and the retry's landing
+    /// or failure clears the claim — a late duplicate failure can never
+    /// paint an error over output that already arrived.
+    open_retry: bool,
     /// The output region's scroll position: how many lines the window
     /// rides lifted off the newest output (0 = bottom-anchored on the
     /// newest lines).
@@ -1848,9 +1853,7 @@ mod tests {
         let mut loaded = false;
         for _ in 0..FIRST_TAIL_LINES {
             match view.handle_key("up", &kb()) {
-                BashViewAction::LoadMore {
-                    generation, lines, ..
-                } => {
+                BashViewAction::LoadMore { generation, .. } => {
                     view.set_error("kernel stalled".to_string(), true, Some(generation));
                     assert!(view.error.is_some());
                     assert!(!view.loading_more, "the failure releases the claim");
@@ -2092,17 +2095,31 @@ mod tests {
         let text = frame_text(&frame);
         assert!(text.iter().any(|row| row.contains("line one")));
 
-        // A retry that FAILS releases the claim for the next Up (and the
-        // new failure replaces the shown error); a kill error meanwhile
-        // never touches it.
-        view.set_error("Bash output: again".to_string(), true, Some(generation));
-        assert!(view.fetch_error);
+        // A retry that FAILS releases the claim for the next Up, and a
+        // kill error meanwhile never touches it: back out, reopen, fail
+        // the open fetch, retry, fail the retry, retry again.
+        view.handle_key("left", &kb());
+        view.handle_key("enter", &kb());
+        let reopened = view.detail_generation;
+        view.set_error("Bash output: first".to_string(), true, Some(reopened));
+        assert_eq!(
+            view.handle_key("up", &kb()),
+            BashViewAction::OpenDetail {
+                id: "a".to_string(),
+                generation: reopened,
+            }
+        );
+        view.set_error(
+            "Bash output: retry failed".to_string(),
+            true,
+            Some(reopened),
+        );
         assert!(!view.open_retry, "the failed retry releases the claim");
         assert_eq!(
             view.handle_key("up", &kb()),
             BashViewAction::OpenDetail {
                 id: "a".to_string(),
-                generation,
+                generation: reopened,
             }
         );
         view.set_error("Could not kill bash command: nope".to_string(), false, None);
@@ -2110,8 +2127,9 @@ mod tests {
             view.open_retry,
             "a kill error never releases the retry claim"
         );
-        view.set_output("a", "line two", generation);
+        view.set_output("a", "line two", reopened);
         assert!(!view.open_retry);
+        assert!(view.error.is_none(), "the landing clears the fetch error");
     }
 
     /// A one-row output region (the designed minimum under a long
