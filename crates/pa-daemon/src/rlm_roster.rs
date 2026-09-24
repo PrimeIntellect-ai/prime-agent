@@ -444,11 +444,11 @@ mod tests {
         // Saved children of the walk are not re-listed as passive rows.
         let roots = vec![
             RosterWalkRoot {
-                session_file: parent.clone(),
+                session_file: parent,
                 active_session_id: None,
             },
             RosterWalkRoot {
-                session_file: child.clone(),
+                session_file: child,
                 active_session_id: None,
             },
         ];

@@ -233,8 +233,6 @@ fn child_cell(receipts_dir: &Path) -> String {
     let error_path = receipts_dir.join("child-reply.error").display().to_string();
     format!(
         "from rlm import host_request\nimport json, traceback\ntry:\n    receipt = await host_request(\"agent_message.send\", {{\"message\": \"kid reply\", \"receiver_role\": \"parent\"}})\n    open({receipt_path:?}, \"w\").write(json.dumps(receipt))\nexcept Exception:\n    open({error_path:?}, \"w\").write(traceback.format_exc())\n    raise",
-        receipt_path = receipt_path,
-        error_path = error_path,
     )
 }
 
@@ -276,7 +274,7 @@ fn receipt_listing(dir: &Path) -> String {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .map(|entries| {
             entries
-                .filter_map(|entry| entry.ok())
+                .filter_map(std::result::Result::ok)
                 .map(|entry| entry.file_name().to_string_lossy().to_string())
                 .collect()
         })
@@ -610,9 +608,6 @@ fn record_cell(request: &str, name: &str, receipts_dir: &Path) -> String {
         .to_string();
     format!(
         "from rlm import host_request\nimport json, traceback\ntry:\n    result = await host_request({request})\n    open({receipt_path:?}, \"w\").write(json.dumps(result))\nexcept Exception:\n    open({error_path:?}, \"w\").write(traceback.format_exc())\n    raise",
-        request = request,
-        receipt_path = receipt_path,
-        error_path = error_path,
     )
 }
 

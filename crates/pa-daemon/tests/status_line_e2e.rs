@@ -145,7 +145,7 @@ fn serve(
     let body: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
     requests.lock().expect("mock lock").push(RecordedRequest {
         path: path.clone(),
-        body: body.clone(),
+        body: body,
         auth,
     });
     if method != "POST" || !path.contains("chat/completions") {

@@ -149,7 +149,7 @@ impl WorkerConfig {
             .unwrap_or_else(|| {
                 agent_dir
                     .join("daemon-workers")
-                    .join(format!("{}.recovery.jsonl", active_session_id))
+                    .join(format!("{active_session_id}.recovery.jsonl"))
             });
         let script = std::env::var_os(WORKER_SCRIPT_ENV)
             .map(PathBuf::from)
@@ -537,7 +537,7 @@ impl crate::status_line::StatusSession for SessionCore {
     fn status_messages(&self) -> Vec<Value> {
         self.store
             .as_ref()
-            .map(|store| store.messages())
+            .map(super::session_store::SessionFile::messages)
             .unwrap_or_default()
     }
 
@@ -999,7 +999,7 @@ impl Worker {
             std::sync::Arc::new(move || {
                 !core
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .steering
                     .is_empty()
             })
@@ -1283,7 +1283,7 @@ impl Worker {
                     engine: std::sync::Arc::clone(&engine),
                     user_bash: std::sync::Arc::clone(&user_bash),
                     roster_link: Arc::clone(&roster_link),
-                    worker_token: worker_token.clone(),
+                    worker_token: worker_token,
                     worker_instance_id: config.worker_instance_id.clone(),
                     roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
                     roster_push_order: std::sync::Arc::clone(&roster_push_order),
@@ -1296,13 +1296,13 @@ impl Worker {
                 recovery: Arc::clone(&recovery),
                 core: Arc::clone(&core),
                 input_pauses: input_pauses.clone(),
-                prompt_admissions: prompt_admissions.clone(),
+                prompt_admissions: prompt_admissions,
                 work_notify: Arc::clone(&work_notify),
                 idle_notify: Arc::clone(&idle_notify),
                 events: events.clone(),
                 engine: std::sync::Arc::clone(&engine),
                 active_session_id,
-                status_notify: status_notify.clone(),
+                status_notify: status_notify,
                 roster_pushes: roster_pushes.clone(),
             };
             tokio::spawn(async move {
@@ -1340,7 +1340,7 @@ impl Worker {
             auth_storage: pa_core::auth::AuthStorage::create(&agent_dir),
             get_user_servers: Box::new(|| None),
             begin_login: None,
-            agent_dir: Some(agent_dir.clone()),
+            agent_dir: Some(agent_dir),
             get_catalog_sources: None,
             remote_source: None,
             probe_override: None,
@@ -2552,8 +2552,8 @@ impl Worker {
             }
             core.auto_compaction_enabled = auto_compaction_enabled;
             core.service_tier = restored_tier.unwrap_or(Some(service_tier));
-            core.steering_mode = steering_mode.clone();
-            core.follow_up_mode = follow_up_mode.clone();
+            core.steering_mode.clone_from(&steering_mode);
+            core.follow_up_mode.clone_from(&follow_up_mode);
             core.forced_all_steering = false;
             core.scoped_models = Vec::new();
             core.retry_abort_requested = false;
@@ -2576,7 +2576,7 @@ impl Worker {
             core.rlm_child_id = rlm_child_id;
             core.parent_active_session_id = parent_active_session_id;
             core.parent_session_id = parent_session_id;
-            core.child_script = child_script.clone();
+            core.child_script.clone_from(&child_script);
             (self.summary_locked(&core), rlm_depth)
         };
         // TS `sdk.ts` seeds the Agent's queue modes from the settings
@@ -2746,7 +2746,7 @@ impl Worker {
         let messages: Vec<Value> = core
             .store
             .as_ref()
-            .map(|s| s.messages())
+            .map(super::session_store::SessionFile::messages)
             .unwrap_or_default();
         let state = self.connection_state_locked(&core);
         let last_event_sequence = core.last_event_sequence;
@@ -2783,7 +2783,7 @@ impl Worker {
         });
         if !slim {
             result["state"] = summary_value;
-            result["messages"] = Value::Array(messages.clone());
+            result["messages"] = Value::Array(messages);
         }
         result["snapshot"] = snapshot;
         result["replay"] = json!(replay);
@@ -3064,7 +3064,7 @@ impl Worker {
             let core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             sender_is_child_of(&sender, &core).then_some(AgentFamilyRelationship::Child)
         };
         let prompt = pa_core::session_engine::agent_messaging::create_agent_session_message_prompt(
@@ -3105,7 +3105,7 @@ impl Worker {
                     .clone()
                     .unwrap_or_else(|| "top-level".to_string()),
             });
-            if let Some(name) = summary.session_name.clone().filter(|name| !name.is_empty()) {
+            if let Some(name) = summary.session_name.filter(|name| !name.is_empty()) {
                 target["sessionName"] = json!(name);
             }
             // The receiving side's custom row (TS
@@ -3212,7 +3212,7 @@ impl Worker {
             let store = core.store.as_ref();
             let data = json!({
                 "activeSessionId": core.active_session_id,
-                "sessionId": store.map(|s| s.session_id()).unwrap_or_default(),
+                "sessionId": store.map(super::session_store::SessionFile::session_id).unwrap_or_default(),
                 "sessionFile": core
                     .store
                     .as_ref()
@@ -3469,7 +3469,7 @@ impl Worker {
             let mut core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             core.cwd = cwd.to_string();
         }
         self.engine.set_cwd(std::path::PathBuf::from(cwd));
@@ -3491,7 +3491,7 @@ impl Worker {
             let mut core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             // The moved-to file's persisted depth wins (TS
             // `config.rlmDepth ?? header.rlmDepth`; the replacement carries
             // no create-config depth).
@@ -3542,7 +3542,7 @@ impl Worker {
             let core = self
                 .core
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             crate::scheduled_jobs::live_binding(&core)
         };
         if let Some((binding, artifact_dir)) = binding {
@@ -4075,7 +4075,7 @@ impl Worker {
         let messages: Vec<Value> = core
             .store
             .as_ref()
-            .map(|s| s.messages())
+            .map(super::session_store::SessionFile::messages)
             .unwrap_or_default();
         response_success(None, "get_messages", Some(json!({ "messages": messages })))
     }
@@ -4367,7 +4367,9 @@ impl Worker {
                 .map(|p| p.to_string_lossy().to_string()),
             leaf_id: store.and_then(|s| s.leaf_id().map(str::to_string)),
             auto_compaction_enabled: core.auto_compaction_enabled,
-            message_count: store.map(|s| s.message_count()).unwrap_or(0) as u32,
+            message_count: store
+                .map(super::session_store::SessionFile::message_count)
+                .unwrap_or(0) as u32,
             session_actions: session_snapshot(core),
             compaction_count: store
                 .map(|store| store.compaction_count() as u32)
@@ -4408,7 +4410,9 @@ impl Worker {
         let store = core.store.as_ref();
         journal.record(
             &core.active_session_id,
-            store.map(|s| s.session_id()).unwrap_or(""),
+            store
+                .map(super::session_store::SessionFile::session_id)
+                .unwrap_or(""),
             store
                 .map(|s| s.path.to_string_lossy().to_string())
                 .as_deref(),
@@ -5325,7 +5329,11 @@ impl TurnRunner {
 
         let prompt_index = {
             let core = self.core.lock().unwrap();
-            core.store.as_ref().map(|s| s.message_count()).unwrap_or(0) / 2
+            core.store
+                .as_ref()
+                .map(super::session_store::SessionFile::message_count)
+                .unwrap_or(0)
+                / 2
         };
         let request = PromptRequest {
             batch: batched
@@ -5664,8 +5672,8 @@ impl TurnRunner {
                         json!({ "type": "message_start", "message": message }),
                         json!({ "type": "message_end", "message": message }),
                     ],
-                    EngineEvent::CompactionStart { event } => vec![event.clone()],
-                    EngineEvent::Compaction { event, .. } => vec![event.clone()],
+                    EngineEvent::CompactionStart { event } => vec![event],
+                    EngineEvent::Compaction { event, .. } => vec![event],
                     EngineEvent::GoalUpdate { goal } => vec![json!({
                         "type": "goal_update",
                         "goal": goal,
@@ -5767,7 +5775,6 @@ impl TurnRunner {
                         // attempt. On success the row names the error the
                         // starts reported (the end event carries none).
                         let error = final_error
-                            .clone()
                             .or_else(|| last_retry_error.take())
                             .unwrap_or_else(|| "Unknown error".to_string());
                         last_retry_error = None;
@@ -5804,7 +5811,7 @@ impl TurnRunner {
                         .open(&path)
                     {
                         for frame in &frames {
-                            let _ = writeln!(file, "{}", frame);
+                            let _ = writeln!(file, "{frame}");
                         }
                     }
                 }
@@ -6168,7 +6175,9 @@ pub(crate) fn session_summary(
                     .unwrap_or_default(),
             )
         });
-    let messages = store.map(|store| store.messages()).unwrap_or_default();
+    let messages = store
+        .map(super::session_store::SessionFile::messages)
+        .unwrap_or_default();
     let last_activity_at = messages
         .iter()
         .rev()
@@ -6239,12 +6248,14 @@ pub(crate) fn session_summary(
         is_bash_running: Some(bash_running),
         is_running_tools: streaming && !core.running_tool_calls.is_empty(),
         attached_clients: core.attached_client_ids.len() as u32,
-        message_count: store.map(|s| s.message_count()).unwrap_or(0) as u32,
+        message_count: store
+            .map(super::session_store::SessionFile::message_count)
+            .unwrap_or(0) as u32,
         session_actions: session_snapshot(core),
         streaming_message: None,
         created: store.map(|s| s.header.timestamp.clone()),
         modified,
-        first_message: store.and_then(|s| s.first_message()),
+        first_message: store.and_then(super::session_store::SessionFile::first_message),
         parent_session_path: store.and_then(|store| store.header.parent_session.clone()),
         parent_active_session_id: core.parent_active_session_id.clone(),
         parent_session_id: core.parent_session_id.clone(),
@@ -6922,7 +6933,7 @@ mod tests {
         let path = dir.join(crate::session_store::session_file_name(
             session.session_id(),
         ));
-        session.set_path(path.clone());
+        session.set_path(path);
         session.append_message(serde_json::json!({
             "role": "user", "content": "hi", "timestamp": 1u64
         }));
@@ -7077,7 +7088,7 @@ mod tests {
     async fn abort_and_send_queued_delivers_the_parked_queue_at_the_boundary() {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir =
             std::env::temp_dir().join(format!("pa-worker-abort-send-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -7281,7 +7292,7 @@ mod tests {
     async fn abort_and_send_queued_with_only_follow_ups_stays_abort_only() {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = std::env::temp_dir().join(format!("pa-worker-abort-fu-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let config = WorkerConfig {
@@ -7586,7 +7597,7 @@ mod tests {
     async fn goal_turn_end_loop_runs_to_completion() {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir =
             std::env::temp_dir().join(format!("pa-worker-goal-loop-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -7736,7 +7747,7 @@ mod tests {
     async fn aborted_turn_row_broadcasts_and_persists_through_the_worker_gate() {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir =
             std::env::temp_dir().join(format!("pa-worker-aborted-row-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -7926,7 +7937,7 @@ mod tests {
     async fn kill_cancels_the_sessions_scheduled_jobs() {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir =
             std::env::temp_dir().join(format!("pa-worker-kill-jobs-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -8012,7 +8023,7 @@ mod tests {
     async fn kill_cancels_a_mid_provider_wait_turn_and_surfaces_the_aborted_row() {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir =
             std::env::temp_dir().join(format!("pa-worker-kill-path-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -8173,7 +8184,7 @@ mod tests {
     async fn compact_interrupt_swallows_the_aborted_row() {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir =
             std::env::temp_dir().join(format!("pa-worker-compact-abort-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -8281,7 +8292,7 @@ mod tests {
     async fn goal_pause_withdraws_the_queued_continuation() {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir =
             std::env::temp_dir().join(format!("pa-worker-goal-pause-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -9375,7 +9386,7 @@ mod turn_stream_tests {
     async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups() {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir =
             std::env::temp_dir().join(format!("pa-worker-abort-send-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -9556,7 +9567,7 @@ mod turn_stream_tests {
     async fn abort_and_send_queued_with_no_steering_aborts_only_and_parks_the_queue() {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir =
             std::env::temp_dir().join(format!("pa-worker-abort-only-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -10196,7 +10207,7 @@ mod turn_stream_tests {
     async fn a_retried_turn_broadcasts_one_agent_end_per_run() {
         let _faux = crate::agent_engine::tests::FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = std::env::temp_dir().join(format!(
             "pa-worker-agent-end-retry-{}",
             uuid::Uuid::new_v4()

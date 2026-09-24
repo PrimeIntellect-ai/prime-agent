@@ -1418,7 +1418,10 @@ impl Supervisor {
                     eprintln!(
                         "[supervisor] wrote worker frame {}: {:?}",
                         request.command_type,
-                        written.as_ref().map(|_| "ok").map_err(|e| e.to_string())
+                        written
+                            .as_ref()
+                            .map(|_| "ok")
+                            .map_err(std::string::ToString::to_string)
                     );
                 }
                 if written.is_err() {
@@ -2128,7 +2131,7 @@ impl Supervisor {
                 // The durable create command must reopen the same session
                 // file on relaunch, or a respawned worker would create a
                 // fresh session and lose history.
-                descriptor.create_command.session_path = Some(session_file.clone());
+                descriptor.create_command.session_path = Some(session_file);
             }
             // The binding table learns the durable identity here: a create
             // over a session file another worker owned (the session
@@ -3358,9 +3361,7 @@ impl Supervisor {
                         "sessions": sessions,
                     }
                 });
-                let _ = self
-                    .events
-                    .send((ClientRouting::Broadcast, closing.clone()));
+                let _ = self.events.send((ClientRouting::Broadcast, closing));
                 // The response is written before the accept loop exits (the
                 // write path is the dispatch channel; the 100ms drain only
                 // orders the exit behind it - the coordinator's Booting
@@ -3531,8 +3532,10 @@ impl Supervisor {
             if let Some(start_id) = crate::protocol::process_start_id(*pid as u32) {
                 descriptor.process_start_id = Some(start_id);
             }
-            descriptor.socket_path = socket_path.clone();
-            descriptor.worker_instance_id = worker_instance_id.clone();
+            descriptor.socket_path.clone_from(socket_path);
+            descriptor
+                .worker_instance_id
+                .clone_from(&worker_instance_id);
             if let Some(session_id) = &registration.session_id {
                 descriptor.root_session_id = Some(session_id.clone());
             }
@@ -4621,7 +4624,7 @@ impl Supervisor {
                                 *supports_extension_ui,
                             );
                             if let Some(client) = data.get_mut("client") {
-                                client["capabilities"] = json!(client_capabilities.clone());
+                                client["capabilities"] = json!(client_capabilities);
                             }
                             if wants_chunked(&client_capabilities) {
                                 let purpose = if matches!(command, DaemonCommand::Reattach { .. }) {

@@ -356,7 +356,7 @@ fn the_lease_owner_names_the_live_worker_not_a_stale_inherited_id() {
     let leases_dir = agent_dir.join("session-leases");
     let owner: Value = std::fs::read_dir(&leases_dir)
         .expect("session-leases directory")
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .filter_map(|entry| std::fs::read_to_string(entry.path().join("owner.json")).ok())
         .map(|content| serde_json::from_str::<Value>(&content).expect("owner.json"))
         .find(|owner| owner["sessionPath"].as_str() == Some(session_file.as_str()))

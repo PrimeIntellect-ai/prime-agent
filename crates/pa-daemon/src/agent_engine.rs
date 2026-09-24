@@ -485,7 +485,7 @@ impl AgentSessionEngine {
                 )
             }),
             begin_login: None,
-            agent_dir: Some(agent_dir.clone()),
+            agent_dir: Some(agent_dir),
             get_catalog_sources: Some(Box::new(move || {
                 // Declared local service-catalog sources (TS
                 // `settingsManager.getMcpCatalogSources()`), re-read per
@@ -701,7 +701,7 @@ impl AgentSessionEngine {
         let pending_branch = self
             .pending_branch
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         // Rehydrate the goal driver from the durable store (TS
         // constructor: `this._goalState = this._loadPersistedGoalState()`
@@ -716,7 +716,7 @@ impl AgentSessionEngine {
             let path = self
                 .session_file
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             tokio::task::spawn_blocking(move || {
                 crate::goal_state_persist::persisted_goal_state(path.as_deref())
@@ -740,7 +740,7 @@ impl AgentSessionEngine {
         let session_file = self
             .session_file
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         if let Some(path) = session_file {
             let (window, branch) = tokio::task::spawn_blocking(move || {
@@ -1078,7 +1078,7 @@ impl AgentSessionEngine {
         *self
             .restored_model
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(RestoredSessionModel {
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(RestoredSessionModel {
             session_file: session_path.to_path_buf(),
             model,
             fallback_message,
@@ -1114,13 +1114,13 @@ impl AgentSessionEngine {
         let decision = self
             .restored_model
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()?;
         let (provider, model_id) = decision.model?;
         let current = self
             .session_file
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()?;
         if decision.session_file != current {
             return None;
@@ -1355,7 +1355,7 @@ impl AgentSessionEngine {
         let file = self
             .session_file
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()?;
         let header = pa_core::session::manager::read_session_header(&file)?;
         Some(pa_core::session_engine::runtime_wiring::KernelCronBinding {
@@ -1401,7 +1401,7 @@ impl AgentSessionEngine {
         let session_file = self
             .session_file
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         // Children inherit the parent model selector; the engine resolves
         // the model here, after the create command set the rest of the
@@ -1676,7 +1676,7 @@ impl AgentSessionEngine {
                 *self
                     .pending_max_depth
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(max_depth);
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(max_depth);
             }
         }
     }
@@ -1700,7 +1700,7 @@ impl AgentSessionEngine {
         let pending = self
             .pending_max_depth
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         if let Some(max_depth) = pending {
             if let Err(error) = manager.append_custom_entry(
@@ -1850,7 +1850,7 @@ impl SessionEngine for AgentSessionEngine {
             Some((
                 crate::engine::PromptRequest {
                     batch: Vec::new(),
-                    message: message.content.text().to_string(),
+                    message: message.content.text(),
                     images: Vec::new(),
                     source: "user".to_string(),
                     agent_message_id: None,
@@ -1948,14 +1948,14 @@ impl SessionEngine for AgentSessionEngine {
 
     fn creation_model(&self) -> Option<(String, String)> {
         let model = self.resolve_registry_model().ok()?;
-        Some((model.provider.clone(), model.id.clone()))
+        Some((model.provider.clone(), model.id))
     }
 
     fn set_session_file(&self, path: std::path::PathBuf) {
         *self
             .session_file
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(path);
     }
 
     /// TS `createAgentSession`'s restored-from-session step (sdk.ts): a
@@ -1988,12 +1988,12 @@ impl SessionEngine for AgentSessionEngine {
         let decision = self
             .restored_model
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()?;
         let current = self
             .session_file
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()?;
         if decision.session_file != current {
             return None;
@@ -2018,7 +2018,7 @@ impl SessionEngine for AgentSessionEngine {
         *self
             .own_summary
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(summary);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(summary);
     }
 
     fn configure_service_tier(&self, tier: Option<pa_types::ai::ServiceTier>) {
@@ -2080,13 +2080,13 @@ impl SessionEngine for AgentSessionEngine {
                 .write()
                 .expect("initial selection lock");
             if selection.provider.is_some() {
-                initial.provider = selection.provider.clone();
+                initial.provider.clone_from(&selection.provider);
             }
             if selection.model.is_some() {
-                initial.model = selection.model.clone();
+                initial.model.clone_from(&selection.model);
             }
             if selection.api_key.is_some() {
-                initial.api_key = selection.api_key.clone();
+                initial.api_key.clone_from(&selection.api_key);
             }
             if selection.thinking.is_some() {
                 initial.thinking = selection.thinking;
@@ -2274,7 +2274,7 @@ impl SessionEngine for AgentSessionEngine {
                 error: error.to_string(),
             };
         }
-        let custom_instructions = request.custom_instructions.clone();
+        let custom_instructions = request.custom_instructions;
         // The live target's key, the same chain every other summarizer
         // arm reads: the config key is the startup snapshot and goes
         // stale with the session's provider switches (the R8 seam's
@@ -2464,7 +2464,7 @@ impl SessionEngine for AgentSessionEngine {
             *self
                 .pending_branch
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(branch_entries);
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(branch_entries);
             return Ok(());
         }
         self.runtime.block_on(async move {
@@ -2527,7 +2527,7 @@ impl SessionEngine for AgentSessionEngine {
             if *slot == cwd {
                 return;
             }
-            *slot = cwd.clone();
+            (*slot).clone_from(&cwd);
         }
         if self
             .autonomous_driver_default
@@ -2654,7 +2654,7 @@ impl SessionEngine for AgentSessionEngine {
             }
         };
         let question = request.question.clone();
-        let previous_turns = request.previous_turns.clone();
+        let previous_turns = request.previous_turns;
         let retry_policy = pa_core::session_engine::provider_retry::DEFAULT_PROVIDER_RETRY_POLICY;
         let result =
             self.runtime
@@ -3138,7 +3138,7 @@ impl SessionEngine for AgentSessionEngine {
             None => TurnPrompt::User {
                 text: request.message.clone(),
                 images: request.images.clone(),
-                batch: request.batch.clone(),
+                batch: request.batch,
             },
         };
         self.run_turns(turn_prompt, aborted, &mut emit);
@@ -3910,7 +3910,7 @@ impl AgentSessionEngine {
             if let Some(text) = self
                 .held_autonomous_continuation
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .take()
             {
                 let admission = self
@@ -4681,7 +4681,7 @@ pub(crate) mod tests {
 
         let engine = AgentSessionEngine::new(AgentEngineConfig {
             cwd: dir.path().to_path_buf(),
-            agent_dir: agent_dir.clone(),
+            agent_dir: agent_dir,
             // No process-level fallback: the wire flags must be the source.
             provider: None,
             model: None,
@@ -4834,7 +4834,7 @@ pub(crate) mod tests {
     fn recovery_rebuild_rehydrates_the_goal_from_the_session_file() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().unwrap();
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
@@ -4985,7 +4985,7 @@ pub(crate) mod tests {
     fn recovered_engine_compaction_walk_sees_the_durable_history() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().unwrap();
         write_compaction_settings(dir.path(), 1);
         // The durable store a killed worker leaves behind: a long
@@ -5066,7 +5066,7 @@ pub(crate) mod tests {
     fn post_compaction_goal_continuation_mint() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _engine_dir) = faux_engine_with_settings(
             serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
             1,
@@ -5158,7 +5158,7 @@ pub(crate) mod tests {
     fn goal_turn_end_mints_the_loop_until_the_goal_completes() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().unwrap();
         let engine = std::sync::Arc::new(
             AgentSessionEngine::new(AgentEngineConfig {
@@ -5272,7 +5272,7 @@ pub(crate) mod tests {
     fn paused_goal_mints_no_turn_end_continuation() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _engine_dir) = faux_engine_with_settings(
             serde_json::json!({ "responses": [
                 {"text": "start turn reply"},
@@ -5322,7 +5322,7 @@ pub(crate) mod tests {
     fn budget_exhausted_stops_with_the_ts_budget_steer() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _engine_dir) = faux_engine_with_settings(
             serde_json::json!({ "responses": [{"text": "crossing turn reply"}] }),
             1,
@@ -5391,7 +5391,7 @@ pub(crate) mod tests {
     fn queued_input_defers_the_turn_end_mint() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _engine_dir) = faux_engine_with_settings(
             serde_json::json!({ "responses": [{"text": "first"}, {"text": "second"}] }),
             1,
@@ -5444,7 +5444,7 @@ pub(crate) mod tests {
     fn running_children_owe_the_continuation_and_settle_delivers_it() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().unwrap();
         let engine = std::sync::Arc::new(
             AgentSessionEngine::new(AgentEngineConfig {
@@ -5560,7 +5560,7 @@ pub(crate) mod tests {
     fn injected_custom_turn_holds_one_representation() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
             serde_json::json!({ "responses": [{"text": "notice acknowledged"}] }),
             1,
@@ -5669,7 +5669,7 @@ pub(crate) mod tests {
     fn goal_start_continuation_holds_one_representation() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, _dir) = faux_engine_with_settings(
             serde_json::json!({ "responses": [{"text": "goal turn reply"}] }),
             1,
@@ -5743,7 +5743,7 @@ pub(crate) mod tests {
     fn threshold_crossing_auto_compacts_with_the_event_pair() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Probe: the baseline turn's total usage (system prompt included).
         let (probe, _probe_dir) = faux_engine_with_settings(
             serde_json::json!({ "responses": [{"text": "seed reply"}] }),
@@ -5874,7 +5874,7 @@ pub(crate) mod tests {
     fn threshold_compaction_stays_on_the_session_provider_after_a_resolution_drift() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().unwrap();
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
@@ -5986,7 +5986,7 @@ pub(crate) mod tests {
             .saturating_sub(FAUX_REQUEST_BUDGET + headroom)
             .max(1);
         write_settings("faux", "faux-1", reserve);
-        registration.set_responses(parsed.responses.clone());
+        registration.set_responses(parsed.responses);
         let engine = new_engine();
         let mut events: Vec<EngineEvent> = Vec::new();
         admit(&engine, "seed turn".to_string(), &mut events);
@@ -6081,7 +6081,7 @@ pub(crate) mod tests {
     fn retire_clears_the_provider_target_for_the_replacement_build() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().unwrap();
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
@@ -6212,7 +6212,7 @@ pub(crate) mod tests {
     fn threshold_compaction_counts_into_the_run_telemetry() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Probe: the baseline turn's total usage (system prompt included).
         let (probe, _probe_dir) = faux_engine_with_settings(
             serde_json::json!({ "responses": [{"text": "seed reply"}] }),
@@ -6272,7 +6272,7 @@ pub(crate) mod tests {
     fn requested_compaction_counts_into_the_run_telemetry() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // A tiny reserve keeps the threshold arm silent (TS reserve 1 means
         // the context must nearly fill the window).
         let (engine, dir) = faux_engine_with_settings(
@@ -6332,7 +6332,7 @@ pub(crate) mod tests {
     fn manual_wire_compaction_counts_into_the_run_telemetry() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (engine, dir) = faux_engine_with_settings(
             serde_json::json!({
                 "responses": [
@@ -6481,7 +6481,7 @@ pub(crate) mod tests {
     fn threshold_skip_records_the_durable_outcome_row() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Probe: the baseline turn's total usage (system prompt included).
         let (probe, _probe_dir) = faux_engine_with_settings(
             serde_json::json!({ "responses": [{"text": "seed reply"}] }),
@@ -6558,7 +6558,7 @@ pub(crate) mod tests {
     fn requested_compaction_skip_records_the_durable_outcome_row() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().unwrap();
         let engine = AgentSessionEngine::new(AgentEngineConfig {
             cwd: dir.path().to_path_buf(),
@@ -6652,7 +6652,7 @@ pub(crate) mod tests {
                     }
                     events
                         .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .push(event);
                     true
                 },
@@ -6737,7 +6737,7 @@ pub(crate) mod tests {
     fn threshold_compaction_aborted_mid_run_records_the_cancelled_outcome() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Probe: the baseline turn's total usage (the same shape as the
         // threshold crossing test; the headroom sits between the two
         // turns' usage).
@@ -6797,7 +6797,7 @@ pub(crate) mod tests {
 
         let events = events
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         assert_cancelled_end_event(&events, "threshold", "Compaction cancelled");
         assert!(outcome_row_in_entries(&engine));
@@ -6824,7 +6824,7 @@ pub(crate) mod tests {
     fn requested_compaction_aborted_mid_run_records_the_cancelled_outcome() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // A tiny reserve keeps the threshold check silent (the headroom is
         // the whole window) while the 10-token keep-recent budget leaves
         // the turns summarizable for the requested run.
@@ -6867,7 +6867,7 @@ pub(crate) mod tests {
         wait_for_compaction_start(&started);
         let start_reason = events
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .find_map(|event| match event {
                 EngineEvent::CompactionStart { event } => Some(event["reason"].clone()),
@@ -6880,7 +6880,7 @@ pub(crate) mod tests {
 
         let events = events
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         assert_cancelled_end_event(&events, "requested", "Requested compaction cancelled");
         assert!(outcome_row_in_entries(&engine));
@@ -6914,7 +6914,7 @@ pub(crate) mod tests {
     fn threshold_below_the_headroom_stays_silent() {
         let _faux = FAUX_TEST_LOCK
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = tempfile::TempDir::new().unwrap();
         let engine = AgentSessionEngine::new(AgentEngineConfig {
             cwd: dir.path().to_path_buf(),
@@ -7244,7 +7244,7 @@ pub(crate) mod tests {
         .unwrap();
         let engine = AgentSessionEngine::new(AgentEngineConfig {
             cwd: dir.path().to_path_buf(),
-            agent_dir: agent_dir.clone(),
+            agent_dir: agent_dir,
             provider: None,
             model: None,
             api_key: None,
@@ -7794,7 +7794,7 @@ pub(crate) mod tests {
         .unwrap();
         let engine = AgentSessionEngine::new(AgentEngineConfig {
             cwd: dir.path().to_path_buf(),
-            agent_dir: agent_dir.clone(),
+            agent_dir: agent_dir,
             provider: None,
             model: None,
             api_key: None,
@@ -8075,7 +8075,7 @@ fn faux_model_from_script(script: &str) -> anyhow::Result<Model> {
 fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
     let _faux = FAUX_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
@@ -8231,7 +8231,7 @@ fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
 fn settled_turn_emits_the_terminal_turn_end_payload() {
     let _faux = FAUX_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = tests::faux_engine_with_settings(
         serde_json::json!({ "responses": [{"text": "settled reply"}] }),
         1,
@@ -8281,7 +8281,7 @@ fn settled_turn_emits_the_terminal_turn_end_payload() {
 fn settled_turn_emits_the_run_agent_end_payload() {
     let _faux = FAUX_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (engine, _engine_dir) = tests::faux_engine_with_settings(
         serde_json::json!({ "responses": [{"text": "settled reply"}] }),
         1,
@@ -8351,7 +8351,7 @@ fn settled_turn_emits_the_run_agent_end_payload() {
 fn retried_run_restarts_with_its_own_agent_frames() {
     let _faux = FAUX_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::create_dir_all(dir.path().join("agent")).unwrap();
     std::fs::write(
@@ -8477,7 +8477,7 @@ fn retried_run_restarts_with_its_own_agent_frames() {
 fn active_goal_aborted_turn_row_broadcasts_and_goal_accounting_skips_it() {
     let _faux = FAUX_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
@@ -8713,7 +8713,7 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
     ]);
     let _faux = FAUX_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
@@ -8813,7 +8813,7 @@ fn run_prompts(
 ) -> (std::sync::Arc<AgentSessionEngine>, Vec<EngineEvent>) {
     let _faux = FAUX_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = AgentSessionEngine::new(AgentEngineConfig {
         cwd: dir.path().to_path_buf(),
@@ -9131,7 +9131,7 @@ fn custom_rows(events: &[EngineEvent]) -> Vec<serde_json::Value> {
 fn assistant_updates_stream_live_while_the_turn_runs() {
     let _faux = FAUX_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     // A paced script: 40 short words at 100 tokens/second streams for
     // roughly 0.4s wall time. If the engine buffered events until the turn
@@ -9282,8 +9282,8 @@ fn compact_session_command_emits_the_result_on_success() {
     let (_engine, events) = run_prompts(
         serde_json::json!({
             "responses": [
-                { "text": filler.clone() },
-                { "text": filler.clone() },
+                { "text": filler },
+                { "text": filler },
                 { "text": "## Summary\nthe session story" },
             ]
         }),
@@ -9416,7 +9416,7 @@ fn autonomous_limit_stops_the_run_without_a_row() {
 fn autonomous_gate_pass_and_failure_drive_the_loop() {
     let _faux = FAUX_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // The gate passes only on its second run (a counter file in the cwd).
     let dir = tempfile::TempDir::new().unwrap();
     let gate = format!(
@@ -9529,7 +9529,7 @@ impl pa_core::autonomous::AutonomousDriver for ScriptedDriver {
 fn the_turn_loop_is_driven_by_the_driver_trait() {
     let _faux = FAUX_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     let engine = std::sync::Arc::new(
         AgentSessionEngine::new(AgentEngineConfig {
@@ -9615,7 +9615,7 @@ fn the_turn_loop_is_driven_by_the_driver_trait() {
 fn agent_engine_streams_updates_and_final_message() {
     let _faux = FAUX_TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::TempDir::new().unwrap();
     // Scoped env: the faux seam is process-global; keep the test isolated.
     let engine = AgentSessionEngine::new(AgentEngineConfig {

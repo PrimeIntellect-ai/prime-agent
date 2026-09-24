@@ -215,7 +215,7 @@ impl RestoreProgress {
                 target.settled = true;
                 target.failure = by_file
                     .get(target.session_file.as_str())
-                    .map(|message| message.to_string());
+                    .map(std::string::ToString::to_string);
             }
             state.settled_generation += 1;
             state.failures = failures;

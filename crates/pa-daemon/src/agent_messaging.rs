@@ -323,7 +323,7 @@ impl AgentMessageController for LinkAgentMessageController {
                 // member keys on the row's live id so role-addressed sends
                 // target the live worker, never the replaced id.
                 if active_session_id != child.active_session_id {
-                    member.id = active_session_id.clone();
+                    member.id.clone_from(&active_session_id);
                 }
                 child_members.push(member);
                 continue;
@@ -544,7 +544,7 @@ impl LinkAgentMessageController {
         let summary = self
             .own_summary
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         FamilyIdentity::from_summary(summary.as_ref(), &self.active_session_id)
     }
@@ -557,7 +557,7 @@ impl LinkAgentMessageController {
         let summary = self
             .own_summary
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let mut sender = json!({
             "activeSessionId": self.active_session_id,
@@ -734,7 +734,7 @@ impl LinkAgentObserveController {
         let summary = self
             .own_summary
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         let identity = FamilyIdentity::from_summary(summary.as_ref(), &self.active_session_id);
         Ok((sessions, identity))
