@@ -159,6 +159,11 @@ pub struct SessionEngine {
     /// Installed session telemetry (agent-event subscriber). `None` when
     /// telemetry is disabled or the session is not depth 0.
     pub telemetry: Option<std::sync::Arc<super::telemetry::SessionTelemetry>>,
+    /// The RLM child-usage attribution producer: the kernel `rlm.spawn`
+    /// handler registers spawn targets into it, and the embedding wires
+    /// the child-observation sink (the daemon children registry) onto it
+    /// after the build.
+    pub rlm_usage: std::sync::Arc<super::rlm_usage::RlmChildUsageAttributions>,
     /// The session's kernel provisioner. The engine is the STRONG owner on
     /// purpose: the `ipython` tool on the agent and the compaction
     /// kernel-state probe on the session hold weak references, because the
@@ -720,6 +725,9 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
     // whether this session reports at all).
     if let Some(telemetry) = telemetry.as_ref() {
         session.set_skill_telemetry(telemetry.clone());
+        // Same lifetime for the `rlm child usage attributed` adoption
+        // event: the producer's flush reports through this handle.
+        wiring.rlm_usage.set_telemetry(telemetry.clone());
     }
     let goal_driver = wiring.runtime.goal_driver().clone();
     Ok(SessionEngine {
@@ -736,6 +744,7 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
         extension_diagnostics,
         turn_boundary,
         telemetry,
+        rlm_usage: wiring.rlm_usage,
         provisioner,
     })
 }

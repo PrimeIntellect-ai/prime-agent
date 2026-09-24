@@ -321,6 +321,34 @@ impl SessionTelemetry {
         self.client.track("skill used", properties);
     }
 
+    /// `rlm child usage attributed` (schema v1): one durable child-usage
+    /// attribution row landed in the parent session (the RLM producer's
+    /// flush). Primitives only — the origin label and the batch's token
+    /// counts and cost; never prompt, session, or file content.
+    pub fn note_child_usage_attributed(
+        &self,
+        origin: &str,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_write_tokens: u64,
+        cost: f64,
+    ) {
+        let mut properties = self.session_properties();
+        properties.set("origin", Value::from(origin));
+        properties.set("input_tokens", Value::from(input_tokens));
+        properties.set("output_tokens", Value::from(output_tokens));
+        properties.set("cache_read_tokens", Value::from(cache_read_tokens));
+        properties.set("cache_write_tokens", Value::from(cache_write_tokens));
+        properties.set(
+            "cost",
+            Value::from(
+                serde_json::Number::from_f64(cost).unwrap_or_else(|| serde_json::Number::from(0)),
+            ),
+        );
+        self.client.track("rlm child usage attributed", properties);
+    }
+
     /// `agent command used`: builtin session commands only, canonical name.
     /// Feed from `session_commands::execute_session_command` (TS
     /// `captureAgentCommandUsed`).
@@ -1346,6 +1374,28 @@ mod tests {
         assert_eq!(skills[1]["source"], serde_json::json!("steer"));
         let all = serde_json::to_string(&fixture.mock.events()).unwrap();
         assert!(!all.contains("skill content"));
+    }
+
+    /// `rlm child usage attributed`: the origin label and the batch's
+    /// primitives; the token counts and cost round-trip, and nothing
+    /// else rides.
+    #[tokio::test]
+    async fn child_usage_attributed_event_shape() {
+        let fixture = fixture();
+        let telemetry = SessionTelemetry::detached(
+            fixture.client.clone(),
+            fixture.state.clone(),
+            "interactive".to_string(),
+        );
+        telemetry.note_child_usage_attributed("spawn_task", 50_208, 2_929, 0, 0, 0.0089957);
+        fixture.client.flush().await.unwrap();
+        let events = event_properties(&fixture.mock, "rlm child usage attributed").await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["origin"], serde_json::json!("spawn_task"));
+        assert_eq!(events[0]["input_tokens"], serde_json::json!(50_208));
+        assert_eq!(events[0]["output_tokens"], serde_json::json!(2_929));
+        assert_eq!(events[0]["cache_read_tokens"], serde_json::json!(0));
+        assert!((events[0]["cost"].as_f64().unwrap() - 0.0089957).abs() < 1e-9);
     }
 
     /// `build_client`: settings-provided PostHog endpoint + the local mirror.

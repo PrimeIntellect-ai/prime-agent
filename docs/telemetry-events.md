@@ -206,6 +206,24 @@ ONLY — never tool names, arguments, results, or pasted credential material.
 | `action` | string | `config` / `refresh` / `paste-install` |
 | `server_name` | string | server id from settings / ACP admission / the resolved service catalog |
 
+### `rlm child usage attributed`
+
+One durable `child_usage_attributed` row landed in the parent session: the
+RLM producer folded a recursive child's billable usage batch into the
+parent assistant row that spawned it (the `rlm child usage` accounting
+feature's adoption signal). Primitives only — never prompt, session, or
+file content.
+
+| property | type | notes |
+|---|---|---|
+| `session_id` | string | as above |
+| `origin` | string | `spawn_task` / `agent_message` / `direct_user` (the triggering prompt's label) |
+| `input_tokens` | number | the batch's usage totals |
+| `output_tokens` | number | |
+| `cache_read_tokens` | number | |
+| `cache_write_tokens` | number | |
+| `cost` | number | the batch's cost total |
+
 ### `tool executed`
 
 Per tool execution. Tool name only — never arguments or results.
