@@ -136,11 +136,21 @@ pub(crate) fn already_active_line(holder: &str, session_path: &Path) -> String {
 
 /// The suggested `--resume <holder>` argument, shell-quoted so a holder id
 /// the daemon or a roster row controls can never break the suggested
-/// command (or inject a second one): POSIX single quotes with the
+/// command (or inject a second one). Unix: POSIX single quotes with the
 /// embedded-quote escape - the exact form a shell round-trips
 /// byte-identically, and inert for the hex ids the product mints.
+/// Windows (`cmd.exe` passes the whole token through and the CLI's own
+/// argument parser splits on the quotes): double quotes with the
+/// embedded-quote doubling, the CRT parsing rule.
 pub(crate) fn quoted_resume_arg(id: &str) -> String {
-    format!("--resume '{}'", id.replace('\'', "'\\''"))
+    #[cfg(windows)]
+    {
+        format!("--resume \"{}\"", id.replace('"', "\"\""))
+    }
+    #[cfg(not(windows))]
+    {
+        format!("--resume '{}'", id.replace('\'', "'\\''"))
+    }
 }
 
 /// The descriptive refusal for a holder the live roster identifies: the

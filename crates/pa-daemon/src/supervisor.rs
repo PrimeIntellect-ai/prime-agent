@@ -4781,6 +4781,18 @@ impl Supervisor {
         for resident in self.registry.list().await {
             resident.intentional_stop.store(true, Ordering::SeqCst);
             resident.note_retired();
+            // The stop tombstone persists before the worker is even told (TS
+            // `stopWorkerUntracked` persists before its request): a
+            // supervisor that dies between here and the worker's exit
+            // leaves durable stop intent, and the next boot finishes the
+            // stop instead of adopting the leftover as healthy.
+            if self.persist_stop_tombstone(&resident).await.is_err() {
+                self.log_line(&format!(
+                    "session worker {} stop tombstone could not persist; leaving the worker untouched (the next boot retries the stop)",
+                    resident.worker_id
+                ));
+                continue;
+            }
             let _ = self
                 .route_command(&resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
                 .await;
@@ -4789,9 +4801,7 @@ impl Supervisor {
             // contract). A worker that missed the routed shutdown (a dead
             // connection, a wedged socket, a flush outlasting the route
             // budget) gets the identity-gated SIGTERM -> SIGKILL
-            // escalation; one that survives even that keeps its descriptor
-            // WITH the stop tombstone, so the next boot's adoption pass
-            // finishes the stop. Deleting the descriptor of a live worker
+            // escalation. Deleting the descriptor of a live worker
             // orphans it: nothing on any later daemon can adopt or reap it
             // through its identity, while it keeps holding its runtime
             // session lease - every open of its session then refuses with
@@ -4800,14 +4810,25 @@ impl Supervisor {
                 let descriptor = resident.descriptor.lock().await;
                 (descriptor.pid as u32, descriptor.process_start_id.clone())
             };
+            // An unobservable identity never receives the escalation's
+            // signals (a pid that cannot be proven ours stays untouched);
+            // a live process behind such a pid keeps its tombstoned
+            // descriptor too, exactly like a SIGKILL survivor - the next
+            // boot retries the stop.
+            let alive_unverified =
+                start_id.is_none() && crate::lease::is_process_alive(pid).unwrap_or(false);
             match crate::boot_reap::stop_process(pid, start_id).await {
                 crate::boot_reap::ReapOutcome::Survived => {
-                    if self.persist_stop_tombstone(&resident).await.is_ok() {
-                        self.log_line(&format!(
-                            "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",
-                            resident.worker_id
-                        ));
-                    }
+                    self.log_line(&format!(
+                        "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",
+                        resident.worker_id
+                    ));
+                }
+                _ if alive_unverified => {
+                    self.log_line(&format!(
+                        "session worker {} cannot be identity-verified; descriptor tombstoned for the next boot",
+                        resident.worker_id
+                    ));
                 }
                 _ => {
                     let _ = std::fs::remove_file(&resident.descriptor_path);

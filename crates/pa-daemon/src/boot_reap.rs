@@ -103,11 +103,23 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
     let socket_path = supervisor.options.socket_path.clone();
     let descriptor_dir = supervisor.descriptor_dir();
     // The adoption pass's business, never the reap's: the pids this
-    // daemon's own descriptors name (a crash restart's live workers
-    // re-register and keep serving).
+    // daemon's own descriptors name, protected only while the process
+    // identity still matches the descriptor (a recycled pid is a different
+    // process and must not shield a leftover; an unobservable identity
+    // keeps the skip - a missed reap is recoverable, a wrong one is not).
     let protected: HashSet<u32> =
         crate::descriptor::load_descriptors(&descriptor_dir, &socket_path)
             .into_iter()
+            .filter(|(_, descriptor)| {
+                crate::lease::get_process_start_id(descriptor.pid as u32)
+                    .map(|observed| {
+                        descriptor
+                            .process_start_id
+                            .as_deref()
+                            .is_some_and(|expected| observed == expected)
+                    })
+                    .unwrap_or(true)
+            })
             .map(|(_, descriptor)| descriptor.pid as u32)
             .collect();
     let mut targets = same_socket_worker_targets(&socket_path, &protected);
@@ -143,12 +155,18 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
     .await;
     // The dead workers' socket files leave with them (a killed process
     // cannot clean up after itself; the ids never repeat, so a stale
-    // endpoint would linger past every spawn).
+    // endpoint would linger past every spawn). The unlink stays inside the
+    // product's endpoint namespace: the path was validated as one of this
+    // supervisor's own worker sockets at discovery, and the last check
+    // re-verifies the socket-ness before the remove - a regular file at a
+    // matching name is never unlinked.
     for (target, outcome) in outcomes {
         if let (Some(socket), ReapOutcome::Term | ReapOutcome::Kill) =
             (&target.worker_socket, outcome)
         {
-            let _ = std::fs::remove_file(socket);
+            if is_unix_socket_file(socket) {
+                let _ = std::fs::remove_file(socket);
+            }
         }
     }
 }
@@ -169,15 +187,17 @@ pub(crate) async fn stop_process(pid: u32, start_id: Option<String>) -> ReapOutc
 }
 
 /// Whether the pid still names the discovered process (the identity gate: a
-/// recycled pid is a different process and is never signaled).
+/// recycled pid is a different process and is never signaled). An
+/// UNVERIFIABLE identity never signals: the conservative liveness rule the
+/// lease uses (an unobservable owner counts as alive) is safe for lease
+/// retention, not for termination - a pid whose identity cannot be proven
+// must not receive SIGTERM or SIGKILL on liveness alone.
 fn identity_current(target: &ReapTarget) -> bool {
     match &target.start_id {
         Some(expected) => {
             crate::lease::get_process_start_id(target.pid).as_deref() == Some(expected.as_str())
         }
-        // No observable identity: liveness alone answers (the conservative
-        // gate - an unobservable holder is never signaled twice on a guess).
-        None => true,
+        None => false,
     }
 }
 
@@ -252,29 +272,66 @@ fn same_socket_worker_targets(socket_path: &Path, protected: &HashSet<u32>) -> V
         }) {
             continue;
         }
-        let worker_socket = environ
+        // The target's own endpoint must be THIS supervisor's deterministic
+        // worker-socket name (`<socket_dir>/worker-<hash12(ours)>-*.sock`),
+        // read from the process env: a forged or foreign value never names
+        // our socket dir and our key, so the unlink below stays inside the
+        // product's own endpoint namespace.
+        let Some(worker_socket) = environ
             .iter()
             .find_map(|entry| entry.strip_prefix(&format!("{}=", crate::worker::WORKER_SOCKET_ENV)))
-            .map(PathBuf::from);
+            .filter(|path| is_our_worker_socket(path, socket_path))
+            .map(PathBuf::from)
+        else {
+            continue;
+        };
         targets.push(ReapTarget {
             pid,
             start_id: crate::lease::get_process_start_id(pid),
-            worker_socket,
+            worker_socket: Some(worker_socket),
             kind: ReapKind::Worker,
         });
     }
     targets
 }
 
-/// Whether a command line is the product's worker role: `worker` as the
-/// first argument (`prime-agent worker`, `pa-daemon worker` - the argv the
-/// supervisor spawns). The env-propagation hazard this gate exists for: a
-/// session kernel, a bash child, or a tool's server inherits the worker
-/// env but never runs the worker role.
+/// The product's own binary names (the roles run from these): `prime-agent`
+/// (the release/install name) and `pa-daemon` (the workspace binary, also
+/// what the harnesses execute). A reap target's executable must be one of
+/// these - a session's arbitrary long-running command (`python worker`, a
+/// tool server) never qualifies, whatever it inherited.
+pub(crate) fn is_product_binary(exe: &str) -> bool {
+    matches!(
+        Path::new(exe).file_name().and_then(|name| name.to_str()),
+        Some("prime-agent") | Some("pa-daemon")
+    )
+}
+
+/// Whether a command line is the product's worker role: a product binary
+/// with `worker` as its first argument (`prime-agent worker`,
+/// `pa-daemon worker` - the exact argv the supervisor spawns). The two
+/// hazard classes this gate exists for: a session kernel, bash child, or
+/// tool server that merely INHERITED the worker env, and a user's
+/// same-socket command that happens to carry a `worker` argument.
 pub(crate) fn is_worker_argv(argv: &[String]) -> bool {
-    argv.first()
-        .is_some_and(|exe| !exe.is_empty() && Path::new(exe).file_name().is_some())
+    argv.first().is_some_and(|exe| is_product_binary(exe))
         && argv.get(1).map(String::as_str) == Some("worker")
+}
+
+/// Whether a path is one of THIS supervisor's worker endpoints: under the
+/// shared socket dir, named with this socket's own key
+/// (`worker-<hash12(supervisor socket)>-*.sock`) - the deterministic name
+/// `worker_socket_path` mints, so a foreign or forged value never matches
+/// and the reap's endpoint unlink stays inside the product's namespace.
+#[cfg(target_os = "linux")]
+pub(crate) fn is_our_worker_socket(path: &str, supervisor_socket: &Path) -> bool {
+    let Some(name) = Path::new(path).file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let key = crate::paths::hash_key(&supervisor_socket.to_string_lossy(), 12);
+    Path::new(path).parent() == Some(crate::platform::socket_dir().as_path())
+        && name.starts_with(&format!("worker-{key}-"))
+        && name.ends_with(".sock")
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -316,10 +373,19 @@ fn same_socket_supervisor_targets(_socket_path: &Path) -> Vec<ReapTarget> {
     Vec::new()
 }
 
-/// Whether a command line is a supervisor of `socket`: either the product
-/// form (`--mode daemon --daemon-socket <socket>`) or the pa-daemon binary
-/// form (`supervisor --socket <socket>`).
+/// Whether a command line is a supervisor of `socket`: a product binary
+/// (`prime-agent`/`pa-daemon`) running either the product form (`--mode
+/// daemon --daemon-socket <socket>`) or the pa-daemon binary form
+/// (`supervisor --socket <socket>`). The executable gate is
+/// load-bearing: an arbitrary inherited-socket command that merely carries
+/// the argument tokens is never a target.
 pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> bool {
+    let Some(exe) = argv.first() else {
+        return false;
+    };
+    if !is_product_binary(exe) {
+        return false;
+    }
     let after_flag = |flag: &str| {
         argv.windows(2)
             .find(|pair| pair[0] == flag)
@@ -331,6 +397,17 @@ pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> boo
             after_flag("--socket") == Some(socket) && argv.iter().any(|arg| arg == "supervisor")
         }
     }
+}
+
+/// Whether the path is a unix socket file (the reap's endpoint unlink
+/// removes endpoints only - a regular file at a matching name is never
+/// touched).
+#[cfg(target_os = "linux")]
+fn is_unix_socket_file(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_socket())
+        .unwrap_or(false)
 }
 
 /// The numeric /proc entry names (the process census).
@@ -419,6 +496,9 @@ mod tests {
 
     /// The identity gate: a recycled pid (a different process now holding
     /// the number) is never signaled - the discovery's start id decides.
+    /// An UNVERIFIABLE identity never signals either: the conservative
+    /// liveness rule the lease uses is safe for lease retention, not for
+    /// termination.
     #[tokio::test]
     async fn a_recycled_pid_is_never_signaled() {
         let mut child = std::process::Command::new("sleep")
@@ -432,6 +512,17 @@ mod tests {
         assert!(
             child.try_wait().expect("child alive").is_none(),
             "the recycled identity must not have been signaled"
+        );
+        let mut unobservable = target(pid);
+        unobservable.start_id = None;
+        assert_eq!(
+            stop_target(&unobservable).await,
+            ReapOutcome::AlreadyGone,
+            "an unverifiable identity is never signaled"
+        );
+        assert!(
+            child.try_wait().expect("child alive").is_none(),
+            "the unverifiable identity must not have been signaled"
         );
         let _ = child.kill();
         let _ = child.wait();
@@ -487,6 +578,46 @@ mod tests {
         assert!(
             !is_worker_argv(&worker_flag_second),
             "a flag never substitutes for the role argument"
+        );
+        let foreign_worker_arg = ["/usr/bin/python", "worker"]
+            .iter()
+            .map(|arg| arg.to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            !is_worker_argv(&foreign_worker_arg),
+            "a foreign binary with a worker argument never matches"
+        );
+    }
+
+    /// The endpoint gate: only this supervisor's deterministic worker-socket
+    /// names match - a foreign path, another socket's key, or a name
+    /// outside the shared socket dir never does (the reap's unlink stays
+    /// inside the product's endpoint namespace).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn our_worker_socket_names_only() {
+        let supervisor = Path::new("/tmp/prime-agent-1000/daemon.sock");
+        let key = crate::paths::hash_key(&supervisor.to_string_lossy(), 12);
+        let dir = crate::platform::socket_dir().to_string_lossy().to_string();
+        let ours = format!("{dir}/worker-{key}-abcdef123456.sock");
+        assert!(
+            is_our_worker_socket(&ours, supervisor),
+            "the deterministic name matches"
+        );
+        assert!(
+            !is_our_worker_socket(&format!("{dir}/worker-OTHERKEY00-abcdef.sock"), supervisor),
+            "another socket's key never matches"
+        );
+        assert!(
+            !is_our_worker_socket("/etc/passwd", supervisor),
+            "an arbitrary path never matches"
+        );
+        assert!(
+            !is_our_worker_socket(
+                &format!("/tmp/elsewhere/worker-{key}-abcdef123456.sock"),
+                supervisor
+            ),
+            "a matching name outside the socket dir never matches"
         );
     }
 

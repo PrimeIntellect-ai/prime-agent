@@ -598,21 +598,29 @@ impl AgentsViewMode {
     /// satisfy. The selection stands on the rebuild's default row, and the
     /// status line keeps the fetch's own honest error.
     fn settle_anchor_wait_on_saved_failure(&mut self) {
-        self.anchor_selection_pending = false;
-        self.clear_anchor_loading_hint();
+        self.end_anchor_wait();
     }
 
     /// TS `rearmSavedSearchFetch`: a terminal saved-catalog failure re-arms
     /// on the next query change. The loop owns the client, so the mode only
-    /// records the intent; `take_saved_fetch_rearm` hands it to the loop.
+    /// records the intent; `take_saved_fetch_rearm` hands it to the loop
+    /// AND consumes the failure: at most one retry is ever armed, so two
+    /// concurrent `list_saved_sessions` scans (whose completions can
+    /// arrive out of order) never race a stale failure over a newer
+    /// success.
     fn note_query_changed(&mut self) {
         self.saved_query_rearm = self.saved_fetch_failed;
     }
 
-    /// Whether the loop must re-arm the saved-catalog fetch (one retry per
-    /// terminal failure; a query change consumes the intent).
+    /// Whether the loop must re-arm the saved-catalog fetch (one retry
+    /// per terminal failure; the consumption clears the failure intent
+    /// with it, so the retry in flight is the only one until IT fails).
     fn take_saved_fetch_rearm(&mut self) -> bool {
-        std::mem::take(&mut self.saved_query_rearm)
+        let rearm = std::mem::take(&mut self.saved_query_rearm);
+        if rearm {
+            self.saved_fetch_failed = false;
+        }
+        rearm
     }
 
     /// The loading hint belongs to the wait alone: ending the wait by
@@ -953,8 +961,11 @@ impl AgentsViewMode {
             .keybindings
             .matches(key, "tui.editor.deleteCharBackward")
         {
-            self.query.pop();
-            self.note_query_changed();
+            // A no-op edit on an empty query changes nothing: the
+            // re-arm's expensive retry must not fire behind it.
+            if self.query.pop().is_some() {
+                self.note_query_changed();
+            }
             self.rebuild_rows();
             return;
         }
@@ -962,8 +973,10 @@ impl AgentsViewMode {
             .keybindings
             .matches(key, "tui.editor.deleteToLineStart")
         {
-            self.query.clear();
-            self.note_query_changed();
+            if !self.query.is_empty() {
+                self.query.clear();
+                self.note_query_changed();
+            }
             self.rebuild_rows();
             return;
         }
@@ -1803,6 +1816,17 @@ async fn run_agents_view_surface(
                 UiInput::SavedLoaded { sessions } => {
                     mode.saved = sessions;
                     mode.saved_fetch_failed = false;
+                    // The failure status is the fetch's own honest error;
+                    // the catalog's success retires it (the status line
+                    // must not keep reporting an unavailable catalog after
+                    // it loaded).
+                    if mode
+                        .status
+                        .as_deref()
+                        .is_some_and(|status| status.starts_with("Saved sessions unavailable"))
+                    {
+                        mode.status = None;
+                    }
                     mode.rebuild_rows();
                 }
                 UiInput::SavedFailed { error } => {
@@ -2255,8 +2279,10 @@ mod tests {
     }
 
     /// TS `rearmSavedSearchFetch`: a terminal saved-catalog failure re-arms
-    /// on the next query change (one honest retry), and a successful fetch
-    /// clears the intent.
+    /// on the next query change - ONE retry, single-flight: the consumption
+    /// clears the failure intent with it, so concurrent out-of-order scans
+    /// never race a stale failure over a newer success. A NEW terminal
+    /// failure re-arms again; a healthy fetch never does.
     #[test]
     fn a_failed_fetch_rearms_once_per_query_change() {
         let mut mode = mode_with_anchor(None, Vec::new());
@@ -2275,12 +2301,75 @@ mod tests {
             !mode.take_saved_fetch_rearm(),
             "the intent is consumed once per query change"
         );
-        // The retry landing clears the failed state: no more re-arms.
+        // The arm consumed the failure flag: no second concurrent retry
+        // until the in-flight one fails again.
         mode.note_query_changed();
-        assert!(mode.take_saved_fetch_rearm());
+        assert!(
+            !mode.take_saved_fetch_rearm(),
+            "the retry in flight is the only one"
+        );
+        mode.saved_fetch_failed = true;
+        mode.note_query_changed();
+        assert!(
+            mode.take_saved_fetch_rearm(),
+            "a new terminal failure re-arms again"
+        );
         mode.saved_fetch_failed = false;
         mode.note_query_changed();
         assert!(!mode.take_saved_fetch_rearm());
+    }
+
+    /// A no-op edit on an empty query changes nothing: the re-arm's
+    /// expensive retry never fires behind backspace or ctrl+u on an
+    /// already-empty search.
+    #[test]
+    fn a_noop_edit_on_an_empty_query_never_rearms() {
+        let mut mode = mode_with_anchor(None, Vec::new());
+        mode.query.clear();
+        mode.saved_fetch_failed = true;
+        // Backspace on the empty query: the shape `deleteCharBackward`
+        // matches.
+        mode.handle_key("backspace");
+        assert!(
+            !mode.take_saved_fetch_rearm(),
+            "the no-op backspace did not re-arm"
+        );
+    }
+
+    /// A successful catalog load retires the failure status the terminal
+    /// fetch left behind: the status line never keeps reporting an
+    /// unavailable catalog after it loaded.
+    #[test]
+    fn a_successful_load_retires_the_failure_status() {
+        let mut mode = mode_with_anchor(None, Vec::new());
+        mode.status = Some("Saved sessions unavailable: scan failed".to_string());
+        mode.saved_fetch_failed = true;
+        mode.saved = Vec::new();
+        // The load arm's own logic (the loop's SavedLoaded handler): the
+        // failure flag clears and the fetch's own status retires.
+        mode.saved_fetch_failed = false;
+        if mode
+            .status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Saved sessions unavailable"))
+        {
+            mode.status = None;
+        }
+        assert_eq!(mode.status, None, "the stale failure status retired");
+        // An unrelated status (the flow's own notice) survives a load.
+        mode.status = Some("Session s1 is no longer running".to_string());
+        if mode
+            .status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Saved sessions unavailable"))
+        {
+            mode.status = None;
+        }
+        assert_eq!(
+            mode.status.as_deref(),
+            Some("Session s1 is no longer running"),
+            "an unrelated status is never clobbered by the load"
+        );
     }
 
     /// The saved-catalog fetch rides the LONG-RUNNING budget, never the 30s
