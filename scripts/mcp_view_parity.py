@@ -265,8 +265,8 @@ def rust_side(out: Path, rust_dir: Path) -> None:
 
 
 def diff_sides(ts_path: Path, rust_path: Path) -> int:
-    ts_frames = json.loads(ts_path.read_text())
-    rust_frames = json.loads(rust_path.read_text())
+    ts_frames = json.loads(Path(ts_path).read_text())
+    rust_frames = json.loads(Path(rust_path).read_text())
     failures = 0
     for name, _cards, _keys in SCENARIOS:
         ts_lines = ts_frames.get(name, [])

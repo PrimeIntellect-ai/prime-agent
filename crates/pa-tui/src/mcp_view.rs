@@ -666,9 +666,11 @@ impl McpView {
     /// dropped when the viewport cannot fit the panel skeleton (TS
     /// `MIN_ROWS_FOR_DETAIL`).
     fn detail_rows(&self) -> usize {
-        (self.viewport_rows >= MIN_ROWS_FOR_DETAIL)
-            .then_some(DETAIL_ROWS + DETAIL_SPACER_ROWS)
-            .unwrap_or(0)
+        if self.viewport_rows >= MIN_ROWS_FOR_DETAIL {
+            DETAIL_ROWS + DETAIL_SPACER_ROWS
+        } else {
+            0
+        }
     }
 
     /// The visible row window centered on the selection.
