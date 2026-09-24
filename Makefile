@@ -14,15 +14,6 @@ deny:
 	@command -v cargo-deny >/dev/null 2>&1 || { echo "cargo-deny not installed (cargo install cargo-deny --locked)"; exit 1; }
 	cargo deny --all-features --workspace check advisories licenses
 
-# Codebase-health report (AGENTS.md LOC soft ratchet): frozen per-file
-# ceilings in scripts/loc-baseline.json; new files are compared to the
-# 500-line default ceiling; frozen ceilings can only go down (wins are
-# recorded with scripts/check_loc.py --update-baseline). The check reports
-# and never blocks. The local mirror of the .github/workflows/
-# codebase-health.yml job.
-loc:
-	python3 scripts/check_loc.py
-
 # Windows cfg-hygiene gate (docs/windows-readiness.md): cross-target check +
 # clippy at -D warnings for every crate and test, the local mirror of the
 # staged ci.yml windows-cross job. Fails loudly when the target is missing

@@ -1,44 +1,45 @@
-# Codebase-health report: the max-LOC soft ratchet (AGENTS.md).
-#
-# Whole-file line counts of tracked Rust files against scripts/loc-baseline.json:
-# new files are compared to the 500-line default ceiling and files frozen in the
-# baseline can only shrink. The check REPORTS and never blocks the build: it
-# emits per-file PR annotations for over-ceiling files and unrecorded ratchet
-# wins (plus a job summary), so reviewers see the size signal at review time -
-# the humans and agents decide what to do. `--update-baseline` records wins and
-# never raises a ceiling. Local mirror: `make loc`.
-#
-# The ceiling is guidance set at 500 lines (operator ruling: the 500-600 comfort
-# band; 500 matches the repo's original published target) - see the PR body for
-# the derivation. It exists so the port
-# does not repeat the TS repo's giant-file failure mode (files that accrete
-# features until they are unreviewable): the 2026-09-24 tip already holds
-# worker.rs 10,992 / agent_engine.rs 9,838 / session_ui.rs 9,442 lines.
-
+# Non-blocking, PR-only guidance for files growing past 500 lines.
 name: codebase-health
-
 on:
-  push:
-    branches:
-      - main
-      - rust
   pull_request:
-
-permissions: {}
-
-concurrency:
-  group: codebase-health-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
+permissions:
+  contents: read
 jobs:
   loc:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: LOC guidance report (soft ratchet)
-        run: python3 scripts/check_loc.py
+      - name: Report growing Rust files over 500 lines
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git -C "$GITHUB_WORKSPACE" fetch --no-tags --depth=1 origin "$BASE_SHA"
+          python3 - <<'PY'
+          import os
+          import subprocess
+          from pathlib import Path
+
+          root = Path(os.environ['GITHUB_WORKSPACE'])
+          base = os.environ['BASE_SHA']
+          git = ['git', '-C', str(root)]
+          changed = subprocess.check_output(git + ['diff', '--name-only', '-z',
+              '--diff-filter=ACMR', base, 'HEAD', '--', '*.rs']).split(b'\0')
+          count = 0
+          for raw in filter(None, changed):
+              path = os.fsdecode(raw)
+              if path == 'crates/pa-ai/src/models_generated.rs':
+                  continue
+              old = subprocess.run(git + ['show', f'{base}:{path}'],
+                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
+              before = len(old.splitlines())
+              after = len((root / path).read_bytes().splitlines())
+              if after > 500 and after > before:
+                  count += 1
+                  if count <= 10:
+                      print(f'::warning file={path},line=1,title=File size guidance::'
+                            f'{before} -> {after} lines; consider splitting this module')
+          print(f'{count} changed Rust file(s) grew beyond 500 lines (guidance only).')
+          PY
