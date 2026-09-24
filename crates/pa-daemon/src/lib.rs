@@ -15,6 +15,7 @@ pub(crate) mod agent_roster;
 mod async_safe_runtime;
 mod auto_compaction;
 mod autonomous_continuation;
+pub(crate) mod bash_notices;
 pub mod branch_navigation;
 mod compact_autorefine;
 pub mod compaction;
