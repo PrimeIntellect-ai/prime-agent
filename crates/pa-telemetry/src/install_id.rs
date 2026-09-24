@@ -5,8 +5,8 @@
 //! <uuid> }`, created exclusively and mode 0600 on first use, validated on
 //! load, atomically replaced when the stored state is invalid. The exclusive
 //! create publishes a fully-written candidate (unique temp file + hard
-//! link), so concurrent creators converge on one id without ever observing a
-//! half-written winner (the TS `wx` create leaves exactly that window).
+//! link), so concurrent creators converge on one id and never observe a
+//! half-written winner.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -90,11 +90,9 @@ enum Publish {
 /// wins and its state appears at `path` fully written. The candidate is
 /// written to a unique sibling temp file and hard-linked into place: `link`
 /// is an atomic exclusive create, so a loser can never observe the winner's
-/// file mid-write (the read-modify-write window that used to make concurrent
-/// creation diverge: losers saw an empty winner file, replaced it, and
-/// returned their own id). Filesystems without hard links fall back to the
+/// file mid-write. Filesystems without hard links fall back to the
 /// open+write+sync exclusive create, where losers re-read after
-/// `AlreadyExists` like before.
+/// `AlreadyExists`.
 fn publish_exclusive(path: &Path, payload: &[u8]) -> Result<Publish> {
     let tmp = unique_sibling(path);
     let linked = create_exclusive(&tmp, payload).and_then(|()| std::fs::hard_link(&tmp, path));
@@ -281,12 +279,9 @@ mod tests {
         assert!(ids.iter().all(|id| id == &ids[0]));
     }
 
-    /// The battery-red race this module now guards against: a loser read the
-    /// winner's file between its exclusive create and its write completion,
-    /// saw invalid state, replaced it with its own id, and returned that id.
-    /// The one-shot test above is solo-green on the old code; this loop
-    /// aligns more callers than there are cores on a fresh directory over and
-    /// over, hard enough to catch the old read-modify-write window.
+    /// Concurrent creators must converge on one durable id: this loop aligns
+    /// more callers than there are cores on a fresh directory over and over,
+    /// and asserts every caller returns the same id the state file stores.
     #[test]
     fn concurrent_create_stress_converges() {
         const ROUNDS: usize = 64;
