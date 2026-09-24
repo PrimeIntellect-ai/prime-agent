@@ -285,7 +285,9 @@ impl TracesCommands for ScriptedTraces {
                 completed: 0,
                 total: 2,
             });
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            // The hold keeps the run in flight across the next submit
+            // (the one-sweep guard reads the live run synchronously).
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             let _ = progress.send(TraceUploadAllNote::Progress {
                 completed: 2,
                 total: 2,
@@ -1177,12 +1179,9 @@ async fn tui_traces_login_enables_and_uploads() {
             .await
             .expect("interactive run");
     let rendered = rendered_frames(&outcome);
-    assert!(
-        rendered.contains(
-            "Saved API key for Prime Agent Traces. Credentials saved to /agent/auth.json."
-        ),
-        "the login status row renders:\n{rendered}"
-    );
+    // TS `showStatus` rewrites back-to-back status rows in place: the
+    // login's row is superseded by the enable row (the surviving TS
+    // observable); the enable write proves the flow itself completed.
     assert!(
         rendered.contains("Trace sharing enabled. Trace uploaded (64 bytes)."),
         "the enable continues after the login:\n{rendered}"

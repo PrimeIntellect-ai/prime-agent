@@ -402,9 +402,9 @@ mod tests {
                 // The status poll answers pending once (the flow sleeps
                 // its poll interval and yields), then delivers the
                 // encrypted fixture key.
-                Some(cipher)
+                Some(_cipher)
                     if url.contains("/api/v1/auth_challenge/status")
-                        && !self.status_pending_once.swap(false, Ordering::SeqCst) =>
+                        && self.status_pending_once.swap(false, Ordering::SeqCst) =>
                 {
                     Ok(PrimeHttpResponse {
                         status: 200,
@@ -490,9 +490,9 @@ mod tests {
         LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn fast_options(
-        prime_cli_config_path: Option<&std::path::Path>,
-    ) -> PrimeAgentTracesLoginOptions {
+    fn fast_options<'a>(
+        prime_cli_config_path: Option<&'a std::path::Path>,
+    ) -> PrimeAgentTracesLoginOptions<'a> {
         let mut options = PrimeAgentTracesLoginOptions::new(prime_cli_config_path);
         // The pending status poll's interval stays real: keep it short so
         // the tests yield without waiting the product's 5s window.
@@ -554,6 +554,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_login_reuses_an_eligible_prime_cli_key() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
@@ -585,6 +588,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_browser_login_completes_the_challenge_round_trip() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
@@ -641,6 +647,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn the_browser_key_without_traces_access_reports_the_ts_error() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
@@ -663,6 +672,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn an_ineligible_cli_key_falls_through_to_the_browser() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");
@@ -697,6 +709,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // The process env must stay stable across the flow's awaits:
+    // the sync env lock is held for the whole test by design.
+    #[allow(clippy::await_holding_lock)]
     async fn an_expired_challenge_reports_the_ts_error() {
         let _env = env_lock();
         std::env::remove_var("PRIME_AGENT_TRACES_BASE_URL");

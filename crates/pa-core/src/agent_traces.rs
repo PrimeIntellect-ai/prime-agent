@@ -1865,7 +1865,7 @@ mod tests {
 
     #[test]
     fn the_content_preview_splits_head_and_tail() {
-        let body = "0123456789abcdef".repeat(2);
+        let body = "0123456789abcdef".repeat(4);
         // The marker takes 34 chars of the window; the remaining 6 split
         // into the head and tail halves.
         let (content, truncated) = trace_content_preview(&body, 40);
