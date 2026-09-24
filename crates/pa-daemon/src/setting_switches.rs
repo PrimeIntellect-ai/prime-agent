@@ -224,6 +224,10 @@ impl Worker {
                 None,
             );
         }
+        // The cycled model (and any level the switch clamps) reaches the
+        // roster surfaces immediately: the TS `cycle_model` daemon handler
+        // schedules a roster flush after the switch, matching `set_model`.
+        self.push_roster_delta();
         // The new model may not keep the priority tier (TS
         // `_clampServiceTierForModel`).
         self.clamp_service_tier_for_model();

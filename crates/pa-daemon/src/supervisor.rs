@@ -2365,15 +2365,21 @@ impl Supervisor {
                 worker_token,
                 summary,
                 removed,
+                sequence,
+                worker_instance_id,
                 ..
             } => {
                 let response = self
                     .handle_worker_roster_delta(
                         &command_id,
                         &type_name,
-                        worker_token,
-                        summary.clone(),
-                        removed.clone().unwrap_or_default(),
+                        crate::supervisor_roster::WorkerRosterDelta {
+                            worker_token: worker_token.clone(),
+                            summary: summary.clone(),
+                            removed: removed.clone().unwrap_or_default(),
+                            sequence: *sequence,
+                            worker_instance_id: worker_instance_id.clone(),
+                        },
                     )
                     .await;
                 (vec![response_line(&response)], false)
@@ -3279,6 +3285,21 @@ impl Supervisor {
             if token.as_str() != descriptor.authentication_token {
                 return fail("Session worker authentication failed");
             }
+            let previous_worker_instance_id = descriptor.worker_instance_id.clone();
+            // A REPLACEMENT registration flips the roster's stale-delta
+            // slot to the replacement BEFORE the replacement is exposed
+            // anywhere — the descriptor update below, the persisted
+            // record, the recorded registration: a predecessor's pull or
+            // frame still in flight must already meet the slot naming the
+            // replacement (its own stamp mismatches and drops), never the
+            // predecessor it carries. A same-process re-register (a
+            // dropped supervisor link, a create replay) keeps the slot
+            // untouched — the counter did not restart.
+            if previous_worker_instance_id.as_deref() != worker_instance_id.as_deref() {
+                let replacement = worker_instance_id.clone().unwrap_or_default();
+                let mut roster = self.roster.lock().unwrap();
+                roster.note_worker_generation(&resident.worker_id, &replacement);
+            }
             descriptor.pid = *pid;
             descriptor.socket_path = socket_path.clone();
             descriptor.worker_instance_id = worker_instance_id.clone();
@@ -3296,7 +3317,7 @@ impl Supervisor {
                 descriptor.session_file.as_deref(),
             );
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
-            match registration.session_id.clone() {
+            let durable_session_id = match registration.session_id.clone() {
                 Some(session_id) => Some(session_id),
                 None => descriptor
                     .session_file
@@ -3304,7 +3325,8 @@ impl Supervisor {
                     .as_deref()
                     .and_then(|file| Path::new(file).file_stem())
                     .map(|stem| stem.to_string_lossy().to_string()),
-            }
+            };
+            durable_session_id
         };
         let record = self.registry.record_registration(registration).await;
         // A restore pass that owns this session's roster row can settle it
@@ -3551,6 +3573,13 @@ impl Supervisor {
             "list_saved_sessions",
             Some(json!({ "sessions": sessions })),
         )));
+        // Telemetry: how many served rows carry a usage summary — the
+        // agents-view spend columns' data (a count only, never session
+        // payload).
+        let rows_with_usage = infos.iter().filter(|info| info.usage.is_some()).count();
+        if let Some(client) = &*self.telemetry.lock().unwrap() {
+            pa_core::session_engine::telemetry::track_saved_sessions_usage(client, rows_with_usage);
+        }
         lines
     }
 
@@ -3837,8 +3866,11 @@ impl Supervisor {
             _ => create_summary.clone(),
         };
         // The new session joins the agent roster immediately (subscribers
-        // see the roster_update before their next list).
-        self.write_roster_summary(&summary, Some(&resident.worker_id));
+        // see the roster_update before their next list) — as an
+        // authoritative pull write, so its embedded counter raises the
+        // stale-delta watermark for the resident.
+        self.write_roster_summary_for_resident(&resident, &summary)
+            .await;
         // The spawn append is a ledger-append moment: the new edge can be
         // the first time this family is live in the roster (a resumed
         // parent, a supervisor restart), so the seed runs here too - after
@@ -4604,6 +4636,15 @@ fn saved_session_summary(info: &crate::session_store::SessionInfo) -> Value {
             object.insert("thinkingLevel".to_string(), json!(level));
         }
     }
+    // TS `summaryForInactiveSession` publishes the scan's own-usage
+    // summary: the agents-view roster record reads it before the saved
+    // catalog row's (own cost `daemon.usage ?? saved.usage`). The child's
+    // own row carries the child spend, so rollups never double count.
+    if let Some(usage) = &info.usage {
+        if let Some(object) = row.as_object_mut() {
+            object.insert("usage".to_string(), json!(usage));
+        }
+    }
     row
 }
 
@@ -4662,6 +4703,13 @@ fn saved_session_row(info: &crate::session_store::SessionInfo) -> Value {
             "model".to_string(),
             json!({ "provider": provider, "modelId": model_id }),
         );
+    }
+    // TS `serializeSavedSessionInfo` publishes the scan's own-usage
+    // summary: the agents-view spend columns and the archived-row
+    // keep-condition read `saved.usage.cost`. The child's own row
+    // carries the child spend, so rollups never double count.
+    if let Some(usage) = &info.usage {
+        object.insert("usage".to_string(), json!(usage));
     }
     // The persisted thinking level rides the catalog row too: the TUI merges
     // it into live summaries that lack one (the same enrichment as `model`).
@@ -4809,6 +4857,50 @@ mod tests {
         assert!(saved_session_row(&draft_info)
             .get("thinkingLevel")
             .is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The saved-session surfaces publish the scan's own-usage summary (TS
+    /// `serializeSavedSessionInfo` and `summaryForInactiveSession`): the
+    /// agents-view spend columns and the archived-row keep-condition read
+    /// `usage.cost`; a session with no billable work stays bare, exactly
+    /// like TS's undefined serialization.
+    #[test]
+    fn saved_session_rows_publish_the_own_usage_summary() {
+        let dir = std::env::temp_dir().join(format!("pa-saved-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+        let path = dir.join(format!("{}.jsonl", session.session_id()));
+        session.set_path(path.clone());
+        session.append_message(json!({
+            "role": "assistant", "content": "done", "provider": "p", "model": "m",
+            "timestamp": 1u64,
+            "usage": {
+                "input": 100, "output": 10, "cacheRead": 5, "cacheWrite": 0,
+                "totalTokens": 115,
+                "cost": { "input": 0.0, "output": 0.25, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.25 }
+            }
+        }));
+        session.rewrite().unwrap();
+        let info = crate::session_store::read_session_info(&path).unwrap();
+        let row = saved_session_row(&info);
+        assert_eq!(
+            row["usage"],
+            json!({ "inputTokens": 105, "outputTokens": 10, "cost": 0.25 })
+        );
+        let summary = saved_session_summary(&info);
+        assert_eq!(
+            summary["usage"],
+            json!({ "inputTokens": 105, "outputTokens": 10, "cost": 0.25 })
+        );
+        // A draft with no billable work stays bare on both surfaces.
+        let mut draft = crate::session_store::SessionFile::create("/tmp", None, 0);
+        let draft_path = dir.join(format!("{}.jsonl", draft.session_id()));
+        draft.set_path(draft_path.clone());
+        draft.rewrite().unwrap();
+        let draft_info = crate::session_store::read_session_info(&draft_path).unwrap();
+        assert!(saved_session_row(&draft_info).get("usage").is_none());
+        assert!(saved_session_summary(&draft_info).get("usage").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
