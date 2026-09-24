@@ -328,7 +328,7 @@ fn print_resume_refuses_a_foreign_lease_holder() {
             "it — that daemon owns this session)\n",
             "\n",
             "• Take over on this daemon:\n",
-            "  kill {} — the holder is {}\n",
+            "  kill {} # the holder is {}\n",
             "  Then retry — the file unlocks when the holder exits.\n",
             "\n",
             "Session: foreign01ab3c\n"

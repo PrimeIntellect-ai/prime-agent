@@ -131,7 +131,7 @@ commands, so nothing is left to guess:
 >   (switch to the TypeScript product — its daemon owns this session)
 >
 > • Take over on this daemon:
->   `kill \<holder-pid\>`
+>   `kill \<holder-pid\> # the holder is \<its process image\>`
 >   Then retry — the file unlocks when the holder exits.
 >
 > Session: \<session-id\> (\<session-name\>)

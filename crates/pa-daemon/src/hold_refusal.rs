@@ -222,11 +222,14 @@ fn take_over_lines(
             // the time the user runs it, and the annotation lets a human
             // sanity-check before the signal (the retry path needs no
             // kill at all once the holder exits - the lease unlocks).
+            // The annotation rides behind a `#`, so pasting the WHOLE
+            // line still runs exactly `kill <pid>` - the shell stops at
+            // the comment instead of parsing the image name as arguments.
             let kill = match holder_exe
                 .and_then(|exe| exe.file_name())
                 .map(|name| name.to_string_lossy().to_string())
             {
-                Some(image) => format!("  kill {pid} — the holder is {image}"),
+                Some(image) => format!("  kill {pid} # the holder is {image}"),
                 None => format!("  kill {pid}"),
             };
             lines.push(kill);

@@ -174,30 +174,30 @@ mkdir -p "${PREFIX}/share" "${bin_dir}"
 
 # Extract to a staging dir inside the prefix (same filesystem, so the final
 # swap is a rename, not a cross-device copy). Publication is SERIALIZED
-# (a mkdir lock, pid-liveness-recoverable): concurrent installers must not
-# interleave the directory swap. The old tree is renamed ASIDE first and
-# removed only after the new stage is in place, so the live tree is never
-# rm'd while the launcher still points into it - and mv can never nest a
-# stage inside a recreated live dir.
+# behind an atomic symlink lock: the claim is `ln -s <pid>` - ONE
+# operation that carries the holder's identity, and the ln itself is the
+# single winner (every other waiter fails against the existing link), so
+# two installers can never both enter the publish section. A lock whose
+# holder is DEAD (a crashed install - the cleanup trap cannot run under
+# SIGKILL) is never auto-stolen: a waiter that dropped a dead lock would
+# race other waiters into a double publish, so it dies with the one-line
+# manual recovery instead. The old tree is renamed ASIDE first and
+# removed only after the new stage is in place, so the live tree is
+# never rm'd while the launcher still points into it.
 stage="$(mktemp -d "${PREFIX}/share/prime-agent-rust.stage.XXXXXX")"
 tar -xzf "$asset" -C "$stage"
 [ -x "${stage}/prime-agent" ] \
   || die "the tarball did not contain an executable prime-agent payload"
-lock_dir="${PREFIX}/share/.prime-agent-rust-install.lock"
-until mkdir "$lock_dir" 2>/dev/null; do
-  held_by="$(cat "$lock_dir/pid" 2>/dev/null)"
-  if [ -z "$held_by" ]; then
-    sleep 1    # a fresh holder may still be writing its pid
-    held_by="$(cat "$lock_dir/pid" 2>/dev/null)"
-    [ -n "$held_by" ] || { rm -rf "$lock_dir"; continue; }
-  fi
-  if kill -0 "$held_by" 2>/dev/null; then
+lock_link="${PREFIX}/share/.prime-agent-rust-install.lock"
+until ln -s $$ "$lock_link" 2>/dev/null; do
+  held_by="$(readlink "$lock_link" 2>/dev/null || true)"
+  if [ -n "$held_by" ] && kill -0 "$held_by" 2>/dev/null; then
     die "another install-rust.sh (pid ${held_by}) is publishing to ${PREFIX}; retry when it finishes"
   fi
-  rm -rf "$lock_dir"   # a dead holder's stale lock: remove and retry
+  die "a previous install-rust.sh (pid ${held_by:-unknown}) left a stale publication lock (a crashed install; its cleanup trap cannot have run). Remove it and retry:
+  rm -f ${lock_link}"
 done
-printf '%s\n' "$$" > "$lock_dir/pid"
-trap 'rm -rf "$lock_dir"' EXIT
+trap 'rm -f "$lock_link"' EXIT
 old="${PREFIX}/share/prime-agent-rust.old.$$"
 if [ -d "$share_dir" ]; then
   mv "$share_dir" "$old"
