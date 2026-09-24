@@ -638,6 +638,11 @@ impl SlashCommandEntry {
 /// loader only emits `local` sources — so the scope prefix is the
 /// fallback for any other source, exactly like the TS tail.
 pub fn autocomplete_source_tag(source_info: &serde_json::Value) -> Option<String> {
+    // TS guards the whole ladder with `if (!sourceInfo) return undefined`:
+    // an absent source info gets no tag (the row renders bare).
+    if source_info.is_null() {
+        return None;
+    }
     let scope_prefix = match source_info.get("scope").and_then(serde_json::Value::as_str) {
         Some("user") => "user",
         Some("project") => "project",

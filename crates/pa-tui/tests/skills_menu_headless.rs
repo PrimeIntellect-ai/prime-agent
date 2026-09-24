@@ -196,10 +196,18 @@ fn attach_data(id: &str) -> Value {
 }
 
 /// A minimal settings seam for the harness: every getter returns its TS
-/// default, writes succeed without persistence.
-#[derive(Default)]
+/// default, writes succeed without persistence. The skill-commands flag
+/// starts at the TS default (true), not `bool::default`.
 struct StubSettings {
     enable_skill_commands: std::sync::Mutex<bool>,
+}
+
+impl Default for StubSettings {
+    fn default() -> Self {
+        Self {
+            enable_skill_commands: std::sync::Mutex::new(true),
+        }
+    }
 }
 
 impl pa_tui::client_settings::ClientSettings for StubSettings {

@@ -8931,12 +8931,13 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
         .iter()
         .filter(|command| command.get("source").and_then(Value::as_str) == Some("skill"))
         .collect();
-    assert_eq!(skill_commands.len(), 1, "one skill command: {commands:?}");
-    let command = skill_commands[0];
-    assert_eq!(
-        command.get("name").and_then(Value::as_str),
-        Some("skill:demo-skill")
-    );
+    // The checkout's own bundled skills (the packaged `skills/` layout)
+    // enumerate too, so the assertion is on the test's own skill, not the
+    // count.
+    let command = skill_commands
+        .iter()
+        .find(|command| command.get("name").and_then(Value::as_str) == Some("skill:demo-skill"))
+        .unwrap_or_else(|| panic!("the demo skill enumerated: {commands:?}"));
     assert_eq!(
         command.get("description").and_then(Value::as_str),
         Some("Demo the slash menu wiring")
@@ -8948,6 +8949,15 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
             .and_then(Value::as_str),
         Some("user")
     );
+    // Every skill command carries the `skill:` name form and its source
+    // info (the menu row's source label reads them).
+    for command in &skill_commands {
+        assert!(command
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name.starts_with("skill:")));
+        assert!(command.get("sourceInfo").is_some());
+    }
 }
 
 /// The TS replacement teardown (`teardownForReplacement` -> `teardownCurrent`
