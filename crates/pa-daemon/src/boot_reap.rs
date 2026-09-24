@@ -116,6 +116,14 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
     let protected: HashSet<u32> =
         crate::descriptor::load_descriptors(&descriptor_dir, &socket_path)
             .into_iter()
+            .filter(|(_, descriptor)| {
+                // A tombstoned descriptor is DURABLE STOP INTENT: its
+                // worker is something to finish stopping, never to adopt -
+                // the reap is the executor (a tombstoned leftover that
+                // survived the predecessor's own escalation, or whose
+                // worker socket died while the process lives).
+                descriptor.stop_requested_at.is_none()
+            })
             .filter(|(_, descriptor)| match &descriptor.process_start_id {
                 Some(expected) => crate::lease::get_process_start_id(descriptor.pid as u32)
                     .map(|observed| observed == expected.as_str())
@@ -254,7 +262,7 @@ async fn await_gone(target: &ReapTarget, budget: Duration) -> bool {
 /// Linux-only (the /proc census); other platforms answer nothing.
 #[cfg(target_os = "linux")]
 fn same_socket_worker_targets(socket_path: &Path, protected: &HashSet<u32>) -> Vec<ReapTarget> {
-    let socket = socket_path.to_string_lossy().to_string();
+    let socket = normalize_socket_spelling(socket_path);
     let mut targets = Vec::new();
     for pid in numeric_proc_entries() {
         if pid == std::process::id() || protected.contains(&pid) {
@@ -270,7 +278,9 @@ fn same_socket_worker_targets(socket_path: &Path, protected: &HashSet<u32>) -> V
             continue;
         };
         if !environ.iter().any(|entry| {
-            entry == &format!("{}={}", crate::worker::WORKER_SUPERVISOR_SOCKET_ENV, socket)
+            entry
+                .strip_prefix(&format!("{}=", crate::worker::WORKER_SUPERVISOR_SOCKET_ENV))
+                .is_some_and(|value| normalize_socket_spelling(Path::new(value)) == socket)
         }) {
             continue;
         }
@@ -331,7 +341,8 @@ pub(crate) fn is_our_worker_socket(path: &str, supervisor_socket: &Path) -> bool
         return false;
     };
     let key = crate::paths::hash_key(&supervisor_socket.to_string_lossy(), 12);
-    Path::new(path).parent() == Some(crate::platform::socket_dir().as_path())
+    normalize_socket_spelling(Path::new(path).parent().unwrap_or(Path::new(path)))
+        == normalize_socket_spelling(&crate::platform::socket_dir())
         && name.starts_with(&format!("worker-{key}-"))
         && name.ends_with(".sock")
 }
@@ -348,7 +359,7 @@ fn same_socket_worker_targets(_socket_path: &Path, _protected: &HashSet<u32>) ->
 /// be here: its listener would have refused this daemon's bind.
 #[cfg(target_os = "linux")]
 fn same_socket_supervisor_targets(socket_path: &Path) -> Vec<ReapTarget> {
-    let socket = socket_path.to_string_lossy().to_string();
+    let socket = normalize_socket_spelling(socket_path);
     let mut targets = Vec::new();
     for pid in numeric_proc_entries() {
         if pid == std::process::id() {
@@ -410,6 +421,31 @@ fn is_unix_socket_file(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
         .map(|meta| meta.file_type().is_socket())
         .unwrap_or(false)
+}
+
+/// One socket path's NORMALIZED spelling: the canonicalized form when the
+/// path exists (symlinks, `..`, and duplicate separators collapse), else
+/// the lexically normalized path. The reap compares spellings this way on
+/// BOTH sides (the socket it was spawned with and the env value the
+/// leftover carries), so a leftover whose inherited spelling differs
+/// (`/a/b/../c/daemon.sock` vs `/a/c/daemon.sock`, a symlinked tmpdir)
+/// is still a same-socket predecessor - its lease is held either way.
+#[cfg(target_os = "linux")]
+pub(crate) fn normalize_socket_spelling(path: &Path) -> String {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical.to_string_lossy().to_string();
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized.to_string_lossy().to_string()
 }
 
 /// The numeric /proc entry names (the process census).

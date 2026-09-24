@@ -145,7 +145,14 @@ pub(crate) fn already_active_line(holder: &str, session_path: &Path) -> String {
 pub(crate) fn quoted_resume_arg(id: &str) -> String {
     #[cfg(windows)]
     {
-        format!("--resume \"{}\"", id.replace('"', "\"\""))
+        // The CRT parsing rule: a backslash run before a quote (or before
+        // the closing quote) folds 2n -> n, so every backslash doubles and
+        // every embedded quote escapes - neither can terminate the
+        // argument.
+        format!(
+            "--resume \"{}\"",
+            id.replace('\\', "\\\\").replace('"', "\\\"")
+        )
     }
     #[cfg(not(windows))]
     {

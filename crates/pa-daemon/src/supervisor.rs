@@ -4814,9 +4814,13 @@ impl Supervisor {
             // signals (a pid that cannot be proven ours stays untouched);
             // a live process behind such a pid keeps its tombstoned
             // descriptor too, exactly like a SIGKILL survivor - the next
-            // boot retries the stop.
-            let alive_unverified =
-                start_id.is_none() && crate::lease::is_process_alive(pid).unwrap_or(false);
+            // boot retries the stop. The unverifiable class covers BOTH a
+            // descriptor without a recorded id and a recorded id the
+            // platform cannot observe right now (the probe returns None
+            // while the process lives).
+            let alive_unverified = (start_id.is_none()
+                || crate::lease::get_process_start_id(pid).is_none())
+                && crate::lease::is_process_alive(pid).unwrap_or(false);
             match crate::boot_reap::stop_process(pid, start_id).await {
                 crate::boot_reap::ReapOutcome::Survived => {
                     self.log_line(&format!(
