@@ -10,7 +10,6 @@
 #![cfg(unix)]
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
