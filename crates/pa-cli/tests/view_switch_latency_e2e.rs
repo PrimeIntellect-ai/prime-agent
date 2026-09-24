@@ -26,8 +26,17 @@ const VIEW_SWITCH_CEILING: Duration = Duration::from_millis(1_000);
 /// The seeded artifact tree size: enough rows that the context-tree cache
 /// warm at attach does real work in the background, without doubling the
 /// fixture cost of the daemon-side guard (`context_latency_e2e`).
-const SEEDED_CHILDREN: usize = 10;
+/// Box-shaped per the operator's real store (the governance session that
+/// reported the 5-10s handoff carries 66 live+persisted children): the
+/// seeded artifact tree matches that per-session child scale.
+const SEEDED_CHILDREN: usize = 60;
 const SEEDED_MESSAGES_PER_CHILD: usize = 50;
+/// The transcript the round trip re-attaches to: a multi-hundred-message
+/// session file (the reporting governance session carries 1279 messages
+/// in 9.4MB — the attach snapshot ships the whole history), written
+/// directly instead of run turn-by-turn (the fixture writer, not live
+/// model turns).
+const SEEDED_TRANSCRIPT_MESSAGES: usize = 400;
 
 struct Supervisor {
     child: Child,
@@ -119,6 +128,50 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
 
 /// Create a live session through the daemon protocol (the same `create`
 /// config the TUI sends), writing the scripted engine config first.
+/// Create a live session FROM a pre-written session file (the
+/// operator-scale attach snapshot): the worker opens the file's history
+/// and the scripted engine appends any live turns.
+async fn create_session_from_file_via_daemon(
+    socket: &Path,
+    script_path: &Path,
+    script: &serde_json::Value,
+    cwd: &Path,
+    session_dir: &Path,
+    session_path: &Path,
+) -> String {
+    std::fs::write(script_path, script.to_string()).expect("write script");
+    let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(socket)
+        .await
+        .expect("connect supervisor");
+    let data = client
+        .request_ok(DaemonCommand::Create {
+            id: None,
+            session_path: Some(session_path.display().to_string()),
+            continue_recent: None,
+            no_session: None,
+            name: None,
+            config: Some(serde_json::json!({
+                "cwd": cwd.display().to_string(),
+                "sessionDir": session_dir.display().to_string(),
+                "script": script_path.display().to_string(),
+            })),
+            telemetry_disabled: None,
+            runtime_metadata: None,
+            lifecycle: None,
+            env: None,
+            launch_env: None,
+            rest: Default::default(),
+        })
+        .await
+        .expect("create session from file");
+    client.close();
+    data.get("activeSessionId")
+        .or_else(|| data.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("session id")
+        .to_string()
+}
+
 async fn create_session_via_daemon(
     socket: &Path,
     script_path: &Path,
@@ -260,17 +313,62 @@ async fn agents_view_round_trip_reattaches_under_the_ceiling() {
     std::fs::create_dir_all(&session_dir).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
+    // The multi-hundred-message transcript, written directly (the
+    // operator-scale attach snapshot ships the whole history): a parent-
+    // chained user/assistant run.
+    let durable = format!("01a0vs-{:012x}", std::process::id() as u64);
+    let transcript_path = session_dir.join(format!("{durable}.jsonl"));
+    {
+        let filler = "a".repeat(1024);
+        let mut content = String::new();
+        content.push_str(
+            &serde_json::json!({
+                "type": "session", "version": 3, "id": durable,
+                "timestamp": "2024-01-01T00:00:00.000Z", "cwd": "/tmp",
+            })
+            .to_string(),
+        );
+        content.push('\n');
+        let mut parent_id = String::new();
+        for index in 0..SEEDED_TRANSCRIPT_MESSAGES {
+            let entry_id = format!("{durable}-m{index}");
+            let is_assistant = index % 2 == 1;
+            content.push_str(
+                &serde_json::json!({
+                    "type": "message",
+                    "id": entry_id,
+                    "parentId": parent_id,
+                    "timestamp": "2024-01-01T00:00:00.000Z",
+                    "message": {
+                        "role": if is_assistant { "assistant" } else { "user" },
+                        "content": if is_assistant { &filler } else { "question" },
+                        "usage": if is_assistant {
+                            serde_json::json!({
+                                "input": 1000, "output": 100, "cacheRead": 0, "cacheWrite": 0,
+                                "totalTokens": 1100,
+                                "cost": { "input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0, "total": 2 },
+                            })
+                        } else { serde_json::Value::Null },
+                    },
+                })
+                .to_string(),
+            );
+            content.push('\n');
+            parent_id = entry_id;
+        }
+        std::fs::write(&transcript_path, content).expect("write seeded transcript");
+    }
     let script = serde_json::json!({ "responses": [
         { "text": "hello from scripted", "delayMs": 20 },
-        { "text": "second turn", "delayMs": 20 },
     ] });
     let script_path = dir.path().join("script.json");
-    let (active, durable) = create_session_via_daemon(
+    let active = create_session_from_file_via_daemon(
         &supervisor.socket,
         &script_path,
         &script,
         dir.path(),
         &session_dir,
+        &transcript_path,
     )
     .await;
 
