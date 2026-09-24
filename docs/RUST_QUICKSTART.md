@@ -59,7 +59,7 @@ mkdir -p ~/.local/share/prime-agent-rust
 tar xzf prime-agent-*-aarch64-apple-darwin.tar.gz -C ~/.local/share/prime-agent-rust
 # Load-bearing without the launcher (see the daemon section below): the Rust
 # daemon must get its OWN socket so it never touches the TS daemon.
-export PRIME_AGENT_DAEMON_SOCKET="${TMPDIR:-/tmp}/prime-agent-rust/daemon.sock"
+export PRIME_AGENT_DAEMON_SOCKET="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
 ~/.local/share/prime-agent-rust/prime-agent --version
 ```
 
@@ -85,7 +85,7 @@ prime-agent-rust              # interactive TUI in the current directory
 prime-agent-rust -p "..."     # one-shot print mode
 prime-agent-rust --resume     # browse sessions or resume one directly
 prime-agent-rust agents       # running, idle, and saved sessions
-prime-agent-rust shutdown    # stop every agent, worker, and daemon it discovers
+prime-agent-rust shutdown    # the TS state-root sweep (see Uninstall before relying on it)
 ```
 
 The rest of the public commands (`attach`, `status`, `doctor`, `update`,
@@ -106,7 +106,7 @@ it.
 `prime-agent-rust` launcher pins its socket:
 
 ```bash
-export PRIME_AGENT_DAEMON_SOCKET="${TMPDIR:-/tmp}/prime-agent-rust/daemon.sock"
+export PRIME_AGENT_DAEMON_SOCKET="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
 ```
 
 Without the pin, the Rust CLI would resolve the default socket, find the
@@ -156,20 +156,25 @@ Update: re-run the installer. It resolves the newest successful
 the launcher is rewritten each time, and the session store is never
 touched by an update.
 
-Uninstall:
+Uninstall — close the sessions, stop the Rust daemon, remove the two paths:
 
 ```bash
-prime-agent-rust shutdown --force
+# Stop your sessions first (a held lease refuses the payload swap):
+prime-agent-rust daemon kill <active-session-id>   # or close them in the TUI
+# The Rust daemon's socket is pinned OUTSIDE the shared state root, so the
+# TS-root `shutdown` sweep does not reach it — stop it directly. (Its pid is
+# also the first line of its log, beside the socket's hash-named file under
+# ~/.prime/agent/logs/.)
+pkill -f 'prime-agent-rust/prime-agent daemon'
 rm -rf ~/.local/share/prime-agent-rust ~/.local/bin/prime-agent-rust
 ```
 
-Close your sessions first (a held lease refuses the sweep). Note that
-`shutdown` stops every agent, worker, and daemon it discovers in the state
-root — the TypeScript daemon included: it is the same state-root-wide sweep
-the TS product's own `shutdown` performs, on both sides. If you would rather
-leave the TS daemon running, close the Rust sessions and go straight to the
-`rm -rf`. Never remove the TypeScript product's files; the Rust uninstall
-paths are exactly the two above.
+Note `prime-agent-rust shutdown --force` sweeps the SHARED state root — it
+stops every agent, worker, and daemon it discovers there, the TypeScript
+daemon included (the same state-root-wide sweep the TS product's own
+`shutdown` performs) — but it does NOT stop this build's own daemon, whose
+socket is pinned outside that root. Never remove the TypeScript product's
+files; the Rust uninstall paths are exactly the two above.
 
 ## Known limits
 

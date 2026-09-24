@@ -440,7 +440,11 @@ pub fn acquire_session_lease(
 }
 
 /// Acquire mandatory runtime ownership before opening or writing a session.
-pub(crate) fn acquire_runtime_session_lease(
+/// The runtime acquire the daemon's workers use (ungated by the test
+/// env flag): the CLI print-mode guard shares it so a resume either
+/// atomically owns the file's runtime lease or answers the refusal -
+/// no observe-then-open window for a second writer.
+pub fn acquire_runtime_session_lease(
     session_path: &Path,
     agent_dir: &Path,
 ) -> Result<SessionLease> {

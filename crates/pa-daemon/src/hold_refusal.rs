@@ -74,22 +74,29 @@ pub enum HolderFlavor {
     AnotherProcess,
 }
 
-/// Classify a live holder by resolving its pid to the process image.
-pub fn classify_holder(pid: Option<u32>) -> HolderFlavor {
+/// Resolve a live holder's process image, classified: the pid maps to
+/// the executable (best-effort, the liveness-probe contract), which names
+/// the product flavor and the take-over line's what-you-are-killing
+/// annotation. `None` (unresolvable) classifies anonymously and resolves
+/// no executable.
+fn holder_process(pid: Option<u32>) -> (HolderFlavor, Option<std::path::PathBuf>) {
     let exe = pid
         .and_then(pa_types::platform::process::process_executable_path)
         .map(|path| path.canonicalize().unwrap_or(path));
     let own = std::env::current_exe()
         .ok()
         .map(|path| path.canonicalize().unwrap_or(path));
-    classify_from(exe.as_deref(), own.as_deref())
+    let flavor = classify_from(exe.as_deref(), own.as_deref());
+    (flavor, exe)
 }
 
 /// The classification core, factored for tests: `exe` is the holder's
 /// resolved process image, `own_exe` this process's own. Order matters —
-/// every rust-build shape contains the `prime-agent` substring family, so
 /// the rust checks run first and the TS claim is never made about a rust
-/// binary.
+/// binary — and the path checks match whole path COMPONENTS (platform
+/// separators, no raw substrings): an arbitrary parent directory named
+/// `target` must not claim a TypeScript holder, and a Windows cargo build
+/// (`target\debug\prime-agent.exe`) classifies the same as a Unix one.
 pub fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor {
     let Some(exe) = exe else {
         return HolderFlavor::AnotherProcess;
@@ -99,9 +106,35 @@ pub fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor
             return HolderFlavor::ThisBuild;
         }
     }
-    let path = exe.to_string_lossy().to_lowercase();
-    if path.contains("prime-agent-rust") || path.contains("/target/") {
+    let components: Vec<String> = exe
+        .components()
+        .map(|component| {
+            component
+                .as_os_str()
+                .to_string_lossy()
+                .to_lowercase()
+        })
+        .collect();
+    if components
+        .iter()
+        .any(|component| component == "prime-agent-rust")
+    {
         return HolderFlavor::ThisBuild;
+    }
+    if let Some(index) = components
+        .iter()
+        .position(|component| component == "target")
+    {
+        // A cargo build tree answers its profile directory
+        // (`<repo>/target/<profile>/...`); anything else named `target`
+        // is not evidence about this product.
+        let profile = components
+            .get(index + 1)
+            .map(String::as_str)
+            .unwrap_or_default();
+        if matches!(profile, "debug" | "release" | "bench" | "test") {
+            return HolderFlavor::ThisBuild;
+        }
     }
     let name = exe
         .file_name()
@@ -123,7 +156,8 @@ pub fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor
 /// is best-effort: an unreadable file renders without the name, never
 /// fails the refusal).
 pub fn refusal_message(hold: &HoldIdentity, session_path: Option<&Path>) -> String {
-    refusal_for_flavor(classify_holder(hold.pid), hold, session_path)
+    let (flavor, holder_exe) = holder_process(hold.pid);
+    refusal_for_flavor(flavor, hold, session_path, holder_exe.as_deref())
 }
 
 /// The holder's recorded identity for the footer and the `--resume`
@@ -143,32 +177,72 @@ fn session_label(hold: &HoldIdentity, session_path: Option<&Path>) -> String {
 
 /// The session's name from its durable file, for the footer (best-effort:
 /// the lease is held, but reading the file for its name never fails the
-/// refusal).
+/// refusal). A bounded-cost scan, not a full load: the refusal fires
+/// while the holder is live and the file may be large or still growing,
+/// so this reads line by line (constant memory) and parses only the
+/// `session_info` candidates — the latest one wins, exactly like
+/// `SessionFile::session_name`.
 fn session_name_of(session_path: Option<&Path>) -> Option<String> {
+    use std::io::BufRead;
     let path = session_path?;
-    crate::session_store::SessionFile::open(path)
-        .ok()?
-        .session_name()
-        .map(str::to_string)
+    let file = std::fs::File::open(path).ok()?;
+    let mut name = None;
+    for line in std::io::BufReader::new(file).lines() {
+        let Ok(line) = line else {
+            break;
+        };
+        if !line.contains("\"session_info\"") {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("session_info") {
+            continue;
+        }
+        if let Some(found) = value.get("name").and_then(serde_json::Value::as_str) {
+            let trimmed = found.trim();
+            if !trimmed.is_empty() {
+                name = Some(trimmed.to_string());
+            }
+        }
+    }
+    name
 }
 
 /// The take-over option: kill the holder and retry. With a resolved pid
 /// the `kill` is the surgical command; without one the state-root sweep
 /// (`shutdown --force`, which stops every daemon it discovers) is the
 /// honest fallback. The sweep binary is the flavor's own product.
-fn take_over_lines(hold: &HoldIdentity, sweep_binary: &str) -> Vec<String> {
+fn take_over_lines(
+    hold: &HoldIdentity,
+    sweep_binary: &str,
+    holder_exe: Option<&Path>,
+) -> Vec<String> {
+    let mut lines = vec!["• Take over on this daemon:".to_string()];
     match hold.pid {
-        Some(pid) => vec![
-            "• Take over on this daemon:".to_string(),
-            format!("  kill {pid}"),
-            "  Then retry — the file unlocks when the holder exits.".to_string(),
-        ],
-        None => vec![
-            "• Take over on this daemon:".to_string(),
-            format!("  {sweep_binary} shutdown --force"),
-            "  Then retry — it stops every daemon in the state root.".to_string(),
-        ],
+        Some(pid) => {
+            // The kill line names what would be killed when the resolved
+            // image is known: a stale pid could belong to a reused pid by
+            // the time the user runs it, and the annotation lets a human
+            // sanity-check before the signal (the retry path needs no
+            // kill at all once the holder exits - the lease unlocks).
+            let kill = match holder_exe
+                .and_then(|exe| exe.file_name())
+                .map(|name| name.to_string_lossy().to_string())
+            {
+                Some(image) => format!("  kill {pid} — the holder is {image}"),
+                None => format!("  kill {pid}"),
+            };
+            lines.push(kill);
+            lines.push("  Then retry — the file unlocks when the holder exits.".to_string());
+        }
+        None => {
+            lines.push(format!("  {sweep_binary} shutdown --force"));
+            lines.push("  Then retry — it stops every daemon in the state root.".to_string());
+        }
     }
+    lines
 }
 
 /// The footer: the session's id (or file path) with its name, the same
@@ -195,6 +269,7 @@ pub fn refusal_for_flavor(
     flavor: HolderFlavor,
     hold: &HoldIdentity,
     session_path: Option<&Path>,
+    holder_exe: Option<&Path>,
 ) -> String {
     let holder_id = hold.holder_id();
     let id = hold
@@ -227,7 +302,7 @@ the same daemon, so this build cannot open the file while that process holds it.
                 }
             }
             lines.push(String::new());
-            lines.extend(take_over_lines(hold, "prime-agent"));
+            lines.extend(take_over_lines(hold, "prime-agent", holder_exe));
         }
         HolderFlavor::ThisBuild => {
             lines.push(format!(
@@ -258,7 +333,7 @@ daemon owns this session)"
                 }
             }
             lines.push(String::new());
-            lines.extend(take_over_lines(hold, "prime-agent-rust"));
+            lines.extend(take_over_lines(hold, "prime-agent-rust", holder_exe));
         }
         HolderFlavor::AnotherProcess => {
             lines.push(format!(
@@ -267,7 +342,7 @@ daemon owns this session)"
 runtime lease."
             ));
             lines.push(String::new());
-            lines.extend(take_over_lines(hold, "prime-agent-rust"));
+            lines.extend(take_over_lines(hold, "prime-agent-rust", holder_exe));
         }
     }
     lines.push(String::new());
@@ -311,7 +386,7 @@ mod tests {
             pid: Some(4242),
             active_session_id: Some("ts01ab".to_string()),
         };
-        let message = refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold, None);
+        let message = refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold, None, None);
         let expected = "This session is currently open in your TypeScript version of Prime Agent \
 (active in ts01ab). The Rust and TS versions share the same session store but not \
 the same daemon, so this build cannot open the file while that process holds it.
@@ -339,7 +414,7 @@ Session: ts01ab";
             pid: Some(4300),
             active_session_id: Some("rs01cd".to_string()),
         };
-        let message = refusal_for_flavor(HolderFlavor::ThisBuild, &hold, None);
+        let message = refusal_for_flavor(HolderFlavor::ThisBuild, &hold, None, None);
         assert!(
             message.contains("prime-agent-rust --daemon-socket <socket> --resume rs01cd"),
             "the attach command names the flag and the session: {message}"
@@ -357,7 +432,7 @@ Session: ts01ab";
             pid: None,
             active_session_id: None,
         };
-        let message = refusal_for_flavor(HolderFlavor::AnotherProcess, &hold, None);
+        let message = refusal_for_flavor(HolderFlavor::AnotherProcess, &hold, None, None);
         assert!(
             message.contains("(active in another process)"),
             "the anonymous holder id renders: {message}"
@@ -389,7 +464,7 @@ Session: ts01ab";
             pid: Some(4242),
             active_session_id: Some("ts01ab".to_string()),
         };
-        let message = refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold, Some(&file));
+        let message = refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold, Some(&file), None);
         assert!(
             message.ends_with("Session: ts01ab (lane work)"),
             "the footer names the session and its name: {message}"
@@ -399,7 +474,7 @@ Session: ts01ab";
             pid: Some(4242),
             active_session_id: None,
         };
-        let message = refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold, Some(&file));
+        let message = refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold, Some(&file), None);
         assert!(
             message.ends_with(&format!("Session: {} (lane work)", file.display())),
             "without a holder id the footer names the file and its name: {message}"

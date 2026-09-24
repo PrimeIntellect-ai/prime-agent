@@ -132,11 +132,12 @@ async fn try_daemon_attached_acp(options: &RunOptions) -> Option<i32> {
     if std::env::var_os("PRIME_AGENT_FAUX_SCRIPT").is_some() {
         return None;
     }
-    let socket_path = options
-        .daemon_socket
-        .clone()
-        .map(|socket| crate::config::expand_tilde_path(&socket))
-        .unwrap_or_else(pa_daemon::socket::default_daemon_socket_path);
+    // Flag > env > default: the ACP transport resolves the same
+    // `PRIME_AGENT_DAEMON_SOCKET` contract as every other mode (the
+    // `prime-agent-rust` launcher pins that env, so the ACP path must
+    // honor it or it would target the TypeScript default socket and
+    // treat the schema mismatch as a stale daemon).
+    let socket_path = crate::config::resolve_daemon_socket_path(options.daemon_socket.as_deref());
     let cwd = options.config.cwd.clone();
     let result = async {
         crate::interactive_mode::ensure_daemon_running(&socket_path, &cwd)
@@ -760,14 +761,36 @@ fn assert_session_not_active_in_daemon(
     // open with the same refusal the daemon's create path answers - a
     // print-mode run over a held file would be a second writer on it.
     let agent_dir = crate::config::get_agent_dir();
-    if let Some(owner) = pa_daemon::lease::live_lease_owner(&agent_dir, session_path) {
-        return Err(pa_daemon::hold_refusal::refusal_message(
-            &pa_daemon::hold_refusal::HoldIdentity {
-                pid: Some(owner.pid),
-                active_session_id: owner.active_session_id,
-            },
-            Some(session_path),
-        ));
+    // Acquire, not observe: a probe leaves a window where a daemon worker
+    // (or another CLI) acquires the file's runtime lease after the check
+    // and before this in-process open - two writers on one file. The
+    // acquire is atomic against the shared lease table: a live foreign
+    // holder answers with the session-hold refusal, and a successful
+    // acquire is held for the process lifetime (the one-shot print run
+    // IS the writer; `forget` keeps the lease armed until the process
+    // exits, whose dead pid the liveness probes treat as released).
+    match pa_daemon::lease::acquire_runtime_session_lease(session_path, &agent_dir) {
+        Ok(lease) => {
+            std::mem::forget(lease);
+        }
+        Err(error) => {
+            let Some(active) =
+                error.downcast_ref::<pa_daemon::lease::SessionAlreadyActiveError>()
+            else {
+                // The lease table itself failed (io, permissions): never
+                // silently proceed over an undeterminable ownership record.
+                return Err(format!(
+                    "could not verify the session file is not held: {error:#}"
+                ));
+            };
+            return Err(pa_daemon::hold_refusal::refusal_message(
+                &pa_daemon::hold_refusal::HoldIdentity {
+                    pid: active.holder_pid,
+                    active_session_id: active.active_session_id.clone(),
+                },
+                Some(session_path),
+            ));
+        }
     }
     Ok(())
 }

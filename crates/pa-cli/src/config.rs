@@ -33,9 +33,21 @@ pub fn resolve_daemon_socket_path(daemon_socket: Option<&str>) -> PathBuf {
         .or_else(|| {
             std::env::var_os(ENV_DAEMON_SOCKET)
                 .filter(|value| !value.is_empty())
-                .map(|value| expand_tilde_path(&value.to_string_lossy()))
+                .map(expand_tilde_path_os)
         })
         .unwrap_or_else(pa_daemon::socket::default_daemon_socket_path)
+}
+
+/// [`expand_tilde_path`] over a raw environment value: a tilde-prefixed
+/// value expands against the home dir; anything else passes through as
+/// the original bytes — a `to_string_lossy` here would silently rewrite a
+/// non-UTF-8 socket path (U+FFFD) and point the CLI at a socket nobody
+/// is serving.
+pub fn expand_tilde_path_os(value: &std::ffi::OsStr) -> PathBuf {
+    if value.to_str().is_some_and(|path| path.starts_with('~')) {
+        return expand_tilde_path(&value.to_string_lossy());
+    }
+    PathBuf::from(value)
 }
 
 /// `PRIME_AGENT_CODING_AGENT_SESSION_DIR`: legacy session-dir override.

@@ -88,12 +88,15 @@ fi
 # (the id from the run page URL).
 if [ "$HAVE_GH" = 1 ]; then
   if [ "$RUN" = "latest" ]; then
+    # An empty run list makes jq print the literal "null" - refuse it
+    # here instead of passing a bogus id to the download.
     RUN="$(gh run list --repo "$REPO" --workflow "$WORKFLOW" --branch "$BRANCH" \
       --status success --limit 1 --json databaseId \
       --jq '.[0].databaseId')" \
       || die "could not list ${WORKFLOW} runs in ${REPO} (is gh authenticated?)"
   fi
-  [ -n "$RUN" ] || die "no successful ${WORKFLOW} run found on ${BRANCH} in ${REPO}"
+  [ -n "$RUN" ] && [ "$RUN" != "null" ] \
+    || die "no successful ${WORKFLOW} run found on ${BRANCH} in ${REPO}"
 else
   api() {
     curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
@@ -181,21 +184,27 @@ rm -rf "$share_dir"
 mv "$stage" "$share_dir"
 
 # --- the launcher (the cohabitation contract lives here) -------------------------
-# Every line is load-bearing:
-cat > "$launcher" <<EOF
+# Every line is load-bearing. The heredoc is QUOTED ('EOF'): the launcher
+# is written literally, with NOTHING expanded at install time - the exec
+# path resolves from the launcher's own location at launch (the payload
+# rides ../share/ from wherever the prefix placed the binary), the
+# per-user socket suffix runs at launch, and a prefix containing shell
+# syntax can never end up reparsed inside this generated script.
+cat > "$launcher" <<'EOF'
 #!/bin/sh
 # prime-agent-rust — launcher written by install-rust.sh.
 # The session store is shared with the TypeScript product BY DESIGN: both
-# read and write the same \$HOME/.prime/agent (sessions and their leases),
+# read and write the same $HOME/.prime/agent (sessions and their leases),
 # so the same sessions appear in both products. The env keeps the TS
 # product's default while allowing the usual overrides.
-export PRIME_AGENT_CODING_AGENT_DIR="\${PRIME_AGENT_CODING_AGENT_DIR:-\$HOME/.prime/agent}"
+export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.prime/agent}"
 # This daemon's OWN socket: the products share the store, NOT the daemon —
 # their daemon schema ids differ, so without this pin the Rust CLI would
 # treat the TypeScript daemon as stale and shut it down when idle. This
-# build honors the env (flag > env > default).
-export PRIME_AGENT_DAEMON_SOCKET="\${PRIME_AGENT_DAEMON_SOCKET:-\${TMPDIR:-/tmp}/prime-agent-rust/daemon.sock}"
-exec "${share_dir}/prime-agent" "\$@"
+# build honors the env (flag > env > default). The default is per-user
+# (the uid suffix), like the product's own per-user default socket.
+export PRIME_AGENT_DAEMON_SOCKET="${PRIME_AGENT_DAEMON_SOCKET:-${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock}"
+exec "$(dirname "$0")/../share/prime-agent-rust/prime-agent" "$@"
 EOF
 chmod 0755 "$launcher"
 

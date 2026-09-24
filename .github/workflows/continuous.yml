@@ -48,7 +48,10 @@ jobs:
           arguments: --all-features --workspace
           command-arguments: advisories licenses
 
+  # The audit gates every build: an unaudited tree must not produce
+  # downloadable branch-channel binaries.
   build:
+    needs: deny
     name: build-${{ matrix.target }}
     runs-on: ${{ matrix.runs-on }}
     permissions:
