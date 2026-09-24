@@ -78,6 +78,47 @@ pub struct McpServiceRow {
 }
 
 impl McpServiceRow {
+    /// Parse one legacy roster entry (a daemon that predates the catalog
+    /// surface serves only `connections`): the row keeps the roster's
+    /// honest connected state; a not-connected row stays connectable.
+    fn from_roster_entry(value: &Value) -> Option<Self> {
+        let connected = value
+            .get("connected")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        Some(McpServiceRow {
+            service_id: value.get("server")?.as_str()?.to_string(),
+            label: value
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            connection_status: if connected {
+                "connected"
+            } else {
+                "not_connected"
+            }
+            .to_string(),
+            connectable: !connected,
+            login_pending: false,
+            uses_oauth: value
+                .get("usesOAuth")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            source: "catalog".to_string(),
+            connection_ids: Vec::new(),
+            paste_token: false,
+            aliases: Vec::new(),
+            description: None,
+            category: None,
+            publisher: None,
+            docs_url: None,
+            setup_hint: None,
+            tool_count: None,
+            verified_at: None,
+        })
+    }
+
     /// Parse one daemon `services` entry.
     fn from_value(value: &Value) -> Option<Self> {
         let connection_ids = value
@@ -459,7 +500,7 @@ impl McpView {
     /// carries no live tool listing — the picker opens from this local
     /// state exactly like TS, so the open is instant.
     pub fn from_response(data: &Value, viewport_rows: usize) -> Self {
-        let rows: Vec<McpServiceRow> = data
+        let services: Vec<McpServiceRow> = data
             .get("services")
             .and_then(Value::as_array)
             .map(|entries| {
@@ -469,6 +510,23 @@ impl McpView {
                     .collect()
             })
             .unwrap_or_default();
+        // The catalog cards own the rows when the daemon serves them (TS
+        // `buildPluginViews` already includes user-declared servers); a
+        // daemon that predates the catalog surface serves only the legacy
+        // `connections` roster, and its rows render from the roster.
+        let rows = if services.is_empty() {
+            data.get("connections")
+                .and_then(Value::as_array)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter_map(McpServiceRow::from_roster_entry)
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            services
+        };
         let mut view = McpView {
             rows,
             search: SearchInput::new(),
