@@ -327,10 +327,6 @@ fn attach_data(id: &str) -> Value {
     })
 }
 
-fn options(socket: PathBuf) -> InteractiveOptions {
-    options_with_session(socket, SessionSelection::New)
-}
-
 fn options_with_session(socket: PathBuf, session: SessionSelection) -> InteractiveOptions {
     InteractiveOptions {
         socket_path: socket,
