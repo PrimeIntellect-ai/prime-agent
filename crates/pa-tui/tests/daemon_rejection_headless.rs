@@ -626,6 +626,12 @@ fn refused_saved_session_create_names_the_holder_and_next_steps() {
         "the refused create falls back to the agents view, not exit"
     );
     let notice = run.agents_view_notice.as_deref().unwrap_or_default();
+    // The refusal stays a TYPED `RequestRejected` (the run hands off to
+    // the agents view instead of exiting) and carries the descriptive text.
+    assert!(
+        notice.contains("the daemon rejected the create request:"),
+        "the typed rejection frames the descriptive notice: {notice}"
+    );
     assert!(
         notice.contains("Session is already active in 245ddb974b6d: /tmp/sess-1.jsonl"),
         "the notice keeps the TS refusal first line: {notice}"

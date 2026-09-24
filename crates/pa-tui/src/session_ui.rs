@@ -8362,7 +8362,14 @@ async fn describe_session_open_failure(
         Some(holder) => crate::session_open_error::already_active_error(&holder, &path),
         None => crate::session_open_error::already_active_unknown_holder(&owner, &path),
     };
-    anyhow!(text)
+    // The refusal stays a typed `RequestRejected`: `is_daemon_rejection`
+    // keeps classifying it (the interactive open hands off to the agents
+    // view with the notice instead of exiting the client), with the
+    // daemon's own message replaced by the descriptive text.
+    anyhow::Error::new(crate::daemon_client::RequestRejected {
+        command: "create".to_string(),
+        message: text,
+    })
 }
 
 /// The retry-episode collapse (SANCTIONED DIVERGENCE from TS, operator
