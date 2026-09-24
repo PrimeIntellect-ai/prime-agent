@@ -714,6 +714,11 @@ async fn run_interactive_surface(
     let (heartbeats_tx, mut heartbeats_rx) =
         mpsc::unbounded_channel::<crate::session_ui::HeartbeatsUpdate>();
     let (bash_tx, mut bash_rx) = mpsc::unbounded_channel::<crate::session_ui::BashActivityUpdate>();
+    // Background slash-command-catalog refreshes (`get_commands`) report
+    // here; the loop folds the session's skill commands into the
+    // autocomplete provider.
+    let (commands_tx, mut commands_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::CommandCatalogUpdate>();
     // The double-Ctrl+C force-quit guard: the terminal reader observes the
     // pair even while this loop is wedged in a daemon request, and a plain
     // std-thread watchdog enforces the exit deadline without the runtime.
@@ -782,6 +787,7 @@ async fn run_interactive_surface(
         crate::session_ui::ActivityUpdates {
             heartbeats: heartbeats_tx,
             bash: bash_tx,
+            commands: commands_tx,
         },
     )
     .await
@@ -1432,6 +1438,11 @@ async fn run_interactive_surface(
             maybe_bash = bash_rx.recv() => {
                 if let Some(update) = maybe_bash {
                     session.apply_bash_activity(update, &mut view);
+                }
+            }
+            maybe_commands = commands_rx.recv() => {
+                if let Some(update) = maybe_commands {
+                    session.apply_command_catalog(update, &mut view);
                 }
             }
             _reconnect_tick = async {

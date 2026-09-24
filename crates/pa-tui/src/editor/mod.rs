@@ -10,6 +10,7 @@
 //! `text_ops` (deletion/yank), `motion` (cursor movement), `input` (key
 //! dispatch), `autocomplete`, and `layout` (rendering-facing layout).
 
+use crate::autocomplete::SlashCommandEntry;
 use crate::keybindings::KeybindingsManager;
 use crate::width::is_whitespace_char;
 use std::collections::HashMap;
@@ -204,6 +205,16 @@ impl Editor {
     pub fn set_autocomplete_hidden_commands(&mut self, hidden: std::collections::HashSet<String>) {
         if let Some(provider) = self.autocomplete_provider.as_mut() {
             provider.set_hidden_commands(hidden);
+        }
+    }
+
+    /// Replace the provider's `skill:` commands (TS
+    /// `setupAutocompleteProvider` rebuilds the command list with the
+    /// session's skills; this port swaps the list on the installed
+    /// provider).
+    pub fn set_autocomplete_skill_commands(&mut self, skills: Vec<SlashCommandEntry>) {
+        if let Some(provider) = self.autocomplete_provider.as_mut() {
+            provider.set_skill_commands(skills);
         }
     }
 
