@@ -313,9 +313,14 @@ impl WindowedSessionStore {
                 // last in file order — the cumulative aggregate the TS fold
                 // ends with.
                 if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+                    // A malformed aggregate (null, a scalar) must not
+                    // replace a valid row usage with zeros — the session
+                    // store fold skips non-objects the same way.
                     if let (Some(target), Some(aggregate)) = (
                         value.get("targetId").and_then(serde_json::Value::as_str),
-                        value.get("aggregateUsage"),
+                        value
+                            .get("aggregateUsage")
+                            .filter(serde_json::Value::is_object),
                     ) {
                         older_aggregates
                             .entry(target.to_owned())
@@ -352,17 +357,22 @@ impl WindowedSessionStore {
                                         .count()
                                         as u64;
                                 }
-                                if let Some(usage) = &message.usage {
-                                    // Recorded per row, not summed inline: an
-                                    // attribution targeting this older
-                                    // assistant replaces its usage with the
-                                    // cumulative aggregate (TS
-                                    // `applyChildUsageAttributions`), and
-                                    // the totals sum the folded rows after
-                                    // the walk.
-                                    older_usage
-                                        .push((id.to_owned(), OlderPathUsage::from_usage(usage)));
-                                }
+                                // Recorded per row, not summed inline: an
+                                // attribution targeting this older assistant
+                                // replaces its usage with the cumulative
+                                // aggregate (TS
+                                // `applyChildUsageAttributions` — assignment,
+                                // not merge: a row that never carried usage
+                                // still gets the aggregate inserted), and the
+                                // totals sum the folded rows after the walk.
+                                older_usage.push((
+                                    id.to_owned(),
+                                    message
+                                        .usage
+                                        .as_ref()
+                                        .map(OlderPathUsage::from_usage)
+                                        .unwrap_or_default(),
+                                ));
                             }
                             _ => {}
                         }
