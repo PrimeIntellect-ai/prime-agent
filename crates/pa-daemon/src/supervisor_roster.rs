@@ -267,17 +267,30 @@ impl Supervisor {
         // exactly like the old reseed degraded to no rows.
         let (_, parent_by_child) = self.live_edges_and_parents().await.unwrap_or_default();
         let roots = self.roster_seed_roots().await;
+        // The ledger/roots awaits opened a late-write window. Only
+        // rows that carry the STOPPED generation settle here: the
+        // stopped worker's own in-flight delta can have written a row
+        // the snapshot missed (settle it), but a same-session
+        // re-registration reuses the worker id (the sequence-slot fix
+        // assumes it) and its replacement rows are LIVE. The registry
+        // decides, OUTSIDE the roster lock (an await cannot run under
+        // it): the passivation caller removed the stopped resident
+        // before this call, so a resident that is BACK in the registry
+        // by now belongs to the replacement - return and let the
+        // replacement's own registration/refresh own its rows (a
+        // just-resumed session must not vanish or render inactive).
+        let replacement_live = self
+            .registry
+            .get(worker_id)
+            .await
+            .is_some_and(|resident| !resident.route_state().retired);
+        if replacement_live {
+            return;
+        }
         let mut changed = Vec::new();
         let mut removed = Vec::new();
         {
             let mut roster = self.roster.lock().unwrap();
-            // The ledger/roots awaits opened a late-write window: an
-            // authenticated `worker_roster_delta` that passed its token
-            // check before the registry removal can still have written
-            // a row the snapshot above never saw. Re-collect the
-            // worker's rows under this write lock and settle the union -
-            // every row the stopped worker wrote settles before the
-            // stop completes.
             let mut settle: Vec<AgentRosterEntry> = owned;
             for late in roster.entries_for_worker(worker_id).into_iter().cloned() {
                 if !settle
