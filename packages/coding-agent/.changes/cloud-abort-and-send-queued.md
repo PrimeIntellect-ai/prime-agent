@@ -1,0 +1,1 @@
+- Fixed Ctrl+C (abort and send queued) on a cloud session aborting the in-flight turn instead of failing as unsupported; queued follow-ups stay queued in the cloud row.

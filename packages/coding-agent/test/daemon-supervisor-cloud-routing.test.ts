@@ -530,6 +530,33 @@ describe("supervisor cloud bootstrap read parity", () => {
 		}) as never;
 	}
 
+	it("translates abort_and_send_queued on a cloud row to a guest abort (Ctrl+C keeps the queued follow-ups)", async () => {
+		const seen: string[] = [];
+		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			cloud: () => ({
+				...cloudStub,
+				resolveActive: () => ({ record: { sessionId: "sess_ctrlc" }, remoteSessionId: "sess_ctrlc" }),
+				handleSessionCommand: async (_command: DaemonCommand) => {
+					seen.push(_command.type);
+					return { id: "ctrlc-1", type: "response", command: _command.type, success: true };
+				},
+			}),
+			modelCatalog: () => catalogStub,
+			log: () => undefined,
+		}) as never;
+		const result = await (
+			supervisor as never as {
+				handleCommand(client: unknown, command: DaemonCommand): Promise<DaemonOutbound | undefined>;
+			}
+		).handleCommand(makeClient(), {
+			id: "ctrlc-1",
+			type: "abort_and_send_queued",
+			activeSessionId: "active-cloud",
+		});
+		expect(result).toMatchObject({ success: true, command: "abort" });
+		expect(seen).toEqual(["abort"]);
+	});
+
 	it("serves get_model_catalog and get_available_models from the supervisor catalog", async () => {
 		const supervisor = bootstrapRoutingSupervisor();
 		const catalog = await supervisor.handleCommand(makeClient(), {

@@ -3178,6 +3178,12 @@ export class DaemonSupervisor {
 					toolDefinition: cloudBuiltinToolDefinition(command.name),
 				});
 			}
+			if (command.type === "abort_and_send_queued") {
+				// The guest protocol has one abort; queued follow-ups stay in
+				// the registry's pending queue, so aborting the in-flight turn
+				// preserves Ctrl+C behavior (stop the turn, keep the queue).
+				return await this.handleCloudSessionCommand(client, { ...command, type: "abort" }, cloudTarget);
+			}
 			if (isCloudSessionCommand(command)) {
 				return await this.handleCloudSessionCommand(client, command, cloudTarget);
 			}
