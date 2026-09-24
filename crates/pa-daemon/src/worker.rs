@@ -895,6 +895,56 @@ fn supervisor_link_config(config: &WorkerConfig) -> SupervisorLinkConfig {
     }
 }
 
+/// Whether a delivery's sender is one of THIS session's children, by the
+/// sender's recorded durable parent edge: the persisted session id first
+/// (it survives this session's own worker replacement), then the live
+/// active id, then the session-file alias. Runtime kind alone never
+/// decides — a subagent spawned by another parent is not a child here.
+fn sender_is_child_of(sender: &Value, core: &SessionCore) -> bool {
+    let store = core.store.as_ref();
+    sender_parent_edge_is(
+        sender,
+        store.map(SessionFile::session_id),
+        core.active_session_id.as_str(),
+        store
+            .filter(|store| !store.path.as_os_str().is_empty())
+            .map(|store| store.path.as_path()),
+    )
+}
+
+/// The edge test behind [`sender_is_child_of`], pure over the recipient's
+/// durable identity: the sender block's parent edge (persisted id, live
+/// id, or session file) must point back at this session.
+fn sender_parent_edge_is(
+    sender: &Value,
+    own_session_id: Option<&str>,
+    own_active_session_id: &str,
+    own_session_file: Option<&std::path::Path>,
+) -> bool {
+    let sender_parent = |key: &str| {
+        sender
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    if let Some(parent) = sender_parent("parentSessionId") {
+        if own_session_id.is_some_and(|id| id == parent) {
+            return true;
+        }
+    }
+    if let Some(parent) = sender_parent("parentActiveSessionId") {
+        if parent == own_active_session_id {
+            return true;
+        }
+    }
+    if let (Some(parent), Some(file)) = (sender_parent("parentSessionPath"), own_session_file) {
+        if crate::agent_messaging::same_session_file(parent, &file.to_string_lossy()) {
+            return true;
+        }
+    }
+    false
+}
+
 impl Worker {
     pub fn new(config: WorkerConfig, registration: Option<RegistrationHandle>) -> Self {
         let events = Arc::new(EventPump::new());
@@ -3011,9 +3061,17 @@ impl Worker {
             .find_map(|key| sender.get(*key).and_then(Value::as_str))
             .unwrap_or("unknown")
             .to_string();
-        let from_relationship = match sender.get("runtimeKind").and_then(Value::as_str) {
-            Some("subagent") => Some(AgentFamilyRelationship::Child),
-            _ => None,
+        // The delivery's relationship label derives from the sender's
+        // durable parent edge, never from the sender's runtime kind alone:
+        // a subagent spawned by a DIFFERENT parent is not this session's
+        // child, and its messages must not render as one. The core lock is
+        // scoped to the read (a std MutexGuard never rides an await).
+        let from_relationship = {
+            let core = self
+                .core
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            sender_is_child_of(&sender, &core).then_some(AgentFamilyRelationship::Child)
         };
         let prompt = pa_core::session_engine::agent_messaging::create_agent_session_message_prompt(
             &AgentMessagePromptPayload {
@@ -6509,6 +6567,9 @@ mod agent_message_tests {
                         "sessionId": "source-file",
                         "sessionName": "research-lane",
                         "runtimeKind": "subagent",
+                        // The child label derives from this parent edge,
+                        // never from the runtime kind alone.
+                        "parentActiveSessionId": "target-session",
                     },
                 }),
             )
@@ -6569,6 +6630,9 @@ mod agent_message_tests {
                         "activeSessionId": "source-session",
                         "sessionName": "source-agent",
                         "runtimeKind": "subagent",
+                        // The child label derives from this parent edge,
+                        // never from the runtime kind alone.
+                        "parentActiveSessionId": "target-session",
                     },
                     "deliveryMode": "follow_up",
                 }),
@@ -6745,6 +6809,68 @@ mod prompt_image_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The delivery's relationship label is edge-derived: a subagent
+    /// sender whose durable parent edge points at this session is a
+    /// child; a subagent from another family never is, no matter its
+    /// runtime kind (the mislabeled-ack regression — sibling lanes'
+    /// messages must not render "from child:").
+    #[test]
+    fn sender_child_edge_decides_the_relationship_label() {
+        let true_child = json!({
+            "activeSessionId": "ddd444",
+            "runtimeKind": "subagent",
+            "parentSessionId": "sess-a",
+        });
+        assert!(sender_parent_edge_is(
+            &true_child,
+            Some("sess-a"),
+            "aaa111",
+            None
+        ));
+        let live_child = json!({
+            "activeSessionId": "eee555",
+            "runtimeKind": "subagent",
+            "parentActiveSessionId": "aaa111",
+        });
+        assert!(sender_parent_edge_is(
+            &live_child,
+            Some("sess-a"),
+            "aaa111",
+            None
+        ));
+        let foreign_child = json!({
+            "activeSessionId": "fff666",
+            "runtimeKind": "subagent",
+            "parentSessionId": "sess-zz",
+        });
+        assert!(!sender_parent_edge_is(
+            &foreign_child,
+            Some("sess-a"),
+            "aaa111",
+            None
+        ));
+        let edgeless = json!({ "activeSessionId": "ggg777", "runtimeKind": "subagent" });
+        assert!(!sender_parent_edge_is(
+            &edgeless,
+            Some("sess-a"),
+            "aaa111",
+            None
+        ));
+        let moved_child = json!({
+            "activeSessionId": "hhh888",
+            "runtimeKind": "subagent",
+            "parentSessionPath": "/old/root/sessions/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl",
+        });
+        assert!(sender_parent_edge_is(
+            &moved_child,
+            Some("sess-a"),
+            "aaa111",
+            Some(std::path::Path::new(
+                "/new/root/sessions/01a0d0a5-e954-71b7-8479-8dc7980768a1.jsonl"
+            )),
+        ));
+    }
 
     /// A message-less top-level session is a draft (hidden from the agents
     /// view); a session with messages is live; a resident subagent is live
@@ -9928,6 +10054,9 @@ mod turn_stream_tests {
                         "activeSessionId": "source-session",
                         "sessionName": "research-lane",
                         "runtimeKind": "subagent",
+                        // The child label derives from this parent edge,
+                        // never from the runtime kind alone.
+                        "parentActiveSessionId": "target-session",
                     },
                 }),
             )

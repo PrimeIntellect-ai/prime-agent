@@ -550,6 +550,11 @@ pub async fn create_session(mut config: SessionEngineConfig) -> anyhow::Result<S
                     .collect::<Vec<_>>(),
             ),
             allow_recursion: config.allow_recursion,
+            // The session's recursion depth rides the dynamic tail's
+            // session-role section: a spawned child's prompt must read
+            // "depth: N (not root)" with the child-agent reply doctrine,
+            // never the root identity.
+            rlm_depth: config.rlm_depth,
             generic_mcp_servers,
             prompt_guidelines: Some(prompt_guidelines),
             ..Default::default()
@@ -967,6 +972,66 @@ mod tests {
             } if user.content.text() == "run the echo tool"
         )));
         let _ = ToolDefinitionBridge::new;
+    }
+
+    /// A spawned child's prompt stamps its recursion depth: create_session
+    /// at depth N reads "depth: N (not root)", never the root identity the
+    /// pre-fix default (None -> 0) stamped on every child.
+    #[tokio::test]
+    async fn spawned_child_prompt_stamps_its_depth() {
+        let model = pa_agent::types::Model {
+            id: "m".into(),
+            name: "m".into(),
+            api: "test".into(),
+            provider: "test".into(),
+            base_url: "http://localhost".into(),
+            reasoning: false,
+            cost: Default::default(),
+            context_window: 1_000,
+            max_tokens: 100,
+        };
+        let provider = Arc::new(ScriptedProvider::new(model.clone()));
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("project");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let engine = create_session(SessionEngineConfig {
+            cron_store: None,
+            queued_steering_probe: None,
+            steering_mode: None,
+            follow_up_mode: None,
+            cwd: cwd.clone(),
+            agent_dir: tmp.path().join("agent"),
+            mcp_manager: None,
+            model: Some(model),
+            thinking_level: None,
+            stream_fn: Some(provider.stream_fn()),
+            tools: vec![bridge_tool(echo_definition())],
+            custom_system_prompt: None,
+            prompt_guidelines: vec![],
+            generic_mcp_servers: vec![],
+            allow_recursion: None,
+            session_manager: None,
+            extra_host_handlers: None,
+            conversation_log_path: None,
+            additional_skill_paths: vec![],
+            additional_prompt_paths: vec![],
+            extra_builtin_skill_overrides: vec![],
+            rlm_subagent_host: None,
+            rlm_depth: Some(2),
+            telemetry: None,
+            model_info: None,
+            cli_extension_sources: vec![],
+            extension_tool_allow_list: None,
+            prewarm_ipython_kernel: None,
+            queued_goal_context_purge: None,
+        })
+        .await
+        .unwrap();
+
+        assert!(engine
+            .system_prompt
+            .contains("Recursive agent depth: 2 (not root)"));
+        assert!(!engine.system_prompt.contains("depth: 0 (root)"));
     }
 
     /// The login chain's prompt-gating end to end at the engine level: a
