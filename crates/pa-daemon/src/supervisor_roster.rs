@@ -4,7 +4,7 @@
 //! `daemon-supervisor.ts`; the store itself lives in `agent_roster.rs`,
 //! and the seeding/hydration arms live in `supervisor_roster_seed.rs`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -258,16 +258,21 @@ impl Supervisor {
             roster.forget_worker_sequences(worker_id);
             owned
         };
-        if owned.is_empty() {
-            return;
-        }
         // The stopping worker's family view - live edges and the
         // surviving resident roots (the caller removed the worker from
         // the registry first) - decides each subagent row's fate. This is
         // the old remove+reseed's reach, without its per-family
-        // transcript reads; a ledger failure degrades to an empty view,
-        // exactly like the old reseed degraded to no rows.
-        let (_, parent_by_child) = self.live_edges_and_parents().await.unwrap_or_default();
+        // transcript reads; a ledger failure degrades to an empty view
+        // for the owned rows, exactly like the old reseed degraded to no
+        // rows, while the unowned sweep below stays armed only on the
+        // successful read (a transient ledger failure must not read as
+        // "no anchors anywhere" for the display rows).
+        let ledger_view = self.live_edges_and_parents().await;
+        let empty_view: (
+            Vec<crate::rlm_ledger::RlmLedgerEdge>,
+            HashMap<PathBuf, PathBuf>,
+        ) = (Vec::new(), HashMap::new());
+        let (_, parent_by_child) = ledger_view.as_ref().unwrap_or(&empty_view);
         let roots = self.roster_seed_roots().await;
         // The ledger/roots awaits opened a late-write window. Only
         // rows that carry the STOPPED generation settle here: the
@@ -330,7 +335,7 @@ impl Supervisor {
                             parent_by_child
                                 .get(&canonical_session_path(Path::new(file)))
                                 .is_some_and(|parent| {
-                                    family_descends_from(&parent_by_child, parent, &roots)
+                                    family_descends_from(parent_by_child, parent, &roots)
                                 })
                         })
                         .unwrap_or(false);
@@ -341,6 +346,50 @@ impl Supervisor {
                 } else {
                     roster.delete(&entry.agent_id);
                     removed.push(entry.agent_id);
+                }
+            }
+            // The unowned rows - the ones the boot/registration seeds
+            // wrote and the loop above passivated - carry no worker, so
+            // no stop ever revisited them: the rows a departed root's
+            // registration seeded outlived the root (the registration
+            // walk runs at register time, while the root is resident),
+            // and the agents view rendered them as top-level rows until
+            // the saved catalog re-parented them minutes later - the
+            // operator's agents-view flash. The passivation's own anchor
+            // rule settles them with the same verdict as the owned rows:
+            // a subagent row whose family walk no longer reaches a
+            // surviving resident root returns to the saved catalog
+            // alone (the dead family stays resumable there), while the
+            // anchored passivated rows keep their display. The sweep
+            // needs the ledger view the pass already read; a failed
+            // read leaves the display rows untouched.
+            if ledger_view.is_ok() {
+                for entry in roster.entries() {
+                    if entry.worker_id.is_some() {
+                        continue;
+                    }
+                    let subagent = entry
+                        .summary
+                        .get("rlmChildId")
+                        .and_then(Value::as_str)
+                        .is_some();
+                    let anchored = subagent
+                        && entry
+                            .summary
+                            .get("sessionFile")
+                            .and_then(Value::as_str)
+                            .map(|file| {
+                                parent_by_child
+                                    .get(&canonical_session_path(Path::new(file)))
+                                    .is_some_and(|parent| {
+                                        family_descends_from(parent_by_child, parent, &roots)
+                                    })
+                            })
+                            .unwrap_or(false);
+                    if !anchored {
+                        roster.delete(&entry.agent_id);
+                        removed.push(entry.agent_id);
+                    }
                 }
             }
         }
@@ -447,8 +496,8 @@ fn normalize_model_to_durable_pair(object: &mut serde_json::Map<String, Value>) 
 mod tests {
     use super::*;
     use crate::supervisor_roster_seed::tests::{
-        append_family_edge, live_child_summary, register_root_worker, roster_fixture,
-        roster_row_for_child, write_display_file,
+        append_family_edge, drain_pending_seeds_for_tests, live_child_summary,
+        register_root_worker, roster_fixture, roster_row_for_child, write_display_file,
     };
     use pa_types::daemon::agent_roster::AgentRosterStatus;
 
@@ -708,6 +757,172 @@ mod tests {
                 |entry| entry.summary.get("rlmChildId").and_then(Value::as_str)
                     != Some("sub-queued")
             ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The unowned half of the stop pass: the rows the boot and
+    /// registration seeds write carry no worker, so the family's
+    /// departure never revisited them - the rows a departed root seeded
+    /// outlived the root and the agents view rendered them as top-level
+    /// rows until the saved catalog re-parented them minutes later (the
+    /// operator's flash). The anchor rule settles them with the same
+    /// verdict as the owned rows: the family that lost its last resident
+    /// root returns to the saved catalog alone, while another root's
+    /// anchored seeded row keeps its display.
+    #[tokio::test]
+    async fn stop_prunes_seeded_rows_of_a_family_that_lost_its_root() {
+        let (dir, supervisor, root_file, child_file) = roster_fixture().await;
+        let agent_dir = dir.join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        // The surviving root's family: its seeded child stays anchored
+        // through the other root's stop.
+        let survivor_file = sessions_dir.join("root-2.jsonl");
+        let survivor_child = sessions_dir.join("sub-live.jsonl");
+        write_display_file(&survivor_file, "/the/survivor/cwd");
+        write_display_file(&survivor_child, "/the/survivor/child/cwd");
+        register_root_worker(&supervisor, "w-survivor", &survivor_file).await;
+        append_family_edge(
+            &agent_dir,
+            &sessions_dir,
+            "sub-live",
+            &survivor_file,
+            &survivor_child,
+        );
+        append_family_edge(&agent_dir, &sessions_dir, "sub-9", &root_file, &child_file);
+        register_root_worker(&supervisor, "w-root", &root_file).await;
+        // The stopping root owns its own top-level row, like the
+        // production stop does (the worker's summary push).
+        let mut root_summary = live_child_summary(&root_file, &child_file);
+        root_summary["runtimeKind"] = json!("top-level");
+        root_summary["sessionId"] = json!("root-persisted");
+        root_summary["id"] = json!("root-persisted");
+        root_summary["sessionFile"] = json!(root_file.to_string_lossy());
+        root_summary.as_object_mut().unwrap().remove("rlmChildId");
+        root_summary
+            .as_object_mut()
+            .unwrap()
+            .remove("parentSessionPath");
+        supervisor.write_roster_summary(&root_summary, Some("w-root"));
+        // The boot seed publishes both families' seeded rows.
+        supervisor.spawn_roster_boot_seed();
+        drain_pending_seeds_for_tests(&supervisor).await;
+        let mut events = supervisor.events.subscribe();
+        let _ = drain_roster_pushes(&mut events);
+        let _ = roster_row_for_child(&supervisor, "sub-9");
+        let _ = roster_row_for_child(&supervisor, "sub-live");
+
+        // The stop: the caller removed the resident from the registry
+        // first (both `stop_worker` and the give-up do exactly this).
+        supervisor.registry.remove("w-root").await;
+        supervisor.passivate_roster_worker("w-root", false).await;
+
+        let pushes = drain_roster_pushes(&mut events);
+        let removed: Vec<String> = pushes
+            .iter()
+            .flat_map(|push| {
+                push["removed"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|id| id.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert!(
+            removed.iter().any(|id| id.ends_with("#sub-9")),
+            "the orphaned family's seeded row leaves the roster (and the subscribers): {removed:?}"
+        );
+        let roster = supervisor.roster.lock().unwrap();
+        assert!(
+            !roster.entries().iter().any(|entry| entry
+                .summary
+                .get("rlmChildId")
+                .and_then(Value::as_str)
+                == Some("sub-9")),
+            "the departed family's seeded row is gone"
+        );
+        drop(roster);
+        // The surviving root's family keeps its seeded display row.
+        let kept = roster_row_for_child(&supervisor, "sub-live");
+        assert_eq!(
+            kept.worker_id, None,
+            "the anchored seeded row stays unowned"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The operator's flash at the response boundary: a store seeded with
+    /// hundreds of dead subagent sessions under a family whose root
+    /// departs. While the root is resident the roster serves the seeded
+    /// family (TS `seedRosterLedger` parity - a resident root's passive
+    /// descendants render); the stop must leave the first roster snapshot
+    /// clean, so the agents view's first frame never dumps the dead
+    /// family's rows as top-level entries.
+    #[tokio::test]
+    async fn stop_leaves_the_first_roster_snapshot_clean_behind_hundreds_of_seeded_rows() {
+        let (dir, supervisor, root_file, _child_file) = roster_fixture().await;
+        let agent_dir = dir.join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        register_root_worker(&supervisor, "w-root", &root_file).await;
+        for index in 0..300 {
+            let seeded_child = sessions_dir.join(format!("sub-flash-{index}.jsonl"));
+            write_display_file(&seeded_child, "/the/flash/cwd");
+            append_family_edge(
+                &agent_dir,
+                &sessions_dir,
+                &format!("sub-flash-{index}"),
+                &root_file,
+                &seeded_child,
+            );
+        }
+        supervisor.spawn_roster_boot_seed();
+        drain_pending_seeds_for_tests(&supervisor).await;
+        let before = supervisor
+            .handle_roster_subscribe("s1", "roster_subscribe")
+            .await;
+        let roster = before.data.expect("roster snapshot")["roster"].clone();
+        let family_rows = roster
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter(|entry| {
+                        entry["summary"]["rlmChildId"]
+                            .as_str()
+                            .is_some_and(|id| id.starts_with("sub-flash-"))
+                    })
+                    .count()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            family_rows, 300,
+            "a resident root's seeded family serves to subscribers (TS parity)"
+        );
+
+        // The root departs: its family loses its only anchor.
+        supervisor.registry.remove("w-root").await;
+        supervisor.passivate_roster_worker("w-root", false).await;
+
+        let after = supervisor
+            .handle_roster_subscribe("s2", "roster_subscribe")
+            .await;
+        let roster = after.data.expect("roster snapshot")["roster"].clone();
+        let family_rows = roster
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter(|entry| {
+                        entry["summary"]["rlmChildId"]
+                            .as_str()
+                            .is_some_and(|id| id.starts_with("sub-flash-"))
+                    })
+                    .count()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            family_rows, 0,
+            "the first roster snapshot behind a departed family is clean: {roster:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

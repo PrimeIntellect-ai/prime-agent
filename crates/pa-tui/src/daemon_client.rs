@@ -68,8 +68,12 @@ pub enum DaemonClientEvent {
     /// the UI re-attaches through the supervisor, which respawns the
     /// worker and hands out a fresh peer ticket.
     DirectLinkLost { active_session_id: String },
-    /// `session_list_item` progress frame of `list_saved_sessions`.
-    SessionListItem { session: Value },
+    /// `session_list_item` progress frame of `list_saved_sessions`: one
+    /// saved row as the scan streams it (newest first), tagged with the
+    /// request id it belongs to (TS's connection routes the stream to
+    /// the originating `listDaemonSavedSessions` callbacks; the agents
+    /// view applies only the frames of its own in-flight fetch).
+    SessionListItem { session: Value, request_id: String },
     /// `session_list_progress` progress frame of `list_saved_sessions`.
     SessionListProgress { loaded: u64, total: u64 },
     /// `daemon_closing`: the supervisor is going down. An update restart
@@ -145,6 +149,11 @@ pub(crate) fn client_event_from_value(value: &Value) -> Option<DaemonClientEvent
         }),
         "session_list_item" => Some(DaemonClientEvent::SessionListItem {
             session: value.get("session").cloned().unwrap_or(Value::Null),
+            request_id: value
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
         }),
         "session_list_progress" => Some(DaemonClientEvent::SessionListProgress {
             loaded: value.get("loaded").and_then(Value::as_u64).unwrap_or(0),
@@ -516,6 +525,22 @@ impl DaemonClient {
             "daemon_{}",
             self.next_request_id.fetch_add(1, Ordering::SeqCst) + 1
         );
+        self.request_supervisor_with_id(command, &id, timeout_ms)
+            .await
+    }
+
+    /// One JSONL envelope on the supervisor connection, under the caller's
+    /// own envelope id: the streamed `session_list_item` frames of
+    /// `list_saved_sessions` carry it, so the caller can attribute the
+    /// catalog stream to its own fetch (TS's connection routes the
+    /// stream to the originating `listDaemonSavedSessions` callbacks).
+    pub async fn request_supervisor_with_id(
+        &self,
+        command: DaemonCommand,
+        id: &str,
+        timeout_ms: u64,
+    ) -> Result<DaemonResponse> {
+        let id = id.to_string();
         let envelope = DaemonCommandEnvelope {
             frame_type: DaemonCommandFrameType::Command,
             id: id.clone(),
