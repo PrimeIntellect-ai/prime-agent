@@ -84,6 +84,9 @@ pub enum SettingsMenuAction {
     PreviewTheme {
         name: String,
     },
+    /// Esc inside a submenu closed it (TS `onCancel` → `done()`); the menu
+    /// itself stays open (a top-level Esc is the menu [`Cancel`]).
+    SubmenuClosed,
     /// The theme submenu closed with Esc: restore the row's theme.
     RestoreTheme {
         name: String,
@@ -364,11 +367,14 @@ impl SettingsMenu {
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> SettingsMenuAction {
         if let Some(mut sub) = self.sub.take() {
             let action = self.handle_submenu_key(&mut sub, key, kb);
-            // A value select or a theme restore closes the submenu (TS
-            // `done()`); a plain navigation or live preview keeps it open.
+            // A value select, a theme restore, or the submenu's Esc (TS
+            // `done()` and `onCancel` both close it) closes the submenu; a
+            // plain navigation or live preview keeps it open.
             let closed = matches!(
                 action,
-                SettingsMenuAction::Change { .. } | SettingsMenuAction::RestoreTheme { .. }
+                SettingsMenuAction::Change { .. }
+                    | SettingsMenuAction::RestoreTheme { .. }
+                    | SettingsMenuAction::SubmenuClosed
             );
             if !closed {
                 self.sub = Some(sub);
@@ -553,7 +559,9 @@ impl SettingsMenu {
             SettingsSubmenu::Theme { .. } => SettingsMenuAction::RestoreTheme {
                 name: self.rows[sub.row].current.clone(),
             },
-            _ => SettingsMenuAction::None,
+            // Every other submenu just goes back (TS `onCancel` →
+            // `done()`); the menu itself stays open.
+            _ => SettingsMenuAction::SubmenuClosed,
         }
     }
 
@@ -1039,6 +1047,17 @@ mod menu_tests {
                 value: "auto".to_string()
             }
         );
+        // Esc inside the submenu closes it (TS `onCancel` → `done()`)
+        // while the menu itself stays open.
+        assert_eq!(menu.handle_key("enter", &kb()), SettingsMenuAction::None);
+        assert_eq!(
+            menu.handle_key("esc", &kb()),
+            SettingsMenuAction::SubmenuClosed
+        );
+        let text = render_text(&menu);
+        assert!(text.iter().any(|row| {
+            row.contains("Type to search · Enter/Space to change · Esc to cancel")
+        }));
     }
 
     #[test]

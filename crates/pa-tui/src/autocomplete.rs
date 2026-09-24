@@ -893,10 +893,11 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
                     }
                     // TS `command.getArgumentCompletions`: a command that
                     // supplies argument items offers them at its argument
-                    // position (filtered by the typed term); the
-                    // model/effort/… selectors stay per-command UIs, so
-                    // commands without items fall through to path
-                    // completion.
+                    // position (filtered by the typed term); commands
+                    // without items — and terms with no match — answer
+                    // nothing (TS `getSuggestions` returns null at argument
+                    // positions; the force-triggered path completion is
+                    // the file surface there).
                     SlashKind::Argument => {
                         let Some(command) = context.command_name.as_deref() else {
                             return None;
@@ -1103,7 +1104,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["priority"]
         );
-        // No match falls through to path completion (None here).
+        // A term with no match answers nothing (TS `getSuggestions` null
+        // at argument positions).
         assert!(provider
             .get_suggestions(&["/tier zz".to_string()], 0, 8, false)
             .is_none());

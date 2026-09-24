@@ -38,7 +38,10 @@ pub(crate) fn engine_supports_service_tier(
                 tier,
             ))
         })
-        .unwrap_or(false)
+        // A session without a resolved model still accepts `default` (TS
+        // `supportsServiceTier` answers the default tier true for any
+        // model, including none).
+        .unwrap_or(tier == ServiceTier::Default)
 }
 
 /// The wire name of a service tier (the serde lowercase form).

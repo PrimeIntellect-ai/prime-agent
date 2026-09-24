@@ -4131,6 +4131,7 @@ impl SessionUi {
             crate::settings_menu::SettingsMenuAction::Cancel => {
                 view.settings_menu = None;
             }
+            crate::settings_menu::SettingsMenuAction::SubmenuClosed => {}
             crate::settings_menu::SettingsMenuAction::PreviewTheme { name } => {
                 // TS `onThemePreview`: switch live without persisting.
                 view.theme = crate::app::load_theme(&name);
