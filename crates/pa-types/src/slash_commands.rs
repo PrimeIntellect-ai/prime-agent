@@ -49,6 +49,7 @@ const CANONICAL_BUILTIN_SLASH_COMMANDS: &[BuiltinSlashCommand] = &[
     BuiltinSlashCommand { name: "model", description: "Select model (opens selector UI; Tab filters by typed text)", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "effort", description: "Select reasoning/thinking level (opens selector UI)", execution: SlashCommandExecution::Client, argument_hint: Some("[level]"), aliases: &["thinking"], takes_argument: false },
     BuiltinSlashCommand { name: "fast", description: "Toggle OpenAI Fast mode", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },
+    BuiltinSlashCommand { name: "tier", description: "Show or set the service tier", execution: SlashCommandExecution::Client, argument_hint: Some("[default|flex|priority|auto]"), aliases: &[], takes_argument: false },
     BuiltinSlashCommand { name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)", execution: SlashCommandExecution::Client, argument_hint: Some("[path]"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "import", description: "Import and resume a session from a JSONL file", execution: SlashCommandExecution::Client, argument_hint: Some("<path.jsonl>"), aliases: &[], takes_argument: true },
     BuiltinSlashCommand { name: "share", description: "Share session as a secret GitHub gist", execution: SlashCommandExecution::Client, argument_hint: None, aliases: &[], takes_argument: false },

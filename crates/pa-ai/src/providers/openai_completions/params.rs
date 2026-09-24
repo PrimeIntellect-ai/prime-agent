@@ -191,6 +191,21 @@ pub(crate) fn build_params(
         }
     }
 
+    // OpenAI and OpenRouter accept a top-level service_tier (OpenRouter:
+    // flex and priority for every model,
+    // https://openrouter.ai/docs/guides/features/service-tiers). Prime
+    // Inference tolerates but ignores the field (probed 2026-09-01), so it
+    // is not forwarded; other OpenAI-compatible gateways may reject
+    // unknown fields (TS #2144).
+    if let Some(service_tier) = options.base.service_tier {
+        if model.provider == "openai" || model.provider == "openrouter" {
+            params.insert(
+                "service_tier".into(),
+                serde_json::to_value(service_tier).unwrap_or(Value::Null),
+            );
+        }
+    }
+
     if model.base_url.contains("openrouter.ai") {
         if let Some(crate::types::CompatKind::OpenAiCompletions(compat)) = model.compat_kind() {
             if let Some(routing) = &compat.as_ref().open_router_routing {
@@ -395,6 +410,69 @@ mod tests {
             Value::Object(map) => map,
             _ => panic!("build_params returns a JSON object"),
         }
+    }
+
+    /// Assemble params with a service tier requested over the base
+    /// stream options (the shape the daemon's provider adapter and
+    /// `stream_simple` both hand the completions path).
+    fn tiered_params(provider: &str, model_id: &str, tier: Option<crate::types::ServiceTier>) -> Map<String, Value> {
+        let model = models_generated::get_model(provider, model_id)
+            .unwrap_or_else(|| panic!("compiled catalog carries {provider}/{model_id}"));
+        let context = Context {
+            system_prompt: None,
+            messages: vec![Message::User(UserMessage {
+                content: UserMessageContent::Text("Hi".into()),
+                timestamp: 1,
+                rest: Default::default(),
+            })],
+            tools: None,
+        };
+        let options = OpenAICompletionsOptions::from_base(StreamOptions {
+            api_key: Some("test".into()),
+            service_tier: tier,
+            ..Default::default()
+        });
+        let params = build_params(
+            model,
+            &context,
+            Some(&options),
+            &crate::providers::openai_completions::get_compat(model),
+            CacheRetention::None,
+            None,
+        );
+        match params {
+            Value::Object(map) => map,
+            _ => panic!("build_params returns a JSON object"),
+        }
+    }
+
+    /// TS #2144: the completions path forwards `service_tier` for OpenAI
+    /// and OpenRouter only — other OpenAI-compatible gateways may reject
+    /// unknown fields, and Prime Inference tolerates but ignores the field.
+    #[test]
+    fn forwards_service_tier_for_openai_and_openrouter_only() {
+        use crate::types::ServiceTier;
+        for (provider, model_id) in [
+            ("openai", "gpt-5.5"),
+            ("openrouter", "openai/gpt-5.5"),
+        ] {
+            let params = tiered_params(provider, model_id, Some(ServiceTier::Priority));
+            assert_eq!(
+                params.get("service_tier"),
+                Some(&json!("priority")),
+                "{provider}/{model_id}: the requested tier must reach the request"
+            );
+            let unset = tiered_params(provider, model_id, None);
+            assert!(
+                !unset.contains_key("service_tier"),
+                "{provider}/{model_id}: no tier requested means no field"
+            );
+        }
+        let gateway = tiered_params("prime-inference", "z-ai/glm-5.3", Some(ServiceTier::Priority));
+        assert!(
+            !gateway.contains_key("service_tier"),
+            "gateways never receive the field"
+        );
     }
 
     /// Port of the TS regression (#2519, gateway-verified 2026-09-21):

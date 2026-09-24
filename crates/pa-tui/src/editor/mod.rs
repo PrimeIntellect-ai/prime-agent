@@ -221,6 +221,19 @@ impl Editor {
         }
     }
 
+    /// Replace one command's argument completions on the installed provider
+    /// (TS `command.getArgumentCompletions`, e.g. the `/tier` tier
+    /// choices).
+    pub fn set_autocomplete_argument_completions(
+        &mut self,
+        command: &'static str,
+        items: Vec<crate::autocomplete::CompletionItem>,
+    ) {
+        if let Some(provider) = self.autocomplete_provider.as_mut() {
+            provider.set_argument_completions(command, items);
+        }
+    }
+
     /// Replace the provider's `skill:` commands (TS
     /// `setupAutocompleteProvider` rebuilds the command list with the
     /// session's skills; this port swaps the list on the installed

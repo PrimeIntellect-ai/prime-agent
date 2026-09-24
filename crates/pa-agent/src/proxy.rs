@@ -205,8 +205,13 @@ pub fn stream_proxy(
     (handle, stream)
 }
 
-/// Request body options subset (TS `buildProxyRequestOptions` keeps the
-/// serializable `SimpleStreamOptions` fields).
+/// Request body options subset (TS `buildProxyRequestOptions` over the
+/// total `PROXY_SERIALIZED_OPTIONS` map): every field of
+/// [`crate::stream::StreamRequestOptions`] is either serialized here
+/// (temperature, maxTokens, reasoning, sessionId, serviceTier) or
+/// explicitly client-local (apiKey, signal). A new stream option must be
+/// classified on both sides or the proxy transport silently drops what
+/// direct transport sends (TS #2491 — serviceTier itself was the drop).
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProxyRequestOptions {
@@ -217,6 +222,8 @@ struct ProxyRequestOptions {
     reasoning: ThinkingLevelWire,
     #[serde(skip_serializing_if = "Option::is_none")]
     session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_tier: Option<crate::types::ServiceTier>,
 }
 
 #[derive(serde::Serialize)]
@@ -253,6 +260,7 @@ async fn proxy_run(
             crate::types::ThinkingLevel::Max => ThinkingLevelWire::Max,
         },
         session_id: options.session_id.clone(),
+        service_tier: options.service_tier,
     };
     let body = serde_json::json!({
         "model": model,
@@ -819,4 +827,153 @@ pub fn parse_streaming_json(partial_json: &str) -> serde_json::Value {
         }
     }
     serde_json::Value::Object(serde_json::Map::new())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serve one `POST /api/stream` on a local listener, capture the
+    /// request body, and answer with `sse`. Returns the proxy URL base and
+    /// the captured body.
+    fn spawn_proxy_stub(sse: &'static str) -> (String, std::sync::mpsc::Receiver<serde_json::Value>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind proxy stub");
+        let addr = listener.local_addr().expect("proxy stub addr");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept proxy request");
+            let mut buffer = [0u8; 64 * 1024];
+            let mut request = String::new();
+            loop {
+                let n = std::io::Read::read(&mut stream, &mut buffer).expect("read request");
+                if n == 0 {
+                    break;
+                }
+                request.push_str(&String::from_utf8_lossy(&buffer[..n]));
+                let header_end = request.find("\r\n\r\n").expect("headers terminator");
+                if let Some(len) = content_length(&request[..header_end]) {
+                    if request.len() - header_end - 4 >= len {
+                        break;
+                    }
+                }
+            }
+            let header_end = request.find("\r\n\r\n").expect("headers terminator");
+            let body: serde_json::Value =
+                serde_json::from_str(&request[header_end + 4..]).expect("request body");
+            tx.send(body).expect("send captured body");
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{sse}",
+                sse.len()
+            );
+            std::io::Write::write_all(&mut stream, reply.as_bytes()).expect("write sse");
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    fn content_length(header_text: &str) -> Option<usize> {
+        for line in header_text.lines() {
+            if let Some((name, value)) = line.split_once(':') {
+                if name.trim().eq_ignore_ascii_case("content-length") {
+                    return value.trim().parse().ok();
+                }
+            }
+        }
+        None
+    }
+
+    fn test_model() -> Model {
+        serde_json::from_value(serde_json::json!({
+            "id": "mock-1", "name": "Mock 1", "api": "openai-completions",
+            "provider": "prime-inference", "baseUrl": "http://127.0.0.1:9/v1",
+            "reasoning": false, "input": [], "contextWindow": 1000, "maxTokens": 100,
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }))
+        .expect("test model")
+    }
+
+    fn context() -> LlmContext {
+        LlmContext::default()
+    }
+
+    const DONE_SSE: &str = "data: {\"type\":\"start\"}\n\ndata: {\"type\":\"done\",\"reason\":\"stop\",\"usage\":{\"input\":1,\"output\":2,\"cacheRead\":0,\"cacheWrite\":0,\"totalTokens\":3,\"cost\":{\"input\":0,\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"total\":0}}}\n\n";
+
+    /// TS #2491: `serviceTier` serializes into the proxy request (it was
+    /// silently dropped before the option list was total).
+    #[tokio::test]
+    async fn serializes_service_tier_into_the_proxy_request() {
+        let (proxy_url, rx) = spawn_proxy_stub(DONE_SSE);
+        let (handle, mut stream) = stream_proxy(
+            test_model(),
+            context(),
+            StreamRequestOptions {
+                service_tier: Some(ServiceTier::Priority),
+                ..Default::default()
+            },
+            ProxyStreamOptions {
+                auth_token: "token".to_string(),
+                proxy_url,
+                signal: AbortSignal::never(),
+            },
+        );
+        let _ = stream.result().await;
+        handle.end(None);
+        let body = rx.recv().expect("stub captured request");
+        assert_eq!(
+            body["options"]["serviceTier"],
+            serde_json::json!("priority"),
+            "the requested tier must reach the proxy request"
+        );
+    }
+
+    /// An unset tier stays off the wire (TS serializes the field only when
+    /// the option is present).
+    #[tokio::test]
+    async fn without_a_tier_the_proxy_request_omits_it() {
+        let (proxy_url, rx) = spawn_proxy_stub(DONE_SSE);
+        let (handle, mut stream) = stream_proxy(
+            test_model(),
+            context(),
+            StreamRequestOptions::default(),
+            ProxyStreamOptions {
+                auth_token: "token".to_string(),
+                proxy_url,
+                signal: AbortSignal::never(),
+            },
+        );
+        let _ = stream.result().await;
+        handle.end(None);
+        let body = rx.recv().expect("stub captured request");
+        assert!(body["options"].get("serviceTier").is_none());
+    }
+
+    /// The serialized option set is total: every option the loop carries is
+    /// classified (serialized or client-local). A fully-populated request
+    /// serializes exactly the classified keys, so adding a stream option
+    /// without classifying it shows up here (TS's compile-time
+    /// `PROXY_SERIALIZED_OPTIONS` guard, pinned as a test).
+    #[test]
+    fn proxy_request_options_stay_total() {
+        let options = ProxyRequestOptions {
+            temperature: Some(0.5),
+            max_tokens: Some(128),
+            reasoning: ThinkingLevelWire::High,
+            session_id: Some("session".to_string()),
+            service_tier: Some(ServiceTier::Flex),
+        };
+        let value = serde_json::to_value(&options).expect("serialize");
+        let keys: std::collections::BTreeSet<String> = value
+            .as_object()
+            .expect("object")
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(
+            keys,
+            ["maxTokens", "reasoning", "serviceTier", "sessionId", "temperature"]
+                .into_iter()
+                .map(String::from)
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+    }
 }

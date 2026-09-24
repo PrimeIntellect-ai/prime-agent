@@ -87,7 +87,7 @@ impl KillCloseReason {
         }
     }
 }
-use crate::setting_switches::{effective_service_tier, supports_fast_mode};
+use crate::setting_switches::effective_service_tier;
 use crate::types::{AgentConnectionState, SessionActionSnapshot, SessionSummary};
 
 /// TS-parity worker environment variables (`daemon-worker-protocol.ts`).
@@ -2484,8 +2484,15 @@ impl Worker {
                 settings.get_compaction_enabled(),
             )
         };
-        self.engine
-            .configure_service_tier(restored_tier.unwrap_or(Some(service_tier)));
+        // TS `createAgentSession` clamps the session's ACTIVE tier to the
+        // model's support (`clampServiceTier(model, preference)`); the
+        // stored preference below keeps the requested tier, so resuming on
+        // a capable model re-applies it (#2144).
+        let configured_tier = restored_tier.unwrap_or(Some(service_tier));
+        self.engine.configure_service_tier(effective_service_tier(
+            configured_tier,
+            self.engine.as_ref(),
+        ));
         // The abort supervision's terminal record (the supervisor declared
         // a wedged run aborted and injected it into this create replay):
         // the rebuilt transcript discloses the abort with the same
@@ -2551,7 +2558,7 @@ impl Worker {
                 agent_engine.clear_session_closed();
             }
             core.auto_compaction_enabled = auto_compaction_enabled;
-            core.service_tier = restored_tier.unwrap_or(Some(service_tier));
+            core.service_tier = configured_tier;
             core.steering_mode.clone_from(&steering_mode);
             core.follow_up_mode.clone_from(&follow_up_mode);
             core.forced_all_steering = false;
@@ -4323,12 +4330,6 @@ impl Worker {
     pub(crate) fn connection_state_locked(&self, core: &SessionCore) -> AgentConnectionState {
         let store = core.store.as_ref();
         let model = self.engine.model_metadata();
-        let model_fast_mode = model
-            .as_ref()
-            .and_then(|model| model.get("id"))
-            .and_then(Value::as_str)
-            .map(supports_fast_mode)
-            .unwrap_or(false);
         AgentConnectionState {
             is_streaming: core.busy,
             is_compacting: core.compacting,
@@ -4340,9 +4341,10 @@ impl Worker {
                 .effective_thinking_level()
                 .unwrap_or_else(|| "default".to_string()),
             // The effective tier: the preference clamped to the model's
-            // fast-mode support (`priority` degrades to `default`).
+            // support (`supportsServiceTier`; an unsupported tier degrades
+            // to `default`).
             service_tier: crate::setting_switches::service_tier_wire_name(
-                effective_service_tier(core.service_tier, model_fast_mode)
+                effective_service_tier(core.service_tier, self.engine.as_ref())
                     .unwrap_or(pa_types::ai::ServiceTier::Auto),
             )
             .to_string(),

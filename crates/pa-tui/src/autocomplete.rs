@@ -73,6 +73,11 @@ pub trait AutocompleteProvider: Send {
     /// command list). A default no-op for providers without command
     /// listings.
     fn set_skill_commands(&mut self, _skills: Vec<SlashCommandEntry>) {}
+    /// Replace the argument completions for one command (TS
+    /// `command.getArgumentCompletions`): the items offered at the
+    /// command's argument position. A default no-op for providers without
+    /// argument completions.
+    fn set_argument_completions(&mut self, _command: &'static str, _items: Vec<CompletionItem>) {}
 }
 
 /// Slash-command context (port of slash-command-context.ts): which part of
@@ -715,6 +720,10 @@ pub struct CombinedAutocompleteProvider {
     /// `getAvailableCommands` drops `/fast` when the model is not
     /// fast-mode-eligible).
     hidden: std::collections::HashSet<String>,
+    /// Per-command argument completions (TS
+    /// `command.getArgumentCompletions`): the items offered at the
+    /// command's argument position (e.g. the `/tier` tier choices).
+    arguments: std::collections::HashMap<&'static str, Vec<CompletionItem>>,
     paths: PathCompletionProvider,
 }
 
@@ -737,6 +746,7 @@ impl CombinedAutocompleteProvider {
             commands,
             skill_commands: Vec::new(),
             hidden: Default::default(),
+            arguments: Default::default(),
             paths: PathCompletionProvider { base },
         }
     }
@@ -753,6 +763,12 @@ impl CombinedAutocompleteProvider {
     /// merges).
     pub fn set_skill_commands(&mut self, skills: Vec<SlashCommandEntry>) {
         self.skill_commands = skills;
+    }
+
+    /// Replace one command's argument completions (TS
+    /// `command.getArgumentCompletions`, e.g. the `/tier` tier choices).
+    pub fn set_argument_completions(&mut self, command: &'static str, items: Vec<CompletionItem>) {
+        self.arguments.insert(command, items);
     }
 
     /// The slash-name suggestions for a typed prefix (fuzzy filter over
@@ -843,6 +859,10 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         CombinedAutocompleteProvider::set_skill_commands(self, skills);
     }
 
+    fn set_argument_completions(&mut self, command: &'static str, items: Vec<CompletionItem>) {
+        CombinedAutocompleteProvider::set_argument_completions(self, command, items);
+    }
+
     fn get_suggestions(
         &self,
         lines: &[String],
@@ -871,11 +891,34 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
                             items,
                         });
                     }
-                    // The builtin registry carries no argument completions
-                    // (model/effort/… selectors are per-command UIs this
-                    // build does not have yet); other positions fall through
-                    // to path completion.
-                    SlashKind::Argument => return None,
+                    // TS `command.getArgumentCompletions`: a command that
+                    // supplies argument items offers them at its argument
+                    // position (filtered by the typed term); the
+                    // model/effort/… selectors stay per-command UIs, so
+                    // commands without items fall through to path
+                    // completion.
+                    SlashKind::Argument => {
+                        let Some(command) = context.command_name.as_deref() else {
+                            return None;
+                        };
+                        let Some(items) = self.arguments.get(command) else {
+                            return None;
+                        };
+                        let term = context.prefix.trim().to_lowercase();
+                        let matches: Vec<CompletionItem> = items
+                            .iter()
+                            .filter(|item| term.is_empty() || item.value.starts_with(&term))
+                            .cloned()
+                            .collect();
+                        if matches.is_empty() {
+                            return None;
+                        }
+                        return Some(Suggestions {
+                            prefix: context.prefix.clone(),
+                            kind: Some(SuggestionKind::SlashCommand),
+                            items: matches,
+                        });
+                    }
                 }
             }
         }

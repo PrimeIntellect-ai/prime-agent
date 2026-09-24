@@ -105,6 +105,11 @@ impl Worker {
                 None,
             );
         }
+        // TS `session.setModel` re-clamps the tier for the switched model
+        // (`_clampServiceTierForModel`): a preference the new model does
+        // not support degrades to `default` and the
+        // `service_tier_changed` event follows the flip.
+        self.clamp_service_tier_for_model();
         // The switched model (and any level the switch clamps) reaches the
         // roster surfaces immediately: the TS `set_model` daemon handler
         // schedules a roster flush after the switch, so the agents view's

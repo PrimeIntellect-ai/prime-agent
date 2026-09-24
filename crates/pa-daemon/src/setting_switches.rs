@@ -19,17 +19,26 @@ use crate::worker::Worker;
 /// The queue-mode wire vocabulary (TS `AgentConnectionQueueMode`).
 const QUEUE_MODES: &[&str] = &["all", "one-at-a-time"];
 
-/// TS `supportsFastMode`: the fast-mode (priority) tier exists on
-/// gpt-5.4/5.5/5.6 models served over the responses APIs.
-pub(crate) fn supports_fast_mode(model_id: &str) -> bool {
-    let eligible = model_id == "gpt-5.4"
-        || model_id == "gpt-5.5"
-        || model_id == "gpt-5.6"
-        || model_id.starts_with("gpt-5.6-");
-    // The provider check needs the full model; this worker-side helper is
-    // keyed on the model id only (the eligible ids are exclusive to the
-    // responses providers), matching the TS eligibility list.
-    eligible
+/// TS `supportsServiceTier` as the worker sees it: the engine's resolved
+/// model metadata (provider, api, id) against the shared pa-types
+/// eligibility fields. A session without a resolved model supports only
+/// the `default` tier, exactly like the TS `model == null` arm.
+pub(crate) fn engine_supports_service_tier(
+    engine: &dyn crate::engine::SessionEngine,
+    tier: ServiceTier,
+) -> bool {
+    let model = engine.model_metadata();
+    model
+        .as_ref()
+        .and_then(|model| {
+            Some(pa_types::ai::supports_service_tier_fields(
+                model.get("provider")?.as_str()?,
+                model.get("api")?.as_str()?,
+                model.get("id")?.as_str()?,
+                tier,
+            ))
+        })
+        .unwrap_or(false)
 }
 
 /// The wire name of a service tier (the serde lowercase form).
@@ -43,29 +52,20 @@ pub(crate) fn service_tier_wire_name(tier: ServiceTier) -> &'static str {
     }
 }
 
-/// TS `_getEffectiveServiceTier`: a `priority` request on a model without
-/// fast mode degrades to `default`; every other tier passes through.
-/// `None` (the settings default "auto") passes as `Auto`.
+/// TS `_getEffectiveServiceTier` (#2144's `clampServiceTier`): a tier the
+/// current model does not support degrades to `default`. An unset
+/// (`null`) preference passes through; `None` on the wire reads as `auto`
+/// (see [`service_tier_wire_name`]).
 pub(crate) fn effective_service_tier(
     tier: Option<ServiceTier>,
-    fast_mode: bool,
+    engine: &dyn crate::engine::SessionEngine,
 ) -> Option<ServiceTier> {
     match tier {
-        Some(ServiceTier::Priority) if !fast_mode => Some(ServiceTier::Default),
-        other => other,
+        None | Some(ServiceTier::Default) => tier,
+        Some(tier) => engine_supports_service_tier(engine, tier)
+            .then_some(tier)
+            .or(Some(ServiceTier::Default)),
     }
-}
-
-/// The model's fast-mode support as the worker sees it (the engine's
-/// resolved model metadata, when there is one).
-fn engine_fast_mode(engine: &dyn crate::engine::SessionEngine) -> bool {
-    let model = engine.model_metadata();
-    model
-        .as_ref()
-        .and_then(|model| model.get("id"))
-        .and_then(Value::as_str)
-        .map(supports_fast_mode)
-        .unwrap_or(false)
 }
 
 impl Worker {
@@ -237,7 +237,7 @@ impl Worker {
                 self.engine
                     .effective_thinking_level()
                     .unwrap_or_else(|| "off".to_string()),
-                effective_service_tier(core.service_tier, engine_fast_mode(self.engine.as_ref()))
+                effective_service_tier(core.service_tier, self.engine.as_ref())
                     .unwrap_or(ServiceTier::Auto),
             )
         };
@@ -254,25 +254,25 @@ impl Worker {
     }
 
     /// Re-clamp the effective service tier for the engine's current model
-    /// (TS `_clampServiceTierForModel` on a model switch): a `priority`
-    /// preference on a model without fast mode degrades to `default` and
-    /// the `service_tier_changed` session event follows the flip.
+    /// (TS `_clampServiceTierForModel` on a model switch, #2144's
+    /// `clampServiceTier`): a preference the switched-to model does not
+    /// support degrades to `default`, the engine's request slot follows the
+    /// clamp, and the `service_tier_changed` session event follows the
+    /// flip. The stored preference keeps the requested tier, so switching
+    /// back to (or resuming on) a capable model re-applies it.
     fn clamp_service_tier_for_model(&self) {
-        let (previous, fast_mode) = {
+        let (preference, clamped) = {
             let core = self.core.lock().unwrap();
             (
-                effective_service_tier(core.service_tier, true).unwrap_or(ServiceTier::Auto),
-                engine_fast_mode(self.engine.as_ref()),
+                core.service_tier,
+                effective_service_tier(core.service_tier, self.engine.as_ref()),
             )
         };
-        let effective = effective_service_tier(Some(previous), fast_mode).unwrap_or(previous);
-        if effective != previous {
-            // The engine's request slot must follow the clamp, or requests
-            // keep the previous tier after cycling to a model without it.
-            self.engine.configure_service_tier(Some(effective));
+        if clamped != preference {
+            self.engine.configure_service_tier(clamped);
             self.emit_worker_event(json!({
                 "type": "service_tier_changed",
-                "serviceTier": service_tier_wire_name(effective),
+                "serviceTier": service_tier_wire_name(clamped.unwrap_or(ServiceTier::Auto)),
             }));
         }
     }
@@ -370,10 +370,12 @@ impl Worker {
         response_success(None, "cycle_thinking_level", Some(json!({ "level": next })))
     }
 
-    /// `set_service_tier { serviceTier }` (TS `session.setServiceTier`):
-    /// record the preference, the durable `service_tier_change` row on a
-    /// change, the settings default (when the model supports fast mode),
-    /// and the `service_tier_changed` event on an effective change. An
+    /// `set_service_tier { serviceTier }` (TS `session.setServiceTier`,
+    /// #2144 semantics): the preference and the durable `service_tier_change`
+    /// row keep the REQUESTED tier (only the active state clamps), so
+    /// switching to (or resuming on) a capable model re-applies it; the
+    /// settings default persists only when the model supports the tier; and
+    /// the `service_tier_changed` event follows an effective change. An
     /// unchanged request answers success without side effects.
     pub(crate) fn handle_set_service_tier(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("set_service_tier") {
@@ -392,13 +394,13 @@ impl Worker {
                 None,
             );
         };
-        let fast_mode = engine_fast_mode(self.engine.as_ref());
-        let effective = effective_service_tier(Some(tier), fast_mode).unwrap_or(tier);
+        let effective = effective_service_tier(Some(tier), self.engine.as_ref()).unwrap_or(tier);
         let (preference_changed, effective_changed, cwd) = {
             let mut core = self.core.lock().unwrap();
             let preference = core.service_tier;
             let previous_effective =
-                effective_service_tier(preference, fast_mode).unwrap_or(ServiceTier::Auto);
+                effective_service_tier(preference, self.engine.as_ref())
+                    .unwrap_or(ServiceTier::Auto);
             core.service_tier = Some(tier);
             let effective_changed = previous_effective != effective;
             let preference_changed = preference != Some(tier);
@@ -406,20 +408,22 @@ impl Worker {
             if preference_changed {
                 if let Some(store) = core.store.as_mut() {
                     // The same durable row the creation prefix writes (TS
-                    // `appendServiceTierChange`).
-                    let _ = store
-                        .persist_entry("service_tier_change", json!({ "serviceTier": effective }));
+                    // `appendServiceTierChange(serviceTier)` — the
+                    // REQUESTED tier, not the clamped one).
+                    let _ =
+                        store.persist_entry("service_tier_change", json!({ "serviceTier": tier }));
                 }
                 cwd.clone_from(&core.cwd);
             }
             (preference_changed, effective_changed, cwd)
         };
         self.engine.configure_service_tier(Some(effective));
-        if preference_changed && fast_mode {
-            // TS persists the default only when the model keeps fast mode.
+        if preference_changed && engine_supports_service_tier(self.engine.as_ref(), tier) {
+            // TS persists the default only when the model supports the
+            // tier (#2144: `supportsServiceTier(this.model, serviceTier)`).
             let mut settings =
                 pa_core::settings::SettingsManager::create(&cwd, &self.config.agent_dir);
-            let _ = settings.set_default_service_tier(effective);
+            let _ = settings.set_default_service_tier(tier);
         }
         if effective_changed {
             self.emit_worker_event(json!({
@@ -813,9 +817,10 @@ mod tests {
         assert_eq!(response.data, Some(Value::Null));
     }
 
-    /// `set_service_tier` records the durable row on change (the priority
-    /// request clamps to `default` without fast mode), and an unchanged
-    /// request records nothing more.
+    /// `set_service_tier` records the durable row on change (the row keeps
+    /// the REQUESTED tier while an unsupported request clamps to `default`
+    /// in the active state — TS #2144), and an unchanged request records
+    /// nothing more.
     #[tokio::test]
     async fn set_service_tier_records_the_durable_row() {
         let worker = created_worker().await;
@@ -831,11 +836,12 @@ mod tests {
                         .entries()
                         .iter()
                         .filter(|entry| entry.type_ == "service_tier_change")
-                        .count()
+                        .map(|entry| entry.fields.clone())
+                        .collect::<Vec<serde_json::Value>>()
                 })
-                .unwrap_or(0)
+                .unwrap_or_default()
         };
-        let baseline = tier_rows(&worker);
+        let baseline = tier_rows(&worker).len();
         let response = worker
             .dispatch(
                 "set_service_tier",
@@ -843,7 +849,8 @@ mod tests {
             )
             .await;
         assert!(response.success, "failed: {response:?}");
-        // The scripted engine reports no model: priority clamps to default.
+        // The scripted engine reports no model: priority clamps to default
+        // in the active state...
         let state = worker
             .dispatch(
                 "get_connection_state",
@@ -851,20 +858,14 @@ mod tests {
             )
             .await;
         assert_eq!(state.data.expect("data")["serviceTier"], json!("default"));
-        let rows = {
-            let core = worker.core.lock().unwrap();
-            core.store
-                .as_ref()
-                .map(|store| {
-                    store
-                        .entries()
-                        .iter()
-                        .filter(|entry| entry.type_ == "service_tier_change")
-                        .count()
-                })
-                .unwrap_or(0)
-        };
-        assert_eq!(rows, baseline + 1, "one new preference row");
+        // ...but the durable row keeps the requested tier, so resuming on
+        // a capable model re-applies it.
+        let rows = tier_rows(&worker);
+        assert_eq!(rows.len(), baseline + 1, "one new preference row");
+        assert_eq!(
+            rows.last().and_then(|row| row.get("serviceTier")),
+            Some(&json!("priority"))
+        );
         // An unchanged request is a no-op success (no new row).
         let response = worker
             .dispatch(
@@ -873,20 +874,22 @@ mod tests {
             )
             .await;
         assert!(response.success);
-        let rows = {
-            let core = worker.core.lock().unwrap();
-            core.store
-                .as_ref()
-                .map(|store| {
-                    store
-                        .entries()
-                        .iter()
-                        .filter(|entry| entry.type_ == "service_tier_change")
-                        .count()
-                })
-                .unwrap_or(0)
-        };
-        assert_eq!(rows, baseline + 1);
+        assert_eq!(tier_rows(&worker).len(), baseline + 1);
+        // A `flex` preference clamps the same way (the scripted engine
+        // reports no model) and records its own requested tier.
+        let response = worker
+            .dispatch(
+                "set_service_tier",
+                &json!({ "activeSessionId": "switch-session", "serviceTier": "flex" }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let rows = tier_rows(&worker);
+        assert_eq!(rows.len(), baseline + 2);
+        assert_eq!(
+            rows.last().and_then(|row| row.get("serviceTier")),
+            Some(&json!("flex"))
+        );
         let response = worker
             .dispatch(
                 "set_service_tier",
