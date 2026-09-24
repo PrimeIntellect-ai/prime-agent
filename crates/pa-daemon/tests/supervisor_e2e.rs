@@ -1437,7 +1437,7 @@ fn create_config_model_flags_reach_the_worker_engine() {
                             "id": "mock-1",
                             "name": "Mock 1",
                             "api": "openai-completions",
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096
                         }
                     ]
@@ -1477,7 +1477,7 @@ fn create_config_model_flags_reach_the_worker_engine() {
     // The flagged model's context window (128000) proves the worker engine
     // resolved `battery/mock-1` from the create config.
     assert_eq!(
-        stats["data"]["contextUsage"]["contextWindow"], 128000,
+        stats["data"]["contextUsage"]["contextWindow"], 128_000,
         "context usage reflects the wire-flagged model: {stats}"
     );
 }
@@ -1909,7 +1909,7 @@ fn tool_result_entries_persisted_and_streamed() {
                 assert_eq!(event["toolCallId"], "call-1");
             }
             Some("tool_execution_end") => tool_execution_end = event.clone(),
-            Some("message_start") | Some("message_end") => {
+            Some("message_start" | "message_end") => {
                 if event["message"]["role"] == "toolResult" {
                     message_pair += 1;
                     tool_result_message = event["message"].clone();

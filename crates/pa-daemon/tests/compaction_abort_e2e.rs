@@ -85,7 +85,7 @@ fn chunk(delta: Value, finish_reason: Option<&str>, usage: Value) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
-        "created": 1750000000,
+        "created": 1_750_000_000,
         "model": "mock-1",
         "choices": [{
             "index": 0,
@@ -107,7 +107,7 @@ fn small_usage() -> Value {
 /// The crossing turn's reported usage (the f14-auto battery shape).
 fn crossing_usage() -> Value {
     json!({
-        "prompt_tokens": 126000, "completion_tokens": 10, "total_tokens": 126010,
+        "prompt_tokens": 126000, "completion_tokens": 10, "total_tokens": 126_010,
         "prompt_tokens_details": {"cached_tokens": 80},
     })
 }
@@ -204,7 +204,7 @@ fn serve(
         json!({
             "id": "chatcmpl-test",
             "object": "chat.completion.chunk",
-            "created": 1750000000,
+            "created": 1_750_000_000,
             "model": "mock-1",
             "choices": [],
             "usage": usage,
@@ -342,7 +342,7 @@ impl Client {
     /// Read lines until the response for `id` arrives, parking broadcast
     /// events on the way.
     fn read_response(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -380,7 +380,7 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
                             "id": "mock-1",
                             "name": "Mock 1",
                             "api": "openai-completions",
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096,
                         }
                     ]
@@ -701,7 +701,7 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
                             "id": "mock-1",
                             "name": "Mock 1",
                             "api": "openai-completions",
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096,
                         }
                     ]

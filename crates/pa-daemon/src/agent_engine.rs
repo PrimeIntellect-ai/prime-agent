@@ -4175,10 +4175,8 @@ impl AgentSessionEngine {
                                 // message pair).
                                 match agent_message {
                                     pa_agent::types::AgentMessage::Standard(
-                                        pa_agent::types::Message::Assistant(_),
-                                    )
-                                    | pa_agent::types::AgentMessage::Standard(
-                                        pa_agent::types::Message::ToolResult(_),
+                                        pa_agent::types::Message::Assistant(_)
+                                            | pa_agent::types::Message::ToolResult(_),
                                     ) => {
                                         if let Some(value) = session_wire_value(agent_message) {
                                             let event = if matches!(
@@ -4633,7 +4631,7 @@ pub(crate) mod tests {
                                 "id": "mock-1",
                                 "name": "Mock 1",
                                 "api": "openai-completions",
-                                "contextWindow": 128000,
+                                "contextWindow": 128_000,
                                 "maxTokens": 4096,
                             }
                         ]
@@ -4664,7 +4662,7 @@ pub(crate) mod tests {
                                 "id": "mock-reason",
                                 "name": "Mock Reasoning",
                                 "api": "openai-completions",
-                                "contextWindow": 128000,
+                                "contextWindow": 128_000,
                                 "maxTokens": 4096,
                                 "reasoning": true,
                             },
@@ -4672,7 +4670,7 @@ pub(crate) mod tests {
                                 "id": "mock-plain",
                                 "name": "Mock Plain",
                                 "api": "openai-completions",
-                                "contextWindow": 128000,
+                                "contextWindow": 128_000,
                                 "maxTokens": 4096,
                             }
                         ]
@@ -5915,7 +5913,7 @@ pub(crate) mod tests {
                         "models": [{
                             "id": "faux-1",
                             "name": "Faux Model",
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 16384,
                         }],
                     },
@@ -5926,7 +5924,7 @@ pub(crate) mod tests {
                         "models": [{
                             "id": "drift-1",
                             "name": "Drift Model",
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 16384,
                         }],
                     },
@@ -6107,14 +6105,14 @@ pub(crate) mod tests {
                         "api": "faux", "baseUrl": "http://localhost:0", "apiKey": "sk-faux",
                         "models": [{
                             "id": "faux-1", "name": "Faux Model",
-                            "contextWindow": 128000, "maxTokens": 16384,
+                            "contextWindow": 128_000, "maxTokens": 16384,
                         }],
                     },
                     "drift": {
                         "api": "faux", "baseUrl": "http://localhost:0", "apiKey": "sk-drift",
                         "models": [{
                             "id": "drift-1", "name": "Drift Model",
-                            "contextWindow": 128000, "maxTokens": 16384,
+                            "contextWindow": 128_000, "maxTokens": 16384,
                         }],
                     },
                 }
@@ -7949,7 +7947,7 @@ pub(crate) mod tests {
                         "baseUrl": "http://127.0.0.1:9",
                         "apiKey": "sk-battery",
                         "models": [
-                            { "id": "mock-1", "contextWindow": 128000, "maxTokens": 4096 }
+                            { "id": "mock-1", "contextWindow": 128_000, "maxTokens": 4096 }
                         ]
                     }
                 }
@@ -8018,7 +8016,7 @@ pub(crate) mod tests {
                             {
                                 "id": "mock-1",
                                 "reasoning": true,
-                                "contextWindow": 128000,
+                                "contextWindow": 128_000,
                                 "maxTokens": 4096
                             }
                         ]
@@ -8741,7 +8739,7 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
                 "modelId": "faux-1",
                 "modelName": "Faux",
                 "reasoning": false,
-                "contextWindow": 128000,
+                "contextWindow": 128_000,
                 "tokensPerSecond": 30,
                 "responses": [
                     {"content": [
@@ -8791,7 +8789,7 @@ fn abort_in_flight_turn_cancels_a_running_kernel_cell() {
         })
     };
     // The cell started (bounded by the kernel boot).
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(3);
     while !marker.exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
