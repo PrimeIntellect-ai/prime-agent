@@ -30,16 +30,32 @@ struct LeaseOwner {
     created_at: String,
 }
 
-/// Error matching the TS wire shape (`session_already_active`).
+/// Error matching the TS wire shape (`session_already_active`): `Display`
+/// keeps the TS message byte-identical; the user-facing rendering lives in
+/// [`crate::hold_refusal`] (the TS/Rust co-existence refusal).
 #[derive(Debug, thiserror::Error)]
 #[error("Session is already active in {owner}: {session_path}")]
 pub struct SessionAlreadyActiveError {
     pub session_path: String,
     pub active_session_id: Option<String>,
     pub owner: String,
+    /// The live holder's pid (the error is raised only against a live
+    /// owner): what the refusal's holder classification resolves into a
+    /// product flavor (this Rust build vs the TypeScript product).
+    pub holder_pid: Option<u32>,
 }
 
 impl SessionAlreadyActiveError {
+    /// The typed wire info for the refusal (`session_already_active`, the
+    /// TS `serializeDaemonError` shape): the raw fields a client renders
+    /// or acts on itself, carried beside the user-facing refusal text.
+    pub fn error_info(&self) -> pa_types::daemon::DaemonErrorInfo {
+        pa_types::daemon::DaemonErrorInfo::SessionAlreadyActive {
+            session_path: self.session_path.clone(),
+            active_session_id: self.active_session_id.clone(),
+        }
+    }
+
     fn for_owner(session_path: &str, owner: Option<&LeaseOwner>) -> Self {
         SessionAlreadyActiveError {
             session_path: session_path.to_string(),
@@ -49,6 +65,7 @@ impl SessionAlreadyActiveError {
             owner: owner
                 .and_then(|o| o.active_session_id.clone())
                 .unwrap_or_else(|| "another process".to_string()),
+            holder_pid: owner.map(|o| o.pid),
         }
     }
 }
@@ -380,6 +397,10 @@ impl SessionLease {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveLeaseOwner {
     pub pid: u32,
+    /// The owner's recorded active session id, when it carries one (the TS
+    /// product and this port both stamp it): the holder identity the
+    /// session-hold refusal names.
+    pub active_session_id: Option<String>,
 }
 
 /// Whether a live process holds the session file's runtime lease: read the
@@ -397,7 +418,10 @@ pub fn live_lease_owner(agent_dir: &Path, session_path: &Path) -> Option<LiveLea
     if !owner_alive(&owner) {
         return None;
     }
-    Some(LiveLeaseOwner { pid: owner.pid })
+    Some(LiveLeaseOwner {
+        pid: owner.pid,
+        active_session_id: owner.active_session_id.filter(|id| !id.is_empty()),
+    })
 }
 
 /// Acquire the lease for one session file. Returns `None` when leases are

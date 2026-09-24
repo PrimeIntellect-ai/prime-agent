@@ -240,3 +240,92 @@ fn print_continue_refuses_an_active_daemon_session() {
         "stderr: {stderr}"
     );
 }
+
+/// A session file held by a live FOREIGN lease holder — this test process
+/// stands in for the other product's holder on the shared session store —
+/// refuses `--resume` with the session-hold refusal. No daemon runs: the
+/// roster probe has nothing to answer, and the guard's lease probe is what
+/// must catch a holder no roster of this product's daemon can see. The
+/// guard runs before the file is opened, so the file itself only has to
+/// exist (the resume selector names it directly).
+#[test]
+fn print_resume_refuses_a_foreign_lease_holder() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let sessions = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions).expect("sessions dir");
+    let socket = dir.path().join("daemon.sock");
+    let env = vec![
+        ("HOME".to_string(), dir.path().to_string_lossy().to_string()),
+        (
+            "PRIME_AGENT_CODING_AGENT_DIR".to_string(),
+            agent_dir.to_string_lossy().to_string(),
+        ),
+        (
+            "PRIME_AGENT_FAUX_SCRIPT".to_string(),
+            json!({"responses": [{"text": "first turn"}]}).to_string(),
+        ),
+    ];
+    let session_path = sessions.join("foreign-held.jsonl");
+    std::fs::write(&session_path, "{}\n").expect("session file");
+
+    // The foreign holder: this test process takes the runtime lease, in
+    // exactly the role the other product's daemon worker plays on the
+    // shared session store. The lease-enable env is consumed at the
+    // acquire itself, so it leaves this test's window immediately.
+    std::env::set_var(pa_daemon::lease::SESSION_LEASES_ENABLED_ENV, "1");
+    std::env::set_var(
+        pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV,
+        "foreign01ab3c",
+    );
+    let holder = pa_daemon::lease::acquire_session_lease(Some(&session_path), &agent_dir)
+        .expect("lease acquire probe")
+        .expect("the lease must be held");
+    std::env::remove_var(pa_daemon::lease::SESSION_LEASE_OWNER_ID_ENV);
+    std::env::remove_var(pa_daemon::lease::SESSION_LEASES_ENABLED_ENV);
+
+    // The refusal: this test process runs a build of this product (the
+    // cargo test binary under /target/), so the holder classification
+    // reads as another Rust build, never the TypeScript product and never
+    // an unnamed process.
+    let expected = concat!(
+        "Error: This session is currently open in another Rust build of Prime Agent ",
+        "(active in foreign01ab3c). Close it there first, or open a different session.\n"
+    );
+    let (stdout, stderr, code) = run_print(
+        &[
+            "-p",
+            "--daemon-socket",
+            &socket.to_string_lossy(),
+            "--resume",
+            &session_path.to_string_lossy(),
+            "resume me",
+        ],
+        &env,
+    );
+    assert_eq!(code, 1);
+    assert!(stdout.is_empty(), "stdout: {stdout}");
+    assert_eq!(stderr, expected);
+
+    holder.release();
+
+    // With the holder gone the same open proceeds: the guard's lease
+    // probe answers None for a released lease (the stale record is not
+    // live ownership).
+    let (_stdout, stderr, code) = run_print(
+        &[
+            "-p",
+            "--daemon-socket",
+            &socket.to_string_lossy(),
+            "--resume",
+            &session_path.to_string_lossy(),
+            "resume me now",
+        ],
+        &env,
+    );
+    assert_eq!(
+        code, 0,
+        "the released holder must let the open proceed: stderr {stderr}"
+    );
+    assert!(!stderr.contains("This session is currently open"));
+}

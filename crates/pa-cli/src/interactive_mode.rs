@@ -645,11 +645,10 @@ async fn run_agents_view_flow(
     }
 }
 
-/// `--daemon-socket` value or the per-user default socket path.
+/// `--daemon-socket` value, the `PRIME_AGENT_DAEMON_SOCKET` environment,
+/// or the per-user default socket path (precedence in that order).
 pub fn resolve_socket_path(daemon_socket: Option<&str>) -> PathBuf {
-    daemon_socket
-        .map(config::expand_tilde_path)
-        .unwrap_or_else(pa_daemon::socket::default_daemon_socket_path)
+    config::resolve_daemon_socket_path(daemon_socket)
 }
 
 fn build_tui_options(

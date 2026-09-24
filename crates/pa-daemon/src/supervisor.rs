@@ -38,7 +38,7 @@ use crate::protocol::{
     command_active_session_id, command_type_name, current_protocol_info,
     default_server_capabilities, parse_supervisor_command_line, response_failure, response_line,
     response_success, DaemonResponse, DaemonRuntimeIdentity, EnvelopeParseError,
-    DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
+    TypedCreateRejection, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
 };
 use crate::registry::{ResidentWorker, SessionRegistry, WorkerRegistration, WorkerRequest};
 use crate::session_store::list_sessions;
@@ -1164,13 +1164,25 @@ impl Supervisor {
         }
         if !response.success {
             // Same rule as the route error above: a worker whose create
-            // replay failed must not be left running.
+            // replay failed must not be left running. A typed rejection
+            // relays verbatim and logs the conflict like the launch path.
             let mut child = child;
             let _ = child.kill().await;
-            return Err(anyhow!(
-                "worker create failed on relaunch: {}",
-                response.error.unwrap_or_default()
-            ));
+            return Err(match response.error_info {
+                Some(error_info) => {
+                    let message = response.error.clone().unwrap_or_default();
+                    self.log_line(&format!("relaunch create refused — {message}"));
+                    TypedCreateRejection {
+                        message,
+                        error_info,
+                    }
+                    .into()
+                }
+                None => anyhow!(
+                    "worker create failed on relaunch: {}",
+                    response.error.unwrap_or_default()
+                ),
+            });
         }
         // The create replay consumed the terminal record when the
         // disclosure it carried is durable (persisted by this replay, or
@@ -1971,10 +1983,41 @@ impl Supervisor {
             let _ = child.kill().await;
             let _ = std::fs::remove_file(&descriptor_path);
             self.registry.remove(&worker_id).await;
-            return Err(anyhow!(
-                "session worker create failed: {}",
-                response.error.unwrap_or_default()
-            ));
+            // A typed worker rejection relays verbatim - the typed text is
+            // the user-facing refusal (the session-hold rejection the
+            // lease raises against a live foreign holder) - and the daemon
+            // logs the detected conflict itself, not just the raw
+            // session-worker failure: the rotating log beside the socket
+            // is where a refused create leaves its record. The wrap stays
+            // for untyped failures, whose text is context the raw error
+            // lacks.
+            return Err(match response.error_info {
+                Some(error_info) => {
+                    let message = response.error.clone().unwrap_or_default();
+                    match &error_info {
+                        pa_types::daemon::DaemonErrorInfo::SessionAlreadyActive {
+                            session_path,
+                            active_session_id,
+                        } => self.log_line(&format!(
+                            "create refused: session file {session_path} is already active{} — {message}",
+                            active_session_id
+                                .as_deref()
+                                .map(|id| format!(" in {id}"))
+                                .unwrap_or_default(),
+                        )),
+                        _ => self.log_line(&format!("create refused — {message}")),
+                    }
+                    TypedCreateRejection {
+                        message,
+                        error_info,
+                    }
+                    .into()
+                }
+                None => anyhow!(
+                    "session worker create failed: {}",
+                    response.error.unwrap_or_default()
+                ),
+            });
         }
         // The create response is authoritative: a sessioned create must
         // carry a non-empty session file before it can succeed (the
@@ -2389,15 +2432,28 @@ impl Supervisor {
                         ))],
                         false,
                     ),
-                    Err(error) => (
-                        vec![response_line(&response_failure(
-                            Some(&command_id),
-                            &type_name,
-                            &error.to_string(),
-                            None,
-                        ))],
-                        false,
-                    ),
+                    Err(error) => {
+                        // A typed worker rejection carries its wire info to
+                        // the client (the TS `serializeDaemonError` shape);
+                        // untyped failures stay the bare string.
+                        let (message, error_info) =
+                            match error.downcast_ref::<TypedCreateRejection>() {
+                                Some(rejection) => (
+                                    rejection.message.clone(),
+                                    Some(rejection.error_info.clone()),
+                                ),
+                                None => (error.to_string(), None),
+                            };
+                        (
+                            vec![response_line(&response_failure(
+                                Some(&command_id),
+                                &type_name,
+                                &message,
+                                error_info,
+                            ))],
+                            false,
+                        )
+                    }
                 }
             }
             DaemonCommand::GetDirectWorkerTransport {

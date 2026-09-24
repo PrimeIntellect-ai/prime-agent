@@ -713,43 +713,59 @@ fn assert_session_not_active_in_daemon(
     session_path: &std::path::Path,
 ) -> Result<(), String> {
     let socket = crate::interactive_mode::resolve_socket_path(socket_path);
-    let Ok(mut client) = crate::daemon_client::DaemonClient::connect(&socket) else {
-        return Ok(());
-    };
-    let list = client
-        .request(pa_types::daemon::DaemonCommand::List {
-            id: None,
-            all: None,
-            cwd: None,
-            session_dir: None,
-            include_client_owned: None,
-            rest: Default::default(),
-        })
-        .map_err(|error| format!("Could not check active sessions: {error:#}"))?;
-    if !list.success {
-        return Ok(());
-    }
-    let target = pa_daemon::lease::canonical_session_path(session_path);
-    for row in list
-        .data
-        .and_then(|data| data.get("sessions").cloned())
-        .and_then(|sessions| sessions.as_array().cloned())
-        .unwrap_or_default()
-    {
-        let Some(file) = row.get("sessionFile").and_then(serde_json::Value::as_str) else {
-            continue;
-        };
-        if pa_daemon::lease::canonical_session_path(std::path::Path::new(file)) != target {
-            continue;
+    if let Ok(mut client) = crate::daemon_client::DaemonClient::connect(&socket) {
+        let list = client
+            .request(pa_types::daemon::DaemonCommand::List {
+                id: None,
+                all: None,
+                cwd: None,
+                session_dir: None,
+                include_client_owned: None,
+                rest: Default::default(),
+            })
+            .map_err(|error| format!("Could not check active sessions: {error:#}"))?;
+        if list.success {
+            let target = pa_daemon::lease::canonical_session_path(session_path);
+            for row in list
+                .data
+                .and_then(|data| data.get("sessions").cloned())
+                .and_then(|sessions| sessions.as_array().cloned())
+                .unwrap_or_default()
+            {
+                let Some(file) = row.get("sessionFile").and_then(serde_json::Value::as_str) else {
+                    continue;
+                };
+                if pa_daemon::lease::canonical_session_path(std::path::Path::new(file)) != target {
+                    continue;
+                }
+                let active_session_id = row
+                    .get("activeSessionId")
+                    .or_else(|| row.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                return Err(format!(
+                    "Session is already active in {active_session_id}: {}",
+                    target.display()
+                ));
+            }
         }
-        let active_session_id = row
-            .get("activeSessionId")
-            .or_else(|| row.get("id"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        return Err(format!(
-            "Session is already active in {active_session_id}: {}",
-            target.display()
+    }
+    // The daemon's roster covers only its own sessions; the session store
+    // is shared, so the file may instead be held by a live process no
+    // roster here names - typically the TypeScript product's daemon or one
+    // of its surviving workers, with this Rust daemon running beside it
+    // (each product owns its daemon; the store is the shared part). The
+    // runtime lease table is the one cross-daemon ownership record the
+    // shared agent dir offers, so a live holder refuses the in-process
+    // open with the same refusal the daemon's create path answers - a
+    // print-mode run over a held file would be a second writer on it.
+    let agent_dir = crate::config::get_agent_dir();
+    if let Some(owner) = pa_daemon::lease::live_lease_owner(&agent_dir, session_path) {
+        return Err(pa_daemon::hold_refusal::refusal_message(
+            &pa_daemon::hold_refusal::HoldIdentity {
+                pid: Some(owner.pid),
+                active_session_id: owner.active_session_id,
+            },
         ));
     }
     Ok(())

@@ -1,0 +1,249 @@
+# Coworker-facing release pipeline for the Rust product.
+#
+# The org repo's `v*` tag history (release.yml) stays owned by the merged TS
+# product, and continuous.yml is the branch-push build channel; this workflow
+# is the Rust product's own release channel under the `rust-v*` tag namespace:
+# a tag publishes the versioned tarballs + install-rust.sh to a GitHub
+# release, and a plain push to `rust` still builds (artifacts downloadable
+# from the run page) so early adopters can try a binary before a tag is cut.
+# The `rust-v` prefix keeps the two products' release histories disjoint —
+# the TS installers resolve `v*` tags, install-rust.sh resolves `rust-v*`,
+# and neither ever sees the other's releases.
+#
+# Unlike release.yml's promote stage (SBOM + provenance attestation,
+# notarization reserved), this channel carries none of the supply-chain
+# gates: it is a convenience channel for coworkers, not the release
+# authority (docs/installer-ci-design.md §13 sets the same split for the
+# continuous channel).
+#
+name: rust-release
+
+on:
+  push:
+    branches:
+      - rust
+    tags:
+      - "rust-v*"
+
+permissions: {}
+
+concurrency:
+  group: rust-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  tag-check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # The gate only applies to tags, so branch pushes skip silently (green
+      # with skipped checkout/toolchain steps, and the validate step below
+      # exits 0 at its first line). On a tag, the name must equal
+      # `rust-v<Cargo.toml workspace version>`: the shipped binary answers
+      # the workspace version via --version, and install-rust.sh resolves
+      # releases by tag name — a mismatched tag would publish binaries whose
+      # --version disagrees with the release that carries them.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        if: github.ref_type == 'tag'
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+        if: github.ref_type == 'tag'
+        with:
+          toolchain: "1.98.1"
+      - name: Validate tag matches workspace version
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "ref is a branch; nothing to gate"
+            exit 0
+          fi
+          tag_ver="${GITHUB_REF_NAME#rust-v}"
+          cargo_ver="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          [[ "${tag_ver}" == "${cargo_ver}" ]]             || { echo "tag rust-v${tag_ver} does not match Cargo.toml ${cargo_ver}"; exit 1; }
+          echo "tag and workspace version agree (${tag_ver})"
+
+  build:
+    needs: tag-check
+    name: build-${{ matrix.target }}
+    runs-on: ${{ matrix.runs-on }}
+    permissions:
+      contents: read
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runs-on: macos-14
+          - target: x86_64-apple-darwin
+            runs-on: macos-15-intel  # macos-13 is retired; this is the Intel runner now
+          - target: x86_64-unknown-linux-gnu
+            runs-on: ubuntu-24.04
+          # aarch64-linux and windows ship later (kept visible as rows);
+          # install-rust.sh turns linux-arm64 users away with that exact
+          # message instead of a guess:
+          # - target: aarch64-unknown-linux-gnu
+          #   runs-on: ubuntu-24.04-arm
+          # - target: x86_64-pc-windows-msvc
+          #   runs-on: windows-2022
+    env:
+      # AppleDouble resource forks must not leak into the archive; the
+      # assembler additionally enforces plain-file payloads.
+      COPYFILE_DISABLE: "1"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # Scoped to this pipeline so its restores never alias the
+          # continuous channel's cache for the same targets.
+          key: rust-release-${{ matrix.target }}
+      # pa-cli pulls the whole product (its dependency edges reach every
+      # crate), so -p pa-cli builds exactly the shipped binary; --locked
+      # honors the committed lockfile.
+      - name: Build (release, locked, pa-cli)
+        run: cargo build --release --locked -p pa-cli --target ${{ matrix.target }} -j 4
+      - name: Assemble tarball + checksums + manifest (commit-stamped)
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          [[ -n "${version}" ]] || { echo "could not read the workspace version"; exit 1; }
+          python3 scripts/release/assemble_artifacts.py \
+            --repo-root . \
+            --version "${version}" \
+            --target "${{ matrix.target }}" \
+            --sha "${GITHUB_SHA}" \
+            --binary "target/${{ matrix.target }}/release/prime-agent" \
+            --out-dir "target/${{ matrix.target }}/dist"
+          cat "target/${{ matrix.target }}/dist/manifest.json"
+      # The raw target binary answers the compile-time workspace version (no
+      # exe-adjacent package.json in the cargo dir; the -continuous.<sha>
+      # stamp lands in the tarball's staged package.json, which the binary
+      # resolves once extracted). The answer must be non-empty and start with
+      # the workspace version — the same value the release tag names — so the
+      # shipped --version can never drift from the release that carries it.
+      - name: "Smoke: --version answers"
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/prime-agent"
+          out="$("${bin}" --version)"
+          [[ -n "${out}" ]]             || { echo "binary printed an empty --version"; exit 1; }
+          version="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)"
+          [[ "${out}" == "${version}"* ]]             || { echo "binary reports '${out}', expected the workspace version ${version}"; exit 1; }
+          echo "--version answered: ${out}"
+      - name: Upload artifacts
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: rust-build-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/dist/prime-agent-*
+            target/${{ matrix.target }}/dist/SHA256SUMS
+            target/${{ matrix.target }}/dist/manifest.json
+          if-no-files-found: error
+
+  release:
+    needs: build
+    name: attach release assets (rust-v tag)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    timeout-minutes: 30
+    # Tag pushes only: branch pushes stop at the build artifacts (the run
+    # page download is the early-adopter channel).
+    if: github.ref_type == 'tag'
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: incoming
+      # The one deliberate break from release.yml's promote stage (which
+      # receives ONLY built artifacts): this job checks out the source for
+      # exactly one file. install-rust.sh travels with the binaries it
+      # matches — it names this pipeline's asset scheme (rust-v* tags,
+      # prime-agent-<version>-<target>.tar.gz, merged SHA256SUMS), so
+      # coworkers install from any rust-v* release with one command and the
+      # installer is never older or newer than the release it sits beside.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Verify hash continuity (artifacts match build-job manifests)
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, hashlib, pathlib, sys
+          incoming = pathlib.Path("incoming")
+          failures = []
+          for entry_dir in sorted(p for p in incoming.iterdir() if p.is_dir()):
+              manifest_path = entry_dir / "manifest.json"
+              manifest = json.loads(manifest_path.read_text())
+              for b in manifest["binaries"]:
+                  tar = entry_dir / b["file"]
+                  if not tar.is_file():
+                      failures.append(f"{b['file']}: missing")
+                      continue
+                  digest = hashlib.sha256(tar.read_bytes()).hexdigest()
+                  if digest != b["sha256"]:
+                      failures.append(f"{b['file']}: sha256 mismatch")
+          if failures:
+              sys.exit("hash continuity failed:\n" + "\n".join(failures))
+          print(f"hash continuity verified for all archives")
+          PY
+      - name: Flatten release assets (tarballs + merged checksums + manifest + installer)
+        run: |
+          set -euo pipefail
+          mkdir release-out
+          # Flatten the per-target tarballs: download-artifact nests them one
+          # directory per matrix row, and the release takes plain globs.
+          find incoming -name 'prime-agent-*.tar.gz' -exec cp {} release-out/ \;
+          # Merge the per-target SHA256SUMS + manifest.json exactly like the
+          # release.yml promote job does (one sorted pair per release), so
+          # the release carries ONE checksum file covering every platform.
+          python3 - <<'PY'
+          import json, pathlib
+          incoming = pathlib.Path("incoming")
+          merged, sums, version = [], [], None
+          for entry_dir in sorted(p for p in incoming.iterdir() if p.is_dir()):
+              manifest = json.loads((entry_dir / "manifest.json").read_text())
+              version = manifest["version"]
+              merged.extend(manifest["binaries"])
+              sums.extend(line for line in
+                          (entry_dir / "SHA256SUMS").read_text().splitlines()
+                          if line.strip())
+          merged.sort(key=lambda b: b["file"])
+          sums.sort(key=lambda line: line.split(None, 1)[1])
+          out = pathlib.Path("release-out")
+          (out / "manifest.json").write_text(
+              json.dumps({"version": version, "binaries": merged}, indent=2) + "\n")
+          (out / "SHA256SUMS").write_text("\n".join(sums) + "\n")
+          PY
+          cp install-rust.sh release-out/
+          ls -la release-out
+      - name: Attach to GitHub release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          # The TS v* releases own the repo's "latest" slot; a rust-v* tag
+          # must not steal it (the TS installers point users at the TS
+          # latest, and install-rust.sh resolves rust-v* releases itself).
+          # NOT prerelease: the installer's default tag resolution prefers
+          # stable releases, so marking these prerelease would hide them
+          # from the default install.
+          make_latest: "false"
+          fail_on_unmatched_files: true
+          files: |
+            release-out/prime-agent-*.tar.gz
+            release-out/SHA256SUMS
+            release-out/manifest.json
+            release-out/install-rust.sh

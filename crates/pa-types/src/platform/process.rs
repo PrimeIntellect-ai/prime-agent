@@ -71,6 +71,93 @@ pub fn process_start_id(_pid: u32) -> Option<String> {
     None
 }
 
+/// The executable a live pid currently runs (best-effort, like the liveness
+/// probes: `None` when the platform cannot answer). Names the process
+/// holding a runtime session lease in the session-hold refusal - the TS and
+/// Rust products share the session store, so the holder of a refused file is
+/// whichever product owns it. An unresolvable holder stays anonymous, never
+/// a guess: the refusal's flavor claim (TypeScript vs Rust) is made only
+/// from a resolved path.
+#[cfg(target_os = "linux")]
+pub fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
+    if pid == 0 {
+        return None;
+    }
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+/// macOS: `proc_pidpath` (libproc). A process the caller may not inspect
+/// answers 0 and stays `None` - the same best-effort contract as the Linux
+/// `/proc` read.
+#[cfg(all(unix, target_vendor = "apple"))]
+pub fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
+    if pid == 0 {
+        return None;
+    }
+    let mut buffer = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: writes the pid's executable path into `buffer` (at most its
+    // size, NUL-terminated) and returns the byte count; 0 means the path
+    // was not resolvable.
+    let written = unsafe {
+        libc::proc_pidpath(
+            pid as libc::pid_t,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+        )
+    };
+    if written <= 0 {
+        return None;
+    }
+    let written = (written as usize).min(buffer.len());
+    let end = buffer[..written]
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(written);
+    Some(std::path::PathBuf::from(
+        String::from_utf8_lossy(&buffer[..end]).into_owned(),
+    ))
+}
+
+/// Other unixes expose neither `/proc/<pid>/exe` nor libproc's
+/// `proc_pidpath`: the holder hint stays anonymous there.
+#[cfg(all(unix, not(any(target_os = "linux", target_vendor = "apple"))))]
+pub fn process_executable_path(_pid: u32) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// Windows: `QueryFullProcessImageNameW` under the same query access the
+/// identity ladder uses.
+#[cfg(windows)]
+pub fn process_executable_path(pid: u32) -> Option<std::path::PathBuf> {
+    if pid == 0 {
+        return None;
+    }
+    let handle = winapi::open_process(winapi::PROCESS_QUERY_LIMITED_INFORMATION, pid)?;
+    let mut buffer = [0u16; 1024];
+    let mut size = buffer.len() as u32;
+    // SAFETY: writes the process image path into `buffer` (at most `size`
+    // wide chars, NUL-terminated); a 0 return means the query failed.
+    let written =
+        unsafe { winapi::query_full_process_image_name(handle, buffer.as_mut_ptr(), &mut size) };
+    winapi::close_handle(handle);
+    if written == 0 {
+        return None;
+    }
+    let end = buffer[..(size as usize).min(buffer.len())]
+        .iter()
+        .position(|wide| *wide == 0)
+        .unwrap_or((size as usize).min(buffer.len()));
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(
+        &buffer[..end],
+    )))
+}
+
+/// No executable path on platforms without a process-inspection surface.
+#[cfg(not(any(unix, windows)))]
+pub fn process_executable_path(_pid: u32) -> Option<std::path::PathBuf> {
+    None
+}
+
 // Suspend-to-background signal control (TS `handleCtrlZ`): the
 // interactive TUI stops its whole process group with SIGTSTP when the
 // user suspends it, with SIGINT ignored for the stopped window (a
@@ -257,6 +344,12 @@ mod winapi {
     extern "system" {
         fn OpenProcess(access: u32, inherit_handle: i32, process_id: usize) -> Handle;
         fn CloseHandle(handle: Handle) -> i32;
+        fn QueryFullProcessImageNameW(
+            handle: Handle,
+            flags: u32,
+            exe_name: *mut u16,
+            size: *mut u32,
+        ) -> i32;
         fn GetExitCodeProcess(handle: Handle, exit_code: *mut u32) -> i32;
         fn GetProcessTimes(
             handle: Handle,
@@ -276,6 +369,17 @@ mod winapi {
 
     pub(crate) fn close_handle(handle: Handle) {
         unsafe { CloseHandle(handle) };
+    }
+
+    /// The full path of the process image (`QueryFullProcessImageNameW`,
+    /// win32 format), `0` when the query fails.
+    pub(crate) fn query_full_process_image_name(
+        handle: Handle,
+        buffer: *mut u16,
+        size: *mut u32,
+    ) -> i32 {
+        // SAFETY: the caller owns `buffer`/`size` for the call's duration.
+        unsafe { QueryFullProcessImageNameW(handle, 0, buffer, size) }
     }
 
     /// The creation-time ticks of the process, `None` when the query fails.
@@ -415,5 +519,35 @@ mod suspend_shield_tests {
                 },
             );
         }
+    }
+}
+
+/// The executable-path probe: the own pid resolves to the running binary,
+/// and pid 0 (the no-process sentinel) never does. `PATH_MAX`-sized paths
+/// and unresolvable pids answer `None` on the live path, so this pins the
+/// one contract callers rely on - a resolved path names a live process's
+/// image, never a guess.
+#[cfg(test)]
+mod executable_path_tests {
+    use super::*;
+
+    #[test]
+    fn own_pid_resolves_and_zero_does_not() {
+        let resolved = process_executable_path(std::process::id())
+            .expect("the own pid's executable must resolve");
+        let current = std::env::current_exe().expect("current_exe");
+        let resolved_name = resolved
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let current_name = current
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            resolved_name, current_name,
+            "the own pid must resolve to the running executable ({resolved:?} vs {current:?})"
+        );
+        assert_eq!(process_executable_path(0), None);
     }
 }
