@@ -349,6 +349,8 @@ pub(crate) struct SessionUi {
     pending_snapshot: Option<Vec<ChatEntry>>,
     /// Snapshot labels (model) for the next rebuild.
     pending_model: Option<String>,
+    /// Snapshot service tier for the next rebuild (the tray badge).
+    pending_service_tier: Option<String>,
     /// Snapshot queue state for the next rebuild (attach re-sync).
     pending_queue: Option<crate::queued::QueuedMessages>,
     /// The parked-message browse state (TS `QueueSelection`): which queued
@@ -690,6 +692,7 @@ impl SessionUi {
             next_image_marker_id: 1,
             pending_snapshot: None,
             pending_model: None,
+            pending_service_tier: None,
             pending_queue: None,
             queue_selection: crate::queued::QueueSelection::default(),
             context: None,
@@ -926,7 +929,7 @@ impl SessionUi {
         self.session_id = reconstructed.session_id;
         self.session_name.clone_from(&reconstructed.session_name);
         self.service_tier.clone_from(&reconstructed.service_tier);
-        view.chrome.service_tier = self.service_tier.clone();
+        self.pending_service_tier = reconstructed.service_tier.clone();
         self.current_model_provider
             .clone_from(&reconstructed.model_provider);
         self.session_file = attach
@@ -1241,6 +1244,9 @@ impl SessionUi {
         }
         if let Some(model) = self.pending_model.take() {
             view.chrome.model_id = Some(model);
+        }
+        if let Some(tier) = self.pending_service_tier.take() {
+            view.chrome.service_tier = Some(tier);
         }
         view.queued = self.pending_queue.take().unwrap_or_default();
         // A rebuilt view starts from the snapshot's queue: any browse
