@@ -1005,11 +1005,13 @@ async fn tui_traces_upload_all_sweeps_with_live_progress() {
         rendered.contains("Uploaded 2 of 2 traces; 128 bytes stored."),
         "the summary row renders:\n{rendered}"
     );
-    // A second sweep while the first still holds the run guard answers
-    // the TS warning.
-    assert!(
-        rendered.contains("A trace upload is already running. Cancel it before starting another."),
-        "the one-sweep guard renders:\n{rendered}"
+    // The one-sweep guard: the second submit while the first still runs
+    // never starts a second sweep (the TS warning it shows is a status
+    // row the later progress rewrites in place, exactly like TS).
+    assert_eq!(
+        rendered.matches("Uploading traces: 0/2").count(),
+        1,
+        "exactly one sweep started:\n{rendered}"
     );
 }
 

@@ -397,30 +397,29 @@ mod tests {
             // resolves before the future arms.
             let url = url.to_string();
             self.served.lock().unwrap().push(url.clone());
-            let dynamic = self.dynamic_status.lock().unwrap().take();
-            let answer = match dynamic {
-                // The status poll answers pending once (the flow sleeps
-                // its poll interval and yields), then delivers the
-                // encrypted fixture key.
-                Some(_cipher)
-                    if url.contains("/api/v1/auth_challenge/status")
-                        && self.status_pending_once.swap(false, Ordering::SeqCst) =>
-                {
+            // The cipher stays until the pending answer has been served:
+            // only the result response consumes it.
+            let dynamic = self.dynamic_status.lock().unwrap().clone();
+            let answer = if url.contains("/api/v1/auth_challenge/status") && dynamic.is_some() {
+                if self.status_pending_once.swap(false, Ordering::SeqCst) {
+                    // The first poll answers pending (the flow sleeps its
+                    // poll interval and yields).
                     Ok(PrimeHttpResponse {
                         status: 200,
                         body: r#"{"pending":true}"#.to_string(),
                     })
-                }
-                Some(cipher) if url.contains("/api/v1/auth_challenge/status") => {
+                } else {
+                    let cipher = self.dynamic_status.lock().unwrap().take();
                     Ok(PrimeHttpResponse {
                         status: 200,
-                        body: format!(r#"{{"result":"{cipher}"}}"#),
+                        body: format!(r#"{{"result":"{}"}}"#, cipher.unwrap_or_default()),
                     })
                 }
-                _ => match self.pop(&url) {
+            } else {
+                match self.pop(&url) {
                     Some((status, body)) => Ok(PrimeHttpResponse { status, body }),
                     None => panic!("no scripted response for {url}"),
-                },
+                }
             };
             Box::pin(async move { answer })
         }

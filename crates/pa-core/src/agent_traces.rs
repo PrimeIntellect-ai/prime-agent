@@ -1866,14 +1866,15 @@ mod tests {
     #[test]
     fn the_content_preview_splits_head_and_tail() {
         let body = "0123456789abcdef".repeat(4);
-        // The marker takes 34 chars of the window; the remaining 6 split
+        // The marker takes 33 chars of the window; the remaining 6 split
         // into the head and tail halves.
-        let (content, truncated) = trace_content_preview(&body, 40);
+        let (content, truncated) = trace_content_preview(&body, 33 + 6);
         assert!(truncated);
         let parts: Vec<&str> = content.split("... middle of trace omitted ...").collect();
         assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0], "012");
-        assert_eq!(parts[1], "def");
+        // The marker's newlines stay with their sides after the split.
+        assert_eq!(parts[0].trim_end(), "012");
+        assert_eq!(parts[1].trim_start(), "def");
         let (whole, truncated) = trace_content_preview("short", 10);
         assert_eq!(whole, "short");
         assert!(!truncated);
