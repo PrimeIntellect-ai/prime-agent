@@ -90,7 +90,7 @@ if [ "$OS" = "Linux" ]; then
 the Linux builds require glibc >= 2.35 (Ubuntu 22.04 or newer)" ;;
   esac
   glibc_major="$(printf '%s' "${glibc%%.*}" | tr -cd '0-9')"
-  glibc_minor="$(printf '%s' "${glibc#*.}" | tr -cd '0-9')"
+  glibc_minor="$(printf '%s' "${glibc#*.}" | sed 's/\..*//' | tr -cd '0-9')"
   if [ -z "$glibc_major" ] || [ -z "$glibc_minor" ] \
      || [ "$glibc_major" -lt 2 ] \
      || { [ "$glibc_major" -eq 2 ] && [ "$glibc_minor" -lt 35 ]; }; then
