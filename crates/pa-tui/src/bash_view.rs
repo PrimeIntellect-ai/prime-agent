@@ -402,6 +402,10 @@ impl BashView {
             }
         }
         lines.extend(self.pane_footer(theme, width, &self.list_hint(kb)));
+        // The budget math keeps every normal viewport exact; a terminal
+        // shorter than the frame itself degrades by truncation — the
+        // pane never renders past its allocated rows.
+        lines.truncate(self.viewport_rows.max(1));
         lines
     }
 
@@ -427,23 +431,13 @@ impl BashView {
             lines.extend(self.pane_footer(theme, width, &self.detail_hint(kb)));
             return lines;
         };
-        let name = single_line(&activity.command);
+        let name = single_line(&scrub_controls(&activity.command));
         // The drill-in's command block is the EXACT command — embedded
         // newlines and spacing stay verbatim — with the non-newline
         // control characters scrubbed: a command carrying an escape
         // sequence never executes terminal control operations when
         // rendered (only the title cell single-lines for identity).
-        let command_exact: String = activity
-            .command
-            .chars()
-            .map(|character| {
-                if character.is_control() && character != '\n' {
-                    ' '
-                } else {
-                    character
-                }
-            })
-            .collect();
+        let command_exact = scrub_controls(&activity.command);
         let subtitle = if activity.running() {
             "running".to_string()
         } else {
@@ -490,12 +484,13 @@ impl BashView {
         if left >= 6 {
             command_rows = (left - 5).min(command_wrapped.len());
             if command_wrapped.len() > command_rows {
-                // The leading marker rides inside the block's own budget:
+                // The trailing marker rides inside the block's own budget
+                // (a clipped block spends exactly its lines + marker):
                 // the clip never overspends the viewport.
                 command_rows = command_rows.saturating_sub(1).max(1);
                 command_clipped = true;
             }
-            left -= 2 + command_rows;
+            left -= 2 + command_rows + usize::from(command_clipped);
         }
         let output_rows = left.saturating_sub(2).max(if left >= 3 { 1 } else { 0 });
         if command_rows > 0 {
@@ -504,16 +499,18 @@ impl BashView {
                 Span::raw("  "),
                 theme.fg_span(ThemeColor::Dim, "Command".to_string()),
             ]);
+            for line in command_wrapped[..command_rows].iter() {
+                let mut row = vec![Span::raw("  ")];
+                row.extend(line.iter().cloned());
+                lines.push(truncate_line(&row, width, ""));
+            }
+            // The marker trails the kept head: the command's tail is
+            // what a clip drops.
             if command_clipped {
                 lines.push(vec![
                     Span::raw("  "),
                     theme.fg_span(ThemeColor::Dim, "\u{2026}".to_string()),
                 ]);
-            }
-            for line in command_wrapped[..command_rows].iter() {
-                let mut row = vec![Span::raw("  ")];
-                row.extend(line.iter().cloned());
-                lines.push(truncate_line(&row, width, ""));
             }
         }
         if pairs_rows > 0 {
@@ -583,6 +580,7 @@ impl BashView {
             }
         }
         lines.extend(self.pane_footer(theme, width, &self.detail_hint(kb)));
+        lines.truncate(self.viewport_rows.max(1));
         lines
     }
 
@@ -726,7 +724,10 @@ impl Columns {
         };
         let mut row = vec![Span::raw(if selected { "\u{203a}" } else { " " })];
         row.push(Span::raw(" "));
-        let command = plain_cell(&single_line(&activity.command), self.command);
+        let command = plain_cell(
+            &single_line(&scrub_controls(&activity.command)),
+            self.command,
+        );
         if selected {
             row.push(theme.bold(Span::raw(command)));
         } else {
@@ -837,9 +838,16 @@ fn single_line(value: &str) -> String {
 /// line's own leading and trailing spacing stays exactly as the kernel
 /// wrote it (indented logs and fixed-width rows keep their shape).
 fn clean_line(value: &str) -> String {
+    scrub_controls(value)
+}
+
+/// Non-newline control characters become spaces (a command or prompt
+/// carrying ANSI/OSC escapes can never execute terminal control
+/// operations when rendered); newlines stay for the wraps.
+fn scrub_controls(value: &str) -> String {
     value
         .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
         .collect::<String>()
 }
 
@@ -1255,6 +1263,51 @@ mod tests {
         let frame = view.render(&theme(), 70, &kb());
         let text = frame_text(&frame);
         assert!(text.iter().any(|row| row.contains("fresh fetch")));
+    }
+
+    /// A clipped command block spends exactly its budget: the marker
+    /// trails the kept head (the tail is what a clip drops) and the
+    /// pane never renders past the viewport.
+    #[test]
+    fn a_clipped_command_trails_the_marker_inside_the_budget() {
+        let mut catalog = activities();
+        catalog[0].command = "word ".repeat(60);
+        let mut view = BashView::new(catalog, 14);
+        view.handle_key("enter", &kb());
+        let frame = view.render(&theme(), 70, &kb());
+        assert!(frame.len() <= 14, "the drill-in fits: {}", frame.len());
+        let text = frame_text(&frame);
+        assert!(
+            text.iter().any(|row| row.contains("word")),
+            "the command's head renders"
+        );
+        let text_idx = text
+            .iter()
+            .position(|row| row.trim() == "\u{2026}")
+            .expect("the marker renders");
+        let word_idx = text
+            .iter()
+            .position(|row| row.contains("word"))
+            .expect("the command line");
+        assert!(
+            text_idx > word_idx,
+            "the marker trails the command: {text:?}"
+        );
+    }
+
+    /// A terminal shorter than the frame itself never renders past its
+    /// allocated rows (the pane degrades by truncation).
+    #[test]
+    fn a_sub_frame_viewport_never_overflows() {
+        for viewport_rows in [1usize, 2, 3, 5, 7] {
+            let view = BashView::new(activities(), viewport_rows);
+            let frame = view.render(&theme(), 70, &kb());
+            assert!(
+                frame.len() <= viewport_rows,
+                "viewport {viewport_rows}: pane is {} rows",
+                frame.len()
+            );
+        }
     }
 
     #[test]

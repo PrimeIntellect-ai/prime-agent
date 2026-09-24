@@ -700,6 +700,10 @@ impl HeartbeatsPicker {
             }
         }
         lines.extend(self.pane_footer(theme, width, &self.list_hint(kb)));
+        // The budget math keeps every normal viewport exact; a terminal
+        // shorter than the frame itself degrades by truncation — the
+        // pane never renders past its allocated rows.
+        lines.truncate(self.viewport_rows.max(1));
         lines
     }
 
@@ -774,7 +778,16 @@ impl HeartbeatsPicker {
         // leading blank and label ride the budget too, and the pairs
         // block's blank renders only with its rows.
         let prompt_width = width.saturating_sub(4).max(10);
-        let wrapped = wrap_text(&entry.job.prompt, prompt_width);
+        // Non-newline control characters scrub before the wrap (an
+        // escape sequence in a prompt can never execute terminal
+        // control operations when rendered).
+        let prompt = entry
+            .job
+            .prompt
+            .chars()
+            .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
+            .collect::<String>();
+        let wrapped = wrap_text(&prompt, prompt_width);
         let mut pairs_rows = pairs.len().min(MAX_DETAIL_ROWS);
         let mut prompt_budget = self
             .viewport_rows
@@ -828,6 +841,7 @@ impl HeartbeatsPicker {
             ));
         }
         lines.extend(self.pane_footer(theme, width, &self.detail_hint(kb)));
+        lines.truncate(self.viewport_rows.max(1));
         lines
     }
 
@@ -949,15 +963,9 @@ impl Columns {
     /// The dim column header row.
     fn header_row(&self, theme: &Theme, width: usize) -> Line {
         let mut row = vec![Span::raw("  ")];
-        row.push(theme.fg_span(
-            ThemeColor::Dim,
-            format!("{:<width$}", "Interval", width = self.interval),
-        ));
+        row.push(theme.fg_span(ThemeColor::Dim, plain_cell("Interval", self.interval)));
         row.push(Span::raw("  "));
-        row.push(theme.fg_span(
-            ThemeColor::Dim,
-            format!("{:<width$}", "Label", width = self.label),
-        ));
+        row.push(theme.fg_span(ThemeColor::Dim, plain_cell("Label", self.label)));
         row.push(Span::raw("  "));
         row.push(theme.fg_span(ThemeColor::Dim, "Next run".to_string()));
         row.push(Span::raw(" ".repeat(16 - "Next run".len())));
@@ -1639,6 +1647,43 @@ mod tests {
         assert!(text
             .iter()
             .any(|row| row.contains("Error: management failed")));
+    }
+
+    /// A terminal shorter than the frame itself never renders past its
+    /// allocated rows (both panes degrade by truncation).
+    #[test]
+    fn a_sub_frame_viewport_never_overflows() {
+        for viewport_rows in [1usize, 2, 3, 5, 7, 9] {
+            let picker = HeartbeatsPicker::new(entries(), None, None, viewport_rows);
+            let frame = picker.render(&theme(), 70, &kb());
+            assert!(
+                frame.len() <= viewport_rows,
+                "viewport {viewport_rows}: pane is {} rows",
+                frame.len()
+            );
+            let mut drill = HeartbeatsPicker::new(entries(), None, None, viewport_rows);
+            drill.handle_key("enter", &kb());
+            let frame = drill.render(&theme(), 70, &kb());
+            assert!(
+                frame.len() <= viewport_rows,
+                "viewport {viewport_rows}: detail is {} rows",
+                frame.len()
+            );
+        }
+    }
+
+    /// A prompt carrying escape sequences renders inert (control
+    /// characters scrub before the wrap).
+    #[test]
+    fn an_escape_sequence_in_the_prompt_never_reaches_the_terminal() {
+        let mut catalog = entries();
+        catalog[0].job.prompt = "run \u{1b}[31mred\u{1b}[0m now".to_string();
+        let mut picker = HeartbeatsPicker::new(catalog, None, None, 24);
+        picker.handle_key("enter", &kb());
+        let frame = picker.render(&theme(), 70, &kb());
+        let joined = frame_text(&frame).join("\n");
+        assert!(!joined.contains('\u{1b}'), "the escape scrubs: {joined:?}");
+        assert!(joined.contains("red"), "the visible text stays");
     }
 
     #[test]
