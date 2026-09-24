@@ -754,6 +754,10 @@ async fn run_interactive_surface(
     // toggle (TS `fullscreenEnabled`); the compose gates the top bar on it.
     if let Some(settings) = &options.client_settings {
         view.fullscreen = settings.fullscreen();
+        // TS constructs the chat TUI with the live `showHardwareCursor`
+        // value (interactive-mode.ts `new TUI(..., getShowHardwareCursor())`);
+        // the settings menu's toggle updates it in place.
+        view.show_hardware_cursor = settings.show_hardware_cursor();
     }
     apply_startup_chrome(&mut view, &options);
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiInput>();
@@ -2023,15 +2027,20 @@ impl Renderer {
                 // screen is already blank). TS paints the new frame
                 // straight over the old one, so the clear escape must
                 // never reach the pane on its own: queue it with the
-                // cursor show and let the first draw's single flush carry
+                // cursor hide and let the first draw's single flush carry
                 // clear + frame together — a separate clear-and-flush
                 // here shows a blank pane for the whole render gap, a
                 // visible flicker on every surface switch (the chat's own
                 // first frame is the tail render on the first event).
+                // The cursor hides with the mount (TS `TUI.start`
+                // writes hideCursor, never a show): a shown cursor at a
+                // stale position here would be dragged across the clear
+                // and the first repaint — the cursor-glitch window
+                // between surfaces.
                 crossterm::queue!(
                     std::io::stdout(),
                     crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                    crossterm::cursor::Show
+                    crossterm::cursor::Hide
                 )?;
                 Ok(Renderer::Terminal {
                     term: terminal,
@@ -2154,6 +2163,13 @@ impl Renderer {
                 // The suspension released the alternate screen (the client
                 // command prompted on the primary one); re-enter it.
                 crate::altscreen::enter()?;
+                // The suspend's release tail showed the cursor for the
+                // plain terminal (the client command's prompt needs it);
+                // taking the surface back hides it again (TS `ui.start()`
+                // on the SIGCONT resume) — otherwise the visible cursor
+                // sits at a stale position through the clear and the full
+                // repaint below, the exact window the glitch shows in.
+                let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
                 // The raw-mode bracket re-arms the enhanced-key modes (TS
                 // `start` on SIGCONT re-runs the paste enable and the kitty
                 // query).

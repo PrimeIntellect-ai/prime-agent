@@ -4209,6 +4209,11 @@ impl SessionUi {
                     value,
                     view,
                 );
+                // The live TUI effect (TS persists through the settings
+                // manager, then calls `ui.setShowHardwareCursor(enabled)`
+                // in place): the very next frame shows or hides the
+                // hardware cursor at the focused caret.
+                view.show_hardware_cursor = value == "true";
             }
             "editor-padding" => {
                 if let Some(settings) = &self.client_settings {

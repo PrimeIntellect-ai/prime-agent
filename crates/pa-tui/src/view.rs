@@ -155,6 +155,13 @@ pub struct AgentView {
     /// the fullscreen compose pins the top bar; the inline surface (TS
     /// `fullscreen rendering off`) renders without it.
     pub fullscreen: bool,
+    /// The `showHardwareCursor` setting (TS default false): the hardware
+    /// cursor is positioned at the focused caret for IME on every frame
+    /// either way, but only shown when this is set — TS keeps the
+    /// terminal's own cursor hidden by default so frame paints never drag
+    /// a visible cursor across the pane (`positionHardwareCursor` and the
+    /// paint tail move it while hidden).
+    pub show_hardware_cursor: bool,
     pub(crate) scroll_top: usize,
     following: bool,
     /// The transcript-tail offset of the last composed frame (TS
@@ -305,6 +312,7 @@ impl AgentView {
             shortcut_guide: None,
             show_images: true,
             fullscreen: true,
+            show_hardware_cursor: false,
             scroll_top: 0,
             following: true,
             last_max_scroll: 0,

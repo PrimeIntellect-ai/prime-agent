@@ -573,6 +573,12 @@ async fn run_agents_view_flow(
             // bindings as the session it opened from (TS
             // `AgentsViewMode.keybindings`).
             keybindings: base.keybindings.clone(),
+            // TS `AgentsViewMode` constructs its TUI with the live
+            // `settingsManager.getShowHardwareCursor()` (default false).
+            show_hardware_cursor: base
+                .client_settings
+                .as_ref()
+                .is_some_and(|settings| settings.show_hardware_cursor()),
         };
         let view_run = pa_tui::agents_view::run_agents_view(
             view_options,
