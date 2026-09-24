@@ -632,16 +632,6 @@ impl Editor {
             .filter(|&c| c == '\n' || (c as u32) >= 32)
             .collect();
         let mut filtered = filtered_raw;
-        // File paths get a leading space when following a word char.
-        if filtered.starts_with(['/', '~', '.']) {
-            let line = &self.lines[self.cursor_line];
-            let char_before = char_at(line, self.cursor_col.saturating_sub(1));
-            if let Some(c) = char_before {
-                if c.is_alphanumeric() || c == '_' {
-                    filtered = format!(" {}", filtered);
-                }
-            }
-        }
         // A payload that filters to nothing (control-only bytes, empty
         // bracketed paste) changes nothing: no undo step, no selection
         // removal — the editor stays exactly as it was.
@@ -651,8 +641,22 @@ impl Editor {
         self.push_undo_snapshot();
         // Pasting over a selection replaces it (one undo step; undo of a
         // paste-then-selection-paste restores the whole original text).
+        // The removal runs BEFORE the path-space check below: the check
+        // inspects the character before the INSERTION point, which after
+        // a selection replace is the selection's start, not the live
+        // cursor a forward selection leaves behind.
         if self.has_selection() {
             self.remove_selection();
+        }
+        // File paths get a leading space when following a word char.
+        if filtered.starts_with(['/', '~', '.']) {
+            let line = &self.lines[self.cursor_line];
+            let char_before = char_at(line, self.cursor_col.saturating_sub(1));
+            if let Some(c) = char_before {
+                if c.is_alphanumeric() || c == '_' {
+                    filtered = format!(" {}", filtered);
+                }
+            }
         }
         let line_count = filtered.split('\n').count();
         if line_count > LARGE_PASTE_LINES || filtered.chars().count() > LARGE_PASTE_CHARS {

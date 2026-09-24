@@ -34,11 +34,19 @@ impl Editor {
         if anchor == cursor {
             return None;
         }
-        if anchor < cursor {
-            Some((anchor, cursor))
+        let (start, end) = if anchor < cursor {
+            (anchor, cursor)
         } else {
-            Some((cursor, anchor))
+            (cursor, anchor)
+        };
+        // The hidden bang prefix is never selectable: a cursor parked
+        // inside it (a backward jump lands on the raw `!` at column 0)
+        // floors the range's start at the protected column.
+        let start = (start.0, start.1.max(self.line_start_col(start.0)));
+        if start == end {
+            return None;
         }
+        Some((start, end))
     }
 
     /// The selected text, lines joined with `\n`.
@@ -131,11 +139,19 @@ impl Editor {
     /// cursor at the end.
     pub(crate) fn select_all(&mut self) {
         self.last_action = None;
-        self.selection_anchor = Some((0, self.line_start_col(0)));
+        let anchor = (0, self.line_start_col(0));
         let last = self.lines.len() - 1;
-        self.cursor_line = last;
         let col = self.lines[last].chars().count();
+        self.selection_anchor = Some(anchor);
+        self.cursor_line = last;
         self.set_cursor_col(col);
+        // A prompt with nothing selectable (an empty prompt, or a bare
+        // hidden `!` prefix) must not leave a zero-span anchor behind:
+        // the next select motion would keep extending from it instead of
+        // anchoring at the cursor.
+        if !self.has_selection() {
+            self.selection_anchor = None;
+        }
     }
 
     /// Remove the selection from the buffer (the caller owns the undo
@@ -493,6 +509,68 @@ mod tests {
         e.handle_input("X");
         assert_eq!(e.get_text(), "!Xd", "the bang prefix survived the replace");
         assert_eq!(e.bash_prompt_prefix(), Some("! "));
+    }
+
+    /// A jump landing inside the hidden bang prefix can never seed a
+    /// selection that covers it (the range start floors at the protected
+    /// column).
+    #[test]
+    fn a_cursor_parked_on_the_bang_prefix_cannot_select_it() {
+        let mut e = ed();
+        e.set_text("!cmd");
+        // A backward jump finds the raw `!` at column 0 and parks the
+        // cursor there — inside the hidden prefix.
+        e.set_cursor_for_tests(0, 4);
+        e.handle_input("ctrl+alt+]");
+        e.handle_input("!");
+        assert_eq!(e.get_cursor(), (0, 0));
+        // Extending right from inside the prefix: the anchor floors at
+        // the protected column, so the first press yields no selection
+        // and the second selects PAST the prefix.
+        e.handle_input("shift+right");
+        assert!(!e.has_selection(), "no zero-span anchor is parked");
+        e.handle_input("shift+right");
+        let Some(((line, col), _)) = e.selection_range() else {
+            panic!("selection expected");
+        };
+        assert_eq!((line, col), (0, 1), "the selection starts past the prefix");
+        e.handle_input("backspace");
+        assert_eq!(e.get_text(), "!md", "the prefix itself is never deleted");
+    }
+
+    /// A prompt with nothing selectable leaves no zero-span anchor behind
+    /// (Ctrl+Shift+A on an empty prompt, then typing, must not create a
+    /// selection the NEXT keystroke would replace).
+    #[test]
+    fn select_all_on_an_empty_prompt_leaves_no_stale_anchor() {
+        let mut e = ed();
+        e.set_text("");
+        e.handle_input("ctrl+shift+a");
+        assert_eq!(e.selection_anchor, None);
+        e.handle_input("a");
+        assert!(!e.has_selection());
+        e.handle_input("b");
+        assert_eq!(e.get_text(), "ab", "the second keystroke inserts");
+    }
+
+    /// Pasting a file path over a forward selection inspects the
+    /// INSERTION point (the selection start), not the live cursor the
+    /// selection leaves behind.
+    #[test]
+    fn a_path_paste_over_a_forward_selection_gets_its_space_from_the_start() {
+        let mut e = ed();
+        e.set_text("abc def");
+        // Forward selection: cursor at 0 (before the selection), anchor at 3.
+        e.set_cursor_for_tests(0, 0);
+        e.handle_input("shift+right");
+        e.handle_input("shift+right");
+        e.handle_input("shift+right");
+        assert!(e.has_selection());
+        let _ = e.take_events();
+        e.handle_paste("/tmp/x");
+        // The insertion point is the selection start (col 0), whose
+        // preceding character is nothing — no leading space.
+        assert_eq!(e.get_text(), "/tmp/x def");
     }
 
     /// Paragraph motion into line 0 lands on the protected column (the

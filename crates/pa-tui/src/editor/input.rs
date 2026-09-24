@@ -74,50 +74,98 @@ impl Editor {
             return;
         }
         if self.kb_matches(input, "tui.editor.selectLeft") {
+            // Selection motions move the cursor away from the completion
+            // token: the dropdown closes instead of holding a stale
+            // anchor for the next Enter.
+            self.cancel_autocomplete();
             self.select_left();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectRight") {
+            // Selection motions move the cursor away from the completion
+            // token: the dropdown closes instead of holding a stale
+            // anchor for the next Enter.
+            self.cancel_autocomplete();
             self.select_right();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectUp") {
+            // Selection motions move the cursor away from the completion
+            // token: the dropdown closes instead of holding a stale
+            // anchor for the next Enter.
+            self.cancel_autocomplete();
             self.select_up();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectDown") {
+            // Selection motions move the cursor away from the completion
+            // token: the dropdown closes instead of holding a stale
+            // anchor for the next Enter.
+            self.cancel_autocomplete();
             self.select_down();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectWordLeft") {
+            // Selection motions move the cursor away from the completion
+            // token: the dropdown closes instead of holding a stale
+            // anchor for the next Enter.
+            self.cancel_autocomplete();
             self.select_word_left();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectWordRight") {
+            // Selection motions move the cursor away from the completion
+            // token: the dropdown closes instead of holding a stale
+            // anchor for the next Enter.
+            self.cancel_autocomplete();
             self.select_word_right();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectLineStart") {
+            // Selection motions move the cursor away from the completion
+            // token: the dropdown closes instead of holding a stale
+            // anchor for the next Enter.
+            self.cancel_autocomplete();
             self.select_line_start();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectLineEnd") {
+            // Selection motions move the cursor away from the completion
+            // token: the dropdown closes instead of holding a stale
+            // anchor for the next Enter.
+            self.cancel_autocomplete();
             self.select_line_end();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectParagraphUp") {
+            // Selection motions move the cursor away from the completion
+            // token: the dropdown closes instead of holding a stale
+            // anchor for the next Enter.
+            self.cancel_autocomplete();
             self.select_paragraph_up();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectParagraphDown") {
+            // Selection motions move the cursor away from the completion
+            // token: the dropdown closes instead of holding a stale
+            // anchor for the next Enter.
+            self.cancel_autocomplete();
             self.select_paragraph_down();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectDocStart") {
+            // Selection motions move the cursor away from the completion
+            // token: the dropdown closes instead of holding a stale
+            // anchor for the next Enter.
+            self.cancel_autocomplete();
             self.select_doc_start();
             return;
         }
         if self.kb_matches(input, "tui.editor.selectDocEnd") {
+            // Selection motions move the cursor away from the completion
+            // token: the dropdown closes instead of holding a stale
+            // anchor for the next Enter.
+            self.cancel_autocomplete();
             self.select_doc_end();
             return;
         }
@@ -221,21 +269,28 @@ impl Editor {
             return;
         }
         if self.kb_matches(input, "tui.editor.cursorDocStart") {
+            // Doc/paragraph jumps have no TS counterpart, so an open
+            // completion dropdown has no anchor semantics for them: the
+            // dropdown closes instead of staying stale at the old token.
+            self.cancel_autocomplete();
             self.clear_selection();
             self.move_to_doc_start();
             return;
         }
         if self.kb_matches(input, "tui.editor.cursorDocEnd") {
+            self.cancel_autocomplete();
             self.clear_selection();
             self.move_to_doc_end();
             return;
         }
         if self.kb_matches(input, "tui.editor.cursorParagraphUp") {
+            self.cancel_autocomplete();
             self.clear_selection();
             self.move_paragraph_backward();
             return;
         }
         if self.kb_matches(input, "tui.editor.cursorParagraphDown") {
+            self.cancel_autocomplete();
             self.clear_selection();
             self.move_paragraph_forward();
             return;

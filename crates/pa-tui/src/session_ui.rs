@@ -6933,12 +6933,17 @@ impl SessionUi {
             )
         };
         if page_up {
+            // The viewport consumes the key before the editor, so the
+            // editor's own page arms never run: collapse a selection
+            // here or it survives the scroll as a stale replace range.
+            view.editor.clear_selection();
             view.scroll_by(-(view.page_size() as isize));
             self.track_scroll("page_up", view.is_following());
             self.dirty = true;
             return Ok(());
         }
         if page_down {
+            view.editor.clear_selection();
             view.scroll_by(view.page_size() as isize);
             self.track_scroll("page_down", view.is_following());
             self.dirty = true;
@@ -7410,6 +7415,11 @@ impl SessionUi {
             && view.editor.is_cursor_at_end()
             && self.focus_subagents_summary(view)
         {
+            // The focus leaves the editor with the selection active: a
+            // later keystroke would fall back through to the editor and
+            // replace the stale range, so the selection collapses with
+            // the handoff.
+            view.editor.clear_selection();
             self.dirty = true;
             return Ok(());
         }
