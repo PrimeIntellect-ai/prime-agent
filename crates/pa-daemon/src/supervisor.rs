@@ -675,12 +675,6 @@ impl Supervisor {
         self.log.append(&format!("[{}] {message}", util::now_iso()));
     }
 
-    /// This socket's descriptor directory (the boot reap's protected-pid
-    /// census; every other reader lives in this module).
-    pub(crate) fn descriptor_dir(&self) -> std::path::PathBuf {
-        self.descriptor_dir.clone()
-    }
-
     /// The spawn ledger for one sessions dir (TS `rlmSpawnLedgerFor`): the
     /// default dir's ledger is memoized; any other dir constructs a fresh
     /// instance (its seeding no-ops when its ledger file exists).

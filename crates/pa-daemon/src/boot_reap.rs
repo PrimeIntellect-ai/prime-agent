@@ -515,9 +515,6 @@ fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
         return protected;
     };
     for spelling in spellings.flatten() {
-        let Some(name) = spelling.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
         let dir = spelling.path();
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
