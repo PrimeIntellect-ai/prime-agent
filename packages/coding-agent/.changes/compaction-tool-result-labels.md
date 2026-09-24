@@ -1,3 +1,0 @@
-- Fixed: compaction, branch, and refine summaries now label each serialized tool result with its tool name, so parallel tool calls can be paired with their results.
-- Fixed: failed tool results are marked as errors in the label, keeping failure attribution visible in summaries.
-- Fixed: serialized tool calls now carry a sequential `#N` prefix and results repeat the matching index, so repeated calls of the same tool pair unambiguously.

@@ -1,1 +1,0 @@
-- Fixed proxy streaming: a truncated response now ends with an error instead of leaving the turn waiting forever, and the service tier setting is now sent through the proxy like it is for direct provider calls.

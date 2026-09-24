@@ -1,1 +1,0 @@
-- Fixed kernel REPL protocol output that could buffer unbounded memory in the host: Python-level stdout/stderr writes now ship as 64 Ki-char frames, oversized result reprs are capped at 1 Mi chars with a marker, oversized display payloads fail the cell, and the host repairs a kernel that streams an oversized protocol line.

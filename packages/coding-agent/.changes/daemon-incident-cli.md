@@ -1,1 +1,0 @@
-- Added `prime-agent incident` to reconstruct daemon incidents from logs into an operator timeline (supervisor events, session anomalies, recovery actions) with `--since`/`--until` window and `--session` filters.
