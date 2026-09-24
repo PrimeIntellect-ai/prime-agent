@@ -1011,7 +1011,7 @@ impl SessionUi {
         // not a live activity (the tray's TS label still covers the
         // paused and budget-limited states).
         let goal_tokens = (goal.status == pa_types::goal::GoalStatus::Active)
-            .then(|| (goal.tokens_used, goal.token_budget));
+            .then_some((goal.tokens_used, goal.token_budget));
         // The dock's bash indicator counts only runs actively running
         // right now (operator scoping): finished runs stay as dimmed rows
         // inside the panel, never in the indicator. The feed itself is the
@@ -6021,8 +6021,8 @@ impl SessionUi {
     fn scope_heartbeats(&self, heartbeats: Vec<HeartbeatEntry>) -> Vec<HeartbeatEntry> {
         scope_heartbeats(
             heartbeats,
-            (!self.active_session_id.is_empty()).then(|| self.active_session_id.as_str()),
-            (!self.session_id.is_empty()).then(|| self.session_id.as_str()),
+            (!self.active_session_id.is_empty()).then_some(self.active_session_id.as_str()),
+            (!self.session_id.is_empty()).then_some(self.session_id.as_str()),
             &[],
         )
     }
