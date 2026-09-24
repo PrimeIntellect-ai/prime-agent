@@ -580,6 +580,15 @@ pub(crate) struct SessionUi {
 /// Why one transcript rebuild runs (TS: a session rebind renders through
 /// `renderCurrentSessionState`, a same-session resync through
 /// `renderResyncedSession` — the bash slot survives only the resync).
+/// The reattach outcome for `reattach_after_update`: the budget expiry
+/// (a queued attach waiting out a slow restore, §10.4) is a RETRY
+/// outcome — the reconnect driver schedules its next attempt; only a
+/// true attach error is an `Err`.
+pub(crate) enum ReattachOutcome {
+    Attached,
+    AttachBudgetExceeded,
+}
+
 pub(crate) enum RebuildKind {
     /// A new session took the view's place (`/new`, `/switch`, startup):
     /// the previous session's held cards die with its transcript.
@@ -791,10 +800,11 @@ impl SessionUi {
         client: DaemonClient,
         view: &mut AgentView,
         lost: bool,
-    ) -> Result<()> {
+    ) -> Result<ReattachOutcome> {
         // One reattach attempt's budget (§10.4: a queued attach can
-        // legitimately wait out a slow restore). The bound lives INSIDE
-        // this function — a caller-side timeout would cancel this future
+        // legitimately wait out a slow restore — the budget's expiry is a
+        // RETRY outcome, never a fatal one). The bound lives INSIDE this
+        // function — a caller-side timeout would cancel this future
         // mid-attach and skip the failure-path `close()` below, leaking
         // the half-installed client's supervisor connection and reader.
         const REATTACH_BUDGET: Duration = Duration::from_secs(30);
@@ -833,12 +843,13 @@ impl SessionUi {
                 );
             }
             Err(_) => {
-                // A wedged attach outlived the budget: same disposal, and
-                // the driver's retry owns the next attempt.
+                // A wedged attach outlived the budget (§10.4: a queued
+                // attach can legitimately wait out a slow restore): same
+                // disposal, but the expiry is a RETRY outcome — the
+                // driver's next attempt owns the recovery, never a fatal
+                // exit.
                 self.client.close();
-                return Err(anyhow!(
-                    "the reattach attempt outlived its budget (session {durable})"
-                ));
+                return Ok(ReattachOutcome::AttachBudgetExceeded);
             }
         }
         // Flush the attach snapshot BEFORE the banner lands: `rebuild_view`
@@ -860,7 +871,7 @@ impl SessionUi {
             }
         }
         self.dirty = true;
-        Ok(())
+        Ok(ReattachOutcome::Attached)
     }
 
     /// Detach the current session and attach `id`, rebuilding the transcript

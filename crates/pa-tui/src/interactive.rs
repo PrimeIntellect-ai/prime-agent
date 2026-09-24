@@ -1701,9 +1701,12 @@ async fn run_interactive_surface(
                     Ok(Ok((client, fresh_events))) => {
                         // The reattach self-bounds (its budget is inside
                         // the function, so a timeout cannot cancel the
-                        // failure-path client close).
+                        // failure-path client close); the budget's expiry
+                        // is a RETRY outcome, never a fatal one (§10.4: a
+                        // queued attach can legitimately wait out a slow
+                        // restore).
                         match session.reattach_after_update(client, &mut view, lost).await {
-                            Ok(()) => {
+                            Ok(crate::session_ui::ReattachOutcome::Attached) => {
                                 events = fresh_events;
                                 events_closed = false;
                                 reader_dead = session.client.reader_dead();
@@ -1722,6 +1725,20 @@ async fn run_interactive_surface(
                                     );
                                 }
                                 session.dirty = true;
+                            }
+                            Ok(crate::session_ui::ReattachOutcome::AttachBudgetExceeded) => {
+                                // The queued attach outlived the attempt's
+                                // budget (a slow restore): schedule another
+                                // on both paths (§10.4 — never a fatal
+                                // exit).
+                                session.note(
+                                    "the daemon is still restoring — retrying…",
+                                    &mut view,
+                                );
+                                session.dirty = true;
+                                if let Some(state) = reconnect.take() {
+                                    reconnect = Some(state.next_attempt());
+                                }
                             }
                             Err(error) => {
                                 // An unexpected-loss reattach failure is a

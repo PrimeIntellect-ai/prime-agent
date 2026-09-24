@@ -71,6 +71,16 @@ class DaemonProbe:
     def close(self):
         self.s.close()
 
+    def handshake(self, timeout=90.0):
+        """Read the daemon_hello with a deadline: a daemon that accepts
+        the socket but never greets fails the trace instead of blocking
+        indefinitely."""
+        self.deadline = time.monotonic() + timeout
+        try:
+            return self.read_line()
+        finally:
+            self.deadline = None
+
 
 def kitty_probe_timing(budget_s=2.5):
     """The terminal enhanced-key query latency, measured on THIS process's
@@ -139,7 +149,12 @@ def store_shape(agent_dir):
         for f in os.listdir(sessions):
             if f.endswith(".jsonl"):
                 p = os.path.join(sessions, f)
-                size = os.path.getsize(p)
+                try:
+                    size = os.path.getsize(p)
+                except OSError:
+                    # The live store changes mid-scan: a vanished file is
+                    # skipped, never an aborted trace.
+                    continue
                 files += 1
                 total += size
                 largest = max(largest, size)
@@ -182,7 +197,7 @@ def main():
 
     # 1. The connection + handshake.
     p = DaemonProbe(args.socket)
-    hello = p.read_line()
+    hello = p.handshake()
     trace["steps"].append({
         "label": "daemon_hello handshake",
         "command": "connect",
@@ -233,21 +248,24 @@ def main():
         trace["steps"].append(solo)
         heavy = {"type": "get_context_tree", "activeSessionId": active}
         p2 = DaemonProbe(args.socket)
-        p2.read_line()
+        p2.handshake()
         result_box = {}
         sent = threading.Event()
 
         def fire_heavy():
-            env = {"type": "command", "id": "concurrent-heavy", "protocol": PROTOCOL, "command": heavy}
-            p2.deadline = time.monotonic() + 90.0
-            t0 = time.time()
-            p2.s.sendall((json.dumps(env) + "\n").encode())
-            sent.set()
-            while True:
-                msg = p2.read_line()
-                if msg.get("id") == "concurrent-heavy" and msg.get("type") == "response":
-                    result_box["heavy"] = {"wall_ms": (time.time() - t0) * 1000.0}
-                    return
+            try:
+                env = {"type": "command", "id": "concurrent-heavy", "protocol": PROTOCOL, "command": heavy}
+                p2.deadline = time.monotonic() + 90.0
+                t0 = time.time()
+                p2.s.sendall((json.dumps(env) + "\n").encode())
+                sent.set()
+                while True:
+                    msg = p2.read_line()
+                    if msg.get("id") == "concurrent-heavy" and msg.get("type") == "response":
+                        result_box["heavy"] = {"wall_ms": (time.time() - t0) * 1000.0}
+                        return
+            except Exception as exc:  # noqa: BLE001 - the heavy leg's failure is recorded, never swallowed
+                result_box["heavy_error"] = repr(exc)
 
         th = threading.Thread(target=fire_heavy)
         th.start()
@@ -257,17 +275,18 @@ def main():
         trace["concurrency"] = {
             "heavy_label": "get_context_tree",
             "heavy_wall_ms": round(result_box["heavy"]["wall_ms"], 2) if result_box.get("heavy") else None,
+            "heavy_error": result_box.get("heavy_error"),
             "light_wall_ms": round(light["wall_ms"], 2),
             "light_solo_wall_ms": round(solo["wall_ms"], 2),
             "light_inflation_ms": round(light["wall_ms"] - solo["wall_ms"], 2),
-            "sync": "the light request fires after the heavy request is on the wire",
+            "sync": "the light request fires after the heavy request is on the wire; a failed heavy leg records heavy_error instead of a silent null",
         }
         p2.close()
 
         # 4. The attach round trip (the Esc-handoff surface): a fresh
         #    client attaches and detaches.
         p3 = DaemonProbe(args.socket)
-        p3.read_line()
+        p3.handshake()
         attach = command_timing(p3, {"type": "attach", "activeSessionId": active, "clientId": "latency-trace"}, "attach-fresh", "fresh-client attach (the Esc-handoff surface)")
         trace["steps"].append(attach)
 
@@ -294,6 +313,9 @@ def main():
             "steps": chain,
             "total_wall_ms": round(chain_total, 2),
         }
+        # The step-4 attach registered this trace client: detach it, so
+        # the probe leaves no phantom attached client behind.
+        command_timing(p3, {"type": "detach", "activeSessionId": active, "clientId": "latency-trace"}, "detach-trace", "detach the trace client")
         p3.close()
 
     # 6. The terminal enhanced-key probe timing (run the trace from inside
