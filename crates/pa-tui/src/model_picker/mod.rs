@@ -955,7 +955,7 @@ mod tests {
             "thinkingLevelMap": map.map(|m| serde_json::from_str::<serde_json::Value>(m).unwrap()),
             "input": ["text"],
             "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 128000, "maxTokens": 4096,
+            "contextWindow": 128_000, "maxTokens": 4096,
         }))
         .expect("mock model deserializes")
     }

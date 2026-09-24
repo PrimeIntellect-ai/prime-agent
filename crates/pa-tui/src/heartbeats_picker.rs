@@ -1144,7 +1144,7 @@ mod tests {
                 "activeSessionId": "live-1",
                 "sessionId": "sess-1",
                 "prompt": format!("tick {id}"),
-                "schedule": {"kind": "interval", "expression": "every 10m", "intervalMs": 600000},
+                "schedule": {"kind": "interval", "expression": "every 10m", "intervalMs": 600_000},
                 "createdAt": "2026-01-01T00:00:00.000Z",
                 "nextRunAt": "2026-01-01T00:10:00.000Z",
                 "runCount": 2,

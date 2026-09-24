@@ -549,7 +549,7 @@ const MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
 const SPINNER_INTERVAL_MS: u128 = 80;
 /// Spec §10.2: the client reconnect window after an update restart
 /// (10 minutes).
-const RECONNECT_WINDOW: Duration = Duration::from_secs(10 * 60);
+const RECONNECT_WINDOW: Duration = Duration::from_mins(10);
 /// One reconnect attempt's connect budget.
 const RECONNECT_ATTEMPT_TIMEOUT_S: u64 = 5;
 /// One reconnect attempt's reattach budget: a queued attach can legitimately
@@ -561,9 +561,9 @@ const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(10);
 
 /// TS `DAEMON_RECONNECT_TIMEOUT_MS`: the bounded session-plane reconnect
 /// window after the direct worker link dies.
-const SESSION_RECONNECT_WINDOW: Duration = Duration::from_secs(60);
+const SESSION_RECONNECT_WINDOW: Duration = Duration::from_mins(1);
 /// TS reconnect backoff cap (`min(2000, 100 * 2 ** min(attempt, 5))`).
-const SESSION_RECONNECT_BACKOFF_MAX: Duration = Duration::from_millis(2_000);
+const SESSION_RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(2);
 /// One re-attach attempt's budget: the attach carries its own request
 /// timeouts; this bounds a wedged attempt so the loop reschedules instead
 /// of blocking the UI.
@@ -1845,7 +1845,7 @@ async fn check_tmux_keyboard_setup() -> Option<String> {
     }
     let query = |option: &'static str| async move {
         tokio::time::timeout(
-            Duration::from_millis(2_000),
+            Duration::from_secs(2),
             tokio::task::spawn_blocking(move || {
                 std::process::Command::new("tmux")
                     .args(["show", "-gv", option])

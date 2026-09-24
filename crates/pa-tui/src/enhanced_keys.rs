@@ -175,7 +175,7 @@ fn drain_bounded(out: &mut Stdout, max: Duration) {
 }
 
 /// TS `drainInput` defaults.
-const DRAIN_MAX: Duration = Duration::from_millis(1000);
+const DRAIN_MAX: Duration = Duration::from_secs(1);
 const DRAIN_IDLE: Duration = Duration::from_millis(50);
 /// The force-quit drain cap: the exit must be observed within 2s of the
 /// second Ctrl+C, 1.5s of which elapses before the watchdog fires.
