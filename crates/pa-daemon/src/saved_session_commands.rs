@@ -357,8 +357,11 @@ pub(crate) fn tombstone_saved_session_delete_captured(
     }
 }
 
-/// TS `tombstoneSavedSessionDelete`: the two phases in one call (the
-/// tests and the top-level early-out keep the combined shape).
+/// TS `tombstoneSavedSessionDelete`: the two phases in one call. The
+/// real delete handler keeps the phases SPLIT (the capture must ride
+/// the file being alive and the tombstone waits for the removal to
+/// succeed); only the tests use the combined shape.
+#[cfg(test)]
 pub(crate) fn tombstone_saved_session_delete(
     agent_dir: &Path,
     sessions_dir: &Path,

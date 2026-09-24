@@ -540,6 +540,7 @@ pub(crate) mod tests {
             depth,
             name: name.to_string(),
             deleted: None,
+            deleted_usage: None,
         }
     }
 
@@ -1054,6 +1055,7 @@ pub(crate) mod tests {
                     depth: 1,
                     name: "w9".to_string(),
                     deleted: None,
+                    deleted_usage: None,
                 },
             );
             roster.write_seeded(candidate.summary, candidate.seeded_cwd)

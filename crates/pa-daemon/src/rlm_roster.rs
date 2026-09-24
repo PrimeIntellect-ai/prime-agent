@@ -339,6 +339,7 @@ mod tests {
                 depth: 1,
                 name: "worker-c".to_string(),
                 deleted: None,
+                deleted_usage: None,
             },
             info,
             metadata: RlmChildMetadata::default(),
