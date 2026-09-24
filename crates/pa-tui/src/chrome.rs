@@ -467,8 +467,14 @@ pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
 fn truncate_spans_to_width(spans: &[crate::Span], width: usize) -> Vec<crate::Span> {
     let mut out: Vec<crate::Span> = Vec::new();
     let mut remaining = width;
-    for span in spans {
+    for (index, span) in spans.iter().enumerate() {
         if remaining == 0 {
+            // The frame filled on a span boundary: the later spans still
+            // exist, so the ellipsis must land (a silent drop would hide
+            // content the reader cannot know about).
+            if content_follows(spans, index) {
+                land_marker(&mut out, width);
+            }
             break;
         }
         let mut text = String::new();
@@ -482,16 +488,19 @@ fn truncate_spans_to_width(spans: &[crate::Span], width: usize) -> Vec<crate::Sp
             consumed += char_width;
         }
         if text.is_empty() {
+            // This span's first character cannot fit: nothing of it
+            // renders, and the ellipsis must still mark the cut.
+            if content_follows(spans, index) {
+                land_marker(&mut out, width);
+            }
             break;
         }
-        let mut truncated = false;
         if consumed < str_width(&span.content) {
-            // The span could not fit whole: the ellipsis replaces the first
-            // character that would not fit, and nothing after it renders.
-            // The ellipsis borrows its column from the span's last kept
-            // character — a span that fills the edge exactly gives one
-            // character back (and at a one-column remainder the ellipsis
-            // renders alone), so the row always ends INSIDE the width.
+            // The span could not fit whole: the ellipsis borrows its
+            // column from the span's last kept character — a span that
+            // fills the edge exactly gives one character back (and at a
+            // one-column remainder the ellipsis renders alone), so the
+            // row always ends INSIDE the width.
             let ellipsis = crate::width::char_width('\u{2026}');
             while consumed + ellipsis > remaining {
                 match text.pop() {
@@ -501,17 +510,55 @@ fn truncate_spans_to_width(spans: &[crate::Span], width: usize) -> Vec<crate::Sp
             }
             text.push('\u{2026}');
             consumed += ellipsis;
-            truncated = true;
+            let mut piece = span.clone();
+            piece.content = text;
+            out.push(piece);
+            remaining -= consumed;
+            break;
         }
         let mut piece = span.clone();
         piece.content = text;
         out.push(piece);
         remaining -= consumed;
-        if truncated {
-            break;
-        }
     }
     out
+}
+
+/// Whether any span from `index` (inclusive) still carries content — a
+/// cut there must leave a marker.
+fn content_follows(spans: &[crate::Span], index: usize) -> bool {
+    spans[index..].iter().any(|span| !span.content.is_empty())
+}
+
+/// Land the truncation marker on a row that filled the frame on a span
+/// boundary: the ellipsis borrows a column from the last kept character
+/// (however wide it was), and a row too narrow for any content keeps
+/// the marker alone when it fits at all.
+fn land_marker(out: &mut Vec<crate::Span>, width: usize) {
+    let ellipsis = crate::width::char_width('\u{2026}');
+    let row_width = |out: &Vec<crate::Span>| {
+        out.iter()
+            .map(|piece| crate::width::str_width(&piece.content))
+            .sum::<usize>()
+    };
+    while row_width(out) + ellipsis > width {
+        match out.last_mut() {
+            Some(piece) => {
+                if piece.content.pop().is_none() {
+                    out.pop();
+                }
+            }
+            None => break,
+        }
+    }
+    match out.last_mut() {
+        Some(piece) => piece.content.push('\u{2026}'),
+        None => {
+            if ellipsis <= width {
+                out.push(crate::Span::raw("\u{2026}"));
+            }
+        }
+    }
 }
 
 /// The framed activity dock: a muted separator rule above one row of

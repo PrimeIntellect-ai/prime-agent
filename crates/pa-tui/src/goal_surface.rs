@@ -602,8 +602,7 @@ mod tests {
             for line in &frame {
                 assert!(
                     crate::width::spans_width(line) <= width,
-                    "a {width}-wide row fits: {:?}",
-                    line
+                    "a {width}-wide row fits: {line:?}"
                 );
             }
         }
