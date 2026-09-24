@@ -68,7 +68,7 @@ pub fn session_usage_summary_from(usage: &Usage) -> Option<SessionUsageSummary> 
 /// `set`/`contains` constant-time over that insertion order (a plain
 /// `HashMap` would reorder the sums; a bare vec scan is the O(n²) fold
 /// long sessions would stall on).
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct AssistantUsageById {
     entries: Vec<(String, Usage)>,
     index: std::collections::HashMap<String, usize>,
@@ -162,7 +162,7 @@ pub struct SessionUsageTotals {
 /// the fold's authority — an attribution folds only when its target is
 /// already in the map (the assistant entry precedes its children's settle
 /// in the file).
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct UsageScan {
     assistant_usage_by_id: AssistantUsageById,
     attributed_child_usage: Usage,

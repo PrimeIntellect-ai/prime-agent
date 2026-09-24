@@ -325,3 +325,89 @@ fn captured_fixture_cold_and_warm_timings() {
         legacy[3], cold[3], warm[3]
     );
 }
+
+#[test]
+fn a_torn_trailing_line_folds_once_completed() {
+    let dir = test_dir();
+    let path = dir.join("torn.jsonl");
+    append_rows(
+        &path,
+        &[json!({"type":"session","id":"t","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"})],
+    );
+    // A torn trailing message: no newline, so the scan leaves it unconsumed.
+    let torn = r#"{"type":"message","id":"torn","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"torn text","timestamp":1790110000000}}"#;
+    {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(torn.as_bytes()).unwrap();
+    }
+    let partial = read_session_info(&path).unwrap();
+    assert_eq!(partial.message_count, 0, "a torn line must not fold");
+    // The completed line folds exactly once, and the row matches the oracle.
+    {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+    assert_fold_matches(&path);
+    let completed = read_session_info(&path).unwrap();
+    assert_eq!(completed.message_count, 1);
+    assert!(completed.all_messages_text.contains("torn text"));
+}
+
+#[test]
+fn a_same_size_rewrite_rescans_from_the_top() {
+    let dir = test_dir();
+    let path = dir.join("rewrite.jsonl");
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"r","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+            json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}),
+        ],
+    );
+    let first = read_session_info(&path).unwrap();
+    assert_eq!(first.name.as_deref(), Some("before"));
+    // A same-size rewrite with different early content: the resume must not
+    // answer the stale row (TS resumes only strictly-grown files).
+    let line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"after!"}).to_string();
+    let before_line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}).to_string();
+    assert_eq!(line.len(), before_line.len());
+    let content = fs::read_to_string(&path).unwrap();
+    let rewritten = content.replacen(&before_line, &line, 1);
+    assert_eq!(rewritten.len(), content.len());
+    // Force the mtime tick so the generation is not byte-equal.
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    let _ = fs::write(&path, rewritten.as_bytes());
+    let file = fs::File::open(&path).unwrap();
+    let _ = file.set_modified(past);
+    drop(file);
+    let rewritten_info = read_session_info(&path).unwrap();
+    assert_eq!(
+        rewritten_info.name.as_deref(),
+        Some("after!"),
+        "a same-size rewrite must rescan"
+    );
+    assert_fold_matches(&path);
+}
+
+#[test]
+fn multi_round_appends_match_the_legacy_fold() {
+    let dir = test_dir();
+    let path = dir.join("rounds.jsonl");
+    append_rows(
+        &path,
+        &[json!({"type":"session","id":"q","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"})],
+    );
+    for round in 0..5 {
+        for index in 0..50 {
+            append_rows(
+                &path,
+                &[
+                    json!({"type":"message","id":format!("r{round}m{index}"),"timestamp":"2026-09-23T00:00:00.000Z","message":{"role": if index % 2 == 0 { "user" } else { "assistant" },"content":format!("round {round} message {index}"),"timestamp":1790110000000u64 + round as u64 * 1000 + index as u64}}),
+                ],
+            );
+        }
+        assert_fold_matches(&path);
+    }
+    let final_info = read_session_info(&path).unwrap();
+    assert_eq!(final_info.message_count, 250);
+}
