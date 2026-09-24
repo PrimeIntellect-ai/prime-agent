@@ -322,6 +322,7 @@ mod tests {
         let parked_calls_for_seam = Arc::clone(&parked_calls);
         let mut seam = move |message: AssistantMessage, abort: &str| {
             let parked_calls = Arc::clone(&parked_calls_for_seam);
+            let abort = abort.to_string();
             Box::pin(async move {
                 parked_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 // The seam sees the failed message and the give-up
@@ -429,7 +430,7 @@ mod tests {
             Box::pin(async move {
                 seam_ran.store(true, std::sync::atomic::Ordering::SeqCst);
                 None
-            })
+            }) as crate::session_engine::provider_park::ParkFuture
         };
         let _ = run_turn_with_auto_retry(
             &fast_policy(),

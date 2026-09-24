@@ -847,7 +847,7 @@ impl AgentSessionEngine {
         let job_id = match persisted.job_id {
             Some(job_id) if self.quota_wake_job_active(&job_id) => Some(job_id),
             Some(job_id) if self.quota_wake_job_exists(&job_id) => None,
-            Some(_cancelled) | None => self.create_quota_resume_job(persisted.resume_at_ms).await,
+            Some(_) | None => self.create_quota_resume_job(persisted.resume_at_ms).await,
         };
         *self
             .quota_park
@@ -3431,7 +3431,8 @@ impl AgentSessionEngine {
                 let abort = abort.to_string();
                 let quota_parked_flag = std::sync::Arc::clone(&quota_parked_flag);
                 Box::pin(async move {
-                    let Some(engine) = engine_weak.upgrade() else {
+                    let Some(engine) = engine_weak.as_ref().and_then(std::sync::Weak::upgrade)
+                    else {
                         return None;
                     };
                     let outcome = engine.park_for_quota_reset(&message, &abort).await;
@@ -4206,7 +4207,7 @@ impl AgentSessionEngine {
             .iter()
             .any(|job| job.id == job_id && job.status == pa_core::cron::JobStatus::Active);
         if matches_job {
-            let _ = wiring.store.cancel(job_id);
+            let _ = wiring.store.cancel(job_id, crate::util::now_ms());
         }
     }
 
@@ -4320,14 +4321,14 @@ impl AgentSessionEngine {
         let state = QuotaParkState {
             park_count,
             resume_at_ms,
-            job_id: job_id.clone(),
+            job_id: Some(job_id.clone()),
             wake_retries: existing.as_ref().map_or(0, |park| park.wake_retries),
         };
         *self
             .quota_park
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
-        self.append_quota_park_entry(resume_at_ms, park_count, job_id.as_deref(), message)
+        self.append_quota_park_entry(resume_at_ms, park_count, Some(job_id.as_str()), message)
             .await;
         Some(ProviderParkOutcome {
             status_message: quota_parked_final_error(abort, resume_at_ms, &error),
@@ -4388,14 +4389,14 @@ impl AgentSessionEngine {
         let state = QuotaParkState {
             park_count: park.park_count,
             resume_at_ms,
-            job_id: job_id.clone(),
+            job_id: Some(job_id.clone()),
             wake_retries: retries,
         };
         *self
             .quota_park
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
-        self.append_quota_resume_rearm_entry(resume_at_ms, park.park_count, job_id.as_deref())
+        self.append_quota_resume_rearm_entry(resume_at_ms, park.park_count, Some(job_id.as_str()))
             .await;
         let resume_at_iso = pa_core::session::manager::format_iso(resume_at_ms as i64);
         Some(pa_core::session_engine::provider_park::ProviderParkOutcome {
