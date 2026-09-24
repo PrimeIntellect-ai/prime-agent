@@ -51,6 +51,16 @@ impl SearchInput {
         self.cursor = self.cursor.min(self.value.chars().count());
     }
 
+    /// Prefill a fresh filter from a typed partial (`/model <partial>` +
+    /// Tab): the value lands whole and the caret sits at its end, so the
+    /// next keystroke extends the filter and Backspace deletes the tail.
+    /// Unlike `set_value` (TS `setValue`), which only clamps a caret
+    /// already placed inside the value.
+    pub(crate) fn prefill(&mut self, value: &str) {
+        self.value = value.to_string();
+        self.cursor = self.value.chars().count();
+    }
+
     fn chars(&self) -> Vec<char> {
         self.value.chars().collect()
     }
@@ -526,6 +536,23 @@ mod tests {
         input.set_value("mock");
         assert_eq!(input.value(), "mock");
         assert_eq!(input.cursor(), 0);
+    }
+
+    /// A prefill from a typed partial (`/model gp` + Tab) continues where
+    /// the user stopped: the caret sits at the end, typing extends the
+    /// filter, and Backspace deletes the tail — unlike `set_value`, which
+    /// leaves the caret at its old column (0 on a fresh input).
+    #[test]
+    fn prefill_places_the_caret_at_the_end() {
+        let mut input = SearchInput::new();
+        input.prefill("gp");
+        assert_eq!(input.value(), "gp");
+        assert_eq!(input.cursor(), 2);
+        input.handle_key("t", &kb());
+        assert_eq!(input.value(), "gpt");
+        assert_eq!(input.cursor(), 3);
+        input.handle_key("backspace", &kb());
+        assert_eq!(input.value(), "gp");
     }
 
     #[test]

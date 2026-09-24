@@ -390,6 +390,18 @@ collected.
 |---|---|---|
 | `kind` | string | `panel` / `subagents` / `heartbeats` / `bash` |
 
+### `tui menu opened`
+
+A menu surface opened (adoption of the unified menu panel): `source` is
+`command` (the bare slash submission — `/model`, `/mcp`) or `tab` (a typed
+partial + Tab in the command's argument context, opening the menu filtered
+to the match). Never carries prompt or search content.
+
+| property | type | notes |
+|---|---|---|
+| `menu` | string | `model` / `mcp` |
+| `source` | string | `command` / `tab` |
+
 ### `tui prompt stash`
 
 A prompt-stash transition (adoption of the session-switch draft stash, TS
