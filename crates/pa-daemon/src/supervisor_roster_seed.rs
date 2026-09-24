@@ -140,13 +140,10 @@ impl Supervisor {
     /// this port's workers push only their own summary, so the daemon
     /// walks the family here instead - registration answers on the
     /// client's open path, and the seed never blocks it.
-    pub(crate) fn spawn_roster_registration_seed(
-        self: &Arc<Self>,
-        root: &Path,
-    ) -> tokio::task::JoinHandle<()> {
+    pub(crate) fn spawn_roster_registration_seed(self: &Arc<Self>, root: &Path) {
         let supervisor = Arc::clone(self);
         let root = root.to_path_buf();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let seeded = supervisor.seed_roster_family_edges(&root).await;
             if !seeded.is_empty() {
                 // TS awaits its family reseed's hydration reads
@@ -155,7 +152,12 @@ impl Supervisor {
                 // work bounded to its own background budget.
                 let _ = supervisor.spawn_seeded_hydration(seeded).await;
             }
-        })
+        });
+        // A subscribe drains and awaits the in-flight seeds before its
+        // snapshot: a push must never overtake the snapshot answer.
+        if let Ok(mut pending) = self.pending_registration_seeds.lock() {
+            pending.push(handle);
+        }
     }
 
     /// The default ledger's live edges and their canonical child->parent
@@ -1132,10 +1134,14 @@ pub(crate) mod tests {
         );
         let mut events = supervisor.events.subscribe();
 
-        supervisor
-            .spawn_roster_registration_seed(&root_file)
-            .await
-            .expect("registration seed task");
+        supervisor.spawn_roster_registration_seed(&root_file);
+        // The subscribe drain: awaiting the in-flight seed tasks exactly
+        // like handle_roster_subscribe does, so the pushes have landed
+        // before the assertions read them.
+        let pending = std::mem::take(&mut *supervisor.pending_registration_seeds.lock().unwrap());
+        for handle in pending {
+            handle.await.expect("registration seed task");
+        }
         let pushes = drain_roster_pushes(&mut events);
         assert_eq!(
             pushes.len(),

@@ -144,6 +144,12 @@ pub struct Supervisor {
     /// The supervisor's agent roster (classified entries; the roster arms
     /// live in `supervisor_roster.rs`).
     pub(crate) roster: std::sync::Mutex<crate::agent_roster::AgentRoster>,
+    /// In-flight registration-seed tasks (each `worker_register`'s
+    /// background family walk). A `roster_subscribe` drains and awaits
+    /// them before building its snapshot: a seeded row's push must
+    /// never overtake the snapshot answer (a client that applies the
+    /// push first and then the snapshot would lose the rows).
+    pub(crate) pending_registration_seeds: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// In-flight saved-session renames (TS `pendingSessionNames`): one
     /// reservation per `[depth, parent, name]` scope, so a concurrent
     /// rename of the same name fails the second caller.
@@ -259,6 +265,7 @@ impl Supervisor {
             registry: SessionRegistry::new(),
             events,
             roster: std::sync::Mutex::new(crate::agent_roster::AgentRoster::new()),
+            pending_registration_seeds: std::sync::Mutex::new(Vec::new()),
             pending_session_names: std::sync::Mutex::new(std::collections::HashSet::new()),
             shutting_down: AtomicBool::new(false),
             shutdown_notify: tokio::sync::Notify::new(),
@@ -2367,7 +2374,7 @@ impl Supervisor {
             }
             DaemonCommand::RosterSubscribe { .. } => {
                 roster_subscribed.store(true, std::sync::atomic::Ordering::SeqCst);
-                let response = self.handle_roster_subscribe(&command_id, &type_name);
+                let response = self.handle_roster_subscribe(&command_id, &type_name).await;
                 (vec![response_line(&response)], false)
             }
             DaemonCommand::RosterUnsubscribe { .. } => {

@@ -40,11 +40,19 @@ impl Supervisor {
     /// (`supervisor_roster_seed.rs`) publish `roster_update` for rows
     /// that land between subscribes, so the answer itself never reads
     /// the ledger or a transcript.
-    pub(crate) fn handle_roster_subscribe(
-        &self,
+    pub(crate) async fn handle_roster_subscribe(
+        self: &Arc<Self>,
         command_id: &str,
         type_name: &str,
     ) -> DaemonResponse {
+        // A registration seed's pushes must never overtake this answer
+        // (a client that applies the push first and then the snapshot
+        // would lose the seeded rows): drain the in-flight seed tasks
+        // and await them to completion BEFORE the snapshot is read.
+        let pending = std::mem::take(&mut *self.pending_registration_seeds.lock().unwrap());
+        for handle in pending {
+            let _ = handle.await;
+        }
         let roster = self.roster.lock().unwrap().entries();
         response_success(
             Some(command_id),
@@ -199,8 +207,6 @@ impl Supervisor {
 
     /// Refresh one resident worker's entry from its live `get_state`
     /// (registration, adoption, and create flows).
-    /// Refresh one resident worker's entry from its live `get_state`
-    /// (registration, adoption, and create flows).
     pub(crate) async fn refresh_roster_entry(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
         let response = self
             .route_command(resident, "get_state", json!({}), ROUTE_TIMEOUT_MS)
@@ -232,12 +238,23 @@ impl Supervisor {
         ephemeral: bool,
     ) {
         let owned: Vec<AgentRosterEntry> = {
-            let roster = self.roster.lock().unwrap();
-            roster
+            let mut roster = self.roster.lock().unwrap();
+            let owned: Vec<AgentRosterEntry> = roster
                 .entries_for_worker(worker_id)
                 .into_iter()
                 .cloned()
-                .collect()
+                .collect();
+            // The sequence slot dies with the rows' snapshot, BEFORE the
+            // ledger/roots awaits: a stop that awaits first races a
+            // re-registration of the same session (the replacement flips
+            // the slot to its own instance and starts pushing) and would
+            // then delete the FRESH slot here, after which the gate
+            // accepts a predecessor frame as a fresh generation and
+            // drops the replacement's live deltas. Clearing under this
+            // first lock also bounds the slot map on every stop, even
+            // when the worker owns no roster rows.
+            roster.forget_worker_sequences(worker_id);
+            owned
         };
         if owned.is_empty() {
             return;
@@ -254,7 +271,23 @@ impl Supervisor {
         let mut removed = Vec::new();
         {
             let mut roster = self.roster.lock().unwrap();
-            for entry in owned {
+            // The ledger/roots awaits opened a late-write window: an
+            // authenticated `worker_roster_delta` that passed its token
+            // check before the registry removal can still have written
+            // a row the snapshot above never saw. Re-collect the
+            // worker's rows under this write lock and settle the union -
+            // every row the stopped worker wrote settles before the
+            // stop completes.
+            let mut settle: Vec<AgentRosterEntry> = owned;
+            for late in roster.entries_for_worker(worker_id).into_iter().cloned() {
+                if !settle
+                    .iter()
+                    .any(|entry: &AgentRosterEntry| entry.agent_id == late.agent_id)
+                {
+                    settle.push(late);
+                }
+            }
+            for entry in settle {
                 // The snapshot predates the ledger/roots awaits: a
                 // resumed worker can replace a row meanwhile, and only
                 // rows this worker still owns settle here.
@@ -295,9 +328,6 @@ impl Supervisor {
                     removed.push(entry.agent_id);
                 }
             }
-            // The sequence slot dies with the rows: a replacement process
-            // for the same worker restarts its counter from zero.
-            roster.forget_worker_sequences(worker_id);
         }
         self.push_roster_update(changed, removed);
     }
@@ -410,7 +440,9 @@ mod tests {
         supervisor.write_roster_summary(&root_summary, Some("w-root"));
         let _ = drain_roster_pushes(&mut events);
 
-        let first = supervisor.handle_roster_subscribe("s1", "roster_subscribe");
+        let first = supervisor
+            .handle_roster_subscribe("s1", "roster_subscribe")
+            .await;
         assert!(first.success);
         let roster = first.data.expect("roster snapshot")["roster"].clone();
         assert_eq!(
@@ -419,7 +451,9 @@ mod tests {
             "only the in-memory row answers: {roster}"
         );
         // A pure snapshot is stable: subscribing again answers the same.
-        let second = supervisor.handle_roster_subscribe("s2", "roster_subscribe");
+        let second = supervisor
+            .handle_roster_subscribe("s2", "roster_subscribe")
+            .await;
         assert_eq!(second.data.expect("roster snapshot")["roster"], roster);
         assert!(
             drain_roster_pushes(&mut events).is_empty(),
