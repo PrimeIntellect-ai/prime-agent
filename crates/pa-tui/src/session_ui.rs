@@ -3641,7 +3641,7 @@ impl SessionUi {
                 let task = tokio::spawn(async move {
                     let report = handle
                         .0
-                        .upload_all(session_dir.as_deref(), notes.clone(), run_cancel)
+                        .upload_all(session_dir.as_deref(), notes.clone(), run_cancel.clone())
                         .await;
                     let _ = notes.send(crate::traces::TraceUploadAllNote::Done {
                         result: report,

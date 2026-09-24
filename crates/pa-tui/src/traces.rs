@@ -648,7 +648,7 @@ mod tests {
         let oversize = TracePreviewInfo {
             content_preview: String::new(),
             truncated: true,
-            ..info
+            ..info.clone()
         };
         let oversize_text = preview_block(&oversize)
             .iter()

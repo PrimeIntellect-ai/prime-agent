@@ -372,7 +372,6 @@ mod tests {
             let (_, status, body) = queue
                 .remove(position)
                 .expect("the scripted response was queued");
-            self.served.lock().unwrap().push(url.to_string());
             Some((status, body))
         }
     }
@@ -384,22 +383,27 @@ mod tests {
             _api_key: &str,
             _timeout_ms: u64,
         ) -> Pin<Box<dyn Future<Output = Result<PrimeHttpResponse, String>> + Send>> {
+            // The trait's boxed answer is 'static, so the whole read
+            // resolves before the future arms.
             let url = url.to_string();
-            Box::pin(async move {
-                if url.contains("/api/v1/auth_challenge/status") {
-                    if let Some(cipher) = self.dynamic_status.lock().unwrap().take() {
-                        self.served.lock().unwrap().push(url);
-                        return Ok(PrimeHttpResponse {
-                            status: 200,
-                            body: format!(r#"{{"result":"{cipher}"}}"#),
-                        });
-                    }
+            self.served.lock().unwrap().push(url.clone());
+            let dynamic = self.dynamic_status.lock().unwrap().take();
+            let answer = match dynamic {
+                // The status poll answers with the challenge's encrypted
+                // fixture key once the generate request captured the
+                // flow's public key.
+                Some(cipher) if url.contains("/api/v1/auth_challenge/status") => {
+                    Ok(PrimeHttpResponse {
+                        status: 200,
+                        body: format!(r#"{{"result":"{cipher}"}}"#),
+                    })
                 }
-                match self.pop(&url) {
+                _ => match self.pop(&url) {
                     Some((status, body)) => Ok(PrimeHttpResponse { status, body }),
                     None => panic!("no scripted response for {url}"),
-                }
-            })
+                },
+            };
+            Box::pin(async move { answer })
         }
 
         fn post_json<'a>(
@@ -411,6 +415,7 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Result<PrimeHttpResponse, String>> + Send + 'a>> {
             let url = url.to_string();
             let body = body.to_string();
+            self.served.lock().unwrap().push(url.clone());
             Box::pin(async move {
                 if url.ends_with("/api/v1/auth_challenge/generate") {
                     // Capture the flow's public key so the status poll can
@@ -433,7 +438,6 @@ mod tests {
                         .expect("encrypt");
                     let encoded = base64::engine::general_purpose::STANDARD.encode(cipher);
                     *self.dynamic_status.lock().unwrap() = Some(encoded);
-                    self.served.lock().unwrap().push(url);
                     return Ok(PrimeHttpResponse {
                         status: 200,
                         body: r#"{"challenge":"ch-1","status_auth_token":"tok"}"#.to_string(),
@@ -500,7 +504,7 @@ mod tests {
         let missing = ScriptedHttp::new(vec![(
             "https://api.primeintellect.ai/api/v1/user/whoami",
             200,
-            r#"{"data":{"scope":{}}}"#.to_string(),
+            r#"{"data":{"scope":{}}}"#,
         )]);
         match check_prime_agent_traces_access(
             &missing,
@@ -669,7 +673,7 @@ mod tests {
         let http = ScriptedHttp::new(vec![(
             "https://api.primeintellect.ai/api/v1/auth_challenge/status?challenge=ch-1",
             404,
-            String::new(),
+            "",
         )]);
         let callbacks = PrimeAgentTracesCallbacks {
             on_auth: &|_| {},

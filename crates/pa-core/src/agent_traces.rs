@@ -163,32 +163,33 @@ pub enum TraceUploadResult {
     },
 }
 
+/// TS `AgentTracePreviewResult`'s ready payload (boxed on the enum: the
+/// ready arm dwarfs the fallback states).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TracePreviewData {
+    pub session_file: PathBuf,
+    pub session_id: String,
+    pub trace_id: String,
+    pub parent_session_id: Option<String>,
+    pub cwd: String,
+    pub size: u64,
+    pub max_bytes: u64,
+    pub uploadable: bool,
+    pub endpoint: String,
+    pub git_repo: Option<String>,
+    pub git_commit: Option<String>,
+    pub content_preview: String,
+    pub truncated: bool,
+}
+
 /// TS `AgentTracePreviewResult`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TracePreviewResult {
-    Ready {
-        session_file: PathBuf,
-        session_id: String,
-        trace_id: String,
-        parent_session_id: Option<String>,
-        cwd: String,
-        size: u64,
-        max_bytes: u64,
-        uploadable: bool,
-        endpoint: String,
-        git_repo: Option<String>,
-        git_commit: Option<String>,
-        content_preview: String,
-        truncated: bool,
-    },
+    Ready(Box<TracePreviewData>),
     NoSessionFile,
     EmptySession,
-    InvalidSession {
-        message: String,
-    },
-    Failed {
-        message: String,
-    },
+    InvalidSession { message: String },
+    Failed { message: String },
 }
 
 /// TS `AgentTraceUploadAllProgress`.
@@ -565,35 +566,6 @@ fn read_agent_trace_outbox_entry(
 /// TS `signatureEquals`.
 fn signature_equals(recorded: Option<TraceUploadSignature>, current: TraceUploadSignature) -> bool {
     recorded.is_some_and(|recorded| recorded == current)
-}
-
-/// TS `markAgentTraceOutboxPendingSync` (best-effort, synchronous: the
-/// upload intent must be on disk the moment a persist returns). An entry
-/// that already exists keeps its cursor; a broken agent dir never
-/// surfaces.
-fn mark_agent_trace_outbox_pending_sync(agent_dir: &Path, session_file: &Path) -> bool {
-    let entry_path = agent_trace_outbox_entry_path(agent_dir, session_file);
-    if entry_path.exists() {
-        return true;
-    }
-    let write = || -> std::io::Result<()> {
-        std::fs::create_dir_all(agent_trace_outbox_dir(agent_dir))?;
-        let temp = entry_path.with_extension(format!(
-            "{}.{}.tmp",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::write(
-            &temp,
-            format!(
-                "{}\n",
-                json!({"sessionFile": session_file.to_string_lossy()})
-            ),
-        )?;
-        std::fs::rename(temp, entry_path)?;
-        Ok(())
-    };
-    write().is_ok()
 }
 
 /// TS `recordAgentTraceOutboxUpload`: the durable cursor write.
@@ -1414,7 +1386,7 @@ pub async fn preview_trace_file(
                 .max(256),
         )
     };
-    TracePreviewResult::Ready {
+    TracePreviewResult::Ready(Box::new(TracePreviewData {
         session_file: session_file.to_path_buf(),
         session_id: header.id.clone(),
         trace_id,
@@ -1432,7 +1404,7 @@ pub async fn preview_trace_file(
         git_commit,
         content_preview,
         truncated,
-    }
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1880,14 +1852,14 @@ mod tests {
         let fixture = Fixture::new();
         let session = fixture.write_session("s.jsonl", "sid-1");
         match preview_trace_file(Some(&session), Some("https://api.example/"), None).await {
-            TracePreviewResult::Ready {
-                session_id,
-                trace_id,
-                endpoint,
-                uploadable,
-                truncated,
-                ..
-            } => {
+            TracePreviewResult::Ready(data) => {
+                let (session_id, trace_id, endpoint, uploadable, truncated) = (
+                    data.session_id,
+                    data.trace_id,
+                    data.endpoint,
+                    data.uploadable,
+                    data.truncated,
+                );
                 assert_eq!(session_id, "sid-1");
                 assert_eq!(trace_id, "sid-1");
                 assert_eq!(
@@ -2101,26 +2073,5 @@ mod tests {
             agent_trace_outbox_entry_path(&fixture.agent_dir, &fixture.session_dir.join("t.jsonl")),
             path
         );
-    }
-
-    #[test]
-    fn the_pending_marker_keeps_an_existing_cursor() {
-        let fixture = Fixture::new();
-        let session = fixture.session_dir.join("s.jsonl");
-        assert!(mark_agent_trace_outbox_pending_sync(
-            &fixture.agent_dir,
-            &session
-        ));
-        // A second mark does not overwrite the entry (the cursor survives).
-        assert!(mark_agent_trace_outbox_pending_sync(
-            &fixture.agent_dir,
-            &session
-        ));
-        let raw =
-            std::fs::read_to_string(agent_trace_outbox_entry_path(&fixture.agent_dir, &session))
-                .expect("entry");
-        let (recorded, uploaded) = parse_outbox_entry(&raw).expect("entry parse");
-        assert_eq!(recorded, session.to_string_lossy());
-        assert!(uploaded.is_none());
     }
 }

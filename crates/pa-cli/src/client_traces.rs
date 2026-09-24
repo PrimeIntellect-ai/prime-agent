@@ -11,7 +11,7 @@ use pa_core::agent_traces::{
     agent_traces_log_path, preview_trace_file, trace_credential, upload_all_traces,
     upload_trace_file, TracePreviewResult, TraceUploadAllOptions, TraceUploadAllProgress,
     TraceUploadCancel as EngineCancel, TraceUploadOptions, TraceUploadResult,
-    DEFAULT_REQUEST_TIMEOUT_MS, MAX_TRACE_BYTES,
+    DEFAULT_REQUEST_TIMEOUT_MS,
 };
 use pa_tui::traces::{
     TraceLoginOutcome, TracePreviewInfo, TracePreviewOutcome, TraceUploadAllNote,
@@ -102,32 +102,19 @@ fn map_upload_result(result: TraceUploadResult) -> TraceUploadOutcome {
 /// The engine preview mapped to the TUI outcome.
 fn map_preview_result(result: TracePreviewResult) -> TracePreviewOutcome {
     match result {
-        TracePreviewResult::Ready {
-            session_file,
-            session_id,
-            trace_id,
-            parent_session_id,
-            size,
-            uploadable,
-            endpoint,
-            git_repo,
-            git_commit,
-            content_preview,
-            truncated,
-            ..
-        } => TracePreviewOutcome::Ready(Box::new(TracePreviewInfo {
-            session_file: session_file.to_string_lossy(),
-            size,
-            max_bytes: MAX_TRACE_BYTES,
-            uploadable,
-            endpoint,
-            session_id,
-            trace_id,
-            parent_session_id,
-            git_repo,
-            git_commit,
-            content_preview,
-            truncated,
+        TracePreviewResult::Ready(data) => TracePreviewOutcome::Ready(Box::new(TracePreviewInfo {
+            session_file: data.session_file.to_string_lossy(),
+            size: data.size,
+            max_bytes: data.max_bytes,
+            uploadable: data.uploadable,
+            endpoint: data.endpoint,
+            session_id: data.session_id,
+            trace_id: data.trace_id,
+            parent_session_id: data.parent_session_id,
+            git_repo: data.git_repo,
+            git_commit: data.git_commit,
+            content_preview: data.content_preview,
+            truncated: data.truncated,
         })),
         TracePreviewResult::NoSessionFile => TracePreviewOutcome::NoSessionFile,
         TracePreviewResult::EmptySession => TracePreviewOutcome::EmptySession,
