@@ -8510,7 +8510,10 @@ async fn describe_session_open_failure(
     .and_then(|result| result.ok())
     .map(|data| crate::session_open_error::roster_rows(&data).to_vec())
     .unwrap_or_default();
-    let holder = crate::session_open_error::holder_from_roster(&rows, &path);
+    // The path-keyed lookup first; the refusal's own holder id is the
+    // fallback (a relative resume path can miss the canonical row).
+    let holder = crate::session_open_error::holder_from_roster(&rows, &path)
+        .or_else(|| crate::session_open_error::holder_by_id(&rows, &owner));
     // The daemon's ORIGINAL refusal line stays verbatim (never
     // reconstructed from a possibly-relative caller path) and the holder
     // guidance rides the same line — the agents-view handoff renders the

@@ -86,6 +86,37 @@ fn model_label(model: &Value) -> Option<String> {
     }
 }
 
+/// The roster row for a known holder id (the daemon refusal already
+/// names it): a live row whose active session id matches. The
+/// path-keyed lookup alone can miss when the caller's resume path does
+/// not canonicalize against the process cwd (a relative path).
+pub fn holder_by_id(rows: &[Value], holder_id: &str) -> Option<SessionHolder> {
+    rows.iter().find_map(|row| {
+        let id = row
+            .get("activeSessionId")
+            .or_else(|| row.get("id"))
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())?;
+        if id != holder_id {
+            return None;
+        }
+        Some(SessionHolder {
+            id: single_line(id),
+            name: row
+                .get("sessionName")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+                .map(single_line),
+            cwd: row.get("cwd").and_then(Value::as_str).map(single_line),
+            model: row
+                .get("model")
+                .and_then(model_label)
+                .as_deref()
+                .map(single_line),
+        })
+    })
+}
+
 /// The roster rows of a daemon `list` response payload.
 pub fn roster_rows(data: &Value) -> &[Value] {
     data.get("sessions")
@@ -258,6 +289,23 @@ mod tests {
         let data = json!({"sessions": [row("/s/a.jsonl", "a", None, None)], "other": 1});
         assert_eq!(roster_rows(&data).len(), 1);
         assert_eq!(roster_rows(&json!({})).len(), 0);
+    }
+
+    /// The id-keyed fallback finds the holder when the caller's path
+    /// cannot canonicalize (a relative resume path): the refusal's own
+    /// holder id matches the live row.
+    #[test]
+    fn the_id_fallback_finds_the_holder() {
+        let rows = vec![row(
+            "/abs/other.jsonl",
+            "holder-9",
+            Some("lane work"),
+            Some("/w"),
+        )];
+        let holder = holder_by_id(&rows, "holder-9").expect("the id row answers");
+        assert_eq!(holder.name.as_deref(), Some("lane work"));
+        assert_eq!(holder.cwd.as_deref(), Some("/w"));
+        assert!(holder_by_id(&rows, "someone-else").is_none());
     }
 
     /// The roster's `model` rides as an object (`{id, provider}`): the
