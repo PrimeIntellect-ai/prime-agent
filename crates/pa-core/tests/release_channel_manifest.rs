@@ -319,11 +319,18 @@ fn the_rolling_nightly_refresh_is_a_serialized_job() {
     // The newest-wins guard: re-runs of an older tag must never clobber a
     // newer rolling beta.json; gh release download's destination flag is
     // --dir (Bugbot: --output-dir was discarded and never wrote the guard
-    // file).
+    // file). The guard FAILS CLOSED: a release carrying an unreadable
+    // beta.json is never clobbered (Bugbot: a discarded download failure
+    // fell through to --clobber), while a release with NO beta.json asset
+    // (a partial earlier refresh) has nothing to protect - the clobber
+    // heals it.
     assert!(run.contains("sort -V"), "{run}");
     assert!(run.contains("skipping the refresh"), "{run}");
     assert!(run.contains(r#"--dir "$guard""#), "{run}");
     assert!(!run.contains("--output-dir"), "{run}");
+    assert!(run.contains("--json assets"), "{run}");
+    assert!(run.contains("refusing to clobber"), "{run}");
+    assert!(run.contains("attempt $attempt failed; retrying"), "{run}");
     // The promote job hands the refresh its payload as an artifact.
     let promote = workflow
         .jobs

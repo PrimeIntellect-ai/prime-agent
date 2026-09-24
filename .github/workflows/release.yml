@@ -343,10 +343,30 @@ jobs:
         run: |
           set -euo pipefail
           if gh release view nightly >/dev/null 2>&1; then
-            guard="$(mktemp -d)"
-            if gh release download nightly --pattern beta.json \
-                 --dir "$guard" >/dev/null 2>&1 \
-               && [ -s "$guard/beta.json" ]; then
+            # The newest-wins guard protects the CURRENT beta.json, and it
+            # fails CLOSED: a release that carries a beta.json we cannot read
+            # is never clobbered (Bugbot: a discarded download failure fell
+            # through to --clobber, so a re-run of an older tag could replace
+            # a newer nightly). A release with NO beta.json asset (a partial
+            # earlier refresh) has nothing to protect - the clobber heals it.
+            if gh release view nightly --json assets --jq '.[].name' \
+                 2>/dev/null | grep -qx "beta.json"; then
+              guard="$(mktemp -d)"
+              ok=0
+              for attempt in 1 2 3; do
+                if gh release download nightly --pattern beta.json \
+                     --dir "$guard" >/dev/null 2>&1 \
+                   && [ -s "$guard/beta.json" ]; then
+                  ok=1
+                  break
+                fi
+                echo "guard beta.json download attempt $attempt failed; retrying"
+                sleep 5
+              done
+              if [ "$ok" -ne 1 ]; then
+                echo "could not read the rolling nightly's beta.json; refusing to clobber it (re-run this refresh once the release is readable)" >&2
+                exit 1
+              fi
               current="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$guard/beta.json")"
               newest="$(printf '%s\n%s\n' "$current" "$RELEASE_VERSION" | sort -V | tail -1)"
               if [ "$newest" != "$RELEASE_VERSION" ]; then
