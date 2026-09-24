@@ -8336,43 +8336,55 @@ async fn describe_session_open_failure(
     error: anyhow::Error,
     session_path: Option<String>,
 ) -> anyhow::Error {
-    let Some(path) = session_path else {
+    // Only a typed daemon rejection decorates (transport failures pass
+    // through unchanged), and the RAW rejection message is what gets
+    // decorated — the typed wrapper's own display adds the framing
+    // prefix exactly once.
+    let Some(rejected) = error
+        .downcast_ref::<crate::daemon_client::RequestRejected>()
+        .map(|rejected| rejected.message.clone())
+    else {
         return error;
     };
-    let Some(owner) = crate::session_open_error::owner_from_refusal(&error.to_string()) else {
+    let Some(owner) = crate::session_open_error::owner_from_refusal(&rejected) else {
         return error;
     };
-    // The refusal names the holder id only: probe the live roster for
-    // the row hosting the same file (best effort — a probe failure keeps
-    // the refusal's own first line and the process-lease guidance).
-    let path = std::path::PathBuf::from(path);
-    let rows: Vec<Value> = client
-        .request_ok(DaemonCommand::List {
+    let Some(path) = session_path.map(std::path::PathBuf::from) else {
+        return error;
+    };
+    // The live-roster probe is best-effort and BOUNDED: a stalled `list`
+    // must not hold the refusal for the daemon's full request timeout —
+    // the startup hands off to the agents view promptly either way.
+    let rows: Vec<Value> = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        client.request_ok(DaemonCommand::List {
             id: None,
             all: None,
             cwd: None,
             session_dir: None,
             include_client_owned: None,
             rest: Default::default(),
-        })
-        .await
-        .map(|data| crate::session_open_error::roster_rows(&data).to_vec())
-        .unwrap_or_default();
+        }),
+    )
+    .await
+    .ok()
+    .and_then(|result| result.ok())
+    .map(|data| crate::session_open_error::roster_rows(&data).to_vec())
+    .unwrap_or_default();
     let holder = crate::session_open_error::holder_from_roster(&rows, &path);
     // The daemon's ORIGINAL refusal line stays verbatim (never
     // reconstructed from a possibly-relative caller path) and the holder
     // guidance rides the same line — the agents-view handoff renders the
     // notice on a single status line, so a multiline decoration would
     // hide the holder and the next steps.
-    let text =
-        crate::session_open_error::decorate_interactive_refusal(&error.to_string(), holder, &owner);
+    let message =
+        crate::session_open_error::decorate_interactive_refusal(&rejected, holder, &owner);
     // The refusal stays a typed `RequestRejected`: `is_daemon_rejection`
     // keeps classifying it (the interactive open hands off to the agents
-    // view with the notice instead of exiting the client), with the
-    // daemon's own message replaced by the decorated single-line text.
+    // view with the notice instead of exiting the client).
     anyhow::Error::new(crate::daemon_client::RequestRejected {
         command: "create".to_string(),
-        message: text,
+        message,
     })
 }
 

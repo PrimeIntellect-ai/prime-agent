@@ -627,8 +627,11 @@ fn refused_saved_session_create_names_the_holder_and_next_steps() {
     // SINGLE-LINE text: the agents-view status strip would hide a
     // multiline notice behind its first paragraph.
     assert!(
-        notice.contains("the daemon rejected the create request:"),
-        "the typed rejection frames the descriptive notice: {notice}"
+        notice
+            .matches("the daemon rejected the create request:")
+            .count()
+            == 1,
+        "the typed rejection frames the notice exactly once: {notice}"
     );
     assert!(
         notice.contains("Session is already active in 245ddb974b6d: /tmp/sess-1.jsonl"),

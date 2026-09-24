@@ -63,7 +63,13 @@ pub fn holder_from_roster(rows: &[Value], session_path: &Path) -> Option<Session
 /// collapse to spaces so a renamed session (or any roster-controlled
 /// value) cannot inject lines into the refusal text.
 fn single_line(value: &str) -> String {
-    value.replace(['\r', '\n'], " ")
+    // Every control character flattens (not only line breaks): a
+    // roster-controlled value cannot smuggle ANSI/OSC sequences into the
+    // refusal text.
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// The model label of a `model` roster field: a display string, or the
@@ -164,22 +170,6 @@ pub fn decorate_interactive_refusal(
     format!("{first} \u{b7} {guidance}")
 }
 
-/// The descriptive refusal when the holder is not in the live roster (a
-/// foreign process owns the file's runtime lease): the TS first line
-/// with the anonymous owner, then the next steps that still apply.
-pub fn already_active_unknown_holder(holder: &str, session_path: &Path) -> String {
-    let mut lines = vec![already_active_line(holder, session_path)];
-    lines.push(
-        "The holder is not a session on this daemon (another process owns the file's lease)."
-            .to_string(),
-    );
-    lines.push(
-        "It unlocks when that process exits; to browse live sessions, run: prime-agent agents"
-            .to_string(),
-    );
-    lines.join("\n")
-}
-
 /// The canonical form of a session path matching
 /// `pa_daemon::lease::canonical_session_path` without pa-tui depending
 /// on pa-daemon.
@@ -260,18 +250,6 @@ mod tests {
         let text = already_active_error(&holder, Path::new("/s/a.jsonl"));
         assert!(text
             .contains("Holder: session live-9\nAttach to it instead: prime-agent --resume live-9"));
-    }
-
-    /// A holder outside the live roster keeps the TS first line and
-    /// points at the process lease instead of an attach selector.
-    #[test]
-    fn a_foreign_holder_gets_process_guidance() {
-        let text =
-            already_active_unknown_holder("another process (pid 4242)", Path::new("/s/a.jsonl"));
-        assert!(text
-            .starts_with("Session is already active in another process (pid 4242): /s/a.jsonl\n"));
-        assert!(text.contains("not a session on this daemon"));
-        assert!(text.contains("prime-agent agents"));
     }
 
     /// The roster extraction tolerates the payload wrapper.
