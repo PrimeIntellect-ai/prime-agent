@@ -1466,15 +1466,39 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
     );
 
     // The overflow probe: the arm compacts once (the summarizer consumed
-    // the third scripted response) and the retried turn recovers.
-    let prompt = client.request(
-        "session/prompt",
-        json!({
-            "sessionId": session_id,
-            "prompt": [{ "type": "text", "text": format!("overflow probe {}", "x".repeat(2_000)) }],
-        }),
-    );
-    let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
+    // the third scripted response) and the retried turn recovers. The
+    // seed turn's drain can outlive its response on a loaded runner (the
+    // overflow retry then bounces off the still-running prompt guard) —
+    // the probe is re-issued until the session settles (the recovered
+    // turn's assertion itself is unchanged and strict).
+    let mut prompt_response = Value::Null;
+    let mut updates = Vec::new();
+    let mut probe_attempts = 0;
+    loop {
+        probe_attempts += 1;
+        let prompt = client.request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": format!("overflow probe {}", "x".repeat(2_000)) }],
+            }),
+        );
+        let (response, prompt_updates) = client.wait_response(prompt, TIMEOUT);
+        let refused = response["error"].is_object()
+            && response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("already running"));
+        if !refused {
+            prompt_response = response;
+            updates = prompt_updates;
+            break;
+        }
+        assert!(
+            probe_attempts < 40,
+            "the session never settled after the seed turn: {response}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
     assert_eq!(
         prompt_response["result"],
         json!({ "stopReason": "end_turn" }),
