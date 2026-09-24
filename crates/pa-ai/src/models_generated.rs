@@ -56,6 +56,7 @@ pub fn get_models(provider: &str) -> Vec<&'static Model> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ModelExt;
 
     #[test]
     fn catalog_loads_and_matches_ts_scale() {
@@ -85,5 +86,71 @@ mod tests {
     fn unknown_lookups_are_none() {
         assert!(get_model("nope", "nope").is_none());
         assert!(get_models("nope").is_empty());
+    }
+
+    /// Port of the #2519 regenerated catalog: Prime Inference GLM routes
+    /// declare their reasoning controls from the live catalog — glm-5.3 is
+    /// an effort route, glm-4.7 a reasoning-object toggle.
+    #[test]
+    fn prime_inference_glm_routes_declare_catalog_reasoning_controls() {
+        let glm_53 = get_model("prime-inference", "z-ai/glm-5.3").expect("compiled");
+        let Some(crate::types::CompatKind::OpenAiCompletions(compat)) = glm_53.compat_kind() else {
+            panic!("glm-5.3 carries a compat object");
+        };
+        assert_eq!(compat.supports_reasoning_effort, Some(true));
+        assert_eq!(compat.thinking_format, None);
+        assert_eq!(
+            glm_53
+                .thinking_level_map
+                .as_ref()
+                .and_then(|map| map.get(&crate::types::ModelThinkingLevel::High)),
+            Some(&Some("high".to_string()))
+        );
+
+        let glm_47 = get_model("prime-inference", "z-ai/glm-4.7").expect("compiled");
+        let Some(crate::types::CompatKind::OpenAiCompletions(compat)) = glm_47.compat_kind() else {
+            panic!("glm-4.7 carries a compat object");
+        };
+        assert_eq!(compat.supports_reasoning_effort, Some(false));
+        assert_eq!(
+            compat.thinking_format,
+            Some(crate::types::ThinkingFormat::Openrouter)
+        );
+        assert!(
+            glm_47
+                .thinking_level_map
+                .as_ref()
+                .expect("toggle routes carry a thinking-level map")
+                .get(&crate::types::ModelThinkingLevel::Off)
+                .is_none(),
+            "toggle routes expose no off level"
+        );
+    }
+
+    /// Port of the TS fix (#2459): Prime Inference rejects `enable_thinking`
+    /// with a 400, so no prime-inference route may carry the zai thinking
+    /// format in its compat — request shaping would send the parameter on
+    /// every reasoning request.
+    #[test]
+    fn prime_inference_routes_never_carry_the_zai_thinking_format() {
+        for model in get_models("prime-inference") {
+            let Some(crate::types::CompatKind::OpenAiCompletions(compat)) = model.compat_kind()
+            else {
+                continue;
+            };
+            assert_ne!(
+                compat.thinking_format,
+                Some(crate::types::ThinkingFormat::Zai),
+                "prime-inference model {} must not carry the zai thinking format",
+                model.id
+            );
+        }
+        // The direct z.ai provider keeps the toggle.
+        let glm = get_model("zai", "glm-5.3").expect("direct zai glm-5.3 is compiled");
+        assert!(matches!(
+            glm.compat_kind(),
+            Some(crate::types::CompatKind::OpenAiCompletions(compat))
+                if compat.thinking_format == Some(crate::types::ThinkingFormat::Zai)
+        ));
     }
 }
