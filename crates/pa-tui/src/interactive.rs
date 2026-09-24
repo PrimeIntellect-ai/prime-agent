@@ -255,8 +255,8 @@ pub struct InteractiveOptions {
     /// TS `assertTelemetryAttachAllowed` guard.
     pub telemetry_disabled: Option<bool>,
     /// `/mcp login` / `/mcp logout`: the client-side auth flows the
-    /// composition root provides (login suspends the TUI and prompts on
-    /// the terminal). `None` reports the commands as unavailable.
+    /// composition root provides (they drive the inline auth panel).
+    /// `None` reports the commands as unavailable.
     pub client_auth: Option<crate::client_auth::ClientAuthCommandsHandle>,
     /// `/traces`: the settings + credential state the composition root
     /// owns (the trace upload subsystem itself stays unported). `None`
@@ -720,6 +720,12 @@ async fn run_interactive_surface(
     // open view.
     let (heartbeats_tx, mut heartbeats_rx) =
         mpsc::unbounded_channel::<crate::session_ui::HeartbeatsUpdate>();
+    // The inline auth panel's login flows drive the panel through this
+    // channel (progress lines, the URL block, prompts, the team picker,
+    // and each flow's settled outcome); the loop owns the receiving side
+    // and folds every request into the mounted panel.
+    let (auth_panel_tx, mut auth_panel_rx) =
+        mpsc::unbounded_channel::<crate::auth_panel::AuthPanelRequest>();
     let (bash_tx, mut bash_rx) = mpsc::unbounded_channel::<crate::session_ui::BashActivityUpdate>();
     // Background slash-command-catalog refreshes (`get_commands`) report
     // here; the loop folds the session's skill commands into the
@@ -791,6 +797,7 @@ async fn run_interactive_surface(
         reload_tx,
         traces_upload_tx,
         catalog_tx,
+        auth_panel_tx,
         crate::session_ui::ActivityUpdates {
             heartbeats: heartbeats_tx,
             bash: bash_tx,
@@ -1064,22 +1071,12 @@ async fn run_interactive_surface(
                         // Headless runs keep no terminal renderer (TS never
                         // registers the action without one), so the request is
                         // observed and dropped.
-                        // A provider login that prompts on the plain terminal
-                        // (browser OAuth, the MCP device flow): hand the
-                        // terminal over while the flow runs, like `/mcp
-                        // login`.
-                        if session.pending_terminal_login() {
-                            renderer.suspend(&mut view)?;
-                            session.run_terminal_login(&mut view).await?;
-                            renderer.resume()?;
-                        }
                         // A parked `/traces login` (or the enable arm's
-                        // login-first step): the flow prompts on the plain
-                        // terminal, like the provider logins.
+                        // login-first step): mount the inline auth panel
+                        // and spawn the flow (the panel channel carries
+                        // its requests and the settled outcome).
                         if session.pending_traces_login() {
-                            renderer.suspend(&mut view)?;
-                            session.run_traces_login(&mut view).await?;
-                            renderer.resume()?;
+                            session.run_traces_login(&mut view);
                         }
                         // A `/update` run: the child processes own the plain
                         // terminal, and a successful self-update replaces this
@@ -1109,27 +1106,26 @@ async fn run_interactive_surface(
                             }
                         }
                         // The `/mcp` view resolved to an auth request (its
-                        // Enter on a connection, or the inline paste panel):
-                        // run the client auth commands directly — the
+                        // Enter on a connection, or the pasteable service's
+                        // paste flow): mount the inline auth panel and spawn
+                        // the client auth command against it — the
                         // typed-command arg path is gone, so the view never
-                        // resolves through a submitted `/mcp <args>` string.
-                        // A login and a paste both hand the terminal over
-                        // (the OAuth flow and the token prompt read the
-                        // plain terminal's stdin).
-                        if let Some(args) = session.take_pending_mcp_auth() {
-                            let suspended = session.mcp_auth_needs_terminal(&args);
-                            if suspended {
-                                renderer.suspend(&mut view)?;
-                            }
-                            session.run_mcp_auth(&args, &mut view).await;
-                            if suspended {
-                                renderer.resume()?;
-                            }
+                        // resolves through a submitted `/mcp <args>`
+                        // string, and no flow touches the terminal.
+                        if session.pending_mcp_auth() {
+                            session.run_mcp_auth(&mut view);
                         }
                     }
                     UiInput::Paste(text) => {
                         session.stop_selection_auto_scroll();
-                        session.handle_paste(&text, &mut view);
+                        // The inline auth panel owns the frame: the paste
+                        // lands in its field, never in the editor behind
+                        // it.
+                        if view.auth_panel.is_some() {
+                            session.paste_to_auth_panel(&text, &mut view);
+                        } else {
+                            session.handle_paste(&text, &mut view);
+                        }
                     }
                     // A mouse report reaches the transcript scroll dispatch
                     // (TS `handleFullscreenInput`'s wheel branch); non-wheel
@@ -1174,14 +1170,12 @@ async fn run_interactive_surface(
                             renderer.resume()?;
                         }
                         // A parked `/traces login` (or the enable arm's
-                        // login-first step): the flow prompts on the plain
-                        // terminal, like the provider logins (the Submit
-                        // path needs the same handoff the Key path has —
-                        // headless plans drive commands as submissions).
+                        // login-first step): mount the inline auth panel and
+                        // spawn the flow (the Submit path needs the same
+                        // dispatch the Key path has — headless plans drive
+                        // commands as submissions).
                         if session.pending_traces_login() {
-                            renderer.suspend(&mut view)?;
-                            session.run_traces_login(&mut view).await?;
-                            renderer.resume()?;
+                            session.run_traces_login(&mut view);
                         }
                     }
                     UiInput::HeadlessDone => headless_done = true,
@@ -1277,6 +1271,12 @@ async fn run_interactive_surface(
             && !session.share_pending()
             && !session.reload_pending()
             && !session.traces_upload_pending()
+            // An inline auth flow is work like an upload: the harness
+            // must not finish before its settled outcome lands (a live
+            // terminal never ends the run on its own).
+            && view.auth_panel.is_none()
+            && !session.pending_traces_login()
+            && !session.pending_mcp_auth()
         {
             break;
         }
@@ -1437,6 +1437,11 @@ async fn run_interactive_surface(
             maybe_catalog = catalog_rx.recv() => {
                 if let Some(update) = maybe_catalog {
                     session.apply_model_catalog(update, &mut view);
+                }
+            }
+            maybe_auth_panel = auth_panel_rx.recv() => {
+                if let Some(request) = maybe_auth_panel {
+                    session.apply_auth_panel_request(request, &mut view).await;
                 }
             }
             maybe_heartbeats = heartbeats_rx.recv() => {
