@@ -9,7 +9,7 @@ use crate::theme::Theme;
 use crate::view::AgentView;
 use anyhow::Result;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
-use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{self};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::io::stdout;
 use std::time::Duration;
@@ -20,6 +20,10 @@ pub struct AppOptions {
     pub replay_delay_ms: u64,
     /// Auto-exit after this many ms of runtime (headless verification).
     pub auto_exit_ms: Option<u64>,
+    /// Panic after the first paint (the exit-restore verifier's panic-path
+    /// driver: a real unwind on the live surface must still leave the
+    /// terminal whole).
+    pub panic_after_frame: bool,
 }
 
 impl Default for AppOptions {
@@ -28,6 +32,7 @@ impl Default for AppOptions {
             theme: "prime".to_string(),
             replay_delay_ms: 0,
             auto_exit_ms: None,
+            panic_after_frame: false,
         }
     }
 }
@@ -43,7 +48,25 @@ pub fn load_theme(name: &str) -> Theme {
 
 /// Run the view against a session stream until the stream ends and the user
 /// exits. `on_submit` receives editor submissions (unused in replay mode).
+///
+/// Every error return funnels through the one exit restore: an early `?`
+/// after the mount (a stream read, a draw failure) must not hand the shell
+/// a terminal still in TUI state.
 pub fn run_app(
+    stream: Box<dyn SessionStream>,
+    options: AppOptions,
+    on_submit: Box<dyn FnMut(&str) + Send>,
+) -> Result<()> {
+    match run_app_surface(stream, options, on_submit) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            crate::exit_restore::restore_terminal();
+            Err(error)
+        }
+    }
+}
+
+fn run_app_surface(
     mut stream: Box<dyn SessionStream>,
     options: AppOptions,
     mut on_submit: Box<dyn FnMut(&str) + Send>,
@@ -51,8 +74,15 @@ pub fn run_app(
     // The TS theme emits raw ANSI color codes regardless of NO_COLOR; match
     // that so the same terminal renders the same frames either way.
     crossterm::style::force_color_output(true);
+    // A panic anywhere between the mount below and the deliberate
+    // teardown must still hand the terminal back whole (the same
+    // unwind-guard contract the session surface arms).
+    let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
     terminal::enable_raw_mode()?;
-    crossterm::execute!(stdout(), EnterAlternateScreen)?;
+    // The alternate screen mounts through the ownership module (the same
+    // `pendingAltScreenHandoff` semantics the session surface uses), so
+    // the surface's alt-screen state is tracked for every exit path.
+    crate::altscreen::enter()?;
     // The replay surface owns the same enhanced-key modes as the session
     // (TS `ProcessTerminal.start`): bracketed pastes arrive as one chunk.
     crate::enhanced_keys::enable(&mut std::io::stdout())?;
@@ -84,6 +114,11 @@ pub fn run_app(
         let (_w, h) = crossterm::terminal::size()?;
         view.set_terminal_rows(h);
         draw(&mut terminal, &mut view)?;
+        if options.panic_after_frame {
+            // The verifier's panic driver: the unwind must cross the live
+            // surface's unwind guard, not the already-restored exit.
+            panic!("pa-tui-replay: --panic-exit reached");
+        }
 
         // Input.
         let timeout = Duration::from_millis(if stream_ended { 50 } else { 5 });
@@ -122,10 +157,7 @@ pub fn run_app(
         }
     }
 
-    let mut out = stdout();
-    let _ = crate::enhanced_keys::disable(&mut out);
-    terminal::disable_raw_mode()?;
-    crossterm::execute!(stdout(), LeaveAlternateScreen)?;
+    crate::exit_restore::restore_terminal();
     Ok(())
 }
 

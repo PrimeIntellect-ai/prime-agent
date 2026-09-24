@@ -33,3 +33,21 @@ pub fn leave() -> Result<()> {
     }
     Ok(())
 }
+
+/// Whether the process owns the alternate screen (the preserve-handoff
+/// state an incoming surface inherits: a run entering on an active alt
+/// screen owns its release even when it fails before mounting).
+pub(crate) fn active() -> bool {
+    ACTIVE.load(Ordering::SeqCst)
+}
+
+/// Leave the alternate screen unconditionally (the exit restore's
+/// last-line-of-defense): surfaces that mounted the screen outside the
+/// ownership module (or a flag desynced by a partial restore) must not
+/// keep the alt buffer up after the process dies — a `?1049l` on a
+/// primary-screen terminal is a no-op, so the unconditional write costs
+/// nothing when the screen is already left.
+pub(crate) fn force_leave(out: &mut std::io::Stdout) {
+    ACTIVE.store(false, Ordering::SeqCst);
+    let _ = crossterm::execute!(out, LeaveAlternateScreen);
+}

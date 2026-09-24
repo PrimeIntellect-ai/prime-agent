@@ -7,6 +7,7 @@
 pub mod activity_panel;
 pub mod agents_view;
 pub mod agents_view_forest;
+pub mod agents_view_search;
 pub mod agents_view_state;
 pub mod altscreen;
 pub mod ansi;
@@ -34,6 +35,7 @@ pub mod effort_picker;
 mod enhanced_keys;
 pub mod error_summary;
 mod exit_guard;
+pub(crate) mod exit_restore;
 pub mod export_share;
 pub mod fuzzy;
 pub mod goal_surface;

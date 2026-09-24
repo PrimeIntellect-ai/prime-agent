@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use pa_types::daemon::agent_roster::AgentRosterStatus;
 use serde_json::Value;
 
+use crate::agents_view_search::score_search;
 use crate::width::str_width;
 
 /// One of the three sections every unified record sorts into.
@@ -62,7 +63,12 @@ pub struct UnifiedRecord {
     /// Every key this record is reachable by (selection survival).
     pub aliases: Vec<String>,
     pub section: Section,
-    pub searchable: String,
+    /// The picker's match targets: the name, the durable session id,
+    /// and the cwd (see `agents_view_search`).
+    pub search: SessionSearchText,
+    /// The query-relevance score behind the ranked list (lower is better);
+    /// `None` for retained ancestors and unqueried rosters.
+    pub search_score: Option<f64>,
 }
 
 fn get_str<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
@@ -114,45 +120,51 @@ fn saved_aliases(saved: &Value) -> Vec<String> {
     aliases
 }
 
-fn join_search_text(parts: &[Option<&str>]) -> String {
-    parts
-        .iter()
-        .filter_map(|part| *part)
-        .filter(|part| !part.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>()
-        .join(" ")
+/// The picker targets of one roster entry: the session NAME (primary),
+/// the durable session ID (paste-a-prefix targeting), and the CWD — the
+/// restricted corpus of `agents_view_search`. Daemon data wins for
+/// joined records; saved rows carry the durable name for archived
+/// sessions.
+fn daemon_search_text(summary: &Value) -> SessionSearchText {
+    SessionSearchText {
+        name: get_str(summary, "sessionName")
+            .map(str::to_string)
+            .unwrap_or_default(),
+        id: get_str(summary, "sessionId")
+            .map(str::to_string)
+            .unwrap_or_default(),
+        cwd: get_str(summary, "cwd")
+            .map(str::to_string)
+            .unwrap_or_default(),
+    }
 }
 
-fn daemon_search_text(summary: &Value) -> String {
-    join_search_text(&[
-        get_str(summary, "sessionId"),
-        get_str(summary, "activeSessionId"),
-        get_str(summary, "sessionName"),
-        get_str(summary, "firstMessage"),
-        get_str(summary, "cwd"),
-        get_str(summary, "sessionFile"),
-        get_str(summary, "summary"),
-    ])
+fn saved_search_text(saved: &Value) -> SessionSearchText {
+    SessionSearchText {
+        name: get_str(saved, "name")
+            .map(str::to_string)
+            .unwrap_or_default(),
+        id: get_str(saved, "id").map(str::to_string).unwrap_or_default(),
+        cwd: get_str(saved, "cwd")
+            .map(str::to_string)
+            .unwrap_or_default(),
+    }
 }
 
-fn saved_search_text(saved: &Value) -> String {
-    join_search_text(&[
-        get_str(saved, "id"),
-        get_str(saved, "name"),
-        get_str(saved, "firstMessage"),
-        // The capped transcript corpus (TS `allMessagesText`): a query can
-        // find a session by any user/assistant message text.
-        get_str(saved, "allMessagesText"),
-        // The latest recap's summary (TS `agentStatus?.summary`).
-        saved
-            .get("agentStatus")
-            .and_then(|status| status.get("summary"))
-            .and_then(Value::as_str),
-        get_str(saved, "cwd"),
-        get_str(saved, "path"),
-        get_str(saved, "parentSessionPath"),
-    ])
+/// Merge saved targets into a live record's (daemon data wins).
+fn enrich_search_text(live: &SessionSearchText, saved: &SessionSearchText) -> SessionSearchText {
+    let pick = |live_value: &str, saved_value: &str| {
+        if live_value.is_empty() {
+            saved_value.to_string()
+        } else {
+            live_value.to_string()
+        }
+    };
+    SessionSearchText {
+        name: pick(&live.name, &saved.name),
+        id: pick(&live.id, &saved.id),
+        cwd: pick(&live.cwd, &saved.cwd),
+    }
 }
 
 /// Merge the live roster entries and the saved catalog rows into unified
@@ -181,7 +193,7 @@ pub fn reconcile_unified_sessions(roster: &[Value], saved: &[Value]) -> Vec<Unif
             continue;
         };
         let section = status.map(section_from_status).unwrap_or(Section::Idle);
-        let searchable = daemon_search_text(&summary);
+        let search = daemon_search_text(&summary);
         let index = records.len();
         for alias in &aliases {
             by_alias.insert(alias.clone(), index);
@@ -194,7 +206,8 @@ pub fn reconcile_unified_sessions(roster: &[Value], saved: &[Value]) -> Vec<Unif
             identity,
             aliases,
             section,
-            searchable,
+            search,
+            search_score: None,
         });
     }
 
@@ -217,16 +230,13 @@ pub fn reconcile_unified_sessions(roster: &[Value], saved: &[Value]) -> Vec<Unif
                 }
                 by_alias.insert(alias.clone(), index);
             }
-            let mut text = daemon_search_text(record.daemon.as_ref().unwrap_or(&Value::Null));
+            let live = daemon_search_text(record.daemon.as_ref().unwrap_or(&Value::Null));
             let saved_text = saved_search_text(row);
-            if !saved_text.is_empty() {
-                text = format!("{text} {saved_text}");
-            }
-            record.searchable = text;
+            record.search = enrich_search_text(&live, &saved_text);
             continue;
         }
         let index = records.len();
-        let searchable = saved_search_text(row);
+        let search = saved_search_text(row);
         for alias in &aliases {
             by_alias.insert(alias.clone(), index);
         }
@@ -238,7 +248,8 @@ pub fn reconcile_unified_sessions(roster: &[Value], saved: &[Value]) -> Vec<Unif
             identity,
             aliases,
             section: Section::Inactive,
-            searchable,
+            search,
+            search_score: None,
         });
     }
     records
@@ -417,144 +428,7 @@ pub fn filter_empty_sessions(records: &[UnifiedRecord], preserved: &[&str]) -> V
         .collect()
 }
 
-/// One parsed search query (TS `ParsedSearchQuery`): `re:` enters regex
-/// mode; otherwise whitespace tokens with `"quoted phrase"` support.
-pub struct ParsedSearchQuery {
-    regex: Option<fancy_regex::Regex>,
-    tokens: Vec<SearchToken>,
-    /// A query that cannot match anything (an invalid `re:` pattern).
-    matches_never: bool,
-}
-
-enum SearchToken {
-    Fuzzy(String),
-    Phrase(String),
-}
-
-/// Parse a query; invalid `re:` patterns parse to no matches.
-pub fn parse_search_query(query: &str) -> ParsedSearchQuery {
-    let trimmed = query.trim();
-    if let Some(pattern) = trimmed.strip_prefix("re:") {
-        let pattern = pattern.trim();
-        if pattern.is_empty() {
-            return ParsedSearchQuery {
-                regex: None,
-                tokens: Vec::new(),
-                matches_never: true,
-            };
-        }
-        let matches_never = match fancy_regex::Regex::new(&format!("(?i){pattern}")) {
-            Ok(regex) => {
-                return ParsedSearchQuery {
-                    regex: Some(regex),
-                    tokens: Vec::new(),
-                    matches_never: false,
-                };
-            }
-            Err(_) => true,
-        };
-        return ParsedSearchQuery {
-            regex: None,
-            tokens: Vec::new(),
-            matches_never,
-        };
-    }
-    ParsedSearchQuery {
-        regex: None,
-        tokens: tokenize(trimmed),
-        matches_never: false,
-    }
-}
-
-fn tokenize(trimmed: &str) -> Vec<SearchToken> {
-    let mut tokens = Vec::new();
-    let mut buffer = String::new();
-    let mut in_quote = false;
-    for ch in trimmed.chars() {
-        if ch == '"' {
-            if in_quote {
-                push_token(&mut tokens, &mut buffer, SearchToken::Phrase);
-            } else {
-                push_token(&mut tokens, &mut buffer, SearchToken::Fuzzy);
-            }
-            in_quote = !in_quote;
-            continue;
-        }
-        if !in_quote && ch.is_whitespace() {
-            push_token(&mut tokens, &mut buffer, SearchToken::Fuzzy);
-            continue;
-        }
-        buffer.push(ch);
-    }
-    if in_quote {
-        // Unbalanced quotes fall back to plain whitespace tokenization.
-        return trimmed
-            .split_whitespace()
-            .map(|token| SearchToken::Fuzzy(token.to_string()))
-            .collect();
-    }
-    // Whatever is left in the buffer belongs to the last quote state.
-    let kind = if in_quote {
-        SearchToken::Phrase
-    } else {
-        SearchToken::Fuzzy
-    };
-    push_token(&mut tokens, &mut buffer, kind);
-    tokens
-}
-
-fn push_token(tokens: &mut Vec<SearchToken>, buffer: &mut String, kind: fn(String) -> SearchToken) {
-    let value = buffer.trim().to_string();
-    buffer.clear();
-    if !value.is_empty() {
-        tokens.push(kind(value));
-    }
-}
-
-/// The strict fuzzy ceiling above which a token counts as unmatched (TS
-/// `STRICT_FUZZY_MAX_TOKEN_SCORE`).
-const STRICT_FUZZY_MAX_TOKEN_SCORE: f64 = 25.0;
-
-/// Whether the search corpus matches the query (TS `matchSearchText`).
-pub fn matches_query(text: &str, query: &ParsedSearchQuery) -> bool {
-    if query.matches_never {
-        return false;
-    }
-    if let Some(regex) = &query.regex {
-        return regex.is_match(text).unwrap_or(false);
-    }
-    if query.tokens.is_empty() {
-        return true;
-    }
-    let normalized = normalize(text);
-    for token in &query.tokens {
-        match token {
-            SearchToken::Phrase(value) => {
-                if !normalized.contains(&normalize(value)) {
-                    return false;
-                }
-            }
-            SearchToken::Fuzzy(value) => {
-                if !normalized.contains(&normalize(value)) {
-                    let Some(score) = crate::fuzzy::fuzzy_match(value, text) else {
-                        return false;
-                    };
-                    if score > STRICT_FUZZY_MAX_TOKEN_SCORE {
-                        return false;
-                    }
-                }
-            }
-        }
-    }
-    true
-}
-
-fn normalize(text: &str) -> String {
-    text.to_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
+pub use crate::agents_view_search::{parse_search_query, ParsedSearchQuery, SessionSearchText};
 
 /// The keys by which a record's parent is referenced (TS `getParentKeys`).
 fn parent_keys(record: &UnifiedRecord) -> Vec<String> {
@@ -583,10 +457,11 @@ fn parent_keys(record: &UnifiedRecord) -> Vec<String> {
     }
     keys
 }
-
 /// TS `filterUnifiedSessions`: keep the matching records plus every
 /// ancestor, so the hierarchy leading to a match stays reachable (a child
-/// hit keeps its parent rows in the set). Catalog order decides rendering.
+/// hit keeps its parent rows in the set). Catalog order decides nesting;
+/// hits carry their relevance score (`search_score`, lower is better) for
+/// the view's ranked rendering, retained ancestors keep `None`.
 pub fn filter_unified_sessions(
     records: &[UnifiedRecord],
     query: &ParsedSearchQuery,
@@ -602,8 +477,15 @@ pub fn filter_unified_sessions(
         })
         .collect();
     let mut retained = vec![false; records.len()];
+    let mut scores = vec![None; records.len()];
     for index in 0..records.len() {
-        if retained[index] || !matches_query(&records[index].searchable, query) {
+        // Every directly matching record carries its score, even one
+        // already retained as an ancestor of an earlier hit.
+        let Some(score) = score_search(&records[index].search, query) else {
+            continue;
+        };
+        scores[index] = Some(score);
+        if retained[index] {
             continue;
         }
         let mut current = Some(index);
@@ -622,7 +504,11 @@ pub fn filter_unified_sessions(
         .iter()
         .enumerate()
         .filter(|(index, _)| retained[*index])
-        .map(|(_, record)| record.clone())
+        .map(|(index, record)| {
+            let mut record = record.clone();
+            record.search_score = scores[index];
+            record
+        })
         .collect()
 }
 
@@ -817,7 +703,8 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].section, Section::Idle);
         assert_eq!(records[0].identity, "file:/x/s1.jsonl");
-        assert!(records[0].searchable.contains("Bug fix"));
+        assert_eq!(records[0].search.name, "Bug fix");
+        assert_eq!(records[0].search.id, "s1");
         let summary = summary_for_record(&records[0]);
         assert_eq!(summary["firstMessage"], "fix the bug");
         assert_eq!(summary["sessionName"], "Bug fix");
@@ -984,35 +871,10 @@ mod tests {
     }
 
     #[test]
-    fn search_tokens_phrases_and_regex() {
-        let text = "Fix the Node CVE in packages/tui";
-        let phrase = parse_search_query(r#""node cve" fix"#);
-        assert!(matches_query(text, &phrase));
-        let missing_phrase = parse_search_query(r#""node fix""#);
-        assert!(!matches_query(text, &missing_phrase));
-        let fuzzy = parse_search_query("fx");
-        assert!(matches_query(text, &fuzzy));
-        let unrelated = parse_search_query("zebra");
-        assert!(!matches_query(text, &unrelated));
-        let regex = parse_search_query("re:CVE in");
-        assert!(matches_query(text, &regex));
-        let bad = parse_search_query("re:[");
-        assert!(!matches_query(text, &bad));
-        // An unclosed quote falls back to whitespace tokens, and the raw
-        // quote character stays in the token (TS keeps it), so the first
-        // token no longer matches.
-        let unclosed = parse_search_query(r#""node cve"#);
-        assert!(!matches_query(text, &unclosed));
-        assert!(matches_query(
-            text,
-            &parse_search_query(r#""node cve"#.replace('"', "").as_str())
-        ));
-    }
-
-    #[test]
-    fn search_matches_metadata_fields_case_insensitively() {
-        // TS `createUnifiedSearchableText`: the corpus joins id, name,
-        // firstMessage, transcript text, recap summary, cwd, and paths.
+    fn search_matches_the_restricted_corpus_case_insensitively() {
+        // The picker corpus is the session NAME, the durable ID, and the
+        // CWD; the TS corpus fields — first message, transcript text,
+        // recap summary, file paths — never match.
         let saved = vec![json!({
             "id": "sess-alpha",
             "path": "/x/alpha.jsonl",
@@ -1024,31 +886,38 @@ mod tests {
             "parentSessionPath": "/x/parent.jsonl",
         })];
         let records = reconcile_unified_sessions(&[], &saved);
-        let text = &records[0].searchable;
-        // Case-insensitive substring matches on every metadata field.
+        let targets = &records[0].search;
+        for query in ["alpha", "roster", "ROSTER", "api-server", "sess-al"] {
+            let parsed = parse_search_query(query);
+            assert!(
+                score_search(targets, &parsed).is_some(),
+                "query {query:?} should match the restricted corpus"
+            );
+        }
+        // Partial words need the fuzzy path on the name (ordered
+        // subsequence).
+        assert!(score_search(targets, &parse_search_query("rtwr")).is_some());
+        // Content fields are gone from the picker: first messages, the
+        // capped transcript, the recap summary, and file paths never match.
         for query in [
-            "alpha",
-            "roster",
             "deploy the gateway",
             "GATEWAY PROBE",
             "gateway deploy finished",
-            "api-server",
+            "alpha.jsonl",
             "parent.jsonl",
+            "503",
+            "zebra",
         ] {
             let parsed = parse_search_query(query);
             assert!(
-                matches_query(text, &parsed),
-                "query {query:?} should match: {text}"
+                score_search(targets, &parsed).is_none(),
+                "query {query:?} must not match content or path fields"
             );
         }
-        // Partial words need the fuzzy path (ordered subsequence).
-        assert!(matches_query(text, &parse_search_query("gtwy")));
-        // A field that is nowhere in the corpus does not match.
-        assert!(!matches_query(text, &parse_search_query("zebra")));
     }
 
     #[test]
-    fn search_covers_live_recap_and_saved_transcript_together() {
+    fn merged_records_take_the_live_name_and_never_match_the_recap() {
         // A merged record: live daemon summary plus saved enrichment.
         let roster = vec![roster_entry(
             "s1",
@@ -1058,26 +927,25 @@ mod tests {
                 "lifecycle": "live",
                 "activeSessionId": "a1",
                 "sessionFile": "/x/s1.jsonl",
-                "summary": "tuned the retry policy",
+                "sessionName": "tuned retry policy",
+                "cwd": "/work/retry",
             }),
         )];
         let saved = vec![json!({
             "id": "s1",
             "path": "/x/s1.jsonl",
+            "name": "stale catalog name",
             "allMessagesText": "we bumped the backoff ceiling to 30s",
         })];
         let records = reconcile_unified_sessions(&roster, &saved);
         assert_eq!(records.len(), 1);
-        // Both sources are in the merged corpus (TS
-        // `createUnifiedSearchText(record.daemon, record.saved)`).
-        assert!(matches_query(
-            &records[0].searchable,
-            &parse_search_query("retry")
-        ));
-        assert!(matches_query(
-            &records[0].searchable,
-            &parse_search_query("backoff ceiling")
-        ));
+        // Daemon data wins for the merged targets; the saved transcript
+        // and recap text stay out of the corpus.
+        assert_eq!(records[0].search.name, "tuned retry policy");
+        assert_eq!(records[0].search.id, "s1");
+        assert_eq!(records[0].search.cwd, "/work/retry");
+        assert!(score_search(&records[0].search, &parse_search_query("retry")).is_some());
+        assert!(score_search(&records[0].search, &parse_search_query("backoff")).is_none());
     }
 
     #[test]
@@ -1102,8 +970,10 @@ mod tests {
                 "messageCount": 1,
             }),
         ];
+        // "child" hits the child row's NAME (the corpus no longer
+        // carries first messages), and the parent stays as its ancestor.
         let records = reconcile_unified_sessions(&[], &saved);
-        let filtered = filter_unified_sessions(&records, &parse_search_query("fibonacci"));
+        let filtered = filter_unified_sessions(&records, &parse_search_query("child"));
         let titles: Vec<&str> = filtered
             .iter()
             .map(|record| {
@@ -1114,7 +984,7 @@ mod tests {
         // An unrelated query matches nothing, and the parent alone matches
         // only its own query.
         assert!(filter_unified_sessions(&records, &parse_search_query("zebra")).is_empty());
-        let parent_only = filter_unified_sessions(&records, &parse_search_query("orchestrate"));
+        let parent_only = filter_unified_sessions(&records, &parse_search_query("root"));
         assert_eq!(parent_only.len(), 1);
         assert_eq!(
             get_str(parent_only[0].saved.as_ref().unwrap(), "name"),
