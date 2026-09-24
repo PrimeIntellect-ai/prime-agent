@@ -136,7 +136,12 @@ async fn restored_functions_run_against_live_namespace_globals() {
     // A global redefined after the restore wins over the frozen value the
     // saved function captured at snapshot time (pre-fix this returned 1).
     let live = execute(&reader, "G = 2\nreader()").await;
-    assert_eq!(live.status, ExecuteStatus::Ok, "reader cell: {:?}", live.stderr);
+    assert_eq!(
+        live.status,
+        ExecuteStatus::Ok,
+        "reader cell: {:?}",
+        live.stderr
+    );
     assert_eq!(live.result.as_deref(), Some("2"));
 
     // A name the saved function references but the snapshot never saved
@@ -176,8 +181,14 @@ async fn post_restore_auto_snapshot_skips_until_a_real_cell_changes_the_namespac
             drain_host_requests: true,
         })
         .await;
-    assert!(snapshot_path.exists(), "the dispose flush wrote the payload");
-    assert!(manifest_path.exists(), "the dispose flush wrote the manifest");
+    assert!(
+        snapshot_path.exists(),
+        "the dispose flush wrote the payload"
+    );
+    assert!(
+        manifest_path.exists(),
+        "the dispose flush wrote the manifest"
+    );
 
     // Production order (the provisioner): restore, then the bootstrap
     // (whose execution schedules the debounced snapshot), then the arm.
@@ -223,10 +234,7 @@ async fn post_restore_auto_snapshot_skips_until_a_real_cell_changes_the_namespac
         .get("savedNames")
         .and_then(|names| names.as_array())
         .expect("savedNames");
-    let names: Vec<&str> = saved
-        .iter()
-        .filter_map(|name| name.as_str())
-        .collect();
+    let names: Vec<&str> = saved.iter().filter_map(|name| name.as_str()).collect();
     assert!(names.contains(&"restored_var"));
     assert!(names.contains(&"user_var"));
 

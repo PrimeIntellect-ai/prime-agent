@@ -16,8 +16,7 @@ use std::time::Duration;
 
 use pa_core::kernel::manager::{KernelStartOptions, ReplKernelManager};
 use pa_core::kernel::shared::{
-    ExecuteOptions, ExecuteStatus, HostRequestHandlers, KernelManagerOptions,
-    KernelShutdownOptions,
+    ExecuteOptions, ExecuteStatus, HostRequestHandlers, KernelManagerOptions, KernelShutdownOptions,
 };
 
 /// Speaks protocol v3: ready, then per request either the oversized

@@ -76,7 +76,9 @@ impl Inner {
                     Ok(()) => size = 0,
                     Err(error) => {
                         // A failed rotation must not cost the log: keep appending.
-                        self.append_diagnostic(&format!("cannot rotate kernel stderr log: {error}"));
+                        self.append_diagnostic(&format!(
+                            "cannot rotate kernel stderr log: {error}"
+                        ));
                     }
                 }
             }
@@ -312,7 +314,8 @@ impl Inner {
                                 let line: Vec<u8> = buffered.drain(..=rel).collect();
                                 // An invalid-UTF-8 stream ends the reader, like
                                 // read_line's decode error did before.
-                                let Ok(trimmed) = std::str::from_utf8(&line[..line.len() - 1]) else {
+                                let Ok(trimmed) = std::str::from_utf8(&line[..line.len() - 1])
+                                else {
                                     return;
                                 };
                                 if trimmed.trim().is_empty() {
@@ -526,7 +529,8 @@ mod tests {
     }
 
     fn temp_root(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("pa-stderr-perms-{}-{tag}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("pa-stderr-perms-{}-{tag}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
