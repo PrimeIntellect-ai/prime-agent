@@ -48,6 +48,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::ptr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -201,26 +202,90 @@ fn identity_current(target: &ReapTarget) -> bool {
     }
 }
 
-/// Stop one target: gone check, SIGTERM, grace, SIGKILL, verify.
+/// Stop one target: gone check, SIGTERM, grace, SIGKILL, verify. The
+/// signals ride the kernel-held process handle (pidfd): a numeric pid
+/// recycled in the check-then-signal window must never receive the
+/// signal meant for the process that exited - the fd pins the exact
+/// process, whatever the pid table does afterwards.
 async fn stop_target(target: &ReapTarget) -> ReapOutcome {
     if !identity_current(target) || !crate::lease::is_process_alive(target.pid).unwrap_or(false) {
         return ReapOutcome::AlreadyGone;
     }
-    pa_core::platform::process::kill_pid(
-        target.pid as i32,
-        pa_core::platform::process::Signal::Term,
-    );
-    if await_gone(target, TERM_GRACE).await {
-        return ReapOutcome::Term;
-    }
-    pa_core::platform::process::kill_pid(
-        target.pid as i32,
-        pa_core::platform::process::Signal::Kill,
-    );
-    if await_gone(target, KILL_VERIFY).await {
-        return ReapOutcome::Kill;
+    let Some(pidfd) = open_pidfd(target.pid) else {
+        // The kernel-held handle is unavailable (an unsupported platform
+        // or a process that just exited): the conservative default never
+        // signals - a missed reap is recoverable, a wrong one is not.
+        return ReapOutcome::AlreadyGone;
+    };
+    if pidfd_signal(&pidfd, pa_core::platform::process::Signal::Term) {
+        if await_gone(target, TERM_GRACE).await {
+            return ReapOutcome::Term;
+        }
+        if pidfd_signal(&pidfd, pa_core::platform::process::Signal::Kill)
+            && await_gone(target, KILL_VERIFY).await
+        {
+            return ReapOutcome::Kill;
+        }
     }
     ReapOutcome::Survived
+}
+
+/// The kernel-held process handle: `pidfd_open` pins the exact process
+/// behind the pid (a later `stop_target` signal reaches it even if the
+/// numeric pid is recycled the instant after). None when the platform
+/// has no pidfd or the process is already gone.
+#[cfg(target_os = "linux")]
+fn open_pidfd(pid: u32) -> Option<i32> {
+    // libc exports the syscall numbers for x86_64/aarch64 (the platforms
+    // this workspace ships); anything else answers None (the
+    // no-signal default).
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        (fd >= 0).then(|| fd as i32)
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = pid;
+        None
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_pidfd(_pid: u32) -> Option<i32> {
+    None
+}
+
+/// Signal through the kernel-held handle (`pidfd_send_signal`): the
+/// signal reaches the pinned process and nothing else.
+#[cfg(target_os = "linux")]
+fn pidfd_signal(fd: &i32, signal: pa_core::platform::process::Signal) -> bool {
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        let signum = match signal {
+            pa_core::platform::process::Signal::Term => libc::SIGTERM,
+            pa_core::platform::process::Signal::Kill => libc::SIGKILL,
+        };
+        unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                *fd,
+                signum,
+                ptr::null::<u8>(),
+                0,
+            ) == 0
+        }
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        let _ = (fd, signal);
+        false
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pidfd_signal(_fd: &i32, _signal: pa_core::platform::process::Signal) -> bool {
+    false
 }
 
 /// Poll until the identity-gated pid is gone or the budget runs out.
@@ -536,8 +601,19 @@ fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
                 continue;
             }
             // The same normalized-socket identity the worker discovery
-            // matches (the descriptor's supervisor socket path).
-            if normalize_socket_spelling(Path::new(&descriptor.supervisor_socket_path)) != ours {
+            // matches (the descriptor's supervisor socket path) - a
+            // RELATIVE spelling resolves against the WORKER's own working
+            // directory (/proc/<pid>/cwd), exactly as discovery resolves
+            // the inherited env value: a relative spelling is what the
+            // daemon that wrote the descriptor resolved it to mean, never
+            // what this daemon's cwd would.
+            let spelling =
+                match socket_spelling_of(descriptor.pid as u32, &descriptor.supervisor_socket_path)
+                {
+                    spelling if spelling.is_empty() => continue,
+                    spelling => spelling,
+                };
+            if spelling != ours {
                 continue;
             }
             // A tombstoned descriptor is DURABLE STOP INTENT: its worker
@@ -663,7 +739,8 @@ mod tests {
 
     /// A reaped process is provably gone after the escalation: the reap's
     /// own child (the same contract the CLI stop test uses) dies inside the
-    /// TERM grace and reports Term.
+    /// TERM grace and reports Term. The signal rides the kernel-held pidfd
+    /// (the open itself proves the handle is available on this kernel).
     #[tokio::test]
     async fn a_real_process_stops_inside_the_term_grace() {
         let mut child = std::process::Command::new("sleep")
@@ -671,6 +748,8 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         let pid = child.id();
+        #[cfg(target_os = "linux")]
+        assert!(open_pidfd(pid).is_some(), "the kernel-held handle opens");
         let outcome = stop_target(&target(pid)).await;
         let _ = child.wait();
         assert_eq!(outcome, ReapOutcome::Term, "sleep must exit on SIGTERM");
