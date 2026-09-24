@@ -544,6 +544,15 @@ impl RlmSpawnLedger {
             if live_paths.contains(&child) || snapshot_by_path.contains_key(&child) {
                 continue;
             }
+            // A tombstoned path whose transcript still exists bills
+            // through its own archived row (the RLM delete keeps the
+            // file; the rollup sums the child row AND the parent
+            // bucket, so reading both would double the spend): the
+            // bucket is for files that are gone — the capture rides the
+            // tombstone for the day the transcript dies.
+            if Path::new(&edge.child).is_file() {
+                continue;
+            }
             let parent = canonical(&edge.parent);
             snapshot_by_path.insert(child.clone(), edge.deleted_usage.clone());
             children_by_parent.entry(parent).or_default().push(child);
@@ -554,8 +563,11 @@ impl RlmSpawnLedger {
             cost: 0.0,
         };
         let add = |mut left: SessionUsageSummary, right: SessionUsageSummary| {
-            left.input_tokens += right.input_tokens;
-            left.output_tokens += right.output_tokens;
+            // Saturating: the bucket feeds billable rollups — a huge
+            // snapshot must not panic in debug or wrap to an underbill in
+            // release (the same convention as every other usage sum).
+            left.input_tokens = left.input_tokens.saturating_add(right.input_tokens);
+            left.output_tokens = left.output_tokens.saturating_add(right.output_tokens);
             left.cost += right.cost;
             left
         };
@@ -1598,6 +1610,11 @@ mod tests {
                 &usage_summary(0.10),
             )
             .unwrap();
+        // The tombstoned children's transcripts are gone (a delete that
+        // leaves the file alive rides the row — the bucket is for files
+        // that died).
+        fs::remove_file(&child_1).unwrap();
+        fs::remove_file(&grandchild_1).unwrap();
         // The live child subtree never enters the bucket.
         let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
         let parent_key = crate::lease::canonical_session_path(&parent)
@@ -1643,9 +1660,10 @@ mod tests {
         );
     }
 
-    /// Legacy tombstones (pre-capture) fall back to the transcript while it
-    /// exists; once the transcript is gone the documented historical gap
-    /// bills zero — never a fabricated number.
+    /// Legacy tombstones (pre-capture): a live transcript rides its own
+    /// row (the bucket never claims a live file — billing both would
+    /// double the spend); once the transcript is gone the documented
+    /// historical gap bills zero — never a fabricated number.
     #[test]
     fn bucket_legacy_tombstones_fall_back_then_gap_to_zero() {
         let dir = temp_dir("bucket-legacy");
@@ -1675,11 +1693,15 @@ mod tests {
         let parent_key = crate::lease::canonical_session_path(&parent)
             .to_string_lossy()
             .to_string();
+        // A tombstoned path whose transcript still exists rides its own
+        // archived row (the rollup sums the row AND the parent bucket, so
+        // billing both would double the spend) — the bucket never claims
+        // a live file, legacy tombstone or not.
         let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
-        let legacy = bucket
-            .get(&parent_key)
-            .expect("the transcript still answers for a legacy tombstone");
-        assert!((legacy.cost - 0.25).abs() < 1e-9);
+        assert!(
+            !bucket.contains_key(&parent_key),
+            "a live transcript rides its own row, not the bucket"
+        );
         // The transcript goes (a saved-session delete, a cleanup): no
         // snapshot, no file, no spend — the gap is zero, not invented.
         fs::remove_file(&child).unwrap();
@@ -1732,6 +1754,9 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, body).unwrap();
         let ledger = ledger_for(&dir);
+        // The raced child's transcript is gone (the bucket is for files
+        // that died — a live file rides its own row).
+        fs::remove_file(&child).unwrap();
         let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
         let key_a = crate::lease::canonical_session_path(&parent_a)
             .to_string_lossy()

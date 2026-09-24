@@ -796,14 +796,25 @@ mod tests {
             .clone()
             .expect("the snapshot rides the edge");
         assert!((snapshot.cost - 0.06).abs() < 1e-9);
-        // The bucket bills the parent, transcript present or not.
-        let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
+        // While the transcript still exists its own archived row carries
+        // the spend — the bucket skips live files (the rollup sums the
+        // child row AND the parent bucket, so billing both would double
+        // the spend).
+        let live_bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
         let parent_key = canonical_session_path(&parent_file)
             .to_string_lossy()
             .to_string();
-        assert!((bucket[&parent_key].cost - 0.06).abs() < 1e-9);
+        assert!(
+            !live_bucket.contains_key(&parent_key),
+            "a live transcript's spend rides its own row, not the bucket"
+        );
         // The sweep never ran: the transcript is the lazy fallback's copy.
         assert!(child_file.is_file());
+        // The transcript dies (the sweep or a later delete): the bucket's
+        // snapshot is now the only carrier — the spend survives.
+        std::fs::remove_file(&child_file).unwrap();
+        let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
+        assert!((bucket[&parent_key].cost - 0.06).abs() < 1e-9);
     }
 
     /// Invariant A: the snapshot is OWN usage, never the attribution

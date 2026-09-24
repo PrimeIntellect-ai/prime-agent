@@ -407,6 +407,22 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
     }
     let mut rollups = vec![Rollup::default(); records.len()];
     for position in order.iter().rev() {
+        // The deleted-descendant bucket is read INDEPENDENTLY of the own
+        // cost: an orchestrator parent with no own billable work (the
+        // own-zero gate omits `usage` entirely) still bills its deleted
+        // descendants' spend — the bucket carried inside the own-cost
+        // Option would drop with it.
+        let deleted_descendants = records[*position]
+            .saved
+            .as_ref()
+            .and_then(|saved| saved.get("deletedDescendantUsage"))
+            .and_then(|deleted| deleted.get("cost"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        // Deleted subagents keep no row, and their spend is already
+        // subtracted from the parent's own usage by the attribution
+        // entries: without this term a deletion erases the money from
+        // the subtree total (TS #2506's `computeRecursiveRollups`).
         let own_cost = records[*position]
             .daemon
             .as_ref()
@@ -421,20 +437,8 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
                     .and_then(|usage| usage.get("cost"))
                     .and_then(Value::as_f64)
             })
-            // Deleted subagents keep no row, and their spend is already
-            // subtracted from the parent's own usage by the attribution
-            // entries: without this term a deletion erases the money from
-            // the subtree total (TS #2506's `computeRecursiveRollups`).
-            .map(|own| {
-                own + records[*position]
-                    .saved
-                    .as_ref()
-                    .and_then(|saved| saved.get("deletedDescendantUsage"))
-                    .and_then(|deleted| deleted.get("cost"))
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-            })
-            .unwrap_or(0.0);
+            .unwrap_or(0.0)
+            + deleted_descendants;
         let mut rollup = Rollup {
             cost: own_cost,
             descendant_count: 0,
