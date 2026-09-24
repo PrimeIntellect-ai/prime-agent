@@ -8358,14 +8358,18 @@ async fn describe_session_open_failure(
         .await
         .map(|data| crate::session_open_error::roster_rows(&data).to_vec())
         .unwrap_or_default();
-    let text = match crate::session_open_error::holder_from_roster(&rows, &path) {
-        Some(holder) => crate::session_open_error::already_active_error(&holder, &path),
-        None => crate::session_open_error::already_active_unknown_holder(&owner, &path),
-    };
+    let holder = crate::session_open_error::holder_from_roster(&rows, &path);
+    // The daemon's ORIGINAL refusal line stays verbatim (never
+    // reconstructed from a possibly-relative caller path) and the holder
+    // guidance rides the same line — the agents-view handoff renders the
+    // notice on a single status line, so a multiline decoration would
+    // hide the holder and the next steps.
+    let text =
+        crate::session_open_error::decorate_interactive_refusal(&error.to_string(), holder, &owner);
     // The refusal stays a typed `RequestRejected`: `is_daemon_rejection`
     // keeps classifying it (the interactive open hands off to the agents
     // view with the notice instead of exiting the client), with the
-    // daemon's own message replaced by the descriptive text.
+    // daemon's own message replaced by the decorated single-line text.
     anyhow::Error::new(crate::daemon_client::RequestRejected {
         command: "create".to_string(),
         message: text,

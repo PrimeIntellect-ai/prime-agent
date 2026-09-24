@@ -623,21 +623,27 @@ fn refused_saved_session_create_names_the_holder_and_next_steps() {
     );
     let notice = run.agents_view_notice.as_deref().unwrap_or_default();
     // The refusal stays a TYPED `RequestRejected` (the run hands off to
-    // the agents view instead of exiting) and carries the descriptive text.
+    // the agents view instead of exiting) and carries the decorated
+    // SINGLE-LINE text: the agents-view status strip would hide a
+    // multiline notice behind its first paragraph.
     assert!(
         notice.contains("the daemon rejected the create request:"),
         "the typed rejection frames the descriptive notice: {notice}"
     );
     assert!(
         notice.contains("Session is already active in 245ddb974b6d: /tmp/sess-1.jsonl"),
-        "the notice keeps the TS refusal first line: {notice}"
+        "the notice keeps the daemon's refusal line verbatim: {notice}"
     );
     assert!(
-        notice.contains("The holder is not a session on this daemon"),
-        "the notice names the holder's situation: {notice}"
+        notice.contains("Holder: session 245ddb974b6d (not answering on this daemon right now"),
+        "the notice names the unreachable holder: {notice}"
     );
     assert!(
-        notice.contains("prime-agent agents"),
-        "the notice suggests the next step: {notice}"
+        notice.contains("prime-agent --resume 245ddb974b6d"),
+        "the notice suggests the attach next step: {notice}"
+    );
+    assert!(
+        !notice.contains('\n'),
+        "the notice rides ONE status line: {notice:?}"
     );
 }

@@ -121,6 +121,49 @@ pub fn already_active_error(holder: &SessionHolder, session_path: &Path) -> Stri
     lines.join("\n")
 }
 
+/// Decorate the daemon's ORIGINAL refusal for the interactive create
+/// path: the original message stays verbatim (never reconstructed from a
+/// possibly-relative caller path), and the holder guidance rides the SAME
+/// line — the agents-view handoff renders the refusal on a single status
+/// line, so a multiline decoration would hide the holder and the next
+/// steps behind the first paragraph.
+pub fn decorate_interactive_refusal(
+    original: &str,
+    holder: Option<SessionHolder>,
+    owner: &str,
+) -> String {
+    let first = original.lines().next().unwrap_or(original);
+    let guidance = match holder {
+        Some(h) => {
+            let mut identity = format!("Holder: session {}", h.id);
+            if let Some(name) = &h.name {
+                identity.push_str(&format!(" \u{201c}{name}\u{201d}"));
+            }
+            if let Some(cwd) = &h.cwd {
+                identity.push_str(&format!(" \u{b7} cwd {cwd}"));
+            }
+            if let Some(model) = &h.model {
+                identity.push_str(&format!(" \u{b7} model {model}"));
+            }
+            format!(
+                "{identity} \u{b7} Attach instead: prime-agent --resume {} \u{b7} The file unlocks when that session exits",
+                h.id
+            )
+        }
+        None if owner.starts_with("another process") => format!(
+            "The holder is {owner} \u{b7} It unlocks when that process exits \u{b7} Browse live sessions: prime-agent agents"
+        ),
+        // A session-id holder the roster cannot see right now (an
+        // unreachable or restarting worker): the first line names the
+        // session, so the guidance must match it — never claim the
+        // holder is not a daemon session.
+        None => format!(
+            "Holder: session {owner} (not answering on this daemon right now - retry shortly) \u{b7} Attach: prime-agent --resume {owner} once it responds"
+        ),
+    };
+    format!("{first} \u{b7} {guidance}")
+}
+
 /// The descriptive refusal when the holder is not in the live roster (a
 /// foreign process owns the file's runtime lease): the TS first line
 /// with the anonymous owner, then the next steps that still apply.
@@ -286,6 +329,66 @@ pub fn owner_from_refusal(message: &str) -> Option<String> {
     let end = rest.find(SUFFIX)?;
     let owner = &rest[..end];
     (!owner.is_empty()).then(|| owner.to_string())
+}
+
+#[cfg(test)]
+mod decorate_tests {
+    use super::*;
+
+    /// The interactive decoration preserves the original refusal line
+    /// verbatim and rides the guidance on the SAME line (the
+    /// agents-view status strip shows one line only).
+    #[test]
+    fn the_interactive_decoration_keeps_one_line() {
+        let original =
+            "session worker create failed: Session is already active in abc123: /tmp/s.jsonl";
+        let holder = SessionHolder {
+            id: "abc123".to_string(),
+            name: Some("lane work".to_string()),
+            cwd: Some("/w".to_string()),
+            model: None,
+        };
+        let text = decorate_interactive_refusal(original, Some(holder), "abc123");
+        assert!(!text.contains('\n'), "one line: {text:?}");
+        assert!(
+            text.starts_with(original),
+            "the original line is verbatim: {text}"
+        );
+        assert!(
+            text.contains("Holder: session abc123 \u{201c}lane work\u{201d} \u{b7} cwd /w"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Attach instead: prime-agent --resume abc123"),
+            "{text}"
+        );
+    }
+
+    /// A session-id holder the roster cannot see gets session-shaped
+    /// guidance (never the not-a-session contradiction).
+    #[test]
+    fn an_unseen_session_holder_gets_session_guidance() {
+        let original = "Session is already active in 4be64bca6a0a: /tmp/s.jsonl";
+        let text = decorate_interactive_refusal(original, None, "4be64bca6a0a");
+        assert!(
+            text.contains("Holder: session 4be64bca6a0a (not answering on this daemon right now"),
+            "{text}"
+        );
+        assert!(text.contains("prime-agent --resume 4be64bca6a0a"), "{text}");
+        assert!(!text.contains("not a session on this daemon"), "{text}");
+    }
+
+    /// A process holder keeps the process-shaped guidance.
+    #[test]
+    fn a_process_holder_keeps_process_guidance() {
+        let original = "Session is already active in another process (pid 42): /tmp/s.jsonl";
+        let text = decorate_interactive_refusal(original, None, "another process (pid 42)");
+        assert!(
+            text.contains("The holder is another process (pid 42)"),
+            "{text}"
+        );
+        assert!(text.contains("prime-agent agents"), "{text}");
+    }
 }
 
 #[cfg(test)]
