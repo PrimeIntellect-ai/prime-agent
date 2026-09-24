@@ -126,6 +126,20 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             return Some(c.to_string());
         }
         KeyCode::Enter => {
+            // The super prefix keeps Cmd-modified keys their own identity
+            // (unbound combos match nothing instead of falling through to
+            // the bare action and submitting).
+            if super_key {
+                let mut s = String::new();
+                if shift {
+                    s.push_str("shift+");
+                }
+                if alt {
+                    s.push_str("alt+");
+                }
+                s.push_str("super+enter");
+                return Some(s);
+            }
             if alt {
                 "alt+enter"
             } else if shift {
@@ -135,6 +149,13 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             }
         }
         KeyCode::Tab => {
+            if super_key {
+                return Some(if shift {
+                    "shift+super+tab".into()
+                } else {
+                    "super+tab".into()
+                });
+            }
             if shift {
                 "shift+tab"
             } else {
@@ -142,6 +163,14 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             }
         }
         KeyCode::Backspace => {
+            if super_key {
+                return Some(match (ctrl, alt) {
+                    (true, true) => "ctrl+alt+super+backspace".into(),
+                    (true, false) => "ctrl+super+backspace".into(),
+                    (false, true) => "alt+super+backspace".into(),
+                    (false, false) => "super+backspace".into(),
+                });
+            }
             if alt {
                 "alt+backspace"
             } else if ctrl {
@@ -151,7 +180,12 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
                 "backspace"
             }
         }
-        KeyCode::Esc => "escape",
+        KeyCode::Esc => {
+            if super_key {
+                return Some("super+escape".into());
+            }
+            "escape"
+        }
         KeyCode::Left => return Some(modified_name("left", ctrl, alt, shift, super_key)),
         KeyCode::Right => return Some(modified_name("right", ctrl, alt, shift, super_key)),
         KeyCode::Up => return Some(modified_name("up", ctrl, alt, shift, super_key)),
@@ -164,6 +198,13 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
         KeyCode::Insert => return Some(modified_name("insert", ctrl, alt, shift, super_key)),
         KeyCode::F(n) => return Some(modified_name(&format!("f{n}"), ctrl, alt, shift, super_key)),
         KeyCode::BackTab => {
+            if super_key {
+                return Some(if alt {
+                    "shift+alt+super+tab".into()
+                } else {
+                    "shift+super+tab".into()
+                });
+            }
             if alt {
                 // The merged meta-wrapped `ESC ESC [ Z` (Option+Shift+Tab with
                 // option-as-meta): TS's double-ESC branch strips alt and
@@ -218,7 +259,13 @@ fn ctrl_char_id(c: char, alt: bool, shift: bool, super_key: bool) -> String {
         };
     }
     if !alt && lower == 'j' {
-        return if crate::enhanced_keys::kitty_active() {
+        return if super_key {
+            if crate::enhanced_keys::kitty_active() {
+                "shift+super+enter".to_string()
+            } else {
+                "super+enter".to_string()
+            }
+        } else if crate::enhanced_keys::kitty_active() {
             "shift+enter".to_string()
         } else {
             "enter".to_string()
@@ -451,6 +498,61 @@ mod tests {
     /// an UNBOUND one still matches no keybinding, and the bare key must
     /// not leak through. HYPER/META stay undecoded (no binding names one
     /// and terminals never deliver the bits on their own).
+
+    /// Super-modified SPECIAL keys keep their super identity (Bugbot
+    /// round-1 fix): an unbound Cmd combo must match nothing instead of
+    /// falling through to the bare action — Cmd+Enter submitting the
+    /// prompt or Cmd+Backspace deleting a character would be surprising.
+    #[test]
+    fn super_modified_special_keys_keep_their_identity() {
+        crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let cases = [
+            (KeyCode::Enter, KeyModifiers::SUPER, "super+enter"),
+            (
+                KeyCode::Enter,
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                "shift+super+enter",
+            ),
+            (KeyCode::Backspace, KeyModifiers::SUPER, "super+backspace"),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::SUPER | KeyModifiers::CONTROL,
+                "ctrl+super+backspace",
+            ),
+            (KeyCode::Tab, KeyModifiers::SUPER, "super+tab"),
+            (KeyCode::Esc, KeyModifiers::SUPER, "super+escape"),
+            (KeyCode::BackTab, KeyModifiers::SUPER, "shift+super+tab"),
+            (
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL | KeyModifiers::SUPER,
+                "super+enter",
+            ),
+        ];
+        for (code, modifiers, expected) in cases {
+            let event = KeyEvent::new(code, modifiers);
+            assert_eq!(key_event_to_id(&event).as_deref(), Some(expected));
+        }
+        // None of them reach the bare actions.
+        let kb = crate::keybindings::KeybindingsManager::new();
+        for id in ["super+enter", "shift+super+enter", "super+backspace"] {
+            assert!(
+                !kb.matches(id, "tui.input.submit"),
+                "{id} must not submit the prompt"
+            );
+            assert!(
+                !kb.matches(id, "tui.editor.deleteCharBackward"),
+                "{id} must not delete"
+            );
+            assert!(
+                !kb.matches(id, "app.input.clear"),
+                "{id} must not trigger the escape ladder"
+            );
+        }
+    }
+
     #[test]
     fn super_modified_keys_match_nothing() {
         use KeyModifiers as M;

@@ -239,6 +239,11 @@ impl Editor {
         if self.kill_ring.is_empty() {
             return;
         }
+        // A yank inserts at the cursor like typing: any active selection
+        // collapses first, or the stale anchor would cover different
+        // text than the highlight and the next keystroke would splice the
+        // wrong range.
+        self.selection_anchor = None;
         self.push_undo_snapshot();
         let text = self.kill_ring.peek().unwrap_or_default().to_string();
         self.insert_yanked_text(&text);
@@ -250,6 +255,7 @@ impl Editor {
         if self.last_action.as_ref() != Some(&LastAction::Yank) || self.kill_ring.len() <= 1 {
             return;
         }
+        self.selection_anchor = None;
         self.push_undo_snapshot();
         self.delete_yanked_text();
         self.kill_ring.rotate();

@@ -238,19 +238,22 @@ fn chunk_selection(
         return None;
     }
     let chunk_chars = text.chars().count();
+    // The start column is a source-line column (it converts to the
+    // chunk's coordinates); a fully-covered line selects to the chunk's
+    // end directly, and the END line's column converts like the start.
     let lo = if source_line == start_line {
-        start_col
+        start_col.saturating_sub(source_start)
     } else {
         0
     };
     let hi = if source_line == end_line {
-        end_col
+        end_col.saturating_sub(source_start)
     } else {
         chunk_chars
     };
-    let lo = lo.saturating_sub(source_start);
-    let hi = hi.saturating_sub(source_start).min(chunk_chars);
-    (lo < hi).then_some((lo.min(chunk_chars), hi))
+    let hi = hi.min(chunk_chars);
+    let lo = lo.min(chunk_chars);
+    (lo < hi).then_some((lo, hi))
 }
 
 impl AgentView {
@@ -2659,5 +2662,33 @@ mod tests {
             "the content rows shift below the header pair: {:?}",
             joined[header_row + 2]
         );
+    }
+}
+
+#[cfg(test)]
+mod chunk_selection_tests {
+    use super::chunk_selection;
+
+    /// A fully-covered line highlights to the chunk's own end (the
+    /// chunk-local length), not `chunk length - source start` — wrapped
+    /// continuations keep their highlight (Bugbot round-1 fix).
+    #[test]
+    fn wrapped_chunks_on_fully_covered_lines_highlight_to_their_end() {
+        let sel = Some(((0, 10), (2, 5)));
+        // A wrapped continuation chunk of line 1 (source cols 20..30).
+        let range = chunk_selection(sel, 1, 20, "wrapped text");
+        assert_eq!(range, Some((0, 12)), "the whole chunk highlights");
+        // The selection's ending line converts its source column.
+        let range = chunk_selection(sel, 2, 0, "abcde");
+        assert_eq!(range, Some((0, 5)));
+        // A chunk the selection ends before does not highlight.
+        let range = chunk_selection(sel, 2, 6, "fgh");
+        assert_eq!(range, None);
+        // The starting line clips at its start column (a selection
+        // starting exactly at a chunk's end leaves it empty).
+        let range = chunk_selection(sel, 0, 0, "01234567890123456789");
+        assert_eq!(range, Some((10, 20)));
+        let range = chunk_selection(sel, 0, 10, "0123456789");
+        assert_eq!(range, None, "the selection starts at this chunk's end");
     }
 }

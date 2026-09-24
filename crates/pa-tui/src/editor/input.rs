@@ -147,6 +147,9 @@ impl Editor {
                     let is_typed_exact = self.is_slash_name_completion_at_prompt_start();
                     self.push_undo_snapshot();
                     self.last_action = None;
+                    // A completion rewrites the buffer at the cursor: the
+                    // selection collapses with it.
+                    self.selection_anchor = None;
                     let (cl, cc) = (self.cursor_line, self.cursor_col);
                     let prefix = self
                         .autocomplete

@@ -64,7 +64,11 @@ impl Editor {
     /// anchors at the cursor, later ones keep the anchor.
     fn extend_selection(&mut self, motion: fn(&mut Editor)) {
         if self.selection_anchor.is_none() {
-            self.selection_anchor = Some((self.cursor_line, self.cursor_col));
+            // The anchor floors at the hidden bang prefix (the cursor
+            // itself never sits below it, but the anchor is what
+            // remove_selection splices from).
+            let col = self.cursor_col.max(self.line_start_col(self.cursor_line));
+            self.selection_anchor = Some((self.cursor_line, col));
         }
         motion(self);
         if !self.has_selection() {
@@ -198,6 +202,10 @@ impl Editor {
     pub(crate) fn transpose_chars(&mut self) {
         self.history_index = -1;
         self.last_action = None;
+        // The swap moves the cursor without preserving any selection span:
+        // a stale anchor would cover different text than the highlight
+        // shows, so the selection collapses first.
+        self.selection_anchor = None;
         let line = self.lines[self.cursor_line].clone();
         let len = line.chars().count();
         let line_start = self.line_start_col(self.cursor_line);
@@ -407,6 +415,105 @@ mod tests {
         assert_eq!(e.get_text(), "alpha beta");
         e.handle_input("ctrl+shift+z");
         assert_eq!(e.get_text(), "alpha b");
+    }
+
+    /// Yank inserts at the cursor: an active selection collapses first, or
+    /// the stale anchor would splice a wrong range on the next keystroke.
+    #[test]
+    fn yank_collapses_a_stale_selection() {
+        let mut e = ed();
+        e.set_text("keep drop");
+        e.move_to_doc_end();
+        e.handle_input("ctrl+w");
+        assert_eq!(e.get_text(), "keep ");
+        e.handle_input("shift+alt+left");
+        assert!(e.has_selection());
+        e.handle_input("ctrl+y");
+        assert!(!e.has_selection(), "yank collapses the stale selection");
+        assert_eq!(e.get_text(), "keep drop");
+        // Typing after a yank never replaces a stale range.
+        e.handle_input("!");
+        assert_eq!(e.get_text(), "keep drop!");
+    }
+
+    /// An empty paste payload (control-only bytes) is a full no-op: the
+    /// selection, the text, and the undo stack stay untouched.
+    #[test]
+    fn an_empty_paste_with_a_selection_is_a_noop() {
+        let mut e = ed();
+        e.set_text("abc def");
+        e.move_to_doc_end();
+        e.handle_input("shift+alt+left");
+        assert!(e.has_selection());
+        let _ = e.take_events();
+        let disposition = e.handle_paste("\u{7}\u{1}\u{2}");
+        assert_eq!(disposition, PasteDisposition::Inline);
+        assert_eq!(e.get_text(), "abc def", "nothing was inserted");
+        assert!(e.has_selection(), "the selection survives");
+        assert!(e.take_events().is_empty(), "no change event fired");
+    }
+
+    /// Transpose collapses a selection before swapping (the swap moves the
+    /// cursor, which would strand the old anchor on different text).
+    #[test]
+    fn transpose_collapses_the_selection() {
+        let mut e = ed();
+        e.set_text("abdc");
+        e.set_cursor_for_tests(0, 3);
+        e.handle_input("shift+left");
+        e.handle_input("shift+left");
+        assert!(e.has_selection());
+        e.handle_input("ctrl+t");
+        assert!(!e.has_selection(), "transpose collapses the selection");
+        assert_eq!(e.get_text(), "abcd");
+    }
+
+    /// The selection anchor floors at the hidden bang prefix: extending
+    /// from the prompt's start can never select or delete the prefix.
+    #[test]
+    fn selection_anchor_never_covers_the_hidden_prefix() {
+        let mut e = ed();
+        e.set_text("!cmd");
+        // Cursor at the protected start of the bang line.
+        e.set_cursor_for_tests(0, e.line_start_col(0));
+        e.handle_input("shift+right");
+        e.handle_input("shift+right");
+        assert!(e.has_selection());
+        let Some(((line, col), _)) = e.selection_range() else {
+            panic!("selection expected");
+        };
+        assert_eq!((line, col), (0, 1), "the anchor sits past the prefix");
+        // Replacing the selection keeps the prefix.
+        e.handle_input("X");
+        assert_eq!(e.get_text(), "!X", "the bang prefix survived the replace");
+        assert_eq!(e.bash_prompt_prefix(), Some("! "));
+    }
+
+    /// Paragraph motion into line 0 lands on the protected column (the
+    /// same position Home lands on), never inside or before the prefix.
+    #[test]
+    fn paragraph_motion_into_the_bang_line_lands_on_the_protected_start() {
+        let mut e = ed();
+        e.set_text("!cmd\ncontinuation");
+        e.set_cursor_for_tests(1, 13);
+        e.handle_input("ctrl+up");
+        assert_eq!(
+            e.get_cursor(),
+            (0, e.line_start_col(0)),
+            "the cursor lands exactly on the protected start (the Home position)"
+        );
+        // The hidden prefix itself is never inside a selection made by
+        // the paragraph family.
+        e.set_cursor_for_tests(1, 13);
+        e.handle_input("shift+ctrl+up");
+        let Some(((line, col), _)) = e.selection_range() else {
+            panic!("selection expected");
+        };
+        assert_eq!(
+            (line, col),
+            (0, 1),
+            "the selection starts past the hidden prefix"
+        );
     }
 
     /// Doc/paragraph selection families reach the buffer edges.

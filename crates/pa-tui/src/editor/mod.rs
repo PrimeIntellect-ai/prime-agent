@@ -391,6 +391,10 @@ impl Editor {
             return;
         }
         self.cancel_autocomplete();
+        // The injected text lands at the cursor: a stale selection anchor
+        // would make the NEXT keystroke splice a wrong range, so the
+        // selection collapses first.
+        self.selection_anchor = None;
         self.push_undo_snapshot();
         self.last_action = None;
         self.history_index = -1;
@@ -618,12 +622,6 @@ impl Editor {
         self.cancel_autocomplete();
         self.history_index = -1;
         self.last_action = None;
-        self.push_undo_snapshot();
-        // Pasting over a selection replaces it (one undo step; undo of a
-        // paste-then-selection-paste restores the whole original text).
-        if self.has_selection() {
-            self.remove_selection();
-        }
 
         // A tmux popup can re-encode control bytes inside the paste as
         // CSI-u Ctrl+letter sequences; decode them before the per-char
@@ -643,6 +641,18 @@ impl Editor {
                     filtered = format!(" {}", filtered);
                 }
             }
+        }
+        // A payload that filters to nothing (control-only bytes, empty
+        // bracketed paste) changes nothing: no undo step, no selection
+        // removal — the editor stays exactly as it was.
+        if filtered.is_empty() {
+            return PasteDisposition::Inline;
+        }
+        self.push_undo_snapshot();
+        // Pasting over a selection replaces it (one undo step; undo of a
+        // paste-then-selection-paste restores the whole original text).
+        if self.has_selection() {
+            self.remove_selection();
         }
         let line_count = filtered.split('\n').count();
         if line_count > LARGE_PASTE_LINES || filtered.chars().count() > LARGE_PASTE_CHARS {

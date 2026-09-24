@@ -212,7 +212,14 @@ pub const TUI_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
     ),
     (
         "tui.editor.selectParagraphDown",
-        def!(&["shift+ctrl+down"], "Select down one paragraph", scope "editor"),
+        // `shift+ctrl+down` is `tui.viewport.follow` (the fullscreen
+        // transcript key the session dispatch consumes before the editor),
+        // so the paragraph-select default is `shift+alt+down` instead.
+        def!(
+            &["shift+alt+down"],
+            "Select down one paragraph",
+            scope "editor"
+        ),
     ),
     (
         "tui.editor.selectDocStart",
@@ -1225,7 +1232,11 @@ mod tests {
         assert!(kb.matches("shift+down", "tui.editor.selectDown"));
         assert!(kb.matches("shift+alt+right", "tui.editor.selectWordRight"));
         assert!(kb.matches("shift+end", "tui.editor.selectLineEnd"));
-        assert!(kb.matches("shift+ctrl+down", "tui.editor.selectParagraphDown"));
+        assert!(kb.matches("shift+alt+down", "tui.editor.selectParagraphDown"));
+        // `shift+ctrl+down` is the viewport-follow key: it must not also
+        // claim the editor's paragraph-select (the session dispatch owns
+        // it first, so binding both would make the editor default dead).
+        assert!(!kb.matches("shift+ctrl+down", "tui.editor.selectParagraphDown"));
         assert!(kb.matches("ctrl+t", "tui.editor.transposeChars"));
         assert!(kb.matches("ctrl+x", "tui.editor.cutSelection"));
         assert!(kb.matches("ctrl+shift+c", "tui.editor.copySelection"));
