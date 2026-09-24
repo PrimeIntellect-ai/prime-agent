@@ -341,6 +341,7 @@ mod tests {
                 retained_message_count: None,
                 custom_instructions: None,
                 harness_digest: None,
+                harness_state_fingerprint: None,
                 timestamp: 0,
             }),
             custom(COMPACTION_OUTCOME_CUSTOM_TYPE, "later", Some("success")),

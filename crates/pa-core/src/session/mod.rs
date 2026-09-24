@@ -344,23 +344,79 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
         }
     }
 
-    let mut messages: Vec<AgentMessage> = Vec::new();
-    let append_message = |entry: &FileEntry, target: &mut Vec<AgentMessage>| match entry {
-        FileEntry::Message { message, .. } => target.push(message.clone()),
-        FileEntry::CustomMessage { payload, .. } => {
-            target.push(AgentMessage::Custom(create_custom_message(payload, entry)));
+    // Harness digests are regenerable snapshots of persistent state, so only
+    // the newest one belongs in the built context (TS #2394): older digest
+    // custom messages are skipped at assembly time, and a compaction-entry
+    // snapshot yields to any digest appended after the compaction.
+    // Persisted entries keep every copy; the newest digest is authoritative
+    // and is re-delivered at cold boundaries.
+    let mut newest_digest_path_idx: Option<usize> = None;
+    let mut newest_digest_entry_id: Option<String> = None;
+    for (path_idx, &index) in path.iter().enumerate().rev() {
+        if let FileEntry::CustomMessage { payload, .. } = &entries[index] {
+            if payload.custom_type == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE {
+                newest_digest_path_idx = Some(path_idx);
+                newest_digest_entry_id = entries[index].id().map(str::to_string);
+                break;
+            }
         }
-        FileEntry::BranchSummary { payload, .. } if !payload.summary.is_empty() => {
-            target.push(AgentMessage::BranchSummary(
-                pa_types::session::BranchSummaryMessage {
-                    summary: payload.summary.clone(),
-                    from_id: payload.from_id.clone(),
-                    timestamp: timestamp_to_millis(entry.timestamp()),
-                },
-            ));
-        }
-        _ => {}
+    }
+    let compaction_path_idx = compaction
+        .and_then(|compaction_index| path.iter().position(|&index| index == compaction_index));
+    // True when the compaction snapshot is the newest digest in context, so
+    // every digest custom message is older and skipped entirely.
+    let snapshot_outranks_digest = compaction
+        .map(|compaction_index| {
+            let has_snapshot = matches!(
+                &entries[compaction_index],
+                FileEntry::Compaction { payload, .. } if payload.harness_digest.is_some()
+            );
+            has_snapshot
+                && newest_digest_path_idx.is_none_or(|digest_idx| {
+                    compaction_path_idx.is_some_and(|compaction_idx| digest_idx < compaction_idx)
+                })
+        })
+        .unwrap_or(false);
+    let keep_digest_entry_id = if snapshot_outranks_digest {
+        None
+    } else {
+        newest_digest_entry_id.as_deref()
     };
+    // The summary's snapshot yields to any digest appended after the
+    // compaction, carrying its fingerprint with it (TS #2400: the summary
+    // render skips the digest block the same way).
+    let summary_yields_snapshot = compaction.is_some_and(|_| {
+        newest_digest_path_idx.is_some_and(|digest_idx| {
+            compaction_path_idx.is_some_and(|compaction_idx| digest_idx > compaction_idx)
+        })
+    });
+
+    let mut messages: Vec<AgentMessage> = Vec::new();
+    let append_message =
+        |entry: &FileEntry, target: &mut Vec<AgentMessage>, keep_digest_entry_id: Option<&str>| {
+            match entry {
+                FileEntry::Message { message, .. } => target.push(message.clone()),
+                FileEntry::CustomMessage { payload, .. } => {
+                    if payload.custom_type
+                        == crate::session_engine::headless::HARNESS_DIGEST_CUSTOM_TYPE
+                        && entry.id() != keep_digest_entry_id
+                    {
+                        return;
+                    }
+                    target.push(AgentMessage::Custom(create_custom_message(payload, entry)));
+                }
+                FileEntry::BranchSummary { payload, .. } if !payload.summary.is_empty() => {
+                    target.push(AgentMessage::BranchSummary(
+                        pa_types::session::BranchSummaryMessage {
+                            summary: payload.summary.clone(),
+                            from_id: payload.from_id.clone(),
+                            timestamp: timestamp_to_millis(entry.timestamp()),
+                        },
+                    ));
+                }
+                _ => {}
+            }
+        };
 
     if let Some(compaction_index) = compaction {
         let payload = match &entries[compaction_index] {
@@ -377,24 +433,35 @@ pub fn build_session_context(entries: &[FileEntry], leaf_id: Option<&str>) -> Se
                 found_first_kept = true;
             }
             if found_first_kept {
-                append_message(&entries[index], &mut retained);
+                append_message(&entries[index], &mut retained, keep_digest_entry_id);
             }
         }
+        let summary_harness_digest = if summary_yields_snapshot {
+            None
+        } else {
+            payload.harness_digest.clone()
+        };
+        let summary_harness_state_fingerprint = if summary_harness_digest.is_none() {
+            None
+        } else {
+            payload.harness_state_fingerprint.clone()
+        };
         messages.push(AgentMessage::CompactionSummary(CompactionSummaryMessage {
             summary: payload.summary.clone(),
             tokens_before: payload.tokens_before,
             retained_message_count: Some(retained.len() as u64),
             custom_instructions: payload.custom_instructions.clone(),
-            harness_digest: payload.harness_digest,
+            harness_digest: summary_harness_digest,
+            harness_state_fingerprint: summary_harness_state_fingerprint,
             timestamp: timestamp_to_millis(entries[compaction_index].timestamp()),
         }));
         messages.extend(retained);
         for &index in &path[path.partition_point(|&i| i <= compaction_index)..] {
-            append_message(&entries[index], &mut messages);
+            append_message(&entries[index], &mut messages, keep_digest_entry_id);
         }
     } else {
         for &index in &path {
-            append_message(&entries[index], &mut messages);
+            append_message(&entries[index], &mut messages, keep_digest_entry_id);
         }
     }
 
@@ -517,6 +584,139 @@ mod context_tests {
             AgentMessage::User(user) => assert_eq!(user.content.text(), "kept"),
             _ => panic!("expected retained user message"),
         }
+    }
+
+    /// A harness-digest custom entry (TS #2394 fixtures): `display: false`
+    /// with the raw digest in details. `parent` is the raw `parentId` JSON
+    /// literal (`null` or `"u1"`).
+    fn digest_entry_json(id: &str, parent: &str, digest: &str) -> String {
+        format!(
+            r#"{{"type":"custom_message","id":"{id}","parentId":{parent},"timestamp":"2024-01-01T00:00:00.000Z","customType":"harness_digest","content":"[harness-digest]\n\n{digest}\n</harness_state>","display":false,"details":{{"digest":"{digest}"}}}}"#
+        )
+    }
+
+    fn digest_rows(context: &super::SessionContext) -> Vec<String> {
+        context
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                AgentMessage::Custom(custom) if custom.custom_type == "harness_digest" => custom
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.get("digest"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn summary_digest(context: &super::SessionContext) -> Option<String> {
+        context.messages.iter().find_map(|message| match message {
+            AgentMessage::CompactionSummary(summary) => summary.harness_digest.clone(),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn context_keeps_only_the_newest_harness_digest() {
+        let content = format!(
+            r#"
+{{"type":"session","id":"s","timestamp":"2024-01-01T00:00:00.000Z","cwd":"/w","version":3}}
+{{"type":"message","id":"u1","parentId":null,"timestamp":"2024-01-01T00:00:01.000Z","message":{{"role":"user","content":"hello","timestamp":0}}}}
+{digest_a}
+{{"type":"message","id":"m2","parentId":"d1","timestamp":"2024-01-01T00:00:03.000Z","message":{{"role":"user","content":"reply","timestamp":0}}}}
+{digest_b}
+"#,
+            digest_a = digest_entry_json("d1", "\"u1\"", "digest-a"),
+            digest_b = digest_entry_json("d2", "\"m2\"", "digest-b"),
+        );
+        let entries = parse_session_entries(&content);
+        let context = build_session_context(&entries, None);
+        // Only the newest digest custom message rides the built context;
+        // older copies are regenerable redundancy (TS #2394).
+        assert_eq!(digest_rows(&context), vec!["digest-b".to_string()]);
+        // Non-digest rows keep their order.
+        assert_eq!(context.messages.len(), 3);
+    }
+
+    #[test]
+    fn context_drops_retained_digests_when_the_compaction_snapshot_is_newer() {
+        let content = format!(
+            r#"
+{{"type":"session","id":"s","timestamp":"2024-01-01T00:00:00.000Z","cwd":"/w","version":3}}
+{digest_a}
+{{"type":"message","id":"u2","parentId":"d1","timestamp":"2024-01-01T00:00:02.000Z","message":{{"role":"user","content":"kept","timestamp":0}}}}
+{{"type":"compaction","id":"c1","parentId":"u2","timestamp":"2024-01-01T00:00:03.000Z","summary":"the story so far","firstKeptEntryId":"d1","tokensBefore":1234,"harnessDigest":"snapshot digest","harnessStateFingerprint":"fp-snapshot"}}
+{{"type":"message","id":"u3","parentId":"c1","timestamp":"2024-01-01T00:00:04.000Z","message":{{"role":"user","content":"after","timestamp":0}}}}
+"#,
+            digest_a = digest_entry_json("d1", "null", "retained digest"),
+        );
+        let entries = parse_session_entries(&content);
+        let context = build_session_context(&entries, None);
+        // The snapshot outranks every retained digest copy, so no digest
+        // custom message rides the context and the summary keeps its
+        // snapshot (with the fingerprint of the state behind it).
+        assert!(digest_rows(&context).is_empty());
+        assert_eq!(summary_digest(&context).as_deref(), Some("snapshot digest"));
+        match &context.messages[0] {
+            AgentMessage::CompactionSummary(summary) => {
+                assert_eq!(
+                    summary.harness_state_fingerprint.as_deref(),
+                    Some("fp-snapshot")
+                );
+            }
+            _ => panic!("expected compaction summary first"),
+        }
+    }
+
+    #[test]
+    fn context_keeps_the_newest_post_compaction_digest_and_drops_the_snapshot() {
+        let content = format!(
+            r#"
+{{"type":"session","id":"s","timestamp":"2024-01-01T00:00:00.000Z","cwd":"/w","version":3}}
+{{"type":"message","id":"u1","parentId":null,"timestamp":"2024-01-01T00:00:01.000Z","message":{{"role":"user","content":"q","timestamp":0}}}}
+{{"type":"compaction","id":"c1","parentId":"u1","timestamp":"2024-01-01T00:00:02.000Z","summary":"the story so far","firstKeptEntryId":"u1","tokensBefore":1234,"harnessDigest":"snapshot digest","harnessStateFingerprint":"fp-snapshot"}}
+{digest_b}
+"#,
+            digest_b = digest_entry_json("d2", "\"c1\"", "newest digest"),
+        );
+        let entries = parse_session_entries(&content);
+        let context = build_session_context(&entries, None);
+        // A digest appended after the compaction outranks the snapshot: the
+        // summary yields its digest block (and fingerprint), and only the
+        // newest digest custom message rides the context.
+        assert_eq!(digest_rows(&context), vec!["newest digest".to_string()]);
+        assert_eq!(summary_digest(&context), None);
+        match &context.messages[0] {
+            AgentMessage::CompactionSummary(summary) => {
+                assert_eq!(summary.harness_digest, None);
+                assert_eq!(summary.harness_state_fingerprint, None);
+            }
+            _ => panic!("expected compaction summary first"),
+        }
+    }
+
+    #[test]
+    fn context_keeps_the_newest_retained_digest_when_the_compaction_has_no_snapshot() {
+        let content = format!(
+            r#"
+{{"type":"session","id":"s","timestamp":"2024-01-01T00:00:00.000Z","cwd":"/w","version":3}}
+{digest_old}
+{digest_new}
+{{"type":"message","id":"u3","parentId":"d2","timestamp":"2024-01-01T00:00:03.000Z","message":{{"role":"user","content":"kept","timestamp":0}}}}
+{{"type":"compaction","id":"c1","parentId":"u3","timestamp":"2024-01-01T00:00:04.000Z","summary":"the story so far","firstKeptEntryId":"d1","tokensBefore":1234}}
+{{"type":"message","id":"u4","parentId":"c1","timestamp":"2024-01-01T00:00:05.000Z","message":{{"role":"user","content":"after","timestamp":0}}}}
+"#,
+            digest_old = digest_entry_json("d1", "null", "retained old"),
+            digest_new = digest_entry_json("d2", "\"d1\"", "retained newest"),
+        );
+        let entries = parse_session_entries(&content);
+        let context = build_session_context(&entries, None);
+        // A compaction without a snapshot never suppresses the retained
+        // digests; only the newest one rides the context.
+        assert_eq!(digest_rows(&context), vec!["retained newest".to_string()]);
+        assert_eq!(summary_digest(&context), None);
     }
 
     #[test]

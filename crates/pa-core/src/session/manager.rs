@@ -1711,6 +1711,7 @@ mod tests {
                     cost: Default::default(),
                 }),
                 harness_digest: None,
+                harness_state_fingerprint: None,
             })
             .unwrap();
         let line = serialize_entry(

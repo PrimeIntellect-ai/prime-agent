@@ -3,6 +3,8 @@
 
 use std::collections::HashMap;
 
+use sha2::{Digest, Sha256};
+
 use super::{
     compact_harness_text, HarnessEntry, HarnessState, RefinementKind,
     DEFAULT_OVERVIEW_CONTENT_LIMIT, DEFAULT_OVERVIEW_ENTRY_LIMIT,
@@ -95,9 +97,51 @@ fn push_segment(segment: &str, is_cjk_segment: bool, terms: &mut Vec<String>) {
     }
 }
 
+/// Inverse document frequency per query term over the entries being ranked:
+/// `ln(1 + documents / matches)`. A term present in every entry still weighs
+/// `ln(2)`, while a term in one entry of N weighs `ln(1 + N)`, so rare
+/// distinctive terms outrank ubiquitous ones. Terms matching no entry are
+/// absent (they cannot score anything).
+pub fn harness_query_term_idf(
+    entries: &[HarnessEntry],
+    terms: &HarnessQueryTerms,
+) -> HarnessQueryTerms {
+    let mut idf = HarnessQueryTerms::new();
+    if terms.is_empty() {
+        return idf;
+    }
+    let mut matches: HashMap<&str, usize> = HashMap::new();
+    for entry in entries {
+        let title = entry.title.to_lowercase();
+        let content = entry.content.to_lowercase();
+        let identifier = format!("{} {}", entry.path.to_lowercase(), entry.id.to_lowercase());
+        for term in terms.keys() {
+            if title.contains(term.as_str())
+                || content.contains(term.as_str())
+                || identifier.contains(term.as_str())
+            {
+                *matches.entry(term.as_str()).or_insert(0) += 1;
+            }
+        }
+    }
+    for (term, document_frequency) in matches {
+        idf.insert(
+            term.to_string(),
+            (1.0 + entries.len() as f64 / document_frequency as f64).ln(),
+        );
+    }
+    idf
+}
+
 /// Score one entry against query terms: weighted per-term overlap across
-/// title/content/identifier fields (field coverage weighted, not repetition).
-pub fn score_harness_entry_for_query(entry: &HarnessEntry, terms: &HarnessQueryTerms) -> f64 {
+/// title/content/identifier fields (field coverage weighted, not repetition),
+/// with each matched term's weight discounted by its document frequency in
+/// the ranked corpus (`idf`; a missing map weights every term at 1).
+pub fn score_harness_entry_for_query(
+    entry: &HarnessEntry,
+    terms: &HarnessQueryTerms,
+    idf: Option<&HarnessQueryTerms>,
+) -> f64 {
     if terms.is_empty() {
         return 0.0;
     }
@@ -117,7 +161,10 @@ pub fn score_harness_entry_for_query(entry: &HarnessEntry, terms: &HarnessQueryT
             fields += 1;
         }
         if fields > 0 {
-            score += weight * (1.0 + (fields - 1) as f64 * 0.5);
+            let term_idf = idf
+                .and_then(|map| map.get(term.as_str()).copied())
+                .unwrap_or(1.0);
+            score += weight * term_idf * (1.0 + (fields - 1) as f64 * 0.5);
         }
     }
     score
@@ -189,11 +236,18 @@ pub fn format_harness_state_for_prompt(
             .get(&kind_for(kind))
             .cloned()
             .unwrap_or_default();
+        // The ranked corpus is the kind's own entries: they compete for the
+        // same top-k slots, so document frequency discounts terms ubiquitous
+        // within the kind rather than across unrelated kinds.
         let mut entries: Vec<HarnessEntry> = entries.into_values().collect();
-        entries.sort_by(|a, b| match query_terms.as_ref() {
-            Some(terms) if !terms.is_empty() => {
-                let left = score_harness_entry_for_query(b, terms)
-                    .partial_cmp(&score_harness_entry_for_query(a, terms))
+        let ranked_idf = match query_terms.as_ref() {
+            Some(terms) if !terms.is_empty() => Some(harness_query_term_idf(&entries, terms)),
+            _ => None,
+        };
+        entries.sort_by(|a, b| match (query_terms.as_ref(), ranked_idf.as_ref()) {
+            (Some(terms), idf) if !terms.is_empty() => {
+                let left = score_harness_entry_for_query(b, terms, idf)
+                    .partial_cmp(&score_harness_entry_for_query(a, terms, idf))
                     .unwrap_or(std::cmp::Ordering::Equal);
                 if left != std::cmp::Ordering::Equal {
                     return left;
@@ -306,6 +360,157 @@ pub fn format_harness_state_for_prompt(
     lines.join("\n").trim().to_string()
 }
 
+/// Bump when the fingerprinted material or its canonical serialization
+/// changes, so fingerprints minted under different versions never compare
+/// equal.
+pub const HARNESS_DIGEST_FINGERPRINT_VERSION: u32 = 1;
+
+/// The render flags the digest actually reads (TS `renderFlags` on
+/// `harnessDigestFingerprint`): the relevance query terms are excluded —
+/// the digest stays frozen per delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HarnessDigestRenderFlags {
+    pub include_ipython_examples: bool,
+    pub include_shell_examples: bool,
+    pub include_refine_examples: bool,
+}
+
+fn scope_name(entry: &HarnessEntry) -> &'static str {
+    match entry.scope {
+        Some(super::HarnessScope::Local) => "local",
+        _ => "global",
+    }
+}
+
+fn kind_name(entry: &HarnessEntry) -> &'static str {
+    match entry.kind {
+        RefinementKind::Prompt => "prompt",
+        RefinementKind::Memory => "memory",
+        RefinementKind::Skill => "skill",
+        RefinementKind::Subagent => "subagent",
+    }
+}
+
+/// Stable fingerprint of the harness material a digest renders (TS
+/// `harnessDigestFingerprint`). Equal states (per the fields the digest
+/// actually prints) produce equal fingerprints, so cold boundaries can
+/// skip digest re-delivery with a state comparison instead of a
+/// rendered-text comparison that query-term relevance keeps invalidating.
+///
+/// Covered: entry identity and content (entry order is normalized away, as
+/// is the call contract on non-skill entries, which the formatter never
+/// prints), plus the render flags and each refinement's printed fields in
+/// stored order, since the formatter renders a positional newest tail. The
+/// shell-examples flag participates only when IPython examples are not
+/// rendered: the formatter never reads it then, so it is normalized out of
+/// the fingerprint to keep an unchanged digest fresh. Excluded: `metadata`,
+/// `source`, the invisible `created_at`/`updated_at` bookkeeping, and
+/// relevance query terms.
+pub fn harness_digest_fingerprint(
+    state: &HarnessState,
+    render_flags: HarnessDigestRenderFlags,
+) -> String {
+    let mut entries: Vec<&HarnessEntry> = state
+        .entries
+        .values()
+        .flat_map(|records| records.values())
+        .collect();
+    entries.sort_by(|a, b| {
+        format!("{}\0{}\0{}", scope_name(a), kind_name(a), a.id).cmp(&format!(
+            "{}\0{}\0{}",
+            scope_name(b),
+            kind_name(b),
+            b.id
+        ))
+    });
+    let entry_material = |entry: &HarnessEntry| {
+        let mut material = serde_json::Map::new();
+        material.insert("scope".to_string(), serde_json::json!(scope_name(entry)));
+        material.insert("kind".to_string(), serde_json::json!(kind_name(entry)));
+        material.insert("id".to_string(), serde_json::json!(entry.id));
+        material.insert("title".to_string(), serde_json::json!(entry.title));
+        material.insert("path".to_string(), serde_json::json!(entry.path));
+        material.insert("version".to_string(), serde_json::json!(entry.version));
+        material.insert("content".to_string(), serde_json::json!(entry.content));
+        // Only skills render the kernel call contract, so another kind can
+        // change these fields without changing a single digest byte.
+        if entry.kind == RefinementKind::Skill {
+            material.insert(
+                "reference".to_string(),
+                serde_json::Value::Object(entry.reference.clone().into_iter().collect()),
+            );
+            material.insert(
+                "arguments".to_string(),
+                serde_json::Value::Object(entry.arguments.clone().into_iter().collect()),
+            );
+        }
+        serde_json::Value::Object(material)
+    };
+    // Refinements keep their stored order: the formatter renders the newest
+    // tail of the array, so an order-only change renders differently and must
+    // not reuse the previous digest.
+    let refinement_material = state
+        .refinements
+        .iter()
+        .map(|event| {
+            let mut material = serde_json::Map::new();
+            material.insert("id".to_string(), serde_json::json!(event.id));
+            material.insert("trigger".to_string(), serde_json::json!(event.trigger));
+            material.insert("changes".to_string(), serde_json::json!(event.changes));
+            material.insert("outcome".to_string(), serde_json::json!(event.outcome));
+            serde_json::Value::Object(material)
+        })
+        .collect::<Vec<_>>();
+    // The formatter renders the shell call-contract only when IPython
+    // examples are absent, so the shell flag cannot change the digest while
+    // IPython examples take precedence; fingerprint only the flags the
+    // render reads.
+    let effective_shell_examples = if render_flags.include_ipython_examples {
+        false
+    } else {
+        render_flags.include_shell_examples
+    };
+    let mut flags_material = serde_json::Map::new();
+    flags_material.insert(
+        "includeIpythonExamples".to_string(),
+        serde_json::json!(render_flags.include_ipython_examples),
+    );
+    flags_material.insert(
+        "includeShellExamples".to_string(),
+        serde_json::json!(effective_shell_examples),
+    );
+    flags_material.insert(
+        "includeRefineExamples".to_string(),
+        serde_json::json!(render_flags.include_refine_examples),
+    );
+    let mut material = serde_json::Map::new();
+    material.insert(
+        "version".to_string(),
+        serde_json::json!(HARNESS_DIGEST_FINGERPRINT_VERSION),
+    );
+    material.insert(
+        "renderFlags".to_string(),
+        serde_json::Value::Object(flags_material),
+    );
+    material.insert(
+        "entries".to_string(),
+        serde_json::Value::Array(entries.iter().map(|entry| entry_material(entry)).collect()),
+    );
+    material.insert(
+        "refinements".to_string(),
+        serde_json::Value::Array(refinement_material),
+    );
+    let serialized =
+        serde_json::to_string(&serde_json::Value::Object(material)).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(serialized.as_bytes());
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn kind_for(name: &str) -> RefinementKind {
     match name {
         "prompt" => RefinementKind::Prompt,
@@ -334,6 +539,24 @@ mod tests {
         assert_eq!(dupes.iter().filter(|t| *t == "alpha").count(), 1);
     }
 
+    fn make_entry(id: &str, title: &str, content: &str, path: &str) -> HarnessEntry {
+        HarnessEntry {
+            id: id.to_string(),
+            kind: RefinementKind::Memory,
+            title: title.to_string(),
+            content: content.to_string(),
+            path: path.to_string(),
+            scope: Some(HarnessScope::Global),
+            reference: Default::default(),
+            arguments: Default::default(),
+            metadata: Default::default(),
+            source: "test".to_string(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            version: 1,
+        }
+    }
+
     #[test]
     fn scoring_field_coverage() {
         let entry = HarnessEntry {
@@ -354,10 +577,199 @@ mod tests {
         let mut terms = HarnessQueryTerms::new();
         terms.insert("web".to_string(), 1.0);
         // web matches title + content + identifier: 3 fields -> 1.0*(1+1.0) = 2.
-        let score = score_harness_entry_for_query(&entry, &terms);
+        let score = score_harness_entry_for_query(&entry, &terms, None);
         assert!((score - 2.0).abs() < 1e-9);
         terms.insert("absent".to_string(), 1.0);
-        assert!((score_harness_entry_for_query(&entry, &terms) - score).abs() < 1e-9);
+        assert!((score_harness_entry_for_query(&entry, &terms, None) - score).abs() < 1e-9);
+    }
+
+    #[test]
+    fn idf_discounts_common_terms_over_the_ranked_corpus() {
+        let terms = HarnessQueryTerms::from_iter([
+            ("session".to_string(), 1.0),
+            ("quantum".to_string(), 1.0),
+            ("missing".to_string(), 1.0),
+        ]);
+        let common0 = make_entry("common0", "Session notes", "session text", "general");
+        let common1 = make_entry("common1", "Session notes", "session text", "general");
+        let rare = make_entry("rare", "Quantum note", "quantum text", "general");
+        // "session" matches 2 of 3 entries, "quantum" 1 of 3, "missing" none.
+        let corpus = [common0.clone(), common1.clone(), rare.clone()];
+        let idf = harness_query_term_idf(&corpus, &terms);
+        assert_eq!(idf.len(), 2);
+        assert!((idf["session"] - (1.0 + 3.0 / 2.0).ln()).abs() < 1e-9);
+        assert!((idf["quantum"] - (1.0 + 3.0 / 1.0).ln()).abs() < 1e-9);
+        // The discount scales the weighted overlap: "quantum" covers 2
+        // fields of 1 entry.
+        let rare_score = score_harness_entry_for_query(&rare, &terms, Some(&idf));
+        assert!((rare_score - (1.0 + 3.0 / 1.0).ln() * 1.5).abs() < 1e-9);
+        // A term in every entry still weighs ln(2); degenerate corpora stay
+        // inert, and empty terms or corpora score nothing.
+        let solo_idf = harness_query_term_idf(&[rare.clone()], &terms);
+        assert!((solo_idf["quantum"] - 2.0_f64.ln()).abs() < 1e-9);
+        assert!(harness_query_term_idf(&[], &terms).is_empty());
+        assert!(harness_query_term_idf(&corpus, &HarnessQueryTerms::new()).is_empty());
+        // A rare distinctive term outranks a common-term-dense entry in the
+        // rendered window, regardless of updated_at recency.
+        let mut state = empty_harness_state();
+        for entry in [common0, common1, rare] {
+            state
+                .entries
+                .get_mut(&RefinementKind::Memory)
+                .unwrap()
+                .insert(entry.id.clone(), entry);
+        }
+        let rendered = format_harness_state_for_prompt(
+            &state,
+            &HarnessStatePromptOptions {
+                max_entries_per_kind: Some(2),
+                query_terms: Some(HarnessQueryTerms::from_iter([
+                    ("session".to_string(), 1.0),
+                    ("quantum".to_string(), 1.0),
+                ])),
+                ..Default::default()
+            },
+        );
+        assert!(rendered.contains("[global:rare]"));
+        assert!(rendered.contains("+1 more memory entries"));
+    }
+
+    #[test]
+    fn fingerprint_is_stable_across_entry_order_and_ignores_query_terms() {
+        let mut state = empty_harness_state();
+        let alpha = make_entry("alpha", "Alpha note", "Alpha content", "general");
+        let zeta = make_entry("zeta", "Zeta note", "Zeta content", "policy");
+        state
+            .entries
+            .get_mut(&RefinementKind::Memory)
+            .unwrap()
+            .insert("alpha".to_string(), alpha);
+        state
+            .entries
+            .get_mut(&RefinementKind::Prompt)
+            .unwrap()
+            .insert("zeta".to_string(), zeta);
+        let flags = HarnessDigestRenderFlags {
+            include_ipython_examples: true,
+            include_shell_examples: false,
+            include_refine_examples: false,
+        };
+        let baseline = harness_digest_fingerprint(&state, flags);
+        // Kind iteration order is normalized away, as is the invisible
+        // metadata/source/timestamps bookkeeping.
+        let mut reordered = empty_harness_state();
+        let entry = state.entries[&RefinementKind::Memory]["alpha"].clone();
+        reordered
+            .entries
+            .get_mut(&RefinementKind::Memory)
+            .unwrap()
+            .insert("alpha".to_string(), entry);
+        let entry = state.entries[&RefinementKind::Prompt]["zeta"].clone();
+        reordered
+            .entries
+            .get_mut(&RefinementKind::Prompt)
+            .unwrap()
+            .insert("zeta".to_string(), entry);
+        assert_eq!(harness_digest_fingerprint(&reordered, flags), baseline);
+        // A content change re-fingerprints (the digest would differ).
+        let mut changed = state.clone();
+        changed
+            .entries
+            .get_mut(&RefinementKind::Memory)
+            .unwrap()
+            .get_mut("alpha")
+            .unwrap()
+            .content
+            .push_str(" more");
+        assert_ne!(harness_digest_fingerprint(&changed, flags), baseline);
+        // The shell flag cannot change the digest while IPython examples
+        // take precedence: it is normalized out of the material.
+        let shell_on = HarnessDigestRenderFlags {
+            include_ipython_examples: true,
+            include_shell_examples: true,
+            include_refine_examples: false,
+        };
+        assert_eq!(harness_digest_fingerprint(&state, shell_on), baseline);
+        // Without IPython examples the shell contract renders, so the flag
+        // participates; so does the refine flag while IPython is on.
+        let shell_only = HarnessDigestRenderFlags {
+            include_ipython_examples: false,
+            include_shell_examples: true,
+            include_refine_examples: false,
+        };
+        assert_ne!(harness_digest_fingerprint(&state, shell_only), baseline);
+    }
+
+    #[test]
+    fn fingerprint_covers_skill_contract_and_refinement_order() {
+        let mut state = empty_harness_state();
+        let mut skill = make_entry("skill_a", "Skill A", "Skill content", "general");
+        skill.kind = RefinementKind::Skill;
+        skill
+            .reference
+            .insert("type".to_string(), serde_json::json!("python"));
+        state
+            .entries
+            .get_mut(&RefinementKind::Skill)
+            .unwrap()
+            .insert("skill_a".to_string(), skill.clone());
+        state
+            .refinements
+            .push(super::super::HarnessRefinementEvent {
+                id: "r1".to_string(),
+                trigger: "after a repeated failure".to_string(),
+                changes: vec!["create skill skill_a".to_string()],
+                evidence: String::new(),
+                outcome: "routing improved".to_string(),
+                created_at: String::new(),
+            });
+        state
+            .refinements
+            .push(super::super::HarnessRefinementEvent {
+                id: "r2".to_string(),
+                trigger: "a later pass".to_string(),
+                changes: vec!["update memory m".to_string()],
+                evidence: String::new(),
+                outcome: String::new(),
+                created_at: String::new(),
+            });
+        let flags = HarnessDigestRenderFlags {
+            include_ipython_examples: true,
+            include_shell_examples: false,
+            include_refine_examples: true,
+        };
+        let baseline = harness_digest_fingerprint(&state, flags);
+        // The skill's call contract participates; the same fields on a
+        // memory entry never render, so they stay out of the material.
+        let mut contract_changed = state.clone();
+        contract_changed
+            .entries
+            .get_mut(&RefinementKind::Skill)
+            .unwrap()
+            .get_mut("skill_a")
+            .unwrap()
+            .reference
+            .insert("import".to_string(), serde_json::json!("rlm.bash"));
+        assert_ne!(
+            harness_digest_fingerprint(&contract_changed, flags),
+            baseline
+        );
+        let mut memory_touched = state.clone();
+        memory_touched
+            .entries
+            .get_mut(&RefinementKind::Memory)
+            .unwrap()
+            .insert(
+                "m".to_string(),
+                make_entry("m", "M", "memory content", "general"),
+            );
+        // A new memory entry changes the digest, so the fingerprint moves.
+        assert_ne!(harness_digest_fingerprint(&memory_touched, flags), baseline);
+        // Refinements keep their stored order: a reorder renders a
+        // different newest tail and must not reuse the fingerprint.
+        let mut reordered = state.clone();
+        reordered.refinements.reverse();
+        assert_ne!(harness_digest_fingerprint(&reordered, flags), baseline);
     }
 
     #[test]
