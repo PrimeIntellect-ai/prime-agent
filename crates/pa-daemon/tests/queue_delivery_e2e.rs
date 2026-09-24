@@ -821,7 +821,7 @@ fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
         .map(|(index, _)| index)
         .collect();
     let phase_at = |index: usize, phase: &str| {
-        events[index]["actions"]["active"]["phase"].and_then(Value::as_str) == Some(phase)
+        events[index]["actions"]["active"]["phase"].as_str() == Some(phase)
     };
     // The `preparing` projection of follow C's delivery, before the turn
     // starts: the strip's "Starting" row must land before the prompt row.
