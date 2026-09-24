@@ -266,7 +266,7 @@ impl Worker {
     /// the `service_tier_changed` event fires only when the ACTIVE tier
     /// moves. The stored preference keeps the requested tier, so switching
     /// back to (or resuming on) a capable model re-applies it.
-    fn clamp_service_tier_for_model(&self) {
+    pub(crate) fn clamp_service_tier_for_model(&self) {
         let (clamped, previous_active) = {
             let mut core = self.core.lock().unwrap();
             let clamped = effective_service_tier(core.service_tier, self.engine.as_ref());

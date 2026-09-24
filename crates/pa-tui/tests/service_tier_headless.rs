@@ -200,8 +200,8 @@ fn openrouter_catalog() -> Vec<pa_types::ai::Model> {
         "reasoning": true,
         "input": ["text"],
         "cost": { "input": 5, "output": 30, "cacheRead": 0.5, "cacheWrite": 0 },
-        "contextWindow": 272000,
-        "maxTokens": 128000
+        "contextWindow": 272_000,
+        "maxTokens": 128_000
     }))
     .map(|model| vec![model])
     .expect("catalog model")
