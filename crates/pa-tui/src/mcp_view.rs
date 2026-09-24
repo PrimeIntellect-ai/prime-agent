@@ -1366,7 +1366,7 @@ mod tests {
         let token: Vec<u16> = "\u{1f600}a".encode_utf16().collect();
         assert_eq!(
             subsequence_match_score(&haystack, &token),
-            Some(SCORE_SUBSEQUENCE + (4 - 3) * 2),
+            Some(SCORE_SUBSEQUENCE + (4.0 - 3.0) * 2.0),
             "the subsequence span counts UTF-16 units"
         );
     }
