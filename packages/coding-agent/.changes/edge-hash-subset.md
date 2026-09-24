@@ -1,1 +1,0 @@
-- Reduced per-model-request CPU cost by fingerprinting a bounded turn-body subset (model identity, shaping options, system prompt, message count, last message, tool schemas) instead of re-serializing the full request body, with the tool-schema digest memoized per session.

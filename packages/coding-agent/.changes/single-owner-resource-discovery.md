@@ -1,2 +1,0 @@
-- Runtime extension discovery now applies the same rules as package resource discovery: entries matched by a `.gitignore`, `.ignore` or `.fdignore` file in the extensions directory, dot entries and `node_modules` are skipped, so a directory excluded from package discovery is no longer loaded at runtime.
-- Ignore-file parsing, extension entry-point resolution, resource path expansion and path containment checks now each have one implementation instead of two to four copies, so the loaders can no longer drift apart.

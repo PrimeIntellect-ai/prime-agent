@@ -1,1 +1,0 @@
-- Fixed withdrawn background command completion notices silently dropping parked next-turn messages: cancelling a queued turn now re-parks its undelivered prefix records, so deferred context (kernel state restore notices, goal context, deferred RLM child terminal notices) is delivered on the next turn instead of being lost.

@@ -1,1 +1,0 @@
-- Harness digest ranking and harness search now weigh matched query terms by document frequency (tf-idf style), so rare distinctive terms rank above entries dense in ubiquitous words.
