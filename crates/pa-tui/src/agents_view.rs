@@ -1665,7 +1665,14 @@ impl Renderer {
     /// onto the main screen.
     fn finish(self, preserve_alt_screen: bool) -> Vec<String> {
         match self {
-            Renderer::Terminal { .. } => {
+            Renderer::Terminal { term, .. } => {
+                // ratatui's `Terminal` drop restores the cursor its last
+                // frame hid (the `hidden_cursor` flag): run the drop
+                // before the handoff's hide so the hide is the final
+                // word — TS `stop(preserveAltScreen)` leaves the cursor
+                // hidden for the surface taking the screen over. The
+                // real-exit arm ends shown for the shell either way.
+                drop(term);
                 if preserve_alt_screen {
                     // The enhanced-key modes release with the raw-mode
                     // bracket (TS `stop` on every exit, handoffs included).

@@ -2305,6 +2305,15 @@ impl Renderer {
         match self {
             Renderer::Terminal { .. } => {
                 if preserve_alt_screen {
+                    // ratatui's `Terminal` drop restores the cursor its
+                    // last frame hid (the `hidden_cursor` flag): run the
+                    // drop before the hide so the hide is the handoff's
+                    // final word — TS `stop(preserveAltScreen)` leaves the
+                    // cursor hidden for the surface taking the screen
+                    // over, and the adopting mount must not race a stale
+                    // show against its own hide.
+                    let Renderer::Terminal { term, .. } = self;
+                    drop(term);
                     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
                     // Flag this surface's input reader for the background
                     // stop now (TS tears its listener down with the chat):
