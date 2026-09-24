@@ -767,6 +767,144 @@ fn multi_item_queue_delivers_every_item_in_lane_order() {
     );
 }
 
+/// TS #2063 (RES-1306): a queue-visible delivery's active action rides
+/// the turn through its phases at the moments a client renders them —
+/// `preparing` projects at pickup (before the turn's first row; the
+/// queued strip shows it as the "Starting" row), `committing` at the
+/// turn's first row (the prompt becomes visible in the conversation, the
+/// boundary TS drops the Starting row at: the commit fence), `running`
+/// at the turn's first assistant frame — and the settle's projection
+/// carries no active action. Before, the committing/running flips fired
+/// before the engine loop ran, so `preparing` spanned nothing and the
+/// picked-up prompt was visible nowhere from its lane dropping until the
+/// turn's rows landed.
+#[test]
+fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
+    let (_dir, mock, _supervisor, mut client, session_id) = setup("active-action-phases");
+
+    // The busy turn holds its answer while a follow-up parks behind it.
+    mock.hold_busy_turn("turn one");
+    let started = client.send(
+        "p1",
+        json!({ "type": "prompt", "activeSessionId": session_id, "message": "turn one" }),
+    );
+    assert_eq!(started["success"], true, "prompt failed: {started}");
+    mock.wait_busy_turn_request();
+    let parked = client.send("f1", queued_prompt(&session_id, "follow C", "followUp"));
+    assert_eq!(parked["success"], true, "follow-up failed: {parked}");
+    // The parked lane projects while the busy turn still holds.
+    wait_for_projection(&mut client, &[], &["follow C"], "parked lane");
+    // Release: the busy turn settles and the follow-up's turn runs.
+    mock.release_busy_turn();
+    let deadline = Instant::now() + Duration::from_mins(1);
+    while Instant::now() < deadline {
+        if mock.count() >= 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    client.drain_events(Duration::from_secs(2));
+    assert_eq!(
+        mock.count(),
+        2,
+        "turn one, then follow C's turn: {:?}",
+        mock.request_log()
+    );
+
+    let events = &client.events;
+    let action_updates: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            event.get("type").and_then(Value::as_str) == Some("session_action_update")
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let phase_at = |index: usize, phase: &str| {
+        events[index]["actions"]["active"]["phase"].and_then(Value::as_str) == Some(phase)
+    };
+    // The `preparing` projection of follow C's delivery, before the turn
+    // starts: the strip's "Starting" row must land before the prompt row.
+    let preparing = action_updates
+        .iter()
+        .copied()
+        .find(|index| phase_at(*index, "preparing"))
+        .expect("the follow-up's preparing projection never fired");
+    assert_eq!(
+        events[preparing]["actions"]["active"]["label"], "follow C",
+        "the active label is the delivery's text (no labeled preview)"
+    );
+    let agent_starts: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+        .map(|(index, _)| index)
+        .collect();
+    assert!(
+        preparing < agent_starts[1],
+        "the pickup projection precedes the delivered turn's start (events: {:?})",
+        event_types(events)
+    );
+    // The turn's first row is the accepted prompt; the `committing`
+    // projection lands after it (the Starting row drops as the prompt
+    // becomes visible in the conversation).
+    let user_row = events
+        .iter()
+        .enumerate()
+        .find(|(index, event)| {
+            event.get("type").and_then(Value::as_str) == Some("message_start")
+                && event["message"]["role"] == "user"
+                && event["message"]["content"]
+                    .as_array()
+                    .and_then(|blocks| blocks.first())
+                    .and_then(|block| block["text"].as_str())
+                    == Some("follow C")
+        })
+        .map(|(index, _)| index)
+        .expect("the follow-up's accepted row never broadcast");
+    let committing = action_updates
+        .iter()
+        .copied()
+        .find(|index| phase_at(*index, "committing"))
+        .expect("the committing projection never fired");
+    assert!(
+        preparing < user_row && user_row < committing,
+        "preparing precedes the accepted row, committing follows it (events: {:?})",
+        event_types(events)
+    );
+    // The `running` projection lands after the turn's first assistant
+    // frame, and the settle's projection carries no active action.
+    let assistant_row = events
+        .iter()
+        .enumerate()
+        .find(|(index, event)| {
+            index > &user_row
+                && event.get("type").and_then(Value::as_str) == Some("message_start")
+                && event["message"]["role"] == "assistant"
+        })
+        .map(|(index, _)| index)
+        .expect("the follow-up's assistant row never broadcast");
+    let running = action_updates
+        .iter()
+        .copied()
+        .find(|index| phase_at(*index, "running"))
+        .expect("the running projection never fired");
+    assert!(
+        assistant_row < running,
+        "running follows the turn's first assistant frame (events: {:?})",
+        event_types(events)
+    );
+    let settled = action_updates
+        .last()
+        .expect("the settle's projection fired");
+    assert!(
+        events[*settled]["actions"]["active"].is_null(),
+        "the settle's projection carries no active action (events: {:?})",
+        event_types(events)
+    );
+    assert!(*settled > running);
+}
+
 fn event_types(events: &[Value]) -> Vec<String> {
     events
         .iter()

@@ -269,6 +269,7 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
             .as_ref()
             .map(|a| queue_lane(a, "followUps"))
             .unwrap_or_default(),
+        starting: actions.as_ref().and_then(starting_from_actions),
     };
 
     let service_tier = state
@@ -285,6 +286,25 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         queued,
         service_tier,
     }
+}
+
+/// The preparing-turn label of a `sessionActions` wire value, or `None`
+/// when no picked-up prompt is preparing (TS #2063
+/// `connectionState.sessionActions.active`: the interactive strip renders
+/// the "Starting" row exactly while the active action is a turn in its
+/// `preparing` phase — the prompt left its lane at pickup, so the strip is
+/// the only place it shows until the turn renders it).
+fn starting_from_actions(actions: &Value) -> Option<String> {
+    let active = actions.get("active")?;
+    let is_preparing_turn = active.get("kind").and_then(Value::as_str) == Some("turn")
+        && active.get("phase").and_then(Value::as_str) == Some("preparing");
+    is_preparing_turn.then(|| {
+        active
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    })
 }
 
 /// One lane of a `sessionActions` wire value: the preview strings in order.
@@ -412,10 +432,15 @@ pub enum TurnUpdate {
     /// payload; the session view owns announcement and tray rendering).
     GoalUpdate(Value),
     /// `session_action_update`: the queue projection changed (a message
-    /// parked behind the run, was delivered, or was cleared).
+    /// parked behind the run, was delivered, or was cleared). `starting`
+    /// carries the picked-up prompt whose turn is still preparing (TS
+    /// #2063 `sessionActions.active` with `kind: "turn"` / `phase:
+    /// "preparing"`), so the strip keeps it visible until the turn
+    /// begins.
     QueueUpdated {
         steering: Vec<String>,
         follow_ups: Vec<String>,
+        starting: Option<String>,
     },
     /// `bash_start` (the user-bash slot, TS `!command`): a command run
     /// outside the model loop; `transient` marks a side-conversation run
@@ -642,6 +667,7 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
             Some(TurnUpdate::QueueUpdated {
                 steering: queue_lane(&actions, "steering"),
                 follow_ups: queue_lane(&actions, "followUps"),
+                starting: starting_from_actions(&actions),
             })
         }
         // `bash_start` (TS `runUserBash` emits before the process runs):
@@ -1590,8 +1616,34 @@ mod tests {
             crate::queued::QueuedMessages {
                 steering: vec!["turn right".to_string()],
                 follow_ups: vec!["then summarize".to_string()],
+                starting: None,
             },
             "an attach re-syncs the queue strip from the snapshot"
+        );
+    }
+
+    /// TS #2063: an attach re-sync mid-preparing keeps the picked-up
+    /// prompt visible too — the snapshot's active action projects the
+    /// same starting row the live frames carry.
+    #[test]
+    fn reconstructs_the_starting_row_from_session_actions() {
+        let mut attach = slim_attach();
+        attach["snapshot"]["state"]["sessionActions"] = json!({
+            "queuedCount": 0,
+            "steering": [],
+            "followUps": [],
+            "active": {
+                "kind": "turn",
+                "phase": "preparing",
+                "label": "queued before compaction",
+            },
+        });
+        let data = attach_data_from_response(&attach).unwrap();
+        let view = reconstruct(&data);
+        assert_eq!(
+            view.queued.starting,
+            Some("queued before compaction".to_string()),
+            "an attach re-sync keeps the preparing turn's prompt visible"
         );
     }
 
@@ -1673,7 +1725,81 @@ mod tests {
             TurnUpdate::QueueUpdated {
                 steering: vec![],
                 follow_ups: vec!["queued follow-up".to_string()],
+                starting: None,
             }
+        );
+    }
+
+    /// TS #2063 (RES-1306): a queue update that reports a preparing turn
+    /// carries the picked-up prompt's label as the strip's starting row,
+    /// whatever the parked lanes hold; a later phase (the turn committed)
+    /// drops it.
+    #[test]
+    fn decodes_the_preparing_turn_label_as_the_starting_row() {
+        let preparing = json!({
+            "type": "session_action_update",
+            "actions": {
+                "queuedCount": 0,
+                "steering": [],
+                "followUps": [],
+                "active": {
+                    "kind": "turn",
+                    "phase": "preparing",
+                    "label": "queued before compaction",
+                },
+            },
+        });
+        assert_eq!(
+            event_to_update(&preparing),
+            Some(TurnUpdate::QueueUpdated {
+                steering: vec![],
+                follow_ups: vec![],
+                starting: Some("queued before compaction".to_string()),
+            })
+        );
+        let committed = json!({
+            "type": "session_action_update",
+            "actions": {
+                "queuedCount": 0,
+                "steering": [],
+                "followUps": [],
+                "active": {
+                    "kind": "turn",
+                    "phase": "committing",
+                    "label": "queued before compaction",
+                },
+            },
+        });
+        assert_eq!(
+            event_to_update(&committed),
+            Some(TurnUpdate::QueueUpdated {
+                steering: vec![],
+                follow_ups: vec![],
+                starting: None,
+            })
+        );
+        // An active action that is not a turn never projects a starting
+        // row.
+        let other_kind = json!({
+            "type": "session_action_update",
+            "actions": {
+                "queuedCount": 0,
+                "steering": [],
+                "followUps": [],
+                "active": {
+                    "kind": "session_command",
+                    "phase": "preparing",
+                    "label": "/theme dark",
+                },
+            },
+        });
+        assert_eq!(
+            event_to_update(&other_kind),
+            Some(TurnUpdate::QueueUpdated {
+                steering: vec![],
+                follow_ups: vec![],
+                starting: None,
+            })
         );
     }
 
