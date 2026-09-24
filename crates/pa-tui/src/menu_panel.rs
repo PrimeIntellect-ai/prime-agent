@@ -31,14 +31,6 @@ impl<'a> MenuSegment<'a> {
     pub fn muted(text: &'a str) -> Self {
         Self { text, color: None }
     }
-
-    /// A status segment with its theme color.
-    pub fn themed(color: ThemeColor, text: &'a str) -> Self {
-        Self {
-            text,
-            color: Some(color),
-        }
-    }
 }
 
 /// Trailing segments are joined with `" · "` and shrink from the front when
@@ -420,19 +412,6 @@ pub(crate) fn hint_row(theme: &Theme, width: usize, hint: &str) -> Line {
     truncate_line(&line, width, "")
 }
 
-/// One detail-block row: the selected item's metadata under the list,
-/// truncated to the frame width (marked) and padded to the full row; the
-/// content's own spans carry the color and leading indent.
-pub(crate) fn detail_row(theme: &Theme, width: usize, content: Line) -> Line {
-    let _ = theme;
-    let mut line = truncate_line(&content, width, "\u{2026}");
-    let used = crate::width::spans_width(&line);
-    if used < width {
-        line.push(Span::raw(" ".repeat(width - used)));
-    }
-    line
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,7 +441,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_rows_carry_muted_and_status_trailing() {
+    fn menu_rows_carry_the_muted_trailing() {
         let theme = theme();
         let muted = [
             MenuSegment::muted("current"),
@@ -474,11 +453,6 @@ mod tests {
         assert!(text.starts_with("  "));
         assert!(text.contains("label"));
         assert!(text.ends_with("current · provider"));
-        let status = [MenuSegment::themed(ThemeColor::Success, "connected")];
-        let row = menu_row(&theme, 60, vec![Span::raw("label")], &status, true);
-        let text = row_text(&row);
-        assert!(text.starts_with("\u{203a}"));
-        assert!(text.ends_with("connected"));
     }
 
     #[test]
