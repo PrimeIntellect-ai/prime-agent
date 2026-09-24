@@ -1097,7 +1097,10 @@ TS reference: `packages/coding-agent/src/modes/interactive/interactive-mode.ts` 
   subscription OAuth flows (Anthropic/Copilot/Codex/xAI) and the Prime
   browser logins are not ported — their rows render (TS names, TS order,
   prime-inference first) and their flows report the unavailability; the
-  MCP device flow runs like `/mcp login` (terminal suspended); (3) the
+  MCP device flow runs like `/mcp login` (through the inline auth panel;
+  the Prime Inference login renders its paste prompt, progress lines, and
+  the team picker there — TS `LoginDialogComponent` +
+  `PrimeTeamSelectorComponent`, no terminal takeover); (3) the
   post-logout `/reload` for removed `mcp:` credentials stays unported
   (the TS rule), reported with the removal status instead.
 - `/traces`: the TS status block verbatim ("Trace Sharing", automatic
