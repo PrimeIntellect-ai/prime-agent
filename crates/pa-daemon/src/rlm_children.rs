@@ -1122,7 +1122,7 @@ impl SupervisorChildSessionsInner {
             tokio::task::spawn_blocking(move || crate::session_store::SessionFile::open(&path))
                 .await
                 .ok();
-        let Ok(store) = joined else {
+        let Some(Ok(store)) = joined else {
             // Same failure contract as before: a torn or unreadable file
             // leaves the cursor untouched — the next observation retries.
             return;

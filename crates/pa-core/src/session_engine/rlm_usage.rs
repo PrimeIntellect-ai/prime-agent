@@ -172,13 +172,15 @@ impl RlmChildUsageAttributions {
             Box::pin(async move { forward.record_child_usage(report).await }).await;
             return;
         }
-        let target_id = match self
+        // The lookup guard drops at its own statement: a scrutinee temp
+        // held across the fallback await is not Send.
+        let registered = self
             .children
             .lock()
             .expect("rlm usage children lock")
             .get(&report.rlm_child_id)
-            .cloned()
-        {
+            .cloned();
+        let target_id = match registered {
             Some(target_id) => target_id,
             None => match self.adopt_from_fallback(&report.rlm_child_id).await {
                 Some(target_id) => target_id,
