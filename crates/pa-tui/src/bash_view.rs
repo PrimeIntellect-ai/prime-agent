@@ -302,15 +302,34 @@ impl BashView {
     /// fetch failure carries the detail-open generation it was issued
     /// under — like the tail responses, a late error from an earlier
     /// open of the same row never lands on the newer open (and never
-    /// releases its in-flight load claim). A failed lazy load that DOES
-    /// land releases its in-flight claim so a later up press can retry;
-    /// `fetch` marks a tail-fetch failure, which the next successful
-    /// fetch supersedes.
+    /// releases its in-flight load claim). A landed fetch failure
+    /// restores the lazy-load window to the loaded size (so the retry
+    /// re-issues instead of reading the wire cap as the end) and
+    /// releases the in-flight claim for the retry; a kill error touches
+    /// neither — it knows nothing about the load's fate.
     pub fn set_error(&mut self, error: String, fetch: bool, generation: Option<u64>) {
         if fetch && generation.is_some_and(|generation| generation != self.detail_generation) {
             return;
         }
-        self.loading_more = false;
+        if fetch {
+            // A failed lazy load never leaves its grown window behind:
+            // the retry re-issues from the loaded size (a window left at
+            // the wire's line cap would read as the end and stop
+            // retrying — the remaining output would be permanently
+            // inaccessible).
+            if self.loading_more {
+                self.tail_window = self
+                    .output_tail
+                    .as_ref()
+                    .map(|(_, output)| output.len() as u32)
+                    .unwrap_or(FIRST_TAIL_LINES);
+            }
+            // Only a fetch failure releases the in-flight load claim:
+            // a kill error knows nothing about the load's fate, and a
+            // duplicate load racing the still-in-flight one could let
+            // either response overwrite the other's scroll state.
+            self.loading_more = false;
+        }
         self.error = Some(error);
         self.fetch_error = fetch;
     }
@@ -1785,11 +1804,14 @@ mod tests {
         );
     }
 
-    /// A fetch or load error surfaces in the pane and releases the
-    /// in-flight load claim so a later up press can retry — and the
-    /// retried load's success supersedes the shown fetch error (the
-    /// failure it described is gone; a kill error keeps the
-    /// registry-refresh lifecycle and never clears on a tail landing).
+    /// A fetch or load error surfaces in the pane, releases the
+    /// in-flight load claim for the retry, restores the lazy-load window
+    /// to the loaded size (the retry re-issues the same grown request
+    /// instead of reading the wire cap as the end), and the retried
+    /// load's success supersedes the shown fetch error. A kill error
+    /// touches neither the window nor the claim (it knows nothing about
+    /// the load's fate) and never clears on a tail landing — only the
+    /// registry refresh clears it.
     #[test]
     fn an_error_releases_the_load_claim_and_a_success_clears_it() {
         let mut catalog = activities();
@@ -1810,7 +1832,10 @@ mod tests {
                     view.set_error("kernel stalled".to_string(), true, Some(generation));
                     assert!(view.error.is_some());
                     assert!(!view.loading_more, "the failure releases the claim");
-                    assert_eq!(view.tail_window, lines);
+                    assert_eq!(
+                        view.tail_window, FIRST_TAIL_LINES,
+                        "the failed load's window is restored to the loaded size"
+                    );
                     assert_eq!(generation, view.detail_generation);
                     loaded = true;
                     break;
@@ -1827,18 +1852,18 @@ mod tests {
                 .any(|row| row.contains("Error: kernel stalled")),
             "the fetch error surfaces"
         );
-        // A retry issues a fresh load (the window keeps growing from the
-        // last requested size).
+        // The retry re-issues the same grown window (not the wire cap):
+        // the restored window doubles from the loaded size.
         let mut retried = false;
         for _ in 0..FIRST_TAIL_LINES {
             match view.handle_key("up", &kb()) {
                 BashViewAction::LoadMore {
                     lines, generation, ..
                 } => {
-                    assert_eq!(lines, FIRST_TAIL_LINES * 4);
+                    assert_eq!(lines, FIRST_TAIL_LINES * 2);
                     // The grown window lands: the shown fetch error is
                     // stale — the fetch just succeeded.
-                    let grown: Vec<String> = (1..=FIRST_TAIL_LINES * 4)
+                    let grown: Vec<String> = (1..=FIRST_TAIL_LINES * 2)
                         .map(|n| format!("line-{n:03}"))
                         .collect();
                     view.set_output("a", &grown.join("\n"), generation);
@@ -1860,8 +1885,8 @@ mod tests {
             "the error row is gone after the landing"
         );
 
-        // A kill error keeps its lifecycle: a tail landing never clears
-        // it (only the registry refresh does).
+        // A kill error keeps its lifecycle: it neither clears the error on
+        // a tail landing nor releases a load claim.
         view.set_error("Could not kill bash command: gone".to_string(), false, None);
         assert!(view.error.is_some());
         view.set_output("a", &tail.join("\n"), view.detail_generation);
@@ -1873,45 +1898,132 @@ mod tests {
         assert!(view.error.is_none());
     }
 
-    /// A late fetch error from an earlier open of the same row never
-    /// lands on the newly reopened detail (the generation gate the tail
-    /// responses already had): it never shows, and never releases the
-    /// newer open's in-flight load claim. A kill error owns no
-    /// generation and keeps its landing.
+    /// A failed FINAL lazy load (the last growth, up to the wire cap)
+    /// restores the loaded window, so the retry re-issues the same cap
+    /// request instead of reading the window the failed request left
+    /// behind as the end: the remaining output stays reachable.
     #[test]
-    fn a_late_fetch_error_never_lands_on_a_reopened_detail() {
-        let mut view = BashView::new(activities(), 40);
+    fn a_failed_final_load_keeps_the_tail_reachable() {
+        let mut catalog = activities();
+        catalog[0].command = "run".to_string();
+        let mut view = BashView::new(catalog, 24);
         view.handle_key("enter", &kb());
-        let first_generation = view.detail_generation;
-        // Back out and reopen the same row while a load is in flight
-        // under the new open.
-        view.handle_key("left", &kb());
-        view.handle_key("enter", &kb());
-        assert_ne!(view.detail_generation, first_generation);
-        view.loading_more = true;
-        // The earlier open's late fetch error never lands.
-        view.set_error(
-            "stale fetch failure".to_string(),
-            true,
-            Some(first_generation),
+        let lines =
+            |count: u32| -> Vec<String> { (1..=count).map(|n| format!("line-{n:03}")).collect() };
+        // The real flow: 50 loads, grows to 100, then the final growth to
+        // the 200-line wire cap - which FAILS.
+        view.set_output(
+            "a",
+            &lines(FIRST_TAIL_LINES).join("\n"),
+            view.detail_generation,
         );
-        assert!(view.error.is_none(), "the stale error never shows");
+        let _ = view.render(&theme(), 70, &kb());
+        for _ in 0..FIRST_TAIL_LINES {
+            match view.handle_key("up", &kb()) {
+                BashViewAction::LoadMore { generation, .. } => {
+                    view.set_output("a", &lines(FIRST_TAIL_LINES * 2).join("\n"), generation);
+                    break;
+                }
+                BashViewAction::None => continue,
+                other => panic!("up only walks or loads: {other:?}"),
+            }
+        }
+        let _ = view.render(&theme(), 70, &kb());
+        // The final growth (100 -> the 200-line cap) issues and fails.
+        let mut failed = false;
+        for _ in 0..TAIL_LINES {
+            match view.handle_key("up", &kb()) {
+                BashViewAction::LoadMore {
+                    generation: gen,
+                    lines,
+                    ..
+                } => {
+                    assert_eq!(lines, TAIL_LINES);
+                    view.set_error("kernel stalled".to_string(), true, Some(gen));
+                    failed = true;
+                    break;
+                }
+                BashViewAction::None => continue,
+                other => panic!("up only walks or loads: {other:?}"),
+            }
+        }
+        assert!(failed, "the final (cap) load was issued");
+        // The failure restored the loaded window - not the cap the failed
+        // request had set - so the tail is not complete and the retry
+        // re-issues the same cap request.
+        assert_eq!(view.tail_window, FIRST_TAIL_LINES * 2);
+        assert!(!view.tail_complete, "the failed load never ends the tail");
+        assert!(!view.loading_more);
+        let mut retried = false;
+        for _ in 0..TAIL_LINES {
+            match view.handle_key("up", &kb()) {
+                BashViewAction::LoadMore { lines, .. } => {
+                    assert_eq!(lines, TAIL_LINES);
+                    retried = true;
+                    break;
+                }
+                BashViewAction::None => continue,
+                other => panic!("up only walks or loads: {other:?}"),
+            }
+        }
+        assert!(retried, "the cap retry re-issues after the failure");
+    }
+
+    /// A kill error never releases the in-flight load claim: a failed
+    /// kill while a lazy load is in flight leaves the claim held, so the
+    /// next Up does not stack a duplicate same-generation load; the
+    /// still-in-flight load later lands and clears it.
+    #[test]
+    fn a_kill_error_never_releases_the_load_claim() {
+        let mut catalog = activities();
+        catalog[0].command = "run".to_string();
+        let mut view = BashView::new(catalog, 24);
+        view.handle_key("enter", &kb());
+        let tail: Vec<String> = (1..=FIRST_TAIL_LINES)
+            .map(|n| format!("line-{n:03}"))
+            .collect();
+        view.set_output("a", &tail.join("\n"), view.detail_generation);
+        let _ = view.render(&theme(), 70, &kb());
+        // Walk to the top and issue a lazy load.
+        let mut generation = 0;
+        for _ in 0..FIRST_TAIL_LINES {
+            match view.handle_key("up", &kb()) {
+                BashViewAction::LoadMore {
+                    generation: gen, ..
+                } => {
+                    generation = gen;
+                    break;
+                }
+                BashViewAction::None => continue,
+                other => panic!("up only walks or loads: {other:?}"),
+            }
+        }
+        assert!(view.loading_more, "the load is in flight");
+        // The kill fails while the load is still in flight.
+        view.set_error(
+            "Could not kill bash command: still running".to_string(),
+            false,
+            None,
+        );
+        assert!(view.error.is_some());
         assert!(
             view.loading_more,
-            "a prior open's error never releases the current claim"
+            "a kill error never releases the load claim"
         );
-        // The current open's fetch error lands and releases the claim.
-        view.set_error(
-            "current fetch failure".to_string(),
-            true,
-            Some(view.detail_generation),
+        assert_eq!(
+            view.tail_window,
+            FIRST_TAIL_LINES * 2,
+            "a kill error never touches the window either"
         );
-        assert_eq!(view.error.as_deref(), Some("current fetch failure"));
+        // The next Up does not stack a duplicate load.
+        assert_eq!(view.handle_key("up", &kb()), BashViewAction::None);
+        assert!(view.loading_more);
+        // The still-in-flight load lands and clears the claim.
+        let grown: Vec<String> = (1..=FIRST_TAIL_LINES * 2)
+            .map(|n| format!("line-{n:03}"))
+            .collect();
+        view.set_output("a", &grown.join("\n"), generation);
         assert!(!view.loading_more);
-        // A kill error owns no generation: it still lands on the open
-        // detail (its lifecycle is the registry refresh).
-        view.set_error("Could not kill bash command: nope".to_string(), false, None);
-        assert!(view.error.is_some());
     }
 
     /// A one-row output region (the designed minimum under a long
