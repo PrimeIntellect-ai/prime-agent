@@ -211,6 +211,13 @@ impl Editor {
         self.autocomplete.is_some()
     }
 
+    /// Whether a completion request is parked: Tab or a trigger key
+    /// queued it and the host loop materializes it at the next
+    /// input-idle tick, so the dropdown is about to open.
+    pub fn has_pending_autocomplete(&self) -> bool {
+        self.pending_autocomplete.is_some()
+    }
+
     /// Drain pending editor events (change/submit) for the host loop.
     pub fn take_events(&mut self) -> Vec<EditorEvent> {
         std::mem::take(&mut self.events)
@@ -647,6 +654,157 @@ mod tests {
         }
         e.handle_input("ctrl+-");
         assert_eq!(e.get_text(), "");
+    }
+
+    #[test]
+    fn picker_argument_context_reports_command_and_partial() {
+        let mut e = ed();
+        // The argument position at the prompt start: command + partial.
+        e.set_text("/model gp");
+        assert_eq!(
+            e.picker_argument_context(),
+            Some(("model".to_string(), "gp".to_string()))
+        );
+        e.set_text("/mcp lin ");
+        assert_eq!(
+            e.picker_argument_context(),
+            Some(("mcp".to_string(), "lin ".to_string()))
+        );
+        // The command-name position is not an argument context.
+        e.set_text("/model");
+        assert_eq!(e.picker_argument_context(), None);
+        // A plain token is no context at all.
+        e.set_text("hello there");
+        assert_eq!(e.picker_argument_context(), None);
+        // Other commands report their names; the caller picks the
+        // picker-backed ones.
+        e.set_text("/export ht");
+        assert_eq!(
+            e.picker_argument_context(),
+            Some(("export".to_string(), "ht".to_string()))
+        );
+    }
+
+    #[test]
+    fn deleting_to_an_empty_prompt_clears_the_parked_request() {
+        // `./` + Tab parks a forced completion request (no menu until the
+        // queue drains). Deleting back to the empty prompt must cancel the
+        // parked request too, not just the open menu: otherwise the parked
+        // request materializes the whole-cwd dropdown on an empty prompt.
+        let mut e = ed();
+        e.handle_input(".");
+        e.handle_input("/");
+        e.handle_input("tab");
+        assert!(e.pending_autocomplete.is_some(), "the request parks");
+        e.handle_input("backspace");
+        e.handle_input("backspace");
+        assert_eq!(e.get_text(), "");
+        assert!(
+            e.pending_autocomplete.is_none(),
+            "the parked request cancels"
+        );
+        e.materialize_autocomplete();
+        assert!(
+            e.autocomplete_state().is_none(),
+            "no dropdown materializes on the emptied prompt"
+        );
+    }
+
+    /// The session's Esc guard treats the parked-request window (Tab
+    /// queued a request the host loop materializes at the next idle
+    /// tick) as an open menu: no dropdown is visible yet, so
+    /// `has_pending_autocomplete` is what the guard tests, and a cancel
+    /// there must stop the request from ever opening.
+    #[test]
+    fn cancel_clears_a_parked_request_before_it_opens() {
+        let mut e = ed();
+        e.handle_input(".");
+        e.handle_input("/");
+        e.handle_input("tab");
+        assert!(
+            !e.is_showing_autocomplete(),
+            "the dropdown is not visible before the idle tick"
+        );
+        assert!(e.has_pending_autocomplete(), "the request is parked");
+        e.cancel_autocomplete();
+        assert!(!e.has_pending_autocomplete());
+        e.materialize_autocomplete();
+        assert!(
+            e.autocomplete_state().is_none(),
+            "the cancelled request never opens"
+        );
+    }
+
+    #[test]
+    fn picker_argument_context_requires_the_cursor_at_the_argument_end() {
+        // A cursor inside the argument would filter the picker on the head
+        // and drop the tail on accept, so the Tab interception only fires
+        // when the cursor sits at the argument's end.
+        let mut e = ed();
+        e.set_text("/model gp");
+        assert_eq!(
+            e.picker_argument_context(),
+            Some(("model".to_string(), "gp".to_string()))
+        );
+        e.handle_input("left");
+        assert_eq!(e.picker_argument_context(), None);
+        // Whitespace after the cursor still counts as the argument end.
+        e.set_text("/mcp lin ");
+        assert_eq!(
+            e.picker_argument_context(),
+            Some(("mcp".to_string(), "lin ".to_string()))
+        );
+    }
+
+    /// Applying from the picker clears the editor (the command is
+    /// fulfilled), so draft text on a later line must stop the Tab
+    /// interception: opening the picker there would silently discard the
+    /// draft on apply. Whitespace-only later lines do not block it.
+    #[test]
+    fn picker_argument_context_rejects_later_draft_lines() {
+        let mut e = ed();
+        e.set_text("/model gp\ndraft reply");
+        e.handle_input("up");
+        assert_eq!(e.get_cursor(), (0, 9));
+        assert_eq!(
+            e.picker_argument_context(),
+            None,
+            "a later draft line must not be discarded by a picker apply"
+        );
+        e.set_text("/model gp\n   ");
+        e.handle_input("up");
+        e.handle_input("end");
+        assert_eq!(e.get_cursor(), (0, 9));
+        assert_eq!(
+            e.picker_argument_context(),
+            Some(("model".to_string(), "gp".to_string())),
+            "whitespace-only later lines keep the interception"
+        );
+    }
+
+    #[test]
+    fn tab_on_an_empty_prompt_is_a_noop() {
+        // Tab on an empty prompt must not open a completion menu: the
+        // forced pass would list the whole cwd (junk entries like a
+        // `.claude` directory), with no anchor token to complete.
+        let mut e = ed();
+        e.handle_input("tab");
+        e.materialize_autocomplete();
+        assert!(!e.is_showing_autocomplete(), "no dropdown on empty Tab");
+        // Whitespace-only prompts are the same empty prompt.
+        e.handle_input(" ");
+        e.handle_input(" ");
+        e.handle_input("tab");
+        e.materialize_autocomplete();
+        assert!(!e.is_showing_autocomplete(), "no dropdown on blank Tab");
+        // A typed token still completes on Tab (the slash-name context).
+        e.set_text("/mo");
+        e.handle_input("tab");
+        e.materialize_autocomplete();
+        assert!(
+            e.is_showing_autocomplete(),
+            "typed slash context still opens on Tab"
+        );
     }
 
     #[test]

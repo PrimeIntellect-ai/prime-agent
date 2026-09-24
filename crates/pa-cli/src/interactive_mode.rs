@@ -271,6 +271,23 @@ impl pa_tui::interactive::InteractionTelemetry for CliInteractionTelemetry {
         })
     }
 
+    fn menu_opened(
+        &self,
+        menu: &'static str,
+        source: &'static str,
+    ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let Some(client) = self.client() else {
+                return;
+            };
+            let mut properties = pa_telemetry::base_properties("interactive");
+            properties.set("menu", serde_json::Value::from(menu));
+            properties.set("source", serde_json::Value::from(source));
+            client.track("tui menu opened", properties);
+            let _ = client.shutdown().await;
+        })
+    }
+
     fn subagents_view_opened(
         &self,
         children_total: u64,
