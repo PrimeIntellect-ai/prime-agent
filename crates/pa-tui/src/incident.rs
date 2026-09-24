@@ -891,6 +891,34 @@ pub fn classify_incident_entry(entry: &IncidentLogEntry) -> Option<IncidentEvent
         ));
     }
 
+    // The boot restore pass's failures name the session they could not
+    // bring back (supervisor.rs's update-restore call sites).
+    if let Some(rest) = msg.strip_prefix("update restore: could not ") {
+        if let Some((verb, id_and_error)) = rest.split_once(' ') {
+            let session_id = id_and_error
+                .split_once(": ")
+                .map(|(id, _)| id)
+                .unwrap_or(id_and_error);
+            let subject = format!("session {session_id}");
+            return Some(event(
+                entry,
+                IncidentSeverity::Warn,
+                IncidentCategory::Recovery,
+                IncidentEventClass::RecoveryFailure,
+                subject.clone(),
+                format!(
+                    "update restore could not {} session {session_id}",
+                    if verb == "resume" {
+                        "resume"
+                    } else {
+                        "restore"
+                    }
+                ),
+                collect_tokens(session_id),
+            ));
+        }
+    }
+
     // Provider stream failures (the incident-enrichment lane's worker sink
     // writes these into the daemon log): anomalies attributed to the
     // session named on the line.
@@ -973,17 +1001,12 @@ pub fn classify_incident_entry(entry: &IncidentLogEntry) -> Option<IncidentEvent
 
     // Unknown-but-failing diagnostics still matter during an incident:
     // degrade them to a readable per-line summary instead of dropping them
-    // (the TS generic-diagnostic fallthrough, matched to rust's log
-    // shapes: no level/component field, so the failure is in the wording).
-    if [
-        "failed to ",
-        "failed after ",
-        "could not ",
-        "Could not ",
-        "cannot ",
-    ]
-    .iter()
-    .any(|prefix| msg.starts_with(prefix))
+    // (the TS generic-diagnostic fallthrough, matched to rust's log shapes:
+    // the lines carry no level/component, so the failure marker — a
+    // `failed`/`could not` — can sit mid-line).
+    if ["failed", "could not", "Could not", "cannot"]
+        .iter()
+        .any(|marker| msg.contains(marker))
     {
         return Some(event(
             entry,
@@ -1659,24 +1682,55 @@ mod tests {
     fn degrades_unknown_failures_and_drops_routine_noise() {
         let classified = events(&[
             entry(1_000, "failed to append RLM ledger spawn: disk full"),
+            entry(2_000, "session archive sweep failed: the dir vanished"),
             entry(
-                2_000,
+                3_000,
                 "RLM ledger: skipped record with unknown op on line 3",
             ),
             entry(
-                3_000,
+                4_000,
                 "session binding superseded: 2339fb7da605 -> 2339fb7da606 (file \"/tmp/a.jsonl\")",
             ),
+            entry(5_000, "archived 3 session(s) into /tmp/archive"),
         ]);
         assert_eq!(
             classified.len(),
-            1,
+            2,
             "unknown failures degrade; routine bookkeeping drops"
         );
         assert_eq!(classified[0].event_class, IncidentEventClass::Diagnostic);
         assert_eq!(
             classified[0].summary,
             "failed to append RLM ledger spawn: disk full"
+        );
+        assert_eq!(
+            classified[1].summary,
+            "session archive sweep failed: the dir vanished"
+        );
+    }
+
+    #[test]
+    fn classifies_update_restore_failures_by_session() {
+        let classified = events(&[
+            entry(
+                1_000,
+                "update restore: could not restore 2339fb7da605: the file is unreadable",
+            ),
+            entry(
+                2_000,
+                "update restore: could not resume 2339fb7da606: the worker did not answer",
+            ),
+        ]);
+        assert_eq!(classified.len(), 2);
+        assert!(classified.iter().all(|incident| {
+            incident.category == IncidentCategory::Recovery
+                && incident.event_class == IncidentEventClass::RecoveryFailure
+        }));
+        assert_eq!(classified[0].subject, "session 2339fb7da605");
+        assert!(classified[0].tokens.contains(&"2339fb7da605".to_string()));
+        assert_eq!(
+            classified[1].summary,
+            "update restore could not resume session 2339fb7da606"
         );
     }
 
