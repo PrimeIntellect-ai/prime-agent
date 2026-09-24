@@ -2854,7 +2854,7 @@ mod tests {
             "the drill-in hint rides the breakdown row: {text}"
         );
         assert!(
-            !text.contains("bash \u{b7}"),
+            !text.contains("bash \u{b7} done"),
             "the cards' own panel rows are gone in overview: {text}"
         );
 

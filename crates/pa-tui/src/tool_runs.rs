@@ -251,14 +251,15 @@ pub fn run_summary(chat: &[ChatEntry], run: ToolRun) -> RunSummary {
     }
 }
 
-/// The summary row's glyph (the tool-card marker vocabulary): the working
-/// icon while the run is live, an error marker when any card failed,
+/// The summary row's glyph (the tool-card marker vocabulary): an error
+/// marker when any card failed (error wins even while the run streams,
+/// the panel-status semantics), the working icon while the run is live,
 /// the settled check otherwise.
 fn status_glyph(summary: &RunSummary, frame: usize) -> (&'static str, ThemeColor) {
-    if summary.live {
-        (crate::chat::working_icon_frame(frame), ThemeColor::BashMode)
-    } else if summary.failed {
+    if summary.failed {
         ("\u{2717}", ThemeColor::Error)
+    } else if summary.live {
+        (crate::chat::working_icon_frame(frame), ThemeColor::BashMode)
     } else {
         ("\u{2713}", ThemeColor::Success)
     }
@@ -406,9 +407,16 @@ impl ToolRuns {
     }
 
     /// Rebuild the map's suffix from `from` over `chat`: the prefix keeps
-    /// its classification (a run's shape never changes before the first
-    /// mutated entry). Call AFTER the chat vector itself changed.
+    /// its classification. Call AFTER the chat vector itself changed.
+    /// A tail member sequence ending at `from` can extend across the
+    /// mutation point, so the rebuild point first rolls back over it -
+    /// the whole affected run re-derives from its own start (callers
+    /// that already pass a walked-back start stay idempotent).
     pub fn rebuild_from(&mut self, chat: &[ChatEntry], from: usize) {
+        let mut from = from.min(chat.len());
+        while from > 0 && is_run_glue(&chat[from - 1]) {
+            from -= 1;
+        }
         self.slots.truncate(from);
         let mut index = self.slots.len();
         while index < chat.len() {
@@ -451,14 +459,19 @@ fn scan_run(chat: &[ChatEntry], start: usize) -> Option<ToolRun> {
                 end += 1;
             }
             glue if is_run_glue(glue) => {
-                // The glue binds only when another card follows it: a
+                // The glue binds only when another CARD follows it: a
                 // trailing hidden assistant stays its own (zero-row)
-                // entry, exactly as the uncondensed view renders it.
+                // entry, exactly as the uncondensed view renders it. The
+                // probe skips hidden-assistant chains only - a card ends
+                // the probe and the scan continues through the main loop.
                 let mut probe = end + 1;
-                while probe < chat.len() && is_run_glue(&chat[probe]) {
+                while probe < chat.len()
+                    && is_run_glue(&chat[probe])
+                    && !matches!(chat[probe], ChatEntry::Tool(_))
+                {
                     probe += 1;
                 }
-                if probe < chat.len() && matches!(chat[probe], ChatEntry::Tool(_)) {
+                if matches!(chat.get(probe), Some(ChatEntry::Tool(_))) {
                     end = probe;
                 } else {
                     break;

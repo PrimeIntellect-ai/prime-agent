@@ -287,6 +287,7 @@ fn wall_clock_prefers_the_wire_timestamps() {
     if let ChatEntry::Tool(card) = &mut chat[4] {
         card.result = None;
         card.ended_at = None;
+        card.ended_ms = None;
     }
     let summary = run_summary(&chat, map.run_at(0).expect("qualifies"));
     assert!(summary.live, "a card without a result runs");

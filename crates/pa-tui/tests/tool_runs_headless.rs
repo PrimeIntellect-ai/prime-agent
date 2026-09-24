@@ -135,6 +135,15 @@ impl MockSupervisor {
 fn serve_turn(writer: &mut UnixStream, prompt: &str) {
     let event = |payload: Value| json!({ "type": "session_event", "activeSessionId": "s1", "event": payload });
     let calls = if prompt.contains("short") { 4 } else { 6 };
+    // The daemon echoes the submitted prompt as the turn's user message:
+    // the TUI renders the user row from this event.
+    write_json(
+        writer,
+        &event(json!({
+            "type": "message_start",
+            "message": { "role": "user", "content": prompt, "timestamp": 50u64 },
+        })),
+    );
     let tool_calls: Vec<Value> = (0..calls)
         .map(|index| {
             json!({
