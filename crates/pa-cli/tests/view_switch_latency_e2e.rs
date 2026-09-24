@@ -172,53 +172,6 @@ async fn create_session_from_file_via_daemon(
         .to_string()
 }
 
-async fn create_session_via_daemon(
-    socket: &Path,
-    script_path: &Path,
-    script: &serde_json::Value,
-    cwd: &Path,
-    session_dir: &Path,
-) -> (String, String) {
-    std::fs::write(script_path, script.to_string()).expect("write script");
-    let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(socket)
-        .await
-        .expect("connect supervisor");
-    let data = client
-        .request_ok(DaemonCommand::Create {
-            id: None,
-            session_path: None,
-            continue_recent: None,
-            no_session: None,
-            name: None,
-            config: Some(serde_json::json!({
-                "cwd": cwd.display().to_string(),
-                "sessionDir": session_dir.display().to_string(),
-                "script": script_path.display().to_string(),
-            })),
-            telemetry_disabled: None,
-            runtime_metadata: None,
-            lifecycle: None,
-            env: None,
-            launch_env: None,
-            rest: Default::default(),
-        })
-        .await
-        .expect("create session");
-    client.close();
-    let active = data
-        .get("activeSessionId")
-        .or_else(|| data.get("id"))
-        .and_then(serde_json::Value::as_str)
-        .expect("session id")
-        .to_string();
-    let durable = data
-        .get("sessionId")
-        .and_then(serde_json::Value::as_str)
-        .expect("durable session id")
-        .to_string();
-    (active, durable)
-}
-
 /// Seed one persisted child session file (a version-3 header plus a
 /// parent-chained message run), the artifact tree the context-tree cache
 /// warms against at attach.
