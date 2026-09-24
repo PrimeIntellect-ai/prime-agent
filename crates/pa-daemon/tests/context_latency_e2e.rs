@@ -25,22 +25,24 @@ use std::time::{Duration, Instant};
 
 /// The generous-but-bounded response ceiling: `/context` is in-memory
 /// data (the artifact walk is a background refresh), so a healthy
-/// round trip is milliseconds — one full second is the regression
-/// ceiling, an order of magnitude under the operator's 10s client
-/// timeout.
-const CONTEXT_RESPONSE_CEILING: Duration = Duration::from_millis(1_000);
+/// round trip is milliseconds — 750ms is the regression ceiling, an
+/// order of magnitude under the operator's 10s client timeout, and
+/// calibrated so the seeded tree's INLINE walk (the pre-cache code,
+/// ~1.5s/61MB on the gate VM) cannot squeeze under it.
+const CONTEXT_RESPONSE_CEILING: Duration = Duration::from_millis(750);
 
 /// How long the test waits for the background refresh to fill the cache
 /// with the seeded persisted children (the warm fires at create/attach;
 /// the walk is a bounded disk read of the seeded tree).
 const CACHE_FILL_DEADLINE: Duration = Duration::from_secs(30);
 
-/// The seeded tree: enough child session bytes (~100MB) that an inline
-/// walk would blow the ceiling (the pre-cache code parsed every child
-/// file per request), while the seeded write stays a bounded test-setup
-/// cost.
+/// The seeded tree: enough child session bytes (~150MB) that an inline
+/// walk blows the ceiling by a wide margin (the pre-cache code parsed
+/// every child file per request; calibrated on the gate VM at
+/// ~1.5s/61MB), while the seeded write stays a bounded test-setup cost.
 const SEEDED_CHILDREN: usize = 60;
 const SEEDED_MESSAGES_PER_CHILD: usize = 800;
+const SEEDED_ASSISTANT_CONTENT_KB: usize = 6;
 
 struct Daemon {
     child: Child,
@@ -170,7 +172,7 @@ fn scripted_turn(client: &mut Client, session_id: &str, text: &str, id: &str) {
 fn seed_child_session(dir: &std::path::Path, child_id: &str) {
     std::fs::create_dir_all(dir).expect("child dir");
     let file = dir.join(format!("{child_id}.jsonl"));
-    let filler = "x".repeat(2 * 1024);
+    let filler = "x".repeat(SEEDED_ASSISTANT_CONTENT_KB * 1024);
     let mut content = String::with_capacity(SEEDED_MESSAGES_PER_CHILD * (filler.len() + 256) + 512);
     content.push_str(
         &serde_json::json!({
