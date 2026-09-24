@@ -1,1 +1,0 @@
-- The daemon supervisor, both daemon clients and the agents view now share the daemon protocol module's response and session-summary guards. The agents view now rejects a session summary that has no working directory instead of accepting it as complete (the daemon has always required it).

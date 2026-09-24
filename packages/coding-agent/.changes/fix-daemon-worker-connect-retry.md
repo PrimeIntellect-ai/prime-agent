@@ -1,1 +1,0 @@
-- Fixed the daemon worker client keeping a stale socket after a failed or timed-out connect, so the next connect attempt on that client threw "already connected" instead of opening a fresh socket.
