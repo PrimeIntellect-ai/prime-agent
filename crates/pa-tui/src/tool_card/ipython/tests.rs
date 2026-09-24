@@ -146,7 +146,7 @@ fn sent_agent_messages_render_below_the_code() {
     assert!(
         flat[1]
             .trim_end()
-            .starts_with(" \u{25c6} Agent message sent \u{b7} to parent Worker"),
+            .starts_with(" \u{2709} Agent message sent \u{b7} to parent Worker"),
         "got: {flat:?}"
     );
     assert!(!flat[1].contains("Ping."), "no body when collapsed");
@@ -160,7 +160,7 @@ fn sent_agent_messages_render_below_the_code() {
     assert_eq!(flat[summary - 1], "", "blank between code and receipt");
     assert_eq!(
         flat[summary].trim_end(),
-        " \u{25c6} Agent message sent \u{b7} to parent Worker"
+        " \u{2709} Agent message sent \u{b7} to parent Worker"
     );
     assert_eq!(flat[summary + 1], " \u{2570}\u{2500} Ping.");
     assert_eq!(flat[summary + 2], "    Then report back.");
