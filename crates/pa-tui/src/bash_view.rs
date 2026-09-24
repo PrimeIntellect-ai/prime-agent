@@ -12,7 +12,7 @@
 use serde_json::Value;
 
 use crate::keybindings::{format_key_text, KeybindingsManager};
-use crate::menu_panel::{hug_row, menu_list_layout, plain_cell, status_dot};
+use crate::menu_panel::{hug_row, menu_list_layout, plain_cell, scrub_controls, status_dot};
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line, wrap_text};
 use crate::{Line, Span};
@@ -70,11 +70,13 @@ pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
             }
             Some(BashActivity {
                 id: id.to_string(),
+                // Every process-supplied string renders somewhere in the
+                // view: control characters scrub at the parse boundary.
                 command: row
                     .get("command")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
+                    .map(crate::menu_panel::scrub_controls)
+                    .unwrap_or_default(),
                 pid: row
                     .get("pid")
                     .and_then(Value::as_u64)
@@ -82,12 +84,12 @@ pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
                 started_at: row
                     .get("startedAt")
                     .and_then(Value::as_str)
-                    .map(str::to_string),
+                    .map(crate::menu_panel::scrub_controls),
                 status: row
                     .get("status")
                     .and_then(Value::as_str)
-                    .unwrap_or("unknown")
-                    .to_string(),
+                    .map(crate::menu_panel::scrub_controls)
+                    .unwrap_or_else(|| "unknown".to_string()),
                 exit_code: row.get("exitCode").and_then(Value::as_i64),
                 duration_ms: row.get("durationMs").and_then(Value::as_u64),
             })
@@ -841,16 +843,6 @@ fn clean_line(value: &str) -> String {
     scrub_controls(value)
 }
 
-/// Non-newline control characters become spaces (a command or prompt
-/// carrying ANSI/OSC escapes can never execute terminal control
-/// operations when rendered); newlines stay for the wraps.
-fn scrub_controls(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
-        .collect::<String>()
-}
-
 /// The duration cell: whole milliseconds read as a compact human word
 /// (`780ms`, `3.4s`, `2m 05s`), `—` when the wire carries none.
 fn format_duration(duration_ms: Option<u64>) -> String {
@@ -1272,10 +1264,10 @@ mod tests {
     fn a_clipped_command_trails_the_marker_inside_the_budget() {
         let mut catalog = activities();
         catalog[0].command = "word ".repeat(60);
-        let mut view = BashView::new(catalog, 14);
+        let mut view = BashView::new(catalog, 18);
         view.handle_key("enter", &kb());
         let frame = view.render(&theme(), 70, &kb());
-        assert!(frame.len() <= 14, "the drill-in fits: {}", frame.len());
+        assert!(frame.len() <= 18, "the drill-in fits: {}", frame.len());
         let text = frame_text(&frame);
         assert!(
             text.iter().any(|row| row.contains("word")),

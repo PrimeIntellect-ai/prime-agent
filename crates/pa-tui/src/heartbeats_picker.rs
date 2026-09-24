@@ -104,7 +104,15 @@ pub struct HeartbeatEntry {
 /// is missing: rows without a parseable id drop, matching the
 /// supervisor's own id-keyed merge.
 pub fn parse_heartbeat_job(job: &Value) -> Option<HeartbeatJob> {
-    let text = |field: &str| job.get(field).and_then(Value::as_str).map(str::to_string);
+    // Every daemon-supplied string renders somewhere in the view (the
+    // table cells, the subtitle, the detail pairs): control characters
+    // scrub at the parse boundary — an ANSI/OSC sequence in catalog data
+    // can never execute terminal control operations when rendered.
+    let text = |field: &str| {
+        job.get(field)
+            .and_then(Value::as_str)
+            .map(crate::menu_panel::scrub_controls)
+    };
     let id = text("id").filter(|id| !id.is_empty())?;
     Some(HeartbeatJob {
         id,
@@ -119,8 +127,8 @@ pub fn parse_heartbeat_job(job: &Value) -> Option<HeartbeatJob> {
             .get("schedule")
             .and_then(|schedule| schedule.get("expression"))
             .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+            .map(crate::menu_panel::scrub_controls)
+            .unwrap_or_default(),
         created_at: text("createdAt").unwrap_or_default(),
         next_run_at: text("nextRunAt"),
         last_error: text("lastError"),
@@ -145,11 +153,11 @@ pub fn parse_heartbeats(data: &Value) -> Vec<HeartbeatEntry> {
                 session_name: row
                     .get("sessionName")
                     .and_then(Value::as_str)
-                    .map(str::to_string),
+                    .map(crate::menu_panel::scrub_controls),
                 first_message: row
                     .get("firstMessage")
                     .and_then(Value::as_str)
-                    .map(str::to_string),
+                    .map(crate::menu_panel::scrub_controls),
             })
         })
         .collect()
@@ -1684,6 +1692,62 @@ mod tests {
         let joined = frame_text(&frame).join("\n");
         assert!(!joined.contains('\u{1b}'), "the escape scrubs: {joined:?}");
         assert!(joined.contains("red"), "the visible text stays");
+    }
+
+    /// Daemon-supplied catalog fields render inert: an ANSI/OSC sequence
+    /// in a schedule expression, status, or session label never reaches
+    /// the terminal (the parse boundary scrubs it).
+    #[test]
+    fn catalog_control_sequences_scrub_at_the_parse_boundary() {
+        let data = serde_json::json!({
+            "heartbeats": [{
+                "job": {
+                    "id": "esc-1",
+                    "status": "active\u{1b}[31m",
+                    "source": "heartbeat",
+                    "activeSessionId": "live-1",
+                    "sessionId": "sess-1",
+                    "prompt": "tick",
+                    "schedule": {"kind": "interval", "expression": "every 10m\u{1b}[2J"},
+                },
+                "sessionName": "\u{1b}]52;c;clipboard\u{7} the session",
+            }]
+        });
+        let mut parsed = parse_heartbeats(&data);
+        sort_heartbeats(&mut parsed);
+        let picker = HeartbeatsPicker::new(parsed, None, None, 24);
+        let frame = picker.render(&theme(), 70, &kb());
+        let joined = frame_text(&frame).join("\n");
+        assert!(
+            !joined.contains('\u{1b}'),
+            "no escapes reach the render: {joined:?}"
+        );
+        assert!(joined.contains("every 10m"), "the visible schedule stays");
+        // The drill-in's subtitle and pairs stay inert too.
+        let data2 = serde_json::json!({
+            "heartbeats": [{
+                "job": {
+                    "id": "esc-1",
+                    "status": "active\u{1b}[31m",
+                    "source": "heartbeat",
+                    "activeSessionId": "live-1",
+                    "sessionId": "sess-1",
+                    "prompt": "tick",
+                    "schedule": {"kind": "interval", "expression": "every 10m\u{1b}[2J"},
+                },
+                "sessionName": "the session",
+            }]
+        });
+        let mut catalog = parse_heartbeats(&data2);
+        sort_heartbeats(&mut catalog);
+        let mut drill = HeartbeatsPicker::new(catalog, None, None, 24);
+        drill.handle_key("enter", &kb());
+        let frame = drill.render(&theme(), 70, &kb());
+        let joined = frame_text(&frame).join("\n");
+        assert!(
+            !joined.contains('\u{1b}'),
+            "the drill-in stays inert: {joined:?}"
+        );
     }
 
     #[test]

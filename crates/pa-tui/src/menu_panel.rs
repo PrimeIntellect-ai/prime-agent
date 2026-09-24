@@ -136,6 +136,16 @@ pub(crate) fn plain_cell(text: &str, width: usize) -> String {
     cell
 }
 
+/// Non-newline control characters become spaces (ANSI/OSC sequences in
+/// daemon- or process-supplied text can never execute terminal control
+/// operations when rendered); newlines stay for the wraps.
+pub(crate) fn scrub_controls(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
+        .collect::<String>()
+}
+
 /// The status-dot vocabulary (the operator's 2026-09-23 directive; TS
 /// `subagent-summary-line`'s counts box `● running / ◐ idle /
 /// ○ inactive`): the filled circle rides the live states (running,
