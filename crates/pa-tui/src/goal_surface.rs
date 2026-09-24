@@ -208,10 +208,9 @@ pub fn render_goal_panel(
 
     let goal = &panel.goal;
     let mut lines: Vec<Line> = Vec::new();
-    lines.push(vec![theme.fg_span(
-        ThemeColor::BorderMuted,
-        "\u{2500}".repeat(width.max(1)),
-    )]);
+    lines.push(vec![
+        theme.fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width.max(1)))
+    ]);
     lines.push(vec![
         Span::raw("  "),
         theme.fg_span(ThemeColor::Text, "Goal".to_string()),
@@ -447,18 +446,16 @@ mod tests {
         state.time_used_seconds = 125;
         state.tokens_used = 18_000;
         state.token_budget = Some(40_000);
-        let frame = render_goal_panel(
-            &GoalPanel { goal: state },
-            &theme,
-            60,
-            &kb,
-        );
+        let frame = render_goal_panel(&GoalPanel { goal: state }, &theme, 60, &kb);
         let text: Vec<String> = frame
             .iter()
             .map(|line| line.iter().map(|span| span.content.as_str()).collect())
             .collect();
         let joined = text.join("\n");
-        assert!(text.iter().any(|row| row.trim() == "Goal"), "the title: {joined}");
+        assert!(
+            text.iter().any(|row| row.trim() == "Goal"),
+            "the title: {joined}"
+        );
         // The objective wraps, never single-lines.
         assert!(joined.contains("ship the rust port"));
         assert!(joined.contains("with all batteries green"));
@@ -473,7 +470,11 @@ mod tests {
             .position(|row| row.contains("close"))
             .expect("the hint row");
         assert!(text[hint].trim() != "\u{2500}");
-        assert_eq!(text.len() - hint - 1, 1, "one blank below the hint: {text:?}");
+        assert_eq!(
+            text.len() - hint - 1,
+            1,
+            "one blank below the hint: {text:?}"
+        );
         assert!(text.last().expect("the last row").trim().is_empty());
         // A goal without an objective degrades to the placeholder.
         let mut bare = goal(GoalStatus::Active);
@@ -481,7 +482,11 @@ mod tests {
         let frame = render_goal_panel(&GoalPanel { goal: bare }, &theme, 60, &kb);
         let joined: String = frame
             .iter()
-            .map(|line| line.iter().map(|span| span.content.as_str()).collect::<String>())
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("No objective recorded"), "{joined}");

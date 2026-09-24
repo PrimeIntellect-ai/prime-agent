@@ -1066,8 +1066,8 @@ impl SessionUi {
         // 2026-09-24 directive: "make it 'Pursuing goal (time)'"): the
         // token budget lives inside the goal panel the row opens, not on
         // the bar. A completed goal's bookkeeping is not a live activity.
-        let goal_label = (goal.status == pa_types::goal::GoalStatus::Active)
-            .then(|| tray_goal_label(goal));
+        let goal_label =
+            (goal.status == pa_types::goal::GoalStatus::Active).then(|| tray_goal_label(goal));
         // The dock's bash indicator counts only runs actively running
         // right now (operator scoping): finished runs stay as rows inside
         // the bash view, never in the indicator. The feed is the
@@ -6258,11 +6258,7 @@ impl SessionUi {
 
     /// The goal panel owns the frame while open: the close and back
     /// keys dismiss it; every other key is consumed (a read-only view).
-    async fn handle_goal_panel_key(
-        &mut self,
-        key: KeyEvent,
-        view: &mut AgentView,
-    ) -> Result<()> {
+    async fn handle_goal_panel_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
         };

@@ -672,9 +672,9 @@ mod tests {
         let success = theme.fg_style(ThemeColor::Success).fg;
         let muted = theme.fg_style(ThemeColor::Muted).fg;
         let colored = |text: &str, color| {
-            frame[1].iter().any(|span| {
-                span.content.contains(text) && span.style.fg == color
-            })
+            frame[1]
+                .iter()
+                .any(|span| span.content.contains(text) && span.style.fg == color)
         };
         assert!(colored("● 2 running", success));
         assert!(colored("◷ 3 heartbeats", success));
@@ -695,7 +695,10 @@ mod tests {
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
-        assert_eq!(text, " ◆ subagents · ○ 0 running  ·  ◷ 1 heartbeat  ·  ▸ 0 shells");
+        assert_eq!(
+            text,
+            " ◆ subagents · ○ 0 running  ·  ◷ 1 heartbeat  ·  ▸ 0 shells"
+        );
         // A dead-only roster keeps the dock mounted and its Subagents
         // group selectable (finished subagents are browsable history):
         // the rendered count stays running-only and reads zero.

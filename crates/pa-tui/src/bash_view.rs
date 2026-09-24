@@ -21,7 +21,9 @@
 use serde_json::Value;
 
 use crate::keybindings::{format_key_text, KeybindingsManager};
-use crate::menu_panel::{fill_row, hug_row, menu_list_layout, plain_cell, scrub_controls, status_dot};
+use crate::menu_panel::{
+    fill_row, hug_row, menu_list_layout, plain_cell, scrub_controls, status_dot,
+};
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line, wrap_text};
 use crate::{Line, Span};

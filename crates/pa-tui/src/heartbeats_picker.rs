@@ -948,7 +948,8 @@ fn parse_cron_field(field: &str) -> CronField {
     if field == "*" {
         CronField::Any
     } else if let Some(step) = field.strip_prefix("*/") {
-        step.parse::<u32>().map_or(CronField::Other, CronField::Step)
+        step.parse::<u32>()
+            .map_or(CronField::Other, CronField::Step)
     } else {
         field
             .parse::<u32>()
@@ -1118,7 +1119,10 @@ impl Columns {
         row.push(Span::raw(" "));
         row.push(theme.fg_span(
             ThemeColor::Muted,
-            plain_cell(&human_schedule(&entry.job.schedule_expression), self.interval),
+            plain_cell(
+                &human_schedule(&entry.job.schedule_expression),
+                self.interval,
+            ),
         ));
         row.push(Span::raw("  "));
         if selected {
