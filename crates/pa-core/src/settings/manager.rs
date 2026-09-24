@@ -346,13 +346,16 @@ impl SettingsManager {
             .unwrap_or(true)
     }
 
-    /// TS `getAgentTracesEnabled`: default off until the user opts in.
+    /// `agentTraces.enabled`: unset means ON. Sharing stays on until the
+    /// user opts out (`/traces`), and the value persists only then, like
+    /// the compaction default — so a fresh install never sees the opt-in
+    /// question. (TS defaults this setting off and asks on first run.)
     pub fn get_agent_traces_enabled(&self) -> bool {
         self.merged
             .agent_traces
             .as_ref()
             .and_then(|traces| traces.enabled)
-            .unwrap_or(false)
+            .unwrap_or(true)
     }
 
     pub fn set_agent_traces_enabled(&mut self, enabled: bool) -> Result<()> {
@@ -931,6 +934,19 @@ mod tests {
         );
         manager.global.idle_eviction_minutes = Some(serde_json::json!(45));
         assert_eq!(manager.get_idle_eviction(), IdleEviction::Minutes(45));
+    }
+
+    #[test]
+    fn agent_traces_default_on_and_persist_the_opt_out() {
+        // Unset means ON: the default is the configuration, so nothing
+        // is written for a fresh home. An explicit opt-out writes the
+        // global scope and survives a reload.
+        let mut manager = SettingsManager::in_memory(Settings::default());
+        assert!(manager.get_agent_traces_enabled());
+        manager.set_agent_traces_enabled(false).unwrap();
+        assert!(!manager.get_agent_traces_enabled());
+        manager.reload().unwrap();
+        assert!(!manager.get_agent_traces_enabled());
     }
 
     #[test]

@@ -167,6 +167,14 @@ pub(crate) enum BashActivityUpdate {
         /// one row): a late failure lands only on that row's open detail
         /// pane, never on whichever row the user switched to.
         activity_id: Option<String>,
+        /// The failure came from a tail fetch (the view supersedes it on
+        /// the next successful fetch) rather than a kill.
+        fetch: bool,
+        /// The detail-open generation the failed tail fetch was issued
+        /// under: like the tail responses, a late fetch failure from an
+        /// earlier open of the same row never lands on the newer one
+        /// (a kill owns no generation and stays `None`).
+        generation: Option<u64>,
     },
 }
 
@@ -1063,14 +1071,12 @@ impl SessionUi {
             .iter()
             .filter(|activity| activity.running())
             .count();
-        // The dock's subagent count stays live-only: dead registry rows
-        // (passivated children the ledger still seeds) never bloat the
-        // indicator — running and idle are the activities to act on.
-        let live = counts.running + counts.idle;
+        // The dock's subagent count is the live running count only:
+        // idle and dead registry rows (passivated children the ledger
+        // still seeds) never bloat the indicator — they render in the
+        // scoped agents view.
         let dock = crate::chrome::ActivityDock {
-            subagents: live,
             subagents_running: counts.running,
-            subagents_idle: counts.idle,
             subagents_total: counts.total,
             heartbeats: self.heartbeat_catalog.len(),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
@@ -5989,6 +5995,8 @@ impl SessionUi {
             BashActivityUpdate::Error {
                 message,
                 activity_id,
+                fetch,
+                generation,
                 ..
             } => {
                 // An in-view action's failure surfaces in the open bash
@@ -6002,7 +6010,7 @@ impl SessionUi {
                 };
                 if view.bash_view.is_some() && detail_matches {
                     if let Some(bash_view) = view.bash_view.as_mut() {
-                        bash_view.set_error(message);
+                        bash_view.set_error(message, fetch, generation);
                     }
                 } else {
                     self.error_row(&message, view);
@@ -6072,6 +6080,51 @@ impl SessionUi {
         }
     }
 
+    /// Fetch one bash activity's output tail off the key loop (a stalled
+    /// kernel must not freeze the TUI behind the request bound): the
+    /// response lands on the open view through the update channel,
+    /// stamped with the detail-open generation it was issued under (the
+    /// open's first window or a later lazy load's grown one — the view
+    /// owns the window policy).
+    fn spawn_bash_tail_fetch(&self, activity_id: String, generation: u64, lines: u32) {
+        let client = self.client.clone();
+        let session = self.active_session_id.clone();
+        let tx = self.bash_updates.clone();
+        tokio::spawn(async move {
+            let response_id = activity_id.clone();
+            let result = client
+                .request_ok(DaemonCommand::TailKernelBash {
+                    id: None,
+                    active_session_id: session.clone(),
+                    activity_id,
+                    lines: Some(lines),
+                    rest: Default::default(),
+                })
+                .await;
+            match result {
+                Ok(data) => {
+                    if let Some(tail) = data.get("tail").and_then(Value::as_str) {
+                        let _ = tx.send(BashActivityUpdate::Tail {
+                            session,
+                            activity_id: response_id,
+                            generation,
+                            tail: tail.to_string(),
+                        });
+                    }
+                }
+                Err(error) => {
+                    let _ = tx.send(BashActivityUpdate::Error {
+                        session,
+                        message: format!("Bash output: {error:#}"),
+                        activity_id: Some(response_id),
+                        fetch: true,
+                        generation: Some(generation),
+                    });
+                }
+            }
+        });
+    }
+
     /// One key press while the bash view is open: the view owns the frame
     /// the same way as the heartbeats view; its actions run the kernel
     /// bash requests off the key loop.
@@ -6091,45 +6144,25 @@ impl SessionUi {
                 view.bash_view = None;
             }
             Some(BashViewAction::OpenDetail { id, generation }) => {
-                // The request runs off the key loop (a stalled kernel
-                // must not freeze the TUI behind the request bound): the
-                // tail lands on the open view through the update channel,
-                // stamped with this open's generation so a late response
-                // from an earlier open never overwrites it.
-                let client = self.client.clone();
-                let session = self.active_session_id.clone();
-                let tx = self.bash_updates.clone();
-                tokio::spawn(async move {
-                    let response_id = id.clone();
-                    let result = client
-                        .request_ok(DaemonCommand::TailKernelBash {
-                            id: None,
-                            active_session_id: session.clone(),
-                            activity_id: id,
-                            lines: Some(crate::bash_view::TAIL_LINES),
-                            rest: Default::default(),
-                        })
-                        .await;
-                    match result {
-                        Ok(data) => {
-                            if let Some(tail) = data.get("tail").and_then(Value::as_str) {
-                                let _ = tx.send(BashActivityUpdate::Tail {
-                                    session,
-                                    activity_id: response_id,
-                                    generation,
-                                    tail: tail.to_string(),
-                                });
-                            }
-                        }
-                        Err(error) => {
-                            let _ = tx.send(BashActivityUpdate::Error {
-                                session,
-                                message: format!("Bash output: {error:#}"),
-                                activity_id: Some(response_id),
-                            });
-                        }
-                    }
-                });
+                // The lazy tail: the open asks for the first window only
+                // (FIRST_TAIL_LINES); the detail's upward scroll grows
+                // the window on demand (LoadMore below). The request runs
+                // off the key loop (a stalled kernel must not freeze the
+                // TUI behind the request bound): the tail lands on the
+                // open view through the update channel, stamped with this
+                // open's generation so a late response from an earlier
+                // open never overwrites it.
+                self.spawn_bash_tail_fetch(id, generation, crate::bash_view::FIRST_TAIL_LINES);
+            }
+            Some(BashViewAction::LoadMore {
+                id,
+                generation,
+                lines,
+            }) => {
+                // The detail scrolled to the top of its loaded window:
+                // re-fetch the row's output with the grown window (the
+                // view owns the growth policy, capped by the wire).
+                self.spawn_bash_tail_fetch(id, generation, lines);
             }
             Some(BashViewAction::Kill { id }) => {
                 let client = self.client.clone();
@@ -6156,6 +6189,8 @@ impl SessionUi {
                                 session,
                                 message: format!("Could not kill bash command: {error:#}"),
                                 activity_id: Some(error_id),
+                                fetch: false,
+                                generation: None,
                             });
                         }
                     }
@@ -7060,12 +7095,17 @@ impl SessionUi {
             )
         };
         if page_up {
+            // The viewport consumes the key before the editor, so the
+            // editor's own page arms never run: collapse a selection
+            // here or it survives the scroll as a stale replace range.
+            view.editor.clear_selection();
             view.scroll_by(-(view.page_size() as isize));
             self.track_scroll("page_up", view.is_following());
             self.dirty = true;
             return Ok(());
         }
         if page_down {
+            view.editor.clear_selection();
             view.scroll_by(view.page_size() as isize);
             self.track_scroll("page_down", view.is_following());
             self.dirty = true;
@@ -7178,6 +7218,15 @@ impl SessionUi {
             if view.editor.is_showing_autocomplete() || view.editor.has_pending_autocomplete() {
                 view.editor.cancel_autocomplete();
                 self.clear_ctrl_c_hint();
+                return Ok(());
+            }
+            // An active selection consumes the first Escape (standard
+            // editors' drop-the-selection press): the interrupt/clear
+            // ladder runs on the next press.
+            if view.editor.has_selection() {
+                view.editor.clear_selection();
+                self.clear_ctrl_c_hint();
+                self.dirty = true;
                 return Ok(());
             }
             self.clear_ctrl_c_hint();
@@ -7528,6 +7577,11 @@ impl SessionUi {
             && view.editor.is_cursor_at_end()
             && self.focus_subagents_summary(view)
         {
+            // The focus leaves the editor with the selection active: a
+            // later keystroke would fall back through to the editor and
+            // replace the stale range, so the selection collapses with
+            // the handoff.
+            view.editor.clear_selection();
             self.dirty = true;
             return Ok(());
         }
@@ -7538,18 +7592,72 @@ impl SessionUi {
             self.clear_ctrl_c_hint();
         }
         for event in view.editor.take_events() {
-            if let crate::editor::EditorEvent::Submitted(text) = event {
-                if self.queue_selection.is_browsing() {
-                    // Enter steers the selected parked message: the edit
-                    // replaces it and moves it onto the steering lane
-                    // (TS `applyQueueSelection(text, "steering")`).
-                    self.apply_queue_selection(&text, QueueLane::Steering, view)
-                        .await?;
-                } else {
-                    view.editor.add_to_history(&text);
-                    self.submit_prompt(&text, SubmitBehavior::Steer, view)
-                        .await?;
+            match event {
+                crate::editor::EditorEvent::Submitted(text) => {
+                    if self.queue_selection.is_browsing() {
+                        // Enter steers the selected parked message: the edit
+                        // replaces it and moves it onto the steering lane
+                        // (TS `applyQueueSelection(text, "steering")`).
+                        self.apply_queue_selection(&text, QueueLane::Steering, view)
+                            .await?;
+                    } else {
+                        view.editor.add_to_history(&text);
+                        self.submit_prompt(&text, SubmitBehavior::Steer, view)
+                            .await?;
+                    }
                 }
+                crate::editor::EditorEvent::ClipboardWrite(text) => {
+                    // A selection cut/copy. On a live terminal it takes
+                    // TS `copySelection`'s shape exactly: the OSC 52
+                    // sequence goes straight to the terminal (it works
+                    // locally, over SSH, and through tmux
+                    // `set-clipboard`), the same write the mouse
+                    // selection's `copy_selection` below performs. The
+                    // platform-tool chain (child processes whose
+                    // `wait()` has no timeout) never runs on this path:
+                    // a stalled xclip/wl-copy/pbcopy can neither freeze
+                    // the prompt nor leak an unkillable blocking task,
+                    // and no background task accumulates. The toast is
+                    // success-only; a failed write shows the error row.
+                    // A headless run has no terminal to write to and no
+                    // stalling children (the tools fail to spawn
+                    // instantly), so it keeps the synchronous platform
+                    // chain and its captured OSC sink stays verifiable.
+                    if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                        use std::io::Write;
+                        // The sequence goes through `osc52::sequence`, so
+                        // the encoded-payload cap applies to this path
+                        // like every other OSC 52 write: an oversized
+                        // sequence desynchronizes the terminal, so the
+                        // copy reports failure instead of writing it.
+                        match crate::osc52::sequence(&text) {
+                            Some(sequence) => {
+                                let mut out = std::io::stdout();
+                                match out.write_all(sequence.as_bytes()) {
+                                    Ok(()) => {
+                                        let _ = out.flush();
+                                        self.toast("Copied selection to clipboard", view);
+                                    }
+                                    Err(error) => {
+                                        self.error_row(
+                                            &format!("Failed to copy selection: {error}"),
+                                            view,
+                                        );
+                                    }
+                                }
+                            }
+                            None => {
+                                self.error_row("Failed to copy selection to clipboard", view);
+                            }
+                        }
+                    } else {
+                        match crate::clipboard::copy_to_clipboard(&text, &mut self.osc_sink) {
+                            Ok(()) => self.toast("Copied selection to clipboard", view),
+                            Err(message) => self.error_row(&message, view),
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         self.dirty = true;

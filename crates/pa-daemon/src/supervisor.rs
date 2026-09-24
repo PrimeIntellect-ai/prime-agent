@@ -360,6 +360,17 @@ impl Supervisor {
         }
     }
 
+    /// Emit the deleted-child usage capture's `daemon event` (schema v1,
+    /// kind `deleted_child_usage_captured`): source + count, primitives
+    /// only.
+    pub(crate) fn note_deleted_child_usage_captured(&self, source: &str, count: usize) {
+        if let Some(client) = &*self.telemetry.lock().unwrap() {
+            pa_core::session_engine::telemetry::track_deleted_child_usage_captured(
+                client, source, count,
+            );
+        }
+    }
+
     /// Emit a `daemon event` (best-effort, non-blocking; no-op when the
     /// daemon is opted out).
     pub(crate) fn note_daemon_event(&self, kind: &str, exit_reason: Option<&str>) {
@@ -569,6 +580,18 @@ impl Supervisor {
         socket::restrict_socket_path(&self.options.socket_path);
         self.log
             .append(&format!("supervisor started pid {}", std::process::id()));
+
+        // The boot reap (the operator's same-socket predecessor rule): this
+        // daemon now owns the socket's lineage, so leftover worker processes
+        // of a dead predecessor - alive, still holding their runtime session
+        // leases, unreachable through any descriptor or registration - die
+        // here, and a wedged predecessor supervisor dies with them. Daemons
+        // and workers on OTHER sockets are never touched (the scan matches
+        // the socket path alone). The reap precedes the adoption pass and
+        // the first client: a create racing a leftover holder would answer
+        // the lease refusal this pass exists to clear. Bounded by
+        // construction (every target shares one escalation window).
+        crate::boot_reap::reap_predecessors(&self).await;
 
         // Update boot (spec §6): consume the roster from the spawn env
         // BEFORE the sweep deletes the file it points at, sweep this
@@ -3792,6 +3815,27 @@ impl Supervisor {
             .filter(|info| !scope_current || info.cwd == cwd)
             .collect::<Vec<_>>();
         infos.append(&mut merged);
+        // Every row - scanned or passive-merged - carries its tombstoned
+        // descendants' spend (TS `withPassiveRlmDescendantInfos`'s
+        // deleted-usage half): one bucket read per list, attached by
+        // canonical parent path so the agents-view recursive rollup bills
+        // deleted subagents to the parent that spent them. A broken ledger
+        // degrades to bare rows, exactly like the passive merge above.
+        match ledger.deleted_descendant_usage_by_parent() {
+            Ok(bucket) => {
+                for info in infos.iter_mut() {
+                    let path = crate::lease::canonical_session_path(&info.path)
+                        .to_string_lossy()
+                        .to_string();
+                    info.deleted_descendant_usage = bucket.get(&path).cloned();
+                }
+            }
+            Err(error) => {
+                self.log_line(&format!(
+                    "Could not attach deleted-descendant usage: {error:#}"
+                ));
+            }
+        }
         let total = infos.len();
         let mut lines = Vec::new();
         for (index, info) in infos.iter().enumerate() {
@@ -4670,8 +4714,15 @@ impl Supervisor {
                             let deleted_child = rest
                                 .get("rlmLedgerDelete")
                                 .and_then(Value::as_str)
-                                .map(str::to_string);
-                            self.finalize_worker_stop(&resident, deleted_child.as_deref())
+                                .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
+                                .map(|_| crate::stop_cleanup::DeletedChild {
+                                    child_id: rest
+                                        .get("rlmChildId")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                });
+                            self.finalize_worker_stop(&resident, deleted_child.as_ref())
                                 .await;
                         }
                     }
@@ -4766,10 +4817,63 @@ impl Supervisor {
         for resident in self.registry.list().await {
             resident.intentional_stop.store(true, Ordering::SeqCst);
             resident.note_retired();
+            // The stop tombstone persists before the worker is even told (TS
+            // `stopWorkerUntracked` persists before its request): a
+            // supervisor that dies between here and the worker's exit
+            // leaves durable stop intent, and the next boot finishes the
+            // stop instead of adopting the leftover as healthy.
+            if self.persist_stop_tombstone(&resident).await.is_err() {
+                self.log_line(&format!(
+                    "session worker {} stop tombstone could not persist; leaving the worker untouched (the next boot retries the stop)",
+                    resident.worker_id
+                ));
+                continue;
+            }
             let _ = self
                 .route_command(&resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
                 .await;
-            let _ = std::fs::remove_file(&resident.descriptor_path);
+            // The terminal stop deletes the descriptor ONLY after the
+            // worker's process is provably gone (TS `stopWorkerUntracked`'s
+            // contract). A worker that missed the routed shutdown (a dead
+            // connection, a wedged socket, a flush outlasting the route
+            // budget) gets the identity-gated SIGTERM -> SIGKILL
+            // escalation. Deleting the descriptor of a live worker
+            // orphans it: nothing on any later daemon can adopt or reap it
+            // through its identity, while it keeps holding its runtime
+            // session lease - every open of its session then refuses with
+            // `Session is already active in <its id>`.
+            let (pid, start_id) = {
+                let descriptor = resident.descriptor.lock().await;
+                (descriptor.pid as u32, descriptor.process_start_id.clone())
+            };
+            // An unobservable identity never receives the escalation's
+            // signals (a pid that cannot be proven ours stays untouched);
+            // a live process behind such a pid keeps its tombstoned
+            // descriptor too, exactly like a SIGKILL survivor - the next
+            // boot retries the stop. The unverifiable class covers BOTH a
+            // descriptor without a recorded id and a recorded id the
+            // platform cannot observe right now (the probe returns None
+            // while the process lives).
+            let alive_unverified = (start_id.is_none()
+                || crate::lease::get_process_start_id(pid).is_none())
+                && crate::lease::is_process_alive(pid).unwrap_or(false);
+            match crate::boot_reap::stop_process(pid, start_id).await {
+                crate::boot_reap::ReapOutcome::Survived => {
+                    self.log_line(&format!(
+                        "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",
+                        resident.worker_id
+                    ));
+                }
+                _ if alive_unverified => {
+                    self.log_line(&format!(
+                        "session worker {} cannot be identity-verified; descriptor tombstoned for the next boot",
+                        resident.worker_id
+                    ));
+                }
+                _ => {
+                    let _ = std::fs::remove_file(&resident.descriptor_path);
+                }
+            }
         }
         self.registry.clear().await;
         // The workers are all stopped now, so the accept loop may exit;
@@ -5020,6 +5124,15 @@ fn saved_session_row(info: &crate::session_store::SessionInfo) -> Value {
     if let Some(usage) = &info.usage {
         object.insert("usage".to_string(), json!(usage));
     }
+    // TS #2506 `serializeSavedSessionInfo`'s optional
+    // `deletedDescendantUsage`: the recursive spend of ledger-tombstoned
+    // descendants (the listing arm attaches it from the spawn ledger's
+    // bucket). The agents-view recursive cost rollup adds it to this
+    // row's own cost — the deleted child keeps no row anywhere, its
+    // spend bills here exactly once.
+    if let Some(deleted) = &info.deleted_descendant_usage {
+        object.insert("deletedDescendantUsage".to_string(), json!(deleted));
+    }
     // The persisted thinking level rides the catalog row too: the TUI merges
     // it into live summaries that lack one (the same enrichment as `model`).
     if let Some(level) = &info.thinking_level {
@@ -5133,6 +5246,40 @@ mod tests {
     /// `list_saved_sessions` catalog row) carry the persisted thinking
     /// level: the agents-view Model column renders "model:level" for
     /// sessions without a live worker, top-level and subagent alike.
+    /// TS #2506's `serializeSavedSessionInfo`: the listing arm's bucket
+    /// attach publishes `deletedDescendantUsage` on the saved row - the
+    /// agents-view recursive rollup's deleted-descendant term. Absent
+    /// rows (no tombstoned descendants) carry no field, matching the
+    /// optional wire shape.
+    #[test]
+    fn saved_session_rows_publish_deleted_descendant_usage() {
+        let dir = std::env::temp_dir().join(format!("pa-saved-dd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+        let path = dir.join(format!("{}.jsonl", session.session_id()));
+        session.set_path(path.clone());
+        session.rewrite().unwrap();
+        let mut info = crate::session_store::read_session_info(&path).unwrap();
+        assert!(
+            info.deleted_descendant_usage.is_none(),
+            "the file scan never sets the ledger-derived field"
+        );
+        info.deleted_descendant_usage = Some(crate::session_usage::SessionUsageSummary {
+            input_tokens: 1_100,
+            output_tokens: 110,
+            cost: 0.5,
+        });
+        let row = saved_session_row(&info);
+        assert_eq!(
+            row["deletedDescendantUsage"],
+            json!({ "inputTokens": 1_100, "outputTokens": 110, "cost": 0.5 })
+        );
+        // Absent again: the field never rides as a null.
+        info.deleted_descendant_usage = None;
+        let row = saved_session_row(&info);
+        assert!(row.get("deletedDescendantUsage").is_none());
+    }
+
     #[test]
     fn saved_session_rows_carry_the_persisted_thinking_level() {
         let dir = std::env::temp_dir().join(format!("pa-saved-tl-{}", uuid::Uuid::new_v4()));

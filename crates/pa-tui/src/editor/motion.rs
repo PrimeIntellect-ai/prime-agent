@@ -26,6 +26,78 @@ impl Editor {
         self.set_cursor_col(len);
     }
 
+    /// Move to the start of the whole text (TS has no doc jump; the
+    /// standard `Ctrl+Home` / macOS `Cmd+Up` editors' motion).
+    pub(crate) fn move_to_doc_start(&mut self) {
+        self.last_action = None;
+        self.cursor_line = 0;
+        self.set_cursor_col(self.line_start_col(0));
+    }
+
+    /// Move to the end of the whole text (`Ctrl+End` / `Cmd+Down`).
+    pub(crate) fn move_to_doc_end(&mut self) {
+        self.last_action = None;
+        self.cursor_line = self.lines.len() - 1;
+        let len = self.lines[self.cursor_line].chars().count();
+        self.set_cursor_col(len);
+    }
+
+    /// The first line of the paragraph containing `line` (paragraphs are
+    /// blank-line separated; the bang prefix's line 0 is its own).
+    fn paragraph_start(&self, mut line: usize) -> usize {
+        while line > 0 && self.lines[line].trim().is_empty() {
+            line -= 1;
+        }
+        while line > 0 && !self.lines[line - 1].trim().is_empty() {
+            line -= 1;
+        }
+        line
+    }
+
+    /// The last line of the paragraph containing `line`.
+    fn paragraph_end(&self, mut line: usize) -> usize {
+        let last = self.lines.len() - 1;
+        while line < last && self.lines[line].trim().is_empty() {
+            line += 1;
+        }
+        while line < last && !self.lines[line + 1].trim().is_empty() {
+            line += 1;
+        }
+        line
+    }
+
+    /// Move up one paragraph (readline's `backward-paragraph` shape): from
+    /// inside a paragraph to its first line; already at the paragraph's
+    /// first line, to the previous paragraph's first line. `Ctrl+Up`.
+    pub(crate) fn move_paragraph_backward(&mut self) {
+        self.last_action = None;
+        let start = self.paragraph_start(self.cursor_line);
+        let target = if self.cursor_line == start && start > 0 {
+            self.paragraph_start(start - 1)
+        } else {
+            start
+        };
+        self.cursor_line = target;
+        self.set_cursor_col(self.line_start_col(target));
+    }
+
+    /// Move down one paragraph (readline's `forward-paragraph`):
+    /// `Ctrl+Down` lands at the END of the current paragraph's last line;
+    /// already at that line, at the next paragraph's end.
+    pub(crate) fn move_paragraph_forward(&mut self) {
+        self.last_action = None;
+        let end = self.paragraph_end(self.cursor_line);
+        let last = self.lines.len() - 1;
+        let target = if self.cursor_line == end && end < last {
+            self.paragraph_end(end + 1)
+        } else {
+            end
+        };
+        self.cursor_line = target;
+        let col = self.lines[target].chars().count();
+        self.set_cursor_col(col);
+    }
+
     pub(crate) fn move_word_backwards(&mut self) {
         self.last_action = None;
         let current_line = self.lines[self.cursor_line].clone();

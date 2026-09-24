@@ -3,3 +3,10 @@
 /bin/
 __pycache__/
 steer-queue-runs/
+
+# local gate logs (driver downloads)
+clippy-*.log
+fmt-*.log
+tests-*.log
+test-compile-*.log
+

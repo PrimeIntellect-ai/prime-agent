@@ -1,3 +1,49 @@
+## Deleted-subagent spend: the durable capture ahead of TS (lane deleted-child-spend, 2026-09-23)
+
+**The ahead-of-TS exception (Kevin's directive, 2026-09-23).** TS PR
+#2506 (open at time of writing) adds `deletedDescendantUsage` to
+saved-session rows so agents-view subtree costs stop dropping deleted
+subagents' spend — but its bucket re-reads each tombstoned child's
+transcript via `readSessionInfo`, and a normal delete removes the
+`.jsonl` before that read runs, so the field publishes $0 for every
+actually-deleted subagent (the Macroscope review of 2f9ddd17, open
+thread). The Rust port ships the same wire surface WITH the fix the TS
+PR still lacks: the deletion lifecycle captures the child's final own
+usage DURABLY BEFORE any unlink and the bucket reads the snapshot, so
+the spend survives the transcript's removal, a saved-session delete,
+and daemon restarts.
+
+**What shipped (Rust-only until TS follows):**
+- The ledger delete record carries an optional own-usage snapshot (the
+  post-settlement amendment); replay merges it into the tombstoned edge
+  (sticky across idempotent re-tombstones, last-wins on retried
+  captures). No record-version bump: `v:1` readers skip unknown fields.
+- `finalize_worker_stop` captures from the frozen transcript AFTER the
+  kill reply (the worker's close settled the aborted row, mid-turn
+  partial usage durable) and BEFORE the artifact sweep; the adoption
+  finalize reconstructs the delete from the ledger tombstone alone, so a
+  supervisor crash between tombstone and sweep loses nothing (restart
+  coverage).
+- The saved-session delete captures while the file is alive (the
+  Rust-side instance of the same race: `tombstone_saved_session_delete`
+  runs pre-unlink).
+- The agents-view rollup bills the bucket to the parent's own cost
+  (TS #2506's `computeRecursiveRollups` delta), and the rollup walk's
+  BFS order bound now re-evaluates — a `0..order.len()` range captured
+  the roots' length once, silently dropping every depth-2+ descendant's
+  cost from recursive totals (pre-existing, load-bearing for the
+  numeric fixture).
+- Daemon schema revision 29 → 30 (Rust's numbering already diverged
+  from TS's 27; TS #2506 proposes TS-side 28 — the field name/shape
+  matches its `SessionUsageSummary {inputTokens, outputTokens, cost}`
+  exactly, so the products agree once it lands).
+
+**Documented historical gap (no fabricated backfill):** tombstones that
+predate the capture carry no snapshot; the bucket falls back to the
+transcript while it exists and bills zero once it is gone. Spend from
+children deleted before this change is irrecoverable when their
+transcripts are gone — recorded, never invented.
+
 ## Compaction arms coverage matrix — print/ACP/daemon reconciliation (lane print-arms-audit, 2026-09-20)
 
 ### The #229 flag, reconciled
@@ -485,7 +531,12 @@ Key divergences from TS, deliberate:
   SIGKILL of a session, ever.
 - The all-stopped exit keeps worker descriptors on disk (the new
   supervisor's create-or-adopt restore), unlike `begin_shutdown` which
-  deletes them for a terminal stop.
+  deletes them for a terminal stop — but only after the worker's process is
+  provably gone (TS `stopWorkerUntracked`'s contract, the daemon-boot-reap
+  lane): a worker that missed the routed `shutdown` gets the identity-gated
+  SIGTERM → SIGKILL escalation, and a SIGKILL survivor keeps its descriptor
+  with the stop tombstone so the next boot finishes the stop instead of
+  adopting (or refusing to adopt) a live leftover holding its session lease.
 
 
 ## Update-prepare transaction (spec redesign over the TS prepare RPC, 2026-09-18)
@@ -1559,3 +1610,71 @@ the port.
 - **FUTURE — not implemented**: nothing in the codebase changes today;
   the dock's `bash` activity tracking and the `bash()` tool API stay as
   they are.
+
+## Daemon-boot predecessor reap (operator-directed divergence, 2026-09-24)
+
+The operator's report, verbatim: "when I shut down a daemon and then spin
+up the new daemon and try to open a session, it gives me that error that
+it is already in a different session worker, which should not be the
+case. ... ideally we kill previous daemons when we boot new ones, unless
+they are in different sockets."
+
+The failure chain this closes, in order: a session worker outlives its
+supervisor by design (the supervisor-lost exit window); when a NEW daemon
+takes over the same socket path, the worker's availability probe connects
+to the new daemon and resets the window, so a leftover worker holds its
+runtime session lease forever; if its descriptor was deleted (the old
+`begin_shutdown` removed descriptors unconditionally, even for workers
+that missed the routed `shutdown`), nothing on the new daemon can reach
+it — its re-registration is refused (`Unknown session worker`), the
+adoption pass has no descriptor, the create-open reuse seam has no
+resident — so every open of its session bounces with `Session is already
+active in <leftover id>` (the wire refusal the TUI decorates).
+
+Sanctioned divergences from TS, documented per the #289 precedent:
+
+- **The boot reap** (`pa-daemon/src/boot_reap.rs`): a daemon that boots
+  on a socket owns that socket's lineage. At boot (after the bind, before
+  the adoption pass and the accept loop) it reaps same-socket predecessor
+  processes: leftover worker processes whose
+  `PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET` names this socket and
+  that no descriptor of this socket names (a crash restart's live,
+  descriptor-backed workers are the adoption pass's business and stay),
+  plus wedged supervisor processes of this socket path. The escalation is
+  the CLI stop contract (`stop_tracked_process`): identity-gated SIGTERM,
+  a bounded grace, SIGKILL, a bounded verify — concurrent across targets,
+  one log line per verdict. Daemons and workers on DIFFERENT sockets are
+  never touched (the scan matches the socket path alone; the two-daemons-
+  one-store fleet and the mission-box containment rule). TS has no
+  counterpart: TS leaves leftovers to their own unreachable-supervisor
+  exit window, which a new daemon on the same socket keeps resetting.
+  Linux-only discovery (`/proc` environ + cmdline censuses); platforms
+  without the census reap nothing at boot.
+- **The terminal stop's verified delete** (`begin_shutdown`): the
+  descriptor leaves disk only after the worker's process is provably
+  gone — TS `stopWorkerUntracked`'s contract, ported for the terminal
+  stop. A worker that missed the routed `shutdown` gets the identity-gated
+  SIGTERM → SIGKILL escalation in-process (the daemon exits right after;
+  TS's background `finalizeTimedOutWorkerStop` would die with it); a
+  SIGKILL survivor keeps its descriptor with the stop tombstone, so the
+  next boot's tombstoned-stop adoption branch finishes the stop (kill +
+  the archived-state belt — the existing unkillable-worker contract).
+- **The unseen-holder refusal text** (`pa-tui/src/session_open_error.rs`):
+  the interactive decoration for a holder the roster cannot see no longer
+  promises "retry shortly" — no worker on this daemon will ever answer
+  that id. The guidance names what the holder can be (another daemon's
+  worker, or a leftover process) and the two real ways around it
+  (restarting this daemon reaps same-socket leftovers; the holder's exit
+  unlocks the file). The TS-identical first line stays byte-identical.
+
+Where the code lives: `pa-daemon/src/boot_reap.rs` (the reap), the
+`begin_shutdown` stop pass in `crates/pa-daemon/src/supervisor.rs`, the
+`saved-catalog` loading lifecycle in `crates/pa-tui/src/agents_view.rs`
+(the long-running request budget for `list_saved_sessions`, the entry
+anchor settling on a terminal failure — TS
+`resolveMissingSelectionAnchor`'s finally arm — and the one-per-query
+retry re-arm, TS `rearmSavedSearchFetch`), and the e2e
+`pa-daemon/tests/daemon_boot_reap_e2e.rs` (the operator's exact flow:
+kill the supervisor, lose the descriptor, boot the new daemon, open the
+session — it must open) plus `pa-tui/tests/agents_view_saved_catalog_failure.rs`
+(the failure settles the anchor and the view stays openable).

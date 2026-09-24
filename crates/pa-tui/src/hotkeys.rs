@@ -37,6 +37,19 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
     let yank = key_display(kb, "tui.editor.yank");
     let yank_pop = key_display(kb, "tui.editor.yankPop");
     let undo = key_display(kb, "tui.editor.undo");
+    let redo = key_display(kb, "tui.editor.redo");
+    let cursor_doc_start = key_display(kb, "tui.editor.cursorDocStart");
+    let cursor_doc_end = key_display(kb, "tui.editor.cursorDocEnd");
+    let cursor_paragraph_up = key_display(kb, "tui.editor.cursorParagraphUp");
+    let cursor_paragraph_down = key_display(kb, "tui.editor.cursorParagraphDown");
+    let select_all = key_display(kb, "tui.editor.selectAll");
+    let select_word_left = key_display(kb, "tui.editor.selectWordLeft");
+    let select_word_right = key_display(kb, "tui.editor.selectWordRight");
+    let select_line_start = key_display(kb, "tui.editor.selectLineStart");
+    let select_line_end = key_display(kb, "tui.editor.selectLineEnd");
+    let cut_selection = key_display(kb, "tui.editor.cutSelection");
+    let copy_selection = key_display(kb, "tui.editor.copySelection");
+    let transpose_chars = key_display(kb, "tui.editor.transposeChars");
     let tab = key_display(kb, "tui.input.tab");
     let clear = key_display(kb, "app.clear");
     let clear_input = key_display(kb, "app.input.clear");
@@ -71,6 +84,8 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
 | `{cursor_word_left}` / `{cursor_word_right}` | Move by word |
 | `{cursor_line_start}` | Start of line |
 | `{cursor_line_end}` | End of line |
+| `{cursor_doc_start}` / `{cursor_doc_end}` | Start / end of text |
+| `{cursor_paragraph_up}` / `{cursor_paragraph_down}` | Move one paragraph |
 | `{jump_forward}` | Jump forward to character |
 | `{jump_backward}` | Jump backward to character |
 | `{page_up}` / `{page_down}` | Scroll by page |
@@ -87,6 +102,18 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
 | `{yank}` | Paste the most-recently-deleted text |
 | `{yank_pop}` | Cycle through the deleted text after pasting |
 | `{undo}` | Undo |
+| `{redo}` | Redo |
+| `{transpose_chars}` | Swap the characters around the cursor |
+
+**Selection**
+| Key | Action |
+|-----|--------|
+| Shift+arrows | Select by character / line |
+| `{select_word_left}` / `{select_word_right}` | Select by word |
+| `{select_line_start}` / `{select_line_end}` | Select to line start / end |
+| `{select_all}` | Select all text |
+| `{cut_selection}` | Cut selection |
+| `{copy_selection}` | Copy selection |
 
 **Other**
 | Key | Action |

@@ -382,10 +382,84 @@ fn handle_metadata(
             .get("cacheWriteInputTokens")
             .and_then(Value::as_u64)
             .unwrap_or(0);
+        // TS `totalTokens || input + output`: an explicitly reported zero is
+        // falsy, so only a positive reported total is kept. The sum
+        // saturates — TS doubles never wrap, and a Rust u64 must not
+        // panic (debug) or wrap to a wrong total (release).
         output.usage.total_tokens = usage
             .get("totalTokens")
             .and_then(Value::as_u64)
-            .unwrap_or(output.usage.input + output.usage.output);
+            .filter(|total| *total > 0)
+            .unwrap_or(output.usage.input.saturating_add(output.usage.output));
         calculate_cost(model, &mut output.usage, None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{zero_model_cost, ModelInput, Usage};
+    use serde_json::json;
+
+    /// TS `amazon-bedrock.ts` `handleMetadata` assigns
+    /// `usage.totalTokens = event.usage.totalTokens || input + output`, so an
+    /// explicitly reported zero total is falsy and falls back to the
+    /// input/output sum; a positive reported total is kept verbatim.
+    #[test]
+    fn metadata_usage_total_tokens_explicit_zero_falls_back_to_sum() {
+        let model = Model {
+            id: "anthropic.claude-fable-5".into(),
+            name: "Claude Fable 5".into(),
+            api: crate::providers::bedrock::API_BEDROCK_CONVERSE_STREAM.to_string(),
+            provider: "bedrock".into(),
+            base_url: "https://bedrock-runtime.us-east-1.amazonaws.com".into(),
+            reasoning: true,
+            thinking_level_map: None,
+            input: vec![ModelInput::Text],
+            cost: zero_model_cost(),
+            context_window: 200_000,
+            max_tokens: 8192,
+            featured: None,
+            headers: None,
+            compat: None,
+        };
+        let request_id = None;
+        let mut output = crate::event_stream::initial_assistant_message(
+            crate::providers::bedrock::API_BEDROCK_CONVERSE_STREAM,
+            "bedrock",
+            &model.id,
+        );
+
+        handle_metadata(
+            &json!({"usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 0}}),
+            &model,
+            &mut output,
+            &request_id,
+        );
+        assert_eq!(
+            output.usage,
+            Usage {
+                input: 10,
+                output: 5,
+                total_tokens: 15,
+                ..Usage::default()
+            }
+        );
+
+        handle_metadata(
+            &json!({"usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 99}}),
+            &model,
+            &mut output,
+            &request_id,
+        );
+        assert_eq!(output.usage.total_tokens, 99);
+
+        handle_metadata(
+            &json!({"usage": {"inputTokens": 10, "outputTokens": 5}}),
+            &model,
+            &mut output,
+            &request_id,
+        );
+        assert_eq!(output.usage.total_tokens, 15);
     }
 }

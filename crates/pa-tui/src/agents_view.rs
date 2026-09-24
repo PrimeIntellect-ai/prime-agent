@@ -162,6 +162,17 @@ const PULSE_INTERVAL_MS: u64 = 250;
 /// lands.
 const ANCHOR_LOADING_HINT: &str = "Still loading sessions — press ↓ or ↑ to pick a session now.";
 
+/// The saved-catalog fetch's request budget: the LONG-RUNNING class, never
+/// the 30s default. The scan is the known-slow whole-file re-parse of every
+/// saved session (the operator's ~130-session dir takes over a minute), so
+/// the default class turned every large dir into a false `Saved sessions
+/// unavailable` timeout — the loading state that never completes. The
+/// scan-state-cache lane owns the scan's speed; this is the lifecycle's
+/// budget so the state can complete at all.
+fn saved_catalog_timeout_ms() -> u64 {
+    crate::daemon_client::LONG_RUNNING_REQUEST_TIMEOUT_MS
+}
+
 enum UiInput {
     Key(String),
     Resize,
@@ -273,6 +284,13 @@ struct AgentsViewMode {
     /// `ui.terminal.rows` live at key time); 0 before the first render,
     /// where `page_step` floors to the 4-row minimum anyway.
     last_height: usize,
+    /// The saved-catalog fetch settled on a terminal failure: the entry
+    /// anchor's wait ended with it, and the next query change re-arms one
+    /// retry (TS `rearmSavedSearchFetch`).
+    saved_fetch_failed: bool,
+    /// A failed saved-catalog fetch wants re-arming on the query's next
+    /// change (the loop owns the client, so the mode records the intent).
+    saved_query_rearm: bool,
 }
 
 impl AgentsViewMode {
@@ -328,6 +346,8 @@ impl AgentsViewMode {
             scope_popped: false,
             opened: None,
             new_session: false,
+            saved_fetch_failed: false,
+            saved_query_rearm: false,
         }
     }
 
@@ -568,6 +588,39 @@ impl AgentsViewMode {
     fn end_anchor_wait(&mut self) {
         self.anchor_selection_pending = false;
         self.clear_anchor_loading_hint();
+    }
+
+    /// The saved-catalog fetch settled on a terminal failure: the entry
+    /// anchor's wait ends with it (TS `resolveMissingSelectionAnchor`'s
+    /// finally arm). The anchor's row can only arrive through this fetch,
+    /// so a pending wait behind the failure would keep re-arming the
+    /// loading hint on every open — an open the failed catalog can never
+    /// satisfy. The selection stands on the rebuild's default row, and the
+    /// status line keeps the fetch's own honest error.
+    fn settle_anchor_wait_on_saved_failure(&mut self) {
+        self.end_anchor_wait();
+    }
+
+    /// TS `rearmSavedSearchFetch`: a terminal saved-catalog failure re-arms
+    /// on the next query change. The loop owns the client, so the mode only
+    /// records the intent; `take_saved_fetch_rearm` hands it to the loop
+    /// AND consumes the failure: at most one retry is ever armed, so two
+    /// concurrent `list_saved_sessions` scans (whose completions can
+    /// arrive out of order) never race a stale failure over a newer
+    /// success.
+    fn note_query_changed(&mut self) {
+        self.saved_query_rearm = self.saved_fetch_failed;
+    }
+
+    /// Whether the loop must re-arm the saved-catalog fetch (one retry
+    /// per terminal failure; the consumption clears the failure intent
+    /// with it, so the retry in flight is the only one until IT fails).
+    fn take_saved_fetch_rearm(&mut self) -> bool {
+        let rearm = std::mem::take(&mut self.saved_query_rearm);
+        if rearm {
+            self.saved_fetch_failed = false;
+        }
+        rearm
     }
 
     /// The loading hint belongs to the wait alone: ending the wait by
@@ -886,6 +939,7 @@ impl AgentsViewMode {
         if self.keybindings.matches(key, "app.input.clear") {
             if !self.query.is_empty() {
                 self.query.clear();
+                self.note_query_changed();
                 self.rebuild_rows();
             } else if self.scope_active {
                 self.open_scope_root(false);
@@ -907,7 +961,11 @@ impl AgentsViewMode {
             .keybindings
             .matches(key, "tui.editor.deleteCharBackward")
         {
-            self.query.pop();
+            // A no-op edit on an empty query changes nothing: the
+            // re-arm's expensive retry must not fire behind it.
+            if self.query.pop().is_some() {
+                self.note_query_changed();
+            }
             self.rebuild_rows();
             return;
         }
@@ -915,12 +973,16 @@ impl AgentsViewMode {
             .keybindings
             .matches(key, "tui.editor.deleteToLineStart")
         {
-            self.query.clear();
+            if !self.query.is_empty() {
+                self.query.clear();
+                self.note_query_changed();
+            }
             self.rebuild_rows();
             return;
         }
         if key.chars().count() == 1 {
             self.query.push_str(key);
+            self.note_query_changed();
             self.rebuild_rows();
         }
     }
@@ -1582,6 +1644,57 @@ async fn open_roster_link(
     Ok((client, events, roster))
 }
 
+/// The saved-catalog fetch (TS `armSavedSearchFetch`): one request whose
+/// result (or failure) re-enters the loop as a `UiInput`. The scan is the
+/// known-slow path — the whole-file re-parse of every saved session — so it
+/// rides the LONG-RUNNING request budget: the default 30s class would turn
+/// every large sessions dir into a false `Saved sessions unavailable` and
+/// leave the entry anchor's row permanently unloaded (the loading state
+/// that outlives the scan). A terminal failure re-arms on the next query
+/// change (the loop's `take_saved_fetch_rearm`), like TS
+/// `rearmSavedSearchFetch`.
+fn spawn_saved_catalog_fetch(
+    client: &DaemonClient,
+    ui_tx: mpsc::UnboundedSender<UiInput>,
+    cwd: PathBuf,
+    session_dir: Option<PathBuf>,
+) {
+    let client = client.clone();
+    tokio::spawn(async move {
+        let saved = client
+            .request_with_timeout(
+                DaemonCommand::ListSavedSessions {
+                    id: None,
+                    cwd: Some(cwd.to_string_lossy().to_string()),
+                    session_dir: session_dir.map(|dir| dir.to_string_lossy().to_string()),
+                    active_session_id: None,
+                    scope: Value::Null,
+                    rest: Default::default(),
+                },
+                saved_catalog_timeout_ms(),
+            )
+            .await;
+        let input = match saved {
+            Ok(response) if response.success => UiInput::SavedLoaded {
+                sessions: response
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("sessions"))
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default(),
+            },
+            Ok(response) => UiInput::SavedFailed {
+                error: response.error.unwrap_or_else(|| "unknown error".into()),
+            },
+            Err(error) => UiInput::SavedFailed {
+                error: error.to_string(),
+            },
+        };
+        let _ = ui_tx.send(input);
+    });
+}
+
 pub async fn run_agents_view(
     options: AgentsViewOptions,
     ui: AgentsViewUiMode,
@@ -1666,42 +1779,11 @@ async fn run_agents_view_surface(
     // scope). TS `armSavedSearchFetch` runs the scan while the view is
     // already interactive, so a large catalog never delays the first
     // frame; the result (or its failure) re-enters the loop as an input.
-    {
-        let client = client.clone();
-        let cwd = mode.options.cwd.clone();
-        let session_dir = mode.options.session_dir.clone();
-        let ui_tx = ui_tx.clone();
-        tokio::spawn(async move {
-            let saved = client
-                .request(DaemonCommand::ListSavedSessions {
-                    id: None,
-                    cwd: Some(cwd.to_string_lossy().to_string()),
-                    session_dir: session_dir.map(|dir| dir.to_string_lossy().to_string()),
-                    active_session_id: None,
-                    scope: Value::Null,
-                    rest: Default::default(),
-                })
-                .await;
-            let input = match saved {
-                Ok(response) if response.success => UiInput::SavedLoaded {
-                    sessions: response
-                        .data
-                        .as_ref()
-                        .and_then(|data| data.get("sessions"))
-                        .and_then(Value::as_array)
-                        .cloned()
-                        .unwrap_or_default(),
-                },
-                Ok(response) => UiInput::SavedFailed {
-                    error: response.error.unwrap_or_else(|| "unknown error".into()),
-                },
-                Err(error) => UiInput::SavedFailed {
-                    error: error.to_string(),
-                },
-            };
-            let _ = ui_tx.send(input);
-        });
-    }
+    // The loop's re-arm closure shares these clones (the mode holds the
+    // row state, never the client).
+    let cwd = mode.options.cwd.clone();
+    let session_dir = mode.options.session_dir.clone();
+    spawn_saved_catalog_fetch(&client, ui_tx.clone(), cwd.clone(), session_dir.clone());
     // Broadcast frames that landed on the parked connection while the view
     // was closed (heartbeats): the fresh roster snapshot supersedes them.
     while events.try_recv().is_ok() {}
@@ -1712,15 +1794,52 @@ async fn run_agents_view_surface(
         let mut redraw = false;
         if let Some(input) = first_input(&mut pending) {
             match input {
-                UiInput::Key(key) => mode.handle_key(&key),
+                UiInput::Key(key) => {
+                    mode.handle_key(&key);
+                    // TS `queryChanged` -> `armSavedSearchFetch`: a failed
+                    // saved-catalog fetch re-arms on the next query change,
+                    // so the Inactive section gets one honest retry behind
+                    // a terminal failure instead of staying empty for the
+                    // rest of the run.
+                    if mode.take_saved_fetch_rearm() {
+                        spawn_saved_catalog_fetch(
+                            &client,
+                            ui_tx.clone(),
+                            cwd.clone(),
+                            session_dir.clone(),
+                        );
+                    }
+                }
                 UiInput::Resize | UiInput::Settled => {}
                 // The saved-catalog scan landed (TS `armSavedSearchFetch`
                 // applying its result): the Inactive section builds now.
                 UiInput::SavedLoaded { sessions } => {
                     mode.saved = sessions;
+                    mode.saved_fetch_failed = false;
+                    // The failure status is the fetch's own honest error;
+                    // the catalog's success retires it (the status line
+                    // must not keep reporting an unavailable catalog after
+                    // it loaded).
+                    if mode
+                        .status
+                        .as_deref()
+                        .is_some_and(|status| status.starts_with("Saved sessions unavailable"))
+                    {
+                        mode.status = None;
+                    }
                     mode.rebuild_rows();
                 }
                 UiInput::SavedFailed { error } => {
+                    // The catalog settled on a terminal failure (TS
+                    // `refreshSavedSessions`'s catch arm: the fetch is
+                    // settled, never soft-locking the scope fallback). The
+                    // entry anchor's wait ends with it - the anchor's row
+                    // can only come from THIS fetch, so keeping the wait
+                    // pending would re-arm the loading hint on every open
+                    // behind an error the status line already showed (TS
+                    // `resolveMissingSelectionAnchor`'s finally arm).
+                    mode.settle_anchor_wait_on_saved_failure();
+                    mode.saved_fetch_failed = true;
                     mode.status = Some(format!("Saved sessions unavailable: {error}"));
                 }
                 // The headless plan ended: the run stops here (the
@@ -2120,6 +2239,158 @@ mod tests {
             .push(roster_entry("s2", "idle", parent_summary("s2")));
         mode.rebuild_rows();
         assert_eq!(mode.rows[mode.selected].summary["sessionId"], "s1");
+    }
+
+    /// A terminal saved-catalog failure settles the entry anchor's wait (TS
+    /// `resolveMissingSelectionAnchor`'s finally arm): the anchor's row can
+    /// only arrive through THIS fetch, so the wait must not outlive the
+    /// fetch's own failure — the loading hint would re-arm on every open
+    /// behind an error the status line already showed.
+    #[test]
+    fn a_saved_catalog_failure_settles_the_anchor_wait() {
+        let mut mode = mode_with_anchor(
+            Some("s2"),
+            vec![roster_entry("s1", "idle", parent_summary("s1"))],
+        );
+        mode.status = Some(ANCHOR_LOADING_HINT.to_string());
+        mode.settle_anchor_wait_on_saved_failure();
+        assert!(
+            !mode.anchor_selection_pending,
+            "the wait ends with the failed catalog"
+        );
+        assert_ne!(
+            mode.status.as_deref(),
+            Some(ANCHOR_LOADING_HINT),
+            "the loading hint drops with the wait"
+        );
+        // Enter after the settle opens the default row (the wait is over;
+        // the open is the user's explicit choice again), and the loading
+        // hint never re-arms behind the failure the view already showed.
+        mode.handle_key("enter");
+        assert!(
+            mode.opened.is_some(),
+            "the settled view opens the default row instead of re-arming the hint"
+        );
+        assert_ne!(
+            mode.status.as_deref(),
+            Some(ANCHOR_LOADING_HINT),
+            "no re-armed loading hint behind the failure"
+        );
+    }
+
+    /// TS `rearmSavedSearchFetch`: a terminal saved-catalog failure re-arms
+    /// on the next query change - ONE retry, single-flight: the consumption
+    /// clears the failure intent with it, so concurrent out-of-order scans
+    /// never race a stale failure over a newer success. A NEW terminal
+    /// failure re-arms again; a healthy fetch never does.
+    #[test]
+    fn a_failed_fetch_rearms_once_per_query_change() {
+        let mut mode = mode_with_anchor(None, Vec::new());
+        mode.note_query_changed();
+        assert!(
+            !mode.take_saved_fetch_rearm(),
+            "a healthy fetch never re-arms"
+        );
+        mode.saved_fetch_failed = true;
+        mode.note_query_changed();
+        assert!(
+            mode.take_saved_fetch_rearm(),
+            "the query change after a failure re-arms the fetch"
+        );
+        assert!(
+            !mode.take_saved_fetch_rearm(),
+            "the intent is consumed once per query change"
+        );
+        // The arm consumed the failure flag: no second concurrent retry
+        // until the in-flight one fails again.
+        mode.note_query_changed();
+        assert!(
+            !mode.take_saved_fetch_rearm(),
+            "the retry in flight is the only one"
+        );
+        mode.saved_fetch_failed = true;
+        mode.note_query_changed();
+        assert!(
+            mode.take_saved_fetch_rearm(),
+            "a new terminal failure re-arms again"
+        );
+        mode.saved_fetch_failed = false;
+        mode.note_query_changed();
+        assert!(!mode.take_saved_fetch_rearm());
+    }
+
+    /// A no-op edit on an empty query changes nothing: the re-arm's
+    /// expensive retry never fires behind backspace or ctrl+u on an
+    /// already-empty search.
+    #[test]
+    fn a_noop_edit_on_an_empty_query_never_rearms() {
+        let mut mode = mode_with_anchor(None, Vec::new());
+        mode.query.clear();
+        mode.saved_fetch_failed = true;
+        // Backspace on the empty query: the shape `deleteCharBackward`
+        // matches.
+        mode.handle_key("backspace");
+        assert!(
+            !mode.take_saved_fetch_rearm(),
+            "the no-op backspace did not re-arm"
+        );
+    }
+
+    /// A successful catalog load retires the failure status the terminal
+    /// fetch left behind: the status line never keeps reporting an
+    /// unavailable catalog after it loaded.
+    #[test]
+    fn a_successful_load_retires_the_failure_status() {
+        let mut mode = mode_with_anchor(None, Vec::new());
+        mode.status = Some("Saved sessions unavailable: scan failed".to_string());
+        mode.saved_fetch_failed = true;
+        mode.saved = Vec::new();
+        // The load arm's own logic (the loop's SavedLoaded handler): the
+        // failure flag clears and the fetch's own status retires.
+        mode.saved_fetch_failed = false;
+        if mode
+            .status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Saved sessions unavailable"))
+        {
+            mode.status = None;
+        }
+        assert_eq!(mode.status, None, "the stale failure status retired");
+        // An unrelated status (the flow's own notice) survives a load.
+        mode.status = Some("Session s1 is no longer running".to_string());
+        if mode
+            .status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Saved sessions unavailable"))
+        {
+            mode.status = None;
+        }
+        assert_eq!(
+            mode.status.as_deref(),
+            Some("Session s1 is no longer running"),
+            "an unrelated status is never clobbered by the load"
+        );
+    }
+
+    /// The saved-catalog fetch rides the LONG-RUNNING budget, never the 30s
+    /// default: the scan is the known-slow whole-file re-parse, and the
+    /// default class is what turned a minute-long scan into a false
+    /// `Saved sessions unavailable` timeout (the loading state that never
+    /// completes).
+    #[test]
+    fn the_saved_catalog_fetch_uses_the_long_running_budget() {
+        // The budget pin: the saved scan must never fall back to the 30s
+        // default request class (the class that turned the operator's
+        // minute-plus scan into a false `Saved sessions unavailable`
+        // timeout).
+        assert_eq!(
+            saved_catalog_timeout_ms(),
+            crate::daemon_client::LONG_RUNNING_REQUEST_TIMEOUT_MS
+        );
+        assert!(
+            saved_catalog_timeout_ms() > crate::daemon_client::DEFAULT_REQUEST_TIMEOUT_MS,
+            "the saved scan must never fall back to the 30s default class"
+        );
     }
 
     /// A nested anchor (a subagent session the user was attached to) arrives
