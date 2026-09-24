@@ -379,8 +379,6 @@ fn headless_image_model_router(
     // original (the last use).
     let decide_agent_dir = agent_dir.clone();
     let decide = {
-        let cwd = cwd;
-        let agent_dir = decide_agent_dir;
         std::sync::Arc::new(
             move |carries_images: bool,
                   session_model: &AgentModel,
@@ -390,12 +388,14 @@ fn headless_image_model_router(
                 }
                 let session_model: pa_types::ai::Model = json_round_trip(session_model)
                     .ok_or_else(|| "model conversion failed".to_string())?;
-                let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
+                let settings = pa_core::settings::SettingsManager::create(&cwd, &decide_agent_dir);
                 let image_model_reference = settings.get_image_model();
                 let block_images = settings.get_block_images();
-                let auth = pa_core::auth::AuthStorage::create(&agent_dir);
-                let mut registry =
-                    pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+                let auth = pa_core::auth::AuthStorage::create(&decide_agent_dir);
+                let mut registry = pa_core::models::ModelRegistry::create(
+                    auth,
+                    decide_agent_dir.join("models.json"),
+                );
                 registry.load_private_authorization_from_cache();
                 let available: Vec<pa_types::ai::Model> =
                     registry.get_available().into_iter().cloned().collect();
@@ -418,7 +418,6 @@ fn headless_image_model_router(
     };
     let swap_target = {
         let provider_target = std::sync::Arc::clone(&provider_target);
-        let agent_dir = agent_dir.clone();
         std::sync::Arc::new(move |route: Option<&pa_core::models::ResolvedImageModel>| {
             let target = match route {
                 Some(resolved) => {
