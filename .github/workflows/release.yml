@@ -15,13 +15,12 @@ on:
 permissions: {}
 
 concurrency:
-  # Stable releases run per-tag. -beta* tags share one group so their
-  # promotions serialize: the rolling nightly refresh must never interleave
-  # (an older beta's --clobber would otherwise land after a newer one -
-  # Macroscope: the nightly release can serve an older beta.json than the
-  # newest completed tag). cancel-in-progress stays false: queued betas run
-  # one after another, newest last.
-  group: release-${{ contains(github.ref_name, '-') && 'nightly' || github.ref }}
+  # Every tag promotes under its own group: a queued promotion is never
+  # canceled by another tag (single-pending groups would drop a queued
+  # run), so every published tag gets its release. The rolling nightly
+  # refresh - the one piece of shared state - serializes in its own
+  # nightly-refresh job group instead.
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -301,28 +300,52 @@ jobs:
             release-out/prime-agent-*.tar.gz
             release-out/SHA256SUMS
             release-out/*.json
-      - name: Refresh the rolling nightly release (the nightly channel's discoverable base)
+      - name: Upload the nightly refresh payload (the rolling release step consumes it)
         if: contains(github.ref_name, '-')
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: nightly-refresh-payload
+          path: |
+            release-out/prime-agent-*.tar.gz
+            release-out/SHA256SUMS
+            release-out/beta.json
+          if-no-files-found: error
+
+  # The rolling `nightly` release is the nightly channel's discoverable base:
+  # GitHub's latest/download/ alias serves only the latest NON-prerelease
+  # release, so beta.json has no address there. Every -beta* tag refreshes
+  # the fixed `nightly` release's assets (.../releases/download/nightly/),
+  # the base a nightly install records (.install-source). This job carries
+  # the workflow's only shared mutable state, so it - and it alone -
+  # serializes: the group lets one refresh run at a time (a queued refresh
+  # superseded by a newer tag is harmless: the newest beta's refresh wins,
+  # and no per-tag promotion is ever canceled), and the newest-wins guard
+  # refuses to clobber a newer rolling beta.json (re-runs of older tags).
+  nightly-refresh:
+    needs: promote
+    if: contains(github.ref_name, '-')
+    name: rolling nightly release refresh (the nightly channel's discoverable base)
+    concurrency:
+      group: rolling-nightly-refresh
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the nightly refresh payload
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: nightly-refresh-payload
+          path: release-out
+      - name: Refresh the rolling nightly release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # GitHub's latest/download/ alias serves only the latest
-          # NON-prerelease release, so the nightly channel's beta.json has no
-          # discoverable address there (Bugbot: nightly clients get a 404).
-          # The fix is the rolling-release pattern: every -beta* tag also
-          # overwrites the fixed `nightly` release's assets, so
-          # .../releases/download/nightly/ is the stable base nightly installs
-          # record (.install-source) and resolve beta.json + its archives
-          # against. The rolling release is a prerelease itself, so it can
-          # never take the Latest pointer either.
           if gh release view nightly >/dev/null 2>&1; then
-            # Newest-wins guard: a re-run of an older tag must never clobber a
-            # newer rolling beta.json (the concurrency group serializes live
-            # runs; this guards re-runs).
             guard="$(mktemp -d)"
             if gh release download nightly --pattern beta.json \
-                 --output-dir "$guard" >/dev/null 2>&1 \
+                 --dir "$guard" >/dev/null 2>&1 \
                && [ -s "$guard/beta.json" ]; then
               current="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$guard/beta.json")"
               newest="$(printf '%s\n%s\n' "$current" "$RELEASE_VERSION" | sort -V | tail -1)"

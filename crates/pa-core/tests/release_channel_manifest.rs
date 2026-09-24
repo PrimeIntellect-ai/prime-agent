@@ -48,6 +48,12 @@ struct Concurrency {
 
 #[derive(serde::Deserialize)]
 struct Job {
+    #[serde(default)]
+    needs: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    r#if: Option<String>,
+    #[serde(default)]
+    concurrency: Option<Concurrency>,
     steps: Vec<Step>,
 }
 
@@ -262,63 +268,75 @@ fn the_workflow_wires_the_channel_manifest_producer() {
         prerelease, "${{ contains(github.ref_name, '-') }}",
         "the attach step must mark prerelease-tag releases as prereleases"
     );
-    // The rolling `nightly` release is the nightly channel's discoverable
-    // base: GitHub's latest/download/ alias serves only the latest
-    // NON-prerelease release, so beta.json needs a fixed rolling address
-    // (.../releases/download/nightly/) refreshed per -beta* tag (Bugbot:
-    // nightly clients get a 404).
-    let nightly = step(
-        promote,
-        "Refresh the rolling nightly release (the nightly channel's discoverable base)",
-    );
-    assert_eq!(
-        nightly.r#if.as_deref(),
-        Some("contains(github.ref_name, '-')"),
-        "only -beta* tags refresh the rolling nightly release"
-    );
-    let nightly_run = nightly
-        .run
-        .as_deref()
-        .expect("the nightly step runs a script");
-    assert!(
-        nightly_run.contains("gh release upload nightly"),
-        "{nightly_run}"
-    );
-    assert!(
-        nightly_run.contains("release-out/beta.json"),
-        "{nightly_run}"
-    );
-    assert!(nightly_run.contains("--clobber"), "{nightly_run}");
-    assert!(
-        nightly_run.contains("release-out/prime-agent-*.tar.gz"),
-        "{nightly_run}"
-    );
-    assert!(nightly_run.contains("--prerelease"), "{nightly_run}");
-    assert!(
-        step_position(promote, "Attach to GitHub release")
-            < step_position(
-                promote,
-                "Refresh the rolling nightly release (the nightly channel's discoverable base)",
-            ),
-        "the tag release attaches before the rolling refresh"
-    );
-    // The nightly refreshes serialize under one concurrency group (stable
-    // releases keep per-tag groups), and the refresh refuses to clobber a
-    // newer rolling beta.json (Macroscope: an older run must never overwrite
-    // the newest completed tag's beta.json).
+    // Every tag promotes under its own group: a queued promotion is never
+    // canceled by another tag's push, so every published tag gets its
+    // release (Bugbot: a shared group drops queued promotions).
     let group = workflow
         .concurrency
         .as_ref()
         .and_then(|concurrency| concurrency.group.as_deref())
         .expect("the workflow declares a concurrency group");
     assert_eq!(
-        group, "release-${{ contains(github.ref_name, '-') && 'nightly' || github.ref }}",
-        "beta promotions serialize under the shared nightly group"
+        group, "release-${{ github.ref }}",
+        "per-tag concurrency: promotions never queue-supersede each other"
     );
-    assert!(nightly_run.contains("sort -V"), "{nightly_run}");
-    assert!(
-        nightly_run.contains("skipping the refresh"),
-        "{nightly_run}"
+}
+
+#[test]
+fn the_rolling_nightly_refresh_is_a_serialized_job() {
+    let (_, workflow) = load_workflow();
+    let refresh = workflow
+        .jobs
+        .get("nightly-refresh")
+        .expect("the nightly-refresh job exists");
+    assert_eq!(
+        refresh.r#if.as_deref(),
+        Some("contains(github.ref_name, '-')"),
+        "only -beta* tags refresh the rolling nightly release"
+    );
+    // The refresh is the workflow's only shared mutable state, so it alone
+    // serializes (a queued refresh superseded by a newer tag is harmless:
+    // the newest beta's refresh wins; no per-tag promotion is ever
+    // canceled).
+    assert_eq!(
+        refresh
+            .concurrency
+            .as_ref()
+            .and_then(|concurrency| concurrency.group.as_deref()),
+        Some("rolling-nightly-refresh"),
+        "the refresh serializes in its own group"
+    );
+    assert!(refresh.needs.is_some(), "the refresh needs the promote job");
+    let run = step(refresh, "Refresh the rolling nightly release")
+        .run
+        .as_deref()
+        .expect("the refresh step runs a script");
+    assert!(run.contains("gh release upload nightly"), "{run}");
+    assert!(run.contains("release-out/beta.json"), "{run}");
+    assert!(run.contains("--clobber"), "{run}");
+    assert!(run.contains("--prerelease"), "{run}");
+    assert!(run.contains("release-out/prime-agent-*.tar.gz"), "{run}");
+    // The newest-wins guard: re-runs of an older tag must never clobber a
+    // newer rolling beta.json; gh release download's destination flag is
+    // --dir (Bugbot: --output-dir was discarded and never wrote the guard
+    // file).
+    assert!(run.contains("sort -V"), "{run}");
+    assert!(run.contains("skipping the refresh"), "{run}");
+    assert!(run.contains(r#"--dir "$guard""#), "{run}");
+    assert!(!run.contains("--output-dir"), "{run}");
+    // The promote job hands the refresh its payload as an artifact.
+    let promote = workflow
+        .jobs
+        .get("promote")
+        .expect("the promote job exists");
+    let payload = step(
+        promote,
+        "Upload the nightly refresh payload (the rolling release step consumes it)",
+    );
+    assert_eq!(
+        payload.r#if.as_deref(),
+        Some("contains(github.ref_name, '-')"),
+        "only -beta* tags upload the refresh payload"
     );
 }
 
