@@ -765,10 +765,10 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    let socket = dir.join("daemon.sock");
+    let socket = dir.path().join("daemon.sock");
     let _daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, _hello) = Client::connect(&socket);
-    let script_path = dir.join("script.json");
+    let script_path = dir.path().join("script.json");
     std::fs::write(
         &script_path,
         json!({ "responses": [ { "text": "ack", "delayMs": 10 } ] }).to_string(),
@@ -780,7 +780,7 @@ fn wave_b9_owned_session_lifecycle_wire_shapes() {
             "type": "create",
             "lifecycle": "client_owned",
             "config": {
-                "cwd": dir.to_string_lossy(),
+                "cwd": dir.path().to_string_lossy(),
                 "sessionDir": agent_dir.join("sessions").to_string_lossy(),
                 "script": script_path.to_string_lossy(),
             },
