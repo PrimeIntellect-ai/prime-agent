@@ -298,7 +298,6 @@ async fn execute_edit_locked(
 pub fn create_edit_tool_definition(cwd: &str) -> ToolDefinition {
     let cwd = cwd.to_string();
     let execute: crate::tools::tool_definition::ExecuteFn = {
-        let cwd = cwd;
         Arc::new(move |_tool_call_id, params, signal, _on_update| {
             let cwd = cwd.clone();
             Box::pin(async move { execute_edit(&cwd, &LocalEditOperations, &params, signal).await })
