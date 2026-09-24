@@ -351,6 +351,14 @@ fn same_socket_worker_targets(
         if pid == std::process::id() || protected.contains(&pid) {
             continue;
         }
+        // The identity captures BEFORE every /proc read (the abandoned-id
+        // filter included) and re-verifies AFTER the qualification: a
+        // worker that exits mid-census and whose pid the kernel
+        // immediately recycles must never leave a target behind under
+        // the REPLACEMENT'S identity - a recycled worker of ANOTHER
+        // session would otherwise pass the late identity check with its
+        // own argv/exe/socket and take the abandoned id's signal.
+        let start_id = crate::lease::get_process_start_id(pid);
         // The abandoned-id filter (the give-up belt's target class): only
         // workers whose active-session env names the given-up id. `None`
         // keeps the boot reap's whole-census shape.
@@ -359,13 +367,6 @@ fn same_socket_worker_targets(
                 continue;
             }
         }
-        // The identity captures BEFORE the /proc reads and re-verifies
-        // AFTER the qualification: a worker that exits mid-census and
-        // whose pid the kernel immediately recycles must never leave a
-        // target behind under the REUSHER'S identity (the late capture
-        // would have validated the replacement and signaled an
-        // unrelated process).
-        let start_id = crate::lease::get_process_start_id(pid);
         let Some(argv) = read_proc_argv(pid) else {
             continue;
         };
@@ -797,6 +798,20 @@ mod tests {
         }
     }
 
+    /// Kills and reaps the child on any exit path (a failed assertion in
+    /// between would otherwise leak the `sleep` into the test machine: the
+    /// std child kills nothing on drop).
+    struct ReapOnDrop(Option<std::process::Child>);
+
+    impl Drop for ReapOnDrop {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
     /// The abandoned-id filter (the give-up belt's target class): only a
     /// process whose environment names the given-up id as its worker
     /// active-session matches. A `sleep` child inherits the test's env
@@ -805,20 +820,38 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_abandoned_id_filter_matches_the_stamped_env_only() {
-        let mut child = std::process::Command::new("sleep")
-            .arg("300")
-            .env_remove(crate::worker::WORKER_ACTIVE_SESSION_ID_ENV)
-            .spawn()
-            .expect("spawn unstamped sleep");
+        let _unstamped_guard = ReapOnDrop(
+            std::process::Command::new("sleep")
+                .arg("300")
+                .env_remove(crate::worker::WORKER_ACTIVE_SESSION_ID_ENV)
+                .spawn()
+                .expect("spawn unstamped sleep")
+                .into(),
+        );
         assert!(
-            !proc_environ_names_active_session(child.id(), "6b558be357e3"),
+            !proc_environ_names_active_session(
+                _unstamped_guard
+                    .0
+                    .as_ref()
+                    .expect("guard holds the child")
+                    .id(),
+                "6b558be357e3"
+            ),
             "an unstamped environment never matches the abandoned id"
         );
-        let mut stamped = std::process::Command::new("sleep")
-            .arg("300")
-            .env(crate::worker::WORKER_ACTIVE_SESSION_ID_ENV, "6b558be357e3")
-            .spawn()
-            .expect("spawn stamped sleep");
+        let stamped_guard = ReapOnDrop(
+            std::process::Command::new("sleep")
+                .arg("300")
+                .env(crate::worker::WORKER_ACTIVE_SESSION_ID_ENV, "6b558be357e3")
+                .spawn()
+                .expect("spawn stamped sleep")
+                .into(),
+        );
+        let stamped = stamped_guard
+            .0
+            .as_ref()
+            .expect("guard holds the child")
+            .id();
         // The stamp is readable only once execve completes: between fork
         // and exec the child's environment area still holds the parent's
         // (parallel-test load widens that window), so the read retries a
@@ -826,7 +859,7 @@ mod tests {
         let stamped_matches = {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
             loop {
-                if proc_environ_names_active_session(stamped.id(), "6b558be357e3") {
+                if proc_environ_names_active_session(stamped, "6b558be357e3") {
                     break true;
                 }
                 assert!(
@@ -841,17 +874,13 @@ mod tests {
             "the stamped environment matches its abandoned id"
         );
         assert!(
-            !proc_environ_names_active_session(stamped.id(), "other-id"),
+            !proc_environ_names_active_session(stamped, "other-id"),
             "a different abandoned id never matches"
         );
         assert!(
             !proc_environ_names_active_session(0, "6b558be357e3"),
             "an unreadable pid is the conservative no-match"
         );
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = stamped.kill();
-        let _ = stamped.wait();
     }
 
     /// A reaped process is provably gone after the escalation: the reap's
