@@ -1137,7 +1137,7 @@ mod tombstone_usage_tests {
             })
             .unwrap();
         let capture = capture_saved_session_delete(&fifo.to_string_lossy(), None);
-        match capture {
+        match &capture {
             SavedDeleteCapture::Child {
                 usage,
                 canonical_path,
@@ -1146,7 +1146,7 @@ mod tombstone_usage_tests {
                     usage.is_none(),
                     "a non-regular path captures no usage (no blocking read)"
                 );
-                assert_eq!(canonical_path, fifo.to_string_lossy());
+                assert_eq!(canonical_path, &fifo.to_string_lossy());
             }
             SavedDeleteCapture::TopLevel => {
                 panic!("an unreadable non-regular path is never positively top-level")
