@@ -32,11 +32,14 @@ use crate::session::manager::SessionManager;
 /// TS `addAssistantUsage`: fold one usage block into a running total.
 /// Shared with the daemon's child-side walk (`rlm_child_usage.rs`).
 pub fn add_assistant_usage(total: &mut Usage, usage: &Usage) {
-    total.input += usage.input;
-    total.output += usage.output;
-    total.cache_read += usage.cache_read;
-    total.cache_write += usage.cache_write;
-    total.total_tokens += usage.total_tokens;
+    // Saturating: billable aggregation must neither panic in debug nor
+    // wrap to an underbill in release (the same convention as every
+    // other usage sum in the accounting family).
+    total.input = total.input.saturating_add(usage.input);
+    total.output = total.output.saturating_add(usage.output);
+    total.cache_read = total.cache_read.saturating_add(usage.cache_read);
+    total.cache_write = total.cache_write.saturating_add(usage.cache_write);
+    total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
     total.cost.input = add_cost(total.cost.input, usage.cost.input);
     total.cost.output = add_cost(total.cost.output, usage.cost.output);
     total.cost.cache_read = add_cost(total.cost.cache_read, usage.cost.cache_read);
@@ -146,12 +149,18 @@ impl RlmChildUsageAttributions {
                 .find_map(last_assistant_row)
         };
         if let Some((target_id, usage)) = target {
+            // The base seeds BEFORE the registration publishes: a report
+            // that finds the child entry must never compute from the
+            // default (the spawn-time usage is the aggregate base), or
+            // the broken first aggregate would stick (the later or_insert
+            // preserves it).
+            let mut bases = self.bases.lock().await;
+            bases.entry(target_id.clone()).or_insert(usage);
+            drop(bases);
             self.children
                 .lock()
                 .expect("rlm usage children lock")
-                .insert(rlm_child_id.to_string(), target_id.clone());
-            let mut bases = self.bases.lock().await;
-            bases.entry(target_id).or_insert(usage);
+                .insert(rlm_child_id.to_string(), target_id);
         }
     }
 
@@ -195,14 +204,28 @@ impl RlmChildUsageAttributions {
         };
         // A report that raced the handoff can find its registration
         // copied while the aggregate bases have not been — folding onto
-        // the default would break the durable chain (the bases copy's
-        // or_insert would keep the broken base). The retired side's
-        // frozen base is the true cumulative aggregate; a target that
-        // never had one was seeded at its spawn (register_spawn).
-        self.ensure_base(&target_id).await;
+        // the default would break the durable chain. The retired side's
+        // base is the true cumulative aggregate; read it BEFORE the
+        // bases lock (the lock order there is the fallback's bases
+        // first, ours second).
+        let fallback_base = self.fallback_base(&target_id).await;
         let mut bases = self.bases.lock().await;
+        // The handoff re-check runs WITH the bases lock held: a handoff
+        // that armed while this report resolved blocks its bases copy on
+        // this lock, so the aggregate this report lands is carried by the
+        // adoption — routing the report to the successor now would race
+        // the copies instead.
+        let forward = self.forward.lock().expect("rlm usage forward lock").clone();
+        if let Some(forward) = forward {
+            Box::pin(async move { forward.record_child_usage(report).await }).await;
+            return;
+        }
         for (origin, usage) in report.batches {
-            let base = bases.get(&target_id).copied().unwrap_or_default();
+            let base = bases
+                .get(&target_id)
+                .copied()
+                .or(fallback_base)
+                .unwrap_or_default();
             let mut aggregate = base;
             attribute_child_usage(&mut aggregate, &usage);
             match self.session.lock().await.append_child_usage_attribution(
@@ -315,27 +338,21 @@ impl RlmChildUsageAttributions {
         Some(target_id)
     }
 
-    /// The target's cumulative base when this map lacks it (a report
-    /// racing the adoption's bases copy): or-insert from the retired
-    /// side's frozen base. Lock order — the fallback's bases first, then
-    /// ours — matches [`Self::adopt_from_fallback`].
-    async fn ensure_base(&self, target_id: &str) {
-        if self.bases.lock().await.contains_key(target_id) {
-            return;
-        }
+    /// The retired side's frozen cumulative base for one target (a
+    /// report racing the adoption's bases copy folds onto it instead of
+    /// the default — the bases copy's or_insert would keep a broken
+    /// first aggregate forever). Read BEFORE our own bases lock: the
+    /// lock order is the fallback's bases first, ours second, the same
+    /// as [`Self::adopt_from_fallback`].
+    async fn fallback_base(&self, target_id: &str) -> Option<Usage> {
         let fallback = self
             .fallback
             .lock()
             .expect("rlm usage fallback lock")
             .clone();
-        let Some(fallback) = fallback.and_then(|weak| weak.upgrade()) else {
-            return;
-        };
+        let fallback = fallback.and_then(|weak| weak.upgrade())?;
         let retired_bases = fallback.bases.lock().await;
-        if let Some(base) = retired_bases.get(target_id) {
-            let mut bases = self.bases.lock().await;
-            bases.entry(target_id.to_string()).or_insert(*base);
-        }
+        retired_bases.get(target_id).copied()
     }
 
     /// Drop one child's registration: the child's final observation

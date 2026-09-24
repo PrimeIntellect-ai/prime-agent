@@ -1427,6 +1427,10 @@ impl SupervisorChildSessionsInner {
             // registration drops with the child.
             self.emit_child_usage(record).await;
             self.forget_child_usage(record).await;
+            // Any live usage watcher retires with the record: a follow-up
+            // watch must not keep polling the killed worker after the
+            // delete (the close path sets the same flag).
+            record.lock().await.closed_by_parent = true;
             self.children
                 .lock()
                 .await
