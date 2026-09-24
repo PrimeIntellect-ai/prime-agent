@@ -16,7 +16,7 @@ deny:
 
 # Codebase-health report (AGENTS.md LOC soft ratchet): frozen per-file
 # ceilings in scripts/loc-baseline.json; new files are compared to the
-# 400-line default ceiling; frozen ceilings can only go down (wins are
+# 500-line default ceiling; frozen ceilings can only go down (wins are
 # recorded with scripts/check_loc.py --update-baseline). The check reports
 # and never blocks. The local mirror of the .github/workflows/
 # codebase-health.yml job.

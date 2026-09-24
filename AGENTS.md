@@ -20,13 +20,13 @@ Every contributor (human or agent) must read this before working on this repo.
   no god-modules. The dependency direction is pinned in the Crates table below; each crate's
   README.md states its scope, non-goals, and public API surface.
 - Prefer private modules with an explicitly exported public crate API. Internals are `pub(crate)`.
-- Avoid large modules (see the LOC soft ratchet below). Aim new `.rs` files under 400 whole-file
-  lines (tests included) — it clears the repo's typical file (median 386) so it guides the
-  accretion trend rather than the ordinary contributor, and sits under the exemplar tail
-  (tokio p90=539); if in-file tests would push a module over, put the tests in a dedicated test
-  module or `tests/` file instead. Well past that, put new functionality in a new module unless
-  there is a strong documented reason not to. Be hardest on high-touch orchestration files
-  (session engine, daemon supervisor, TUI app): those attract unrelated changes, so split early.
+- Avoid large modules (see the LOC soft ratchet below). Aim new `.rs` files under 500 whole-file
+  lines (tests included) — the repo's original published target and the operator's stated
+  500-600 comfort band; if in-file tests would push a module over, put the tests in a dedicated
+  test module or `tests/` file instead. Well past that, put new functionality in a new module
+  unless there is a strong documented reason not to. Be hardest on high-touch orchestration
+  files (session engine, daemon supervisor, TUI app): those attract unrelated changes, so split
+  early.
 - One concern per module: a file's doc comment states its single responsibility. New work lands
   in the module that owns the concern — a new concern gets a new module, not new lines in an old
   file. When extracting code, move the related tests and docs with it so invariants stay close to
@@ -76,13 +76,13 @@ Every contributor (human or agent) must read this before working on this repo.
   ratchet wins surface as PR annotations and in `make loc`'s output. The size
   signal is guidance for review — the humans and agents reviewing the change
   decide; a legitimate large file gets a justified `loc-baseline.json` entry.
-- New files aim under the 400-line default ceiling: 300 would have sat below
-  the repo's own median file (386 lines), putting a majority of ordinary
-  files on the ledger from day one — the ceiling bites the accretion trend,
-  not the median contributor; 400 clears the typical file and stays under
-  the exemplar tail (tokio p90=539; gitoxide p75=301, redis median=252 and
-  kernel median=357 for reference). Files above the ceiling when the ratchet
-  landed (2026-09-24, tip d8bb6c57b)
+- New files aim under the 500-line default ceiling — the repo's original
+  published target and the operator's stated 500-600 comfort band (for
+  reference: the exemplar distributions sit lower — gitoxide p75=301, redis
+  median=252, kernel median=357, tokio p90=539 — and our own median file is
+  386 lines, so 500 leaves the ordinary contributor off the ledger and bites
+  only the accretion trend). Files above the ceiling when the ratchet landed
+  (2026-09-24, tip d8bb6c57b)
   are frozen at their measured size: frozen ceilings only go DOWN. A PR that
   shrinks a frozen file records the win with
   `python3 scripts/check_loc.py --update-baseline` (the check reports
