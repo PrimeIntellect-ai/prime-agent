@@ -102,7 +102,12 @@ Every contributor (human or agent) must read this before working on this repo.
   that "works" but was never diffed against the TS binary does not pass review. If TS shows it,
   Rust shows it identically; if Rust shows something TS does not, that is also a parity bug.
 - PRs must state ownership compliance (crate README scope/non-goals/public API, dependency
-  direction).
+  direction) and classify the change: internals, new `pub` surface, or a new
+  dependency/cross-crate re-export. The latter two are architectural changes (rust-analyzer's
+  taxonomy): "adding an innocent-looking `pub use` is a very simple way to break encapsulation."
+- Generated data plumbing is edited via its generator, never by hand
+  (`crates/pa-ai/src/models_generated.rs` regenerates via `scripts/generate-models.py`; the
+  module-size rules do not apply to it because its size tracks the TS catalog, not logic).
 
 ## Adoption telemetry
 
