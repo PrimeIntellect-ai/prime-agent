@@ -29,6 +29,9 @@ import tarfile
 import tempfile
 from pathlib import Path
 
+# The bundled-catalog gate (same release-scripts directory).
+from bundle_catalog import validate_bundled_catalog_dir
+
 # Must mirror STAGED_ENTRIES in assemble_artifacts.py and §5 of the design doc.
 # Continuous builds additionally stage the package.json version manifest.
 EXPECTED_TOP_LEVEL = {
@@ -38,6 +41,11 @@ EXPECTED_TOP_LEVEL = {
     "docs",
     "LICENSE",
     "README.md",
+    # The bundled catalog assets (spec §3.2): the installed artifact must
+    # contain both, and they must pass the same validation gates the packer
+    # enforced at assembly time.
+    "models.bundled.json",
+    "mcp-services.bundled.json",
 }
 CONTINUOUS_EXTRA_TOP_LEVEL = {"package.json"}
 
@@ -138,6 +146,9 @@ def main() -> int:
                     with source, open(target, "wb") as sink:
                         shutil.copyfileobj(source, sink)
                     os.chmod(target, member.mode)
+        # The bundled catalog assets must be present and valid in the
+        # installed layout (the full packer gates: no small-fixture waiver).
+        catalog_facts = validate_bundled_catalog_dir(scratch)
         binary = scratch / "prime-agent"
         if not os.access(binary, os.X_OK):
             fail("staged prime-agent is not executable")
@@ -162,7 +173,10 @@ def main() -> int:
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 
-    print(f"verified {archive_name}: payload, checksums, manifest, livecheck all OK")
+    print(
+        f"verified {archive_name}: payload, checksums, manifest, "
+        f"catalog assets ({json.dumps(catalog_facts)}), livecheck all OK"
+    )
     return 0
 
 

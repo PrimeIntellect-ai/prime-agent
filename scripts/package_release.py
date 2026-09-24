@@ -16,6 +16,8 @@ runtime (PI_PACKAGE_DIR override, else the directory of the executable):
   package.json           version manifest ({"version": <version>, piConfig})
   README.md
   LICENSE
+  models.bundled.json       bundled catalog assets (spec §3.2 layer 2),
+  mcp-services.bundled.json staged beside the executable
   prime-agent-runtime/   the kernel runtime sidecar (dev caches excluded)
   skills/                built-in skills
   docs/                  user-facing docs
@@ -23,6 +25,11 @@ runtime (PI_PACKAGE_DIR override, else the directory of the executable):
 Run it as the packaging dry-run: it builds (or takes) the binary, stages,
 validates, version-pins, hashes, and tars the artifact locally. No network
 publishing happens here.
+
+`--catalog-assets <dir>` supplies the generated bundled catalog assets
+(scripts/release/bundle_catalog.py generates them); the packer hard-fails
+without VALIDATED assets (version gates + >= 42 transport tuples + >= 68
+services).
 """
 
 import argparse
@@ -38,6 +45,11 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# The bundled-catalog validation gate lives in scripts/release/ (the same
+# code the assemble_artifacts.py pipeline packs with).
+sys.path.insert(0, str(ROOT / "scripts" / "release"))
+from bundle_catalog import BUNDLED_CATALOG_FILES, validate_bundled_catalog_dir  # noqa: E402
 # `--root` re-anchors asset discovery (workspace version, prime-agent-runtime,
 # skills, docs, README) so integration tests can package synthetic trees.
 
@@ -56,13 +68,17 @@ EXCLUDED_NAMES = {
 }
 EXCLUDED_SUFFIXES = (".pyc", ".egg-info")
 
-# Required assets after staging (TS validateBinaryAssets): the kernel
-# sidecar must carry its manifest and the REPL entry point.
+# Required assets after staging (TS validateBinaryAssets + the bundled
+# catalog assets the catalog spec §3.2 layer 2 requires): the kernel sidecar
+# must carry its manifest and the REPL entry point, and the bundled catalog
+# assets must sit beside the executable.
 REQUIRED_FILES = (
     "prime-agent",
     "package.json",
     "README.md",
     "LICENSE",
+    "models.bundled.json",
+    "mcp-services.bundled.json",
     "prime-agent-runtime/pyproject.toml",
     "prime-agent-runtime/src/rlm/repl.py",
     "docs/MODEL-SURFACE.md",
@@ -83,6 +99,10 @@ def parse_args(argv):
     parser.add_argument("--platform", help="platform tag (default: derived from this machine)")
     parser.add_argument("--root", type=Path, default=ROOT,
                         help="package assets from this tree (default: the repo root)")
+    parser.add_argument("--catalog-assets", type=Path, default=None,
+                        help="directory with models.bundled.json + "
+                             "mcp-services.bundled.json (see "
+                             "scripts/release/bundle_catalog.py)")
     args = parser.parse_args(argv)
     return args
 
@@ -140,11 +160,31 @@ def copy_tree(source, target):
     walk(source, Path("."))
 
 
-def stage(root, binary, version, stage_dir):
+def resolve_catalog_assets(args):
+    """The bundled catalog assets (spec §3.2 layer 2): the packer
+    hard-fails without validated assets — generate them first (network for
+    CI, a local catalog checkout, or the offline --fixture snapshot) via
+    scripts/release/bundle_catalog.py."""
+    if args.catalog_assets is None:
+        raise SystemExit(
+            "error: missing bundled catalog assets: run "
+            "`python3 scripts/release/bundle_catalog.py generate "
+            "--catalog-dir <prime-agent-catalog>` (CI: --network; offline "
+            "builds: --fixture) and pass --catalog-assets <dir>"
+        )
+    validate_bundled_catalog_dir(args.catalog_assets)
+    return args.catalog_assets
+
+
+def stage(root, binary, version, stage_dir, catalog_assets):
     stage_dir.mkdir(parents=True)
     staged_binary = stage_dir / "prime-agent"
     shutil.copy2(binary, staged_binary)
     staged_binary.chmod(0o755)
+    # The bundled catalog assets ride beside the executable (the runtime's
+    # <packageDir>/models.bundled.json resolution).
+    for name in BUNDLED_CATALOG_FILES:
+        shutil.copy2(catalog_assets / name, stage_dir / name)
     for name in TREE_ASSETS:
         copy_tree(root / name, stage_dir / name)
     shutil.copy2(root / "README.md", stage_dir / "README.md")
@@ -275,7 +315,8 @@ def main(argv=None):
 
     if stage_dir.exists():
         shutil.rmtree(stage_dir)
-    stage(root, binary, version, stage_dir)
+    catalog_assets = resolve_catalog_assets(args)
+    stage(root, binary, version, stage_dir, catalog_assets)
     validate(stage_dir, version)
     pin_version(binary, stage_dir, version)
 
