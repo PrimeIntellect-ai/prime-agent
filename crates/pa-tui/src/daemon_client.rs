@@ -296,6 +296,8 @@ pub struct DaemonClient {
     /// Direct-transport state (retained event sender + live worker link),
     /// one pointer so this struct stays small.
     direct: std::sync::Arc<crate::direct_transport::DirectState>,
+    /// The supervisor reader's death watch (see `reader_dead`).
+    reader_dead_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl DaemonClient {
@@ -327,6 +329,12 @@ impl DaemonClient {
         let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<DaemonClientEvent>();
         let retained_event_tx = event_tx.clone();
+        // The supervisor reader's death signal: the retained event sender
+        // keeps the event channel open after the reader exits (direct
+        // reader pumps may still feed it), so a channel close can never
+        // observe a supervisor socket loss — the watch is the observable
+        // signal the UI loop arms its reconnect driver on.
+        let (reader_dead_tx, reader_dead_rx) = tokio::sync::watch::channel(false);
         let (hello_tx, hello_rx) = oneshot::channel::<Value>();
         let shared = Arc::new(Shared {
             pending: Mutex::new(HashMap::new()),
@@ -385,7 +393,9 @@ impl DaemonClient {
                 }
             }
             // The supervisor socket closed: every supervisor-routed request
-            // in flight fails now instead of riding out its timeout.
+            // in flight fails now instead of riding out its timeout, and
+            // the death watch wakes the UI loop's reconnect driver.
+            let _ = reader_dead_tx.send(true);
             reader_shared.fail_pending("daemon_", "the daemon connection closed");
         });
 
@@ -433,9 +443,19 @@ impl DaemonClient {
                 direct: std::sync::Arc::new(crate::direct_transport::DirectState::new(
                     retained_event_tx,
                 )),
+                reader_dead_rx,
             },
             event_rx,
         ))
+    }
+
+    /// A fresh receiver for the supervisor reader's death watch: fires
+    /// (`true`) when the supervisor socket's reader task ends — a daemon
+    /// hiccup the UI loop's reconnect driver observes (the event channel
+    /// itself stays open: the retained sender keeps it alive for direct
+    /// reader pumps). Poll it with `watch::Receiver::changed`.
+    pub fn reader_dead(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.reader_dead_rx.clone()
     }
 
     pub fn socket_path(&self) -> &Path {

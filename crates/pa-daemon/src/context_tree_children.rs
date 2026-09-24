@@ -25,8 +25,12 @@
 //! durable RLM ledger tombstones at every level of the walk (the caller
 //! resolves this session's deletions into skip ids and hands the whole
 //! record down, so each recursion level skips its own).
-//! The TS child-node cache is not ported yet (the walk runs per
-//! /context call, not per top-bar refresh).
+//!
+//! Caller cadence: the walk is a pure function of the artifact tree, so
+//! it runs from the worker's background context-tree cache
+//! (`context_tree_cache.rs`) as a refresh, not per `/context` call —
+//! `handle_get_context_tree` serves the cached snapshot with the live
+//! roster overlaid.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

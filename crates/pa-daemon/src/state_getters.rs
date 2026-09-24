@@ -90,13 +90,11 @@ impl Worker {
             return response;
         }
         // The root node is in-memory data: the usage totals and the
-        // context estimate walk the live store under the core lock (borrow
-        // based — no owned copy of the history, unlike the pre-cache code
-        // that cloned every branch entry and every store entry under the
-        // lock), so the request answers from memory in bounded time even on
-        // a grown store. The artifact-tree walk (the multi-second disk
-        // part) is the cache's background refresh (`context_tree_cache`),
-        // never the request path.
+        // context estimate walk the live store under the core lock
+        // borrow-based (no owned copy of the history), so the request
+        // answers from memory in bounded time even on a grown store. The
+        // artifact-tree walk is the cache's background refresh
+        // (`context_tree_cache`), never the request path.
         let (label, context_usage, own_usage, total_usage, session_id) = {
             let core = self.core.lock().unwrap();
             let store = core.store.as_ref();

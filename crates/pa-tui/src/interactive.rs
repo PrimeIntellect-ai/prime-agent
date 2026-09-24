@@ -20,6 +20,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::daemon_client::DaemonClient;
+use crate::daemon_client::DaemonClientEvent;
 use crate::exit_guard::ExitGuard;
 use crate::keybindings::KeybindingsManager;
 use crate::session_ui::SessionUi;
@@ -809,6 +810,11 @@ async fn run_interactive_surface(
             crate::app::draw(renderer, &mut view)?;
         }
     }
+    // The supervisor reader's death watch: the event channel itself stays
+    // open across a supervisor socket loss (the retained sender keeps it
+    // alive for direct reader pumps), so this watch is the observable
+    // signal the loop's reconnect driver arms on.
+    let mut reader_dead = client.reader_dead();
     let mut session = match SessionUi::open(
         client,
         &options,
@@ -1009,6 +1015,15 @@ async fn run_interactive_surface(
     // restore still in flight). UI input keeps flowing while reconnecting,
     // so the user can leave with Ctrl+C instead of riding out the window.
     let mut reconnect: Option<ReconnectLoop> = None;
+    // The in-flight reconnect attempt's connect leg (spawned off the loop,
+    // so the attempt's connect+hello wait never blocks UI input or the
+    // render; the reattach leg runs inline on the loop under its own
+    // bound).
+    let mut reconnect_connect: Option<
+        tokio::sync::oneshot::Receiver<
+            anyhow::Result<(DaemonClient, mpsc::UnboundedReceiver<DaemonClientEvent>)>,
+        >,
+    > = None;
     // Set once the event channel has returned None (a closed connection's
     // recv() resolves None instantly and forever — see the events arm).
     let mut events_closed = false;
@@ -1452,6 +1467,27 @@ async fn run_interactive_surface(
                     }
                 }
             }
+            reader_death = reader_dead.changed() => {
+                if reader_death.is_ok() && *reader_dead.borrow_and_update() {
+                    // A supervisor socket loss while a live direct link
+                    // still serves the session is not a pane-level loss
+                    // (session-plane commands ride the link; the
+                    // direct-loss driver owns that path) — reconnect only
+                    // for a total loss.
+                    if reconnect.is_none()
+                        && session_reconnect.is_none()
+                        && session.client.direct_session_id().is_none()
+                    {
+                        session.note_as(
+                            "the daemon connection closed — reconnecting…",
+                            crate::chat::StatusKind::Warning,
+                            &mut view,
+                        );
+                        reconnect = Some(ReconnectLoop::start_lost());
+                        session.dirty = true;
+                    }
+                }
+            }
             maybe_input = ui_rx.recv() => {
                 if let Some(input) = maybe_input {
                     pending.push_back(input);
@@ -1513,11 +1549,15 @@ async fn run_interactive_surface(
                     None => std::future::pending::<()>().await,
                 }
             } => {
-                let Some(state) = reconnect.take() else {
+                if reconnect_connect.is_some() {
                     continue;
+                }
+                let (deadline, lost) = match reconnect.as_ref() {
+                    Some(state) => (state.deadline, state.lost),
+                    None => continue,
                 };
-                if tokio::time::Instant::now() > state.deadline {
-                    if state.lost {
+                if tokio::time::Instant::now() > deadline {
+                    if lost {
                         session.note(
                             "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
                             &mut view,
@@ -1530,19 +1570,56 @@ async fn run_interactive_surface(
                         );
                         session.exit_reason = "update_reconnect_failed";
                     }
+                    reconnect = None;
                     session.dirty = true;
                     running = false;
                     continue;
                 }
-                // One reconnect attempt: bounded connect, hello, reattach
-                // by durable id (§10.4-§10.5).
-                let lost = state.lost;
-                let attempt = tokio::time::timeout(
-                    Duration::from_secs(RECONNECT_ATTEMPT_TIMEOUT_S),
-                    DaemonClient::connect(&options.socket_path),
-                )
-                .await;
-                match attempt {
+                // The connect leg (bounded connect + hello) runs OFF the
+                // loop — the select keeps polling UI input and rendering
+                // while it is out; the reattach leg runs inline under its
+                // own bound when it lands.
+                let socket_path = options.socket_path.clone();
+                let (attempt_tx, attempt_rx) = tokio::sync::oneshot::channel();
+                reconnect_connect = Some(attempt_rx);
+                tokio::spawn(async move {
+                    let attempt = tokio::time::timeout(
+                        Duration::from_secs(RECONNECT_ATTEMPT_TIMEOUT_S),
+                        DaemonClient::connect_with_retry(&socket_path),
+                    )
+                    .await;
+                    let _ = attempt_tx.send(match attempt {
+                        Ok(result) => result,
+                        Err(_) => Err(anyhow!("the reconnect connect attempt timed out")),
+                    });
+                });
+            }
+            maybe_attempt = async {
+                match reconnect_connect.as_mut() {
+                    Some(receiver) => receiver.await,
+                    // Nothing in flight: park the arm at the SAME type the
+                    // in-flight receiver resolves with (the tick is the
+                    // only spawner).
+                    None => {
+                        std::future::pending::<
+                            Result<
+                                anyhow::Result<(
+                                    DaemonClient,
+                                    mpsc::UnboundedReceiver<DaemonClientEvent>,
+                                )>,
+                                tokio::sync::oneshot::Canceled,
+                            >,
+                        >()
+                        .await
+                    }
+                }
+            } => {
+                reconnect_connect = None;
+                let lost = match reconnect.as_ref() {
+                    Some(state) => state.lost,
+                    None => continue,
+                };
+                match maybe_attempt {
                     Ok(Ok((client, fresh_events))) => {
                         match tokio::time::timeout(
                             Duration::from_secs(RECONNECT_ATTACH_TIMEOUT_S),
@@ -1553,6 +1630,7 @@ async fn run_interactive_surface(
                             Ok(Ok(())) => {
                                 events = fresh_events;
                                 events_closed = false;
+                                reader_dead = session.client.reader_dead();
                                 session.reconnect = None;
                                 reconnect = None;
                                 if lost {
@@ -1565,13 +1643,32 @@ async fn run_interactive_surface(
                                 session.dirty = true;
                             }
                             Ok(Err(error)) => {
-                                session.note(
-                                    &format!("reattach after the update failed: {error:#} — run `prime-agent attach` to resume"),
-                                    &mut view,
-                                );
-                                session.exit_reason = "update_reattach_failed";
-                                session.dirty = true;
-                                running = false;
+                                // An unexpected-loss reattach failure is a
+                                // hiccup like any other (the worker still
+                                // respawning): keep retrying through the
+                                // window instead of exiting — the pane never
+                                // dies to it (the operator's kicked-out
+                                // class). The update path keeps its exit
+                                // semantics.
+                                if lost {
+                                    session.note_as(
+                                        &format!("reattach failed: {error:#} — retrying…"),
+                                        crate::chat::StatusKind::Warning,
+                                        &mut view,
+                                    );
+                                    session.dirty = true;
+                                    if let Some(state) = reconnect.take() {
+                                        reconnect = Some(state.next_attempt());
+                                    }
+                                } else {
+                                    session.note(
+                                        &format!("reattach after the update failed: {error:#} — run `prime-agent attach` to resume"),
+                                        &mut view,
+                                    );
+                                    session.exit_reason = "update_reattach_failed";
+                                    session.dirty = true;
+                                    running = false;
+                                }
                             }
                             Err(_) => {
                                 // The queued attach outlived this attempt's
@@ -1581,12 +1678,20 @@ async fn run_interactive_surface(
                                     &mut view,
                                 );
                                 session.dirty = true;
-                                reconnect = Some(state.next_attempt());
+                                if let Some(state) = reconnect.take() {
+                                    reconnect = Some(state.next_attempt());
+                                }
                             }
                         }
                     }
-                    Ok(Err(_)) | Err(_) => {
-                        reconnect = Some(state.next_attempt());
+                    Ok(Err(_)) => {
+                        if let Some(state) = reconnect.take() {
+                            reconnect = Some(state.next_attempt());
+                        }
+                    }
+                    Err(_) => {
+                        // The attempt leg was dropped (a superseded
+                        // attempt): the next tick re-arms.
                     }
                 }
             }
