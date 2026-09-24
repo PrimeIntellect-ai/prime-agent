@@ -468,15 +468,21 @@ pub fn editor_text_spans(
     theme: &Theme,
     chunk: &str,
     highlights: &[(usize, usize, ThemeColor)],
+    selection: Option<(usize, usize)>,
     cursor_col: Option<usize>,
     bg: Style,
 ) -> Vec<Span> {
     let chars: Vec<char> = chunk.chars().collect();
     let len = chars.len();
+    let selection = selection.filter(|(start, end)| *start < *end && *start < len);
     let mut boundaries = vec![0usize, len];
     for (start, end, _) in highlights {
         boundaries.push(*start);
         boundaries.push(*end);
+    }
+    if let Some((start, end)) = selection {
+        boundaries.push(start.min(len));
+        boundaries.push(end.min(len));
     }
     let cursor_on_chunk = cursor_col.filter(|cursor| *cursor <= len);
     if let Some(cursor) = cursor_on_chunk {
@@ -499,6 +505,12 @@ pub fn editor_text_spans(
             .find(|(s, e, _)| *s <= start && start < *e)
         {
             style = bg.patch(theme.fg_style(*color));
+        }
+        // The active selection renders reversed-video like the cursor
+        // cell (there is no TS selection to mirror; reverse keeps it
+        // visible on every theme).
+        if selection.is_some_and(|(s, e)| s <= start && start < e) {
+            style = style.add_modifier(Modifier::REVERSED);
         }
         // The cursor covers exactly the one char under it.
         if cursor_on_chunk == Some(start) && end == start + 1 {
@@ -906,11 +918,56 @@ mod tests {
     }
 
     #[test]
+
+    /// A selection range renders reversed-video, clipped to the chunk, and
+    /// the cursor cell keeps its reverse on top of it.
+    #[test]
+    fn editor_text_spans_render_the_selection_reversed() {
+        let styled = editor_text_spans(
+            &theme(),
+            "hello world",
+            &[],
+            Some((0, 5)),
+            Some(7),
+            Style::default(),
+        );
+        let reversed: Vec<(String, bool)> = styled
+            .iter()
+            .map(|span| {
+                (
+                    span.content.to_string(),
+                    span.style
+                        .add_modifier(Modifier::empty())
+                        .contains(Modifier::REVERSED),
+                )
+            })
+            .collect();
+        assert_eq!(
+            reversed,
+            vec![
+                ("hello".to_string(), true),
+                (" ".to_string(), false),
+                ("w".to_string(), true),
+                ("orld".to_string(), false),
+            ]
+        );
+        // A selection fully past the chunk clips away entirely.
+        let none = editor_text_spans(&theme(), "hi", &[], Some((9, 12)), None, Style::default());
+        assert!(none.len() == 1 && !none[0].style.contains(Modifier::REVERSED));
+    }
+
     fn editor_text_spans_carry_the_cursor_reverse() {
         let theme = theme();
         let bg = Style::default();
         // Cursor inside an accent token: the reversed cell carries accent.
-        let styled = editor_text_spans(&theme, "/new", &[(0, 4, ThemeColor::Accent)], Some(2), bg);
+        let styled = editor_text_spans(
+            &theme,
+            "/new",
+            &[(0, 4, ThemeColor::Accent)],
+            None,
+            Some(2),
+            bg,
+        );
         assert_eq!(
             styled
                 .iter()
@@ -923,7 +980,14 @@ mod tests {
             ]
         );
         // Cursor at the end: the appended reversed space stays default.
-        let styled = editor_text_spans(&theme, "/new", &[(0, 4, ThemeColor::Accent)], Some(4), bg);
+        let styled = editor_text_spans(
+            &theme,
+            "/new",
+            &[(0, 4, ThemeColor::Accent)],
+            None,
+            Some(4),
+            bg,
+        );
         assert_eq!(
             styled
                 .iter()
@@ -935,7 +999,7 @@ mod tests {
             ]
         );
         // No highlights: a single plain run, cursor reversed over its char.
-        let styled = editor_text_spans(&theme, "hello", &[], Some(2), bg);
+        let styled = editor_text_spans(&theme, "hello", &[], None, Some(2), bg);
         assert_eq!(
             styled
                 .iter()

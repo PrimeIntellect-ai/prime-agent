@@ -24,22 +24,44 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             return None;
         }
     }
+    // TS ids support super/hyper/meta combos (keys.ts
+    // formatKeyNameWithModifiers) but no TS keybinding binds one, so a
+    // TS-keyed binding never matches them. The prompt-editor keybind lane
+    // (2026-09-24, documented divergence) binds the macOS Cmd keys: the
+    // kitty protocol delivers them as the SUPER modifier, so a
+    // SUPER-modified key resolves to its `super+<key>` id — anything
+    // unbound still matches nothing. HYPER/META stay undecoded: no
+    // binding names one and terminals never deliver the bits on their own.
     if key
         .modifiers
-        .intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META)
+        .intersects(KeyModifiers::HYPER | KeyModifiers::META)
     {
-        // TS ids support super/hyper/meta combos but no keybinding binds
-        // one (keys.ts formatKeyNameWithModifiers); a super-modified key
-        // matches nothing instead of falling through to the bare key.
         return None;
     }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let super_key = key.modifiers.contains(KeyModifiers::SUPER);
     let base = match key.code {
         KeyCode::Char(c) => {
             if ctrl {
-                return Some(ctrl_char_id(c, alt, shift));
+                return Some(ctrl_char_id(c, alt, shift, super_key));
+            }
+            if super_key {
+                // The plain-super identity (macOS Cmd with the kitty
+                // protocol delivering it): `super+a` select-all and
+                // `super+z` undo style bindings, with shift/alt kept when
+                // the terminal sent them.
+                let shift_prefix = if shift || c.is_ascii_uppercase() {
+                    "shift+"
+                } else {
+                    ""
+                };
+                let alt_prefix = if alt { "alt+" } else { "" };
+                return Some(format!(
+                    "{alt_prefix}{shift_prefix}super+{}",
+                    c.to_ascii_lowercase()
+                ));
             }
             if alt {
                 if c == '\r' || c == '\n' {
@@ -130,17 +152,17 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             }
         }
         KeyCode::Esc => "escape",
-        KeyCode::Left => return Some(modified_name("left", ctrl, alt, shift)),
-        KeyCode::Right => return Some(modified_name("right", ctrl, alt, shift)),
-        KeyCode::Up => return Some(modified_name("up", ctrl, alt, shift)),
-        KeyCode::Down => return Some(modified_name("down", ctrl, alt, shift)),
-        KeyCode::Home => return Some(modified_name("home", ctrl, alt, shift)),
-        KeyCode::End => return Some(modified_name("end", ctrl, alt, shift)),
-        KeyCode::PageUp => return Some(modified_name("pageUp", ctrl, alt, shift)),
-        KeyCode::PageDown => return Some(modified_name("pageDown", ctrl, alt, shift)),
-        KeyCode::Delete => return Some(modified_name("delete", ctrl, alt, shift)),
-        KeyCode::Insert => return Some(modified_name("insert", ctrl, alt, shift)),
-        KeyCode::F(n) => return Some(modified_name(&format!("f{n}"), ctrl, alt, shift)),
+        KeyCode::Left => return Some(modified_name("left", ctrl, alt, shift, super_key)),
+        KeyCode::Right => return Some(modified_name("right", ctrl, alt, shift, super_key)),
+        KeyCode::Up => return Some(modified_name("up", ctrl, alt, shift, super_key)),
+        KeyCode::Down => return Some(modified_name("down", ctrl, alt, shift, super_key)),
+        KeyCode::Home => return Some(modified_name("home", ctrl, alt, shift, super_key)),
+        KeyCode::End => return Some(modified_name("end", ctrl, alt, shift, super_key)),
+        KeyCode::PageUp => return Some(modified_name("pageUp", ctrl, alt, shift, super_key)),
+        KeyCode::PageDown => return Some(modified_name("pageDown", ctrl, alt, shift, super_key)),
+        KeyCode::Delete => return Some(modified_name("delete", ctrl, alt, shift, super_key)),
+        KeyCode::Insert => return Some(modified_name("insert", ctrl, alt, shift, super_key)),
+        KeyCode::F(n) => return Some(modified_name(&format!("f{n}"), ctrl, alt, shift, super_key)),
         KeyCode::BackTab => {
             if alt {
                 // The merged meta-wrapped `ESC ESC [ Z` (Option+Shift+Tab with
@@ -184,14 +206,15 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
 ///   `ctrl+-` are bound in the editor). The remap stays legacy-only:
 ///   under the kitty protocol the same Char+CTRL events are the real
 ///   CSI-u ctrl+digit keys.
-fn ctrl_char_id(c: char, alt: bool, shift: bool) -> String {
+fn ctrl_char_id(c: char, alt: bool, shift: bool, super_key: bool) -> String {
     let lower = c.to_ascii_lowercase();
     let shifted = shift || c.is_ascii_uppercase();
+    let super_prefix = if super_key { "super+" } else { "" };
     if shifted {
         return if alt {
-            format!("shift+ctrl+alt+{lower}")
+            format!("shift+ctrl+alt+{super_prefix}{lower}")
         } else {
-            format!("shift+ctrl+{lower}")
+            format!("shift+ctrl+{super_prefix}{lower}")
         };
     }
     if !alt && lower == 'j' {
@@ -202,7 +225,7 @@ fn ctrl_char_id(c: char, alt: bool, shift: bool) -> String {
         };
     }
     if alt {
-        return format!("ctrl+alt+{lower}");
+        return format!("ctrl+alt+{super_prefix}{lower}");
     }
     if !crate::enhanced_keys::kitty_active() {
         match lower {
@@ -212,10 +235,10 @@ fn ctrl_char_id(c: char, alt: bool, shift: bool) -> String {
             _ => {}
         }
     }
-    format!("ctrl+{lower}")
+    format!("ctrl+{super_prefix}{lower}")
 }
 
-fn modified_name(name: &str, ctrl: bool, alt: bool, shift: bool) -> String {
+fn modified_name(name: &str, ctrl: bool, alt: bool, shift: bool, super_key: bool) -> String {
     let mut s = String::new();
     if shift {
         s.push_str("shift+");
@@ -225,6 +248,9 @@ fn modified_name(name: &str, ctrl: bool, alt: bool, shift: bool) -> String {
     }
     if alt {
         s.push_str("alt+");
+    }
+    if super_key {
+        s.push_str("super+");
     }
     s.push_str(name);
     s
@@ -510,5 +536,76 @@ mod tests {
         let wrapped = KeyEvent::new(KeyCode::BackTab, KeyModifiers::ALT);
         assert_eq!(key_event_to_id(&plain).as_deref(), Some("shift+tab"));
         assert_eq!(key_event_to_id(&wrapped).as_deref(), Some("shift+alt+tab"));
+    }
+
+    /// The macOS Cmd keys arrive as the SUPER modifier under the kitty
+    /// protocol (prompt-editor-keybinds): every identity keeps its `super+`
+    /// prefix so the Cmd bindings (undo/redo, select-all, line and doc
+    /// jumps, cut/copy) match — an unbound one still matches nothing.
+    #[test]
+    fn super_modified_keys_decode_to_super_ids() {
+        let cases = [
+            (
+                KeyCode::Char('z'),
+                KeyModifiers::SUPER,
+                "super+z",
+                "Cmd+Z undo",
+            ),
+            (
+                KeyCode::Char('Z'),
+                KeyModifiers::CTRL | KeyModifiers::SUPER,
+                "shift+ctrl+super+z",
+                "Cmd+Ctrl+Shift+Z redo family",
+            ),
+            (
+                KeyCode::Left,
+                KeyModifiers::SUPER,
+                "super+left",
+                "Cmd+Left line start",
+            ),
+            (
+                KeyCode::Up,
+                KeyModifiers::SUPER,
+                "super+up",
+                "Cmd+Up doc start",
+            ),
+            (
+                KeyCode::Home,
+                KeyModifiers::CTRL,
+                "ctrl+home",
+                "Ctrl+Home doc start",
+            ),
+            (
+                KeyCode::Down,
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                "shift+super+down",
+                "Cmd+Shift+Down select to doc end",
+            ),
+        ];
+        for (code, modifiers, expected, what) in cases {
+            let event = KeyEvent::new(code, modifiers);
+            assert_eq!(key_event_to_id(&event).as_deref(), Some(expected), "{what}");
+        }
+        // The new ids resolve against the registry defaults.
+        let kb = crate::keybindings::KeybindingsManager::new();
+        assert!(kb.matches("super+z", "tui.editor.undo"));
+        assert!(kb.matches("ctrl+shift+z", "tui.editor.redo"));
+        assert!(kb.matches("shift+ctrl+super+z", "tui.editor.redo"));
+        assert!(kb.matches("super+a", "tui.editor.selectAll"));
+        assert!(kb.matches("super+left", "tui.editor.cursorLineStart"));
+        assert!(kb.matches("super+right", "tui.editor.cursorLineEnd"));
+        assert!(kb.matches("super+up", "tui.editor.cursorDocStart"));
+        assert!(kb.matches("super+down", "tui.editor.cursorDocEnd"));
+        assert!(kb.matches("ctrl+up", "tui.editor.cursorParagraphUp"));
+        assert!(kb.matches("ctrl+down", "tui.editor.cursorParagraphDown"));
+        assert!(kb.matches("shift+super+down", "tui.editor.selectDocEnd"));
+        assert!(kb.matches("super+x", "tui.editor.cutSelection"));
+        assert!(kb.matches("super+c", "tui.editor.copySelection"));
+        // The shift+arrow selection families.
+        assert!(kb.matches("shift+left", "tui.editor.selectLeft"));
+        assert!(kb.matches("shift+up", "tui.editor.selectUp"));
+        assert!(kb.matches("shift+ctrl+left", "tui.editor.selectWordLeft"));
+        assert!(kb.matches("shift+home", "tui.editor.selectLineStart"));
+        assert!(kb.matches("shift+ctrl+home", "tui.editor.selectDocStart"));
     }
 }

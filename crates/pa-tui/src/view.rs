@@ -222,6 +222,37 @@ pub struct AgentView {
     pub toasts: crate::toast::Toasts,
 }
 
+/// Clip the editor selection to one rendered chunk (view.rs): the
+/// selection's (line, col) bounds become a char range within `text` — the
+/// chunk of `source_line` starting at `source_start`. `None` when the
+/// selection does not touch this chunk. Lines fully inside the selection
+/// highlight whole; the boundary lines clip at the selection's columns.
+fn chunk_selection(
+    selection: Option<((usize, usize), (usize, usize))>,
+    source_line: usize,
+    source_start: usize,
+    text: &str,
+) -> Option<(usize, usize)> {
+    let ((start_line, start_col), (end_line, end_col)) = selection?;
+    if source_line < start_line || source_line > end_line {
+        return None;
+    }
+    let chunk_chars = text.chars().count();
+    let lo = if source_line == start_line {
+        start_col
+    } else {
+        0
+    };
+    let hi = if source_line == end_line {
+        end_col
+    } else {
+        chunk_chars
+    };
+    let lo = lo.saturating_sub(source_start);
+    let hi = hi.saturating_sub(source_start).min(chunk_chars);
+    (lo < hi).then_some((lo.min(chunk_chars), hi))
+}
+
 impl AgentView {
     /// TS `isCompactAgentMessageNeighbor`: agent messages, tool calls (the
     /// ipython cells included), bash executions, and shell completions
@@ -1030,6 +1061,7 @@ impl AgentView {
     /// The editor surface (TS `Editor.render` with a background): a blank
     /// bg row, content rows with the `> ` prompt and a reverse-video cursor,
     /// and a trailing bg row. Scroll indicators replace the blank rows.
+
     fn render_editor_surface(&mut self, width: usize) -> (Vec<Line>, Option<(usize, usize)>) {
         let bg = crate::chrome::editor_background(&self.theme);
         let border = self.theme.fg_style(ThemeColor::BorderMuted);
@@ -1086,6 +1118,7 @@ impl AgentView {
         }
         // TS `CustomEditor.render`: a bare `--` separator highlights only
         // while the first line opens with an argument-taking slash command.
+        let selection = self.editor.selection_range();
         let editor_lines = self.editor.get_lines();
         let registry = SlashCommandRegistry::builtin_cached();
         let include_bare_separator = editor_lines
@@ -1136,6 +1169,7 @@ impl AgentView {
                 &self.theme,
                 text,
                 &highlights,
+                chunk_selection(selection, line.source_line, line.source_start, text),
                 cursor_pos,
                 bg,
             ));

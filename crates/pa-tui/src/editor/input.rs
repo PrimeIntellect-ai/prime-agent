@@ -46,6 +46,81 @@ impl Editor {
             self.undo();
             return;
         }
+        if self.kb_matches(input, "tui.editor.redo") {
+            self.redo();
+            return;
+        }
+        // The selection families (standard editors' shift+arrow set; no TS
+        // counterpart — see selection.rs): every plain motion below
+        // collapses the selection, so these arms run first.
+        if self.kb_matches(input, "tui.editor.selectAll") {
+            self.select_all();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.cutSelection") {
+            if let Some(text) = self.cut_selection() {
+                self.emit(EditorEvent::ClipboardWrite(text));
+            }
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.copySelection") {
+            if let Some(text) = self.copy_selection() {
+                self.emit(EditorEvent::ClipboardWrite(text));
+            }
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.transposeChars") {
+            self.transpose_chars();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.selectLeft") {
+            self.select_left();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.selectRight") {
+            self.select_right();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.selectUp") {
+            self.select_up();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.selectDown") {
+            self.select_down();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.selectWordLeft") {
+            self.select_word_left();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.selectWordRight") {
+            self.select_word_right();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.selectLineStart") {
+            self.select_line_start();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.selectLineEnd") {
+            self.select_line_end();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.selectParagraphUp") {
+            self.select_paragraph_up();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.selectParagraphDown") {
+            self.select_paragraph_down();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.selectDocStart") {
+            self.select_doc_start();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.selectDocEnd") {
+            self.select_doc_end();
+            return;
+        }
 
         if self.autocomplete.is_some() {
             if self.kb_matches(input, "tui.select.cancel") {
@@ -133,18 +208,42 @@ impl Editor {
             return;
         }
         if self.kb_matches(input, "tui.editor.cursorLineStart") {
+            self.clear_selection();
             self.move_to_line_start();
             return;
         }
         if self.kb_matches(input, "tui.editor.cursorLineEnd") {
+            self.clear_selection();
             self.move_to_line_end();
             return;
         }
+        if self.kb_matches(input, "tui.editor.cursorDocStart") {
+            self.clear_selection();
+            self.move_to_doc_start();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.cursorDocEnd") {
+            self.clear_selection();
+            self.move_to_doc_end();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.cursorParagraphUp") {
+            self.clear_selection();
+            self.move_paragraph_backward();
+            return;
+        }
+        if self.kb_matches(input, "tui.editor.cursorParagraphDown") {
+            self.clear_selection();
+            self.move_paragraph_forward();
+            return;
+        }
         if self.kb_matches(input, "tui.editor.cursorWordLeft") {
+            self.clear_selection();
             self.move_word_backwards();
             return;
         }
         if self.kb_matches(input, "tui.editor.cursorWordRight") {
+            self.clear_selection();
             self.move_word_forwards();
             return;
         }
@@ -166,6 +265,7 @@ impl Editor {
             return;
         }
         if self.kb_matches(input, "tui.editor.cursorUp") {
+            self.clear_selection();
             if self.is_editor_empty()
                 || (self.is_history_navigation_active() && self.is_on_first_visual_line())
             {
@@ -178,6 +278,7 @@ impl Editor {
             return;
         }
         if self.kb_matches(input, "tui.editor.cursorDown") {
+            self.clear_selection();
             if self.is_history_navigation_active() && self.is_on_last_visual_line() {
                 self.navigate_history(1);
             } else if self.is_on_last_visual_line() {
@@ -188,26 +289,32 @@ impl Editor {
             return;
         }
         if self.kb_matches(input, "tui.editor.cursorRight") {
+            self.clear_selection();
             self.move_cursor(0, 1);
             return;
         }
         if self.kb_matches(input, "tui.editor.cursorLeft") {
+            self.clear_selection();
             self.move_cursor(0, -1);
             return;
         }
         if self.kb_matches(input, "tui.editor.pageUp") {
+            self.clear_selection();
             self.page_scroll(-1);
             return;
         }
         if self.kb_matches(input, "tui.editor.pageDown") {
+            self.clear_selection();
             self.page_scroll(1);
             return;
         }
         if self.kb_matches(input, "tui.editor.jumpForward") {
+            self.clear_selection();
             self.jump_mode = Some(JumpDirection::Forward);
             return;
         }
         if self.kb_matches(input, "tui.editor.jumpBackward") {
+            self.clear_selection();
             self.jump_mode = Some(JumpDirection::Backward);
             return;
         }

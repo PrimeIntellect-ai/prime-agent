@@ -7053,6 +7053,15 @@ impl SessionUi {
                 self.clear_ctrl_c_hint();
                 return Ok(());
             }
+            // An active selection consumes the first Escape (standard
+            // editors' drop-the-selection press): the interrupt/clear
+            // ladder runs on the next press.
+            if view.editor.has_selection() {
+                view.editor.clear_selection();
+                self.clear_ctrl_c_hint();
+                self.dirty = true;
+                return Ok(());
+            }
             self.clear_ctrl_c_hint();
             // TS `handleEscape`: an open side-question pane owns the key —
             // the running turn aborts and the pane closes; the armed
@@ -7411,18 +7420,29 @@ impl SessionUi {
             self.clear_ctrl_c_hint();
         }
         for event in view.editor.take_events() {
-            if let crate::editor::EditorEvent::Submitted(text) = event {
-                if self.queue_selection.is_browsing() {
-                    // Enter steers the selected parked message: the edit
-                    // replaces it and moves it onto the steering lane
-                    // (TS `applyQueueSelection(text, "steering")`).
-                    self.apply_queue_selection(&text, QueueLane::Steering, view)
-                        .await?;
-                } else {
-                    view.editor.add_to_history(&text);
-                    self.submit_prompt(&text, SubmitBehavior::Steer, view)
-                        .await?;
+            match event {
+                crate::editor::EditorEvent::Submitted(text) => {
+                    if self.queue_selection.is_browsing() {
+                        // Enter steers the selected parked message: the edit
+                        // replaces it and moves it onto the steering lane
+                        // (TS `applyQueueSelection(text, "steering")`).
+                        self.apply_queue_selection(&text, QueueLane::Steering, view)
+                            .await?;
+                    } else {
+                        view.editor.add_to_history(&text);
+                        self.submit_prompt(&text, SubmitBehavior::Steer, view)
+                            .await?;
+                    }
                 }
+                crate::editor::EditorEvent::ClipboardWrite(text) => {
+                    // A selection cut/copy: the same copy chain as `/copy`
+                    // (platform tools, then OSC 52 for remote sessions).
+                    match crate::clipboard::copy_to_clipboard(&text, &mut self.osc_sink) {
+                        Ok(()) => self.toast("Copied selection to clipboard", view),
+                        Err(message) => self.error_row(&message, view),
+                    }
+                }
+                _ => {}
             }
         }
         self.dirty = true;

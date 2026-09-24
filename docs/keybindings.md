@@ -32,12 +32,38 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | `tui.editor.cursorRight` | `right`, `ctrl+f` | Move cursor right |
 | `tui.editor.cursorWordLeft` | `alt+left`, `ctrl+left`, `alt+b` | Move cursor word left |
 | `tui.editor.cursorWordRight` | `alt+right`, `ctrl+right`, `alt+f` | Move cursor word right |
-| `tui.editor.cursorLineStart` | `home`, `ctrl+a` | Move to line start |
-| `tui.editor.cursorLineEnd` | `end`, `ctrl+e` | Move to line end |
+| `tui.editor.cursorLineStart` | `home`, `ctrl+a`, `super+left` | Move to line start |
+| `tui.editor.cursorLineEnd` | `end`, `ctrl+e`, `super+right` | Move to line end |
+| `tui.editor.cursorDocStart` | `ctrl+home`, `super+up` | Move to start of text |
+| `tui.editor.cursorDocEnd` | `ctrl+end`, `super+down` | Move to end of text |
+| `tui.editor.cursorParagraphUp` | `ctrl+up` | Move one paragraph up |
+| `tui.editor.cursorParagraphDown` | `ctrl+down` | Move one paragraph down |
 | `tui.editor.jumpForward` | `ctrl+]` | Jump forward to character |
 | `tui.editor.jumpBackward` | `ctrl+alt+]` | Jump backward to character |
 | `tui.editor.pageUp` | `pageUp` | Scroll up by page |
 | `tui.editor.pageDown` | `pageDown` | Scroll down by page |
+
+### TUI Editor Selection
+
+`super+` keys are the macOS Cmd keys (delivered by terminals that report the kitty keyboard protocol with Cmd passthrough); on Linux/Windows use the `ctrl+` counterparts.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `tui.editor.selectLeft` | `shift+left` | Select left by character |
+| `tui.editor.selectRight` | `shift+right` | Select right by character |
+| `tui.editor.selectUp` | `shift+up` | Select up one line |
+| `tui.editor.selectDown` | `shift+down` | Select down one line |
+| `tui.editor.selectWordLeft` | `shift+alt+left`, `shift+ctrl+left` | Select left by word |
+| `tui.editor.selectWordRight` | `shift+alt+right`, `shift+ctrl+right` | Select right by word |
+| `tui.editor.selectLineStart` | `shift+home` | Select to start of line |
+| `tui.editor.selectLineEnd` | `shift+end` | Select to end of line |
+| `tui.editor.selectParagraphUp` | `shift+ctrl+up` | Select up one paragraph |
+| `tui.editor.selectParagraphDown` | `shift+ctrl+down` | Select down one paragraph |
+| `tui.editor.selectDocStart` | `shift+ctrl+home`, `super+shift+up` | Select to start of text |
+| `tui.editor.selectDocEnd` | `shift+ctrl+end`, `super+shift+down` | Select to end of text |
+| `tui.editor.selectAll` | `super+a`, `ctrl+shift+a` | Select all text |
+
+Typing, Backspace, Delete, and paste replace an active selection; Escape drops the selection first.
 
 ### TUI Editor Deletion
 
@@ -64,13 +90,17 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 |--------|---------|-------------|
 | `tui.editor.yank` | `ctrl+y` | Paste most recently deleted text |
 | `tui.editor.yankPop` | `alt+y` | Cycle through deleted text after yank |
-| `tui.editor.undo` | `ctrl+-` | Undo last edit |
+| `tui.editor.undo` | `ctrl+-`, `super+z` | Undo last edit |
+| `tui.editor.redo` | `ctrl+shift+z`, `super+shift+z` | Redo the last undone edit |
+| `tui.editor.transposeChars` | `ctrl+t` | Swap the characters around the cursor |
 
 ### TUI Clipboard and Selection
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `tui.input.copy` | `ctrl+c` | Copy selection |
+| `tui.editor.cutSelection` | `ctrl+x`, `super+x` | Cut the selection to the clipboard |
+| `tui.editor.copySelection` | `ctrl+shift+c`, `super+c` | Copy the selection to the clipboard |
 | `tui.select.up` | `up` | Move selection up |
 | `tui.select.down` | `down` | Move selection down |
 | `tui.select.pageUp` | `pageUp` | Page up in list |
