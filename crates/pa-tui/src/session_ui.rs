@@ -1220,6 +1220,11 @@ impl SessionUi {
         // stats and clears the readout left over from the previous session.
         if matches!(kind, RebuildKind::Rebind) {
             view.bash_view = None;
+            // The goal panel dies with the old session too: it is a
+            // snapshot of the previous session's goal state, and until
+            // the new session's own `goal_update` lands it would keep
+            // owning the frame over the rebind with stale content.
+            view.goal_panel = None;
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }
@@ -6275,6 +6280,7 @@ impl SessionUi {
         }
         if view.editor.keybindings().matches(&id, "tui.select.cancel")
             || view.editor.keybindings().matches(&id, "app.modal.back")
+            || view.editor.keybindings().matches(&id, "app.clear")
         {
             view.goal_panel = None;
             self.dirty = true;
