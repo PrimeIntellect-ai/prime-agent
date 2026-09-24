@@ -1,2 +1,0 @@
-- Claude Opus 5.5 is always-on adaptive like the Fable/Mythos models: it rejects `thinking: {type: "disabled"}` and non-default sampling params with a 400, so the Anthropic and Bedrock providers stop sending both and the thinking-payload tests cover the release id.
-- The model rows themselves ship from the prime-agent-catalog repo (add model: claude-opus-5-5, gpt-6-sol, gpt-6-luna); no compiled-catalog regen is needed.

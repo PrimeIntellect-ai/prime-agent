@@ -1,1 +1,0 @@
-- Bumped the Claude Code client version claimed by Anthropic subscription (OAuth) requests from 2.1.261 to 2.1.281: the API gates newer models on the claimed client version and rejects claude-opus-5.5 (and other gated models) with a 400 for anything below 2.280.
