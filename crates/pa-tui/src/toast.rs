@@ -16,7 +16,7 @@ use crate::{Line, Span};
 use ratatui::style::Style;
 
 /// How long a toast stays on screen before it auto-dismisses.
-pub const TOAST_TTL: Duration = Duration::from_millis(3000);
+pub const TOAST_TTL: Duration = Duration::from_secs(3);
 
 /// How many toasts stack at once (the oldest drop first).
 pub const TOAST_STACK_LIMIT: usize = 3;

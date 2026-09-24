@@ -239,7 +239,7 @@ fn reject_removed_command(args: &[String]) -> PublicCommandResult {
         ("daemon", _) => Some("Run \"prime-agent help\" to see the agent commands.".to_string()),
         ("app", Some("update")) => Some("Use \"prime-agent update\".".to_string()),
         ("install", _) => Some("Use \"prime-agent package install\".".to_string()),
-        ("remove", _) | ("uninstall", _) => Some("Use \"prime-agent package remove\".".to_string()),
+        ("remove" | "uninstall", _) => Some("Use \"prime-agent package remove\".".to_string()),
         ("manage", _) => Some("Use \"prime-agent agents\".".to_string()),
         _ => None,
     };

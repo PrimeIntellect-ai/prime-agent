@@ -164,9 +164,9 @@ impl AgentLoopConfig {
                     .filter(|m| {
                         matches!(
                             m,
-                            AgentMessage::Standard(Message::User(_))
-                                | AgentMessage::Standard(Message::Assistant(_))
-                                | AgentMessage::Standard(Message::ToolResult(_))
+                            AgentMessage::Standard(
+                                Message::User(_) | Message::Assistant(_) | Message::ToolResult(_),
+                            )
                         )
                     })
                     .map(|m| match m {

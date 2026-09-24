@@ -352,7 +352,7 @@ mod tests {
             "provider": "prime-inference", "baseUrl": PRIME_INFERENCE_BASE_URL,
             "reasoning": true, "input": ["text"],
             "cost": { "input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1.25 },
-            "contextWindow": 128000, "maxTokens": 8192, "featured": true,
+            "contextWindow": 128_000, "maxTokens": 8192, "featured": true,
             "compat": { "maxTokensField": "max_tokens" }
         }))
         .unwrap()]
@@ -365,7 +365,7 @@ mod tests {
                 {
                     "id": "z-ai/glm-5.3",
                     "pricing": { "input_usd_per_mtok": 0.6, "output_usd_per_mtok": 2.2 },
-                    "specs": { "context_window": 200000, "max_output_tokens": 16384,
+                    "specs": { "context_window": 200_000, "max_output_tokens": 16384,
                                "supports_reasoning": true,
                                "modalities": { "input": ["text"], "output": ["text"] } }
                 },

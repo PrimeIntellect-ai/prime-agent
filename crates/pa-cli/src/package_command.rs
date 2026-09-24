@@ -382,7 +382,7 @@ pub fn handle_package_command(args: &[String]) -> PackageCommandOutcome {
         return PackageCommandOutcome { exit_code: None };
     };
     let command = match args.first().map(String::as_str) {
-        Some("uninstall") | Some("remove") => PackageCommand::Remove,
+        Some("uninstall" | "remove") => PackageCommand::Remove,
         Some("install") => PackageCommand::Install,
         Some("update") => PackageCommand::Update,
         Some("list") => PackageCommand::List,

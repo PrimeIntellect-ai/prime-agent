@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 /// How long a decide response (or a failed fetch) stays authoritative.
-pub const FLAG_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+pub const FLAG_CACHE_TTL: Duration = Duration::from_mins(5);
 
 const DECIDE_API_VERSION: &str = "v=3";
 

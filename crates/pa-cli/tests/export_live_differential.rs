@@ -224,7 +224,7 @@ impl Wire {
         self.writer.flush().expect("flush");
         self.reader
             .get_ref()
-            .set_read_timeout(Some(Duration::from_secs(120)))
+            .set_read_timeout(Some(Duration::from_mins(2)))
             .expect("read timeout");
         loop {
             let mut response = String::new();

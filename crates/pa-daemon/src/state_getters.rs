@@ -725,7 +725,7 @@ mod tests {
         assert_eq!(tree["totalUsage"]["totalTokens"], json!(23032));
         assert_eq!(
             tree["totalUsage"]["cost"]["total"].as_f64(),
-            Some(0.0089957)
+            Some(0.008_995_7)
         );
         // `get_session_stats` reports the same folded totals over the
         // gap-bridged branch.
@@ -740,7 +740,7 @@ mod tests {
         assert_eq!(stats["tokens"]["input"], json!(52898));
         assert_eq!(stats["tokens"]["output"], json!(5863));
         assert_eq!(stats["tokens"]["cacheRead"], json!(18560));
-        assert_eq!(stats["cost"].as_f64(), Some(0.0089957));
+        assert_eq!(stats["cost"].as_f64(), Some(0.008_995_7));
     }
 
     /// `get_context_tree` surfaces the persisted child sessions under the
@@ -1070,10 +1070,10 @@ mod tests {
                         "apiKey": "sk-test",
                         "models": [
                             { "id": "mock-1", "name": "Mock 1", "api": "openai-completions",
-                              "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128000,
+                              "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128_000,
                               "maxTokens": 4096 },
                             { "id": "mock-2", "name": "Mock 2", "api": "openai-completions",
-                              "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128000,
+                              "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128_000,
                               "maxTokens": 4096 }
                         ]
                     }

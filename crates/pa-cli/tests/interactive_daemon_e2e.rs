@@ -1057,7 +1057,7 @@ async fn tui_model_picker_applies_and_effort_reports() {
                     "apiKey": "sk-test",
                     "models": [
                         { "id": "mock-1", "name": "Mock 1", "api": "openai-completions",
-                          "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128000,
+                          "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128_000,
                           "maxTokens": 4096 }
                     ]
                 }
@@ -2152,7 +2152,7 @@ async fn tui_flagged_model_turn_reports_the_ts_preflight_error_without_credentia
         "provider": "prime-inference", "baseUrl": "https://inference.example/v1",
         "reasoning": true, "input": ["text"],
         "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-        "contextWindow": 128000, "maxTokens": 8192
+        "contextWindow": 128_000, "maxTokens": 8192
     }))
     .expect("catalog entry");
     let options = pa_tui::interactive::InteractiveOptions {
@@ -2251,10 +2251,10 @@ async fn tui_model_pick_refreshes_the_label_and_the_next_turn_resolves() {
                     "apiKey": "sk-test",
                     "models": [
                         { "id": "mock-1", "name": "Mock 1", "api": "openai-completions",
-                          "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128000,
+                          "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128_000,
                           "maxTokens": 4096 },
                         { "id": "mock-2", "name": "Mock 2", "api": "openai-completions",
-                          "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128000,
+                          "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128_000,
                           "maxTokens": 4096 }
                     ]
                 }

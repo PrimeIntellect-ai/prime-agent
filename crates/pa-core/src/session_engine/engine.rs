@@ -1132,7 +1132,7 @@ mod tests {
                         "type": "oauth",
                         "access": "fixture-access",
                         "refresh": "fixture-refresh",
-                        "expires": 999999999999999i64,
+                        "expires": 999_999_999_999_999_i64,
                         "endpoint": endpoint,
                         "tokenEndpoint": "https://fixture.example/token",
                         "clientId": "fixture-client",

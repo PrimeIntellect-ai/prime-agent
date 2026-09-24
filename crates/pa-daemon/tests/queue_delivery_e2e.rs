@@ -90,7 +90,7 @@ fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
-        "created": 1750000000,
+        "created": 1_750_000_000,
         "model": "mock-1",
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
     })
@@ -240,7 +240,7 @@ impl Client {
     }
 
     fn read_line(&mut self) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -276,7 +276,7 @@ impl Client {
     }
 
     fn request(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -294,7 +294,7 @@ impl Client {
     }
 
     fn drain_events(&mut self, quiet_ms: Duration) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         let mut last_line = Instant::now();
         loop {
             assert!(Instant::now() < deadline, "event drain timed out");
@@ -344,7 +344,7 @@ fn setup(name: &str) -> (tempfile::TempDir, DelayedMock, Supervisor, Client, Str
                             "id": "mock-1",
                             "name": "Mock 1",
                             "api": "openai-completions",
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096
                         }
                     ]
@@ -472,7 +472,7 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
     // Everything drains: three model requests (turn one + the steers'
     // ONE batched turn — the product default co-delivers the parked
     // steering prefix, Kevin's batch spec — + the follow-up's own turn).
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < deadline {
         if mock.count() >= 3 {
             break;
