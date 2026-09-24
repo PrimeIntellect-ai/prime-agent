@@ -1471,10 +1471,8 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
     // overflow retry then bounces off the still-running prompt guard) —
     // the probe is re-issued until the session settles (the recovered
     // turn's assertion itself is unchanged and strict).
-    let mut prompt_response = Value::Null;
-    let mut updates = Vec::new();
     let mut probe_attempts = 0;
-    loop {
+    let (prompt_response, updates) = loop {
         probe_attempts += 1;
         let prompt = client.request(
             "session/prompt",
@@ -1489,16 +1487,14 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
                 .as_str()
                 .is_some_and(|message| message.contains("already running"));
         if !refused {
-            prompt_response = response;
-            updates = prompt_updates;
-            break;
+            break (response, prompt_updates);
         }
         assert!(
             probe_attempts < 40,
             "the session never settled after the seed turn: {response}"
         );
         std::thread::sleep(std::time::Duration::from_millis(250));
-    }
+    };
     assert_eq!(
         prompt_response["result"],
         json!({ "stopReason": "end_turn" }),
