@@ -429,7 +429,16 @@ impl BashView {
             .filter(|(tail_id, _)| tail_id == &id)
             .map(|(_, output)| output.len())
         else {
-            // Nothing fetched yet: the open fetch owns the region.
+            // The open fetch failed before anything loaded: an Up press
+            // retries it (the shown fetch error has no other retry from
+            // the detail view). While the open fetch is still in flight
+            // (no error shown), Up does nothing.
+            if self.fetch_error {
+                return BashViewAction::OpenDetail {
+                    id,
+                    generation: self.detail_generation,
+                };
+            }
             return BashViewAction::None;
         };
         let height = self.detail_region_rows.get();
@@ -2024,6 +2033,40 @@ mod tests {
             .collect();
         view.set_output("a", &grown.join("\n"), generation);
         assert!(!view.loading_more);
+    }
+
+    /// A failed OPEN fetch (nothing loaded yet) is retryable from the
+    /// detail view: an Up press re-issues the open fetch under the same
+    /// generation, and its success clears the shown error. While the
+    /// open fetch is still in flight, Up does nothing.
+    #[test]
+    fn an_up_press_retries_a_failed_open_fetch() {
+        let mut view = BashView::new(activities(), 24);
+        view.handle_key("enter", &kb());
+        let generation = view.detail_generation;
+        // The open fetch is in flight: Up does nothing.
+        assert_eq!(view.handle_key("up", &kb()), BashViewAction::None);
+        // The fetch fails.
+        view.set_error(
+            "Bash output: kernel stalled".to_string(),
+            true,
+            Some(generation),
+        );
+        assert!(view.fetch_error);
+        // An Up press retries the open fetch under the same generation.
+        assert_eq!(
+            view.handle_key("up", &kb()),
+            BashViewAction::OpenDetail {
+                id: "a".to_string(),
+                generation,
+            }
+        );
+        // The retry lands: the fetch error clears and the output shows.
+        view.set_output("a", "line one", generation);
+        assert!(view.error.is_none(), "the retry supersedes the fetch error");
+        let frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        assert!(text.iter().any(|row| row.contains("line one")));
     }
 
     /// A one-row output region (the designed minimum under a long
