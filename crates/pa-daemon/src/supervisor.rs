@@ -868,7 +868,14 @@ impl Supervisor {
             }
             return AdoptionOutcome::Stopped;
         }
-        let result = if alive {
+        // The adoption answer plus the revival's spawned child, when one
+        // was launched: the monitor must watch the process that actually
+        // runs, never the descriptor's stale pre-restart pid (the
+        // zombie-holder incident: a revived worker was alive and serving
+        // while the monitor polled the dead pid the supervisor replaced,
+        // counted six phantom exits, gave up on the id, and left the live
+        // holder - lease and all - orphaned with every create refused).
+        let (result, revived_child) = if alive {
             let adopted = self
                 .connect_worker(&resident, worker_connect_deadline())
                 .await;
@@ -878,7 +885,7 @@ impl Supervisor {
                 // commands may reach it immediately.
                 resident.note_session_ready();
             }
-            adopted
+            (adopted, None)
         } else {
             let interrupted =
                 crate::journal::WorkerRecoveryJournal::read_interrupted(&journal_path);
@@ -931,13 +938,29 @@ impl Supervisor {
             // Dead worker with journal-proven live work (or a kept
             // worker on an update boot): relaunch from the durable
             // create command. The worker rehydrates the session store,
-            // restoring history and the persisted queue snapshot.
-            self.relaunch_worker(&resident).await.map(|_| ())
+            // restoring history and the persisted queue snapshot. The
+            // spawned child rides out to the monitor arming below: the
+            // descriptor's pid is the DEAD pre-restart holder, and a
+            // monitor parked on it reports a phantom exit of a process
+            // this very adoption just launched.
+            match self.relaunch_worker(&resident).await {
+                Ok(child) => (Ok(()), Some(child)),
+                Err(error) => (Err(error), None),
+            }
         };
         let outcome = match result {
             Ok(()) => {
                 self.registry.insert(Arc::clone(&resident)).await;
-                self.spawn_monitor(Arc::clone(&resident), None, pid);
+                // A live leftover keeps its real pid; a revived worker is
+                // watched through the child handle itself (the pid the
+                // spawn recorded in the descriptor, never the stale one).
+                match revived_child {
+                    Some(child) => {
+                        let child_pid = child.id().unwrap_or(0);
+                        self.spawn_monitor(Arc::clone(&resident), Some(child), child_pid as u64);
+                    }
+                    None => self.spawn_monitor(Arc::clone(&resident), None, pid),
+                }
                 // The adopted worker joins the roster from its live state.
                 self.refresh_roster_entry(&resident).await;
                 // A restore pass that owns this session's roster row can
@@ -1088,6 +1111,15 @@ impl Supervisor {
                 let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();
                 self.passivate_roster_worker(&resident.worker_id, ephemeral)
                     .await;
+                // The exhausted-failure state must release the session
+                // hold: a process this daemon spawned under the id that
+                // outlived the failure loop keeps the session's runtime
+                // lease and refuses every create for the file (the
+                // zombie-holder incident). The belt reaps the id's
+                // same-socket leftovers identity-gated; the last crashed
+                // child is provably gone, and a dead holder's lease
+                // self-heals on the next acquire.
+                crate::boot_reap::reap_abandoned_workers(&self, &resident.worker_id).await;
                 self.log_line(&format!(
                     "session worker {} failed after {failures} consecutive failures",
                     resident.worker_id

@@ -424,12 +424,15 @@ fn service_search_score(service: &McpServiceRow, query: &str) -> Option<f64> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpViewAction {
     /// Enter on a connectable connection/service: run its login flow (the
-    /// caller resolves the auth hook; TS `authenticate`).
-    Select(String),
+    /// caller resolves the auth hook; TS `authenticate`). `label` is the
+    /// service's display name (the inline auth panel's title reads
+    /// "Login to {label}").
+    Select { server: String, label: String },
     /// Enter on a pasteable token service with no installed account: open
-    /// the paste flow (TS `actionText` "paste token").
-    Paste(String),
-    /// Esc or Ctrl+C: close without selecting.
+    /// the paste flow (TS `actionText` "paste token"). `label` is the
+    /// service's display name (the panel's title reads "Connect {label}").
+    Paste { server: String, label: String },
+    /// Esc, Ctrl+C, or back: close without selecting.
     Cancel,
     /// Navigation or search editing only.
     None,
@@ -527,12 +530,22 @@ impl McpView {
                 .get(self.selected)
                 .and_then(|index| self.rows.get(*index));
             return match selected_row {
-                Some(row) if row.wants_paste() => McpViewAction::Paste(row.target().to_string()),
-                Some(row) => McpViewAction::Select(row.target().to_string()),
+                Some(row) if row.wants_paste() => McpViewAction::Paste {
+                    server: row.target().to_string(),
+                    label: row.label.clone(),
+                },
+                Some(row) => McpViewAction::Select {
+                    server: row.target().to_string(),
+                    label: row.label.clone(),
+                },
                 None => McpViewAction::None,
             };
         }
-        if kb.matches(key, "tui.select.cancel") {
+        // Esc/Ctrl+C close; the modal back key closes from an empty
+        // search (its left-edge editing otherwise feeds the field).
+        if kb.matches(key, "tui.select.cancel")
+            || (kb.matches(key, "app.modal.back") && self.search.cursor() == 0)
+        {
             return McpViewAction::Cancel;
         }
         // Everything else edits the search field.
@@ -1105,22 +1118,34 @@ mod tests {
         let mut view = McpView::from_response(&catalog_response(), 19);
         assert_eq!(
             view.handle_key("enter", &kb()),
-            McpViewAction::Select("fixture-echo".to_string())
+            McpViewAction::Select {
+                server: "fixture-echo".to_string(),
+                label: "fixture-echo".to_string(),
+            }
         );
         view.handle_key("down", &kb());
         assert_eq!(
             view.handle_key("enter", &kb()),
-            McpViewAction::Select("notion".to_string())
+            McpViewAction::Select {
+                server: "notion".to_string(),
+                label: "Notion".to_string(),
+            }
         );
         view.handle_key("down", &kb());
         assert_eq!(
             view.handle_key("enter", &kb()),
-            McpViewAction::Select("linear".to_string())
+            McpViewAction::Select {
+                server: "linear".to_string(),
+                label: "Linear".to_string(),
+            }
         );
         view.handle_key("down", &kb());
         assert_eq!(
             view.handle_key("enter", &kb()),
-            McpViewAction::Paste("github".to_string())
+            McpViewAction::Paste {
+                server: "github".to_string(),
+                label: "GitHub".to_string(),
+            }
         );
     }
 
@@ -1328,7 +1353,10 @@ mod tests {
         );
         assert_eq!(
             view.handle_key("enter", &kb()),
-            McpViewAction::Select("linear".to_string()),
+            McpViewAction::Select {
+                server: "linear".to_string(),
+                label: "Linear".to_string(),
+            },
             "Enter applies the surviving match"
         );
         view.paste("-app");
@@ -1450,7 +1478,10 @@ mod tests {
         );
         assert_eq!(
             view.handle_key("enter", &kb()),
-            McpViewAction::Select("linear".to_string()),
+            McpViewAction::Select {
+                server: "linear".to_string(),
+                label: "Linear".to_string(),
+            },
             "Enter applies the surviving match"
         );
     }

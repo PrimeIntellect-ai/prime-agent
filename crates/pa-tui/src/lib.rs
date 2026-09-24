@@ -11,6 +11,7 @@ pub mod agents_view_state;
 pub mod altscreen;
 pub mod ansi;
 pub mod app;
+pub mod auth_panel;
 pub mod autocomplete;
 mod autolink;
 pub mod bash_bang;

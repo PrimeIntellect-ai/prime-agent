@@ -33,6 +33,7 @@ REPO = SCRIPTS_DIR.parent.parent
 sys.path.insert(0, str(SCRIPTS_DIR))
 
 import bundle_catalog  # noqa: E402  (same release-scripts directory)
+from assemble_artifacts import TARGET_ALIASES  # noqa: E402  (same directory)
 
 BUNDLER = SCRIPTS_DIR / "bundle_catalog.py"
 ASSEMBLER = SCRIPTS_DIR / "assemble_artifacts.py"
@@ -40,6 +41,9 @@ VERIFIER = SCRIPTS_DIR / "verify_release.py"
 PACKER = REPO / "scripts" / "package_release.py"
 
 HOST_TARGET = "x86_64-unknown-linux-gnu"
+# Archives carry the TS platform alias (the name the update flow's channel
+# manifest requires): prime-agent-<version>-<platform>.tar.gz.
+HOST_ARCHIVE_PLATFORM = TARGET_ALIASES[HOST_TARGET]
 
 
 def run_cli(script, args, env_extra=None, cwd=None):
@@ -587,7 +591,8 @@ class PackerGates(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing bundled catalog assets", result.stderr)
         # Nothing was packed: no archive, no manifest.
-        self.assertFalse((out / f"prime-agent-9.9.9-{HOST_TARGET}.tar.gz").exists())
+        self.assertFalse(
+            (out / f"prime-agent-9.9.9-{HOST_ARCHIVE_PLATFORM}.tar.gz").exists())
         self.assertFalse((out / "manifest.json").exists())
 
     def test_packer_fails_on_invalid_assets(self):
@@ -630,7 +635,7 @@ class PackerGates(unittest.TestCase):
         result = self.repo.assemble(out, catalog_assets=self.assets)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("bundled catalog assets", result.stdout)
-        archive = out / f"prime-agent-9.9.9-{HOST_TARGET}.tar.gz"
+        archive = out / f"prime-agent-9.9.9-{HOST_ARCHIVE_PLATFORM}.tar.gz"
         self.assertTrue(archive.is_file())
         with tarfile.open(archive) as tar:
             names = tar.getnames()
