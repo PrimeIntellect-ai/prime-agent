@@ -12,11 +12,15 @@ use super::text_utils::{char_at, char_prefix, char_suffix};
 use super::*;
 
 impl Editor {
-    /// A selection is active: the anchor sits somewhere other than the
-    /// cursor.
+    /// A selection is active: the anchor plus cursor produce a non-empty
+    /// range after the hidden-prefix clamp. An anchor whose span the clamp
+    /// floors away (a cursor parked inside the bang prefix) is a phantom
+    /// the editor treats as no selection at all — every consumer gates on
+    /// this, so no stale anchor can wedge Backspace or the insert path.
     pub fn has_selection(&self) -> bool {
-        self.selection_anchor
-            .is_some_and(|anchor| anchor != (self.cursor_line, self.cursor_col))
+        self.selection_anchor.is_some_and(|anchor| {
+            anchor != (self.cursor_line, self.cursor_col) && self.selection_range().is_some()
+        })
     }
 
     /// Drop the selection, keeping the cursor (the plain motions and a
@@ -218,10 +222,6 @@ impl Editor {
     pub(crate) fn transpose_chars(&mut self) {
         self.history_index = -1;
         self.last_action = None;
-        // The swap moves the cursor without preserving any selection span:
-        // a stale anchor would cover different text than the highlight
-        // shows, so the selection collapses first.
-        self.selection_anchor = None;
         let line = self.lines[self.cursor_line].clone();
         let len = line.chars().count();
         let line_start = self.line_start_col(self.cursor_line);
@@ -233,7 +233,12 @@ impl Editor {
         } else {
             self.cursor_col.max(line_start + 1)
         };
+        // The snapshot is taken BEFORE the swap (undo/redo round-trips the
+        // pre-swap state, selection included), and the selection collapses
+        // only when the swap actually applies: a stale anchor would cover
+        // different text than the highlight shows.
         self.push_undo_snapshot();
+        self.selection_anchor = None;
         let head = char_prefix(&line, col - 1);
         let first = char_at(&line, col - 1).unwrap_or_default().to_string();
         let second = char_at(&line, col).unwrap_or_default().to_string();
@@ -509,6 +514,59 @@ mod tests {
         e.handle_input("X");
         assert_eq!(e.get_text(), "!Xd", "the bang prefix survived the replace");
         assert_eq!(e.bash_prompt_prefix(), Some("! "));
+    }
+
+    /// Transpose over a selection: undo/redo round-trips the WHOLE
+    /// pre-swap state, the selection included (the snapshot is taken
+    /// before the swap collapses it).
+    #[test]
+    fn undo_round_trips_a_transposed_selection_state() {
+        let mut e = ed();
+        e.set_text("abdc");
+        e.set_cursor_for_tests(0, 3);
+        e.handle_input("shift+left");
+        e.handle_input("shift+left");
+        assert!(e.has_selection());
+        e.handle_input("ctrl+t");
+        assert!(!e.has_selection());
+        assert_eq!(e.get_text(), "badc");
+        // Undo restores the pre-swap text AND the selection span.
+        e.handle_input("ctrl+-");
+        assert_eq!(e.get_text(), "abdc");
+        assert!(e.has_selection(), "undo restores the selection span");
+        // Redo returns to the transposed, selection-collapsed state.
+        e.handle_input("ctrl+shift+z");
+        assert_eq!(e.get_text(), "badc");
+        assert!(!e.has_selection(), "redo collapses it again");
+    }
+
+    /// A cursor parked inside the hidden bang prefix leaves a phantom
+    /// anchor: the clamp floors its range away, and the editor treats it
+    /// as NO selection at all — Backspace falls through to the normal
+    /// single-character delete and typing inserts, instead of a wedged
+    /// selection no-op that swallows keypresses.
+    #[test]
+    fn a_phantom_selection_inside_the_prefix_is_treated_as_none() {
+        let mut e = ed();
+        e.set_text("!cmd");
+        // The exact phantom shape: the anchor sits inside the hidden
+        // prefix (column 0) and the cursor on the protected start
+        // (column 1) — the clamp floors the range to empty, so this is
+        // NOT a live selection even though the anchor differs.
+        e.selection_anchor = Some((0, 0));
+        e.set_cursor_for_tests(0, 1);
+        assert!(
+            !e.has_selection(),
+            "the clamped-away span is not a selection"
+        );
+        // Backspace falls through to the normal path (a no-op at the
+        // protected prefix — NOT a wedged selection delete that pushes
+        // an undo snapshot and swallows the keypress).
+        e.handle_input("backspace");
+        assert_eq!(e.get_text(), "!cmd");
+        // Typing inserts instead of replacing a phantom range.
+        e.handle_input("X");
+        assert_eq!(e.get_text(), "!Xcmd");
     }
 
     /// A jump landing inside the hidden bang prefix can never seed a
