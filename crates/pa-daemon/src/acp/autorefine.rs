@@ -263,6 +263,11 @@ mod tests {
             session: Some(SessionEntry {
                 session,
                 prompt_task: None,
+                config: std::sync::Arc::new(super::super::InProcessConfig {
+                    queue: tokio::sync::Mutex::new(()),
+                    published: tokio::sync::Mutex::new(Vec::new()),
+                    models: tokio::sync::Mutex::new(Vec::new()),
+                }),
             }),
             session_new_in_flight: false,
             session_close_in_flight: false,
@@ -271,9 +276,10 @@ mod tests {
             engine: engine.clone(),
             actual_cwd: std::sync::Arc::new(dir.path().to_path_buf()),
             product_version: std::sync::Arc::new("test".to_string()),
-            model: Some(model),
+            model: std::sync::Arc::new(Mutex::new(Some(model))),
             api_key: None,
             agent_dir: std::sync::Arc::new(agent_dir),
+            provider_target: std::sync::Arc::new(std::sync::RwLock::new(None)),
             autonomous_config: None,
             mcp: engine.mcp_manager.clone(),
             mcp_owner_id: std::sync::Arc::new("acp-autorefine-owner".to_string()),

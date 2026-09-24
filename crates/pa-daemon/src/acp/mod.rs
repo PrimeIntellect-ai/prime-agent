@@ -828,9 +828,11 @@ async fn wire_config_refresh(
     mode: AcpModeState,
 ) {
     let agent = Arc::clone(session.agent());
+    // The owned clones the 'static listener captures (the borrow ends here).
+    let session = Arc::clone(session);
     agent
         .subscribe(move |event, _signal| {
-            let session = Arc::clone(session);
+            let session = Arc::clone(&session);
             let config = Arc::clone(&config);
             let mode = mode.clone();
             Box::pin(async move {
