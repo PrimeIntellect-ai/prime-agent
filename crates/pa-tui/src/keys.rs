@@ -446,17 +446,40 @@ mod tests {
         assert_eq!(key_event_to_id(&ctrl_alt_j).as_deref(), Some("ctrl+alt+j"));
     }
 
-    /// Super/hyper/meta combos match nothing (TS supports the ids but no
-    /// keybinding binds one); the bare key must not leak through.
+    /// SUPER combos decode to their `super+` ids now (the macOS Cmd keys;
+    /// SANCTIONED DIVERGENCE from TS, prompt-editor-keybinds 2026-09-24):
+    /// an UNBOUND one still matches no keybinding, and the bare key must
+    /// not leak through. HYPER/META stay undecoded (no binding names one
+    /// and terminals never deliver the bits on their own).
     #[test]
     fn super_modified_keys_match_nothing() {
         use KeyModifiers as M;
         let super_k = KeyEvent::new(KeyCode::Char('k'), M::SUPER);
-        assert_eq!(key_event_to_id(&super_k), None);
+        assert_eq!(key_event_to_id(&super_k).as_deref(), Some("super+k"));
         let super_up = KeyEvent::new(KeyCode::Up, M::SUPER);
-        assert_eq!(key_event_to_id(&super_up), None);
+        assert_eq!(key_event_to_id(&super_up).as_deref(), Some("super+up"));
         let hyper_a = KeyEvent::new(KeyCode::Char('a'), M::HYPER | M::META);
         assert_eq!(key_event_to_id(&hyper_a), None);
+        // Nothing binds super+k: the id exists, the binding does not.
+        let kb = crate::keybindings::KeybindingsManager::new();
+        for id in ["super+k", "super+q", "super+insert", "shift+super+f5"] {
+            let matches_any = [
+                "tui.editor.undo",
+                "tui.editor.redo",
+                "tui.editor.selectAll",
+                "tui.editor.cutSelection",
+                "tui.editor.copySelection",
+                "tui.editor.cursorLineStart",
+                "tui.editor.cursorLineEnd",
+                "tui.editor.cursorDocStart",
+                "tui.editor.cursorDocEnd",
+                "tui.editor.selectDocStart",
+                "tui.editor.selectDocEnd",
+            ]
+            .iter()
+            .any(|binding| kb.matches(id, binding));
+            assert!(!matches_any, "unbound super combo `{id}` matches nothing");
+        }
     }
 
     /// Shift+tab keeps its TS id (`\x1b[Z` -> "shift+tab"; crossterm
@@ -552,10 +575,14 @@ mod tests {
                 "Cmd+Z undo",
             ),
             (
+                // A kitty terminal reports Cmd+Shift+Z through the shifted
+                // alternate: crossterm resolves it to Char('Z') with SHIFT
+                // cleared, so the id carries the shift from the produced
+                // character.
                 KeyCode::Char('Z'),
-                KeyModifiers::CONTROL | KeyModifiers::SUPER,
-                "shift+ctrl+super+z",
-                "Cmd+Ctrl+Shift+Z redo family",
+                KeyModifiers::SUPER,
+                "shift+super+z",
+                "Cmd+Shift+Z redo family",
             ),
             (
                 KeyCode::Left,
@@ -590,7 +617,10 @@ mod tests {
         let kb = crate::keybindings::KeybindingsManager::new();
         assert!(kb.matches("super+z", "tui.editor.undo"));
         assert!(kb.matches("ctrl+shift+z", "tui.editor.redo"));
-        assert!(kb.matches("shift+ctrl+super+z", "tui.editor.redo"));
+        assert!(kb.matches("shift+super+z", "tui.editor.redo"));
+        // A ctrl+super combo (Cmd+Ctrl+Shift+Z) is its own identity: it
+        // matches nothing (no binding names all three modifiers).
+        assert!(!kb.matches("shift+ctrl+super+z", "tui.editor.redo"));
         assert!(kb.matches("super+a", "tui.editor.selectAll"));
         assert!(kb.matches("super+left", "tui.editor.cursorLineStart"));
         assert!(kb.matches("super+right", "tui.editor.cursorLineEnd"));

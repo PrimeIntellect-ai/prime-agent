@@ -1111,9 +1111,12 @@ mod tests {
         e.handle_input("ctrl+down");
         assert_eq!(e.get_cursor(), (1, 11));
         // Already at the paragraph's end: down goes to the next
-        // paragraph's end, up returns to the previous paragraph's start.
+        // paragraph's end, up to the current paragraph's start, and a
+        // second up to the previous paragraph's start.
         e.handle_input("ctrl+down");
         assert_eq!(e.get_cursor(), (4, 11));
+        e.handle_input("ctrl+up");
+        assert_eq!(e.get_cursor(), (3, 0));
         e.handle_input("ctrl+up");
         assert_eq!(e.get_cursor(), (0, 0));
     }

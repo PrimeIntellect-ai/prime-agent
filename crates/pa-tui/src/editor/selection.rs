@@ -317,8 +317,8 @@ mod tests {
         e.handle_input("shift+up");
         assert_eq!(
             e.selection_text().as_deref(),
-            Some("e\nsecond line"),
-            "the selection spans through the newline"
+            Some("\nsecond line"),
+            "the selection spans through the newline (the sticky column clamps to line 0's end)"
         );
         e.handle_input("delete");
         assert_eq!(e.get_text(), "first line");
@@ -370,6 +370,7 @@ mod tests {
         e.set_text("unchanged");
         e.move_to_doc_end();
         e.handle_input("shift+alt+left");
+        let _ = e.take_events();
         e.handle_input("ctrl+shift+c");
         assert_eq!(e.get_text(), "unchanged");
         assert!(e.has_selection(), "the selection stays active");
@@ -386,6 +387,7 @@ mod tests {
     fn cut_without_selection_is_a_noop() {
         let mut e = ed();
         e.set_text("abc");
+        let _ = e.take_events();
         e.handle_input("ctrl+x");
         assert_eq!(e.get_text(), "abc");
         assert!(e.take_events().is_empty());
@@ -418,9 +420,10 @@ mod tests {
         e.handle_input("shift+ctrl+home");
         assert_eq!(e.selection_text().as_deref(), Some("one"));
         // The anchor persists: extending to the doc end selects from the
-        // same anchor through the buffer end.
+        // same anchor (line 0's end, so nothing of line 0) through the
+        // buffer end.
         e.handle_input("shift+ctrl+end");
-        assert_eq!(e.selection_text().as_deref(), Some("e\n\ntwo"));
+        assert_eq!(e.selection_text().as_deref(), Some("\n\ntwo"));
         // Anchor at the very start: extend to the doc end selects all.
         e.clear_selection();
         e.move_to_doc_start();
