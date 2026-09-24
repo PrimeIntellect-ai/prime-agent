@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.6] - 2026-09-23
+
+- `turn_end` and `message_update` events are now typed as assistant messages (matching what is actually emitted), and the README documents the `max` thinking level and current `continue()` semantics.
+- Proxy streams now fail with a clear "stream truncated" error instead of hanging forever when the connection ends mid-response, and the proxy request body is derived from the shared stream-options type so new options cannot be silently dropped.
+- Added an optional `modelOverride` run field: when set, prompt and continuation runs use that model (with its own thinking level and service tier) while `state.model` keeps identifying the session model; failures are tagged with the model that served the run.
+
 ## [0.9.4] - 2026-09-08
 
 - Removed the unused `maxRetryDelayMs` agent option; retry delays are owned by the session retry loop.

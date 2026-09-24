@@ -1,1 +1,0 @@
-- Sped up first-run installs by skipping pip/setuptools/wheel seeding when creating the kernel Python venv; every kernel package is installed with `uv pip`, so the seeded tools were never used.

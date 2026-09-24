@@ -1,1 +1,0 @@
-- Fixed the stored Prime team selection being hidden whenever the API key came from a runtime or environment override: an ambient PRIME_API_KEY supplies the key, never the team, so the stored login's team still scopes the credentialed catalog and private-model fetches and team-private internal routes keep appearing in the model picker.
