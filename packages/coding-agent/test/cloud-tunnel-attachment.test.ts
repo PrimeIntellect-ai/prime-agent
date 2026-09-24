@@ -161,6 +161,33 @@ describe("CloudTunnelAttachment", () => {
 		vi.useRealTimers();
 	});
 
+	it("treats a close before the first snapshot as a failed cycle and goes terminal after the cap", async () => {
+		const transport = new FakeTransport();
+		const callbacks = makeCallbacks();
+		const attachment = makeAttachment(transport, callbacks, { maxConsecutiveFailures: 3 });
+		attachment.start();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(transport.connections.length).toBe(1);
+		// The bridge accepts, then closes without ever sending a snapshot:
+		// each cycle is a failure, never a clean settle at the minimum delay.
+		for (let cycle = 1; cycle <= 3; cycle++) {
+			const connection = transport.connections[cycle - 1] as FakeConnection;
+			expect(connection.sent.length).toBe(1);
+			connection.close();
+			await vi.advanceTimersByTimeAsync(20);
+			expect(callbacks.onAttachmentError).toHaveBeenCalledWith(
+				expect.stringContaining("closed before the guest answered the handshake"),
+			);
+			if (cycle < 3) {
+				expect(transport.connections.length).toBe(cycle + 1);
+			}
+		}
+		expect(callbacks.onTerminal).toHaveBeenCalledWith(
+			expect.stringContaining("could not be re-established after 3 attempts"),
+		);
+		await attachment.stop();
+	});
+
 	it("keeps a healthy connection past the handshake deadline once the snapshot arrived", async () => {
 		const transport = new FakeTransport();
 		const callbacks = makeCallbacks({ onAttached: vi.fn() });

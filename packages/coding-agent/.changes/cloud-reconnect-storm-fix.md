@@ -1,0 +1,1 @@
+- Fixed a wedged cloud tunnel connection looping forever at the minimum reconnect delay; a close before the guest answers the handshake now counts as a failed cycle and backs off to an honest terminal state.

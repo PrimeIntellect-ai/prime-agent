@@ -417,6 +417,13 @@ export class CloudTunnelAttachment {
 		// A bridge that accepts the upgrade but never answers hello parks this
 		// connection forever without a deadline; close it and let the reconnect
 		// loop surface the failure honestly instead.
+		let handshakeSatisfied = false;
+		firstSnapshot.then(
+			() => {
+				handshakeSatisfied = true;
+			},
+			() => undefined,
+		);
 		try {
 			await Promise.race([
 				closed,
@@ -431,6 +438,13 @@ export class CloudTunnelAttachment {
 					}, this.handshakeTimeoutMs);
 				}),
 			]);
+
+			if (!handshakeSatisfied) {
+				// A close before the first snapshot is a failed cycle, never a
+				// clean settle: without this, one wedged bridge loops forever at
+				// the minimum reconnect delay instead of backing off honestly.
+				throw new Error("tunnel connection closed before the guest answered the handshake");
+			}
 		} catch (error) {
 			this.firstSnapshotArrived = undefined;
 			clearTimeout(this.handshakeTimer);
