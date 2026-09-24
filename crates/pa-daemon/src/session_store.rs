@@ -110,6 +110,10 @@ pub(crate) struct SessionWindow {
     thinking_level: String,
     service_tier: Option<pa_types::ai::ServiceTier>,
     retained_ids: std::collections::HashSet<String>,
+    /// The discarded prefix's on-chain spend (attribution-folded — the
+    /// window walk's older-path stats): the active stats add it when no
+    /// compaction bounds the region (the prefix rows are in the kept
+    /// region then — a window is a load optimization, not session state).
     pub(crate) older_path_stats: pa_core::session::window::WindowStats,
 }
 
@@ -513,6 +517,16 @@ impl SessionFile {
     /// /context totals). Forks resolve by parent id; only a missing
     /// parent bridges.
     pub fn branch_bridged(&self) -> Vec<&SessionEntry> {
+        self.branch_bridged_positions()
+            .into_iter()
+            .map(|position| &self.entries[position])
+            .collect()
+    }
+
+    /// [`Self::branch_bridged`] as file positions — the accounting walks
+    /// (the compaction-kept region of `get_session_stats`) restrict the
+    /// chain by file position.
+    pub(crate) fn branch_bridged_positions(&self) -> Vec<usize> {
         let mut positions: Vec<usize> = Vec::new();
         let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let mut current = self
@@ -541,9 +555,6 @@ impl SessionFile {
         }
         positions.reverse();
         positions
-            .into_iter()
-            .map(|position| &self.entries[position])
-            .collect()
     }
 
     pub(crate) fn restored_settings(&self) -> pa_core::session::SessionContext {

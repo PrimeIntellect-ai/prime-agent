@@ -197,46 +197,44 @@ fn check(schema: &Value, value: &Value, path: &str, errors: &mut Vec<(String, St
     }
 
     match value {
-        Value::Object(map) => {
-            if types.contains(&"object") || schema.get("properties").is_some() {
+        Value::Object(map) if types.contains(&"object") || schema.get("properties").is_some() => {
+            if let Some(Value::Object(properties)) = schema.get("properties") {
+                for (key, sub_schema) in properties {
+                    let sub_path = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    match map.get(key) {
+                        Some(v) => check(sub_schema, v, &sub_path, errors),
+                        None => {
+                            // Optional properties are skipped, mirroring
+                            // standard JSON Schema.
+                        }
+                    }
+                }
+            }
+            if let Some(Value::Array(required)) = schema.get("required") {
+                for req in required.iter().filter_map(Value::as_str) {
+                    if !map.contains_key(req) {
+                        let base = format_path(path);
+                        errors.push((base, format!("Required property '{req}' is missing")));
+                    }
+                }
+            }
+            if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
                 if let Some(Value::Object(properties)) = schema.get("properties") {
-                    for (key, sub_schema) in properties {
-                        let sub_path = if path.is_empty() {
-                            key.clone()
-                        } else {
-                            format!("{path}.{key}")
-                        };
-                        match map.get(key) {
-                            Some(v) => check(sub_schema, v, &sub_path, errors),
-                            None => {
-                                // Optional properties are skipped, mirroring
-                                // standard JSON Schema.
-                            }
-                        }
-                    }
-                }
-                if let Some(Value::Array(required)) = schema.get("required") {
-                    for req in required.iter().filter_map(Value::as_str) {
-                        if !map.contains_key(req) {
-                            let base = format_path(path);
-                            errors.push((base, format!("Required property '{req}' is missing")));
-                        }
-                    }
-                }
-                if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
-                    if let Some(Value::Object(properties)) = schema.get("properties") {
-                        for key in map.keys() {
-                            if !properties.contains_key(key) {
-                                let sub_path = if path.is_empty() {
-                                    key.clone()
-                                } else {
-                                    format!("{path}.{key}")
-                                };
-                                errors.push((
-                                    sub_path,
-                                    "Property is not allowed by additionalProperties".to_string(),
-                                ));
-                            }
+                    for key in map.keys() {
+                        if !properties.contains_key(key) {
+                            let sub_path = if path.is_empty() {
+                                key.clone()
+                            } else {
+                                format!("{path}.{key}")
+                            };
+                            errors.push((
+                                sub_path,
+                                "Property is not allowed by additionalProperties".to_string(),
+                            ));
                         }
                     }
                 }
