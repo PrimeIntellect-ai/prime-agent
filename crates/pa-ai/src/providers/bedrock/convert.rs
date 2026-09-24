@@ -408,8 +408,8 @@ pub fn map_thinking_level_to_effort(model: &Model, level: ModelThinkingLevel) ->
 pub fn map_stop_reason(reason: Option<&str>) -> crate::types::StopReason {
     use crate::types::StopReason;
     match reason {
-        Some("end_turn") | Some("stop_sequence") => StopReason::Stop,
-        Some("max_tokens") | Some("model_context_window_exceeded") => StopReason::Length,
+        Some("end_turn" | "stop_sequence") => StopReason::Stop,
+        Some("max_tokens" | "model_context_window_exceeded") => StopReason::Length,
         Some("tool_use") => StopReason::ToolUse,
         _ => StopReason::Error,
     }

@@ -359,7 +359,7 @@ mod tests {
             "id": "glm-5.3", "name": "GLM", "api": "openai-completions",
             "provider": provider, "baseUrl": "", "reasoning": false, "input": [],
             "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 128000, "maxTokens": 8192
+            "contextWindow": 128_000, "maxTokens": 8192
         }))
         .unwrap()
     }

@@ -165,7 +165,7 @@ fn initialize_params() -> Value {
     })
 }
 
-const TIMEOUT: Duration = Duration::from_secs(60);
+const TIMEOUT: Duration = Duration::from_mins(1);
 
 /// The TS initialize response shape (capture `ts-happy_path.jsonl`), with the
 /// version and sessionId-class fields normalized as volatile.
@@ -694,7 +694,7 @@ fn acp_daemon_attached_serves_a_client_owned_session() {
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request("session/new", json!({ "mcpServers": [] }));
-    let (new_response, _) = client.wait_response(new, Duration::from_secs(60));
+    let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     assert!(
         new_response["result"]["sessionId"].is_string(),
         "daemon-attached admission succeeds: {new_response}"
@@ -707,14 +707,14 @@ fn acp_daemon_attached_serves_a_client_owned_session() {
         "session/prompt",
         json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "Name a river." }] }),
     );
-    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_secs(120));
+    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(2));
     assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
     let chunk = updates
         .iter()
         .find(|update| update["params"]["update"]["sessionUpdate"] == "agent_message_chunk");
     assert!(chunk.is_some(), "the daemon stream maps to ACP chunks");
     let close = client.request("session/close", json!({ "sessionId": session_id }));
-    let (close_response, _) = client.wait_response(close, Duration::from_secs(60));
+    let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
     shutdown_sandboxed_daemon(&socket);
@@ -765,7 +765,7 @@ fn acp_daemon_attached_admits_mcp_servers_through_the_wire() {
             { "name": "capture-stdio", "type": "stdio", "command": "cat", "args": [], "env": [] },
         ]}),
     );
-    let (new_response, _) = client.wait_response(new, Duration::from_secs(60));
+    let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     assert!(
         new_response["result"]["sessionId"].is_string(),
         "{}",
@@ -778,7 +778,7 @@ fn acp_daemon_attached_admits_mcp_servers_through_the_wire() {
         .unwrap()
         .to_string();
     let close = client.request("session/close", json!({ "sessionId": close_id }));
-    let (close_response, _) = client.wait_response(close, Duration::from_secs(60));
+    let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
     shutdown_sandboxed_daemon(&socket);
@@ -829,7 +829,7 @@ fn acp_daemon_attached_cancels_mid_turn() {
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request("session/new", json!({ "mcpServers": [] }));
-    let (new_response, _) = client.wait_response(new, Duration::from_secs(60));
+    let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     let session_id = new_response["result"]["sessionId"]
         .as_str()
         .unwrap()
@@ -840,14 +840,14 @@ fn acp_daemon_attached_cancels_mid_turn() {
         );
     // The turn is mid-delay: cancel, then wait for the prompt response.
     client.notify("session/cancel", json!({ "sessionId": session_id }));
-    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_secs(60));
+    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(1));
     assert_eq!(prompt_response["result"]["stopReason"], "cancelled");
     assert!(
         updates.is_empty(),
         "a cancelled turn publishes no boundary frames after the cancel"
     );
     let close = client.request("session/close", json!({ "sessionId": session_id }));
-    let (close_response, _) = client.wait_response(close, Duration::from_secs(60));
+    let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
     shutdown_sandboxed_daemon(&socket);
@@ -1114,7 +1114,7 @@ fn acp_daemon_attached_publishes_the_goal_update_meta() {
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request("session/new", json!({ "mcpServers": [] }));
-    let (new_response, _) = client.wait_response(new, Duration::from_secs(60));
+    let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     assert!(
         new_response["result"]["sessionId"].is_string(),
         "daemon-attached admission succeeds: {new_response}"
@@ -1130,7 +1130,7 @@ fn acp_daemon_attached_publishes_the_goal_update_meta() {
             "prompt": [{ "type": "text", "text": "/goal --budget 500 make the daemon publish goal state" }],
         }),
     );
-    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_secs(120));
+    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(2));
     assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
     let goal = updates.iter().find_map(|update| {
         let meta = &update["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"]["goal"];
@@ -1142,7 +1142,7 @@ fn acp_daemon_attached_publishes_the_goal_update_meta() {
     assert_eq!(goal["tokenBudget"], 500);
     assert_eq!(goal["tokensUsed"], 0);
     let close = client.request("session/close", json!({ "sessionId": session_id }));
-    let (close_response, _) = client.wait_response(close, Duration::from_secs(60));
+    let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
     shutdown_sandboxed_daemon(&socket);
@@ -1194,7 +1194,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request("session/new", json!({ "mcpServers": [] }));
-    let (new_response, _) = client.wait_response(new, Duration::from_secs(60));
+    let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     assert!(
         new_response["result"]["sessionId"].is_string(),
         "daemon-attached admission succeeds: {new_response}"
@@ -1211,7 +1211,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
             "prompt": [{ "type": "text", "text": "/autonomous on --max-turns 1" }],
         }),
     );
-    let (enable_response, updates) = client.wait_response(enable, Duration::from_secs(120));
+    let (enable_response, updates) = client.wait_response(enable, Duration::from_mins(2));
     assert_eq!(enable_response["result"]["stopReason"], "end_turn");
     // The enabled accounting is already visible on the command turn's
     // completion envelope (the headless-completion status of the run).
@@ -1230,7 +1230,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
             "prompt": [{ "type": "text", "text": "say something" }],
         }),
     );
-    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_secs(120));
+    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(2));
     assert_eq!(
         prompt_response["result"],
         json!({ "stopReason": "max_turn_requests" }),
@@ -1259,7 +1259,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
         "the run's unlimited continuation budget minus used"
     );
     let close = client.request("session/close", json!({ "sessionId": session_id }));
-    let (close_response, _) = client.wait_response(close, Duration::from_secs(60));
+    let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
     shutdown_sandboxed_daemon(&socket);

@@ -18,9 +18,9 @@ use tokio::process::Command;
 
 use crate::image_load::{LoadedImage, SUPPORTED_IMAGE_MIME_TYPES};
 
-const DEFAULT_LIST_TIMEOUT: Duration = Duration::from_millis(1000);
-const DEFAULT_READ_TIMEOUT: Duration = Duration::from_millis(3000);
-const DEFAULT_POWERSHELL_TIMEOUT: Duration = Duration::from_millis(5000);
+const DEFAULT_LIST_TIMEOUT: Duration = Duration::from_secs(1);
+const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(3);
+const DEFAULT_POWERSHELL_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_MAX_BUFFER_BYTES: usize = 50 * 1024 * 1024;
 
 /// One clipboard image: the base64 payload plus its sniffed mime type

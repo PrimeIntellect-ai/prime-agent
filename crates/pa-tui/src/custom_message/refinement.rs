@@ -21,7 +21,7 @@ pub(crate) fn refinement_outcome_entries(message: &Value, details: &Value) -> Ve
     let summary = details.get("summary").and_then(Value::as_str);
     let scope_ok = matches!(
         details.get("scope").and_then(Value::as_str),
-        Some("local") | Some("global")
+        Some("local" | "global")
     );
     let edits = details.get("edits").and_then(Value::as_array);
     let valid = message
@@ -34,7 +34,7 @@ pub(crate) fn refinement_outcome_entries(message: &Value, details: &Value) -> Ve
             edits.iter().all(|edit| {
                 matches!(
                     edit.get("action").and_then(Value::as_str),
-                    Some("create") | Some("update") | Some("delete")
+                    Some("create" | "update" | "delete")
                 ) && edit.get("kind").map(Value::is_string).unwrap_or(false)
                     && edit.get("id").map(Value::is_string).unwrap_or(false)
                     && edit.get("applied").map(Value::is_boolean).unwrap_or(false)

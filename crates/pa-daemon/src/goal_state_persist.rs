@@ -246,8 +246,8 @@ mod tests {
                 "tokensUsed": 30,
                 "timeUsedSeconds": 0,
                 "continuationsUsed": 0,
-                "createdAt": 1789781423253u64,
-                "updatedAt": 1789781423340u64,
+                "createdAt": 1_789_781_423_253_u64,
+                "updatedAt": 1_789_781_423_340_u64,
             },
         });
         let state = goal_state_from_raw("custom", &ts_row).expect("TS row parses");
@@ -259,7 +259,7 @@ mod tests {
         assert_eq!(state.tokens_used, 30);
         assert_eq!(state.time_used_seconds, 0);
         assert_eq!(state.continuations_used, 0);
-        assert_eq!(state.created_at, Some(1789781423253));
+        assert_eq!(state.created_at, Some(1_789_781_423_253));
     }
 
     #[test]

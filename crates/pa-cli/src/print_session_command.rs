@@ -467,7 +467,7 @@ mod tests {
             "modelId": "faux-1",
             "modelName": "Faux Model",
             "reasoning": false,
-            "contextWindow": 128000,
+            "contextWindow": 128_000,
             "responses": responses,
         })
     }

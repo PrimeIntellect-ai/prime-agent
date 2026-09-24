@@ -128,12 +128,7 @@ pub fn is_persisted_goal_state(value: &serde_json::Value) -> bool {
     }
     let status_ok = matches!(
         record.get("status").and_then(|value| value.as_str()),
-        Some("idle")
-            | Some("active")
-            | Some("paused")
-            | Some("budget_limited")
-            | Some("complete")
-            | Some("error")
+        Some("idle" | "active" | "paused" | "budget_limited" | "complete" | "error")
     );
     if !status_ok {
         return false;

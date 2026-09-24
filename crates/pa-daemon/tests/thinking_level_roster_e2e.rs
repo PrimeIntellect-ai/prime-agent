@@ -91,7 +91,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -145,7 +145,7 @@ impl Client {
     /// The response for one command id; `roster_update` pushes read on the
     /// way are parked in the buffer instead of dropped.
     fn request(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -260,7 +260,7 @@ fn setup(name: &str) -> Harness {
                             "name": "Mock 1",
                             "api": "openai-completions",
                             "reasoning": true,
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096
                         },
                         {
@@ -268,7 +268,7 @@ fn setup(name: &str) -> Harness {
                             "name": "Mock 2",
                             "api": "openai-completions",
                             "reasoning": false,
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096
                         }
                     ]

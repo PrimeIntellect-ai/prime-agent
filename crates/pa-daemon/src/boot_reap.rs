@@ -366,7 +366,7 @@ fn socket_spelling_of(pid: u32, value: &str) -> String {
 pub(crate) fn is_product_binary(exe: &str) -> bool {
     matches!(
         Path::new(exe).file_name().and_then(|name| name.to_str()),
-        Some("prime-agent") | Some("pa-daemon")
+        Some("prime-agent" | "pa-daemon")
     )
 }
 
@@ -514,8 +514,10 @@ pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> boo
 
 /// Whether the path is a unix socket file (the reap's endpoint unlink
 /// removes endpoints only - a regular file at a matching name is never
-/// touched).
-#[cfg(target_os = "linux")]
+/// touched). UNIX-wide on purpose (the caller is unconditional): the
+/// std `os::unix` socket-file probe compiles on every unix - darwin
+/// included.
+#[cfg(unix)]
 fn is_unix_socket_file(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
     std::fs::symlink_metadata(path)
@@ -606,7 +608,10 @@ fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
 /// leftover carries), so a leftover whose inherited spelling differs
 /// (`/a/b/../c/daemon.sock` vs `/a/c/daemon.sock`, a symlinked tmpdir)
 /// is still a same-socket predecessor - its lease is held either way.
-#[cfg(target_os = "linux")]
+/// Pure `std` (canonicalize + components): it compiles on every unix -
+/// darwin included, which the unconditional `supervisor_argv_names_socket`
+/// (the argv-only view the supervisor census normalizes with) requires.
+#[cfg(unix)]
 pub(crate) fn normalize_socket_spelling(path: &Path) -> String {
     if let Ok(canonical) = path.canonicalize() {
         return canonical.to_string_lossy().to_string();
@@ -698,6 +703,10 @@ mod tests {
     /// own child (the same contract the CLI stop test uses) dies inside the
     /// TERM grace and reports Term. The signal rides the kernel-held pidfd
     /// (the open itself proves the handle is available on this kernel).
+    /// LINUX ONLY: the stop is real only where the pidfd opens - elsewhere
+    /// `stop_target` is the never-signal no-op, and the live `sleep` child
+    /// would never exit for the wait.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_real_process_stops_inside_the_term_grace() {
         let mut child = std::process::Command::new("sleep")
@@ -705,7 +714,6 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         let pid = child.id();
-        #[cfg(target_os = "linux")]
         assert!(
             pa_core::platform::process::open_pidfd(pid).is_some(),
             "the kernel-held handle opens"
@@ -773,11 +781,11 @@ mod tests {
     fn worker_argv_shapes() {
         let worker = ["/bin/prime-agent", "worker"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         let pa_daemon_worker = ["/usr/bin/pa-daemon", "worker", "--flag"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         let kernel = [
             "/opt/kernel-venv/bin/python",
@@ -785,19 +793,19 @@ mod tests {
             "prime_agent_runtime.kernel",
         ]
         .iter()
-        .map(|arg| arg.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
         let bash_child = ["/usr/bin/sleep", "300"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         let bare = ["/usr/local/bin/prime-agent"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         let worker_flag_second = ["/usr/local/bin/prime-agent", "--mode", "worker"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         assert!(is_worker_argv(&worker), "the product worker role");
         assert!(
@@ -819,7 +827,7 @@ mod tests {
         );
         let foreign_worker_arg = ["/usr/bin/python", "worker"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         assert!(
             !is_worker_argv(&foreign_worker_arg),
@@ -878,7 +886,7 @@ mod tests {
             "/tmp/x/daemon.sock",
         ]
         .iter()
-        .map(|arg| arg.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
         assert!(supervisor_argv_names_socket(
             &direct,
@@ -892,7 +900,7 @@ mod tests {
             "/tmp/x/y/../daemon.sock",
         ]
         .iter()
-        .map(|arg| arg.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
         assert!(
             supervisor_argv_names_socket(
@@ -947,7 +955,7 @@ mod tests {
             "/tmp/sock/daemon.sock",
         ]
         .iter()
-        .map(|arg| arg.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
         let direct = [
             "/usr/bin/pa-daemon",
@@ -958,7 +966,7 @@ mod tests {
             "/agent",
         ]
         .iter()
-        .map(|arg| arg.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
         let other_socket = [
             "/usr/local/bin/prime-agent",
@@ -968,11 +976,11 @@ mod tests {
             "/tmp/OTHER/daemon.sock",
         ]
         .iter()
-        .map(|arg| arg.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
         let interactive = ["/usr/local/bin/prime-agent"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         assert!(supervisor_argv_names_socket(
             &product,

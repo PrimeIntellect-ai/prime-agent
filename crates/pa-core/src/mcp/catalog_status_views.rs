@@ -155,8 +155,10 @@ pub(crate) fn http_connection_status(
                     }
                 }
             },
-            Err(super::catalog_views::OAuthGrantUsabilityReason::Unbound)
-            | Err(super::catalog_views::OAuthGrantUsabilityReason::CrossEndpoint) => {
+            Err(
+                super::catalog_views::OAuthGrantUsabilityReason::Unbound
+                | super::catalog_views::OAuthGrantUsabilityReason::CrossEndpoint,
+            ) => {
                 // Endpoint binding: a token must prove where it belongs.
                 return HttpStatusResult {
                     status: McpConnectionStatus::Error,
@@ -248,8 +250,10 @@ pub(crate) fn http_connection_status(
             options.endpoint,
         ) {
             Ok(()) => {}
-            Err(super::catalog_views::McpStaticTokenUsabilityReason::Unbound)
-            | Err(super::catalog_views::McpStaticTokenUsabilityReason::CrossEndpoint) => {
+            Err(
+                super::catalog_views::McpStaticTokenUsabilityReason::Unbound
+                | super::catalog_views::McpStaticTokenUsabilityReason::CrossEndpoint,
+            ) => {
                 return HttpStatusResult {
                     status: McpConnectionStatus::Error,
                     login_pending: false,

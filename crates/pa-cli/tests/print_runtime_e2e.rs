@@ -464,7 +464,7 @@ fn print_mode_overflow_skip_surfaces_the_warning_row() {
     write_compaction_settings(
         home.path(),
         &serde_json::json!({
-            "compaction": { "enabled": true, "reserveTokens": 1, "keepRecentTokens": 100000 }
+            "compaction": { "enabled": true, "reserveTokens": 1, "keepRecentTokens": 100_000 }
         }),
     );
     let script = serde_json::json!({ "responses": [overflow_error(0)] });

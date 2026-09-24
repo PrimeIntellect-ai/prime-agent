@@ -222,7 +222,7 @@ fn collect_candidates(
 
 /// Sweep cadence (TS idle-eviction precedent: a boot sweep, then a
 /// periodic re-sweep at the TS max sweep interval).
-const SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const SWEEP_INTERVAL: Duration = Duration::from_mins(5);
 /// The periodic loop sleeps in chunks so a shutdown exits promptly.
 const SWEEP_SLEEP_CHUNK: Duration = Duration::from_secs(5);
 

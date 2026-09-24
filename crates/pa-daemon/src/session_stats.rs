@@ -299,7 +299,7 @@ mod tests {
                 "total": 77321,
             })
         );
-        assert_eq!(stats["cost"].as_f64(), Some(0.0089957));
+        assert_eq!(stats["cost"].as_f64(), Some(0.008_995_7));
     }
 
     fn message(role: &str, fields: Value) -> Value {
@@ -678,11 +678,11 @@ mod tests {
                 "cacheWrite": 269_974,
                 "total": 223_936_248,
             },
-            "cost": 3.921395,
+            "cost": 3.921_395,
             "contextUsage": {
                 "tokens": 53_519,
                 "contextWindow": 200_000,
-                "percent": 26.759500000000003,
+                "percent": 26.759_500_000_000_003,
             },
         });
         assert_eq!(session_stats(&full, Some(200_000)), expected);

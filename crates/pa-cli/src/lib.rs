@@ -139,7 +139,7 @@ fn main_impl(args: Vec<String>, runtime: &dyn mode::Runtime) -> Result<i32, Stri
 
     if matches!(
         parsed.mode,
-        Some(args::Mode::Rpc) | Some(args::Mode::Daemon) | Some(args::Mode::Acp)
+        Some(args::Mode::Rpc | args::Mode::Daemon | args::Mode::Acp)
     ) && !parsed.file_args.is_empty()
     {
         return Err("@file arguments are not supported in RPC, daemon, or ACP mode".to_string());

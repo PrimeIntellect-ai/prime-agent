@@ -22,7 +22,7 @@ impl Inner {
                     if activity_id.len() == 32
                         && activity_id.chars().all(|c| c.is_ascii_hexdigit())
                         && pid > 0
-                        && matches!(active, Some(true) | Some(false))
+                        && matches!(active, Some(true | false))
                     {
                         let mut g = lock(&self.guarded);
                         if active == Some(true) {

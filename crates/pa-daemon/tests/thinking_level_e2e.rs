@@ -68,7 +68,7 @@ fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
-        "created": 1750000000,
+        "created": 1_750_000_000,
         "model": "mock-1",
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
     })
@@ -177,7 +177,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -213,7 +213,7 @@ impl Client {
     }
 
     fn request(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -292,7 +292,7 @@ fn setup(name: &str, thinking: Option<&str>) -> Harness {
                             "name": "Mock 1",
                             "api": "openai-completions",
                             "reasoning": true,
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096
                         }
                     ]
@@ -494,7 +494,7 @@ fn invalid_thinking_level_fails_the_create() {
                     "baseUrl": mock.url(),
                     "apiKey": "sk-battery",
                     "models": [
-                        { "id": "mock-1", "reasoning": true, "contextWindow": 128000, "maxTokens": 4096 }
+                        { "id": "mock-1", "reasoning": true, "contextWindow": 128_000, "maxTokens": 4096 }
                     ]
                 }
             }
