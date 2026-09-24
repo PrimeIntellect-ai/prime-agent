@@ -684,12 +684,7 @@ impl McpView {
                 .rows
                 .iter()
                 .enumerate()
-                .filter_map(|(index, row)| {
-                    let score = match row {
-                        row => service_search_score(row, &trimmed),
-                    }?;
-                    Some((score, index))
-                })
+                .filter_map(|(index, row)| Some((service_search_score(row, &trimmed)?, index)))
                 .collect();
             scored.sort_by(|left, right| left.0.total_cmp(&right.0));
             scored.into_iter().map(|(_, index)| index).collect()
