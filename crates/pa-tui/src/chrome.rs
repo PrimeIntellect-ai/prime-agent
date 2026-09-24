@@ -509,7 +509,6 @@ fn truncate_spans_to_width(spans: &[crate::Span], width: usize) -> Vec<crate::Sp
                 }
             }
             text.push('\u{2026}');
-            consumed += ellipsis;
             let mut piece = span.clone();
             piece.content = text;
             out.push(piece);
