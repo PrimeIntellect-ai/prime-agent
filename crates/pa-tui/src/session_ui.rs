@@ -806,11 +806,21 @@ impl SessionUi {
         self.client = client;
         let durable = self.session_id.clone();
         if durable.is_empty() {
+            // A failed reattach must not leave the half-installed client
+            // (its supervisor connection and reader task) running for the
+            // process's lifetime: close it, and the reconnect driver
+            // installs a fresh one on its next attempt.
+            self.client.close();
             anyhow::bail!("the session's durable id is unknown; cannot reattach");
         }
-        self.attach_session(&durable)
+        if let Err(error) = self
+            .attach_session(&durable)
             .await
-            .with_context(|| format!("reattaching session {durable} after the update"))?;
+            .with_context(|| format!("reattaching session {durable} after the update"))
+        {
+            self.client.close();
+            return Err(error);
+        }
         // Flush the attach snapshot BEFORE the banner lands: `rebuild_view`
         // replaces the transcript from the snapshot, so the banner must come
         // after it to survive the rebuild (§10.5's visible end state).

@@ -566,12 +566,7 @@ const SPINNER_INTERVAL_MS: u128 = 80;
 /// Spec §10.2: the client reconnect window after an update restart
 /// (10 minutes).
 const RECONNECT_WINDOW: Duration = Duration::from_mins(10);
-/// One reconnect attempt's connect budget: covers the whole connect leg —
-/// the connect (3s refused-socket budget) plus the hello handshake (the
-/// 15s budget a loaded daemon legitimately needs), so a slow-greeting
-/// daemon is never cancelled short on every attempt (a dead socket still
-/// fails fast inside the same bound).
-const RECONNECT_ATTEMPT_TIMEOUT_S: u64 = 20;
+
 /// One reconnect attempt's reattach budget: a queued attach can legitimately
 /// wait out a slow restore (§10.4), so the attempt hands back to the loop
 /// instead of wedging the UI.
@@ -1636,15 +1631,14 @@ async fn run_interactive_surface(
                 reconnect_connect = Some(attempt_rx);
                 reconnect_attempt_in_flight = true;
                 tokio::spawn(async move {
-                    let attempt = tokio::time::timeout(
-                        Duration::from_secs(RECONNECT_ATTEMPT_TIMEOUT_S),
-                        DaemonClient::connect_with_retry(&socket_path),
-                    )
-                    .await;
-                    let _ = attempt_tx.send(match attempt {
-                        Ok(result) => result,
-                        Err(_) => Err(anyhow!("the reconnect connect attempt timed out")),
-                    });
+                    // No outer timeout: dropping the future mid-attempt
+                    // would cancel an in-flight handshake without its
+                    // reader abort running (a leaked reader and socket on
+                    // an accepting-but-silent daemon). The leg self-bounds
+                    // — every attempt's connect and hello carry their own
+                    // budgets and abort their own reader on failure.
+                    let attempt = DaemonClient::connect_with_retry(&socket_path).await;
+                    let _ = attempt_tx.send(attempt);
                 });
             }
             maybe_attempt = async {

@@ -851,9 +851,12 @@ pub fn is_daemon_rejection(error: &anyhow::Error) -> bool {
 /// transient under-load failure, not a protocol error — the caller
 /// degrades (retry or surface the queued state) instead of exiting.
 pub fn is_daemon_timeout(error: &anyhow::Error) -> bool {
+    // Case-insensitive: the TUI's own bounded requests say
+    // "timed out after Nms ...", the daemon client's hello/connect paths
+    // "Timed out after Nms ...".
     error
         .chain()
-        .any(|cause| cause.to_string().contains("Timed out after"))
+        .any(|cause| cause.to_string().to_lowercase().contains("timed out after"))
 }
 
 /// Whether an error means the daemon connection could not carry the
@@ -864,7 +867,9 @@ pub fn is_daemon_unreachable(error: &anyhow::Error) -> bool {
     is_daemon_timeout(error)
         || error.chain().any(|cause| {
             let cause = cause.to_string().to_lowercase();
-            cause.contains("daemon connection") || cause.contains("prime agent daemon closed")
+            cause.contains("daemon connection")
+                || cause.contains("prime agent daemon closed")
+                || cause.contains("direct session connection closed")
         })
 }
 

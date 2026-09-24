@@ -72,6 +72,12 @@ pub(crate) struct ContextTreeCache {
     /// each storing walk filters it (later walks never see the child:
     /// the registry row is gone and the ledger tombstones the skip set).
     invalidated: Mutex<HashSet<String>>,
+    /// A poke that arrived while another walk held the single-flight
+    /// guard and targets a session the in-flight walk does NOT serve
+    /// (a fork/switch racing a walk): the completing walk re-arms the
+    /// pending session itself, so the replaced tree does not stay cold
+    /// until a later read.
+    pending: Mutex<Option<(String, Option<PathBuf>)>>,
 }
 
 impl ContextTreeCache {
@@ -207,83 +213,118 @@ impl ContextTreeCache {
         tokio::spawn(async move {
             // No session yet (the create path warms before the store
             // lands): nothing to walk, the next read re-arms.
-            let Some(session_id) = current_session_id else {
+            let Some(first) = current_session_id else {
                 return;
             };
-            // Single flight: the guard is taken inside the task, against
-            // the owned cache clone (a guard on `self` cannot outlive
-            // this method's borrow); while one walk is in progress a
-            // poke's task takes nothing and returns, and the in-flight
-            // walk stores a newer snapshot than any poke could.
-            let Ok(_guard) = cache.refresh.try_lock() else {
-                return;
-            };
-            // Another task may have completed a fresh walk between this
-            // poke's TTL check and its guard acquisition (a burst of
-            // expired reads): recheck so redundant walks cannot serialize
-            // behind each other.
-            {
-                let state = cache
-                    .state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if state.as_ref().is_some_and(|walk| {
-                    walk.session_id == session_id && walk.computed_at.elapsed() < REFRESH_TTL
-                }) {
-                    return;
-                }
-            }
-            let snapshots = engine.rlm_child_snapshots().await;
-            let registry_dir = agent_dir.clone();
-            let walk_session_id = session_id.clone();
-            let walk_session_file = session_file.clone();
-            let walk = tokio::task::spawn_blocking(move || {
-                walk_children(
-                    &registry_dir,
-                    &walk_session_id,
-                    &snapshots,
-                    walk_session_file.as_deref(),
-                )
-            })
-            .await;
-            match walk {
-                Ok(Ok((mut live_nodes, mut persisted))) => {
-                    let mut invalidated = cache
-                        .invalidated
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    // Deletions that landed while this walk ran: the stale
-                    // snapshot must not republish them. The set drains here
-                    // (later walks never see the children: the registry
-                    // rows are gone and the ledger tombstones the skip
-                    // set).
-                    for child_id in invalidated.iter() {
-                        live_nodes.remove(child_id);
-                        persisted.retain(|node| {
-                            node.get("id").and_then(Value::as_str) != Some(child_id)
-                        });
+            let mut request = (first, session_file);
+            loop {
+                // Single flight: the guard is taken inside the task,
+                // against the owned cache clone (a guard on `self` cannot
+                // outlive this method's borrow); while one walk is in
+                // progress a poke's task takes nothing and records a
+                // pending session instead (below).
+                let Ok(_guard) = cache.refresh.try_lock() else {
+                    // A walk is in flight; if it serves a DIFFERENT
+                    // session (a fork/switch racing it), remember this
+                    // poke so the completing walk re-arms the new
+                    // session's tree itself — the replaced tree must not
+                    // stay cold until a later read.
+                    let serving = {
+                        let state = cache
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        state.as_ref().map(|walk| walk.session_id.clone())
+                    };
+                    let served_elsewhere = serving.is_some_and(|serving| serving != request.0);
+                    if served_elsewhere || serving.is_none() {
+                        *cache
+                            .pending
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request);
                     }
-                    invalidated.clear();
-                    let mut state = cache
+                    return;
+                };
+                let (session_id, session_file) = request;
+                // Another task may have completed a fresh walk between
+                // this poke's TTL check and its guard acquisition (a
+                // burst of expired reads): recheck so redundant walks
+                // cannot serialize behind each other.
+                {
+                    let state = cache
                         .state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    *state = Some(CachedWalk {
-                        computed_at: Instant::now(),
-                        session_id,
-                        live_nodes,
-                        persisted,
-                    });
+                    if state.as_ref().is_some_and(|walk| {
+                        walk.session_id == session_id && walk.computed_at.elapsed() < REFRESH_TTL
+                    }) {
+                        return;
+                    }
                 }
-                Ok(Err(error)) => {
-                    eprintln!("context tree walk failed: {error:#}");
+                let snapshots = engine.rlm_child_snapshots().await;
+                let registry_dir = agent_dir.clone();
+                let walk_session_id = session_id.clone();
+                let walk_session_file = session_file.clone();
+                let walk = tokio::task::spawn_blocking(move || {
+                    walk_children(
+                        &registry_dir,
+                        &walk_session_id,
+                        &snapshots,
+                        walk_session_file.as_deref(),
+                    )
+                })
+                .await;
+                match walk {
+                    Ok(Ok((mut live_nodes, mut persisted))) => {
+                        let mut invalidated = cache
+                            .invalidated
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        // Deletions that landed while this walk ran: the
+                        // stale snapshot must not republish them. The set
+                        // drains here (later walks never see the
+                        // children: the registry rows are gone and the
+                        // ledger tombstones the skip set).
+                        for child_id in invalidated.iter() {
+                            live_nodes.remove(child_id);
+                            persisted.retain(|node| {
+                                node.get("id").and_then(Value::as_str) != Some(child_id)
+                            });
+                        }
+                        invalidated.clear();
+                        let mut state = cache
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        *state = Some(CachedWalk {
+                            computed_at: Instant::now(),
+                            session_id: session_id.clone(),
+                            live_nodes,
+                            persisted,
+                        });
+                    }
+                    Ok(Err(error)) => {
+                        eprintln!("context tree walk failed: {error:#}");
+                    }
+                    Err(error) => {
+                        eprintln!("context tree walk join failed: {error:#}");
+                    }
                 }
-                Err(error) => {
-                    eprintln!("context tree walk join failed: {error:#}");
-                }
+                // Drain a pending session (a replaced session that poked
+                // while this walk ran): serve it in this same task while
+                // the guard is held, instead of leaving its tree cold.
+                request = match cache
+                    .pending
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    Some((pending_id, pending_file)) if pending_id != session_id => {
+                        (pending_id, pending_file)
+                    }
+                    _ => return,
+                };
             }
-            // The single-flight guard drops with the task, releasing the
-            // next poke's walk.
         });
     }
 }
