@@ -650,7 +650,7 @@ impl AgentsViewMode {
 
     /// The top-level ancestor row of a nested row (TS `findSubagentRootRow`).
     fn find_subagent_root_row(&self, row: &AgentsViewRow) -> Option<&AgentsViewRow> {
-        let mut identity = row.parent_identity.clone();
+        let mut identity = row.parent_identity.as_deref();
         let mut guard = 0;
         while let Some(current) = identity {
             guard += 1;
@@ -663,7 +663,7 @@ impl AgentsViewMode {
                 .find(|candidate| candidate.identity == current)?;
             match parent.kind {
                 RowKind::Agent => return Some(parent),
-                _ => identity.clone_from(&parent.parent_identity),
+                _ => identity = parent.parent_identity.as_deref(),
             }
         }
         None
