@@ -493,11 +493,91 @@ mod tests {
         assert_eq!(key_event_to_id(&ctrl_alt_j).as_deref(), Some("ctrl+alt+j"));
     }
 
+    #[test]
+    fn super_modified_special_keys_keep_their_identity() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let cases = [
+            (KeyCode::Enter, KeyModifiers::SUPER, "super+enter"),
+            (
+                KeyCode::Enter,
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                "shift+super+enter",
+            ),
+            (KeyCode::Backspace, KeyModifiers::SUPER, "super+backspace"),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::SUPER | KeyModifiers::CONTROL,
+                "ctrl+super+backspace",
+            ),
+            (KeyCode::Tab, KeyModifiers::SUPER, "super+tab"),
+            (KeyCode::Esc, KeyModifiers::SUPER, "super+escape"),
+            (KeyCode::BackTab, KeyModifiers::SUPER, "shift+super+tab"),
+            (
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL | KeyModifiers::SUPER,
+                "super+enter",
+            ),
+        ];
+        for (code, modifiers, expected) in cases {
+            let event = KeyEvent::new(code, modifiers);
+            assert_eq!(key_event_to_id(&event).as_deref(), Some(expected));
+        }
+        // None of them reach the bare actions.
+        let kb = crate::keybindings::KeybindingsManager::new();
+        for id in ["super+enter", "shift+super+enter", "super+backspace"] {
+            assert!(
+                !kb.matches(id, "tui.input.submit"),
+                "{id} must not submit the prompt"
+            );
+            assert!(
+                !kb.matches(id, "tui.editor.deleteCharBackward"),
+                "{id} must not delete"
+            );
+            assert!(
+                !kb.matches(id, "app.input.clear"),
+                "{id} must not trigger the escape ladder"
+            );
+        }
+    }
+
     /// SUPER combos decode to their `super+` ids now (the macOS Cmd keys;
     /// SANCTIONED DIVERGENCE from TS, prompt-editor-keybinds 2026-09-24):
     /// an UNBOUND one still matches no keybinding, and the bare key must
     /// not leak through. HYPER/META stay undecoded (no binding names one
     /// and terminals never deliver the bits on their own).
+    #[test]
+    fn super_modified_keys_match_nothing() {
+        use KeyModifiers as M;
+        let super_k = KeyEvent::new(KeyCode::Char('k'), M::SUPER);
+        assert_eq!(key_event_to_id(&super_k).as_deref(), Some("super+k"));
+        let super_up = KeyEvent::new(KeyCode::Up, M::SUPER);
+        assert_eq!(key_event_to_id(&super_up).as_deref(), Some("super+up"));
+        let hyper_a = KeyEvent::new(KeyCode::Char('a'), M::HYPER | M::META);
+        assert_eq!(key_event_to_id(&hyper_a), None);
+        // Nothing binds super+k: the id exists, the binding does not.
+        let kb = crate::keybindings::KeybindingsManager::new();
+        for id in ["super+k", "super+q", "super+insert", "shift+super+f5"] {
+            let matches_any = [
+                "tui.editor.undo",
+                "tui.editor.redo",
+                "tui.editor.selectAll",
+                "tui.editor.cutSelection",
+                "tui.editor.copySelection",
+                "tui.editor.cursorLineStart",
+                "tui.editor.cursorLineEnd",
+                "tui.editor.cursorDocStart",
+                "tui.editor.cursorDocEnd",
+                "tui.editor.selectDocStart",
+                "tui.editor.selectDocEnd",
+            ]
+            .iter()
+            .any(|binding| kb.matches(id, binding));
+            assert!(!matches_any, "unbound super combo `{id}` matches nothing");
+        }
+    }
 
     /// Super-modified SPECIAL keys keep their super identity (Bugbot
     /// round-1 fix): an unbound Cmd combo must match nothing instead of
@@ -550,37 +630,6 @@ mod tests {
                 !kb.matches(id, "app.input.clear"),
                 "{id} must not trigger the escape ladder"
             );
-        }
-    }
-
-    #[test]
-    fn super_modified_keys_match_nothing() {
-        use KeyModifiers as M;
-        let super_k = KeyEvent::new(KeyCode::Char('k'), M::SUPER);
-        assert_eq!(key_event_to_id(&super_k).as_deref(), Some("super+k"));
-        let super_up = KeyEvent::new(KeyCode::Up, M::SUPER);
-        assert_eq!(key_event_to_id(&super_up).as_deref(), Some("super+up"));
-        let hyper_a = KeyEvent::new(KeyCode::Char('a'), M::HYPER | M::META);
-        assert_eq!(key_event_to_id(&hyper_a), None);
-        // Nothing binds super+k: the id exists, the binding does not.
-        let kb = crate::keybindings::KeybindingsManager::new();
-        for id in ["super+k", "super+q", "super+insert", "shift+super+f5"] {
-            let matches_any = [
-                "tui.editor.undo",
-                "tui.editor.redo",
-                "tui.editor.selectAll",
-                "tui.editor.cutSelection",
-                "tui.editor.copySelection",
-                "tui.editor.cursorLineStart",
-                "tui.editor.cursorLineEnd",
-                "tui.editor.cursorDocStart",
-                "tui.editor.cursorDocEnd",
-                "tui.editor.selectDocStart",
-                "tui.editor.selectDocEnd",
-            ]
-            .iter()
-            .any(|binding| kb.matches(id, binding));
-            assert!(!matches_any, "unbound super combo `{id}` matches nothing");
         }
     }
 
