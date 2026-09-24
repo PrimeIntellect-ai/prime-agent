@@ -844,7 +844,12 @@ mod tests {
         );
         assert_eq!(
             entries[0].reasoning_efforts,
-            Some(["low", "high", "max"].iter().map(|s| s.to_string()).collect())
+            Some(
+                ["low", "high", "max"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            )
         );
         assert_eq!(entries[0].reasoning_mandatory, Some(true));
     }
