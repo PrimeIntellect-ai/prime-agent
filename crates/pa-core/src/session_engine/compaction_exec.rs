@@ -165,12 +165,15 @@ pub async fn complete_summary_call(
 }
 
 /// Sum one wire call's billed usage into a total (TS `addAssistantUsage`).
+/// Token fields saturate at `u64::MAX`: JS numbers saturate to `Infinity`
+/// rather than wrapping, and one overflowing persisted record must never
+/// panic a whole-file reader.
 pub fn add_assistant_usage(total: &mut pa_types::ai::Usage, usage: &pa_types::ai::Usage) {
-    total.input += usage.input;
-    total.output += usage.output;
-    total.cache_read += usage.cache_read;
-    total.cache_write += usage.cache_write;
-    total.total_tokens += usage.total_tokens;
+    total.input = total.input.saturating_add(usage.input);
+    total.output = total.output.saturating_add(usage.output);
+    total.cache_read = total.cache_read.saturating_add(usage.cache_read);
+    total.cache_write = total.cache_write.saturating_add(usage.cache_write);
+    total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
     let add_cost = |left: pa_types::JsNumber, right: pa_types::JsNumber| {
         pa_types::JsNumber::from(left.as_f64() + right.as_f64())
     };
@@ -179,6 +182,25 @@ pub fn add_assistant_usage(total: &mut pa_types::ai::Usage, usage: &pa_types::ai
     total.cost.cache_read = add_cost(total.cost.cache_read, usage.cost.cache_read);
     total.cost.cache_write = add_cost(total.cost.cache_write, usage.cost.cache_write);
     total.cost.total = add_cost(total.cost.total, usage.cost.total);
+}
+
+/// Remove one usage block from a total, clamping every field at zero (TS
+/// `subtractAssistantUsage`: "Remove a previously added usage, clamping at
+/// zero to absorb attribution drift").
+pub fn subtract_assistant_usage(total: &mut pa_types::ai::Usage, usage: &pa_types::ai::Usage) {
+    total.input = total.input.saturating_sub(usage.input);
+    total.output = total.output.saturating_sub(usage.output);
+    total.cache_read = total.cache_read.saturating_sub(usage.cache_read);
+    total.cache_write = total.cache_write.saturating_sub(usage.cache_write);
+    total.total_tokens = total.total_tokens.saturating_sub(usage.total_tokens);
+    let sub_cost = |left: pa_types::JsNumber, right: pa_types::JsNumber| {
+        pa_types::JsNumber::from((left.as_f64() - right.as_f64()).max(0.0))
+    };
+    total.cost.input = sub_cost(total.cost.input, usage.cost.input);
+    total.cost.output = sub_cost(total.cost.output, usage.cost.output);
+    total.cost.cache_read = sub_cost(total.cost.cache_read, usage.cost.cache_read);
+    total.cost.cache_write = sub_cost(total.cost.cache_write, usage.cost.cache_write);
+    total.cost.total = sub_cost(total.cost.total, usage.cost.total);
 }
 
 /// The compaction's billed usage summed over its wire calls (TS `compact`'s
@@ -361,6 +383,26 @@ mod tests {
             timestamp: 0,
             rest: Default::default(),
         }
+    }
+
+    /// Token sums saturate at `u64::MAX` (JS `Infinity`): an overflowing
+    /// record must never panic the whole-file readers that fold totals.
+    #[test]
+    fn add_assistant_usage_saturates_token_totals() {
+        let mut total = pa_types::ai::Usage {
+            input: u64::MAX,
+            output: 1,
+            ..Default::default()
+        };
+        add_assistant_usage(
+            &mut total,
+            &pa_types::ai::Usage {
+                input: 10,
+                ..Default::default()
+            },
+        );
+        assert_eq!(total.input, u64::MAX);
+        assert_eq!(total.output, 1);
     }
 
     /// The entry records the TS wire record: `fromHook: false` (the

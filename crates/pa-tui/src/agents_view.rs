@@ -1066,21 +1066,29 @@ impl AgentsViewMode {
             })
             .collect();
         let mut display: Vec<DisplayItem> = Vec::new();
-        for (section, count) in &counts {
-            if *count == 0 {
-                continue;
-            }
-            if !display.is_empty() {
-                display.push(DisplayItem::Spacer);
-            }
-            display.push(DisplayItem::Heading(*section));
-            let mut include = false;
-            for row in &self.rows {
-                if row.depth == 0 {
-                    include = row.kind == RowKind::Agent && row.section == *section;
+        // While a query is active the list is a ranked picker: one flat,
+        // relevance-ordered run of hits (per-row icons carry the status),
+        // not status section blocks. Without a query the sectioned
+        // layout stays TS-identical.
+        if !self.query.trim().is_empty() {
+            display.extend(self.rows.iter().map(DisplayItem::Row));
+        } else {
+            for (section, count) in &counts {
+                if *count == 0 {
+                    continue;
                 }
-                if include {
-                    display.push(DisplayItem::Row(row));
+                if !display.is_empty() {
+                    display.push(DisplayItem::Spacer);
+                }
+                display.push(DisplayItem::Heading(*section));
+                let mut include = false;
+                for row in &self.rows {
+                    if row.depth == 0 {
+                        include = row.kind == RowKind::Agent && row.section == *section;
+                    }
+                    if include {
+                        display.push(DisplayItem::Row(row));
+                    }
                 }
             }
         }
@@ -1347,10 +1355,15 @@ impl Renderer {
         ui: AgentsViewUiMode,
         ui_tx: mpsc::UnboundedSender<UiInput>,
         exit_guard: crate::exit_guard::ExitGuard,
+        surface_mounted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Result<Renderer> {
         match ui {
             AgentsViewUiMode::Terminal => {
                 crossterm::terminal::enable_raw_mode()?;
+                // The terminal state changed: every later setup step is
+                // fallible and an error from any of them still owns the
+                // release. The flag arms here, not at the end of setup.
+                surface_mounted.store(true, std::sync::atomic::Ordering::SeqCst);
                 // Adopt the alternate screen the previous surface left in
                 // place (TS `pendingAltScreenHandoff`); only the first
                 // surface of the process enters it, so a view switch never
@@ -1488,16 +1501,21 @@ impl Renderer {
     fn finish(self, preserve_alt_screen: bool) -> Vec<String> {
         match self {
             Renderer::Terminal(_) => {
-                // The enhanced-key modes release with the raw-mode bracket
-                // (TS `stop` on every exit, handoffs included).
-                let mut out = std::io::stdout();
-                let _ = crate::enhanced_keys::disable(&mut out);
                 if preserve_alt_screen {
+                    // The enhanced-key modes release with the raw-mode
+                    // bracket (TS `stop` on every exit, handoffs included).
+                    let mut out = std::io::stdout();
+                    let _ = crate::enhanced_keys::disable(&mut out);
                     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
                 } else {
-                    let _ = crossterm::terminal::disable_raw_mode();
-                    let _ = crate::altscreen::leave();
-                    let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
+                    // The one exit restore ends the view's real exit: the
+                    // probe standdown, the input drain, the mode releases,
+                    // the alt-screen leave, the sync/SGR tail, and the
+                    // cooked-tty verification — the same whole-terminal
+                    // contract every exit path guarantees. (The view never
+                    // flushes its frame: TS agents-view `finish` passes
+                    // `flushFullscreen: false`.)
+                    crate::exit_restore::restore_terminal();
                 }
                 Vec::new()
             }
@@ -1569,6 +1587,43 @@ pub async fn run_agents_view(
     ui: AgentsViewUiMode,
     link: Option<AgentsViewLink>,
 ) -> Result<AgentsViewRun> {
+    // Every error return funnels through the one exit restore (an early
+    // `?` between the surface mount and the tail teardown must not hand
+    // the shell a terminal still in TUI state); the restore is
+    // idempotent, so the failed-roster release below costing a second
+    // pass only re-emits the two unconditional tail bytes. The headless
+    // view never owned the terminal, and a terminal-mode error that fired
+    // before this surface mounted must not tear down whatever the caller
+    // had up (the roster-link failure runs its own release inside the
+    // surface fn when the pane was handed over already in TUI state).
+    let owns_terminal = matches!(ui, AgentsViewUiMode::Terminal);
+    let surface_mounted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mounted = std::sync::Arc::clone(&surface_mounted);
+    match run_agents_view_surface(options, ui, link, mounted).await {
+        Ok(run) => Ok(run),
+        Err(error) => {
+            // Same rule as the session surface: restore when this run
+            // changed the terminal state (the flag arms at the raw-mode
+            // entry) OR when it entered on a pane already in TUI state
+            // (the preserve handoff it must release even on a pre-mount
+            // failure).
+            if owns_terminal
+                && (surface_mounted.load(std::sync::atomic::Ordering::SeqCst)
+                    || crate::altscreen::active())
+            {
+                crate::exit_restore::restore_terminal();
+            }
+            Err(error)
+        }
+    }
+}
+
+async fn run_agents_view_surface(
+    options: AgentsViewOptions,
+    ui: AgentsViewUiMode,
+    link: Option<AgentsViewLink>,
+    surface_mounted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<AgentsViewRun> {
     crossterm::style::force_color_output(true);
     // The connection and its first snapshot precede every surface state:
     // this pane was handed over already in TUI state (raw mode on, the
@@ -1581,7 +1636,7 @@ pub async fn run_agents_view(
         Ok(open) => open,
         Err(error) => {
             if matches!(ui, AgentsViewUiMode::Terminal) {
-                crate::exit_guard::restore_terminal_best_effort();
+                crate::exit_restore::restore_terminal();
             }
             return Err(error);
         }
@@ -1597,7 +1652,11 @@ pub async fn run_agents_view(
     mode.rebuild_rows();
 
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiInput>();
-    let mut renderer = Renderer::setup(ui, ui_tx.clone(), exit_guard.clone())?;
+    // A panic anywhere between the mount below and the deliberate
+    // teardown must still hand the terminal back whole (the same
+    // unwind-guard contract the session surface arms).
+    let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
+    let mut renderer = Renderer::setup(ui, ui_tx.clone(), exit_guard.clone(), &surface_mounted)?;
     // The first frame renders from the live roster the moment the surface
     // mounts (TS `applySessionList(this.rosterStore.summaries(), true)`
     // before its first `requestRender`): the saved-catalog fetch below
