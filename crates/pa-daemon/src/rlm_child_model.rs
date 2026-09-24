@@ -558,7 +558,7 @@ mod tests {
                         "thinkingLevelMap": { "minimal": null, "xhigh": "xhigh", "max": "max" },
                         "input": ["text"],
                         "cost": { "input": 2, "output": 10, "cacheRead": 0.2, "cacheWrite": 2.5 },
-                        "contextWindow": 272000, "maxTokens": 128_000,
+                        "contextWindow": 272_000, "maxTokens": 128_000,
                     }
                 ]}
             })

@@ -107,7 +107,7 @@ fn small_usage() -> Value {
 /// The crossing turn's reported usage (the f14-auto battery shape).
 fn crossing_usage() -> Value {
     json!({
-        "prompt_tokens": 126000, "completion_tokens": 10, "total_tokens": 126_010,
+        "prompt_tokens": 126_000, "completion_tokens": 10, "total_tokens": 126_010,
         "prompt_tokens_details": {"cached_tokens": 80},
     })
 }
