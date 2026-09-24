@@ -82,6 +82,35 @@ mod tests {
         assert!(model.cost.input.as_f64() >= 0.0);
     }
 
+    /// Port of #2505: grok-4.7 is selectable on every provider that
+    /// serves it — the xAI API key, OpenRouter, the Vercel AI Gateway,
+    /// and OpenCode Go — with the regenerated catalog's context and
+    /// pricing metadata. (The TS grok-subscription surface builds its
+    /// rows from these at runtime; the Rust branch has no ported xAI
+    /// OAuth login yet.)
+    #[test]
+    fn grok_4_7_is_served_on_every_serving_provider() {
+        let direct = get_model("xai", "grok-4.7").expect("the xAI API key serves grok-4.7");
+        assert_eq!(direct.name, "Grok 4.7");
+        assert!(direct.reasoning);
+        assert_eq!(direct.context_window, 500_000);
+        assert_eq!(direct.max_tokens, 500_000);
+
+        let openrouter =
+            get_model("openrouter", "x-ai/grok-4.7").expect("OpenRouter serves grok-4.7");
+        assert!(openrouter.reasoning);
+        assert_eq!(openrouter.context_window, 500_000);
+
+        let gateway =
+            get_model("vercel-ai-gateway", "spacexai/grok-4.7").expect("the gateway serves it");
+        assert!(gateway.reasoning);
+        assert_eq!(gateway.context_window, 500_000);
+
+        let opencode = get_model("opencode-go", "grok-4.7").expect("OpenCode Go serves it");
+        assert!(opencode.reasoning);
+        assert_eq!(opencode.context_window, 500_000);
+    }
+
     #[test]
     fn unknown_lookups_are_none() {
         assert!(get_model("nope", "nope").is_none());

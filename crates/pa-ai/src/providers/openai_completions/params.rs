@@ -5,7 +5,6 @@ use std::collections::HashMap;
 
 use serde_json::{json, Map, Value};
 
-use crate::env_api_keys::get_prime_team_id;
 use crate::providers::openai_completions::convert::{convert_messages, convert_tools};
 use crate::providers::openai_completions::has_tool_history;
 use crate::providers::openai_completions::{
@@ -322,12 +321,6 @@ pub(crate) fn build_headers(
         headers.push((name.clone(), value.clone()));
     }
 
-    if model.provider == "prime-inference" {
-        if let Some(team_id) = get_prime_team_id() {
-            headers.push(("X-Prime-Team-ID".into(), team_id));
-        }
-    }
-
     if let Some(session_id) = cache_session_id {
         if compat.send_session_affinity_headers {
             headers.push(("session_id".into(), session_id.to_string()));
@@ -354,6 +347,40 @@ mod tests {
     use crate::models::clamp_thinking_level;
     use crate::models_generated;
     use crate::types::{Message, StreamOptions, UserMessage, UserMessageContent};
+
+    /// Port of the TS #2497 pin: the provider layer owns no Prime
+    /// Inference team lookup — a prime-inference request with
+    /// `PRIME_TEAM_ID` set and no caller header carries no
+    /// `X-Prime-Team-ID` (the auth storage is the single owner of the
+    /// team header).
+    #[test]
+    fn prime_inference_adds_no_team_header_the_caller_did_not_pass() {
+        std::env::set_var("PRIME_TEAM_ID", "cli-profile-team");
+        let model = models_generated::get_model("prime-inference", "z-ai/glm-5.3")
+            .expect("the catalog carries a prime-inference model");
+        let compat = crate::providers::openai_completions::get_compat(model);
+        let headers = build_headers(model, "k", None, None, &compat, None);
+        std::env::remove_var("PRIME_TEAM_ID");
+        assert!(
+            headers
+                .iter()
+                .all(|(name, _)| !name.eq_ignore_ascii_case("X-Prime-Team-ID")),
+            "the provider must not inject a team header: {headers:?}"
+        );
+
+        // A caller header (the auth owner's merged headers) still ships.
+        let caller = std::collections::HashMap::from([(
+            "X-Prime-Team-ID".to_string(),
+            "auth-owner-team".to_string(),
+        )]);
+        let headers = build_headers(model, "k", Some(&caller), None, &compat, None);
+        assert!(
+            headers.iter().any(|(name, value)| {
+                name.eq_ignore_ascii_case("X-Prime-Team-ID") && value == "auth-owner-team"
+            }),
+            "the auth owner's header must ship: {headers:?}"
+        );
+    }
 
     /// Assemble params for a compiled catalog model with a reasoning level
     /// requested. Mirrors `streamSimpleOpenAICompletions`: the requested

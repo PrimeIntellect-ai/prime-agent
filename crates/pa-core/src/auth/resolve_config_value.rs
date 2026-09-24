@@ -1,4 +1,5 @@
-//! Resolve config values: `!command` (cached stdout), env var, or literal.
+//! Resolve config values: `!command` (successful results are cached),
+//! env var, or literal.
 //! Port of resolve-config-value.ts.
 
 use std::collections::HashMap;
@@ -6,10 +7,11 @@ use std::sync::Mutex;
 
 use anyhow::Result;
 
-static COMMAND_RESULT_CACHE: Mutex<Option<HashMap<String, Option<String>>>> = Mutex::new(None);
+static COMMAND_RESULT_CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
-/// Resolve a config value: `!command` executes and caches; otherwise the
-/// environment wins over the literal string (set-but-empty means missing).
+/// Resolve a config value: `!command` executes and caches successful
+/// results; otherwise the environment wins over the literal string
+/// (set-but-empty means missing).
 pub fn resolve_config_value(config: &str) -> Option<String> {
     if let Some(command) = config.strip_prefix('!') {
         return execute_command(config, command);
@@ -39,10 +41,16 @@ fn execute_command(cache_key: &str, command: &str) -> Option<String> {
     let mut cache = COMMAND_RESULT_CACHE.lock().unwrap();
     let cache = cache.get_or_insert_with(HashMap::new);
     if let Some(cached) = cache.get(cache_key) {
-        return cached.clone();
+        return Some(cached.clone());
     }
     let value = run_command(command).ok().flatten();
-    cache.insert(cache_key.to_string(), value.clone());
+    // A command that produced no value is not a resolution: a locked
+    // keychain, a missing network, or a rotated secret must be retried on
+    // the next lookup instead of pinning the failure for the lifetime of
+    // the process (TS #2497).
+    if let Some(value) = &value {
+        cache.insert(cache_key.to_string(), value.clone());
+    }
     value
 }
 
@@ -127,12 +135,26 @@ mod tests {
     fn command_resolution_and_cache() {
         let value = resolve_config_value("!echo resolved-value");
         assert_eq!(value.as_deref(), Some("resolved-value"));
-        // Cached path returns the same value.
+        // A successful command runs once per process (the cache holds it).
         assert_eq!(
             resolve_config_value("!echo resolved-value").as_deref(),
             Some("resolved-value")
         );
-        // Failing command resolves to None but does not poison the cache.
-        assert_eq!(resolve_config_value("!exit 1"), None);
+
+        // A failing command resolves to None and is retried on every
+        // lookup (TS #2497: a locked keychain or a transient failure must
+        // not disable the credential for the process lifetime). The
+        // counter proves each lookup re-ran the command.
+        let counter = std::env::temp_dir().join(format!("pa-resolve-retry-{}", std::process::id()));
+        let _ = std::fs::remove_file(&counter);
+        let command = format!("echo x >> {} ; exit 1", counter.display());
+        for _ in 0..3 {
+            assert_eq!(resolve_config_value(&format!("!{command}")), None);
+        }
+        let runs = std::fs::read_to_string(&counter)
+            .map(|text| text.lines().count())
+            .unwrap_or(0);
+        let _ = std::fs::remove_file(&counter);
+        assert_eq!(runs, 3, "failed commands are re-run on each lookup");
     }
 }

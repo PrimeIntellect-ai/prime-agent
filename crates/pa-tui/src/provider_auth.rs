@@ -117,7 +117,16 @@ pub trait ProviderAuthCommands: Send + Sync {
     fn login(&self, provider: &ProviderRow, api_key: Option<&str>) -> ProviderAuthFuture;
     /// TS `runLogout`: remove the stored credential.
     fn logout(&self, provider: &ProviderRow) -> ProviderAuthFuture;
+    /// TS `getAnthropicSubscriptionAuthWarning`: the composition root
+    /// reports the subscription-auth warning text when the stored
+    /// Anthropic credential is an OAuth login or the resolved key is a
+    /// subscription token (`sk-ant-oat...`); `None` when it is not.
+    fn anthropic_subscription_warning(&self) -> ProviderWarningFuture;
 }
+
+/// The boxed-future shape of the subscription-auth warning lookup.
+pub type ProviderWarningFuture =
+    Pin<Box<dyn std::future::Future<Output = Option<&'static str>> + Send>>;
 
 /// The handle the interactive options carry.
 #[derive(Clone)]

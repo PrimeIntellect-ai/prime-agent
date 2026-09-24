@@ -29,8 +29,11 @@ pub use stream::stream_anthropic;
 
 pub const API_ANTHROPIC_MESSAGES: &str = "anthropic-messages";
 
-/// Claude Code version mimicked in OAuth mode.
-const CLAUDE_CODE_VERSION: &str = "2.1.261";
+/// Claude Code version mimicked in OAuth mode. The API gates newer
+/// models on the claimed client version (e.g. claude-opus-5.5 rejects
+/// requests below 2.280 with a 400), so keep this at or above the
+/// latest released Claude Code (TS #2645).
+const CLAUDE_CODE_VERSION: &str = "2.1.281";
 const FINE_GRAINED_TOOL_STREAMING_BETA: &str = "fine-grained-tool-streaming-2025-05-14";
 const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
 
@@ -563,6 +566,47 @@ impl Provider for AnthropicMessagesProvider {
         options: Option<&SimpleStreamOptions>,
     ) -> AssistantMessageEventStream {
         stream_simple_anthropic(model, context, options)
+    }
+}
+
+/// Port of the TS #2645 wire-identity pins: subscription (OAuth)
+/// requests claim the Claude Code client identity, and the claimed
+/// version must stay at or above the API's model gates (the opus-5.5
+/// family rejects anything below 2.280 with a 400).
+#[cfg(test)]
+mod subscription_identity_tests {
+    use super::build_request_headers;
+
+    #[test]
+    fn subscription_requests_claim_the_current_claude_code_identity() {
+        let model = crate::models_generated::get_model("anthropic", "claude-fable-5-1")
+            .expect("the catalog carries an anthropic model");
+        let (headers, is_oauth) =
+            build_request_headers(model, "sk-ant-oat-test", false, false, None, None);
+        assert!(is_oauth);
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.clone())
+        };
+        assert_eq!(
+            header("user-agent").as_deref(),
+            Some("claude-cli/2.1.281"),
+            "the claimed client version must stay above the model gates"
+        );
+        assert_eq!(header("x-app").as_deref(), Some("cli"));
+        let beta = header("anthropic-beta").expect("the OAuth beta header");
+        assert!(beta.contains("claude-code-20250219"));
+        assert!(beta.contains("oauth-2025-04-20"));
+
+        // A plain API key keeps the plain identity (no Claude Code mimicry).
+        let (plain, is_oauth) =
+            build_request_headers(model, "sk-ant-api03-test", false, false, None, None);
+        assert!(!is_oauth);
+        assert!(plain
+            .iter()
+            .all(|(key, _)| key != "user-agent" && key != "x-app"));
     }
 }
 

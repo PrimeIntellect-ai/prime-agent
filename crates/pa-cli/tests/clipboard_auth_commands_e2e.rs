@@ -173,6 +173,7 @@ use std::sync::{Arc, Mutex};
 use pa_tui::provider_auth::{
     AuthCategory, AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
     ProviderAuthFuture, ProviderAuthOutcome, ProviderRow, ProviderRowsFuture,
+    ProviderWarningFuture,
 };
 use pa_tui::traces::{
     TraceLoginOutcome, TracePreviewInfo, TracePreviewOutcome, TraceUploadAllNote,
@@ -408,6 +409,11 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
                 "Removed stored API key for {name}. Environment variables and models.json config are unchanged."
             ))
         })
+    }
+
+    fn anthropic_subscription_warning(&self) -> ProviderWarningFuture {
+        // The clipboard e2e drives no Anthropic subscription auth.
+        Box::pin(async move { None })
     }
 }
 

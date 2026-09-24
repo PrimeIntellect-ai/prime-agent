@@ -885,6 +885,14 @@ async fn run_interactive_surface(
         });
         session.dirty = true;
     }
+    // TS `maybeWarnAboutAnthropicSubscriptionAuth()` at startup (#2645):
+    // the ban-risk warning when the session opens on an Anthropic
+    // subscription credential.
+    if let Some(provider) = session.current_model_provider().await {
+        session
+            .maybe_warn_anthropic_subscription_auth(Some(provider.as_str()), &mut view)
+            .await;
+    }
     // TS `restorePromptStashOnOpen`: a draft stashed on the way out (a
     // previous chat view of this session left via the agents view or a
     // switch) returns to the editor when its chat reopens.

@@ -246,6 +246,9 @@ pub(crate) struct SessionUi {
     session_dir: Option<PathBuf>,
     script_path: Option<PathBuf>,
     model_selection: ModelSelection,
+    /// TS `anthropicSubscriptionWarningShown` (#2645): the Anthropic
+    /// subscription ban-risk warning shows at most once per run.
+    anthropic_subscription_warning_shown: bool,
     /// The model catalog for the `/model` picker: a startup snapshot from
     /// the composition root (the bundled fallback), replaced by the
     /// daemon's `get_model_catalog` response once it lands.
@@ -649,6 +652,7 @@ impl SessionUi {
             session_dir: options.session_dir.clone(),
             script_path: options.script_path.clone(),
             model_selection: options.model_selection.clone(),
+            anthropic_subscription_warning_shown: false,
             model_catalog: options.model_catalog.clone(),
             model_configured_providers: options.model_configured_providers.clone(),
             model_recent_models: options.model_recent_models.clone(),
@@ -3506,6 +3510,14 @@ impl SessionUi {
                         let auth = self.provider_auth.clone().expect("the selector was open");
                         let outcome = auth.0.login(&provider, Some(&api_key)).await;
                         self.apply_auth_outcome(outcome, view);
+                        // TS `onLoginCompleted`: re-check the Anthropic
+                        // subscription warning after credentials change.
+                        let current_provider = self.current_model_provider().await;
+                        self.maybe_warn_anthropic_subscription_auth(
+                            current_provider.as_deref(),
+                            view,
+                        )
+                        .await;
                     }
                     None => {
                         self.pending_terminal_login = Some(provider);
@@ -3561,6 +3573,11 @@ impl SessionUi {
         };
         let outcome = auth.0.login(&provider, None).await;
         self.apply_auth_outcome(outcome, view);
+        // TS `onLoginCompleted`: re-check the Anthropic subscription
+        // warning after credentials change.
+        let current_provider = self.current_model_provider().await;
+        self.maybe_warn_anthropic_subscription_auth(current_provider.as_deref(), view)
+            .await;
         self.dirty = true;
         Ok(())
     }
@@ -6690,6 +6707,8 @@ impl SessionUi {
                 self.model_selection.model = Some(model_id.to_string());
                 self.refresh_model_label(model_id, view).await;
                 self.note(&format!("Model: {model_id}"), view);
+                self.maybe_warn_anthropic_subscription_auth(Some(provider), view)
+                    .await;
             }
             Err(error) => {
                 // TS `showError`: the ⚠ Error row with the error tone.
@@ -6700,6 +6719,58 @@ impl SessionUi {
                 self.dirty = true;
             }
         }
+    }
+
+    /// TS `maybeWarnAboutAnthropicSubscriptionAuth` (#2645): at most once
+    /// per run, when the active model is an Anthropic one and the
+    /// provider's auth is the subscription (a stored OAuth credential or
+    /// an `sk-ant-oat` key — the composition root resolves it), show the
+    /// ban-risk warning row. The `warnings.anthropicExtraUsage` setting
+    /// opts the run out.
+    pub(crate) async fn maybe_warn_anthropic_subscription_auth(
+        &mut self,
+        provider: Option<&str>,
+        view: &mut AgentView,
+    ) {
+        if self.anthropic_subscription_warning_shown {
+            return;
+        }
+        let warnings_enabled = self
+            .client_settings
+            .as_ref()
+            .map(|settings| settings.warnings_anthropic_extra_usage())
+            .unwrap_or(true);
+        if !warnings_enabled || provider != Some("anthropic") {
+            return;
+        }
+        let Some(auth) = self.provider_auth.clone() else {
+            return;
+        };
+        if let Some(warning) = auth.0.anthropic_subscription_warning().await {
+            self.anthropic_subscription_warning_shown = true;
+            self.note_as(&format!("\u{26a0} {warning}"), StatusKind::Warning, view);
+        }
+    }
+
+    /// The active model's provider from the daemon's state (TS
+    /// `getCurrentModel().provider`); best-effort, silent on failure.
+    pub(crate) async fn current_model_provider(&mut self) -> Option<String> {
+        let state = self
+            .bounded_request(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                DaemonCommand::GetState {
+                    id: None,
+                    active_session_id: self.active_session_id.clone(),
+                    rest: Default::default(),
+                },
+            )
+            .await
+            .ok()?;
+        state
+            .get("model")?
+            .get("provider")?
+            .as_str()
+            .map(str::to_string)
     }
 
     /// Apply a thinking level (TS `applyThinkingLevel`): the daemon
