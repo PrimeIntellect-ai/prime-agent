@@ -360,12 +360,16 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         "the agents-back key returned to the view"
     );
 
-    // View run 2 (the flow's carried state): the drilled-in child is now a
-    // live session. TS parity for a CLI-resumed subagent file: its roster
-    // summary is a top-level runtime (TS `metadata.kind` defaults — the
-    // agents view does not re-nest it under its original parent), it keeps
-    // its persisted `rlmDepth` from the session header, and its own saved
-    // descendants (the grandchild) stay behind its collapsed summary row.
+    // View run 2 (the flow's carried state): the drilled-in child is now
+    // a live session that STAYS a child row (the deliberate improvement
+    // over TS `metadata.kind`'s top-level default, the operator's
+    // directive): the live summary derives the runtime kind from the
+    // opened file's spawn-time header binding, so the view re-expands
+    // the parent's tree with the live child nested inside it (part of
+    // the parent's aggregate — a top-level flip would drop that count),
+    // it keeps its persisted `rlmDepth` from the session header, and its
+    // own saved descendants (the grandchild) stay behind its collapsed
+    // summary row.
     let plan = AgentsHeadlessPlan {
         steps: vec![
             AgentsStep::WaitSettle { timeout_ms: 2_000 },
@@ -391,6 +395,14 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // `applySessionList` before `armSavedSearchFetch` applies — so the
     // mount frame predates the saved rows and their summary markers).
     let returned = first_frame_of(&back.frames, "orchestrator chat");
+    assert!(
+        returned.contains("\u{25be} 2 subagents"),
+        "the parent's tree re-expands with the live child nested inside it (the child rides the parent's aggregate - a top-level flip would drop the count to 1):\n{returned}"
+    );
+    assert!(
+        returned.contains("worker alpha"),
+        "the live child's row renders inside the parent's expanded list:\n{returned}"
+    );
     assert!(
         returned.contains("\u{25b8} 1 subagent"),
         "the resumed child's own subtree stays behind its collapsed summary row:\n{returned}"
