@@ -444,7 +444,7 @@ mod tests {
         let rows = render_injected_prompt(&row, Detail::Overview, &theme(), 60);
         assert_eq!(
             flat(&rows[1]).trim_end(),
-            "Python skills unavailable \u{b7} websearch, edit"
+            " Python skills unavailable \u{b7} websearch, edit"
         );
         assert!(row.body.is_some(), "the row expands to the report");
         // Missing details fall back to the bare label.

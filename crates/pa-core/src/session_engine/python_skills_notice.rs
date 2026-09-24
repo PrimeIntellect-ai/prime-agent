@@ -186,9 +186,11 @@ mod tests {
         let message = notice_message(&errors);
         assert_eq!(message.custom_type, PYTHON_SKILLS_UNAVAILABLE_CUSTOM_TYPE);
         assert!(message.display);
+        // The map is ordered (`BTreeMap`): the skill lines and the details
+        // list render deterministically, sorted by import name.
         assert_eq!(
             message.details,
-            Some(serde_json::json!({ "skills": ["websearch", "edit"] }))
+            Some(serde_json::json!({ "skills": ["edit", "websearch"] }))
         );
         let pa_types::ai::UserContent::Text(content) = &message.content else {
             panic!("text content");
