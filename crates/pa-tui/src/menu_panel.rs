@@ -17,17 +17,27 @@ use crate::{Line, Span};
 /// The field prompt (TS `Input` renders `"> "`).
 const FIELD_PROMPT: &str = "> ";
 
-/// One right-aligned trailing segment of a menu row: `text` joined into
-/// the row's trailing cluster, muted (the TS `MenuRow` inline trailing).
+/// One right-aligned trailing segment of a menu row: `text` joined into the
+/// row's trailing cluster, colored by the theme when the surface carries a
+/// status vocabulary (mcp connection states), muted otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MenuSegment<'a> {
     pub text: &'a str,
+    pub color: Option<ThemeColor>,
 }
 
 impl<'a> MenuSegment<'a> {
     /// A muted segment (the TS `MenuRow` inline trailing).
     pub fn muted(text: &'a str) -> Self {
-        Self { text }
+        Self { text, color: None }
+    }
+
+    /// A status segment with its theme color.
+    pub fn themed(color: ThemeColor, text: &'a str) -> Self {
+        Self {
+            text,
+            color: Some(color),
+        }
     }
 }
 
@@ -88,7 +98,10 @@ pub(crate) fn trailing_spans(
         if index > 0 {
             line.push(theme.fg_span(ThemeColor::Muted, " \u{b7} ".to_string()));
         }
-        line.push(theme.fg_span(ThemeColor::Muted, segment.text));
+        match segment.color {
+            Some(color) => line.push(theme.fg_span(color, segment.text)),
+            None => line.push(theme.fg_span(ThemeColor::Muted, segment.text)),
+        }
     }
     truncate_line(&line, budget, "\u{2026}")
 }
@@ -407,6 +420,19 @@ pub(crate) fn hint_row(theme: &Theme, width: usize, hint: &str) -> Line {
     truncate_line(&line, width, "")
 }
 
+/// One detail-block row: the selected item's metadata under the list,
+/// truncated to the frame width (marked) and padded to the full row; the
+/// content's own spans carry the color and leading indent.
+pub(crate) fn detail_row(theme: &Theme, width: usize, content: Line) -> Line {
+    let _ = theme;
+    let mut line = truncate_line(&content, width, "\u{2026}");
+    let used = crate::width::spans_width(&line);
+    if used < width {
+        line.push(Span::raw(" ".repeat(width - used)));
+    }
+    line
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn menu_rows_carry_the_muted_trailing() {
+    fn menu_rows_carry_muted_and_status_trailing() {
         let theme = theme();
         let muted = [
             MenuSegment::muted("current"),
@@ -448,6 +474,11 @@ mod tests {
         assert!(text.starts_with("  "));
         assert!(text.contains("label"));
         assert!(text.ends_with("current · provider"));
+        let status = [MenuSegment::themed(ThemeColor::Success, "connected")];
+        let row = menu_row(&theme, 60, vec![Span::raw("label")], &status, true);
+        let text = row_text(&row);
+        assert!(text.starts_with("\u{203a}"));
+        assert!(text.ends_with("connected"));
     }
 
     #[test]

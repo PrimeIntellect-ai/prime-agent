@@ -653,7 +653,15 @@ impl McpView {
                     .and_then(|index| self.rows.get(*index))
                     .cloned()
                 {
-                    lines.push(row_detail_line(theme, width, &row));
+                    // TS `secondaryText ?? statusText`: the detail falls
+                    // back to the row's status when the entry carries no
+                    // copy; the shared menu grammar's detail_row
+                    // truncates and pads the line.
+                    let text = flatten_to_single_line(
+                        &row.detail_text().unwrap_or_else(|| row.status_text().1),
+                    );
+                    let line = vec![theme.fg_span(ThemeColor::Muted, format!(" {text}"))];
+                    lines.push(crate::menu_panel::detail_row(theme, width, line));
                 }
             }
         }
@@ -832,25 +840,6 @@ fn trailing_menu_row(
             .collect();
     }
     row
-}
-
-/// The selected row's ONE fixed detail line (TS `updateList`'s detail
-/// component): the secondary text — setup guidance or the description —
-/// or the row's status when neither exists, muted and flattened to a
-/// single line. Never a growing block: the panel's height never changes
-/// to fit it (the list layout budgets the row).
-fn row_detail_line(theme: &Theme, width: usize, row: &McpServiceRow) -> Line {
-    // TS `secondaryText ?? statusText`: the ONE fixed detail line falls
-    // back to the row's status when the entry carries no copy.
-    let text = flatten_to_single_line(&row.detail_text().unwrap_or_else(|| row.status_text().1));
-    let line = vec![theme.fg_span(ThemeColor::Muted, format!(" {text}"))];
-    let line = crate::width::truncate_line(&line, width, "\u{2026}");
-    let used = crate::width::spans_width(&line);
-    let mut line = line;
-    if used < width {
-        line.push(Span::raw(" ".repeat(width - used)));
-    }
-    line
 }
 
 /// The trailing key hint (TS `ServiceCatalogPickerComponent.render`, the
