@@ -38,6 +38,22 @@ fn scripted_engine(dir: &Path) -> PathBuf {
     script
 }
 
+/// The held-turn script: the one scripted response paces its stream closed
+/// (`delayMs`) well past the probe window, so the turn it drives holds the
+/// session slot across its provider wait exactly like a real running turn.
+fn held_engine(dir: &Path) -> PathBuf {
+    let script = dir.join("script.json");
+    std::fs::write(
+        &script,
+        json!({ "engine": "faux", "responses": [
+            { "text": "a slow scripted turn", "delayMs": 20_000 },
+        ] })
+        .to_string(),
+    )
+    .expect("write script");
+    script
+}
+
 struct Supervisor {
     child: Child,
     socket: PathBuf,
@@ -246,8 +262,32 @@ fn headless_options(socket: &Path, dir: &Path) -> pa_tui::interactive::Interacti
     }
 }
 
+/// The empty `PromptInput` (the same explicit shape the interactive
+/// daemon e2e uses; the struct carries no `Default`).
+fn empty_prompt_input() -> pa_types::daemon::PromptInput {
+    pa_types::daemon::PromptInput {
+        content: None,
+        images: None,
+        streaming_behavior: None,
+        queue_if_busy: None,
+        expand_prompt_templates: None,
+        source: None,
+        agent_message_id: None,
+        custom_message: None,
+        queue_key: None,
+        prefix_messages: None,
+        admission_id: None,
+    }
+}
+
 /// Create a live session through the daemon protocol, returning its id.
 async fn create_session(socket: &Path, dir: &Path) -> String {
+    create_session_with(socket, dir, &scripted_engine(dir)).await
+}
+
+/// Create a live session driven by the given script (the empty-response
+/// default or the held-turn variant).
+async fn create_session_with(socket: &Path, dir: &Path, script: &Path) -> String {
     let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(socket)
         .await
         .expect("connect supervisor");
@@ -261,7 +301,7 @@ async fn create_session(socket: &Path, dir: &Path) -> String {
             config: Some(json!({
                 "cwd": dir.display().to_string(),
                 "sessionDir": dir.join("agent").join("sessions").display().to_string(),
-                "script": scripted_engine(dir).display().to_string(),
+                "script": script.display().to_string(),
             })),
             telemetry_disabled: None,
             runtime_metadata: None,
@@ -464,4 +504,66 @@ async fn mcp_view_lists_the_configured_mock_connection() {
         rendered.contains("/mcp is not available in this client yet"),
         "Enter dispatched the login and the logout arm stayed routed:\n{rendered}"
     );
+}
+
+/// The mid-turn open (the operator's freeze): a running turn holds the
+/// session slot across its provider wait, and the old daemon handler
+/// waited out the whole session-build window before answering the roster
+/// alone, so `/mcp`/`/plugins` opened mid-turn froze the view for the
+/// bound (the `SESSION_BUILD_WAIT` seconds the freeze reported). The TS
+/// picker builds its rows from local state, so the mid-turn open is
+/// instant: the held-turn probe must answer within the interactive
+/// deadline.
+#[tokio::test]
+async fn get_mcp_connections_answers_instantly_mid_turn() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("agent").join("sessions")).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+    let script = held_engine(dir.path());
+    let session = create_session_with(&supervisor.socket, dir.path(), &script).await;
+    let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(&supervisor.socket)
+        .await
+        .expect("connect supervisor");
+    client
+        .request_ok(DaemonCommand::Prompt {
+            id: None,
+            active_session_id: session.clone(),
+            message: "hold this turn open".to_string(),
+            input: empty_prompt_input(),
+            rest: Default::default(),
+        })
+        .await
+        .expect("start the held turn");
+    // The held turn's admission settles before the probe: the scripted
+    // response keeps the stream closed for the whole assertion window, so
+    // the session slot stays held across the provider wait.
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    let started = Instant::now();
+    let data = client
+        .request_ok(DaemonCommand::GetMcpConnections {
+            id: None,
+            active_session_id: session.clone(),
+            rest: Default::default(),
+        })
+        .await
+        .expect("mid-turn get_mcp_connections");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "mid-turn get_mcp_connections took {elapsed:?}: the catalog open must be instant (the TS picker reads local state; the old handler waited out the session-build bound and froze the open mid-turn)"
+    );
+    // The roster itself answered with the connected fixture (local state,
+    // not a kernel listing).
+    let connections = data
+        .get("connections")
+        .and_then(Value::as_array)
+        .expect("connections array");
+    assert!(
+        connections.iter().any(|entry| {
+            entry.get("server").and_then(Value::as_str) == Some("fixture-echo")
+                && entry.get("connected") == Some(&json!(true))
+        }),
+        "the roster answered mid-turn: {connections:?}"
+    );
+    client.close();
 }
