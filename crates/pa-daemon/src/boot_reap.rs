@@ -122,7 +122,7 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
     // one is not).
     let protected: HashSet<u32> =
         protected_worker_pids(&supervisor.options.agent_dir, &socket_path);
-    let mut targets = same_socket_worker_targets(&socket_path, &protected);
+    let mut targets = same_socket_worker_targets(&socket_path, &protected, None);
     targets.extend(same_socket_supervisor_targets(&socket_path));
     if targets.is_empty() {
         return;
@@ -184,6 +184,73 @@ pub(crate) async fn stop_process(pid: u32, start_id: Option<String>) -> ReapOutc
         kind: ReapKind::Worker,
     })
     .await
+}
+
+/// The give-up belt: when the supervisor abandons a worker id (the
+/// exhausted-failure verdict), no live process of THIS daemon may outlive
+/// it under that id. The zombie-holder incident proved the hole: a failure
+/// loop that spawned duplicates of one id gave up on the id while one of
+/// its processes - the first, healthy one - still lived and held the
+/// session's runtime lease; the registry row left with the give-up, so
+/// every later create found no resident, launched a fresh worker, and
+/// bounced off the orphan's lease with the "already active in <id>"
+/// refusal, forever. The belt sweeps the abandoned id's same-socket
+/// worker processes (the supervisor stamped every spawn's environment
+/// with its active-session id) with the boot reap's own identity-gated
+/// escalation, so the hold the daemon gave up on actually releases: the
+/// last crashed child is already provably gone (the failure loop watched
+/// it die), and a dead holder's lease self-heals on the next acquire -
+/// the sweep exists for the ones nobody is watching anymore.
+///
+/// Never touched: other daemons' workers (different supervisor socket),
+/// other sessions' workers (different active-session id), and any pid a
+/// live resident still owns. Non-Linux platforms have no /proc census
+/// here - the same limitation the boot reap documents.
+pub(crate) async fn reap_abandoned_workers(supervisor: &Arc<Supervisor>, worker_id: &str) {
+    let socket_path = supervisor.options.socket_path.clone();
+    // Belt over the env filter: a pid a LIVE resident still owns is never
+    // signaled, whatever its environment says (a wrong signal is
+    // unrecoverable; a missed sweep is).
+    let mut protected = HashSet::new();
+    for resident in supervisor.registry.list().await {
+        let pid = resident.descriptor.lock().await.pid as u32;
+        if pid != 0 {
+            protected.insert(pid);
+        }
+    }
+    let targets = same_socket_worker_targets(&socket_path, &protected, Some(worker_id));
+    if targets.is_empty() {
+        return;
+    }
+    supervisor.log_line(&format!(
+        "give-up sweep: {} leftover process(es) of session worker {worker_id}",
+        targets.len()
+    ));
+    let outcomes = futures::future::join_all(
+        targets
+            .iter()
+            .map(|target| async move {
+                let outcome = stop_target(target).await;
+                supervisor.log_line(&format!(
+                    "give-up sweep: leftover worker pid {} (start id {:?}) of {worker_id} - {:?}",
+                    target.pid, target.start_id, outcome
+                ));
+                (target.clone(), outcome)
+            })
+            .collect::<Vec<_>>(),
+    )
+    .await;
+    // The reaped leftovers' endpoint files leave with them (the same
+    // deterministic-name gate the boot reap applies).
+    for (target, outcome) in outcomes {
+        if let (Some(socket), ReapOutcome::Term | ReapOutcome::Kill) =
+            (&target.worker_socket, outcome)
+        {
+            if is_unix_socket_file(socket) {
+                let _ = std::fs::remove_file(socket);
+            }
+        }
+    }
 }
 
 /// Whether the pid still names the discovered process (the identity gate: a
@@ -273,12 +340,24 @@ async fn await_gone(target: &ReapTarget, budget: Duration) -> bool {
 /// this daemon's own descriptors name (the adoption pass's business).
 /// Linux-only (the /proc census); other platforms answer nothing.
 #[cfg(target_os = "linux")]
-fn same_socket_worker_targets(socket_path: &Path, protected: &HashSet<u32>) -> Vec<ReapTarget> {
+fn same_socket_worker_targets(
+    socket_path: &Path,
+    protected: &HashSet<u32>,
+    active_session: Option<&str>,
+) -> Vec<ReapTarget> {
     let socket = normalize_socket_spelling(socket_path);
     let mut targets = Vec::new();
     for pid in numeric_proc_entries() {
         if pid == std::process::id() || protected.contains(&pid) {
             continue;
+        }
+        // The abandoned-id filter (the give-up belt's target class): only
+        // workers whose active-session env names the given-up id. `None`
+        // keeps the boot reap's whole-census shape.
+        if let Some(active_session) = active_session {
+            if !proc_environ_names_active_session(pid, active_session) {
+                continue;
+            }
         }
         // The identity captures BEFORE the /proc reads and re-verifies
         // AFTER the qualification: a worker that exits mid-census and
@@ -399,8 +478,32 @@ pub(crate) fn is_our_worker_socket(path: &str, supervisor_socket: &Path) -> bool
 }
 
 #[cfg(not(target_os = "linux"))]
-fn same_socket_worker_targets(_socket_path: &Path, _protected: &HashSet<u32>) -> Vec<ReapTarget> {
+fn same_socket_worker_targets(
+    _socket_path: &Path,
+    _protected: &HashSet<u32>,
+    _active_session: Option<&str>,
+) -> Vec<ReapTarget> {
     Vec::new()
+}
+
+/// Whether one process's environment names `active_session` as its worker
+/// active-session id (the supervisor stamps
+/// `WORKER_ACTIVE_SESSION_ID_ENV` on every spawn; an unreadable
+/// environment never matches - the conservative no-signal default).
+#[cfg(target_os = "linux")]
+fn proc_environ_names_active_session(pid: u32, active_session: &str) -> bool {
+    read_proc_environ(pid).is_some_and(|environ| {
+        environ.iter().any(|entry| {
+            entry
+                .strip_prefix(&format!("{}=", crate::worker::WORKER_ACTIVE_SESSION_ID_ENV))
+                .is_some_and(|value| value == active_session)
+        })
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn proc_environ_names_active_session(_pid: u32, _active_session: &str) -> bool {
+    false
 }
 
 /// The wedged supervisors of this socket path: a supervisor-shaped process
@@ -692,6 +795,46 @@ mod tests {
             worker_socket: None,
             kind: ReapKind::Worker,
         }
+    }
+
+    /// The abandoned-id filter (the give-up belt's target class): only a
+    /// process whose environment names the given-up id as its worker
+    /// active-session matches. A `sleep` child inherits the test's env
+    /// (never the worker var), and one stamped with the env answers true
+    /// only for its own id.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_abandoned_id_filter_matches_the_stamped_env_only() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("300")
+            .env_remove(crate::worker::WORKER_ACTIVE_SESSION_ID_ENV)
+            .spawn()
+            .expect("spawn unstamped sleep");
+        assert!(
+            !proc_environ_names_active_session(child.id(), "6b558be357e3"),
+            "an unstamped environment never matches the abandoned id"
+        );
+        let mut stamped = std::process::Command::new("sleep")
+            .arg("300")
+            .env(crate::worker::WORKER_ACTIVE_SESSION_ID_ENV, "6b558be357e3")
+            .spawn()
+            .expect("spawn stamped sleep");
+        assert!(
+            proc_environ_names_active_session(stamped.id(), "6b558be357e3"),
+            "the stamped environment matches its abandoned id"
+        );
+        assert!(
+            !proc_environ_names_active_session(stamped.id(), "other-id"),
+            "a different abandoned id never matches"
+        );
+        assert!(
+            !proc_environ_names_active_session(0, "6b558be357e3"),
+            "an unreadable pid is the conservative no-match"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = stamped.kill();
+        let _ = stamped.wait();
     }
 
     /// A reaped process is provably gone after the escalation: the reap's
