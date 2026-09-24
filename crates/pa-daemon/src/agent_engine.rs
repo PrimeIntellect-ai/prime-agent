@@ -8871,39 +8871,54 @@ fn run_prompts(
 /// commands (TS `createAgentConnectionCommands`) — including before the
 /// first prompt: the read seam demand-builds the core session (the TS
 /// session exists from create), so the client's slash menu sees the
-/// skill inventory right after attach.
+/// skill inventory right after attach. The faux provider registers under
+/// `FAUX_TEST_LOCK` on a blocking thread (the lock is std, so it never
+/// rides an await); the first model resolution there is the registration,
+/// and the demand-build's resolution reads the cached model.
 #[tokio::test]
 async fn get_commands_enumerates_skills_before_the_first_prompt() {
-    let _faux = FAUX_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let dir = tempfile::TempDir::new().unwrap();
-    let agent_dir = dir.path().join("agent");
-    let skill_dir = agent_dir.join("skills").join("demo-skill");
-    std::fs::create_dir_all(&skill_dir).unwrap();
-    std::fs::write(
-        skill_dir.join("SKILL.md"),
-        "---\nname: demo-skill\ndescription: Demo the slash menu wiring\n---\nRun the demo.",
-    )
-    .unwrap();
-    let engine = AgentSessionEngine::new(AgentEngineConfig {
-        cwd: dir.path().to_path_buf(),
-        agent_dir,
-        provider: None,
-        model: None,
-        api_key: None,
-        thinking: None,
-        session_dir: None,
-        session_file: None,
-        faux_script: Some(json!({ "engine": "faux", "responses": [{ "text": "ok" }] }).to_string()),
-        supervisor_link: None,
-        telemetry_disabled: None,
-        cron_store: None,
-        queued_steering_probe: None,
+    let (engine, _dir) = tokio::task::spawn_blocking(|| {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let skill_dir = agent_dir.join("skills").join("demo-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: Demo the slash menu wiring\n---\nRun the demo.",
+        )
+        .unwrap();
+        let engine = AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir,
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: Some(
+                json!({ "engine": "faux", "responses": [{ "text": "ok" }] }).to_string(),
+            ),
+            supervisor_link: None,
+            telemetry_disabled: None,
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap();
+        let engine = std::sync::Arc::new(engine);
+        engine.register_arc();
+        // Register the faux provider under the lock (this resolution is
+        // the registration); the async section then resolves the cached
+        // model without re-registering.
+        let model = engine.resolve_model().expect("faux model");
+        drop(model);
+        (engine, dir)
     })
-    .unwrap();
-    let engine = std::sync::Arc::new(engine);
-    engine.register_arc();
+    .await
+    .expect("engine build join");
     // No prompt ran: the read seam must build the session itself.
     assert!(engine.session.lock().await.is_none());
     use crate::engine::SessionEngine as _;
