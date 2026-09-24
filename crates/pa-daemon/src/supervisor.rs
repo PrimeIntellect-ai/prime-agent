@@ -113,6 +113,10 @@ pub struct SupervisorOptions {
 pub(crate) enum ClientRouting {
     /// Every connected client (e.g. `daemon_closing`).
     Broadcast,
+    /// Every connected client except one (the shutdown initiator receives its
+    /// `daemon_closing` through the command response instead, so the
+    /// broadcast cannot overtake that response or duplicate the frame).
+    BroadcastExcept { connection_id: String },
     /// Clients attached to the session.
     AttachedSession { active_session_id: String },
     /// Clients holding a roster subscription (`roster_subscribe`).
@@ -2161,7 +2165,11 @@ impl Supervisor {
                                 &connection_id,
                             )
                             .await;
-                        let _ = dispatch_tx.send((lines, stop));
+                        if dispatch_tx.send((lines, stop)).is_err() && stop {
+                            // The initiating connection left before its response
+                            // was selected. The stop pass must still run.
+                            supervisor.ensure_shutdown_started().await;
+                        }
                     });
                 }
                 dispatched = dispatch_rx.recv() => {
@@ -2191,6 +2199,9 @@ impl Supervisor {
                         Ok((routing, payload)) => {
                             let deliver = match &routing {
                                 ClientRouting::Broadcast => true,
+                                ClientRouting::BroadcastExcept {
+                                    connection_id: excluded,
+                                } => excluded != connection_id,
                                 ClientRouting::AttachedSession { active_session_id } => {
                                     attached.lock().unwrap().iter().any(|id| id == active_session_id)
                                 }
@@ -2199,7 +2210,24 @@ impl Supervisor {
                                 }
                             };
                             if deliver {
-                                write_line(&mut writer, &payload).await?;
+                                if let Err(error) = write_line(&mut writer, &payload).await {
+                                    // An event-write failure must not strand an
+                                    // accepted shutdown: if this connection owns
+                                    // the stop, it still starts the pass.
+                                    let is_shutdown_owner = self
+                                        .shutdown_owner
+                                        .lock()
+                                        .unwrap()
+                                        .as_deref()
+                                        == Some(connection_id.as_str());
+                                    if is_shutdown_owner
+                                        && self.shutting_down.load(Ordering::SeqCst)
+                                        && !self.accept_exit.load(Ordering::SeqCst)
+                                    {
+                                        self.ensure_shutdown_started().await;
+                                    }
+                                    return Err(error);
+                                }
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -2216,7 +2244,10 @@ impl Supervisor {
         // into a terminal descriptor sweep.
         let is_shutdown_owner =
             self.shutdown_owner.lock().unwrap().as_deref() == Some(connection_id.as_str());
-        if is_shutdown_owner && !self.accept_exit.load(Ordering::SeqCst) {
+        if is_shutdown_owner
+            && self.shutting_down.load(Ordering::SeqCst)
+            && !self.accept_exit.load(Ordering::SeqCst)
+        {
             self.ensure_shutdown_started().await;
         }
         // Detach from every attached session on disconnect (a TUI exit does
@@ -2398,9 +2429,12 @@ impl Supervisor {
                 let mut lines = vec![response_line(&response)];
                 // daemon_closing goes to every client before the exit.
                 let closing = json!({ "type": "daemon_closing", "reason": "shutdown" });
-                let _ = self
-                    .events
-                    .send((ClientRouting::Broadcast, closing.clone()));
+                let _ = self.events.send((
+                    ClientRouting::BroadcastExcept {
+                        connection_id: connection_id.to_string(),
+                    },
+                    closing.clone(),
+                ));
                 lines.push(closing);
                 // Answer first, then shut down: the connection loop writes
                 // these lines before it awaits begin_shutdown, so the client
