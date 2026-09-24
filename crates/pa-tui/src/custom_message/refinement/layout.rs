@@ -121,6 +121,15 @@ impl Output {
     }
 }
 
+/// The `◆` header's wrapped row count — the entry's click surface spans
+/// the whole header (TS wraps the `RefinementOutcomeMessageComponent`
+/// header in `Clickable`; #2430). Same wrap the traversal's count sink
+/// applies to the header text.
+pub(crate) fn refinement_header_rows(row: &RefinementOutcomeRow, width: usize) -> usize {
+    let header = format!("\u{25c6} {}", row.header);
+    crate::width::wrapped_runs_count([header.as_str()], width.saturating_sub(2).max(1))
+}
+
 pub(crate) fn render_refinement_outcome(
     row: &RefinementOutcomeRow,
     detail: Detail,

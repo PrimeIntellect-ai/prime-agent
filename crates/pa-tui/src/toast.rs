@@ -95,7 +95,10 @@ pub fn overlay_toasts(
     toasts: &[String],
     width: usize,
     style: Style,
-) {
+) -> Vec<(usize, usize, usize)> {
+    // The painted spans (row, from, to): pixels the overlay painted swallow
+    // clicks aimed at content beneath (TS `subtractFrameClickCoverage`).
+    let mut painted = Vec::new();
     // A window shorter than the stack keeps the NEWEST toasts: the latest
     // acknowledgment is the one the user just triggered, so it never hides.
     let capacity = end.saturating_sub(start);
@@ -114,6 +117,7 @@ pub fn overlay_toasts(
         let (markers, _covered) = crate::osc133::split_leading_markers(row);
         let label = format!(" {text} ");
         let col = width.saturating_sub(crate::width::str_width(&label));
+        painted.push((start + offset, col, col + crate::width::str_width(&label)));
         let mut out: Line = markers;
         out.push(Span::raw(" ".repeat(col)));
         out.push(Span::styled(label, style));
@@ -124,6 +128,7 @@ pub fn overlay_toasts(
         }
         *row = out;
     }
+    painted
 }
 
 #[cfg(test)]

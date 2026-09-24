@@ -518,6 +518,9 @@ pub struct InteractiveOutcome {
     /// Texts copied out by finished mouse selections (headless runs have
     /// no terminal for OSC 52; the verifiers read these).
     pub copies: Vec<String>,
+    /// URLs opened by clean clicks on OSC 8 links (headless runs spawn no
+    /// opener; the verifiers read these).
+    pub opened_urls: Vec<String>,
     /// A startup attach failed on a session that is truly gone: the run
     /// hands off to the agents view (`return_to_agents_view`) and this
     /// notice seeds the view's status line instead of the pane dying to
@@ -926,6 +929,7 @@ async fn run_interactive_surface(
                 return_to_agents_view: false,
                 selection_request: None,
                 copies: Vec::new(),
+                opened_urls: Vec::new(),
                 agents_view_notice: None,
             });
         }
@@ -1834,6 +1838,7 @@ async fn run_interactive_surface(
         agents_view_scope: session.scoped_agents_view.take(),
         selection_request: session.pending_selection,
         copies: std::mem::take(&mut session.copies),
+        opened_urls: std::mem::take(&mut session.opened_urls),
         agents_view_notice: None,
     };
     // The agents-view handoff's background detach owns this connection now

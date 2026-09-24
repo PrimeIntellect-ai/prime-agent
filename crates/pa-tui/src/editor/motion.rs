@@ -34,6 +34,84 @@ impl Editor {
         self.set_cursor_col(self.line_start_col(0));
     }
 
+    /// Place the caret from a click on the last rendered layout (TS
+    /// `Editor.placeCursorFromClick`): `[from, to)` bounds the clicked
+    /// visual chunk inside source line `line` (char offsets), `rel` is
+    /// the clicked column past the chunk's text start. A click past the
+    /// midpoint of an atomic segment (a wide grapheme or a paste marker)
+    /// lands after it, before it otherwise; a click past the chunk's
+    /// text keeps the chunk-end offset, snapped to a segment boundary.
+    pub(crate) fn place_cursor_in_chunk(
+        &mut self,
+        line: usize,
+        from: usize,
+        to: usize,
+        rel: usize,
+    ) {
+        let Some(source) = self.lines.get(line) else {
+            return;
+        };
+        let source = source.clone();
+        let slice =
+            |from: usize, to: usize| -> String { char_suffix(&char_prefix(&source, to), from) };
+        // Walk the source line's marker-aware graphemes covering this
+        // visual chunk (TS iterates `this.segment(sourceLine)`).
+        let mut chunk_col = 0usize;
+        let mut placed = to;
+        for seg in self.segment(&source) {
+            let seg_end = seg.index + seg.segment.chars().count();
+            if seg_end <= from {
+                continue;
+            }
+            if seg.index >= to {
+                break;
+            }
+            let slice_start = seg.index.max(from);
+            let in_chunk_width = crate::width::str_width(&slice(slice_start, seg_end.min(to)));
+            if chunk_col + in_chunk_width > rel {
+                let within_segment = if slice_start > seg.index {
+                    crate::width::str_width(&slice(seg.index, slice_start))
+                } else {
+                    0
+                } + rel
+                    - chunk_col;
+                placed = if 2 * within_segment >= crate::width::str_width(&seg.segment) {
+                    seg_end
+                } else {
+                    seg.index
+                };
+                break;
+            }
+            chunk_col += in_chunk_width;
+        }
+        // A click past the chunk's text (the trailing pad) leaves the
+        // chunk-end offset, which can sit inside a marker split across
+        // wrapped rows: snap to the nearest segment boundary.
+        placed = self.snap_cursor_offset(&source, placed);
+        self.cursor_line = line;
+        self.last_action = None;
+        self.set_cursor_col(placed);
+    }
+
+    /// Snap an offset sitting inside an atomic segment to its nearest
+    /// boundary (TS `Editor.snapCursorOffset`).
+    fn snap_cursor_offset(&self, line: &str, offset: usize) -> usize {
+        for seg in self.segment(line) {
+            let seg_end = seg.index + seg.segment.chars().count();
+            if seg.index >= offset {
+                break;
+            }
+            if offset < seg_end {
+                return if 2 * (offset - seg.index) >= seg.segment.chars().count() {
+                    seg_end
+                } else {
+                    seg.index
+                };
+            }
+        }
+        offset
+    }
+
     /// Move to the end of the whole text (`Ctrl+End` / `Cmd+Down`).
     pub(crate) fn move_to_doc_end(&mut self) {
         self.last_action = None;
@@ -527,5 +605,48 @@ mod tests {
         assert_eq!(vl[1].length, 1);
         assert_eq!(vl[0].logical_line, 0);
         assert_eq!(vl[1].logical_line, 0);
+    }
+
+    /// TS `placeCursorFromClick` (PR #2430): a click maps through the
+    /// rendered chunk back to a source caret offset, snapping to atomic
+    /// segment boundaries. `[from, to)` bound the clicked visual chunk in
+    /// char offsets; `rel` is the clicked column past the chunk's start.
+    #[test]
+    fn click_places_the_caret_within_the_chunk() {
+        let mut e = ed();
+        e.set_text("hello world");
+        // The whole line is one chunk: a click at column 5 lands between
+        // the `o` and the space (before the space's tail).
+        e.place_cursor_in_chunk(0, 0, 11, 5);
+        assert_eq!(e.get_cursor(), (0, 5));
+        // A click past the line's end keeps the chunk-end offset.
+        e.place_cursor_in_chunk(0, 0, 11, 20);
+        assert_eq!(e.get_cursor(), (0, 11));
+        // The from-bound maps a wrapped chunk back to its source slice.
+        e.place_cursor_in_chunk(0, 6, 11, 3);
+        assert_eq!(e.get_cursor(), (0, 9));
+    }
+
+    /// An offset inside an atomic paste marker snaps to the marker's
+    /// nearest boundary (TS `snapCursorOffset`).
+    #[test]
+    fn click_snaps_inside_paste_markers() {
+        let mut e = ed();
+        e.handle_input("A");
+        // A large paste stores an atomic `[paste #0]` marker.
+        e.handle_paste(&"line\n".repeat(20));
+        e.handle_input("B");
+        let text = e.get_text();
+        let start = text.find("[paste #").expect("marker text");
+        let end = text[start..].find(']').expect("marker end") + start + 1;
+        let marker_len = text[start..end].chars().count();
+        // A click at the marker's middle would compute an offset inside
+        // the marker; the snap moves it to a boundary.
+        e.place_cursor_in_chunk(0, 1, 1 + marker_len + 1, marker_len / 2);
+        let (_, col) = e.get_cursor();
+        assert!(
+            col == 1 || col == 1 + marker_len,
+            "the caret snapped to a marker boundary: {col}"
+        );
     }
 }
