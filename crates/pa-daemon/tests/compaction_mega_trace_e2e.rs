@@ -78,7 +78,7 @@ fn chunk(delta: Value, finish_reason: Option<&str>, usage: Value) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
-        "created": 1750000000,
+        "created": 1_750_000_000,
         "model": "mock-1",
         "choices": [{
             "index": 0,
@@ -101,7 +101,7 @@ fn small_usage() -> Value {
 /// settled turn's threshold check fires.
 fn crossing_usage() -> Value {
     json!({
-        "prompt_tokens": 126000, "completion_tokens": 10, "total_tokens": 126010,
+        "prompt_tokens": 126_000, "completion_tokens": 10, "total_tokens": 126_010,
         "prompt_tokens_details": {"cached_tokens": 80},
     })
 }
@@ -157,7 +157,7 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
         json!({
             "id": "chatcmpl-test",
             "object": "chat.completion.chunk",
-            "created": 1750000000,
+            "created": 1_750_000_000,
             "model": "mock-1",
             "choices": [],
             "usage": usage,
@@ -320,7 +320,7 @@ fn mega_session_threshold_compaction_phase_measurement() {
                             "id": "mock-1",
                             "name": "Mock 1",
                             "api": "openai-completions",
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096,
                         }
                     ]
