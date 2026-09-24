@@ -233,16 +233,17 @@ mod resume_settings_tests {
             )
             .await;
         assert!(opened.success, "{opened:?}");
+        let opened_summary = opened.data.as_ref().expect("the create's summary");
         assert_eq!(
-            opened.data["runtimeKind"], "subagent",
+            opened_summary["runtimeKind"], "subagent",
             "the opened child keeps its spawn-time kind: {opened:?}"
         );
         assert_eq!(
-            opened.data["rlmDepth"], 1,
+            opened_summary["rlmDepth"], 1,
             "the header's persisted depth rides the summary: {opened:?}"
         );
         assert_eq!(
-            opened.data["parentSessionPath"],
+            opened_summary["parentSessionPath"],
             parent_path.to_string_lossy(),
             "the header's spawn-time parent linkage rides the summary: {opened:?}"
         );
