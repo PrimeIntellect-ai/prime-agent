@@ -53,10 +53,7 @@ impl TranscriptLayout {
 
     /// The absolute transcript row the tail section starts at.
     pub(super) fn tail_start(&self) -> usize {
-        self.offsets
-            .last()
-            .copied()
-            .unwrap_or_else(|| self.splash.len())
+        self.offsets.last().copied().unwrap_or(self.splash.len())
     }
 
     pub(super) fn cursor_at(&self, row: usize) -> (usize, usize) {

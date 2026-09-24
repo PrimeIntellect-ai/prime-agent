@@ -3027,7 +3027,7 @@ mod tests {
             "[autonomous_status]",
             "◆ Context compacted",
         ];
-        let mut v = view_with(entries);
+        let v = view_with(entries);
         for (index, entry) in v.chat.iter().enumerate() {
             let rows = v.render_entry(index, entry, 80, index == 0, false);
             let clicks = v.entry_click_rows(index, entry, 80);
@@ -3043,33 +3043,65 @@ mod tests {
         }
     }
 
+    /// A settled card whose output marker never appears in its args
+    /// preview (the collapsed panel still shows the args' first lines).
+    fn card_with_hidden_output(id: &str, marker: &str) -> ChatEntry {
+        ChatEntry::Tool(Box::new(ToolCallCard {
+            id: id.to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({ "command": "setup" }),
+            started: true,
+            started_at: Some(std::time::Instant::now()),
+            ended_at: Some(std::time::Instant::now()),
+            result: Some(ToolResultView {
+                content: vec![serde_json::json!({ "type": "text", "text": marker })],
+                details: serde_json::Value::Null,
+                is_error: false,
+            }),
+            result_partial: false,
+            aborted: false,
+        }))
+    }
+
     /// A header click flips only its own entry; the global cycle resets
     /// every override (TS `Clickable` + `applyChatExpansion`).
     #[test]
     fn a_header_click_toggles_only_its_entry() {
-        let mut v = view_with(vec![settled_tool_card("t1"), settled_tool_card("t2")]);
+        let mut v = view_with(vec![
+            card_with_hidden_output("t1", "RESULT-ONE"),
+            card_with_hidden_output("t2", "RESULT-TWO"),
+        ]);
         let before = transcript_text(&mut v, 80);
         assert!(
-            !before.contains("done"),
+            !before.contains("RESULT-ONE") && !before.contains("RESULT-TWO"),
             "collapsed cards hide the tool output: {before}"
         );
         v.toggle_entry_expanded(0);
         let after = transcript_text(&mut v, 80);
-        assert_eq!(
-            after.matches("done").count(),
-            1,
-            "only the first card expanded: {after}"
+        assert!(
+            after.contains("RESULT-ONE"),
+            "the first card expanded: {after}"
+        );
+        assert!(
+            !after.contains("RESULT-TWO"),
+            "the second card stays collapsed: {after}"
         );
         // Flipping back collapses just this entry again.
         v.toggle_entry_expanded(0);
         let again = transcript_text(&mut v, 80);
-        assert!(!again.contains("done"), "the card collapsed again: {again}");
+        assert!(
+            !again.contains("RESULT-ONE") && !again.contains("RESULT-TWO"),
+            "the card collapsed again: {again}"
+        );
         // The global cycle resets the overrides wholesale.
         v.toggle_entry_expanded(1);
         v.detail = v.detail.next();
         v.clear_entry_expanded();
         let cycled = transcript_text(&mut v, 80);
-        assert!(!cycled.contains("done"), "the cycle cleared the overrides");
+        assert!(
+            !cycled.contains("RESULT-TWO"),
+            "the cycle cleared the overrides"
+        );
     }
 
     /// The frame compose projects the entries' toggle rows and the frame's
