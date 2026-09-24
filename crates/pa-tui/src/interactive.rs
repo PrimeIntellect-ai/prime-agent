@@ -2312,7 +2312,9 @@ impl Renderer {
                     // cursor hidden for the surface taking the screen
                     // over, and the adopting mount must not race a stale
                     // show against its own hide.
-                    let Renderer::Terminal { term, .. } = self;
+                    let Renderer::Terminal { term, .. } = self else {
+                        unreachable!("the arm matched the terminal renderer")
+                    };
                     drop(term);
                     let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Hide);
                     // Flag this surface's input reader for the background
