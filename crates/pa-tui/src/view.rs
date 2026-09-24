@@ -2967,6 +2967,212 @@ mod tests {
             joined[header_row + 2]
         );
     }
+
+    // ---- fullscreen click regions (TS #2430) ------------------------------
+
+    /// One representative of each toggleable entry family renders its
+    /// click rows on the header/summary rows TS wraps in `Clickable`.
+    #[test]
+    fn entry_click_rows_land_on_each_familys_header() {
+        let entries = vec![
+            settled_tool_card("t1"),
+            ChatEntry::BashExecution(Box::new(crate::bash_card::BashExecutionCard {
+                output_lines: vec!["hi".to_string()],
+                running: false,
+                exit_code: Some(0),
+                ..crate::bash_card::BashExecutionCard::new_running("b1", "echo hi", false)
+            })),
+            ChatEntry::AgentMessage(Box::new(crate::custom_message::AgentMessageRow {
+                direction: crate::custom_message::AgentMessageDirection::FromParent,
+                participant: "parent session".to_string(),
+                message: "the body text".to_string(),
+            })),
+            ChatEntry::ShellCompletion(Box::new(crate::custom_message::ShellCompletionRow {
+                pid: Some(31),
+                exit_code: Some(0),
+                content: "quiet output".to_string(),
+            })),
+            ChatEntry::SkillInvocation(Box::new(crate::custom_message::SkillInvocationRow {
+                name: "demo-skill".to_string(),
+                content: "run the demo".to_string(),
+            })),
+            ChatEntry::InjectedPrompt(Box::new(crate::custom_message::InjectedPromptRow {
+                kind: crate::custom_message::InjectedPromptKind::Heartbeat { schedule: None },
+                body: None,
+            })),
+            ChatEntry::RefinementOutcome(Box::new(crate::custom_message::RefinementOutcomeRow {
+                header: "Harness refined".to_string(),
+                summary: "a change".to_string(),
+                meta: "applied".to_string(),
+                edits: Vec::new(),
+            })),
+            ChatEntry::CustomPanel(Box::new(crate::custom_message::CustomPanelRow {
+                custom_type: "autonomous_status".to_string(),
+                content: "running".to_string(),
+            })),
+            ChatEntry::CompactionSummary {
+                summary: "so far".to_string(),
+                tokens_before: 999,
+                custom_instructions: None,
+            },
+        ];
+        let markers = [
+            "bash",        // the tool panel header (name + status)
+            "$ echo hi",   // the bash card's command header
+            "from parent", // the agent-message summary header
+            "Background shell command finished",
+            "[skill]",
+            "Heartbeat prompt",
+            "◆ Harness refined",
+            "[autonomous_status]",
+            "◆ Context compacted",
+        ];
+        let mut v = view_with(entries);
+        for (index, entry) in v.chat.iter().enumerate() {
+            let rows = v.render_entry(index, entry, 80, index == 0, false);
+            let clicks = v.entry_click_rows(index, entry, 80);
+            assert!(!clicks.is_empty(), "family {index} registers a click row");
+            for click_row in clicks {
+                assert!(
+                    rows.get(click_row)
+                        .is_some_and(|row| text_of(row).contains(markers[index])),
+                    "family {index} click row {click_row} lands on its header:\n{}",
+                    rows.iter().map(text_of).collect::<Vec<_>>().join("\n")
+                );
+            }
+        }
+    }
+
+    /// A header click flips only its own entry; the global cycle resets
+    /// every override (TS `Clickable` + `applyChatExpansion`).
+    #[test]
+    fn a_header_click_toggles_only_its_entry() {
+        let mut v = view_with(vec![settled_tool_card("t1"), settled_tool_card("t2")]);
+        let before = transcript_text(&mut v, 80);
+        assert!(
+            !before.contains("done"),
+            "collapsed cards hide the tool output: {before}"
+        );
+        v.toggle_entry_expanded(0);
+        let after = transcript_text(&mut v, 80);
+        assert_eq!(
+            after.matches("done").count(),
+            1,
+            "only the first card expanded: {after}"
+        );
+        // Flipping back collapses just this entry again.
+        v.toggle_entry_expanded(0);
+        let again = transcript_text(&mut v, 80);
+        assert!(!again.contains("done"), "the card collapsed again: {again}");
+        // The global cycle resets the overrides wholesale.
+        v.toggle_entry_expanded(1);
+        v.detail = v.detail.next();
+        v.clear_entry_expanded();
+        let cycled = transcript_text(&mut v, 80);
+        assert!(!cycled.contains("done"), "the cycle cleared the overrides");
+    }
+
+    /// The frame compose projects the entries' toggle rows and the frame's
+    /// OSC 8 links: `frame_click_target_at` hits the tool header row,
+    /// `frame_link_at` hits a rendered markdown link.
+    #[test]
+    fn frame_clicks_project_toggle_rows_and_links() {
+        crate::hyperlinks::set_hyperlinks_override(Some(true));
+        let entries = vec![
+            settled_tool_card("t1"),
+            ChatEntry::Assistant(Box::new(AssistantMessage {
+                blocks: vec![MessageBlock::Text(
+                    "see [docs](https://example.com/docs)".to_string(),
+                )],
+                has_tool_calls: false,
+                streaming: false,
+                error: None,
+                aborted: false,
+            })),
+        ];
+        let mut v = view_with(entries);
+        let frame = v.render_frame(80, 24);
+        let header_row = frame
+            .iter()
+            .position(|line| row_text(line).contains("bash · done"))
+            .expect("the tool header row");
+        let target = v
+            .frame_click_target_at(header_row, 3)
+            .expect("the header row carries a toggle target");
+        assert_eq!(
+            target.action,
+            crate::click_regions::ClickAction::ToggleEntry { index: 0 }
+        );
+        let link_row = frame
+            .iter()
+            .position(|line| row_text(line).contains("docs"))
+            .expect("the link label");
+        let link_col = 1 + row_text(&frame[link_row])
+            .find("docs")
+            .expect("the label column");
+        assert_eq!(
+            v.frame_link_at(link_row, link_col).as_deref(),
+            Some("https://example.com/docs")
+        );
+        crate::hyperlinks::set_hyperlinks_override(None);
+    }
+
+    /// The dock editor's content rows place the caret through the last
+    /// rendered layout (TS `Editor.placeCursorFromClick`): a click past a
+    /// short line's end leaves the caret at that line's end; a click on an
+    /// earlier line moves it there.
+    #[test]
+    fn editor_clicks_place_the_caret_through_the_dock_layout() {
+        let mut v = view();
+        v.editor.set_text("alpha\nbeta\ngamma");
+        let frame = v.render_frame(80, 24);
+        let (row, col) = frame
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                let text = row_text(line);
+                let col = text.find("beta")?;
+                Some((row, col))
+            })
+            .expect("the editor renders its second line");
+        let target = v
+            .frame_click_target_at(row, col)
+            .expect("the editor content row carries a target");
+        assert!(
+            matches!(
+                target.action,
+                crate::click_regions::ClickAction::EditorCursor
+            ),
+            "the editor row targets caret placement"
+        );
+        // Click past the line's end: the caret lands at the chunk end.
+        v.place_editor_cursor_from_click(row - target.anchor, col - target.col + 9);
+        assert_eq!(
+            v.editor.get_cursor(),
+            (1, 4),
+            "the caret placed at the clicked line's end"
+        );
+        // A click on the first line's middle places the caret on that
+        // line, before the clicked grapheme's tail.
+        let (first_row, first_col) = frame
+            .iter()
+            .enumerate()
+            .find_map(|(row, line)| {
+                let text = row_text(line);
+                let col = text.find("alpha")?;
+                Some((row, col))
+            })
+            .expect("the editor renders its first line");
+        let first = v
+            .frame_click_target_at(first_row, first_col)
+            .expect("the first content row targets the editor");
+        v.place_editor_cursor_from_click(first_row - first.anchor, first_col - first.col + 3);
+        assert_eq!(
+            v.editor.get_cursor(),
+            (0, 3),
+            "the caret placed on the first line"
+        );
+    }
 }
 
 #[cfg(test)]

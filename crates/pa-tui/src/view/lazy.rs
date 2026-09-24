@@ -1,6 +1,6 @@
 //! Sparse fullscreen windows. Unknown global row totals are resolved only
 //! for callers that require absolute coordinates (selection and scroll info).
-use super::{layout::EntryLayout, AgentView};
+use super::{layout::EntryLayout, layout::TranscriptLayout, AgentView};
 use crate::chat::Detail;
 use crate::chrome::render_splash;
 use crate::Line;

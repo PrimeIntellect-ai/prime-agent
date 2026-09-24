@@ -439,7 +439,7 @@ mod tests {
         let mut bash = PaneBash::new_running("echo hi", true);
         bash.output = "hi\n".to_string();
         pane.bash = Some(bash);
-        let rows = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
+        let (rows, _) = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
         let text =
             |line: &crate::Line| -> String { line.iter().map(|s| s.content.as_str()).collect() };
         let joined: Vec<String> = rows.iter().map(&text).collect();
@@ -486,7 +486,7 @@ mod tests {
         let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::Color256);
         let mut pane = SideQuestionPane::default();
         pane.upsert(turn("a", "complete", "the answer"));
-        let rows = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
+        let (rows, _) = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
         let text =
             |line: &crate::Line| -> String { line.iter().map(|s| s.content.as_str()).collect() };
         let joined: Vec<String> = rows.iter().map(&text).collect();
@@ -501,7 +501,7 @@ mod tests {
             .any(|row| row.contains("reply to follow up · esc to return to session")));
         // A running turn swaps the hint.
         pane.upsert(turn("b", "running", ""));
-        let rows = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
+        let (rows, _) = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
         let joined: Vec<String> = rows.iter().map(&text).collect();
         assert!(joined
             .iter()
@@ -512,7 +512,7 @@ mod tests {
             answer: String::new(),
             ..turn("b", "cancelled", "")
         });
-        let rows = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
+        let (rows, _) = pane.render(&theme, 0, false, "Esc/Ctrl+C", 80);
         let joined: Vec<String> = rows.iter().map(&text).collect();
         assert!(joined.iter().any(|row| row.contains("Cancelled")));
     }

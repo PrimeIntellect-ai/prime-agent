@@ -122,7 +122,8 @@ mod tests {
     }
 
     fn base_rows(view: &mut AgentView) -> (Vec<Line>, usize) {
-        view.visible_transcript_window(100, 30)
+        let (rows, start, _) = view.visible_transcript_window(100, 30);
+        (rows, start)
     }
 
     /// The screen row holding a needle (screen geometry, not a guess):
