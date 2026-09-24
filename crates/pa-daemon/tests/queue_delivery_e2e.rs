@@ -851,7 +851,7 @@ fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
     let user_row = events
         .iter()
         .enumerate()
-        .find(|(index, event)| {
+        .find(|(_, event)| {
             event.get("type").and_then(Value::as_str) == Some("message_start")
                 && event["message"]["role"] == "user"
                 && event["message"]["content"]
