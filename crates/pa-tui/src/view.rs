@@ -3017,9 +3017,9 @@ mod tests {
             },
         ];
         let markers = [
-            "bash",        // the tool panel header (name + status)
-            "$ echo hi",   // the bash card's command header
-            "from parent", // the agent-message summary header
+            "bash",                   // the tool panel header (name + status)
+            "$ echo hi",              // the bash card's command header
+            "Agent message received", // the agent-message summary header
             "Background shell command finished",
             "[skill]",
             "Heartbeat prompt",
@@ -3054,7 +3054,12 @@ mod tests {
             started_at: Some(std::time::Instant::now()),
             ended_at: Some(std::time::Instant::now()),
             result: Some(ToolResultView {
-                content: vec![serde_json::json!({ "type": "text", "text": marker })],
+                // Four output lines with the marker last: the collapsed
+                // panel previews only the first three.
+                content: vec![serde_json::json!({
+                    "type": "text",
+                    "text": format!("preview line one\npreview line two\npreview line three\n{marker}")
+                })],
                 details: serde_json::Value::Null,
                 is_error: false,
             }),
@@ -3139,9 +3144,11 @@ mod tests {
             .iter()
             .position(|line| row_text(line).contains("docs"))
             .expect("the link label");
-        let link_col = 1 + row_text(&frame[link_row])
-            .find("docs")
-            .expect("the label column");
+        // The visible column of the label: the OSC 8 wrapper bytes ride in
+        // the span content, so the stripped row gives the column the hit
+        // test reasons in.
+        let stripped: String = crate::hyperlinks::strip_osc8_content(&row_text(&frame[link_row]));
+        let link_col = stripped.find("docs").expect("the label column");
         assert_eq!(
             v.frame_link_at(link_row, link_col).as_deref(),
             Some("https://example.com/docs")

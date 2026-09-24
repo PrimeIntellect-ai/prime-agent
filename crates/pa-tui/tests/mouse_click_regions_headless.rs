@@ -197,7 +197,9 @@ fn attach_data(id: &str) -> Value {
             "role": "toolResult",
             "toolCallId": "t1",
             "toolName": "bash",
-            "content": [{ "type": "text", "text": "OUTPUT-ONE" }],
+            // Four output lines, the marker last: the collapsed card
+            // previews only the first three.
+            "content": [{ "type": "text", "text": "one first\none second\none third\nOUTPUT-ONE" }],
             "isError": false,
         }),
         json!({
@@ -212,7 +214,7 @@ fn attach_data(id: &str) -> Value {
             "role": "toolResult",
             "toolCallId": "t2",
             "toolName": "bash",
-            "content": [{ "type": "text", "text": "OUTPUT-TWO" }],
+            "content": [{ "type": "text", "text": "two first\ntwo second\ntwo third\nOUTPUT-TWO" }],
             "isError": false,
         }),
         json!({
@@ -424,10 +426,13 @@ fn drags_and_modified_clicks_do_not_dispatch() {
 #[test]
 fn clicking_a_transcript_link_opens_it() {
     pa_tui::hyperlinks::set_hyperlinks_override(Some(true));
-    let probe = run_plan(vec![HeadlessStep::ScrollTop]);
-    let (_, link_row, link_col, _) = locate(&probe.0, "spec").expect("the link label renders");
+    // The link label rides the transcript tail - the default following
+    // window shows it without scrolling (the top window folds it under
+    // the fold).
+    let probe = run_plan(vec![]);
+    let (_, link_row, link_col, _) = locate(&probe.0, "spec")
+        .unwrap_or_else(|| panic!("the link label renders: {:#?}", probe.0));
     let opened = run_plan(vec![
-        HeadlessStep::ScrollTop,
         HeadlessStep::Mouse(press(link_col + 1, link_row + 1)),
         HeadlessStep::Mouse(release(link_col + 1, link_row + 1)),
     ]);
@@ -435,7 +440,10 @@ fn clicking_a_transcript_link_opens_it() {
     assert_eq!(
         opened.2,
         vec!["https://example.com/spec".to_string()],
-        "the clicked link opened"
+        "the clicked link opened (press at {}, release at {}): {:#?}",
+        press(link_col + 1, link_row + 1),
+        release(link_col + 1, link_row + 1),
+        opened.0
     );
 }
 
@@ -445,16 +453,18 @@ fn clicking_a_transcript_link_opens_it() {
 #[test]
 fn editor_click_places_the_caret() {
     let probe = run_plan(vec![
+        HeadlessStep::WaitMs(700),
         HeadlessStep::Type("hello world".to_string()),
         HeadlessStep::ScrollTop,
     ]);
-    let (_, editor_row, hello_col, _) =
-        locate(&probe.0, "hello world").expect("the editor renders the typed text");
+    let (_, editor_row, hello_col, _) = locate(&probe.0, "hello world")
+        .unwrap_or_else(|| panic!("the editor renders the typed text: {:#?}", probe.0));
     // Click between "hello" and " world": the needle sits at the text's
     // first column (the row's leading pad, `> ` prompt, and inner pad
     // precede it), so the caret's cell is five text columns in.
     let click_col = hello_col + 5;
     let clicked = run_plan(vec![
+        HeadlessStep::WaitMs(700),
         HeadlessStep::Type("hello world".to_string()),
         HeadlessStep::ScrollTop,
         HeadlessStep::Mouse(press(click_col, editor_row + 1)),

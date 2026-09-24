@@ -686,19 +686,20 @@ fn render_inline_ctx(text: &str, style: &MarkdownStyle, in_link: bool) -> Line {
                     for s in label_spans.iter_mut() {
                         s.style = s.style.add_modifier(m);
                     }
-                    if crate::hyperlinks::hyperlinks_enabled() {
-                        // OSC 8: the label is clickable, the URL never
-                        // printed inline (TS `hyperlink()`).
-                        let open = crate::hyperlinks::osc8_open(&href);
-                        if let Some(first) = label_spans.first_mut() {
-                            first.content.insert_str(0, &open);
-                        }
-                        if let Some(last) = label_spans.last_mut() {
-                            last.content.push_str(crate::hyperlinks::OSC8_CLOSE);
-                        }
-                        spans.extend(label_spans);
-                    } else {
-                        spans.extend(label_spans);
+                    // The label always carries the OSC 8 hyperlink (TS
+                    // #2430 wraps it in both capability paths — the app's
+                    // own click-open handles it even where the terminal
+                    // ignores the sequence); the capability only decides
+                    // whether the URL prints inline after the text.
+                    let open = crate::hyperlinks::osc8_open(&href);
+                    if let Some(first) = label_spans.first_mut() {
+                        first.content.insert_str(0, &open);
+                    }
+                    if let Some(last) = label_spans.last_mut() {
+                        last.content.push_str(crate::hyperlinks::OSC8_CLOSE);
+                    }
+                    spans.extend(label_spans);
+                    if !crate::hyperlinks::hyperlinks_enabled() {
                         // Legacy form: the URL shows after the text unless
                         // the label is the URL (mailto stripped for the
                         // comparison, like autolinked emails).
