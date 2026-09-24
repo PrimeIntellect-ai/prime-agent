@@ -3,10 +3,13 @@ use super::*;
 /// The attribution fold survives the windowed fast open on both sides of
 /// the compaction boundary: an in-window attribution folds into its
 /// retained assistant row, an attribution targeting a discarded-prefix
-/// assistant lands in the older-path stats (the pa-core walk folds the
-/// aggregate), and the windowed store's `session_stats` equals the full
-/// open's — the cumulative totals never lose or double-count the
-/// attributed child spend on either path.
+/// assistant folds into that raw row too (the fold runs on every read;
+/// the windowed store never loads the row). The windowed store's
+/// `session_stats` equals the full open's — the ACTIVE totals (TS
+/// `buildSessionContext` cuts `state.messages` at the compaction, so
+/// pre-cut spend — own or attributed — stays out; the discarded prefix's
+/// folded aggregate survives only on the whole-file surfaces), never
+/// losing or double-counting the attributed child spend on either path.
 #[test]
 fn windowed_open_folds_attributions_on_both_sides_of_the_boundary() {
     let dir = tempfile::tempdir().unwrap();
@@ -68,20 +71,31 @@ fn windowed_open_folds_attributions_on_both_sides_of_the_boundary() {
         windowed.entry(&kept_assistant).unwrap().fields["message"]["usage"]["input"],
         json!(10)
     );
+    // The pre-cut target's fold also rides its raw row (the fold runs on
+    // every read, either side of the boundary), and the windowed store
+    // never loads that row — the discarded prefix stays discarded.
     let full = SessionFile::open(&path).unwrap();
-    // Windowed and full opens agree on the cumulative stats: the
-    // in-window attribution rides the folded rows, the discarded-prefix
-    // attribution rides `older_path_stats`, and neither path loses or
-    // double-counts the attributed spend.
+    assert_eq!(
+        full.entry(&old).unwrap().fields["message"]["usage"]["input"],
+        json!(150)
+    );
+    assert!(windowed.entry(&old).is_none());
+    // Windowed and full opens agree on the ACTIVE stats: TS
+    // `buildSessionContext` cuts `state.messages` at the compaction
+    // boundary, so the pre-cut ancestry — including its attribution-folded
+    // aggregate — is spend the active stats must not report; the in-window
+    // attribution rides the folded rows, and neither path loses or
+    // double-counts the attributed spend. (The pre-cut fold survives on
+    // the whole-file surfaces — the saved rows, `/context`.)
     assert_eq!(
         crate::session_stats::session_stats(&windowed, None),
         crate::session_stats::session_stats(&full, None)
     );
     let stats = crate::session_stats::session_stats(&full, None);
-    assert_eq!(stats["tokens"]["input"], json!(160));
-    assert_eq!(stats["tokens"]["output"], json!(18));
-    assert_eq!(stats["tokens"]["cacheRead"], json!(5));
-    assert_eq!(stats["cost"].as_f64(), Some(0.195));
+    assert_eq!(stats["tokens"]["input"], json!(10));
+    assert_eq!(stats["tokens"]["output"], json!(3));
+    assert_eq!(stats["tokens"]["cacheRead"], json!(0));
+    assert_eq!(stats["cost"].as_f64(), Some(0.03));
 }
 
 #[test]
