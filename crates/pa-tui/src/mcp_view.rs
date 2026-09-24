@@ -161,8 +161,7 @@ impl McpServiceRow {
 
     /// The trailing status text (TS `statusText`, catalog mode): the honest
     /// state vocabulary, with the record-carried tool count on connected
-    /// rows (the live kernel listing is gone with it — the picker opens
-    /// from local state, like TS).
+    /// rows (the picker reads local state only, like TS).
     fn status_text(&self) -> (ThemeColor, String) {
         if self.login_pending {
             return (ThemeColor::Warning, "Login in progress".to_string());
@@ -212,6 +211,28 @@ impl McpServiceRow {
         } else {
             self.description.clone().or_else(|| self.setup_hint.clone())
         }
+    }
+
+    /// The rendered row's primary line (TS `MenuRow` primary: the
+    /// label alone, flattened).
+    fn primary_line(&self) -> String {
+        flatten_to_single_line(&self.label)
+    }
+
+    /// The Enter action for the hint line (TS `actionText`).
+    fn action_hint(&self) -> &'static str {
+        self.action_text()
+    }
+
+    /// The action target (the service id).
+    fn target(&self) -> &str {
+        self.service_id.as_str()
+    }
+
+    /// The paste-panel decision (TS: a requires-setup token service with
+    /// exactly one credential and no installed account).
+    fn wants_paste(&self) -> bool {
+        self.paste_token && self.connection_ids.is_empty()
     }
 
     /// The Enter action hint (TS `actionText`, catalog mode, in the TS
@@ -390,68 +411,13 @@ pub enum McpViewAction {
     None,
 }
 
-/// One rendered row: a resolved service card (the catalog's card for
-/// every catalog service and user-declared server).
-#[derive(Debug, Clone)]
-enum ViewRow {
-    Service(McpServiceRow),
-}
-
-impl ViewRow {
-    fn primary_line(&self) -> String {
-        match self {
-            // TS `MenuRow` primary: the label alone (flattened).
-            ViewRow::Service(service) => flatten_to_single_line(&service.label),
-        }
-    }
-
-    /// The Enter action for the hint line (TS `actionText`).
-    fn action_hint(&self) -> &'static str {
-        match self {
-            ViewRow::Service(service) => service.action_text(),
-        }
-    }
-
-    /// The action target (the service id).
-    fn target(&self) -> &str {
-        match self {
-            ViewRow::Service(service) => service.service_id.as_str(),
-        }
-    }
-
-    /// The paste-panel decision (TS: a requires-setup token service with
-    /// exactly one credential and no installed account).
-    fn wants_paste(&self) -> bool {
-        matches!(self, ViewRow::Service(service)
-            if service.paste_token && service.connection_ids.is_empty())
-    }
-
-    /// The trailing status cell (TS `statusText`, catalog mode).
-    fn status_text(&self) -> (ThemeColor, String) {
-        match self {
-            ViewRow::Service(service) => service.status_text(),
-        }
-    }
-
-    /// The ONE fixed detail line (TS `secondaryText ?? statusText`).
-    fn detail_text(&self) -> Option<String> {
-        match self {
-            ViewRow::Service(service) => Some(
-                service
-                    .detail_text()
-                    .unwrap_or_else(|| service.status_text().1),
-            ),
-        }
-    }
-}
-
 /// The `/mcp` service-catalog view: the resolved catalog's cards (the
 /// TS `ServiceCatalogPickerComponent`'s catalog surface — every resolved
 /// service plus user-declared servers, connected-first) with the TS
 /// picker's search bands and one fixed detail line.
 #[derive(Debug)]
 pub struct McpView {
-    rows: Vec<ViewRow>,
+    rows: Vec<McpServiceRow>,
     search: SearchInput,
     filtered: Vec<usize>,
     selected: usize,
@@ -466,14 +432,13 @@ impl McpView {
     /// carries no live tool listing — the picker opens from this local
     /// state exactly like TS, so the open is instant.
     pub fn from_response(data: &Value, viewport_rows: usize) -> Self {
-        let rows: Vec<ViewRow> = data
+        let rows: Vec<McpServiceRow> = data
             .get("services")
             .and_then(Value::as_array)
             .map(|entries| {
                 entries
                     .iter()
                     .filter_map(McpServiceRow::from_value)
-                    .map(ViewRow::Service)
                     .collect()
             })
             .unwrap_or_default();
@@ -494,7 +459,7 @@ impl McpView {
     pub fn selected_server(&self) -> Option<&str> {
         self.rows
             .get(*self.filtered.get(self.selected)?)
-            .map(ViewRow::target)
+            .map(McpServiceRow::target)
     }
 
     /// One key press (TS `ServiceCatalogPickerComponent.handleInput`):
@@ -649,7 +614,7 @@ impl McpView {
             .filtered
             .get(self.selected)
             .and_then(|index| self.rows.get(*index))
-            .map(ViewRow::action_hint);
+            .map(McpServiceRow::action_hint);
         lines.push(hint_line(theme, width, kb, action));
         lines
     }
@@ -721,7 +686,7 @@ impl McpView {
                 .enumerate()
                 .filter_map(|(index, row)| {
                     let score = match row {
-                        ViewRow::Service(service) => service_search_score(service, &trimmed),
+                        row => service_search_score(row, &trimmed),
                     }?;
                     Some((score, index))
                 })
@@ -808,8 +773,10 @@ fn trailing_menu_row(
 /// or the row's status when neither exists, muted and flattened to a
 /// single line. Never a growing block: the panel's height never changes
 /// to fit it (the list layout budgets the row).
-fn row_detail_line(theme: &Theme, width: usize, row: &ViewRow) -> Line {
-    let text = flatten_to_single_line(&row.detail_text().unwrap_or_default());
+fn row_detail_line(theme: &Theme, width: usize, row: &McpServiceRow) -> Line {
+    // TS `secondaryText ?? statusText`: the ONE fixed detail line falls
+    // back to the row's status when the entry carries no copy.
+    let text = flatten_to_single_line(&row.detail_text().unwrap_or_else(|| row.status_text().1));
     let line = vec![theme.fg_span(ThemeColor::Muted, format!(" {text}"))];
     let line = crate::width::truncate_line(&line, width, "\u{2026}");
     let used = crate::width::spans_width(&line);
@@ -1207,7 +1174,7 @@ mod tests {
             view.rows
                 .iter()
                 .find_map(|row| match row {
-                    ViewRow::Service(service) if service.service_id == id => Some(service),
+                    service if service.service_id == id => Some(service),
                     _ => None,
                 })
                 .expect("row")

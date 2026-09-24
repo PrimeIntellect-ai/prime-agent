@@ -2,13 +2,9 @@
 //! and the resolved service catalog the interactive client's `/mcp`
 //! view renders — every configured connection (built-in catalog plus
 //! user-declared servers) with its connected state, and the
-//! service-catalog cards over the same fresh state (the TS picker builds
-//! both from local reads on every open). Never a kernel round-trip: the
-//! live per-server tool listing that used to run here opened every
-//! connected server inside the request and stalled the picker for
-//! seconds (the session-build wait plus the per-server handshake budget),
-//! freezing the TUI; the TS picker shows the record-carried tool count
-//! instead and so does the Rust view.
+//! service-catalog cards over the same fresh local state (the TS picker
+//! builds both from local reads on every open, never a kernel
+//! round-trip; connected rows carry their record-held tool count).
 
 use serde_json::{json, Value};
 

@@ -17,19 +17,17 @@ use crate::{Line, Span};
 /// The field prompt (TS `Input` renders `"> "`).
 const FIELD_PROMPT: &str = "> ";
 
-/// One right-aligned trailing segment of a menu row: `text` joined into the
-/// row's trailing cluster, colored by the theme when the surface carries a
-/// status vocabulary (mcp connection states), muted otherwise.
+/// One right-aligned trailing segment of a menu row: `text` joined into
+/// the row's trailing cluster, muted (the TS `MenuRow` inline trailing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MenuSegment<'a> {
     pub text: &'a str,
-    pub color: Option<ThemeColor>,
 }
 
 impl<'a> MenuSegment<'a> {
     /// A muted segment (the TS `MenuRow` inline trailing).
     pub fn muted(text: &'a str) -> Self {
-        Self { text, color: None }
+        Self { text }
     }
 }
 
@@ -90,10 +88,7 @@ pub(crate) fn trailing_spans(
         if index > 0 {
             line.push(theme.fg_span(ThemeColor::Muted, " \u{b7} ".to_string()));
         }
-        match segment.color {
-            Some(color) => line.push(theme.fg_span(color, segment.text)),
-            None => line.push(theme.fg_span(ThemeColor::Muted, segment.text)),
-        }
+        line.push(theme.fg_span(ThemeColor::Muted, segment.text));
     }
     truncate_line(&line, budget, "\u{2026}")
 }
