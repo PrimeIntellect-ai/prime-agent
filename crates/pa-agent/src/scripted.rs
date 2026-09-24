@@ -382,7 +382,7 @@ pub fn tool_call_turn_steps(
     let mut steps = vec![ScriptStep::Event(Box::new(AssistantMessageEvent::Start {
         partial: base.clone(),
     }))];
-    let mut partial = base.clone();
+    let mut partial = base;
     let mut content_index = 0usize;
     if let Some(text) = text {
         steps.extend(text_delta_steps(&partial, 0, text));
@@ -443,7 +443,7 @@ pub fn stream_failure_steps(
         partial: base.clone(),
     }))];
     steps.extend(text_delta_steps(&base, 0, partial_text));
-    let mut error_message_partial = base.clone();
+    let mut error_message_partial = base;
     error_message_partial
         .content
         .push(AssistantContent::Text(TextContent {
