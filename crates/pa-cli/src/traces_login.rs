@@ -566,9 +566,14 @@ mod tests {
             ))
         );
         let (progress, _auth, prompts) = ui.logs();
+        // The browser flow starts (its no-cli progress line lands) before
+        // the pasted key overtakes it — both TS dialog progress lines.
         assert_eq!(
             progress,
-            vec!["Checking Prime Agent trace access...".to_string()]
+            vec![
+                "No Prime CLI API key found. Starting browser login...".to_string(),
+                "Checking Prime Agent trace access...".to_string(),
+            ]
         );
         // The prompt is the TS browser companion text.
         assert_eq!(prompts, vec![BROWSER_PROMPT.to_string()]);
