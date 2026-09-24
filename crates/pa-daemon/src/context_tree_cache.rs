@@ -164,14 +164,19 @@ impl ContextTreeCache {
                 return;
             }
         }
-        let Ok(guard) = self.refresh.try_lock() else {
-            return;
-        };
         let cache = Arc::clone(self);
         tokio::spawn(async move {
             // No session yet (the create path warms before the store
             // lands): nothing to walk, the next read re-arms.
             let Some(session_id) = session_id else {
+                return;
+            };
+            // Single flight: the guard is taken inside the task, against
+            // the owned cache clone (a guard on `self` cannot outlive
+            // this method's borrow); while one walk is in progress a
+            // poke's task takes nothing and returns, and the in-flight
+            // walk stores a newer snapshot than any poke could.
+            let Ok(_guard) = cache.refresh.try_lock() else {
                 return;
             };
             let snapshots = engine.rlm_child_snapshots().await;
@@ -207,7 +212,8 @@ impl ContextTreeCache {
                     eprintln!("context tree walk join failed: {error:#}");
                 }
             }
-            drop(guard);
+            // The single-flight guard drops with the task, releasing the
+            // next poke's walk.
         });
     }
 }
