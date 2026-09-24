@@ -10,7 +10,7 @@
 //! fix this measurement grounds.
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -482,8 +482,8 @@ fn mega_session_threshold_compaction_phase_measurement() {
     });
     let summary_path = dir.path().join("mega-measurement.json");
     std::fs::write(&summary_path, summary.to_string()).expect("write summary");
-    println!("summary written: {summary_path}");
-    println!("trace file: {trace_path}");
+    println!("summary written: {}", summary_path.display());
+    println!("trace file: {}", trace_path.display());
     // The driver's artifact dir (the tempdir dies with the test): copy the
     // trace + summary out when the harness asks for it.
     if let Ok(out_dir) = std::env::var("PA_MEGA_OUT_DIR") {
