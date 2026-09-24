@@ -110,6 +110,11 @@ pub(crate) struct SessionWindow {
     thinking_level: String,
     service_tier: Option<pa_types::ai::ServiceTier>,
     retained_ids: std::collections::HashSet<String>,
+    /// The discarded prefix's on-chain spend (attribution-folded — the
+    /// window walk's older-path stats): the active stats add it when no
+    /// compaction bounds the region (the prefix rows are in the kept
+    /// region then — a window is a load optimization, not session state).
+    pub(crate) older_path_stats: pa_core::session::window::WindowStats,
 }
 
 pub fn session_file_name(session_id: &str) -> String {
@@ -308,6 +313,7 @@ impl SessionFile {
                         .map(|entry| entry.id)
                 })
                 .collect(),
+            older_path_stats: window.older_path_stats().clone(),
         });
         Ok(file)
     }

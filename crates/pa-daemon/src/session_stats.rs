@@ -39,7 +39,7 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
         .filter(|entry| entry.type_ == "message")
         .filter_map(|entry| entry.fields.get("message"))
         .collect();
-    let durable_messages = kept_region_messages(store);
+    let (durable_messages, boundary) = kept_region_messages(store);
     let mut user_messages = 0u64;
     let mut assistant_messages = 0u64;
     let mut tool_results = 0u64;
@@ -83,7 +83,32 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
             _ => {}
         }
     }
-    let total_messages = durable_messages.len() as u64;
+    // A windowed store never loads the discarded prefix, but without a
+    // compaction boundary the kept region covers the whole chain: TS
+    // `getSessionStats` sums `state.messages`, which still holds those
+    // rows — the window is a load optimization, not a session state, so
+    // the active totals must equal the full store's walk. The window
+    // walk's older-path stats carry exactly the discarded prefix's
+    // on-chain spend (attribution-folded). With a boundary, the retained
+    // region IS the kept region: the discarded prefix is pre-cut
+    // ancestry TS drops, and nothing is added.
+    let mut older_total_messages = 0u64;
+    if boundary.is_none() {
+        if let Some(window) = &store.window {
+            let older = &window.older_path_stats;
+            user_messages += older.user_messages;
+            assistant_messages += older.assistant_messages;
+            tool_results += older.tool_results;
+            tool_calls += older.tool_calls;
+            input += older.input;
+            output += older.output;
+            cache_read += older.cache_read;
+            cache_write += older.cache_write;
+            cost += older.cost;
+            older_total_messages = older.total_messages;
+        }
+    }
+    let total_messages = durable_messages.len() as u64 + older_total_messages;
     let mut stats = json!({
         "sessionFile": store.path.display().to_string(),
         "sessionId": store.session_id(),
@@ -118,7 +143,9 @@ pub fn session_stats(store: &SessionFile, context_window: Option<u64>) -> Value 
 /// compaction sitting off the active branch (one written on the branch
 /// that was moved away from) never bounds the active list, exactly like
 /// the TS path walk that only sees its own ancestry's compaction.
-fn kept_region_messages(store: &SessionFile) -> Vec<&Value> {
+/// Returns the kept-region messages and the boundary position (`None`
+/// without a chain compaction — the whole chain is kept).
+fn kept_region_messages(store: &SessionFile) -> (Vec<&Value>, Option<usize>) {
     let entries = store.entries();
     let chain = store.branch_bridged_positions();
     // The latest compaction ON THE CHAIN bounds the kept region (TS
@@ -137,9 +164,9 @@ fn kept_region_messages(store: &SessionFile) -> Vec<&Value> {
                 .get("firstKeptEntryId")
                 .and_then(Value::as_str)
                 .and_then(|id| chain.iter().find(|position| entries[**position].id == id))
-                .unwrap_or(compaction)
+                .unwrap_or(*compaction)
         });
-    chain
+    let messages = chain
         .iter()
         .filter(|position| match boundary {
             Some(boundary) => **position >= *boundary,
@@ -147,7 +174,8 @@ fn kept_region_messages(store: &SessionFile) -> Vec<&Value> {
         })
         .filter(|position| entries[**position].type_ == "message")
         .filter_map(|position| entries[*position].fields.get("message"))
-        .collect()
+        .collect();
+    (messages, boundary)
 }
 
 /// `contextUsage` for one whole store (the `get_context_tree` root node):
@@ -518,10 +546,15 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("windowed-boundary.jsonl");
         let usage = |input: u64, output: u64, cache_read: u64, total: u64, cost: f64| {
+            // The full `UsageCost` shape: the typed `FileEntry::Compaction`
+            // payload parses `usage` (the fixture's rows must deserialize
+            // in the window walk), and the cost struct requires every
+            // field — a bare `{ "total": ... }` fails the payload parse and
+            // the boundary never forms.
             json!({
                 "input": input, "output": output, "cacheRead": cache_read,
                 "cacheWrite": 0, "totalTokens": total,
-                "cost": { "total": cost },
+                "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": cost },
             })
         };
         let row = |id: &str, parent: Option<&str>, value: Value| {
