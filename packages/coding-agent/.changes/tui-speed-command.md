@@ -1,1 +1,0 @@
-- Added the `/speed [on|off]` session command: toggles a compact footer readout of model output tok/sec (latest response plus session average), computed from existing stream events with no provider protocol changes.

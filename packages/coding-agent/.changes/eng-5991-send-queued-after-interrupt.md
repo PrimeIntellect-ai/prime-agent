@@ -1,1 +1,0 @@
-- Fixed Escape and Ctrl+C while steering messages are queued: the active run aborts and all queued user steering messages now start together in one new agent turn, preserving order and consuming the queue; an empty queue stays abort-only and the steering mode setting is unchanged.

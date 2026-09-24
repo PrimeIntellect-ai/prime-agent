@@ -1,1 +1,0 @@
-- Fixed paste-a-key connection outcomes rendering as a malformed-message error, named the service instead of the picked row, told rejected tokens how to recover, and tightened the accounts menu spacing and selection bar.

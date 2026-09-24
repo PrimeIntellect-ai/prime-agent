@@ -1,1 +1,0 @@
-- Removed the provider-side Prime Inference team lookup: `X-Prime-Team-ID` now comes only from the caller, so a request with no team header no longer picks up `PRIME_TEAM_ID` or `team_id` from the Prime CLI profile (`~/.prime/config.json`).

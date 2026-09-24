@@ -1,1 +1,0 @@
-- Context-tree rebuilds (top-bar cost refresh, /context) now reuse a per-file parse cache keyed by file size and mtime instead of re-reading every finished child session on each refresh.
