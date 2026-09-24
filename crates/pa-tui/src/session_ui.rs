@@ -56,11 +56,6 @@ const SELECTION_AUTO_SCROLL_DELAY: Duration = Duration::from_millis(150);
 /// never blocks on these — aborts are fire-and-forget, submissions resolve
 /// off the render path).
 const UI_REQUEST_TIMEOUT_MS: u64 = 10_000;
-/// The budget a selection cut/copy gets off the UI dispatch path: the
-/// platform clipboard tools are child processes, and a stalled
-/// xclip/wl-copy/pbcopy must never freeze the prompt (the TS
-/// `execSyncHidden` clipboard budget is the same shape).
-const UI_CLIPBOARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// How long a fetched model catalog stays fresh (TS
 /// `MODEL_CATALOG_REFRESH_TTL_MS`); a `/model` open past it refreshes
@@ -7450,52 +7445,43 @@ impl SessionUi {
                     }
                 }
                 crate::editor::EditorEvent::ClipboardWrite(text) => {
-                    // A selection cut/copy: the same copy chain as `/copy`
-                    // (platform tools, then OSC 52 for remote sessions).
-                    // On a live terminal the chain runs OFF the UI dispatch
-                    // path with a bounded budget: the platform tools are
-                    // child processes whose `wait()` has no timeout of
-                    // its own, and a stalled xclip/wl-copy/pbcopy must
-                    // never freeze the prompt. The toast lands immediately
-                    // (the copy is fire-and-forget); a failure reports
-                    // through the notes channel, like the side-question
-                    // abort path. A headless run has no stalling children
-                    // (the tools fail to spawn instantly), so it keeps
-                    // the synchronous path and its captured OSC sink
-                    // stays verifiable.
+                    // A selection cut/copy. On a live terminal it takes
+                    // TS `copySelection`'s shape exactly: the OSC 52
+                    // sequence goes straight to the terminal (it works
+                    // locally, over SSH, and through tmux
+                    // `set-clipboard`), the same write the mouse
+                    // selection's `copy_selection` below performs. The
+                    // platform-tool chain (child processes whose
+                    // `wait()` has no timeout) never runs on this path:
+                    // a stalled xclip/wl-copy/pbcopy can neither freeze
+                    // the prompt nor leak an unkillable blocking task,
+                    // and no background task accumulates. The toast is
+                    // success-only; a failed write shows the error row.
+                    // A headless run has no terminal to write to and no
+                    // stalling children (the tools fail to spawn
+                    // instantly), so it keeps the synchronous platform
+                    // chain and its captured OSC sink stays verifiable.
                     if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-                        let mut sink = std::mem::replace(
-                            &mut self.osc_sink,
-                            crate::clipboard::OscSink::Stdout,
-                        );
-                        let notes = self.notes.clone();
-                        tokio::spawn(async move {
-                            let outcome = tokio::time::timeout(
-                                UI_CLIPBOARD_TIMEOUT,
-                                tokio::task::spawn_blocking(move || {
-                                    crate::clipboard::copy_to_clipboard(&text, &mut sink)
-                                }),
-                            )
-                            .await;
-                            let failed = match outcome {
-                                Ok(Ok(Ok(()))) => None,
-                                Ok(Ok(Err(message))) => Some(message),
-                                Ok(Err(join_error)) => {
-                                    Some(format!("the clipboard copy join failed: {join_error:#}"))
-                                }
-                                Err(_) => Some("the clipboard copy timed out".to_string()),
-                            };
-                            if let Some(message) = failed {
-                                let _ = notes.send(message);
+                        use base64::Engine;
+                        use std::io::Write;
+                        let encoded =
+                            base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+                        let mut out = std::io::stdout();
+                        match out.write_all(format!("\x1b]52;c;{encoded}\x07").as_bytes()) {
+                            Ok(()) => {
+                                let _ = out.flush();
+                                self.toast("Copied selection to clipboard", view);
                             }
-                        });
+                            Err(error) => {
+                                self.error_row(&format!("Failed to copy selection: {error}"), view);
+                            }
+                        }
                     } else {
                         match crate::clipboard::copy_to_clipboard(&text, &mut self.osc_sink) {
-                            Ok(()) => {}
+                            Ok(()) => self.toast("Copied selection to clipboard", view),
                             Err(message) => self.error_row(&message, view),
                         }
                     }
-                    self.toast("Copied selection to clipboard", view);
                 }
                 _ => {}
             }
