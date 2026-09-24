@@ -1,16 +1,16 @@
 # Codebase-health report: the max-LOC soft ratchet (AGENTS.md).
 #
 # Whole-file line counts of tracked Rust files against scripts/loc-baseline.json:
-# new files are compared to the 300-line default ceiling and files frozen in the
+# new files are compared to the 400-line default ceiling and files frozen in the
 # baseline can only shrink. The check REPORTS and never blocks the build: it
 # emits per-file PR annotations for over-ceiling files and unrecorded ratchet
 # wins (plus a job summary), so reviewers see the size signal at review time -
 # the humans and agents decide what to do. `--update-baseline` records wins and
 # never raises a ceiling. Local mirror: `make loc`.
 #
-# The ceiling is guidance grounded in the exemplar file-size distributions
-# (gitoxide p75=301, redis median=252, kernel median=357; our own p50=386 already
-# sits above it) - see the PR body for the derivation. It exists so the port
+# The ceiling is guidance set at 400 lines (operator ruling: 300 sat below the
+# repo's own median file, 386; 400 clears the typical file and sits under the
+# exemplar tail, tokio p90=539) - see the PR body for the derivation. It exists so the port
 # does not repeat the TS repo's giant-file failure mode (files that accrete
 # features until they are unreviewable): the 2026-09-24 tip already holds
 # worker.rs 10,992 / agent_engine.rs 9,838 / session_ui.rs 9,442 lines.

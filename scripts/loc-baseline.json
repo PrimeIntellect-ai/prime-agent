@@ -1,13 +1,9 @@
 {
- "default_ceiling": 300,
- "note": "Max-LOC guidance baseline (soft ratchet: the check reports, it does not block). Default ceiling 300 whole-file lines, derived from the exemplar file-size distributions (research 2026-09-24: gitoxide p75=301, redis median=252, kernel median=357, tokio p90=539; our own p50=386 already sits above it). Measured 2026-09-24 from the rust tip at landing, d8bb6c57b. Every tracked .rs file above the default ceiling is frozen at its measured whole-file line count; frozen ceilings only go down - a PR that shrinks a frozen file records the win with scripts/check_loc.py --update-baseline (the check reports unrecorded wins; recording keeps the ratchet tight). New files are held to default_ceiling in review; a justified loc-baseline.json entry with a reason exempts a file.",
+ "default_ceiling": 400,
+ "note": "Max-LOC guidance baseline (soft ratchet: the check reports, it does not block). Default ceiling 400 whole-file lines (operator ruling 2026-09-24): 300 sat below the repo's own median file (386 lines), putting a majority of ordinary files on the ledger from day one - the ceiling should bite the accretion trend, not the median contributor; 400 clears the typical file while sitting well under the original 500 and under the exemplar tail (tokio p90=539; gitoxide p75=301, redis median=252, kernel median=357 for reference). Measured 2026-09-24 from the rust tip at landing, d8bb6c57b. Every tracked .rs file above the default ceiling is frozen at its measured whole-file line count; frozen ceilings only go down - a PR that shrinks a frozen file records the win with scripts/check_loc.py --update-baseline (the check reports unrecorded wins; recording keeps the ratchet tight). New files are held to default_ceiling in review; a justified loc-baseline.json entry with a reason exempts a file.",
  "files": {
   "crates/pa-agent/src/agent.rs": {
    "ceiling": 1049,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-agent/src/agent_loop/tool_call.rs": {
-   "ceiling": 345,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-agent/src/proxy.rs": {
@@ -18,16 +14,8 @@
    "ceiling": 460,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-agent/src/stream.rs": {
-   "ceiling": 330,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-agent/src/types.rs": {
    "ceiling": 608,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-agent/src/validation.rs": {
-   "ceiling": 319,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-agent/tests/agent_loop_scripted.rs": {
@@ -36,10 +24,6 @@
   },
   "crates/pa-ai/src/event_stream.rs": {
    "ceiling": 411,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-ai/src/providers/anthropic/convert.rs": {
-   "ceiling": 322,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-ai/src/providers/anthropic/mod.rs": {
@@ -52,10 +36,6 @@
   },
   "crates/pa-ai/src/providers/azure_openai_responses.rs": {
    "ceiling": 515,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-ai/src/providers/bedrock/auth.rs": {
-   "ceiling": 334,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-ai/src/providers/bedrock/convert.rs": {
@@ -142,16 +122,8 @@
    "ceiling": 938,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-ai/src/providers/transform_messages.rs": {
-   "ceiling": 374,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-ai/src/stream.rs": {
    "ceiling": 430,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-ai/src/utils_inner/http.rs": {
-   "ceiling": 315,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-ai/src/utils_inner/json_parse.rs": {
@@ -166,32 +138,16 @@
    "ceiling": 668,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-cli/src/client_traces.rs": {
-   "ceiling": 386,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-cli/src/command_registry.rs": {
    "ceiling": 559,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-cli/src/daemon_client.rs": {
-   "ceiling": 370,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-cli/src/daemon_command.rs": {
    "ceiling": 704,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-cli/src/daemon_discovery/kill.rs": {
-   "ceiling": 382,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-cli/src/daemon_discovery/mod.rs": {
    "ceiling": 698,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-cli/src/daemon_discovery/plan.rs": {
-   "ceiling": 345,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-cli/src/daemon_discovery/scan.rs": {
@@ -208,10 +164,6 @@
   },
   "crates/pa-cli/src/interactive_mode.rs": {
    "ceiling": 1537,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-cli/src/lib.rs": {
-   "ceiling": 351,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-cli/src/mcp_command.rs": {
@@ -262,20 +214,12 @@
    "ceiling": 414,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-cli/src/update_flow/status.rs": {
-   "ceiling": 322,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-cli/src/update_flow/update_command.rs": {
    "ceiling": 563,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-cli/tests/acp_mode_e2e.rs": {
    "ceiling": 1487,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-cli/tests/agents_view_search_e2e.rs": {
-   "ceiling": 398,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-cli/tests/agents_view_subagents_e2e.rs": {
@@ -286,16 +230,8 @@
    "ceiling": 1469,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-cli/tests/continue_guard_e2e.rs": {
-   "ceiling": 375,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-cli/tests/daemon_commands_e2e.rs": {
    "ceiling": 970,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-cli/tests/daemon_discovery_e2e.rs": {
-   "ceiling": 354,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-cli/tests/differential_cli.rs": {
@@ -308,10 +244,6 @@
   },
   "crates/pa-cli/tests/export_live_differential.rs": {
    "ceiling": 463,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-cli/tests/export_share_e2e.rs": {
-   "ceiling": 391,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-cli/tests/interactive_daemon_e2e.rs": {
@@ -336,10 +268,6 @@
   },
   "crates/pa-cli/tests/subagent_panel_nav_e2e.rs": {
    "ceiling": 408,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-cli/tests/subagent_panel_nested_count_e2e.rs": {
-   "ceiling": 376,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-cli/tests/suspend_signal_e2e.rs": {
@@ -386,32 +314,12 @@
    "ceiling": 555,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-core/src/cron/store/state.rs": {
-   "ceiling": 369,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/src/export_html/ansi_to_html.rs": {
-   "ceiling": 321,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/src/export_html/mod.rs": {
-   "ceiling": 385,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-core/src/export_html/theme.rs": {
    "ceiling": 540,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-core/src/export_html/tool_render.rs": {
-   "ceiling": 343,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-core/src/extensions/client.rs": {
    "ceiling": 554,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/src/extensions/host.rs": {
-   "ceiling": 375,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-core/src/extensions/registry.rs": {
@@ -430,14 +338,6 @@
    "ceiling": 725,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-core/src/kernel/manager/repair.rs": {
-   "ceiling": 330,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/src/kernel/manager/requests.rs": {
-   "ceiling": 327,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-core/src/kernel/manager/startup.rs": {
    "ceiling": 478,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
@@ -452,10 +352,6 @@
   },
   "crates/pa-core/src/kernel/rlm_runtime.rs": {
    "ceiling": 447,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/src/kernel/shared.rs": {
-   "ceiling": 389,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-core/src/mcp/catalog_plugin_views.rs": {
@@ -498,10 +394,6 @@
    "ceiling": 715,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-core/src/mcp/service_catalog.rs": {
-   "ceiling": 341,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-core/src/models/custom.rs": {
    "ceiling": 517,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
@@ -510,20 +402,12 @@
    "ceiling": 418,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-core/src/models/private_auth.rs": {
-   "ceiling": 305,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-core/src/models/registry.rs": {
    "ceiling": 930,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-core/src/models/resolver.rs": {
    "ceiling": 931,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/src/packages/git.rs": {
-   "ceiling": 353,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-core/src/packages/manager.rs": {
@@ -538,10 +422,6 @@
    "ceiling": 420,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-core/src/packages/resolve/patterns.rs": {
-   "ceiling": 314,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-core/src/packages/resolve/tests.rs": {
    "ceiling": 1505,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
@@ -554,16 +434,8 @@
    "ceiling": 590,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-core/src/packages/tests.rs": {
-   "ceiling": 336,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-core/src/platform/lock_dir.rs": {
    "ceiling": 417,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/src/platform/process.rs": {
-   "ceiling": 333,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-core/src/prompts/system_prompt.rs": {
@@ -596,10 +468,6 @@
   },
   "crates/pa-core/src/session/manager.rs": {
    "ceiling": 2043,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/src/session/manager_ext.rs": {
-   "ceiling": 392,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-core/src/session/mod.rs": {
@@ -640,10 +508,6 @@
   },
   "crates/pa-core/src/session_engine/compaction_exec.rs": {
    "ceiling": 625,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/src/session_engine/compaction_utils.rs": {
-   "ceiling": 336,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-core/src/session_engine/engine.rs": {
@@ -706,10 +570,6 @@
    "ceiling": 429,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-core/src/session_engine/runtime_wiring.rs": {
-   "ceiling": 366,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-core/src/session_engine/session_commands.rs": {
    "ceiling": 575,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
@@ -728,18 +588,6 @@
   },
   "crates/pa-core/src/settings/manager.rs": {
    "ceiling": 995,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/src/settings/types.rs": {
-   "ceiling": 363,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/src/skills/discovery.rs": {
-   "ceiling": 361,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/src/skills/mod.rs": {
-   "ceiling": 398,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-core/src/skills/prompt_templates.rs": {
@@ -766,10 +614,6 @@
    "ceiling": 477,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-core/src/tools/edit.rs": {
-   "ceiling": 316,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-core/src/tools/edit_diff.rs": {
    "ceiling": 575,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
@@ -782,20 +626,8 @@
    "ceiling": 572,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-core/src/tools/jsdiff.rs": {
-   "ceiling": 309,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-core/src/tools/output_accumulator.rs": {
    "ceiling": 452,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/src/tools/render_utils.rs": {
-   "ceiling": 332,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/src/tools/truncate.rs": {
-   "ceiling": 397,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-core/src/update/download.rs": {
@@ -810,24 +642,12 @@
    "ceiling": 419,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-core/tests/extension_runner.rs": {
-   "ceiling": 373,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-core/tests/kernel_lifecycle.rs": {
    "ceiling": 419,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-core/tests/kernel_prewarm.rs": {
-   "ceiling": 317,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-core/tests/kernel_snapshot_resume.rs": {
    "ceiling": 434,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/tests/kernel_teardown.rs": {
-   "ceiling": 346,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-core/tests/live_catalog_chain.rs": {
@@ -836,10 +656,6 @@
   },
   "crates/pa-core/tests/prompt_guards.rs": {
    "ceiling": 492,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-core/tests/turn_boundary_kernel.rs": {
-   "ceiling": 337,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-daemon/src/acp/autorefine.rs": {
@@ -890,20 +706,12 @@
    "ceiling": 9838,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-daemon/src/agent_message_ingest.rs": {
-   "ceiling": 330,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-daemon/src/agent_messaging.rs": {
    "ceiling": 1653,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-daemon/src/agent_roster.rs": {
    "ceiling": 618,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-daemon/src/autonomous_continuation.rs": {
-   "ceiling": 362,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-daemon/src/boot_reap.rs": {
@@ -934,20 +742,8 @@
    "ceiling": 594,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-daemon/src/descriptor.rs": {
-   "ceiling": 352,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-daemon/src/engine.rs": {
    "ceiling": 1780,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-daemon/src/goal_continuation.rs": {
-   "ceiling": 388,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-daemon/src/goal_state_persist.rs": {
-   "ceiling": 301,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-daemon/src/hold_refusal.rs": {
@@ -976,10 +772,6 @@
   },
   "crates/pa-daemon/src/model_allowlist.rs": {
    "ceiling": 402,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-daemon/src/model_switch.rs": {
-   "ceiling": 398,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-daemon/src/overflow_compaction.rs": {
@@ -1014,10 +806,6 @@
    "ceiling": 643,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-daemon/src/revival_gate.rs": {
-   "ceiling": 386,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-daemon/src/rlm_child_model.rs": {
    "ceiling": 620,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
@@ -1032,10 +820,6 @@
   },
   "crates/pa-daemon/src/rlm_roster.rs": {
    "ceiling": 507,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-daemon/src/roster_activity.rs": {
-   "ceiling": 379,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-daemon/src/saved_session_commands.rs": {
@@ -1062,14 +846,6 @@
    "ceiling": 811,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-daemon/src/session_export.rs": {
-   "ceiling": 330,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-daemon/src/session_input_pause.rs": {
-   "ceiling": 371,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-daemon/src/session_navigation.rs": {
    "ceiling": 927,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
@@ -1080,10 +856,6 @@
   },
   "crates/pa-daemon/src/session_store.rs": {
    "ceiling": 2298,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-daemon/src/session_store_info_tests.rs": {
-   "ceiling": 327,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-daemon/src/session_tree.rs": {
@@ -1106,10 +878,6 @@
    "ceiling": 484,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-daemon/src/socket.rs": {
-   "ceiling": 371,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-daemon/src/state_getters.rs": {
    "ceiling": 1141,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
@@ -1120,10 +888,6 @@
   },
   "crates/pa-daemon/src/stop_cleanup.rs": {
    "ceiling": 978,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-daemon/src/streaming.rs": {
-   "ceiling": 309,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-daemon/src/supervisor.rs": {
@@ -1158,10 +922,6 @@
    "ceiling": 10992,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-daemon/tests/abort_kernel_e2e.rs": {
-   "ceiling": 345,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-daemon/tests/agent_family_e2e.rs": {
    "ceiling": 1177,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
@@ -1190,10 +950,6 @@
    "ceiling": 588,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-daemon/tests/create_join_e2e.rs": {
-   "ceiling": 320,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-daemon/tests/create_reuse_e2e.rs": {
    "ceiling": 555,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
@@ -1216,10 +972,6 @@
   },
   "crates/pa-daemon/tests/goal_recovery_e2e.rs": {
    "ceiling": 595,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-daemon/tests/hold_refusal_e2e.rs": {
-   "ceiling": 351,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-daemon/tests/import_compaction_e2e.rs": {
@@ -1266,10 +1018,6 @@
    "ceiling": 714,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-daemon/tests/recovery_control_plane_e2e.rs": {
-   "ceiling": 353,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-daemon/tests/replacement_kernel_e2e.rs": {
    "ceiling": 766,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
@@ -1300,10 +1048,6 @@
   },
   "crates/pa-daemon/tests/session_archive_e2e.rs": {
    "ceiling": 491,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-daemon/tests/session_rebind_e2e.rs": {
-   "ceiling": 337,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-daemon/tests/session_stop_lifecycle_e2e.rs": {
@@ -1346,16 +1090,8 @@
    "ceiling": 452,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-models/src/compat.rs": {
-   "ceiling": 307,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-models/src/prime_inference.rs": {
    "ceiling": 1169,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-models/src/schema.rs": {
-   "ceiling": 377,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-models/tests/refresh_compat.rs": {
@@ -1378,16 +1114,8 @@
    "ceiling": 1071,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-tui/src/app.rs": {
-   "ceiling": 335,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-tui/src/autocomplete.rs": {
    "ceiling": 1391,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-tui/src/bash_card.rs": {
-   "ceiling": 397,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-tui/src/bash_view.rs": {
@@ -1398,16 +1126,8 @@
    "ceiling": 1428,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-tui/src/chat_slash.rs": {
-   "ceiling": 318,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-tui/src/chrome.rs": {
    "ceiling": 911,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-tui/src/clipboard_image.rs": {
-   "ceiling": 370,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-tui/src/code_preview/bash.rs": {
@@ -1442,10 +1162,6 @@
    "ceiling": 502,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-tui/src/custom_message/refinement/render_oracle.rs": {
-   "ceiling": 303,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-tui/src/custom_message/render.rs": {
    "ceiling": 524,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
@@ -1470,32 +1186,16 @@
    "ceiling": 531,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-tui/src/editor/paste_tests.rs": {
-   "ceiling": 333,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-tui/src/editor/selection.rs": {
    "ceiling": 682,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-tui/src/editor/text_ops.rs": {
-   "ceiling": 376,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-tui/src/editor/wrap.rs": {
    "ceiling": 821,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-tui/src/enhanced_keys.rs": {
-   "ceiling": 385,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-tui/src/exit_guard.rs": {
    "ceiling": 401,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-tui/src/goal_surface.rs": {
-   "ceiling": 329,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-tui/src/heartbeats_picker.rs": {
@@ -1548,14 +1248,6 @@
   },
   "crates/pa-tui/src/model_picker/mod.rs": {
    "ceiling": 1448,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-tui/src/model_picker/render.rs": {
-   "ceiling": 332,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-tui/src/mouse.rs": {
-   "ceiling": 301,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-tui/src/onboarding.rs": {
@@ -1630,44 +1322,20 @@
    "ceiling": 483,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-tui/src/tool_card/ipython/output.rs": {
-   "ceiling": 367,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-tui/src/tool_card/ipython/tests.rs": {
    "ceiling": 406,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-tui/src/tool_card/ipython_details.rs": {
-   "ceiling": 352,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-tui/src/tool_card/mod.rs": {
-   "ceiling": 307,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-tui/src/traces.rs": {
    "ceiling": 683,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-tui/src/tree_display.rs": {
-   "ceiling": 388,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-tui/src/tree_list.rs": {
    "ceiling": 1418,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-tui/src/tree_selector.rs": {
-   "ceiling": 385,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-tui/src/view.rs": {
    "ceiling": 2701,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-tui/src/view/layout.rs": {
-   "ceiling": 367,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-tui/src/view/layout_tests.rs": {
@@ -1682,10 +1350,6 @@
    "ceiling": 698,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-tui/tests/agents_view_saved_catalog_failure.rs": {
-   "ceiling": 309,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-tui/tests/bash_bang_headless.rs": {
    "ceiling": 980,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
@@ -1694,36 +1358,12 @@
    "ceiling": 660,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-tui/tests/drag_select_perf.rs": {
-   "ceiling": 317,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-tui/tests/editor_keybinds_parity_headless.rs": {
-   "ceiling": 342,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-tui/tests/mouse_scroll_headless.rs": {
-   "ceiling": 394,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-tui/tests/mouse_selection_headless.rs": {
    "ceiling": 428,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-tui/tests/nightly_command_headless.rs": {
-   "ceiling": 398,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-tui/tests/plugins_command_headless.rs": {
-   "ceiling": 308,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-tui/tests/skills_menu_headless.rs": {
    "ceiling": 503,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-tui/tests/speed_footer_headless.rs": {
-   "ceiling": 371,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-tui/tests/tui_rss_stability.rs": {
@@ -1738,32 +1378,8 @@
    "ceiling": 1259,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-types/src/daemon/framing.rs": {
-   "ceiling": 307,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-types/src/daemon/outbound.rs": {
    "ceiling": 466,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-types/src/daemon/plane.rs": {
-   "ceiling": 305,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-types/src/daemon/update_flow/artifact.rs": {
-   "ceiling": 303,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-types/src/daemon/update_flow/marker.rs": {
-   "ceiling": 302,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-types/src/daemon/update_flow/roster.rs": {
-   "ceiling": 340,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-types/src/daemon/worker.rs": {
-   "ceiling": 342,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
   "crates/pa-types/src/extension_rpc.rs": {
@@ -1774,20 +1390,8 @@
    "ceiling": 557,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   },
-  "crates/pa-types/src/platform/transport.rs": {
-   "ceiling": 357,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-types/src/platform/windows_pipe.rs": {
-   "ceiling": 335,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
   "crates/pa-types/src/session.rs": {
    "ceiling": 755,
-   "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
-  },
-  "crates/pa-types/src/slash_commands.rs": {
-   "ceiling": 327,
    "reason": "frozen at the 2026-09-24 ratchet landing (tip d8bb6c57b); measure-zero starting point, split candidates ranked by size"
   }
  }
