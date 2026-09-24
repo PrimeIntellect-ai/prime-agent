@@ -61,6 +61,11 @@ jobs:
           key: ${{ matrix.target }}
       - name: Build (release, locked)
         run: cargo build --release --locked --target ${{ matrix.target }} -j 4
+      - name: Generate bundled catalog assets (fixture, offline-safe)
+        run: |
+          set -euo pipefail
+          python3 scripts/release/bundle_catalog.py generate --fixture \
+            --out "target/${{ matrix.target }}/catalog-assets"
       - name: Assemble tarball + checksums + manifest (commit-stamped)
         run: |
           set -euo pipefail
@@ -72,6 +77,7 @@ jobs:
             --target "${{ matrix.target }}" \
             --sha "${GITHUB_SHA}" \
             --binary "target/${{ matrix.target }}/release/prime-agent" \
+            --catalog-assets "target/${{ matrix.target }}/catalog-assets" \
             --out-dir "target/${{ matrix.target }}/dist"
           cat "target/${{ matrix.target }}/dist/manifest.json"
       - name: Upload artifacts
