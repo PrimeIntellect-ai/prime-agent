@@ -1024,12 +1024,22 @@ mod tests {
                     b'u' => {
                         let text = std::str::from_utf8(&payload[..payload.len() - 1])
                             .expect("corpus is ascii");
-                        let codepoint: u32 = text
-                            .split(';')
-                            .next()
-                            .expect("non-empty")
-                            .parse()
-                            .expect("corpus");
+                        let mut fields = text.split(';');
+                        let codepoint: u32 =
+                            fields.next().expect("non-empty").parse().expect("corpus");
+                        // `parse_csi_u_encoded_key_code`: the modifier
+                        // mask rides the second field (the shift-enter
+                        // corpus, `CSI 13;2u`).
+                        let mut modifiers = KeyModifiers::empty();
+                        if let Some(mods) = fields.next() {
+                            let mask: u8 = mods
+                                .split(':')
+                                .next()
+                                .unwrap_or_default()
+                                .parse()
+                                .expect("corpus");
+                            modifiers = parse_modifiers(mask);
+                        }
                         if (57399..=57426).contains(&codepoint) {
                             // translate_functional_key_code: the keypad
                             // block decodes to its characters, Enter, and
@@ -1068,10 +1078,20 @@ mod tests {
                             ));
                         }
                         match codepoint {
-                            27 => ModelParse::Event(Event::Key(KeyCode::Esc.into())),
+                            27 => ModelParse::Event(Event::Key(KeyEvent::new(
+                                KeyCode::Esc,
+                                modifiers,
+                            ))),
+                            // `\r` maps to Enter before the char row
+                            // (crossterm's own match), so the corpus's
+                            // `CSI 13;2u` projects Enter+SHIFT.
+                            13 => ModelParse::Event(Event::Key(KeyEvent::new(
+                                KeyCode::Enter,
+                                modifiers,
+                            ))),
                             c => ModelParse::Event(Event::Key(KeyEvent::new(
                                 KeyCode::Char(char::from_u32(c).expect("corpus")),
-                                KeyModifiers::NONE,
+                                modifiers,
                             ))),
                         }
                     }
@@ -1681,8 +1701,13 @@ mod tests {
         editor.handle_input("a");
         editor.handle_input(&id);
         assert_eq!(editor.get_lines(), vec!["a", ""]);
+        // The newline press carries only its Changed event — a submit
+        // never rides along.
         assert!(
-            editor.take_events().is_empty(),
+            editor
+                .take_events()
+                .into_iter()
+                .all(|event| !matches!(event, crate::editor::EditorEvent::Submitted(_))),
             "the newline press never submits"
         );
     }

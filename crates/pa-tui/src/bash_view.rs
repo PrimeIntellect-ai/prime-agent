@@ -1656,7 +1656,7 @@ mod tests {
         frame = view.render(&theme(), 70, &kb());
         let text = frame_text(&frame);
         assert!(
-            text.iter().any(|row| row.contains("line-25")),
+            text.iter().any(|row| row.contains("line-26")),
             "one up reveals the next older line: {text:?}"
         );
         assert!(

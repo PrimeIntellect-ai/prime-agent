@@ -1750,10 +1750,12 @@ mod tests {
             .map(|n| format!("word-{n:02}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let mut picker = HeartbeatsPicker::new(catalog, None, None, 20);
+        // The schedule pair (item 3) rides the block too, so the prompt
+        // needs one more row than the pre-batch fixture budgeted.
+        let mut picker = HeartbeatsPicker::new(catalog, None, None, 23);
         picker.handle_key("enter", &kb());
         let frame = picker.render(&theme(), 70, &kb());
-        assert!(frame.len() <= 20, "the drill-in fits: {}", frame.len());
+        assert!(frame.len() <= 23, "the drill-in fits: {}", frame.len());
         let text = frame_text(&frame);
         assert!(
             text.iter().any(|row| row.trim() == "…"),
@@ -1804,10 +1806,12 @@ mod tests {
             .map(|n| format!("word-{n:02}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let mut picker = HeartbeatsPicker::new(catalog, None, None, 19);
+        // The schedule pair (item 3) rides the block too, so the
+        // one-row prompt budget needs one more viewport row.
+        let mut picker = HeartbeatsPicker::new(catalog, None, None, 20);
         picker.handle_key("enter", &kb());
         let frame = picker.render(&theme(), 70, &kb());
-        assert!(frame.len() <= 19, "the drill-in fits: {}", frame.len());
+        assert!(frame.len() <= 20, "the drill-in fits: {}", frame.len());
         let text = frame_text(&frame);
         assert!(text.join(" ").contains("word-01"), "a prompt line renders");
         assert!(
