@@ -243,7 +243,7 @@ async fn post_restore_auto_snapshot_skips_until_a_real_cell_changes_the_namespac
 }
 
 #[tokio::test]
-async fn failed_restore_keeps_the_on_disk_payload_the_fresher_copy() {
+async fn failed_restore_keeps_the_on_disk_payload_through_the_debounced_snapshot() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let snapshot_path = snapshot_path_in(dir.path());
     let manifest_path = manifest_path_in(dir.path());
@@ -265,7 +265,10 @@ async fn failed_restore_keeps_the_on_disk_payload_the_fresher_copy() {
     );
 
     // Production order: a cell (here a plain pass instead of the full
-    // bootstrap), then the arm.
+    // bootstrap), then the arm. The first execute also reprovisions (the
+    // failed restore left pending_restore set): the re-attempt fails again,
+    // falls back to an empty namespace, and hands the flush duty back —
+    // which is exactly why the debounced snapshot needs its own guard.
     let pass = execute(&reader, "pass").await;
     assert_eq!(pass.status, ExecuteStatus::Ok);
     reader.mark_restored_namespace_fresh();
@@ -283,9 +286,34 @@ async fn failed_restore_keeps_the_on_disk_payload_the_fresher_copy() {
         "no manifest may be written for a skipped snapshot"
     );
 
-    // The dispose flush (snapshot: true shutdown) is guarded too: the
-    // namespace never got the saved state, so it must not overwrite it.
-    let _ = reader
+    let shutdown = reader.shutdown(KernelShutdownOptions::default()).await;
+    assert!(shutdown.is_ok());
+}
+
+#[tokio::test]
+async fn failed_restore_keeps_the_on_disk_payload_through_the_dispose_flush() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let snapshot_path = snapshot_path_in(dir.path());
+    let manifest_path = manifest_path_in(dir.path());
+    std::fs::write(&snapshot_path, b"not-a-snapshot").expect("write bad payload");
+
+    let Some(options) = test_options(Some(dir.path()), Some(50)) else {
+        return;
+    };
+    let manager = ReplKernelManager::new(options);
+    manager
+        .start(KernelStartOptions::default())
+        .await
+        .expect("kernel must start");
+    assert!(
+        manager.restore_state().await.is_none(),
+        "the unloadable payload must fail the restore"
+    );
+
+    // No cell runs between the failed restore and the dispose: the flush's
+    // pending_restore guard (armed by the failed restore itself) is the only
+    // thing standing between the skills-only namespace and the payload.
+    let _ = manager
         .shutdown(KernelShutdownOptions {
             snapshot: true,
             drain_host_requests: true,
