@@ -48,7 +48,6 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::ptr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -211,81 +210,26 @@ async fn stop_target(target: &ReapTarget) -> ReapOutcome {
     if !identity_current(target) || !crate::lease::is_process_alive(target.pid).unwrap_or(false) {
         return ReapOutcome::AlreadyGone;
     }
-    let Some(pidfd) = open_pidfd(target.pid) else {
+    let Some(pidfd) = pa_core::platform::process::open_pidfd(target.pid) else {
         // The kernel-held handle is unavailable (an unsupported platform
         // or a process that just exited): the conservative default never
         // signals - a missed reap is recoverable, a wrong one is not.
         return ReapOutcome::AlreadyGone;
     };
-    if pidfd_signal(&pidfd, pa_core::platform::process::Signal::Term) {
+    if pa_core::platform::process::pidfd_signal(pidfd, pa_core::platform::process::Signal::Term) {
         if await_gone(target, TERM_GRACE).await {
+            pa_core::platform::process::close_pidfd(pidfd);
             return ReapOutcome::Term;
         }
-        if pidfd_signal(&pidfd, pa_core::platform::process::Signal::Kill)
+        if pa_core::platform::process::pidfd_signal(pidfd, pa_core::platform::process::Signal::Kill)
             && await_gone(target, KILL_VERIFY).await
         {
+            pa_core::platform::process::close_pidfd(pidfd);
             return ReapOutcome::Kill;
         }
     }
+    pa_core::platform::process::close_pidfd(pidfd);
     ReapOutcome::Survived
-}
-
-/// The kernel-held process handle: `pidfd_open` pins the exact process
-/// behind the pid (a later `stop_target` signal reaches it even if the
-/// numeric pid is recycled the instant after). None when the platform
-/// has no pidfd or the process is already gone.
-#[cfg(target_os = "linux")]
-fn open_pidfd(pid: u32) -> Option<i32> {
-    // libc exports the syscall numbers for x86_64/aarch64 (the platforms
-    // this workspace ships); anything else answers None (the
-    // no-signal default).
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    {
-        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-        (fd >= 0).then(|| fd as i32)
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        let _ = pid;
-        None
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn open_pidfd(_pid: u32) -> Option<i32> {
-    None
-}
-
-/// Signal through the kernel-held handle (`pidfd_send_signal`): the
-/// signal reaches the pinned process and nothing else.
-#[cfg(target_os = "linux")]
-fn pidfd_signal(fd: &i32, signal: pa_core::platform::process::Signal) -> bool {
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    {
-        let signum = match signal {
-            pa_core::platform::process::Signal::Term => libc::SIGTERM,
-            pa_core::platform::process::Signal::Kill => libc::SIGKILL,
-        };
-        unsafe {
-            libc::syscall(
-                libc::SYS_pidfd_send_signal,
-                *fd,
-                signum,
-                ptr::null::<u8>(),
-                0,
-            ) == 0
-        }
-    }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-    {
-        let _ = (fd, signal);
-        false
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn pidfd_signal(_fd: &i32, _signal: pa_core::platform::process::Signal) -> bool {
-    false
 }
 
 /// Poll until the identity-gated pid is gone or the budget runs out.
@@ -749,7 +693,10 @@ mod tests {
             .expect("spawn sleep");
         let pid = child.id();
         #[cfg(target_os = "linux")]
-        assert!(open_pidfd(pid).is_some(), "the kernel-held handle opens");
+        assert!(
+            pa_core::platform::process::open_pidfd(pid).is_some(),
+            "the kernel-held handle opens"
+        );
         let outcome = stop_target(&target(pid)).await;
         let _ = child.wait();
         assert_eq!(outcome, ReapOutcome::Term, "sleep must exit on SIGTERM");
