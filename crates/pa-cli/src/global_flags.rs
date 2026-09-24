@@ -174,7 +174,7 @@ pub fn rotate_global_flags_before_command(
     let moved = &args[..positional.index];
     let rest = &args[positional.index + 1..];
     let separator_index = rest.iter().position(|arg| arg == "--");
-    let mut rotated = vec![positional.value.clone()];
+    let mut rotated = vec![positional.value];
     match separator_index {
         None => {
             rotated.extend(rest.iter().cloned());
@@ -221,7 +221,7 @@ mod tests {
     use super::*;
 
     fn args(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| s.to_string()).collect()
+        list.iter().map(std::string::ToString::to_string).collect()
     }
 
     fn sets() -> (HashSet<&'static str>, HashSet<&'static str>) {

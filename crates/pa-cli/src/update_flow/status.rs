@@ -148,7 +148,7 @@ impl StatusWriter {
     /// Refresh `updated_at`/`heartbeat_at` (every mutation and the heartbeat).
     fn touch(&mut self) {
         let now = crate::util_time::now_iso8601();
-        self.status.updated_at = now.clone();
+        self.status.updated_at.clone_from(&now);
         self.status.heartbeat_at = Some(now);
         self.status.epoch += 1;
     }
@@ -231,7 +231,7 @@ impl StatusHeartbeat {
                 ticker.tick().await;
                 let mut writer = writer.lock().await;
                 let now = crate::util_time::now_iso8601();
-                writer.status.updated_at = now.clone();
+                writer.status.updated_at.clone_from(&now);
                 writer.status.heartbeat_at = Some(now);
                 writer.status.epoch += 1;
                 let _ = writer.persist();

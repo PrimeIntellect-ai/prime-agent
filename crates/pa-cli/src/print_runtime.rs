@@ -1171,7 +1171,6 @@ async fn build_faux_engine_parts(
                             debug_assert!(steps.next().is_none());
                             first
                         })
-                        .map_err(|error| error.to_string())
                     }
                     _ => Ok(pa_ai::faux::FauxResponseStep::Message(
                         pa_ai::faux::faux_assistant_text_message(
@@ -1597,7 +1596,7 @@ mod tests {
             serde_json::json!({
                 "mcpCatalogSources": sources
                     .iter()
-                    .map(|path| path.to_string())
+                    .map(std::string::ToString::to_string)
                     .collect::<Vec<_>>()
             })
             .to_string()
