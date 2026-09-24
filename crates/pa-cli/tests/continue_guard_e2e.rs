@@ -307,8 +307,15 @@ fn print_resume_refuses_a_foreign_lease_holder() {
     // an unnamed process.
     // The exact actionable refusal: the classified headline, the
     // continue path with the `--daemon-socket` attach shape, the
-    // take-over `kill` of this test process's pid, and the session
-    // footer (the `{}\n` fixture file carries no name, so no paren).
+    // take-over `kill` of this test process's pid with the holder-image
+    // annotation (the pid-reuse guard: the refusal names what the kill
+    // would hit, here this test binary), and the session footer (the
+    // `{}\n` fixture file carries no name, so no paren).
+    let holder_image = std::env::current_exe()
+        .expect("own exe")
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let expected = format!(
         concat!(
             "Error: This session is currently open in another Rust build of Prime Agent ",
@@ -321,12 +328,13 @@ fn print_resume_refuses_a_foreign_lease_holder() {
             "it — that daemon owns this session)\n",
             "\n",
             "• Take over on this daemon:\n",
-            "  kill {}\n",
+            "  kill {} — the holder is {}\n",
             "  Then retry — the file unlocks when the holder exits.\n",
             "\n",
             "Session: foreign01ab3c\n"
         ),
-        std::process::id()
+        std::process::id(),
+        holder_image
     );
     let (stdout, stderr, code) = run_print(
         &[

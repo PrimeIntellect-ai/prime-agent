@@ -784,8 +784,7 @@ fn assert_session_not_active_in_daemon(
             std::mem::forget(lease);
         }
         Err(error) => {
-            let Some(active) =
-                error.downcast_ref::<pa_daemon::lease::SessionAlreadyActiveError>()
+            let Some(active) = error.downcast_ref::<pa_daemon::lease::SessionAlreadyActiveError>()
             else {
                 // The lease table itself failed (io, permissions): never
                 // silently proceed over an undeterminable ownership record.

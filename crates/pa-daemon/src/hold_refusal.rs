@@ -108,12 +108,7 @@ pub fn classify_from(exe: Option<&Path>, own_exe: Option<&Path>) -> HolderFlavor
     }
     let components: Vec<String> = exe
         .components()
-        .map(|component| {
-            component
-                .as_os_str()
-                .to_string_lossy()
-                .to_lowercase()
-        })
+        .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
         .collect();
     if components
         .iter()
