@@ -1,1 +1,0 @@
-- Fixed `shutdown --force` failing with "Daemon shutdown admission was lost" when slow daemon scans delayed the admission lease refresh.

@@ -1,1 +1,0 @@
-- Changed the daemon to start its session catalog process on demand: the catalog is no longer spawned at supervisor boot, so an idle daemon keeps one fewer compiled runtime resident. The catalog spawns on the first session-file operation (agents view, `list --all`, session rename/delete/archive) and stays resident once started.

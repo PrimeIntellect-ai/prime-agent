@@ -1,1 +1,0 @@
-- Fixed Prime Inference GLM models failing every request with an unsupported `enable_thinking` parameter.

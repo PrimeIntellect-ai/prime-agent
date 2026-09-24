@@ -1,1 +1,0 @@
-- Changed Prime Inference models to take their reasoning controls from the live catalog's `supported_parameters` and `reasoning` metadata: effort routes send only their declared `reasoning_effort` values, toggle-only routes switch reasoning through the declared `reasoning` object, and mandatory routes hide the off level instead of sending disables the gateway rejects.

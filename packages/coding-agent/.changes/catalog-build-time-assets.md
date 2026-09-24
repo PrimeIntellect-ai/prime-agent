@@ -1,1 +1,0 @@
-- Changed bundled model and MCP catalog assets to be generated during build and release instead of committed snapshots.

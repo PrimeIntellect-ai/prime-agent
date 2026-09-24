@@ -1,1 +1,0 @@
-- Added `prime-agent sessions`, a one-line-per-agent operator table (status, activity, staleness, last error, usage) rendered client-side from the existing daemon session summaries.
