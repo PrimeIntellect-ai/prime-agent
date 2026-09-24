@@ -607,36 +607,41 @@ impl McpView {
             ));
         }
 
-        if start > 0 || end < self.filtered.len() {
+        // Nothing to scroll when the frame renders no rows (the
+        // reserved-height guard's 0): the indicator would spend a row
+        // the viewport does not have.
+        if self.visible_items > 0 && (start > 0 || end < self.filtered.len()) {
             let indicator = format!("  ({}/{})", self.selected + 1, self.filtered.len());
             lines.push(vec![theme.fg_span(ThemeColor::Muted, indicator)]);
         }
 
-        if self.filtered.is_empty() {
-            let message = if self.rows.is_empty() {
-                "No external services available"
-            } else {
-                "No matching services"
-            };
-            // The message row aligns with the rows' labels (the TS
-            // `TruncatedText` pad plus the text's own leading space).
-            lines.push(vec![
-                theme.fg_span(ThemeColor::Muted, format!("  {message}"))
-            ]);
-            // One blank row between the empty state and the shortcuts
-            // line (TS): the message never touches the keybinds.
-            lines.push(Vec::new());
-        } else if self.detail_rows() > 0 {
-            // One blank line between the last row and the description
-            // (TS), then the ONE fixed detail line.
-            lines.push(Vec::new());
-            if let Some(row) = self
-                .filtered
-                .get(self.selected)
-                .and_then(|index| self.rows.get(*index))
-                .cloned()
-            {
-                lines.push(row_detail_line(theme, width, &row));
+        if self.visible_items > 0 {
+            if self.filtered.is_empty() {
+                let message = if self.rows.is_empty() {
+                    "No external services available"
+                } else {
+                    "No matching services"
+                };
+                // The message row aligns with the rows' labels (the TS
+                // `TruncatedText` pad plus the text's own leading space).
+                lines.push(vec![
+                    theme.fg_span(ThemeColor::Muted, format!("  {message}"))
+                ]);
+                // One blank row between the empty state and the shortcuts
+                // line (TS): the message never touches the keybinds.
+                lines.push(Vec::new());
+            } else if self.detail_rows() > 0 {
+                // One blank line between the last row and the description
+                // (TS), then the ONE fixed detail line.
+                lines.push(Vec::new());
+                if let Some(row) = self
+                    .filtered
+                    .get(self.selected)
+                    .and_then(|index| self.rows.get(*index))
+                    .cloned()
+                {
+                    lines.push(row_detail_line(theme, width, &row));
+                }
             }
         }
 
@@ -653,11 +658,19 @@ impl McpView {
     /// reserved rows are the search field and the hint, plus the detail
     /// group when the viewport can fit it.
     fn list_layout(&self) -> usize {
+        // The shared layout floors at one row so a picker never reads
+        // empty; this view must never render past its viewport, so a
+        // frame too short for any row renders none (the scroll
+        // indicator follows: nothing to scroll).
+        let reserved = SEARCH_FIELD_ROWS + HINT_ROWS + self.detail_rows();
+        if self.viewport_rows <= reserved {
+            return 0;
+        }
         menu_list_layout(
             Some(self.viewport_rows),
             PREFERRED_VISIBLE_SERVICES,
             self.filtered.len(),
-            SEARCH_FIELD_ROWS + HINT_ROWS + self.detail_rows(),
+            reserved,
             SCROLL_INDICATOR_ROWS,
         )
     }
@@ -673,9 +686,14 @@ impl McpView {
         }
     }
 
-    /// The visible row window centered on the selection.
+    /// The visible row window centered on the selection. A frame too
+    /// short for any row carries the EMPTY window — never raised back
+    /// to one row (list_layout's reserved-height guard owns the 0).
     fn window(&self) -> (usize, usize) {
-        let max_visible = self.visible_items.max(1);
+        if self.visible_items == 0 {
+            return (0, 0);
+        }
+        let max_visible = self.visible_items;
         let selected = self.selected.min(self.filtered.len().saturating_sub(1));
         let start = selected
             .saturating_sub(max_visible / 2)
@@ -1009,6 +1027,26 @@ mod tests {
             "the detail line dropped in the short viewport: {rows:?}"
         );
         assert!(rows.len() <= 7, "the short frame stays within budget");
+        // A viewport the search field and hint alone fill renders the
+        // skeleton only: no service row, no scroll indicator, no detail —
+        // the empty row window is never raised back to one row (the
+        // panel cannot draw past its viewport).
+        let mut view = McpView::from_response(&data, 4);
+        let rows = frame_text(&mut view);
+        assert!(rows.len() <= 4, "the skeleton owns the frame: {rows:?}");
+        assert!(
+            !rows.iter().any(|row| row.contains("Service 0")),
+            "no service row in the too-short frame: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("(1/69)")),
+            "no scroll indicator in the too-short frame: {rows:?}"
+        );
+        assert_eq!(
+            rows.last().map(String::as_str),
+            Some(" \u{2191}/\u{2193} navigate \u{b7} Enter select \u{b7} Esc close"),
+            "the hint rides the skeleton's last row"
+        );
     }
 
     /// The TS row vocabulary: the pasteable row keeps its honest

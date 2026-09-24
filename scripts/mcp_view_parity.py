@@ -302,6 +302,9 @@ def main() -> int:
         return diff_sides(args.diff[0], args.diff[1])
     if not args.side:
         parser.error("one of --side or --diff is required")
+    # The advertised one-liners write under /tmp/mcp: create the output
+    # directory so a fresh checkout's first run does not fail on it.
+    args.out.parent.mkdir(parents=True, exist_ok=True)
     if args.side == "ts":
         ts_side(args.out, args.ts_checkout)
     else:
