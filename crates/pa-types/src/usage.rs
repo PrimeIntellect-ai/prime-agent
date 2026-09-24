@@ -59,10 +59,8 @@ pub fn estimate_tokens(message: &Value) -> u64 {
         .unwrap_or_default();
     let mut chars = 0u64;
     match message.get("content") {
-        Some(Value::String(text)) => {
-            if role == "user" || role == "custom" || role == "toolResult" {
-                chars += text.chars().count() as u64;
-            }
+        Some(Value::String(text)) if role == "user" || role == "custom" || role == "toolResult" => {
+            chars += text.chars().count() as u64;
         }
         Some(Value::Array(blocks)) => {
             for block in blocks {
