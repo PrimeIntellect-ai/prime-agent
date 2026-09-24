@@ -78,13 +78,12 @@ fn suspend_child_mode() {
 /// on the shared 4-CPU sandbox.
 static HARNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Whether this runner is attached to a controlling-terminal session: the
-/// real-signal stop/continue cycle runs in that class. Session-less
-/// runners — CI hosts (the request workflow) and the VM sandboxes the
-/// fleet gates in — are this e2e's documented env-red set (the SIGTSTP
-/// wait timed out there on the base), so skip there loudly instead of
-/// burning the gate on the timeout, the same shape as the
-/// packaged-layout e2e's kernel-python skip.
+/// Whether this runner is attached to a controlling-terminal session.
+/// The real-signal stop/continue cycle runs in that class; session-less
+/// runner chains — CI hosts (the request workflow) and the VM sandboxes
+/// the fleet gates in — skip loudly there instead of holding the gate
+/// on it, the same shape as the packaged-layout e2e's kernel-python
+/// skip.
 fn sigtstp_session_runner() -> bool {
     // tcgetpgrp on fd 0 answers "does this runner's stdin sit on a
     // session's controlling terminal": a pipe or /dev/null stdin and a
@@ -94,8 +93,8 @@ fn sigtstp_session_runner() -> bool {
     if foreground < 0 {
         eprintln!(
             "no controlling-terminal session on the runner (tcgetpgrp(fd 0) \
-             failed); skipping the suspend signal e2e — session-less CI \
-             hosts and VM sandboxes are its documented env-red set"
+             failed); skipping the suspend signal e2e — it needs a \
+             controlling-terminal session to drive the stop/continue cycle"
         );
         return false;
     }
@@ -323,14 +322,12 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// check must stay out of the way). The child moves into its own process
 /// group but stays in this runner's session: kill(0, SIGTSTP) then stops
 /// the child and not this runner, and a parent in a different process
-/// group of the same session is exactly the job-control shape a shell
-/// gives a real Ctrl+Z — the part found the hard way: with its own
-/// session (the old setsid child), the child's group is ORPHANED (its
-/// parent — this runner — is in another session), and job control
-/// discards stop signals generated for an orphaned group under the
-/// default disposition, so the old harness could never complete the
-/// stop on ANY runner (its SIGTSTP wait timed out in every environment,
-/// tty or not). The child's terminal is the harness pty, never a
+/// group of the same session is the job-control shape a shell gives a
+/// real Ctrl+Z. The session membership is load-bearing: an own-session
+/// child's group is ORPHANED (its parent — this runner — is in another
+/// session), and job control discards stop signals generated for an
+/// orphaned group under the default disposition, so the stop would
+/// never complete. The child's terminal is the harness pty, never a
 /// controlling terminal, so no background-group arbitration
 /// (SIGTTIN/SIGTTOU) applies to its I/O across the stop/continue cycle.
 fn spawn_child(socket: &std::path::Path, slave: &OwnedFd) -> Child {
