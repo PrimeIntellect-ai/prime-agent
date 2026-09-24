@@ -3512,7 +3512,23 @@ impl Supervisor {
             Some(resident) => resident,
             None => match self.adopt_registered_worker(&registration, token).await {
                 Ok(resident) => resident,
-                Err(error) => return fail(&format!("{error:#}")),
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    // The definitive unknown-worker refusal is the one
+                    // registration verdict the box incident left invisible:
+                    // a live worker whose descriptor is gone can never be
+                    // adopted again, and before the self-heal it lingered
+                    // silently, holding its session lease against every
+                    // future resume. The refusal is now observable (log +
+                    // telemetry) and the worker retires on it.
+                    if message.starts_with(crate::registration::UNKNOWN_SESSION_WORKER_PREFIX) {
+                        self.log_line(&format!(
+                            "session worker {active_session_id} registration refused (no descriptor on this supervisor); the worker retires and its session file stays resumable"
+                        ));
+                        self.note_daemon_event("registration_refused", None);
+                    }
+                    return fail(&message);
+                }
             },
         };
         // Refresh the durable identity from the live worker (the token was
@@ -3653,8 +3669,14 @@ impl Supervisor {
             .descriptor_dir
             .join(format!("{}.json", registration.active_session_id));
         let Ok(content) = std::fs::read_to_string(&descriptor_path) else {
+            // The TS unknown-worker error: this supervisor holds no
+            // descriptor for the identity, so it can never adopt the
+            // registrant. The worker treats the verdict as terminal (the
+            // refused-registration self-heal) and retires instead of
+            // retrying forever.
             return Err(anyhow!(
-                "Unknown session worker: {}",
+                "{}: {}",
+                crate::registration::UNKNOWN_SESSION_WORKER_PREFIX,
                 registration.active_session_id
             ));
         };
@@ -4778,7 +4800,11 @@ impl Supervisor {
         let _ = self
             .route_command(resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
             .await;
-        let _ = std::fs::remove_file(&resident.descriptor_path);
+        // The per-session stop shares the terminal-stop contract: the
+        // descriptor dies only with a provably-gone process, so a worker
+        // that missed the routed shutdown stays adoptable (or is
+        // escalated away) instead of becoming an invisible lease holder.
+        self.retire_worker_after_stop(resident).await;
         // TS `stopWorkerUntracked`: a client-owned (ephemeral) worker's
         // scheduled jobs die with the registration
         // (`cancelEphemeralWorkerScheduledJobs`) — every remove-descriptor
@@ -4796,6 +4822,51 @@ impl Supervisor {
         // itself are removed). No ledger reseed, no transcript read.
         self.passivate_roster_worker(&resident.worker_id, ephemeral)
             .await;
+    }
+
+    /// Delete one stopped worker's descriptor only after its process is
+    /// provably gone (TS `stopWorkerUntracked`'s contract; the shutdown
+    /// pass and the per-session stop share it). A worker that missed the
+    /// routed `shutdown` (a dead connection, a wedged socket, a flush
+    /// outlasting the route budget) gets the identity-gated
+    /// SIGTERM -> SIGKILL escalation; deleting the descriptor of a live
+    /// worker orphans it — nothing on any later daemon can adopt or reap
+    /// it through its identity, while it keeps holding its runtime
+    /// session lease, so every open of its session then refuses with
+    /// `Session is already active in <its id>`.
+    async fn retire_worker_after_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>) {
+        let (pid, start_id) = {
+            let descriptor = resident.descriptor.lock().await;
+            (descriptor.pid as u32, descriptor.process_start_id.clone())
+        };
+        // An unobservable identity never receives the escalation's
+        // signals (a pid that cannot be proven ours stays untouched);
+        // a live process behind such a pid keeps its tombstoned
+        // descriptor too, exactly like a SIGKILL survivor - the next
+        // boot retries the stop. The unverifiable class covers BOTH a
+        // descriptor without a recorded id and a recorded id the
+        // platform cannot observe right now (the probe returns None
+        // while the process lives).
+        let alive_unverified = (start_id.is_none()
+            || crate::lease::get_process_start_id(pid).is_none())
+            && crate::lease::is_process_alive(pid).unwrap_or(false);
+        match crate::boot_reap::stop_process(pid, start_id).await {
+            crate::boot_reap::ReapOutcome::Survived => {
+                self.log_line(&format!(
+                    "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",
+                    resident.worker_id
+                ));
+            }
+            _ if alive_unverified => {
+                self.log_line(&format!(
+                    "session worker {} cannot be identity-verified; descriptor tombstoned for the next boot",
+                    resident.worker_id
+                ));
+            }
+            _ => {
+                let _ = std::fs::remove_file(&resident.descriptor_path);
+            }
+        }
     }
 
     /// Run the one terminal stop pass, whichever connection first reaches it.
@@ -4832,48 +4903,7 @@ impl Supervisor {
             let _ = self
                 .route_command(&resident, "shutdown", json!({}), ROUTE_TIMEOUT_MS)
                 .await;
-            // The terminal stop deletes the descriptor ONLY after the
-            // worker's process is provably gone (TS `stopWorkerUntracked`'s
-            // contract). A worker that missed the routed shutdown (a dead
-            // connection, a wedged socket, a flush outlasting the route
-            // budget) gets the identity-gated SIGTERM -> SIGKILL
-            // escalation. Deleting the descriptor of a live worker
-            // orphans it: nothing on any later daemon can adopt or reap it
-            // through its identity, while it keeps holding its runtime
-            // session lease - every open of its session then refuses with
-            // `Session is already active in <its id>`.
-            let (pid, start_id) = {
-                let descriptor = resident.descriptor.lock().await;
-                (descriptor.pid as u32, descriptor.process_start_id.clone())
-            };
-            // An unobservable identity never receives the escalation's
-            // signals (a pid that cannot be proven ours stays untouched);
-            // a live process behind such a pid keeps its tombstoned
-            // descriptor too, exactly like a SIGKILL survivor - the next
-            // boot retries the stop. The unverifiable class covers BOTH a
-            // descriptor without a recorded id and a recorded id the
-            // platform cannot observe right now (the probe returns None
-            // while the process lives).
-            let alive_unverified = (start_id.is_none()
-                || crate::lease::get_process_start_id(pid).is_none())
-                && crate::lease::is_process_alive(pid).unwrap_or(false);
-            match crate::boot_reap::stop_process(pid, start_id).await {
-                crate::boot_reap::ReapOutcome::Survived => {
-                    self.log_line(&format!(
-                        "session worker {} survived the shutdown escalation; descriptor tombstoned for the next boot",
-                        resident.worker_id
-                    ));
-                }
-                _ if alive_unverified => {
-                    self.log_line(&format!(
-                        "session worker {} cannot be identity-verified; descriptor tombstoned for the next boot",
-                        resident.worker_id
-                    ));
-                }
-                _ => {
-                    let _ = std::fs::remove_file(&resident.descriptor_path);
-                }
-            }
+            self.retire_worker_after_stop(&resident).await;
         }
         self.registry.clear().await;
         // The workers are all stopped now, so the accept loop may exit;
