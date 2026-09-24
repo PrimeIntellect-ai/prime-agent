@@ -1929,6 +1929,26 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 let record = record.lock().await;
                 SupervisorChildSessions::entry(&record)
             };
+            // The deletion commits BEFORE the best-effort terminal
+            // notice: the notice's supervisor delivery can ride its full
+            // timeout, and a deleted child must leave the registry and the
+            // cached context tree immediately, not after it.
+            this.children
+                .lock()
+                .await
+                .retain(|candidate| !Arc::ptr_eq(candidate, &record));
+            // The cached context-tree rows must not outlive the child: a
+            // deleted subagent leaves `/context` immediately (the
+            // background refresh would otherwise resurrect it through the
+            // settled-children backfill until its next walk).
+            if let Some(notify) = this
+                .delete_notifier
+                .lock()
+                .expect("delete notifier lock")
+                .clone()
+            {
+                notify(&entry.rlm_child_id);
+            }
             // A still-running child was cut short by the delete: the parent
             // session receives the cancelled terminal notice (TS
             // `completeDeletion`, reason `Deleted by parent orchestrator`).
@@ -1948,22 +1968,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 if let Some(notice) = notice {
                     this.deliver_terminal_notice(&notice).await;
                 }
-            }
-            this.children
-                .lock()
-                .await
-                .retain(|candidate| !Arc::ptr_eq(candidate, &record));
-            // The cached context-tree rows must not outlive the child: a
-            // deleted subagent leaves `/context` immediately (the
-            // background refresh would otherwise resurrect it through the
-            // settled-children backfill until its next walk).
-            if let Some(notify) = this
-                .delete_notifier
-                .lock()
-                .expect("delete notifier lock")
-                .clone()
-            {
-                notify(&entry.rlm_child_id);
             }
             Ok(RlmDeleteSubagentResult {
                 subagent: entry,

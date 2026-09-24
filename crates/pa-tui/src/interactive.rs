@@ -1674,6 +1674,11 @@ async fn run_interactive_surface(
                                 events = fresh_events;
                                 events_closed = false;
                                 reader_dead = session.client.reader_dead();
+                                // Re-arm the loss watch for the fresh
+                                // connection: the new client's supervisor
+                                // reader can die later, and the one-shot
+                                // latch must not park that loss.
+                                reader_loss_handled = false;
                                 session.reconnect = None;
                                 reconnect = None;
                                 if lost {

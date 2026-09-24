@@ -66,6 +66,12 @@ pub(crate) struct CachedWalk {
 pub(crate) struct ContextTreeCache {
     state: Mutex<Option<CachedWalk>>,
     refresh: tokio::sync::Mutex<()>,
+    /// Child ids invalidated since the last walk stored (`delete_subagent`):
+    /// an in-flight walk that started BEFORE a deletion must not
+    /// republish the child when its snapshot lands. The set drains as
+    /// each storing walk filters it (later walks never see the child:
+    /// the registry row is gone and the ledger tombstones the skip set).
+    invalidated: Mutex<HashSet<String>>,
 }
 
 impl ContextTreeCache {
@@ -151,15 +157,23 @@ impl ContextTreeCache {
     /// refresh (the settled-children backfill would otherwise keep its
     /// last live row visible until the walk re-files or drops it).
     pub(crate) fn invalidate_child(&self, child_id: &str) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(walk) = state.as_mut() {
-            walk.live_nodes.remove(child_id);
-            walk.persisted
-                .retain(|node| node.get("id").and_then(Value::as_str) != Some(child_id));
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(walk) = state.as_mut() {
+                walk.live_nodes.remove(child_id);
+                walk.persisted
+                    .retain(|node| node.get("id").and_then(Value::as_str) != Some(child_id));
+            }
         }
+        // Remember the deletion: an in-flight walk that started before it
+        // must not republish the child when its snapshot lands.
+        self.invalidated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(child_id.to_string());
     }
 
     /// Re-arm the background walk when the cached snapshot is missing,
@@ -233,7 +247,23 @@ impl ContextTreeCache {
             })
             .await;
             match walk {
-                Ok(Ok((live_nodes, persisted))) => {
+                Ok(Ok((mut live_nodes, mut persisted))) => {
+                    let mut invalidated = cache
+                        .invalidated
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    // Deletions that landed while this walk ran: the stale
+                    // snapshot must not republish them. The set drains here
+                    // (later walks never see the children: the registry
+                    // rows are gone and the ledger tombstones the skip
+                    // set).
+                    for child_id in invalidated.iter() {
+                        live_nodes.remove(child_id);
+                        persisted.retain(|node| {
+                            node.get("id").and_then(Value::as_str) != Some(child_id)
+                        });
+                    }
+                    invalidated.clear();
                     let mut state = cache
                         .state
                         .lock()
@@ -455,6 +485,34 @@ mod tests {
         assert!(
             children.is_empty(),
             "deleted children must leave the tree immediately: {children:?}"
+        );
+    }
+
+    /// An invalidation that lands while a walk is in flight wins over the
+    /// stale snapshot: the walk's store filters the deleted child out
+    /// (the store step drains the invalidated set).
+    #[test]
+    fn an_in_flight_walk_cannot_republish_a_deleted_child() {
+        let cache = cache_with_walk("session-a", &[("child-live", 100)], &[]);
+        cache.invalidate_child("child-live");
+        // Simulate the in-flight walk's store step (the stale snapshot
+        // still contains the child).
+        let mut live_nodes = HashMap::new();
+        live_nodes.insert(
+            "child-live".to_string(),
+            json!({ "id": "child-live", "totalUsage": empty_usage() }),
+        );
+        let mut invalidated = cache
+            .invalidated
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for child_id in invalidated.iter() {
+            live_nodes.remove(child_id);
+        }
+        invalidated.clear();
+        assert!(
+            live_nodes.is_empty(),
+            "the deleted child must not be republished"
         );
     }
 
