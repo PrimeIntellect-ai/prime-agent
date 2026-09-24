@@ -741,9 +741,12 @@ mod tests {
             !text.contains("●"),
             "no status dot rides the segment: {text}"
         );
-        // A single running descendant renders the singular form.
+        // A single running descendant renders the singular form (the
+        // running row is one of the subtree's descendants, so the total
+        // mounts the dock).
         let dock = ActivityDock {
             subagents_running: 1,
+            subagents_total: 1,
             ..ActivityDock::default()
         };
         let frame = render_activity_dock(&dock, &theme, 80).unwrap();
