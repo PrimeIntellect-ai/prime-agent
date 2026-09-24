@@ -329,14 +329,14 @@ mod tests {
                 assert_eq!(message.stop_reason, StopReason::Error);
                 assert!(abort.contains("Provider requested a 4363s wait"));
                 Some(
-                    pa_core::session_engine::provider_park::ProviderParkOutcome {
+                    crate::session_engine::provider_park::ProviderParkOutcome {
                         status_message: format!(
                             "{abort}. Session parked until 2026-09-24T00:00:00.000Z and will resume automatically: {}",
                             message.error_message.as_deref().unwrap_or("unknown error"),
                         ),
                     },
                 )
-            }) as pa_core::session_engine::provider_park::ParkFuture
+            }) as crate::session_engine::provider_park::ParkFuture
         };
         let message = run_turn_with_auto_retry(
             &fast_policy(),
@@ -382,7 +382,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let events_for_emit = Arc::clone(&events);
         let mut seam = move |_message: AssistantMessage, _abort: &str| {
-            Box::pin(async move { None }) as pa_core::session_engine::provider_park::ParkFuture
+            Box::pin(async move { None }) as crate::session_engine::provider_park::ParkFuture
         };
         let message = run_turn_with_auto_retry(
             &fast_policy(),

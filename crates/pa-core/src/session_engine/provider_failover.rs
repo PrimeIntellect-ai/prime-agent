@@ -160,6 +160,8 @@ where
     RF: Future<Output = anyhow::Result<Option<String>>>,
 {
     if !failover.enabled || candidates.is_empty() {
+        // The pass-through moves the park seam: the branch returns, so
+        // the loop below cannot reach (and must not reborrow) it.
         return run_turn_with_auto_retry(
             quick_policy,
             context_window,
@@ -167,7 +169,7 @@ where
             attempt,
             emit,
             wait,
-            park.as_deref_mut(),
+            park,
         )
         .await;
     }

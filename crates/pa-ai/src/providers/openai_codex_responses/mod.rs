@@ -1153,7 +1153,7 @@ mod tests {
     /// the tests can assert the continuation anchoring.
     struct ScriptedCodexServer {
         port: u16,
-        sent_bodies: Arc<std::sync::Mutex<Vec<Value>>>,
+        sent_bodies: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
     }
 
     fn codex_response_events(response_id: &str, message_id: &str, text: &str) -> Vec<Value> {
@@ -1191,7 +1191,7 @@ mod tests {
         use tokio::io::AsyncReadExt;
         let mut header = [0u8; 2];
         match socket.read_exact(&mut header).await {
-            Ok(()) => {}
+            Ok(_) => {}
             Err(_) => return Ok(None),
         }
         let opcode = header[0] & 0x0F;
@@ -1239,6 +1239,8 @@ mod tests {
     /// event list the server answers that request with. A connection whose
     /// scripts are exhausted is held until the client closes it.
     async fn spawn_scripted_codex_server(scripts: Vec<Vec<Vec<Value>>>) -> ScriptedCodexServer {
+        use base64::Engine as _;
+        use sha1::Digest as _;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("mock bind");
@@ -1310,6 +1312,7 @@ mod tests {
     }
 
     fn mock_codex_token() -> String {
+        use base64::Engine as _;
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(json!({ "alg": "RS256", "typ": "JWT" }).to_string());
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
@@ -1347,6 +1350,7 @@ mod tests {
             messages: vec![crate::types::Message::User(crate::types::UserMessage {
                 content: crate::types::UserMessageContent::Text(text.to_string()),
                 timestamp: 1,
+                rest: Default::default(),
             })],
             tools: None,
         }

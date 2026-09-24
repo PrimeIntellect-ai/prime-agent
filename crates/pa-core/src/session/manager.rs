@@ -714,7 +714,10 @@ impl SessionManager {
         &self,
     ) -> Option<crate::session_engine::provider_park::PersistedQuotaPark> {
         use crate::session_engine::provider_park::{scan_quota_park_entries, BranchParkScan};
-        match scan_quota_park_entries(self.active_branch_entries()) {
+        // The loaded branch is a borrow scan (once per build); the windowed
+        // fallback below reads the older metadata records line by line.
+        let branch: Vec<FileEntry> = self.active_branch_entries().into_iter().cloned().collect();
+        match scan_quota_park_entries(&branch) {
             BranchParkScan::Park(park) => return Some(park),
             // A newer resume entry ends the episode; older records cannot
             // restore a park behind it.
