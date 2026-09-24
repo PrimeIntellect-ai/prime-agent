@@ -424,13 +424,12 @@ async fn run_onboarding_phase(
     renderer: &mut Renderer,
     exit_guard: &ExitGuard,
 ) -> Result<bool> {
-    // Trace sharing ships pre-configured ON (Kevin's product decision,
-    // 2026-09-24; sanctioned divergence — TS defaults off and asks on
-    // first run), so a fresh install always takes this branch: the flow
-    // completes silently, nothing is drawn, and the session screen owns
-    // the first frame. The question below mounts only for a user who
-    // explicitly opted out before completing onboarding (TS parity:
-    // `askOnboardingTraceOptIn` skips when already enabled).
+    // Sharing is on unless the user opted out, so a fresh install always
+    // takes this branch: the flow completes silently, nothing is drawn,
+    // and the session screen owns the first frame. The question below
+    // mounts only for a home that explicitly opted out before completing
+    // onboarding (TS parity: `askOnboardingTraceOptIn` skips when already
+    // enabled).
     if task.sink.agent_traces_enabled() {
         let _ = task.sink.mark_onboarding_complete();
         return Ok(false);

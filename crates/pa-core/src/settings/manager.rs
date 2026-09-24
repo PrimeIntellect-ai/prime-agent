@@ -346,12 +346,10 @@ impl SettingsManager {
             .unwrap_or(true)
     }
 
-    /// TS `getAgentTracesEnabled`: the product ships trace sharing
-    /// pre-configured ON (Kevin's product decision, 2026-09-24 — sanctioned
-    /// divergence: TS defaults off and asks on first run), so a fresh
-    /// install never sees the opt-in dialog and `/traces` remains the
-    /// toggle. Like the compaction default, the value persists only once
-    /// the user opts out.
+    /// `agentTraces.enabled`: unset means ON. Sharing stays on until the
+    /// user opts out (`/traces`), and the value persists only then, like
+    /// the compaction default — so a fresh install never sees the opt-in
+    /// question. (TS defaults this setting off and asks on first run.)
     pub fn get_agent_traces_enabled(&self) -> bool {
         self.merged
             .agent_traces
@@ -940,10 +938,9 @@ mod tests {
 
     #[test]
     fn agent_traces_default_on_and_persist_the_opt_out() {
-        // The product ships trace sharing pre-configured on (Kevin's
-        // decision, 2026-09-24): absent -> true, the default IS the
-        // configuration and nothing is written for a fresh home. An
-        // explicit opt-out writes the global scope and survives a reload.
+        // Unset means ON: the default is the configuration, so nothing
+        // is written for a fresh home. An explicit opt-out writes the
+        // global scope and survives a reload.
         let mut manager = SettingsManager::in_memory(Settings::default());
         assert!(manager.get_agent_traces_enabled());
         manager.set_agent_traces_enabled(false).unwrap();

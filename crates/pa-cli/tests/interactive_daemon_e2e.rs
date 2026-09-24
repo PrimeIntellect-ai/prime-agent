@@ -531,9 +531,8 @@ impl pa_tui::interactive::OnboardingSink for FreshHomeOnboardingSink {
     }
 }
 
-/// A fresh install ships trace sharing pre-configured ON (Kevin's
-/// 2026-09-24 product decision; sanctioned divergence from TS, which
-/// defaults off and asks). The first-run onboarding completes silently:
+/// A fresh install never sees the trace question (sharing is on by
+/// default; TS defaults off and asks). The onboarding completes silently:
 /// no trace dialog owns the pane, the submitted prompt goes straight to
 /// the session, and the persisted state reads back shown + enabled with
 /// the default standing unwritten (no `agentTraces` key — the default IS

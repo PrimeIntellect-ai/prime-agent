@@ -1678,9 +1678,8 @@ mod tests {
     async fn the_disabled_requirement_gate_matches_ts() {
         let fixture = Fixture::new();
         let session = fixture.write_session("s.jsonl", "sid");
-        // Sharing ships ON by default (Kevin's 2026-09-24 product
-        // decision), so the disabled gate needs an explicit opt-out on
-        // disk; `reload_config` re-reads it before the gate.
+        // Sharing defaults ON, so the disabled gate needs an explicit
+        // opt-out on disk; `reload_config` re-reads it before the gate.
         let mut settings =
             crate::settings::SettingsManager::create(&fixture.cwd, &fixture.agent_dir);
         settings

@@ -268,8 +268,7 @@ mod tests {
     async fn the_setting_writes_and_reads_the_agent_traces_flag() {
         let (_dir, agent) = temp_agent_dir();
         let traces = ClientTraces::new("/tmp", agent.clone());
-        // Sharing ships pre-configured ON (Kevin's 2026-09-24 product
-        // decision); the default stands with nothing written.
+        // Sharing defaults ON; nothing is written until the user opts out.
         assert!(traces.enabled().await, "the default is on");
         traces
             .set_enabled(false)
