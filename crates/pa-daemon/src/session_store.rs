@@ -1271,6 +1271,11 @@ impl SessionScanState {
     /// TS `scannedPrefixIntact`: the bytes just before the cursor match the
     /// cached window, proving the resume starts where the cached fold left
     /// off (a torn write or a rewrite that raced the scan is caught here).
+    /// Session files are append-only between whole-file rewrites; an
+    /// in-place interior edit that keeps the identity, growth, and this
+    /// window intact defeats the check on TS too - outside the writer
+    /// model (session-manager.ts: "In-place interior edits that defeat all
+    /// four are outside the writer model").
     fn prefix_intact(&self, file: &fs::File) -> bool {
         use std::io::{Read, Seek, SeekFrom};
         if self.offset == 0 {
@@ -1375,12 +1380,12 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
             _ => SessionScanState::fresh(generation),
         }
     };
-    if state.offset > 0 {
-        // The cursor sits at the end of the last complete line; a torn
-        // trailing line was left unconsumed for exactly this re-entry.
-        if std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(state.offset)).is_err() {
-            state = SessionScanState::fresh(generation);
-        }
+    // Position the shared cursor at the resume point. A fresh state rewinds
+    // to byte 0: `prefix_intact` leaves the cursor at the old consumed end
+    // (its tail-window read), and a fresh scan started there would miss the
+    // session header. TS restarts its stream at `state.offset` every scan.
+    if std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(state.offset)).is_err() {
+        return None;
     }
     let mut reader = std::io::BufReader::new(&mut file);
     state.scan_from_cursor(&mut reader, generation.len)?;

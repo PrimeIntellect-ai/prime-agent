@@ -411,3 +411,47 @@ fn multi_round_appends_match_the_legacy_fold() {
     let final_info = read_session_info(&path).unwrap();
     assert_eq!(final_info.message_count, 250);
 }
+
+#[test]
+fn a_failed_prefix_check_rescans_from_byte_zero() {
+    let dir = test_dir();
+    let path = dir.join("grown-rewrite.jsonl");
+    append_rows(
+        &path,
+        &[
+            json!({"type":"session","id":"g","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"}),
+            json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}),
+        ],
+    );
+    let first = read_session_info(&path).unwrap();
+    assert_eq!(first.name.as_deref(), Some("before"));
+    // An in-place rewrite of the consumed prefix's final line changes the
+    // resume tail window, so the grown-file path fails `prefix_intact` and
+    // must rescan from byte zero. A fresh scan that kept the shared cursor
+    // where `prefix_intact` left it would start mid-file, miss the session
+    // header, and return None (the bots' prefix-rewrite-then-append case).
+    let line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"after!!"}).to_string();
+    let before_line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}).to_string();
+    assert_eq!(line.len(), before_line.len());
+    let content = fs::read_to_string(&path).unwrap();
+    let rewritten = content.replacen(&before_line, &line, 1);
+    assert_eq!(rewritten.len(), content.len());
+    let _ = fs::write(&path, rewritten.as_bytes());
+    // The file also grows: a valid appended line enters the resume path.
+    append_rows(
+        &path,
+        &[json!({"type":"message","id":"m1","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"grown","timestamp":1790110000000u64}})],
+    );
+    // Force the mtime tick so the generation is not byte-equal.
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
+    let file = fs::File::open(&path).unwrap();
+    let _ = file.set_modified(past);
+    drop(file);
+    let second = read_session_info(&path).unwrap();
+    assert_eq!(
+        second.name.as_deref(),
+        Some("after!!"),
+        "a prefix rewrite then append must rescan from the top"
+    );
+    assert_fold_matches(&path);
+}
