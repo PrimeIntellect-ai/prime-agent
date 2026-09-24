@@ -9,7 +9,9 @@
 //! `authenticate`); Esc closes.
 
 use crate::keybindings::{format_key_text, KeybindingsManager};
-use crate::menu_panel::{menu_list_layout, search_field_lines};
+use crate::menu_panel::{
+    hint_row, menu_list_layout, menu_row, no_match_row, scroll_row, search_field_lines,
+};
 use crate::search_input::SearchInput;
 use crate::theme::{Theme, ThemeColor};
 use crate::{Line, Span};
@@ -559,6 +561,14 @@ impl McpView {
         McpViewAction::None
     }
 
+    /// Prefill the filter (`/mcp <partial>` + Tab opens the view filtered
+    /// to the typed match), the caret at the partial's end so typing
+    /// extends it.
+    pub fn set_search(&mut self, query: &str) {
+        self.search.prefill(query);
+        self.refilter();
+    }
+
     /// A bracketed paste into the search field.
     pub fn paste(&mut self, text: &str) {
         let previous = self.search.value().to_string();
@@ -605,15 +615,17 @@ impl McpView {
                     }
                 }
             };
-            let trailing = vec![(color, status)];
-            lines.push(trailing_menu_row(
-                theme, width, primary, &trailing, selected,
-            ));
+            let trailing = [crate::menu_panel::MenuSegment::themed(color, status)];
+            lines.push(menu_row(theme, width, primary, &trailing, selected));
         }
 
         if start > 0 || end < self.filtered.len() {
-            let indicator = format!("  ({}/{})", self.selected + 1, self.filtered.len());
-            lines.push(vec![theme.fg_span(ThemeColor::Muted, indicator)]);
+            lines.push(scroll_row(
+                theme,
+                width,
+                self.selected + 1,
+                self.filtered.len(),
+            ));
         }
 
         if self.filtered.is_empty() {
@@ -622,7 +634,7 @@ impl McpView {
             } else {
                 "No matching services"
             };
-            lines.push(vec![theme.fg_span(ThemeColor::Muted, message)]);
+            lines.push(no_match_row(theme, width, message));
         } else if let Some(row) = self
             .filtered
             .get(self.selected)
@@ -716,70 +728,6 @@ impl McpView {
 
 /// One inline menu row with a THEMED trailing cell (the `menu_row` layout
 /// with the TS `statusText` colors: success/warning/error/muted).
-fn trailing_menu_row(
-    theme: &Theme,
-    width: usize,
-    primary: Line,
-    trailing: &[(ThemeColor, &str)],
-    selected: bool,
-) -> Line {
-    let inner_width = width.saturating_sub(2).max(1);
-    let _budget = inner_width.saturating_sub(5).max(1);
-    let trailing_spans: Line = if trailing.is_empty() {
-        Vec::new()
-    } else {
-        let mut spans: Vec<Span> = Vec::with_capacity(trailing.len() * 2 - 1);
-        for (index, (color, text)) in trailing.iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::raw(" \u{b7} "));
-            }
-            spans.push(theme.fg_span(*color, *text));
-        }
-        spans
-    };
-    let trailing_width = crate::width::spans_width(&trailing_spans);
-    let gap = if trailing_width > 0 { 2 } else { 0 };
-    let primary_width = inner_width.saturating_sub(trailing_width + gap).max(1);
-    let mut primary = primary;
-    if selected {
-        primary = primary
-            .into_iter()
-            .map(|mut span| {
-                span.style = span.style.add_modifier(ratatui::style::Modifier::BOLD);
-                span
-            })
-            .collect();
-    }
-    let primary = crate::width::truncate_line(&primary, primary_width, "\u{2026}");
-    let filler_width = inner_width
-        .saturating_sub(crate::width::spans_width(&primary))
-        .saturating_sub(trailing_width);
-    let mut row: Line = Vec::with_capacity(primary.len() + trailing_spans.len() + 4);
-    row.push(Span::raw(if selected { "\u{203a}" } else { " " }));
-    row.push(Span::raw(" "));
-    row.extend(primary);
-    if filler_width > 0 {
-        row.push(Span::raw(" ".repeat(filler_width)));
-    }
-    row.extend(trailing_spans);
-    let mut row = crate::width::truncate_line(&row, width, "");
-    let used = crate::width::spans_width(&row);
-    if used < width {
-        row.push(Span::raw(" ".repeat(width - used)));
-    }
-    if selected {
-        let style = theme.soft_selection_style();
-        row = row
-            .into_iter()
-            .map(|mut span| {
-                span.style = span.style.patch(style);
-                span
-            })
-            .collect();
-    }
-    row
-}
-
 /// The selected row's detail block: the service card's status + setup
 /// guidance (the TS picker's one fixed description line, flattened), with
 /// the per-connection tool listing when the daemon reported one for the
@@ -949,16 +897,9 @@ fn detail_lines(theme: &Theme, width: usize, connection: &McpConnection) -> Vec<
     lines
 }
 
-/// Truncate one detail line to the pane width and pad it to the full row.
+/// One detail-block row (the shared menu grammar's `detail_row`).
 fn detail_line(theme: &Theme, width: usize, line: Line) -> Line {
-    let line = crate::width::truncate_line(&line, width, "\u{2026}");
-    let used = crate::width::spans_width(&line);
-    let _ = theme;
-    let mut line = line;
-    if used < width {
-        line.push(Span::raw(" ".repeat(width - used)));
-    }
-    line
+    crate::menu_panel::detail_row(theme, width, line)
 }
 
 /// The trailing key hint (TS `ServiceCatalogPickerComponent.render`, the
@@ -996,8 +937,7 @@ fn hint_line(theme: &Theme, width: usize, kb: &KeybindingsManager, action: Optio
     } else {
         format!("{select_key} select \u{b7} {close_key} close")
     };
-    let line = vec![theme.fg_span(ThemeColor::Dim, format!(" {hint}"))];
-    crate::width::truncate_line(&line, width, "")
+    hint_row(theme, width, &hint)
 }
 
 #[cfg(test)]
@@ -1272,7 +1212,7 @@ mod tests {
         let rows = frame_text(&mut view);
         assert!(rows
             .iter()
-            .any(|row| row.starts_with("No external services available")));
+            .any(|row| row.starts_with("  No external services available")));
     }
 
     #[test]
@@ -1288,6 +1228,30 @@ mod tests {
         assert!(
             rows.iter().any(|row| row.contains("Linear")),
             "builtin row: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn set_search_filters_to_the_typed_partial() {
+        let mut view = McpView::from_response(&roster_response(), 19);
+        // The Tab-intercepted partial prefills the view's filter, the
+        // caret at its end so typing extends it.
+        view.set_search("lin");
+        assert_eq!(view.search.cursor(), 3, "the caret sits after lin");
+        view.handle_key("e", &kb());
+        assert_eq!(view.search.value(), "line");
+        let rows = frame_text(&mut view);
+        assert!(
+            rows.iter().any(|row| row.contains("Linear")),
+            "the partial keeps the matching service: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("GitHub")),
+            "the non-matching rows drop: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row == "  No matching services") || rows.len() < 8,
+            "the filtered view shrinks"
         );
     }
 
@@ -1336,7 +1300,8 @@ mod tests {
             view.handle_key(&character.to_string(), &kb());
         }
         let rows = frame_text(&mut view);
-        assert!(rows.iter().any(|row| row == "No matching services"));
+        // The no-match status row carries the menu panel's row indent.
+        assert!(rows.iter().any(|row| row == "  No matching services"));
     }
 
     #[test]

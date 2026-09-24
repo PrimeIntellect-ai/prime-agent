@@ -17,6 +17,39 @@ impl Editor {
         )
     }
 
+    /// The `/command <partial>` argument context at the prompt start, when
+    /// the cursor sits in the argument text of a recognized command token:
+    /// the command name plus the typed partial. Tab interception uses this
+    /// to open a picker-command's menu filtered to the partial.
+    pub fn picker_argument_context(&self) -> Option<(String, String)> {
+        let context = self.current_slash_command_context()?;
+        if context.kind != crate::autocomplete::SlashKind::Argument || !context.at_prompt_start {
+            return None;
+        }
+        // The context only reports text up to the cursor, so a cursor
+        // inside the argument (`/model g|p`) would filter the picker on
+        // the head and leave the tail behind on accept. Only intercept
+        // when the cursor sits at the argument's end.
+        let line: Vec<char> = self.lines[self.cursor_line].chars().collect();
+        let remainder = &line[self.cursor_col.min(line.len())..];
+        if remainder.iter().any(|c| !c.is_whitespace()) {
+            return None;
+        }
+        // Applying from the picker clears the editor (the command is
+        // fulfilled), so draft text on a later line would be silently
+        // discarded with it. Only intercept when every line below the
+        // cursor's is whitespace.
+        let later_line_has_text = self
+            .lines
+            .iter()
+            .skip(self.cursor_line + 1)
+            .any(|line| line.chars().any(|c| !c.is_whitespace()));
+        if later_line_has_text {
+            return None;
+        }
+        context.command_name.map(|name| (name, context.prefix))
+    }
+
     pub(crate) fn is_slash_name_completion_at_prompt_start(&self) -> bool {
         let ctx = self.current_slash_command_context();
         let kind_slash = self
@@ -53,6 +86,14 @@ impl Editor {
 
     pub(crate) fn handle_tab_completion(&mut self) {
         if self.autocomplete_provider.is_none() {
+            return;
+        }
+        // An empty prompt has nothing to complete: the forced file pass
+        // would otherwise list the whole cwd (`file_suggestions("")`),
+        // a junk menu with no anchor token. Tab on an empty (or
+        // whitespace-only) prompt is a no-op; completion after text is
+        // typed keeps its existing behavior.
+        if self.get_text().trim().is_empty() {
             return;
         }
         if matches!(self.current_slash_command_context(), Some(c) if c.kind == crate::autocomplete::SlashKind::Name)
@@ -185,11 +226,15 @@ impl Editor {
         let has_ctx =
             self.current_slash_command_context().is_some() || ends_with_symbol_token(&before);
 
+        // An edit that empties the prompt cancels both the open menu and
+        // the parked request (a parked request can exist without an open
+        // menu; if it survived, it would materialize a dropdown on an
+        // empty prompt).
+        if self.get_text().trim().is_empty() {
+            self.cancel_autocomplete();
+            return;
+        }
         if self.autocomplete.is_some() {
-            if self.get_text().trim().is_empty() {
-                self.cancel_autocomplete();
-                return;
-            }
             let force = self
                 .autocomplete
                 .as_ref()

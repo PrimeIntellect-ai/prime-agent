@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::heartbeats_picker::{session_label, HeartbeatEntry};
 use crate::keybindings::{format_key_text, KeybindingsManager};
-use crate::menu_panel::{menu_list_layout, menu_row_trailing};
+use crate::menu_panel::{menu_list_layout, menu_row};
 use crate::subagents::{descendant_entries, entry_status, SessionIdentity};
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line};
@@ -384,12 +384,15 @@ impl ActivityPanel {
                 } else {
                     vec![theme.fg_span(ThemeColor::Dim, clean_line(&row.label))]
                 };
-                let trailing = vec![(status_color(row), clean_line(&row.status))];
-                lines.push(menu_row_trailing(
+                let status = clean_line(&row.status);
+                lines.push(menu_row(
                     theme,
                     width,
                     primary,
-                    &trailing,
+                    &[crate::menu_panel::MenuSegment::themed(
+                        status_color(row),
+                        &status,
+                    )],
                     row_index == self.selected,
                 ));
             }

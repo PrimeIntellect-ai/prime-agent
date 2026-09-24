@@ -717,6 +717,257 @@ mod tests {
         pushes
     }
 
+    /// The stale-delta gate at the handler: the worker's per-request
+    /// supervisor links deliver deltas unordered, so a delayed older
+    /// snapshot (a lower sequence) must not overwrite a newer one — the
+    /// TS worker never has this race (its roster deltas ride one ordered
+    /// supervisor client socket).
+    #[tokio::test]
+    async fn worker_roster_delta_drops_stale_sequences() {
+        let dir = std::env::temp_dir().join(format!("pa-roster-seq-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let supervisor = Arc::new(
+            Supervisor::new(crate::supervisor::SupervisorOptions {
+                socket_path: dir.join("supervisor.sock"),
+                agent_dir: dir.join("agent"),
+            })
+            .expect("supervisor"),
+        );
+        let descriptor: pa_types::daemon::DaemonWorkerDescriptor =
+            serde_json::from_value(serde_json::json!({
+                "version": 2,
+                "workerId": "seq-worker",
+                "pid": 0,
+                "socketPath": "/tmp/none.sock",
+                "recoveryJournalPath": "/tmp/none.jsonl",
+                "supervisorSocketPath": "/tmp/none.sock",
+                "authenticationToken": "seq-token",
+                "workerInstanceId": "i1",
+                "rootActiveSessionId": "s1",
+                "createdAt": "2026-09-23T00:00:00Z",
+                "updatedAt": "2026-09-23T00:00:00Z",
+                "lifecycle": "ready",
+                "createCommand": {},
+                "consecutiveFailures": 0,
+            }))
+            .expect("descriptor");
+        supervisor
+            .registry
+            .insert(ResidentWorker::new(
+                "seq-worker".to_string(),
+                descriptor,
+                dir.join("descriptor.json"),
+            ))
+            .await;
+        let entry_level = || {
+            supervisor
+                .roster
+                .lock()
+                .unwrap()
+                .get("s1")
+                .map(|entry| entry.summary["thinkingLevel"].clone())
+                .expect("the roster entry")
+        };
+        fn summary(level: &str) -> Value {
+            serde_json::json!({
+                "sessionId": "s1",
+                "activeSessionId": "s1",
+                "activity": "idle",
+                "thinkingLevel": level,
+            })
+        }
+        async fn delta(
+            supervisor: &Arc<Supervisor>,
+            token: &str,
+            level: &str,
+            sequence: Option<u64>,
+            instance: &str,
+        ) -> DaemonResponse {
+            supervisor
+                .handle_worker_roster_delta(
+                    "d",
+                    "worker_roster_delta",
+                    WorkerRosterDelta {
+                        worker_token: token.to_string(),
+                        summary: summary(level),
+                        removed: Vec::new(),
+                        sequence,
+                        worker_instance_id: Some(instance.to_string()),
+                    },
+                )
+                .await
+        }
+
+        // A fresh worker's create/registration pull stamps the ZERO
+        // counter (the worker has pushed nothing yet): it starts the
+        // slot and applies — the create path's first authoritative
+        // write.
+        let resident = supervisor
+            .registry
+            .get("seq-worker")
+            .await
+            .expect("resident");
+        let mut fresh_pull = summary("off");
+        fresh_pull["rosterDeltaSequence"] = serde_json::json!(0);
+        fresh_pull["workerInstanceId"] = serde_json::json!("i1");
+        let fresh = supervisor
+            .write_roster_summary_for_resident(&resident, &fresh_pull)
+            .await;
+        assert!(
+            fresh.is_some(),
+            "a stamped-zero pull starts the slot: {fresh:?}"
+        );
+        assert_eq!(entry_level(), serde_json::json!("off"));
+        // In-order deltas apply (the newer level lands).
+        let applied = delta(&supervisor, "seq-token", "high", Some(2), "i1").await;
+        assert!(applied.success, "sequence 2 applies: {applied:?}");
+        assert_eq!(entry_level(), serde_json::json!("high"));
+        // The delayed older snapshot (sequence 1, delivered after 2) answers
+        // success but never overwrites the newer state.
+        let stale = delta(&supervisor, "seq-token", "low", Some(1), "i1").await;
+        assert!(
+            stale.success,
+            "a stale delta still answers success: {stale:?}"
+        );
+        assert_eq!(
+            entry_level(),
+            serde_json::json!("high"),
+            "the stale snapshot never overwrites the newer one"
+        );
+        // A newer sequence applies again.
+        let applied = delta(&supervisor, "seq-token", "low", Some(3), "i1").await;
+        assert!(applied.success, "sequence 3 applies: {applied:?}");
+        assert_eq!(entry_level(), serde_json::json!("low"));
+        // The authoritative pull gates in the same lock section that
+        // writes: the summary's embedded counter (the get_state snapshot
+        // read the worker's counter, stamped with the answering
+        // instance) applies and raises the watermark, so a delta still in
+        // flight when the pull answered is dropped instead of
+        // overwriting the pull's fresher state.
+        let mut pulled = summary("off");
+        pulled["rosterDeltaSequence"] = serde_json::json!(4);
+        pulled["workerInstanceId"] = serde_json::json!("i1");
+        let pull = supervisor
+            .write_roster_summary_for_resident(&resident, &pulled)
+            .await;
+        assert!(pull.expect("pull entry").summary["thinkingLevel"] == serde_json::json!("off"));
+        assert_eq!(entry_level(), serde_json::json!("off"));
+        let stale = delta(&supervisor, "seq-token", "high", Some(4), "i1").await;
+        assert!(
+            stale.success,
+            "the in-flight delta answers success: {stale:?}"
+        );
+        assert_eq!(
+            entry_level(),
+            serde_json::json!("off"),
+            "a delta older than the pull never overwrites the pull"
+        );
+        // A pull whose counter is below the applied watermark is stale:
+        // a delta stamped after the pull's snapshot already applied, so
+        // the older in-flight refresh never overwrites it.
+        let mut stale_pull = summary("medium");
+        stale_pull["rosterDeltaSequence"] = serde_json::json!(3);
+        stale_pull["workerInstanceId"] = serde_json::json!("i1");
+        assert!(
+            supervisor
+                .write_roster_summary_for_resident(&resident, &stale_pull)
+                .await
+                .is_none(),
+            "an older in-flight refresh drops"
+        );
+        assert_eq!(entry_level(), serde_json::json!("off"));
+        // A delayed ZERO-counter pull is sequenced like any other: its
+        // snapshot was taken before the first push, so once a newer
+        // delta applied it is the stale one and drops instead of
+        // overwriting the newer state with pre-change data.
+        let mut zero_pull = summary("high");
+        zero_pull["rosterDeltaSequence"] = serde_json::json!(0);
+        zero_pull["workerInstanceId"] = serde_json::json!("i1");
+        assert!(
+            supervisor
+                .write_roster_summary_for_resident(&resident, &zero_pull)
+                .await
+                .is_none(),
+            "a delayed pre-push pull never overwrites a newer delta"
+        );
+        assert_eq!(entry_level(), serde_json::json!("off"));
+        // A replacement process registers (the registration notes the
+        // new generation) and its counter-restarted sequences apply —
+        // never compared against the predecessor's watermark.
+        supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .note_worker_generation("seq-worker", "i2");
+        let replacement = delta(&supervisor, "seq-token", "medium", Some(1), "i2").await;
+        assert!(
+            replacement.success,
+            "the replacement applies: {replacement:?}"
+        );
+        assert_eq!(entry_level(), serde_json::json!("medium"));
+        // The predecessor's delayed frames drop on the generation
+        // mismatch whatever their sequence: the replacement's
+        // registration made them stale by construction.
+        let predecessor = delta(&supervisor, "seq-token", "high", Some(9_000_000), "i1").await;
+        assert!(
+            predecessor.success,
+            "a superseded frame still answers success: {predecessor:?}"
+        );
+        assert_eq!(entry_level(), serde_json::json!("medium"));
+        // A delayed pull answered by the replaced process drops the same
+        // way — its high counter never pins the replacement's restarted
+        // counter out of the roster.
+        let mut predecessor_pull = summary("low");
+        predecessor_pull["rosterDeltaSequence"] = serde_json::json!(9_000_000);
+        predecessor_pull["workerInstanceId"] = serde_json::json!("i1");
+        assert!(
+            supervisor
+                .write_roster_summary_for_resident(&resident, &predecessor_pull)
+                .await
+                .is_none(),
+            "a superseded pull drops"
+        );
+        assert_eq!(entry_level(), serde_json::json!("medium"));
+        // The predecessor's DELAYED zero-counter pull drops the same
+        // way on the generation mismatch: the stamped zero orders
+        // against the slot, it is not the unsequenced legacy value.
+        let mut predecessor_zero_pull = summary("low");
+        predecessor_zero_pull["rosterDeltaSequence"] = serde_json::json!(0);
+        predecessor_zero_pull["workerInstanceId"] = serde_json::json!("i1");
+        assert!(
+            supervisor
+                .write_roster_summary_for_resident(&resident, &predecessor_zero_pull)
+                .await
+                .is_none(),
+            "a superseded zero-counter pull drops"
+        );
+        assert_eq!(entry_level(), serde_json::json!("medium"));
+        // An unsequenced delta applies (a caller that stamped nothing).
+        let unsequenced = delta(&supervisor, "seq-token", "low", None, "i2").await;
+        assert!(unsequenced.success, "unsequenced applies: {unsequenced:?}");
+        assert_eq!(entry_level(), serde_json::json!("low"));
+        // A wrong token still fails authentication, before the gate.
+        let rejected = delta(&supervisor, "wrong-token", "high", Some(9), "i2").await;
+        assert!(
+            !rejected.success,
+            "authentication still gates: {rejected:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Wrap one delta's fields in the parsed frame shape the handler takes
+    /// (unsequenced: these tests exercise the batching cadence, not the
+    /// stale-delta gate).
+    fn delta_frame(worker_token: &str, summary: Value, removed: Vec<String>) -> WorkerRosterDelta {
+        WorkerRosterDelta {
+            worker_token: worker_token.to_string(),
+            summary,
+            removed,
+            sequence: None,
+            worker_instance_id: None,
+        }
+    }
+
     /// TS parity for the delta push cadence (`daemon-supervisor.ts`
     /// `applyWorkerRosterDelta` + `scheduleRosterPush`): one
     /// `worker_roster_delta` produces one `roster_update` — the entry
@@ -734,9 +985,7 @@ mod tests {
             .handle_worker_roster_delta(
                 "d1",
                 "worker_roster_delta",
-                "delta-token",
-                flip_summary(dir.path(), true),
-                Vec::new(),
+                delta_frame("delta-token", flip_summary(dir.path(), true), Vec::new()),
             )
             .await;
         let pushes = drain_roster_pushes(&mut events);
@@ -752,9 +1001,7 @@ mod tests {
             .handle_worker_roster_delta(
                 "d2",
                 "worker_roster_delta",
-                "delta-token",
-                flip_summary(dir.path(), false),
-                Vec::new(),
+                delta_frame("delta-token", flip_summary(dir.path(), false), Vec::new()),
             )
             .await;
         let pushes = drain_roster_pushes(&mut events);
@@ -790,9 +1037,7 @@ mod tests {
             .handle_worker_roster_delta(
                 "d1",
                 "worker_roster_delta",
-                "delta-token",
-                child_summary,
-                Vec::new(),
+                delta_frame("delta-token", child_summary, Vec::new()),
             )
             .await;
         let child_pushes = drain_roster_pushes(&mut events);
@@ -812,9 +1057,11 @@ mod tests {
             .handle_worker_roster_delta(
                 "d2",
                 "worker_roster_delta",
-                "delta-token",
-                flip_summary(dir.path(), true),
-                vec![child_agent_id.clone()],
+                delta_frame(
+                    "delta-token",
+                    flip_summary(dir.path(), true),
+                    vec![child_agent_id.clone()],
+                ),
             )
             .await;
         let pushes = drain_roster_pushes(&mut events);
@@ -850,9 +1097,7 @@ mod tests {
                 .handle_worker_roster_delta(
                     "warm",
                     "worker_roster_delta",
-                    "delta-token",
-                    summary,
-                    Vec::new(),
+                    delta_frame("delta-token", summary.clone(), Vec::new()),
                 )
                 .await;
             drain_roster_pushes(&mut events);
@@ -868,9 +1113,7 @@ mod tests {
                 .handle_worker_roster_delta(
                     "b",
                     "worker_roster_delta",
-                    "delta-token",
-                    summary,
-                    Vec::new(),
+                    delta_frame("delta-token", summary.clone(), Vec::new()),
                 )
                 .await;
             handler_nanos += start.elapsed().as_nanos();

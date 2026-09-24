@@ -223,6 +223,12 @@ pub fn passive_child_summary(child: &PassiveRlmChild) -> Value {
     if let Some(level) = &info.thinking_level {
         object.insert("thinkingLevel".to_string(), json!(level));
     }
+    // The saved session's own-usage summary rides the passive-child row
+    // too: the roster record publishes the passivated child's spend so
+    // `list --all` rows and parent rollups never read it as zero.
+    if let Some(usage) = &info.usage {
+        object.insert("usage".to_string(), json!(usage));
+    }
     row
 }
 
@@ -303,6 +309,44 @@ mod tests {
         assert!(passive_child_summary(&plain_row)
             .get("thinkingLevel")
             .is_none());
+    }
+
+    /// The passive-child row carries the saved session's own-usage
+    /// summary: a passivated subagent's spend keeps rendering in the
+    /// `list --all` roster and parent rollups.
+    #[test]
+    fn passive_child_summary_carries_the_saved_usage_summary() {
+        let dir = temp_dir("usage");
+        let child = dir.join("sub-usage.jsonl");
+        fs::write(
+            &child,
+            concat!(
+                r#"{"type":"session","version":3,"id":"sub-usage","timestamp":"t","cwd":"/x"}"#,
+                "\n",
+                r#"{"type":"message","id":"m1","timestamp":"t","message":{"role":"assistant","content":"ok","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":12,"cost":{"input":0.0,"output":0.2,"cacheRead":0.0,"cacheWrite":0.0,"total":0.2}}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let info = read_session_info(&child).expect("child info");
+        let child_row = PassiveRlmChild {
+            edge: RlmLedgerEdge {
+                child_id: "sub-usage".to_string(),
+                parent: "/live/root.jsonl".to_string(),
+                child: child.to_string_lossy().to_string(),
+                depth: 1,
+                name: "worker-c".to_string(),
+                deleted: None,
+            },
+            info,
+            metadata: RlmChildMetadata::default(),
+            parent_active_session_id: None,
+        };
+        let summary = passive_child_summary(&child_row);
+        assert_eq!(
+            summary["usage"],
+            json!({ "inputTokens": 10, "outputTokens": 2, "cost": 0.2 })
+        );
     }
 
     fn write_session(path: &std::path::Path, id: &str, messages: usize) {

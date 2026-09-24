@@ -105,6 +105,12 @@ impl Worker {
                 None,
             );
         }
+        // The switched model (and any level the switch clamps) reaches the
+        // roster surfaces immediately: the TS `set_model` daemon handler
+        // schedules a roster flush after the switch, so the agents view's
+        // Model column never keeps the pre-switch model until the next
+        // turn's busy flip.
+        self.push_roster_delta();
         response_success(
             None,
             "set_model",
@@ -142,6 +148,10 @@ impl Worker {
             );
         };
         let previous = self.engine.effective_thinking_level();
+        // The blocking switch owns the pre-switch level (the durable-row
+        // change gate); the handler keeps its own copy for the roster push
+        // after the await.
+        let previous_level = previous.clone();
         let engine = std::sync::Arc::clone(&self.engine);
         let core = std::sync::Arc::clone(&self.core);
         let agent_dir = self.config.agent_dir.clone();
@@ -194,6 +204,15 @@ impl Worker {
                 "This session does not support thinking levels",
                 None,
             );
+        }
+        // The changed level reaches the roster surfaces immediately: TS
+        // emits the `thinking_level_changed` session event on an effective
+        // change and that event is one of the worker's roster-flush
+        // triggers (daemon-mode.ts `ROSTER_SESSION_EVENT_TRIGGERS`), so
+        // the agents view's Model column reads `model:level` right after
+        // the raise instead of waiting for the next turn's busy flip.
+        if applied.as_deref() != previous_level.as_deref() {
+            self.push_roster_delta();
         }
         response_success(None, "set_thinking_level", None)
     }

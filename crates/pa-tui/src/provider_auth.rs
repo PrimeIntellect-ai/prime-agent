@@ -493,7 +493,10 @@ impl ProviderAuthSelector {
                 .as_ref()
                 .map(|status| vec![status.label.clone()])
                 .unwrap_or_default();
-            let trailing_refs: Vec<&str> = trailing.iter().map(String::as_str).collect();
+            let trailing_refs: Vec<crate::menu_panel::MenuSegment> = trailing
+                .iter()
+                .map(|segment| crate::menu_panel::MenuSegment::muted(segment))
+                .collect();
             let row = menu_row(theme, width, primary, &trailing_refs, selected);
             lines.push(row);
         }
