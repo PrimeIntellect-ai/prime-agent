@@ -1,1 +1,0 @@
-- Added model and reasoning effort pickers for ACP clients such as Zed, with model-specific effort options.

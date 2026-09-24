@@ -1,1 +1,0 @@
-- Fixed the kernel stderr log (`kernel-stderr.log` in the session artifact directory) being created world-readable: the log is now owner-only (0600), and its directory is created owner-only (0700) when the kernel manager creates it, matching the kernel state snapshot and the other private session artifacts, because kernel stderr can carry exception payloads.

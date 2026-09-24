@@ -1,1 +1,0 @@
-- Changed the model catalog exporter to refresh curated provider metadata from models.dev where provider slugs map cleanly.
