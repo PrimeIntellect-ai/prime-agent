@@ -220,7 +220,7 @@ async fn stop_target(target: &ReapTarget) -> ReapOutcome {
         // one is not. A LIVE process behind an unobtainable handle is NOT
         // gone: the terminal stop keeps its tombstoned descriptor (the
         // next boot retries), never deletes it behind a false AlreadyGone.
-        if crate::lease::is_process_alive(target.pid).unwrap_or(false) {
+        if identity_current(target) && crate::lease::is_process_alive(target.pid).unwrap_or(false) {
             return ReapOutcome::Survived;
         }
         return ReapOutcome::AlreadyGone;
