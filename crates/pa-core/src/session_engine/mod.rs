@@ -1216,6 +1216,86 @@ mod tests {
         }
     }
 
+    /// The `[python-skills-unavailable]` notice rides the next admitted turn
+    /// ahead of its prompt row (TS `_onPythonSkillsUnavailable` through
+    /// `deliverAs: "nextTurn"`): a boot whose skill imports failed parks the
+    /// row in the next-turn mailbox, and the next prompt's provider request
+    /// carries its user-role view before the prompt text.
+    #[tokio::test]
+    async fn python_skills_unavailable_notice_rides_the_next_turn() {
+        let provider = Arc::new(ScriptedProvider::new(test_model()));
+        provider.push_text_turn("acknowledged");
+        let agent = Agent::new(AgentOptions {
+            initial_state: AgentInitialState {
+                model: Some(test_model()),
+                ..Default::default()
+            },
+            convert_to_llm: Some(crate::session_engine::messages::engine_convert_to_llm()),
+            stream_fn: Some(provider.stream_fn()),
+            ..Default::default()
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        let session = AgentSession::from_session_arc(
+            Arc::new(agent),
+            Arc::new(tokio::sync::Mutex::new(SessionManager::in_memory(
+                tmp.path(),
+            ))),
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+
+        // The kernel boot's report (skill import name -> import error).
+        let errors: python_skills_notice::UnavailablePythonSkills = [
+            (
+                "websearch".to_string(),
+                "No module named 'websearch'".to_string(),
+            ),
+            ("edit".to_string(), "boom".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        session
+            .queue_next_turn_row(python_skills_notice::notice_message(&errors))
+            .await;
+
+        session
+            .prompt("go", PromptOptions::default())
+            .await
+            .unwrap();
+        session.agent().wait_for_idle().await;
+
+        // The provider's request carried the notice row ahead of the prompt.
+        let calls = provider.calls();
+        let first = calls.first().expect("one provider call");
+        let texts: Vec<String> = first
+            .messages
+            .iter()
+            .map(user_text)
+            .filter(|text| !text.is_empty())
+            .collect();
+        let joined = texts.join("\u{0}");
+        assert!(
+            joined.contains("failed to import into the Python kernel"),
+            "the notice must reach the provider: {joined:?}"
+        );
+        assert!(
+            joined.contains("- websearch: No module named 'websearch'"),
+            "the notice names the broken skill: {joined:?}"
+        );
+        assert!(
+            joined.contains("uv pip install"),
+            "the notice carries the fix hint: {joined:?}"
+        );
+        // The notice precedes the prompt row.
+        let notice_at = joined
+            .find("[python-skills-unavailable]")
+            .expect("notice header");
+        let prompt_at = joined.find("go").expect("prompt row");
+        assert!(notice_at < prompt_at);
+    }
+
     #[tokio::test]
     async fn prompt_rides_digest_row_into_the_run() {
         let provider = Arc::new(ScriptedProvider::new(test_model()));
