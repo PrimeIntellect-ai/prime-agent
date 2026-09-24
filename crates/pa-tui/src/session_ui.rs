@@ -929,7 +929,8 @@ impl SessionUi {
         self.session_id = reconstructed.session_id;
         self.session_name.clone_from(&reconstructed.session_name);
         self.service_tier.clone_from(&reconstructed.service_tier);
-        self.pending_service_tier = reconstructed.service_tier.clone();
+        self.pending_service_tier
+            .clone_from(&reconstructed.service_tier);
         self.current_model_provider
             .clone_from(&reconstructed.model_provider);
         self.session_file = attach

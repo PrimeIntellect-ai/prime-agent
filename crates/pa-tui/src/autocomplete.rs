@@ -899,12 +899,8 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
                     // positions; the force-triggered path completion is
                     // the file surface there).
                     SlashKind::Argument => {
-                        let Some(command) = context.command_name.as_deref() else {
-                            return None;
-                        };
-                        let Some(items) = self.arguments.get(command) else {
-                            return None;
-                        };
+                        let command = context.command_name.as_deref()?;
+                        let items = self.arguments.get(command)?;
                         let term = context.prefix.trim().to_lowercase();
                         let matches: Vec<CompletionItem> = items
                             .iter()
