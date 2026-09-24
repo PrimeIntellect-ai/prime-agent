@@ -414,7 +414,13 @@ fn provider_failure_fails_over_to_the_next_provider_and_recovers() {
     assert_eq!(starts.len(), 2, "events: {:?}", client.events);
     assert_eq!(starts[0]["attempt"], 1);
     assert_eq!(starts[0]["maxAttempts"], 1);
-    assert_eq!(starts[0]["delayMs"], 50);
+    // The quick retry's wait sits in the ±20% jitter band around the
+    // 50ms base delay ([40, 70] with rounding headroom).
+    let delay = starts[0]["delayMs"].as_u64().expect("delayMs");
+    assert!(
+        (40..=70).contains(&delay),
+        "jittered delay {delay} outside [40, 70]"
+    );
     assert_eq!(starts[0].get("reason"), None, "quick retry has no reason");
     assert_eq!(starts[1]["attempt"], 2);
     assert_eq!(starts[1]["reason"], "backup");

@@ -346,6 +346,24 @@ impl AgentView {
         self.chat.len()
     }
 
+    /// Pop the LAST chat entry with its cached layout (the retry-episode
+    /// collapse: the superseded failed attempt's error row leaves the
+    /// chat when its retry replaces it — SANCTIONED DIVERGENCE from TS,
+    /// operator ruling 2026-09-23). The sparse window's tail shrinks by
+    /// the entry's rows, mirroring `push_entry`'s growth note.
+    pub fn pop_chat_entry(&mut self) -> Option<ChatEntry> {
+        let index = self.chat.len().checked_sub(1)?;
+        if self.sparse_window_is_tail_anchored() && self.layout_width > 0 {
+            let rows = self.count_entry_rows(index, self.layout_width);
+            self.sparse_tail_delta(-(rows as isize), index);
+        }
+        self.md_caches.borrow_mut().remove(&index);
+        self.sparse_entries.remove(&index);
+        self.entry_heights.pop();
+        self.entry_layout.pop();
+        self.chat.pop()
+    }
+
     /// Replace the text and tone of the status entry at `index` (TS
     /// `showStatus` updates its previous status row in place when nothing
     /// followed it). Returns `false` when the entry is not a status row.
@@ -959,14 +977,7 @@ impl AgentView {
         let Some(state) = self.editor.autocomplete_state() else {
             return Vec::new();
         };
-        let styles = crate::autocomplete::SelectListStyles {
-            selected_prefix: self.theme.fg_style(ThemeColor::Accent),
-            selected_text: self.theme.fg_style(ThemeColor::Accent),
-            description: self.theme.fg_style(ThemeColor::Muted),
-            argument_hint: self.theme.fg_style(ThemeColor::MdCode),
-            scroll_info: self.theme.fg_style(ThemeColor::Muted),
-            no_match: self.theme.fg_style(ThemeColor::Muted),
-        };
+        let theme = &self.theme;
         let bg = self.theme.bg_style(ThemeBg::ToolPanelBg);
         let padding_x = 2usize;
         // The overlay anchors against the live prompt prefix (TS
@@ -978,9 +989,19 @@ impl AgentView {
         let mut rows: Vec<Line> = Vec::new();
         let mut overlay = Vec::new();
         overlay.push(Vec::new());
-        overlay.extend(state.render(input_width, &styles));
+        overlay.extend(state.render(theme, input_width));
         overlay.push(Vec::new());
-        for line in overlay {
+        for mut line in overlay {
+            // The shared menu rows pad to the full input width with
+            // unstyled spans, so the remaining-width fill below never
+            // lands: the popup background must ride on every span the
+            // row left unstyled (the selected row's selection band
+            // carries its own background and is kept).
+            for span in &mut line {
+                if span.style.bg.is_none() {
+                    span.style = span.style.patch(bg);
+                }
+            }
             let used: usize = line.iter().map(|s| str_width(&s.content)).sum();
             let mut row: Line = vec![Span::styled(" ".repeat(padding_x + prompt_width), bg)];
             row.extend(line);
@@ -1646,6 +1667,28 @@ mod tests {
         assert!(
             joined.contains("!!  echo quiet"),
             "the !! prompt hides its typed prefix:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn autocomplete_dropdown_rows_carry_the_popup_background() {
+        // The dropdown floats on the ToolPanelBg overlay above the editor:
+        // every span of a menu row (the shared menu_panel rows pad to the
+        // full input width with unstyled spans) must carry a background,
+        // so an unselected row does not blend into the transcript behind.
+        let mut v = view();
+        v.editor.handle_input("/");
+        v.editor.handle_input("m");
+        v.editor.materialize_autocomplete();
+        assert!(v.editor.is_showing_autocomplete(), "the dropdown opens");
+        let frame = v.render_dock(80);
+        let marker_row = frame
+            .iter()
+            .find(|line| text_of(line).contains("\u{203a}"))
+            .expect("the dropdown renders its marker row");
+        assert!(
+            marker_row.iter().all(|span| span.style.bg.is_some()),
+            "dropdown row spans the popup background: {marker_row:?}"
         );
     }
 

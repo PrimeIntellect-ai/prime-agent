@@ -768,7 +768,10 @@ impl ModelPicker {
                 continue;
             };
             let segments = self.trailing_segments(model);
-            let refs: Vec<&str> = segments.iter().map(String::as_str).collect();
+            let refs: Vec<crate::menu_panel::MenuSegment> = segments
+                .iter()
+                .map(|segment| crate::menu_panel::MenuSegment::muted(segment))
+                .collect();
             max_trailing_width =
                 max_trailing_width.max(crate::menu_panel::trailing_width(&refs, width));
         }
@@ -878,9 +881,10 @@ impl ModelPicker {
     }
 
     /// Prefill the filter (`/model <search>`; TS opens the selector with
-    /// the search term applied).
+    /// the search term applied), the caret at the search's end so typing
+    /// extends it.
     pub fn set_query(&mut self, query: &str) {
-        self.search.set_value(query);
+        self.search.prefill(query);
         self.filter_models(query);
     }
 }
@@ -1191,6 +1195,18 @@ mod tests {
         );
     }
 
+    /// The Tab-intercepted partial keeps the caret at its end, so typing
+    /// extends the filter instead of inserting before it.
+    #[test]
+    fn set_query_prefill_leaves_the_caret_at_the_end() {
+        let mut picker = ModelPicker::new(picker_options(battery_catalog()));
+        picker.set_query("gp");
+        assert_eq!(picker.search.cursor(), 2, "the caret sits after gp");
+        picker.handle_key("t", &kb());
+        assert_eq!(picker.query(), "gpt");
+        assert_eq!(picker.search.cursor(), 3);
+    }
+
     #[test]
     fn typing_into_the_picker_filters_and_resets_the_selection() {
         let mut picker = ModelPicker::new(picker_options(battery_catalog()));
@@ -1397,7 +1413,7 @@ mod tests {
             ModelPicker::open(picker_options(Vec::new()), "");
         let rows = frame_text(&mut picker);
         assert_eq!(rows[1], " >  Search models");
-        assert!(rows.iter().any(|row| row == "No matching models"));
+        assert!(rows.iter().any(|row| row == "  No matching models"));
     }
 
     #[test]
@@ -1412,7 +1428,7 @@ mod tests {
         let mut picker = ModelPicker::new(picker_options(battery_catalog()));
         picker.set_query("zzz-no-match");
         let rows = frame_text(&mut picker);
-        assert!(rows.iter().any(|row| row == "No matching models"));
+        assert!(rows.iter().any(|row| row == "  No matching models"));
     }
 
     #[test]

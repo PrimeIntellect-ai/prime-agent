@@ -5,11 +5,12 @@
 //!
 //! Divergence (Kevin directive 2026-09-23, product improvement beyond the
 //! TS binary): the RLM child rows render the `◆ Subagent <name>
-//! finished|failed|cancelled` diamond rows — accent diamond, semantically
-//! colored label, the failure error and the cancellation reason as the
-//! expandable body — where the TS binary still shows the generic muted
-//! `RLM child status` label over the full content markdown. The TS side is
-//! expected to adopt the same rows.
+//! finished|failed|cancelled` diamond rows — the diamond and the label in
+//! the row's semantic color (the marker icon follows the message text's
+//! color: success green, error red, cancelled yellow), the failure error
+//! and the cancellation reason as the expandable body — where the TS
+//! binary still shows the generic muted `RLM child status` label over the
+//! full content markdown. The TS side is expected to adopt the same rows.
 //!
 //! Second divergence (operator directive 2026-09-23): the heartbeat prompt
 //! row renders the `◷` clock glyph — the unified activity dock's
@@ -50,8 +51,9 @@ pub enum InjectedPromptKind {
     },
     /// `◆ Restored Python kernel state` / `◆ Started fresh Python kernel`.
     KernelRestored { restored: bool },
-    /// `◆ Subagent <name> finished|failed|cancelled` (accent diamond,
-    /// semantic label color; failed/cancelled rows expand to the reason).
+    /// `◆ Subagent <name> finished|failed|cancelled` (the diamond and the
+    /// label share the row's semantic color; failed/cancelled rows expand
+    /// to the reason).
     RlmChildStatus {
         outcome: RlmChildOutcome,
         session_name: String,
@@ -233,6 +235,10 @@ fn prompt_header(row: &InjectedPromptRow, detail: Detail, theme: &Theme) -> Line
             outcome,
             session_name,
         } => {
+            // One color source of truth: the diamond marker carries the
+            // row's semantic color (the same style the label renders in),
+            // so the icon follows the message text instead of the fixed
+            // accent (operator directive 2026-09-23).
             let (label, color) = match outcome {
                 RlmChildOutcome::Finished => ("finished", ThemeColor::Success),
                 RlmChildOutcome::Failed => ("failed", ThemeColor::Error),
@@ -243,10 +249,11 @@ fn prompt_header(row: &InjectedPromptRow, detail: Detail, theme: &Theme) -> Line
             } else {
                 format!("Subagent {session_name} {label}")
             };
+            let color = theme.fg_style(color);
             vec![
-                Span::styled("\u{25c6}".to_string(), accent),
+                Span::styled("\u{25c6}".to_string(), color),
                 Span::raw(" "),
-                Span::styled(label, theme.fg_style(color)),
+                Span::styled(label, color),
             ]
         }
     };
@@ -595,7 +602,6 @@ mod tests {
     #[test]
     fn rlm_child_rows_render_the_diamond_labels() {
         let theme = theme();
-        let diamond = theme.fg_style(ThemeColor::Accent);
         for (outcome, session_name, label, color) in [
             (
                 RlmChildOutcome::Finished,
@@ -626,10 +632,13 @@ mod tests {
             let rows = render_injected_prompt(&row, Detail::Overview, &theme, 60);
             assert_eq!(rows.len(), 2, "{rows:?}");
             assert_eq!(flat(&rows[1]).trim_end(), format!(" \u{25c6} {label}"));
-            // The diamond stays accent; the label carries the semantic
-            // color of the outcome.
-            assert_eq!(rows[1][1], Span::styled("\u{25c6}".to_string(), diamond));
-            assert_eq!(rows[1][3], Span::styled(label, theme.fg_style(color)));
+            // The diamond and the label share the row's semantic color:
+            // the icon follows the message text (operator directive
+            // 2026-09-23), never the fixed accent.
+            let color = theme.fg_style(color);
+            assert_eq!(rows[1][1], Span::styled("\u{25c6}".to_string(), color));
+            assert_eq!(rows[1][3], Span::styled(label, color));
+            assert_ne!(color, theme.fg_style(ThemeColor::Accent));
         }
     }
 

@@ -6,7 +6,7 @@ use pa_types::ai::{Model, ModelThinkingLevel};
 
 use super::{EffortLayout, ModelPicker};
 use crate::keybindings::{format_key_text, KeybindingsManager};
-use crate::menu_panel::{menu_row, search_field_lines};
+use crate::menu_panel::{hint_row, menu_row, no_match_row, scroll_row, search_field_lines};
 use crate::theme::{Theme, ThemeColor};
 use crate::width::str_width;
 use crate::{Line, Span};
@@ -52,19 +52,26 @@ pub(super) fn render(
         let selected = index == picker.selected_index();
         let primary = row_primary(picker, theme, &model, selected, effort_layout);
         let trailing = picker.trailing_segments(&model);
-        let trailing_refs: Vec<&str> = trailing.iter().map(String::as_str).collect();
+        let trailing_refs: Vec<crate::menu_panel::MenuSegment> = trailing
+            .iter()
+            .map(|segment| crate::menu_panel::MenuSegment::muted(segment))
+            .collect();
         lines.push(menu_row(theme, width, primary, &trailing_refs, selected));
     }
 
     let filtered_len = picker.filtered_len();
     // The scroll indicator shows the selection's position in the full list.
     if start > 0 || end < filtered_len {
-        let indicator = format!("  ({}/{})", picker.selected_index() + 1, filtered_len);
-        lines.push(vec![theme.fg_span(ThemeColor::Muted, indicator)]);
+        lines.push(scroll_row(
+            theme,
+            width,
+            picker.selected_index() + 1,
+            filtered_len,
+        ));
     }
 
     if filtered_len == 0 {
-        lines.push(vec![theme.fg_span(ThemeColor::Muted, "No matching models")]);
+        lines.push(no_match_row(theme, width, "No matching models"));
     } else if let Some(model) = picker.selected_model().cloned() {
         if picker.detail_rows() > 0 {
             lines.extend(detail_lines(theme, width, &model));
@@ -290,8 +297,7 @@ fn hint_line(theme: &Theme, width: usize, kb: &KeybindingsManager) -> Line {
     } else {
         format!("{select_key} select \u{b7} {close_key} close")
     };
-    let line = vec![theme.fg_span(ThemeColor::Dim, format!(" {hint}"))];
-    crate::width::truncate_line(&line, width, "")
+    hint_row(theme, width, &hint)
 }
 
 /// Truncate to a width and pad to it (TS `truncateToWidth` with

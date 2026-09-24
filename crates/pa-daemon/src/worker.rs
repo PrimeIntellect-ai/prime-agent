@@ -433,7 +433,11 @@ pub(crate) struct SessionCore {
     /// `priority` to `default` on models without fast mode.
     pub(crate) service_tier: Option<pa_types::ai::ServiceTier>,
     /// The queue delivery modes (TS `agent.steeringMode` / `followUpMode`):
-    /// `"all"` or `"one-at-a-time"`.
+    /// `"all"` or `"one-at-a-time"`. The steering default is `"all"`
+    /// (every queued steer co-delivers as ONE turn at the next
+    /// tool-call boundary; `"one-at-a-time"` stays selectable via the
+    /// setting). The follow-up default is `"one-at-a-time"` (follow-ups
+    /// drain when the session goes idle, one per turn).
     pub(crate) steering_mode: String,
     pub(crate) follow_up_mode: String,
     /// The one-shot forced steering batch (TS `_forcedAllSteeringActionIds`
@@ -511,7 +515,7 @@ impl SessionCore {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
-            steering_mode: "one-at-a-time".to_string(),
+            steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
             scoped_models: Vec::new(),
@@ -787,6 +791,20 @@ pub struct Worker {
     /// session build (TS `createAgentSessionFromServices` parity — the
     /// kernel prewarm starts at create) runs through the concrete handle.
     pub(crate) agent_engine: Option<std::sync::Arc<crate::agent_engine::AgentSessionEngine>>,
+    /// The supervisor link the command arms push roster deltas over (the
+    /// same link the turn runner's busy-flip pushes use; stateless, so
+    /// each request dials its own socket).
+    roster_link: std::sync::Arc<crate::supervisor_link::SupervisorLink>,
+    /// The supervisor-issued worker token authenticating roster pushes.
+    worker_token: String,
+    /// The monotonic roster-delta counter shared with the turn runner: the
+    /// per-request links deliver pushes unordered, so every delta carries
+    /// the counter's value for the supervisor's stale-delta gate.
+    roster_delta_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The push-order lock shared with the turn runner: the snapshot and
+    /// its sequence stamp are one atomic pair, so sequence order is
+    /// snapshot order.
+    roster_push_order: std::sync::Arc<std::sync::Mutex<()>>,
     pub(crate) work_notify: Arc<Notify>,
     idle_notify: Arc<Notify>,
     pub(crate) events: Arc<EventPump>,
@@ -908,7 +926,7 @@ impl Worker {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
-            steering_mode: "one-at-a-time".to_string(),
+            steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
             scoped_models: Vec::new(),
@@ -953,6 +971,18 @@ impl Worker {
         tokio::spawn(async move {
             status_runner.run(status_rx).await;
         });
+        // The supervisor link and worker token for roster pushes: one
+        // construction shared by the turn runner's busy-flip pushes and
+        // the command arms' switch pushes (the same env the runner reads,
+        // so both push over the identical dial path).
+        let roster_link = std::sync::Arc::new(crate::supervisor_link::SupervisorLink::new(
+            std::env::var_os(WORKER_SUPERVISOR_SOCKET_ENV)
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default(),
+        ));
+        let worker_token = std::env::var(WORKER_TOKEN_ENV).unwrap_or_default();
+        let roster_delta_sequence = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let roster_push_order = std::sync::Arc::new(std::sync::Mutex::new(()));
         // The session input-pause table (the admission gate): shared by
         // the worker's arms and the turn runner below.
         let input_pauses = crate::session_input_pause::InputPauseTable::new();
@@ -1159,12 +1189,11 @@ impl Worker {
                 engine: std::sync::Arc::clone(&engine),
                 active_session_id,
                 status_notify: status_notify.clone(),
-                roster_link: std::sync::Arc::new(crate::supervisor_link::SupervisorLink::new(
-                    std::env::var_os(WORKER_SUPERVISOR_SOCKET_ENV)
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_default(),
-                )),
-                worker_token: std::env::var(WORKER_TOKEN_ENV).unwrap_or_default(),
+                roster_link: std::sync::Arc::clone(&roster_link),
+                worker_token: worker_token.clone(),
+                roster_delta_sequence: std::sync::Arc::clone(&roster_delta_sequence),
+                roster_push_order: std::sync::Arc::clone(&roster_push_order),
+                worker_instance_id: config.worker_instance_id.clone(),
             };
             tokio::spawn(async move {
                 runner.run().await;
@@ -1218,6 +1247,10 @@ impl Worker {
             core,
             engine,
             agent_engine,
+            roster_link,
+            worker_token,
+            roster_delta_sequence,
+            roster_push_order,
             work_notify,
             idle_notify,
             events,
@@ -2629,6 +2662,27 @@ impl Worker {
             status_label: None,
             summary: None,
             task_state: None,
+            // The worker's roster-delta counter at snapshot time, and the
+            // process instance that read it — the pair is one snapshot:
+            // the supervisor's pull gate orders the summary against the
+            // watermark of the generation that took it, so a delta still
+            // in flight when the pull answered (a sequence at or below
+            // the counter) is dropped instead of overwriting the pull's
+            // fresher state. Both reads run under the caller's core
+            // lock, and every push stamps its snapshot after the state
+            // change it describes and before its counter increment, so
+            // a counter this summary embeds already includes every
+            // change the snapshot reflects. The PRE-first-push stamp of
+            // zero is a sequenced counter (the supervisor gates it like
+            // any other — a delayed pre-push pull never overwrites a
+            // newer delta's state); only a summary that carries no
+            // counter at all is the unsequenced legacy write.
+            roster_delta_sequence: Some(
+                self.roster_delta_sequence
+                    .load(std::sync::atomic::Ordering::SeqCst),
+            ),
+            worker_instance_id: (!self.config.worker_instance_id.is_empty())
+                .then(|| self.config.worker_instance_id.clone()),
             // The engine's resolved model (the agents-view Model column:
             // TS roster summaries carry it; a not-yet-resolved engine
             // reports none).
@@ -2641,6 +2695,24 @@ impl Worker {
 
     pub(crate) fn snapshot_locked(&self, core: &SessionCore) -> SessionActionSnapshot {
         session_snapshot(core)
+    }
+
+    /// Push one roster delta from a command arm (the model/thinking
+    /// switch seams): the same frame the turn runner's busy flips push,
+    /// so a switch reaches the subscribed roster surfaces (the agents
+    /// view) without a turn — the TS roster-flush parity for
+    /// `thinking_level_changed` and the `set_model`/`cycle_model`
+    /// handlers.
+    pub(crate) fn push_roster_delta(&self) {
+        push_roster_delta(
+            &self.core,
+            &self.engine,
+            &self.roster_link,
+            &self.worker_token,
+            &self.config.worker_instance_id,
+            &self.roster_delta_sequence,
+            &self.roster_push_order,
+        );
     }
 
     fn handle_attach(&self, payload: &Value) -> DaemonResponse {
@@ -4946,6 +5018,18 @@ struct TurnRunner {
     /// agent-messaging link).
     roster_link: std::sync::Arc<crate::supervisor_link::SupervisorLink>,
     worker_token: String,
+    /// The monotonic roster-delta counter shared with the command arms (one
+    /// counter per worker session, so the supervisor's stale-delta gate
+    /// sees a total order over this worker's pushes).
+    roster_delta_sequence: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The push-order lock shared with the command arms (snapshot and
+    /// stamp are one atomic pair).
+    roster_push_order: std::sync::Arc<std::sync::Mutex<()>>,
+    /// The worker process instance id riding every roster delta (the
+    /// supervisor's gate keys its watermark by worker id + instance, so a
+    /// replacement process's restarted counter is never compared against
+    /// the predecessor's).
+    worker_instance_id: String,
 }
 
 impl TurnRunner {
@@ -5062,38 +5146,16 @@ impl TurnRunner {
     /// busy flip, so subscribed clients see live status without polling.
     /// Fire-and-forget: a dead link reconnects on the next flip, and a
     /// supervisor restart re-seeds the entry from registration.
-    fn push_roster_delta(&self) {
-        if std::env::var_os("PA_WORKER_DISABLE_ROSTER_PUSH").is_some() {
-            return;
-        }
-        if self.worker_token.is_empty() || self.roster_link.socket_path().as_os_str().is_empty() {
-            return;
-        }
-        let summary = {
-            let core = self.core.lock().unwrap();
-            session_summary(
-                &core,
-                &self
-                    .engine
-                    .effective_thinking_level()
-                    .unwrap_or_else(|| "default".to_string()),
-                self.engine.model_metadata(),
-                self.engine.model_fallback_message(),
-            )
-        };
-        let summary = serde_json::to_value(&summary).unwrap_or(serde_json::Value::Null);
-        let link = std::sync::Arc::clone(&self.roster_link);
-        let worker_token = self.worker_token.clone();
-        tokio::spawn(async move {
-            let command = serde_json::json!({
-                "type": "worker_roster_delta",
-                "workerToken": worker_token,
-                "summary": summary,
-            });
-            let _ = link
-                .request(command, std::time::Duration::from_secs(10))
-                .await;
-        });
+    pub(crate) fn push_roster_delta(&self) {
+        push_roster_delta(
+            &self.core,
+            &self.engine,
+            &self.roster_link,
+            &self.worker_token,
+            &self.worker_instance_id,
+            &self.roster_delta_sequence,
+            &self.roster_push_order,
+        );
     }
 
     /// One delivery: a single item, or the batch the pump gathered (TS
@@ -5211,6 +5273,13 @@ impl TurnRunner {
             // that end without a model turn (session commands, pre-model
             // failures).
             let mut engine_turn_ended = false;
+            // The last error of the active retry episode (the
+            // `auto_retry_start` errorMessage): the episode's durable
+            // outcome row names it on success too — the final event
+            // carries no error then (SANCTIONED DIVERGENCE, operator
+            // ruling 2026-09-23: one outcome row replaces the per-attempt
+            // error rows TS keeps).
+            let mut last_retry_error: Option<String> = None;
             let mut emit = |mut event: EngineEvent| -> bool {
                 // Sequence + persist under the core lock, then broadcast.
                 // The abort flag lives on the session core (`abort`
@@ -5500,6 +5569,10 @@ impl TurnRunner {
                         error_message,
                         reason,
                     } => {
+                        // The episode remembers its latest error so the
+                        // outcome row can name it on success (the end event
+                        // carries no error then).
+                        last_retry_error = Some(error_message.clone());
                         let mut event = json!({
                             "type": "auto_retry_start",
                             "attempt": attempt,
@@ -5529,13 +5602,46 @@ impl TurnRunner {
                             "success": success,
                             "attempt": attempt,
                         });
-                        if let Some(final_error) = final_error {
+                        if let Some(final_error) = &final_error {
                             event["finalError"] = json!(final_error);
                         }
                         if let Some(restored_model) = restored_model {
                             event["restoredModel"] = json!(restored_model);
                         }
-                        vec![event]
+                        // The episode's ONE durable outcome row (SANCTIONED
+                        // DIVERGENCE, operator ruling 2026-09-23): the
+                        // chat keeps a single resolved/terminal line for
+                        // the whole episode — live, through the message
+                        // pair below, and rebuilt, through the session
+                        // transcript — instead of one error row per failed
+                        // attempt. On success the row names the error the
+                        // starts reported (the end event carries none).
+                        let error = final_error
+                            .clone()
+                            .or_else(|| last_retry_error.take())
+                            .unwrap_or_else(|| "Unknown error".to_string());
+                        last_retry_error = None;
+                        let outcome = pa_core::session_engine::messages::
+                            create_provider_retry_outcome_message(success, attempt, &error);
+                        let outcome = crate::session_commands::custom_message_value(&outcome);
+                        if outcome.is_object() {
+                            if let Some(store) = core.store.as_mut() {
+                                let _ = store.persist_entry(
+                                    "custom_message",
+                                    json!({
+                                        "customType": outcome.get("customType").cloned().unwrap_or(Value::Null),
+                                        "content": outcome.get("content").cloned().unwrap_or(Value::Null),
+                                        "display": outcome.get("display").cloned().unwrap_or(Value::Bool(true)),
+                                        "details": outcome.get("details").cloned().unwrap_or(Value::Null),
+                                    }),
+                                );
+                            }
+                        }
+                        vec![
+                            event,
+                            json!({ "type": "message_start", "message": outcome }),
+                            json!({ "type": "message_end", "message": outcome }),
+                        ]
                     }
                 };
                 // Verification seam: dump the emitted session events for
@@ -5804,6 +5910,79 @@ fn active_lifecycle(runtime_kind: &str, messageless: bool, busy: bool) -> &'stat
     }
 }
 
+/// The worker's roster-delta push (the Rust-native form of the TS
+/// `roster_delta` worker frame): the fresh session summary rides the
+/// supervisor link, so subscribed roster surfaces (the agents view) see a
+/// state change without polling. Shared by the turn runner's busy flips
+/// and the worker's command arms (the model/thinking switches). The
+/// supervisor's roster refresh still backstops every push, so this stays
+/// fire-and-forget: a dead link reconnects on the next push, and a
+/// supervisor restart re-seeds the entry from registration.
+///
+/// The TS worker flushes its roster deltas over ONE ordered supervisor
+/// client socket (a coalesced window re-reads the current state), so a
+/// delayed older frame can never overwrite a newer one. The Rust
+/// supervisor link dials an independent socket per request — the pushes
+/// arrive unordered — so every delta carries the worker's monotonic
+/// counter and the supervisor's stale-delta gate drops the delayed older
+/// snapshots.
+fn push_roster_delta(
+    core: &Arc<Mutex<SessionCore>>,
+    engine: &std::sync::Arc<dyn SessionEngine>,
+    roster_link: &std::sync::Arc<crate::supervisor_link::SupervisorLink>,
+    worker_token: &str,
+    worker_instance_id: &str,
+    sequence: &std::sync::Arc<std::sync::atomic::AtomicU64>,
+    push_order: &std::sync::Arc<std::sync::Mutex<()>>,
+) {
+    if std::env::var_os("PA_WORKER_DISABLE_ROSTER_PUSH").is_some() {
+        return;
+    }
+    if worker_token.is_empty() || roster_link.socket_path().as_os_str().is_empty() {
+        return;
+    }
+    // The push-order lock holds the snapshot and its sequence stamp
+    // together: a busy-flip push racing a switch push must never let the
+    // older snapshot carry the newer sequence (the supervisor would then
+    // keep the stale row and drop the fresh one), so the pair is atomic
+    // and the pairs themselves order — sequence order is snapshot order.
+    let _order = push_order.lock().unwrap();
+    let mut summary = {
+        let core = core.lock().unwrap();
+        session_summary(
+            &core,
+            &engine
+                .effective_thinking_level()
+                .unwrap_or_else(|| "default".to_string()),
+            engine.model_metadata(),
+            engine.model_fallback_message(),
+        )
+    };
+    // The embedded counter is the pre-stamp value read under the order
+    // lock: every sequence this worker stamped before the snapshot is at
+    // or below it. The supervisor's authoritative pulls raise their
+    // watermark to it, so a delta still in flight when the pull answered
+    // is dropped instead of overwriting the pull's fresher state.
+    summary.roster_delta_sequence = Some(sequence.load(std::sync::atomic::Ordering::SeqCst));
+    let summary = serde_json::to_value(&summary).unwrap_or(serde_json::Value::Null);
+    let link = std::sync::Arc::clone(roster_link);
+    let worker_token = worker_token.to_string();
+    let worker_instance_id = worker_instance_id.to_string();
+    let sequence_value = sequence.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    tokio::spawn(async move {
+        let command = serde_json::json!({
+            "type": "worker_roster_delta",
+            "workerToken": worker_token,
+            "summary": summary,
+            "sequence": sequence_value,
+            "workerInstanceId": worker_instance_id,
+        });
+        let _ = link
+            .request(command, std::time::Duration::from_secs(10))
+            .await;
+    });
+}
+
 fn session_summary(
     core: &SessionCore,
     thinking_level: &str,
@@ -5912,6 +6091,13 @@ fn session_summary(
         status_label: None,
         summary: None,
         task_state: None,
+        // Set by the caller when the snapshot backs a roster push (the
+        // push-order lock reads the pre-stamp counter); authoritative
+        // pulls embed the live counter in `summary_locked` instead.
+        // The push's sending instance rides the frame envelope, so the
+        // summary itself never carries one here.
+        roster_delta_sequence: None,
+        worker_instance_id: None,
         model,
         model_fallback_message,
         runtime_kind: Some(core.runtime_kind.clone()),
@@ -8440,7 +8626,7 @@ mod turn_stream_tests {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
-            steering_mode: "one-at-a-time".to_string(),
+            steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
             scoped_models: Vec::new(),
@@ -8463,6 +8649,9 @@ mod turn_stream_tests {
             status_notify,
             roster_link: Arc::new(crate::supervisor_link::SupervisorLink::new(PathBuf::new())),
             worker_token: String::new(),
+            roster_delta_sequence: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            roster_push_order: Arc::new(std::sync::Mutex::new(())),
+            worker_instance_id: String::new(),
         }
     }
 
@@ -8668,8 +8857,58 @@ mod turn_stream_tests {
         );
     }
 
-    /// Queue mode "one-at-a-time" (the TS default): each queued steer is
-    /// its own turn — one reply each, delivered in order.
+    /// The product default: with no explicit mode set, the steering
+    /// lane co-delivers the queued same-class prefix as ONE batched turn
+    /// at the boundary.
+    #[tokio::test]
+    async fn the_default_mode_co_delivers_the_queued_steering_prefix() {
+        let engine: Arc<dyn SessionEngine> = Arc::new(
+            ScriptedEngine::from_value(json!({ "responses": ["batched reply"] }))
+                .unwrap_or_default(),
+        );
+        let runner = burst_runner(Arc::clone(&engine));
+        {
+            let mut core = runner.core.lock().unwrap();
+            assert_eq!(core.steering_mode, "all", "the default is the batched mode");
+            core.steering
+                .push_back(queued_prompt("steer one", TurnPolicy::Queued));
+            core.steering
+                .push_back(queued_prompt("steer two", TurnPolicy::Queued));
+            core.steering
+                .push_back(queued_prompt("steer three", TurnPolicy::Queued));
+        }
+        let mut subscription = runner.events.subscribe();
+        let core = std::sync::Arc::clone(&runner.core);
+        let work_notify = std::sync::Arc::clone(&runner.work_notify);
+        let running = tokio::spawn(async move { runner.run().await });
+        drain_pump(&core, &work_notify).await;
+        running.abort();
+
+        let events = runner_events(&mut subscription);
+        let starts = events
+            .iter()
+            .filter(|event| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+            .count();
+        assert_eq!(
+            starts, 1,
+            "the default batches the whole prefix: {events:?}"
+        );
+        let rows = delivered_rows(&events);
+        assert_eq!(
+            rows,
+            vec![
+                ("user".to_string(), "steer one".to_string()),
+                ("user".to_string(), "steer two".to_string()),
+                ("user".to_string(), "steer three".to_string()),
+                ("assistant".to_string(), "batched reply".to_string()),
+            ],
+            "the default mode co-delivers every parked steer: {rows:?}"
+        );
+    }
+
+    /// Queue mode "one-at-a-time" (selectable via the `steeringMode`
+    /// setting; the product default is "all"): each queued steer is its
+    /// own turn — one reply each, delivered in order.
     #[tokio::test]
     async fn one_at_a_time_delivers_each_queued_steer_as_its_own_turn() {
         // The burst harness has no session store, so the scripted engine
@@ -8683,6 +8922,7 @@ mod turn_stream_tests {
         let runner = burst_runner(Arc::clone(&engine));
         {
             let mut core = runner.core.lock().unwrap();
+            core.steering_mode = "one-at-a-time".to_string();
             core.steering
                 .push_back(queued_prompt("steer one", TurnPolicy::Queued));
             core.steering
@@ -8716,8 +8956,9 @@ mod turn_stream_tests {
 
     /// The forced steering batch (TS `abortAndSendQueued`'s
     /// `_forcedAllSteeringActionIds`): the armed prefix co-delivers as ONE
-    /// turn even under queue mode "one-at-a-time"; an item queued after
-    /// the arm stays out of the batch and delivers next.
+    /// turn even under queue mode "one-at-a-time" (pinned explicitly —
+    /// the product default is "all"); an item queued after the arm stays
+    /// out of the batch and delivers next.
     #[tokio::test]
     async fn forced_batch_delivers_the_armed_prefix_as_one_turn() {
         // (The burst harness serves the first scripted response for every
@@ -8728,6 +8969,7 @@ mod turn_stream_tests {
         let runner = burst_runner(Arc::clone(&engine));
         {
             let mut core = runner.core.lock().unwrap();
+            core.steering_mode = "one-at-a-time".to_string();
             core.steering
                 .push_back(queued_prompt("armed one", TurnPolicy::Queued));
             core.steering
@@ -8863,9 +9105,10 @@ mod turn_stream_tests {
     /// abort of a streaming turn, ALL visible queued plain-user steering
     /// messages send together as the next batched turn — the follow-up
     /// lane stays queued behind it (never discarded, never merged), then
-    /// runs in order once the session goes idle; the default queue mode
-    /// ("one-at-a-time") is unchanged, and with nothing armable queued the
-    /// abort runs abort-only (the queue parks behind the suspension).
+    /// runs in order once the session goes idle; the arm co-delivers
+    /// under any mode (the product default is "all"), and with nothing
+    /// armable queued the abort runs abort-only (the queue parks behind
+    /// the suspension).
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
     async fn abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups() {
@@ -8943,7 +9186,8 @@ mod turn_stream_tests {
         assert!(follow.success, "follow_up failed: {follow:?}");
         // The funnel (the wire command's body — #2599's handler calls it):
         // arm the visible plain-user steering, abort the run, resume the
-        // pump. The default queue mode stays "one-at-a-time".
+        // pump. The arm carries the batch under any mode; the default
+        // itself is asserted below (the product default "all").
         let sent = worker.abort_and_send_queued();
         assert!(sent, "the armed steering batch sent with the abort");
         let idle = tokio::time::timeout(
@@ -9036,8 +9280,8 @@ mod turn_stream_tests {
                 "both lanes drained in order"
             );
             assert_eq!(
-                core.steering_mode, "one-at-a-time",
-                "the default mode is untouched"
+                core.steering_mode, "all",
+                "the default mode is the batched-at-the-boundary product default"
             );
         }
         let _ = std::fs::remove_dir_all(&dir);

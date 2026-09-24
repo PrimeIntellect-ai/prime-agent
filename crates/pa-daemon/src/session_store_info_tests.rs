@@ -13,6 +13,7 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
     let mut first_message = String::new();
     let mut all_messages_text = String::new();
     let mut agent_status: Option<Value> = None;
+    let mut usage_scan = crate::session_usage::UsageScan::default();
     let mut last_activity_ms: Option<u64> = None;
     for line in content.lines() {
         let trimmed = line.trim();
@@ -70,10 +71,34 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
             "agent_status" => {
                 agent_status = entry.fields.get("status").cloned();
             }
+            "child_usage_attributed" => {
+                let usage_field = |name: &str| {
+                    entry.fields.get(name).and_then(|usage| {
+                        serde_json::from_value::<pa_types::ai::Usage>(usage.clone()).ok()
+                    })
+                };
+                usage_scan.fold_child_attribution(
+                    entry.fields.get("targetId").and_then(Value::as_str),
+                    usage_field("childUsage"),
+                    usage_field("aggregateUsage"),
+                );
+            }
+            "compaction" | "branch_summary" => {
+                usage_scan.fold_summarization(entry.fields.get("usage").and_then(|usage| {
+                    serde_json::from_value::<pa_types::ai::Usage>(usage.clone()).ok()
+                }));
+            }
             "message" => {
                 message_count += 1;
                 if let Some(message) = entry.fields.get("message") {
                     let role = message_role(message);
+                    usage_scan.fold_message(
+                        &entry.id,
+                        role,
+                        message.get("usage").and_then(|usage| {
+                            serde_json::from_value::<pa_types::ai::Usage>(usage.clone()).ok()
+                        }),
+                    );
                     if role == Some("assistant") {
                         if let (Some(provider), Some(model_id)) = (
                             message.get("provider").and_then(Value::as_str),
@@ -136,6 +161,7 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
         },
         all_messages_text,
         agent_status,
+        usage: usage_scan.summary(),
     })
 }
 

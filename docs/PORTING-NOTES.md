@@ -1227,6 +1227,65 @@ batch), `sdk.ts`'s settings-seeded `Agent` queue modes,
   and the arming classification; pa-tui unit tests cover the hint text
   (default + rebound key) and its idle/empty-draft gates.
 
+# Multi-steer batch delivery at the tool boundary — the batched default (lane steer-tool-boundary-batch, 2026-09-23)
+
+Kevin's bug report (2026-09-23, his words): "multi steer works correctly
+where if I abort, all steer queued messages get sent [...]. But the
+actual multi steer part doesn't work: if I have multiple messages in the
+steer queue and then a tool call finishes, we send only the first steer
+message, then wait for the next tool call to finish, then send the next
+steer message [...]. Correct behaviour: if we have many messages in the
+steer queue, then ALL of them should be sent after the next tool call."
+
+- **Root cause**: the mid-turn steer path was correct end-to-end (the
+  `steer` wire command parks on the worker's steering lane; TS
+  `_steeringStopPending`'s stop hook ends the running turn at the next
+  tool-call boundary; `gather_delivery_batch` delivers the parked prefix
+  as the next turn) — but the delivery batched ONLY under queue mode
+  `"all"` or the `abort_and_send_queued` forced arm. The default
+  `steeringMode` was the TS default `"one-at-a-time"` (settings-manager
+  `getSteeringMode()`'s `|| "one-at-a-time"`), so N parked steers
+  drip-fed one per boundary: each delivered steer's own turn hit the
+  still-queued stop hook at ITS next boundary and delivered the next —
+  exactly the reported shape. The abort path already co-delivered (the
+  one-shot armed batch), which is why aborting looked correct.
+- **The fix — the deliberate divergence** (Kevin's explicit product
+  decision): the steering queue's DEFAULT is now `"all"`. The settings
+  default (`SettingsManager::get_steering_mode()`), the worker
+  `SessionCore` placeholders, and the TUI's pre-state placeholder flip
+  to `"all"`; the follow-up default keeps the TS `"one-at-a-time"`
+  (follow-ups drain when the session goes idle, one per turn — the
+  follow-up lane never merges into the steering batch). The TS default
+  `"one-at-a-time"` stays selectable through the same setting surface
+  (`steeringMode` in settings / the `set_steering_mode` wire command /
+  the TUI settings menu); `pa-agent`'s library-level
+  `PendingMessageQueue` default stays TS-faithful — the divergence
+  lives only at the product default, where the decision was made.
+- **Unchanged invariants**: `abort_and_send_queued`'s forced batch and
+  its arming classification; the follow-up lane's when-idle delivery
+  behind the steering batch (its own mode, never merged); injected
+  custom rows (agent-message deliveries, heartbeat steers, minted goal
+  contexts) still deliver solo — `gather_delivery_batch`'s
+  same-turn-execution-class + plain-user-row + non-session-command
+  gates are untouched; a queued session command still delivers solo;
+  the pick-up projection (the queue strip drops the delivered rows
+  before their turn starts) applies to the batch as one update.
+- Verifiers: `steer_boundary_batch_e2e.rs` — the reproducer over the
+  real worker stack (live kernel, a scripted sleep cell parks three
+  steers + a follow-up mid-tool) pins the spec: ONE delivery
+  `agent_start` for the whole batch, the three steer rows chained, ONE
+  assistant reply, the follow-up behind as its own turn. Worker unit
+  tests pin the default-mode batch (`the_default_mode_co_delivers...`),
+  the one-at-a-time mode's one-per-turn shape (pinned explicitly), the
+  forced arm over the pinned one-at-a-time mode, and the abort battery's
+  new default assertion; the settings unit test pins the default flip +
+  the explicit-selection survival. `steer_queue_parity.py` grows the
+  unseeded `default-multi-steer` flow — the recorded per-side evidence
+  of the divergence (the TS binary's default drips one steer per
+  boundary; the rust port's default batches) — plus the seeded
+  `one-at-a-time-multi-steer` flow, which byte-compares on both
+  binaries and keeps the mode surface parity-exact.
+
 ## Daemon model allowlist — `allowedModels` (lane metered-model-guardrail, 2026-09-23)
 
 ### The settings key
@@ -1355,3 +1414,25 @@ FRESH session (a parity bug both directions: no resume, no error).
   not the first-listed row.
 - `supervisor_e2e::create_with_continue_recent_is_refused`: the wire
   refusal + the plain-create pass-through.
+
+## Bash timeout-to-background (design note, not implemented; Kevin directive, 2026-09-23)
+
+Kevin wants a 30-second default timeout on `bash()` calls. When a bash
+command runs longer than 30 seconds, the daemon should automatically move
+it to the background, return control to the agent's loop, and notify
+both the agent and the user when it completes. This is a future feature —
+do not implement it yet; this section records the design so it survives
+the port.
+
+- **30-second default timeout** on `bash()` calls; commands that exceed
+  it are auto-converted rather than failed.
+- **Daemon-side conversion**: the daemon owns the timer and moves the
+  long-running command to the background, returning control to the
+  agent's loop (the agent's turn continues without waiting).
+- **Agent + user notification on completion**: both surfaces are told
+  when the backgrounded command finishes.
+- **Kernel-side timeout-to-background is ruled out for now** — the
+  conversion happens in the daemon, not the Python kernel.
+- **FUTURE — not implemented**: nothing in the codebase changes today;
+  the dock's `bash` activity tracking and the `bash()` tool API stay as
+  they are.
