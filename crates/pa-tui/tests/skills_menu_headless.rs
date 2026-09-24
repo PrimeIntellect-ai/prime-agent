@@ -120,7 +120,7 @@ impl MockSupervisor {
                             "command": "get_session_stats",
                             "success": true,
                             "data": {
-                                "contextUsage": { "tokens": 1200, "contextWindow": 200000 },
+                                "contextUsage": { "tokens": 1200, "contextWindow": 200_000 },
                                 "cost": 0.01,
                             },
                         }),

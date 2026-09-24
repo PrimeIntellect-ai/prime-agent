@@ -526,10 +526,7 @@ fn consume_leading_every_schedule(text: &str) -> Option<(String, String)> {
 }
 
 pub fn is_heartbeat_cron_job(job: &AgentCronJob) -> bool {
-    matches!(
-        job.source.as_deref(),
-        Some("heartbeat") | Some("rlm_heartbeat")
-    )
+    matches!(job.source.as_deref(), Some("heartbeat" | "rlm_heartbeat"))
 }
 
 /// Whether a due heartbeat should wait instead of firing now.

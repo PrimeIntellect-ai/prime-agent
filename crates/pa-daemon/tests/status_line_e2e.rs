@@ -87,7 +87,7 @@ fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
-        "created": 1750000000,
+        "created": 1_750_000_000,
         "model": "mock",
         "choices": [{
             "index": 0,
@@ -167,7 +167,7 @@ fn serve(
         json!({
             "id": "chatcmpl-test",
             "object": "chat.completion.chunk",
-            "created": 1750000000,
+            "created": 1_750_000_000,
             "model": "mock",
             "choices": [],
             "usage": {

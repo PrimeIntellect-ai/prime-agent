@@ -645,7 +645,7 @@ mod tests {
             "baseUrl": "", "reasoning": false, "input": [], "cost": {
                 "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0
             },
-            "contextWindow": 100000, "maxTokens": 8192
+            "contextWindow": 100_000, "maxTokens": 8192
         }))
         .unwrap()
     }

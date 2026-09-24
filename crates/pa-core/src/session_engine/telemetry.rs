@@ -945,7 +945,7 @@ mod tests {
         // Flush per event so assertions see every tracked event without an
         // explicit flush round-trip.
         config.batch_size = 1;
-        config.flush_interval = Duration::from_secs(600);
+        config.flush_interval = Duration::from_mins(10);
         config.sinks = vec![mock.clone() as Arc<dyn pa_telemetry::TelemetrySink>];
         TelemetryClient::spawn(config).expect("spawn client")
     }
@@ -1400,7 +1400,7 @@ mod tests {
             fixture.state.clone(),
             "interactive".to_string(),
         );
-        telemetry.note_child_usage_attributed("spawn_task", 50_208, 2_929, 0, 0, 0.0089957);
+        telemetry.note_child_usage_attributed("spawn_task", 50_208, 2_929, 0, 0, 0.008_995_7);
         fixture.client.flush().await.unwrap();
         let events = event_properties(&fixture.mock, "rlm child usage attributed").await;
         assert_eq!(events.len(), 1);
@@ -1408,7 +1408,7 @@ mod tests {
         assert_eq!(events[0]["input_tokens"], serde_json::json!(50_208));
         assert_eq!(events[0]["output_tokens"], serde_json::json!(2_929));
         assert_eq!(events[0]["cache_read_tokens"], serde_json::json!(0));
-        assert!((events[0]["cost"].as_f64().unwrap() - 0.0089957).abs() < 1e-9);
+        assert!((events[0]["cost"].as_f64().unwrap() - 0.008_995_7).abs() < 1e-9);
     }
 
     /// `build_client`: settings-provided PostHog endpoint + the local mirror.

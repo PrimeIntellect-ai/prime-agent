@@ -663,7 +663,7 @@ async fn settle_turn(
             pa_core::autonomous::AutonomousLimitReason::MaxTokens,
         )) => AcpStopReason::MaxTokens,
         Some(AutonomousStopReason::Limit(_)) => AcpStopReason::MaxTurnRequests,
-        Some(AutonomousStopReason::GatePassed) | Some(AutonomousStopReason::GateRetryExhausted) => {
+        Some(AutonomousStopReason::GatePassed | AutonomousStopReason::GateRetryExhausted) => {
             AcpStopReason::EndTurn
         }
     };

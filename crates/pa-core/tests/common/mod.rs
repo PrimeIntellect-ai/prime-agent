@@ -107,7 +107,7 @@ async fn run(listener: TcpListener, requests: RequestLog, responses: ResponseQue
                 // A held connection: the request records, the fetch never
                 // settles (the caller's bounded wait must return first).
                 Scripted::Hang => {
-                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    tokio::time::sleep(std::time::Duration::from_hours(1)).await;
                     let _ = socket.write_all(&[]).await;
                 }
             }

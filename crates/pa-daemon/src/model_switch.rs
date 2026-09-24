@@ -271,7 +271,7 @@ mod tests {
                         "apiKey": "sk-test",
                         "models": [
                             { "id": "mock-1", "name": "Mock 1", "api": "openai-completions",
-                              "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128000,
+                              "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128_000,
                               "maxTokens": 4096 }
                         ]
                     }
@@ -379,7 +379,7 @@ mod tests {
                         "apiKey": "sk-test",
                         "models": [
                             { "id": "mock-1", "name": "Mock 1", "api": "openai-completions",
-                              "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128000,
+                              "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128_000,
                               "maxTokens": 4096 }
                         ]
                     }

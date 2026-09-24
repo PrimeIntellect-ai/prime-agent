@@ -5829,7 +5829,7 @@ impl TurnRunner {
                         .and_then(Value::as_str);
                     let flushes_pending = matches!(
                         stream_kind,
-                        Some("text_end") | Some("thinking_end") | Some("toolcall_end")
+                        Some("text_end" | "thinking_end" | "toolcall_end")
                     );
                     if is_stream_update && !flushes_pending {
                         let sequence = core.last_event_sequence + 1;
@@ -9402,7 +9402,7 @@ mod turn_stream_tests {
             script: Some(json!({
                 "engine": "faux",
                 "responses": [
-                    { "text": "held reply", "delayMs": 600000 },
+                    { "text": "held reply", "delayMs": 600_000 },
                     "batch reply",
                     "follow-up reply"
                 ],
@@ -9582,7 +9582,7 @@ mod turn_stream_tests {
             telemetry_disabled: None,
             script: Some(json!({
                 "engine": "faux",
-                "responses": [{ "text": "held again", "delayMs": 600000 }, "later"]
+                "responses": [{ "text": "held again", "delayMs": 600_000 }, "later"]
             })),
         };
         let worker = std::sync::Arc::new(Worker::new(config, None));
