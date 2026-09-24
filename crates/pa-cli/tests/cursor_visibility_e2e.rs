@@ -225,7 +225,7 @@ fn cursor_stays_hidden_and_positioned_across_mount_picker_and_suspend() {
     let mount_hide = find_subsequence(stream, CURSOR_HIDE.as_bytes())
         .expect("the session hides the hardware cursor");
     assert!(
-        mount_hide < harness.startup_end(),
+        mount_hide < harness.startup_end,
         "the mount hide lands inside the startup window"
     );
 
