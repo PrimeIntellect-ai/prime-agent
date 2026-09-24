@@ -47,6 +47,10 @@ const DETAIL_SPACER_ROWS: usize = 1;
 const MIN_ROWS_FOR_DETAIL: usize =
     SEARCH_FIELD_ROWS + HINT_ROWS + SCROLL_INDICATOR_ROWS + DETAIL_ROWS + DETAIL_SPACER_ROWS + 2;
 
+/// The empty state's window rows (the message plus its blank row before
+/// the hint): the layout must budget them before the message renders.
+const EMPTY_STATE_ROWS: usize = 2;
+
 /// One service-catalog card (the daemon's resolved `services` array; TS
 /// `McpPluginView`): a catalog service or a user-declared server with its
 /// honestly-computed connection state.
@@ -219,11 +223,6 @@ impl McpServiceRow {
         flatten_to_single_line(&self.label)
     }
 
-    /// The Enter action for the hint line (TS `actionText`).
-    fn action_hint(&self) -> &'static str {
-        self.action_text()
-    }
-
     /// The action target (the service id).
     fn target(&self) -> &str {
         self.service_id.as_str()
@@ -289,6 +288,25 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// TS string operations run on UTF-16 code units (`.length`, indexing,
+/// `indexOf`), so the scoring bands and tiebreaks must measure the same
+/// units: a surrogate pair counts as two and a substring position is a
+/// unit index, or non-ASCII queries rank differently from the TS picker.
+fn utf16_len(text: &str) -> usize {
+    text.chars().map(char::len_utf16).sum()
+}
+
+/// The first UTF-16 code-unit index of `needle` in `haystack`, like TS
+/// `indexOf` (byte offsets diverge past ASCII).
+fn utf16_index(haystack: &[u16], needle: &[u16]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
 /// Identity match: exact, prefix (plus the remaining-length tiebreak),
 /// word start, substring (plus the position tiebreak), then the
 /// subsequence fallback with its span penalty.
@@ -298,65 +316,71 @@ fn identity_match_score(text: &str, token: &str) -> Option<f64> {
         return Some(SCORE_EXACT);
     }
     if let Some(rest) = haystack.strip_prefix(token) {
-        return Some(SCORE_PREFIX + rest.chars().count() as f64 * 0.01);
+        return Some(SCORE_PREFIX + utf16_len(rest) as f64 * 0.01);
     }
     if words(&haystack).iter().any(|word| word.starts_with(token)) {
         return Some(SCORE_WORD_START);
     }
-    if let Some(at) = haystack.find(token) {
+    let units: Vec<u16> = haystack.encode_utf16().collect();
+    let token_units: Vec<u16> = token.encode_utf16().collect();
+    if let Some(at) = utf16_index(&units, &token_units) {
         return Some(SCORE_SUBSTRING + at as f64 * 0.01);
     }
-    subsequence_match_score(&haystack, token)
+    subsequence_match_score(&units, &token_units)
 }
 
-/// Identity-only subsequence fallback (TS `subsequenceMatchScore`). The
-/// consecutive-run floor — half the query, minimum two characters —
-/// keeps the fallback for tight abbreviations ("crdb" finds
-/// cockroachdb) while rejecting the scattered matches; the span
+/// Identity-only subsequence fallback (TS `subsequenceMatchScore`,
+/// over UTF-16 code units — the TS walk indexes units, so a surrogate
+/// pair is two). The consecutive-run floor — half the query, minimum
+/// two units — keeps the fallback for tight abbreviations ("crdb"
+/// finds cockroachdb) while rejecting the scattered matches; the span
 /// tiebreak spreads matches.
-fn subsequence_match_score(haystack: &str, token: &str) -> Option<f64> {
-    let token: Vec<char> = token.chars().collect();
-    if token.len() < 2 || token.len() > haystack.chars().count() {
+fn subsequence_match_score(haystack: &[u16], token: &[u16]) -> Option<f64> {
+    if token.len() < 2 || token.len() > haystack.len() {
         return None;
     }
     let mut token_index = 0;
     let mut run_length: i64 = 0;
     let mut longest_run: i64 = 0;
-    let mut first_match: Option<usize> = None;
+    let mut first_match: i64 = -1;
     let mut last_match: i64 = -1;
-    for (index, character) in haystack.chars().enumerate() {
-        if token
-            .get(token_index)
-            .is_some_and(|want| *want == character)
-        {
-            run_length = if last_match == index as i64 - 1 {
-                run_length + 1
-            } else {
-                1
-            };
-            longest_run = longest_run.max(run_length);
-            first_match.get_or_insert(index);
-            last_match = index as i64;
-            token_index += 1;
+    let mut index = 0;
+    while index < haystack.len() && token_index < token.len() {
+        let matched = haystack[index] == token[token_index];
+        if !matched {
+            index += 1;
+            continue;
         }
+        run_length = if last_match == index as i64 - 1 {
+            run_length + 1
+        } else {
+            1
+        };
+        longest_run = longest_run.max(run_length);
+        if first_match == -1 {
+            first_match = index as i64;
+        }
+        last_match = index as i64;
+        token_index += 1;
+        index += 1;
     }
     if token_index < token.len() || longest_run < 2.max((token.len() as i64 + 1) / 2) {
         return None;
     }
-    let span = (last_match - first_match.expect("matched") as i64 + 1) - token.len() as i64;
+    let span = (last_match - first_match + 1) - token.len() as i64;
     Some(SCORE_SUBSEQUENCE + span as f64 * 2.0)
 }
 
 /// Description text matches only as a word start or substring (plus the
-/// position tiebreak) — never a subsequence.
+/// UTF-16 position tiebreak, like TS `indexOf`) — never a subsequence.
 fn description_match_score(text: &str, token: &str) -> Option<f64> {
     let haystack = text.to_lowercase();
     if words(&haystack).iter().any(|word| word.starts_with(token)) {
         return Some(SCORE_DESCRIPTION_WORD_START);
     }
-    haystack
-        .find(token)
-        .map(|at| SCORE_DESCRIPTION_SUBSTRING + at as f64 * 0.01)
+    let units: Vec<u16> = haystack.encode_utf16().collect();
+    let token_units: Vec<u16> = token.encode_utf16().collect();
+    utf16_index(&units, &token_units).map(|at| SCORE_DESCRIPTION_SUBSTRING + at as f64 * 0.01)
 }
 
 /// The row's search score for the whole query (TS `serviceMatchScore`):
@@ -577,24 +601,35 @@ impl McpView {
         // the viewport does not have.
         if self.visible_items > 0 && (start > 0 || end < self.filtered.len()) {
             let indicator = format!("  ({}/{})", self.selected + 1, self.filtered.len());
-            lines.push(vec![theme.fg_span(ThemeColor::Muted, indicator)]);
+            // A narrow frame truncates the indicator to its width (the
+            // menu-panel status-row shape): it never overwrites the
+            // adjacent cells.
+            let line = vec![theme.fg_span(ThemeColor::Muted, indicator)];
+            lines.push(crate::width::truncate_line(&line, width, ""));
         }
 
         if self.visible_items > 0 {
             if self.filtered.is_empty() {
-                let message = if self.rows.is_empty() {
-                    "No external services available"
-                } else {
-                    "No matching services"
-                };
-                // The message row aligns with the rows' labels (the TS
-                // `TruncatedText` pad plus the text's own leading space).
-                lines.push(vec![
-                    theme.fg_span(ThemeColor::Muted, format!("  {message}"))
-                ]);
-                // One blank row between the empty state and the shortcuts
-                // line (TS): the message never touches the keybinds.
-                lines.push(Vec::new());
+                // The empty state's message and its blank row spend the
+                // two rows the window budgets: a viewport too short for
+                // both keeps the skeleton alone (the frame never draws
+                // past its viewport).
+                if self.visible_items >= EMPTY_STATE_ROWS {
+                    let message = if self.rows.is_empty() {
+                        "No external services available"
+                    } else {
+                        "No matching services"
+                    };
+                    // The message row aligns with the rows' labels (the
+                    // TS `TruncatedText` pad plus the text's own leading
+                    // space) and truncates to the frame width.
+                    let line = vec![theme.fg_span(ThemeColor::Muted, format!("  {message}"))];
+                    lines.push(crate::width::truncate_line(&line, width, ""));
+                    // One blank row between the empty state and the
+                    // shortcuts line (TS): the message never touches the
+                    // keybinds.
+                    lines.push(Vec::new());
+                }
             } else if self.detail_rows() > 0 {
                 // One blank line between the last row and the description
                 // (TS), then the ONE fixed detail line.
@@ -614,7 +649,7 @@ impl McpView {
             .filtered
             .get(self.selected)
             .and_then(|index| self.rows.get(*index))
-            .map(McpServiceRow::action_hint);
+            .map(McpServiceRow::action_text);
         lines.push(hint_line(theme, width, kb, action));
         lines
     }
@@ -708,11 +743,31 @@ fn trailing_menu_row(
     selected: bool,
 ) -> Line {
     let inner_width = width.saturating_sub(2).max(1);
-    let trailing_spans: Line = if trailing.is_empty() {
+    // TS `getInlineTrailing`: the trailing cluster lives on a budget of
+    // the inner width minus five — segments reduce from the front until
+    // the cluster fits, then the joined text truncates with the
+    // ellipsis, so a narrow row keeps a SHORTENED status instead of
+    // losing it to the row's right-edge truncation.
+    let budget = inner_width.saturating_sub(5).max(1);
+    let mut reduced: Vec<&(ThemeColor, &str)> = trailing
+        .iter()
+        .filter(|(_, text)| !text.is_empty())
+        .collect();
+    let cluster = |segments: &[&(ThemeColor, &str)]| -> String {
+        segments
+            .iter()
+            .map(|(_, text)| *text)
+            .collect::<Vec<_>>()
+            .join(" \u{b7} ")
+    };
+    while reduced.len() > 1 && crate::width::str_width(&cluster(&reduced)) > budget {
+        reduced.remove(0);
+    }
+    let mut trailing_spans: Line = if reduced.is_empty() {
         Vec::new()
     } else {
-        let mut spans: Vec<Span> = Vec::with_capacity(trailing.len() * 2 - 1);
-        for (index, (color, text)) in trailing.iter().enumerate() {
+        let mut spans: Vec<Span> = Vec::with_capacity(reduced.len() * 2);
+        for (index, (color, text)) in reduced.iter().enumerate() {
             if index > 0 {
                 spans.push(Span::raw(" \u{b7} "));
             }
@@ -720,6 +775,9 @@ fn trailing_menu_row(
         }
         spans
     };
+    if !trailing_spans.is_empty() {
+        trailing_spans = crate::width::truncate_line(&trailing_spans, budget, "\u{2026}");
+    }
     let trailing_width = crate::width::spans_width(&trailing_spans);
     let gap = if trailing_width > 0 { 2 } else { 0 };
     let primary_width = inner_width.saturating_sub(trailing_width + gap).max(1);
@@ -1170,10 +1228,7 @@ mod tests {
         let row = |id: &str| {
             view.rows
                 .iter()
-                .find_map(|row| match row {
-                    service if service.service_id == id => Some(service),
-                    _ => None,
-                })
+                .find(|row| row.service_id == id)
                 .expect("row")
         };
         // The exact band.
@@ -1281,6 +1336,96 @@ mod tests {
         assert!(
             rows.iter().any(|row| row.starts_with("\u{203a} Linear")),
             "the alias still matches after the paste: {rows:?}"
+        );
+    }
+
+    /// TS string operations run on UTF-16 code units: a surrogate pair
+    /// is TWO units to the subsequence walk, and the substring tiebreak
+    /// measures unit positions. The emoji query ranks exactly like the
+    /// TS picker (the review finding).
+    #[test]
+    fn scoring_measures_utf16_units_like_ts() {
+        // The prefix tiebreak: "\u{1f600}ab" leaves one UTF-16 unit of
+        // rest after the emoji prefix (two units), not two chars.
+        assert_eq!(
+            identity_match_score("\u{1f600}ab", "\u{1f600}"),
+            Some(SCORE_PREFIX + 1.0 * 0.01),
+            "the prefix remainder counts UTF-16 units"
+        );
+        // The substring tiebreak: the position after the two-unit emoji
+        // is 2, not the byte offset 4.
+        assert_eq!(
+            identity_match_score("x\u{1f600}y", "y"),
+            Some(SCORE_SUBSTRING + 2.0 * 0.01),
+            "the substring position is a UTF-16 unit index"
+        );
+        // The subsequence walk matches surrogate halves like TS: the
+        // query "\u{1f600}a" (3 units) is a subsequence of "\u{1f600}x a"
+        // (5 units) with the emoji's two consecutive units as a run.
+        let haystack: Vec<u16> = "\u{1f600}x a".encode_utf16().collect();
+        let token: Vec<u16> = "\u{1f600}a".encode_utf16().collect();
+        assert_eq!(
+            subsequence_match_score(&haystack, &token),
+            Some(SCORE_SUBSEQUENCE + (4 - 3) * 2),
+            "the subsequence span counts UTF-16 units"
+        );
+    }
+
+    /// A viewport too short for the empty state's message and its blank
+    /// row keeps the skeleton alone (the frame never draws past its
+    /// viewport; the review finding).
+    #[test]
+    fn the_empty_state_needs_its_window_budget() {
+        let data = json!({ "connections": [], "services": [] });
+        let mut view = McpView::from_response(&data, 5);
+        let rows = frame_text(&mut view);
+        assert!(rows.len() <= 5, "the too-short empty frame fits: {rows:?}");
+        assert!(
+            !rows.iter().any(|row| row.contains("No external services")),
+            "the message stays behind its budget: {rows:?}"
+        );
+        // Once the viewport budgets the two rows, the message rides.
+        let mut view = McpView::from_response(&data, 6);
+        let rows = frame_text(&mut view);
+        assert!(
+            rows.iter().any(|row| row.contains("No external services")),
+            "the message renders inside its budget: {rows:?}"
+        );
+        assert!(rows.len() <= 6, "the empty frame fits: {rows:?}");
+    }
+
+    /// A narrow row keeps a SHORTENED trailing status (TS
+    /// `getInlineTrailing`: the cluster reduces from the front, then
+    /// truncates with the ellipsis) instead of dropping it at the row's
+    /// right edge (the review finding).
+    #[test]
+    fn narrow_rows_shorten_the_trailing_status() {
+        let theme = theme();
+        // Width 24: the trailing budget is 17, so the 19-wide status
+        // SHORTENS with the ellipsis instead of dropping off the row.
+        let row = trailing_menu_row(
+            &theme,
+            24,
+            vec![Span::raw("CockroachDB")],
+            &[(ThemeColor::Success, "Connected \u{b7} 12 tools")],
+            true,
+        );
+        let text = row
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert_eq!(
+            crate::width::str_width(&text.trim_end()),
+            24,
+            "the row stays exactly the width: {text:?}"
+        );
+        assert!(
+            text.contains('\u{2026}'),
+            "the status shortens with the ellipsis: {text:?}"
+        );
+        assert!(
+            text.contains("Connected"),
+            "the shortened status stays on the row: {text:?}"
         );
     }
 
