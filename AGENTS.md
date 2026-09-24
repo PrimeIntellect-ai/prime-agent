@@ -56,7 +56,7 @@ Every contributor (human or agent) must read this before working on this repo.
 - The metric is the whole-file physical line count of every tracked `.rs` file
   (what you see when you open it); `scripts/loc-baseline.json` is the state.
 - New files are held to the 500-line default ceiling. Files that were already
-  over 500 when the ratchet landed (2026-09-24, tip bfc297b5a) are frozen at
+  over 500 when the ratchet landed (2026-09-24, tip d8bb6c57b) are frozen at
   their measured size: the entry can only go DOWN. A PR that shrinks a frozen
   file re-records the win with `python3 scripts/check_loc.py --update-baseline`
   (the check fails on an unrecorded win, so the improvement becomes the new

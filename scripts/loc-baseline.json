@@ -1,6 +1,6 @@
 {
  "default_ceiling": 500,
- "note": "Max-LOC ratchet baseline. Measured 2026-09-24 from org/rust tip bfc297b5a (#2718): every tracked .rs file above the default ceiling is frozen at its measured whole-file line count. Ceilings only go down: a PR that shrinks a frozen file re-records with scripts/check_loc.py --update-baseline (a lower number in this file is a win; a raised number is a hand-edited exception that must carry a reason and is review surface). New files are held to default_ceiling unless a justified entry is added here.",
+ "note": "Max-LOC ratchet baseline. Measured 2026-09-24 from the rust tip at ratchet landing, d8bb6c57b (#2717 folded in; per-file numbers identical to the bfc297b5a measurement - the intervening merge only grew a sub-ceiling file). Every tracked .rs file above the default ceiling is frozen at its measured whole-file line count. Ceilings only go down: a PR that shrinks a frozen file re-records with scripts/check_loc.py --update-baseline (a lower number in this file is a win; a raised number is a hand-edited exception that must carry a reason and is review surface). New files are held to default_ceiling unless a justified entry is added here.",
  "files": {
   "crates/pa-agent/src/agent.rs": {
    "ceiling": 1049,
