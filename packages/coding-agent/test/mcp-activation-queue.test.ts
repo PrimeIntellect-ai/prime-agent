@@ -17,10 +17,9 @@ vi.mock("../src/utils/atomic-file.js", async (importOriginal) => {
 
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { McpConnectionStore } from "../src/core/mcp/connection-store.js";
-
+import { initTheme } from "../src/core/theme/theme.js";
 import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/index.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 beforeEach(() => {
 	vi.stubGlobal(

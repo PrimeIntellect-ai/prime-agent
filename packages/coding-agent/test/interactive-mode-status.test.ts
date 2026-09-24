@@ -6,6 +6,7 @@ import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { emptyGoalState } from "../src/core/goals.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
+import { initTheme } from "../src/core/theme/theme.js";
 import { InProcessAgentConnection } from "../src/modes/agent-connection/in-process-agent-connection.js";
 import type {
 	AgentConnectionExtensionUiRequest,
@@ -19,7 +20,6 @@ import type {
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import { QueueSelection } from "../src/modes/interactive/queue-selection.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { createDeferred } from "./suite/scheduling.js";
 
 function renderAll(container: Container, width = 120): string {

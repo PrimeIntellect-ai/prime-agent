@@ -1,5 +1,8 @@
 // UI Components for extensions
 
+export { type RenderDiffOptions, renderDiff } from "../../../core/rendering/diff.js";
+export { keyHint, keyText, rawKeyHint } from "../../../core/rendering/keybinding-hints.js";
+export { truncateToVisualLines, type VisualTruncateResult } from "../../../core/rendering/visual-truncate.js";
 export { AgentMessageComponent } from "./agent-message.js";
 export { ArminComponent } from "./armin.js";
 export { AssistantMessageComponent } from "./assistant-message.js";
@@ -18,7 +21,6 @@ export {
 export { CustomEditor } from "./custom-editor.js";
 export { CustomMessageComponent } from "./custom-message.js";
 export { DaxnutsComponent } from "./daxnuts.js";
-export { type RenderDiffOptions, renderDiff } from "./diff.js";
 export { DynamicBorder } from "./dynamic-border.js";
 export { ExtensionEditorComponent } from "./extension-editor.js";
 export { ExtensionInputComponent } from "./extension-input.js";
@@ -31,7 +33,6 @@ export {
 	type IPythonCellContentBlock,
 	type IPythonCellState,
 } from "./ipython-cell.js";
-export { keyHint, keyText, rawKeyHint } from "./keybinding-hints.js";
 export { LoginDialogComponent } from "./login-dialog.js";
 export { ModelSelectorComponent } from "./model-selector.js";
 export { OAuthSelectorComponent } from "./oauth-selector.js";
@@ -48,4 +49,3 @@ export { TOOL_PANEL_PADDING_X, ToolPanel, toolPanelContentWidth, toolPanelLine }
 export { TreeSelectorComponent } from "./tree-selector.js";
 export { UserMessageComponent } from "./user-message.js";
 export { UserMessageSelectorComponent } from "./user-message-selector.js";
-export { truncateToVisualLines, type VisualTruncateResult } from "./visual-truncate.js";

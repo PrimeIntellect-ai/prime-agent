@@ -242,6 +242,17 @@ export {
 	type SkillPythonMetadata,
 } from "./core/skills.js";
 export { createSyntheticSourceInfo } from "./core/source-info.js";
+// Theme utilities for custom tools and extensions
+export {
+	getLanguageFromPath,
+	getMarkdownTheme,
+	getSelectListTheme,
+	getSettingsListTheme,
+	highlightCode,
+	initTheme,
+	Theme,
+	type ThemeColor,
+} from "./core/theme/theme.js";
 // Tools
 export {
 	type BashOperations,
@@ -388,17 +399,6 @@ export {
 	UserMessageSelectorComponent,
 	type VisualTruncateResult,
 } from "./modes/interactive/components/index.js";
-// Theme utilities for custom tools and extensions
-export {
-	getLanguageFromPath,
-	getMarkdownTheme,
-	getSelectListTheme,
-	getSettingsListTheme,
-	highlightCode,
-	initTheme,
-	Theme,
-	type ThemeColor,
-} from "./modes/interactive/theme/theme.js";
 // Clipboard utilities
 export { copyToClipboard } from "./utils/clipboard.js";
 export { parseFrontmatter, stripFrontmatter } from "./utils/frontmatter.js";

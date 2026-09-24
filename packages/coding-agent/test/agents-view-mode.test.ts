@@ -4,6 +4,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { initTheme, stopThemeWatcher } from "../src/core/theme/theme.js";
+import { WORKING_ICON_INTERVAL_MS } from "../src/core/theme/working-icon.js";
 import { DaemonAgentConnection } from "../src/modes/agent-connection/daemon-agent-connection.js";
 import type { AgentConnectionSavedSessionInfo } from "../src/modes/agent-connection/types.js";
 import {
@@ -25,8 +27,6 @@ import { DaemonControlPlaneTransportError } from "../src/modes/daemon/daemon-rou
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import * as savedSessionCatalog from "../src/modes/daemon/saved-session-catalog.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
-import { initTheme, stopThemeWatcher } from "../src/modes/interactive/theme/theme.js";
-import { WORKING_ICON_INTERVAL_MS } from "../src/modes/interactive/theme/working-icon.js";
 
 const modeMocks = vi.hoisted(() => ({
 	interactiveRun: vi.fn<() => Promise<never>>(),

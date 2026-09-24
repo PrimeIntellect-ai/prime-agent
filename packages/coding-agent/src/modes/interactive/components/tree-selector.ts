@@ -9,10 +9,10 @@ import {
 	TruncatedText,
 	truncateToWidth,
 } from "@earendil-works/pi-tui";
+import { keyHint, keyText } from "../../../core/rendering/keybinding-hints.js";
+import { theme } from "../../../core/theme/theme.js";
 import type { AgentConnectionSessionTreeNode } from "../../agent-connection/index.js";
-import { theme } from "../theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
-import { keyHint, keyText } from "./keybinding-hints.js";
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
 interface GutterInfo {

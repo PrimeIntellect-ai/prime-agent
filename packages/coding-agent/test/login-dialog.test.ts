@@ -8,8 +8,8 @@ import {
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { initTheme } from "../src/core/theme/theme.js";
 import { LoginDialogComponent } from "../src/modes/interactive/components/login-dialog.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { PRIME_BUTTERFLY_LOGO } from "../src/themes/prime-logo.js";
 
 const mocks = vi.hoisted(() => ({

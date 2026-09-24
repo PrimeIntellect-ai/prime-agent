@@ -3,10 +3,10 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { KeybindingsManager } from "../../../src/core/keybindings.js";
 import type { ModelRegistry } from "../../../src/core/model-registry.js";
 import type { SettingsManager } from "../../../src/core/settings-manager.js";
+import { initTheme } from "../../../src/core/theme/theme.js";
 import type { AgentConnectionModel } from "../../../src/modes/agent-connection/types.js";
 import type { AuthenticationResult } from "../../../src/modes/interactive/auth-flows.js";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
-import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { createHarness, type Harness } from "../harness.js";
 
 interface OnboardingSplashHandle {

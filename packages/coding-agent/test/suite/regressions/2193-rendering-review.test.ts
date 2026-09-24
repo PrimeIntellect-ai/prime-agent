@@ -3,13 +3,6 @@ import { join } from "node:path";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import stripAnsi from "strip-ansi";
 import { afterEach, describe, expect, test } from "vitest";
-import { previewPythonCode, pythonStatementLines } from "../../../src/core/tools/code-preview.js";
-import { AssistantMessageComponent } from "../../../src/modes/interactive/components/assistant-message.js";
-import { IPythonCellComponent } from "../../../src/modes/interactive/components/ipython-cell.js";
-import {
-	readAssignedShellCommand,
-	readBackgroundShellHandle,
-} from "../../../src/modes/interactive/components/shell-completion.js";
 import {
 	initTheme,
 	loadThemeFromPath,
@@ -17,7 +10,14 @@ import {
 	preloadThemeValidator,
 	setThemeInstance,
 	theme,
-} from "../../../src/modes/interactive/theme/theme.js";
+} from "../../../src/core/theme/theme.js";
+import { previewPythonCode, pythonStatementLines } from "../../../src/core/tools/code-preview.js";
+import { AssistantMessageComponent } from "../../../src/modes/interactive/components/assistant-message.js";
+import { IPythonCellComponent } from "../../../src/modes/interactive/components/ipython-cell.js";
+import {
+	readAssignedShellCommand,
+	readBackgroundShellHandle,
+} from "../../../src/modes/interactive/components/shell-completion.js";
 import { createHarness, type Harness } from "../harness.js";
 
 let harness: Harness | undefined;
@@ -72,7 +72,7 @@ describe("conversation rendering review regressions", () => {
 	test("loads custom themes without mdBody before and after validator initialization", async () => {
 		harness = await createHarness();
 		const custom = JSON.parse(
-			readFileSync(new URL("../../../src/modes/interactive/theme/dark.json", import.meta.url), "utf8"),
+			readFileSync(new URL("../../../src/core/theme/dark.json", import.meta.url), "utf8"),
 		) as { name: string; colors: Record<string, string | number> };
 		custom.name = "optional-body";
 		custom.colors.text = "#123456";

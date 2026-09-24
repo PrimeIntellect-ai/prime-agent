@@ -1,5 +1,5 @@
 import fs from "fs";
-import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
+import { initTheme, theme } from "../src/core/theme/theme.js";
 
 // --- Color utilities ---
 

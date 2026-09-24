@@ -3,14 +3,14 @@ import { Container, type MarkdownTheme, type TUI } from "@earendil-works/pi-tui"
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.js";
+import type { FileChangeSummary } from "../src/core/rendering/edit-summary.js";
+import { getMarkdownTheme, initTheme } from "../src/core/theme/theme.js";
 import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/index.js";
 import { AgentActivityTracker } from "../src/modes/interactive/agent-activity.js";
 import type { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
-import type { FileChangeSummary } from "../src/modes/interactive/components/edit-summary.js";
 import { FooterComponent } from "../src/modes/interactive/components/footer.js";
 import type { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
-import { getMarkdownTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
 
 const EMPTY_USAGE: Usage = {
 	input: 0,

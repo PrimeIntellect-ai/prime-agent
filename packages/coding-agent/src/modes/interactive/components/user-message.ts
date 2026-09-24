@@ -7,7 +7,7 @@ import {
 	type TableCellSelectionRegion,
 } from "@earendil-works/pi-tui";
 import { builtinSlashCommandTakesArgument, parseSlashCommand } from "../../../core/slash-commands.js";
-import { getMarkdownTheme, theme } from "../theme/theme.js";
+import { getMarkdownTheme, theme } from "../../../core/theme/theme.js";
 import { PromptTokenMask } from "./prompt-highlight.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";

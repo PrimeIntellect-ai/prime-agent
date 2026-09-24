@@ -3,10 +3,10 @@ import { Container, Input, setKeybindings, type TUI } from "@earendil-works/pi-t
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, expect, it, vi } from "vitest";
 import { KEYBINDINGS, KeybindingsManager } from "../../../src/core/keybindings.js";
+import { initTheme } from "../../../src/core/theme/theme.js";
 import type { ConfigurationMenuComponent } from "../../../src/modes/interactive/components/configuration-menu.js";
 import { ModelSelectorComponent } from "../../../src/modes/interactive/components/model-selector.js";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
-import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { createHarness, type Harness } from "../harness.js";
 
 const harnesses: Harness[] = [];

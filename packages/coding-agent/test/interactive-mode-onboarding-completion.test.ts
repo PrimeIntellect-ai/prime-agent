@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { initTheme } from "../src/core/theme/theme.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
 import type { OnboardingStartupState } from "../src/modes/interactive/onboarding.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 type Context = Record<string, unknown> & {
 	settingsManager: {

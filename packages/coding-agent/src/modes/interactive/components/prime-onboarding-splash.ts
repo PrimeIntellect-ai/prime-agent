@@ -5,8 +5,8 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { getResolvedThemeColors, type ThemeColor, theme } from "../../../core/theme/theme.js";
 import { PRIME_COMPACT_BUTTERFLY_LOGO } from "../../../themes/prime-logo.js";
-import { getResolvedThemeColors, type ThemeColor, theme } from "../theme/theme.js";
 import { isOnboardingExitKey } from "./onboarding-exit.js";
 import { onboardingHighlightBackground } from "./onboarding-highlight.js";
 

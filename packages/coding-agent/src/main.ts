@@ -76,6 +76,7 @@ import {
 } from "./core/session-manager.js";
 import { SettingsManager } from "./core/settings-manager.js";
 import { isTelemetryEnabled } from "./core/telemetry.js";
+import { initTheme, preloadCodeHighlighter, stopThemeWatcher } from "./core/theme/theme.js";
 import { printTimings, resetTimings, time } from "./core/timings.js";
 import { runMigrations, showDeprecationWarnings } from "./migrations.js";
 import { isDaemonCatalogProcess, runDaemonCatalogProcess } from "./modes/daemon/daemon-catalog-process.js";
@@ -119,7 +120,6 @@ import {
 } from "./modes/index.js";
 import { ExtensionSelectorComponent } from "./modes/interactive/components/extension-selector.js";
 import { shouldRunOnboarding } from "./modes/interactive/onboarding.js";
-import { initTheme, preloadCodeHighlighter, stopThemeWatcher } from "./modes/interactive/theme/theme.js";
 import { handleConfigCommand } from "./package-manager-cli.js";
 import { isLocalPath } from "./utils/paths.js";
 import { readPipedStdin } from "./utils/piped-stdin.js";

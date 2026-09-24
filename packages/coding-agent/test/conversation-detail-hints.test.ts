@@ -2,10 +2,10 @@ import { setKeybindings } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeEach, describe, expect, it } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { initTheme } from "../src/core/theme/theme.js";
 import { BranchSummaryMessageComponent } from "../src/modes/interactive/components/branch-summary-message.js";
 import { CompactionSummaryMessageComponent } from "../src/modes/interactive/components/compaction-summary-message.js";
 import { SkillInvocationMessageComponent } from "../src/modes/interactive/components/skill-invocation-message.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 describe("conversation detail hints", () => {
 	beforeEach(() => {

@@ -1,6 +1,6 @@
 import { Container, type Focusable, fuzzyFilter, getKeybindings, TruncatedText } from "@earendil-works/pi-tui";
 import type { PrimeTeam } from "../../../core/prime-inference-auth.js";
-import { theme } from "../theme/theme.js";
+import { theme } from "../../../core/theme/theme.js";
 import {
 	getMenuListLayout,
 	inlineMenuPanelTopRuleRows,

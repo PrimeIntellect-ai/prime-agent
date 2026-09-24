@@ -5,7 +5,7 @@ import {
 	type McpDisconnectionOutcomeDetails,
 	type McpOutcomeDetails,
 } from "../../../core/messages.js";
-import { theme } from "../theme/theme.js";
+import { theme } from "../../../core/theme/theme.js";
 import { ExpandableEventMessage } from "./expandable-event-message.js";
 
 function outcomeHeader(details: McpOutcomeDetails): string {

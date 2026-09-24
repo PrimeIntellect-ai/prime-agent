@@ -10,10 +10,10 @@ import {
 	Text,
 	type TUI,
 } from "@earendil-works/pi-tui";
+import { formatKeyText, keyHint } from "../../../core/rendering/keybinding-hints.js";
+import { theme } from "../../../core/theme/theme.js";
 import { execFileHidden } from "../../../utils/child-process.js";
 import { copyToClipboard } from "../../../utils/clipboard.js";
-import { theme } from "../theme/theme.js";
-import { formatKeyText, keyHint } from "./keybinding-hints.js";
 import { MenuPanel, MenuSearchInput } from "./menu-panel.js";
 import { shouldTreatAsBack } from "./modal-back.js";
 import { isOnboardingExitKey } from "./onboarding-exit.js";

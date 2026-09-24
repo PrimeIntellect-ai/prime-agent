@@ -9,6 +9,7 @@ import { ENV_AGENT_DIR, getAgentLogPath } from "../src/config.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { stopThemeWatcher } from "../src/core/theme/theme.js";
 import { AgentsViewMode, type AgentsViewPersistentState } from "../src/modes/agents-view/agents-view-mode.js";
 import {
 	createIncidentNoticeState,
@@ -18,7 +19,6 @@ import {
 	refreshIncidentNoticeState,
 } from "../src/modes/agents-view/incident-notices.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
-import { stopThemeWatcher } from "../src/modes/interactive/theme/theme.js";
 
 vi.mock("../src/config.js", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../src/config.js")>();

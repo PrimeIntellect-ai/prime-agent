@@ -1,5 +1,5 @@
 import { Box } from "@earendil-works/pi-tui";
-import { theme } from "../theme/theme.js";
+import { theme } from "../../../core/theme/theme.js";
 
 /**
  * Shared skeleton for boxed custom-message cards (compaction, skill,

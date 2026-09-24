@@ -122,7 +122,7 @@ for platform in "${PLATFORMS[@]}"; do
     cp CHANGELOG.md binaries/$platform/
     cp ../../node_modules/@silvia-odwyer/photon-node/photon_rs_bg.wasm binaries/$platform/
     mkdir -p binaries/$platform/theme
-    cp dist/modes/interactive/theme/*.json binaries/$platform/theme/
+    cp dist/core/theme/*.json binaries/$platform/theme/
     mkdir -p binaries/$platform/assets
     cp dist/modes/interactive/assets/* binaries/$platform/assets/
     cp -r dist/core/export-html binaries/$platform/

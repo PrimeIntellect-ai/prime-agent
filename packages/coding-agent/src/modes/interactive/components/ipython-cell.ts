@@ -6,15 +6,19 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { formatAgentMessageParticipant } from "../../../core/agent-messages.js";
+import { renderDiffSeparator, renderRichDiff } from "../../../core/rendering/diff.js";
+import {
+	countChangedLines,
+	FILE_CHANGE_DIFF_INDENT,
+	formatFileChangeSummaryLine,
+} from "../../../core/rendering/edit-summary.js";
+import { getLanguageFromPath, highlightCode, theme } from "../../../core/theme/theme.js";
+import { getWorkingPulseFrame, WORKING_ICON_FRAMES, workingIconFrame } from "../../../core/theme/working-icon.js";
 import { previewIpythonCode, pythonStatementLines } from "../../../core/tools/code-preview.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
 import { parseIpythonBashCell } from "../../../core/tools/ipython-cell-code.js";
-import { getLanguageFromPath, highlightCode, theme } from "../theme/theme.js";
-import { getWorkingPulseFrame, WORKING_ICON_FRAMES, workingIconFrame } from "../theme/working-icon.js";
 import { agentMessageBodyLines, agentMessageSummaryLine } from "./agent-message.js";
 import { normalizeErrorDetails, summarizeErrorDetails } from "./collapsible-error.js";
-import { renderDiffSeparator, renderRichDiff } from "./diff.js";
-import { countChangedLines, FILE_CHANGE_DIFF_INDENT, formatFileChangeSummaryLine } from "./edit-summary.js";
 import type { BackgroundShellHandle, ShellCompletion } from "./shell-completion.js";
 
 export interface IPythonCellContentBlock {

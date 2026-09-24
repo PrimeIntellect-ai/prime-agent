@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { IdleEvictionMinutes } from "../../../core/session-action-store.js";
 import type { MermaidRenderingMode, WarningSettings } from "../../../core/settings-manager.js";
-import { getSelectListTheme, getSettingsListTheme, theme } from "../theme/theme.js";
+import { getSelectListTheme, getSettingsListTheme, theme } from "../../../core/theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 
 const SETTINGS_SUBMENU_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {

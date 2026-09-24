@@ -3,6 +3,7 @@ import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentCronJob, AgentHeartbeatManagementAction } from "../src/core/cron-jobs.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { initTheme } from "../src/core/theme/theme.js";
 import type {
 	AgentConnectionHeartbeat,
 	AgentConnectionRlmChildAgentSnapshot,
@@ -13,7 +14,6 @@ import {
 	HEARTBEAT_REFRESH_RETRY_DELAY_MS,
 	InteractiveMode,
 } from "../src/modes/interactive/interactive-mode.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 interface HeartbeatManagementHarness {
 	heartbeatCatalog: AgentConnectionHeartbeat[];

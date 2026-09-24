@@ -3,13 +3,13 @@ import stripAnsi from "strip-ansi";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { createCompactionSummaryMessage } from "../src/core/messages.js";
+import { getEditorTheme, initTheme } from "../src/core/theme/theme.js";
 import { CollapsibleErrorComponent } from "../src/modes/interactive/components/collapsible-error.js";
 import { CompactionSummaryMessageComponent } from "../src/modes/interactive/components/compaction-summary-message.js";
 import { CustomEditor } from "../src/modes/interactive/components/custom-editor.js";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
 import { TOOL_PANEL_PADDING_X, ToolPanel } from "../src/modes/interactive/components/tool-panel.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
-import { getEditorTheme, initTheme } from "../src/modes/interactive/theme/theme.js";
 
 const mockTui = { requestRender: vi.fn(), setFocus: vi.fn(), terminal: { rows: 24 } } as unknown as TUI;
 function regionFor(lines: string[], regions: ReadonlyArray<ClickRegion>, needle: string): ClickRegion {

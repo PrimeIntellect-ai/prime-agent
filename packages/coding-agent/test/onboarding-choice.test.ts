@@ -2,8 +2,8 @@ import { setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { initTheme } from "../src/core/theme/theme.js";
 import { OnboardingChoiceComponent } from "../src/modes/interactive/components/onboarding-choice.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 describe("OnboardingChoiceComponent", () => {
 	beforeAll(() => {

@@ -1,5 +1,5 @@
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions } from "@earendil-works/pi-tui";
-import { getAvailableThemes, getSelectListTheme } from "../theme/theme.js";
+import { getAvailableThemes, getSelectListTheme } from "../../../core/theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
 
 const THEME_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {

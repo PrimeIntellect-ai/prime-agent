@@ -2,11 +2,11 @@ import { setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
-import { formatConversationDetailStatus } from "../src/modes/interactive/components/keybinding-hints.js";
+import { formatConversationDetailStatus } from "../src/core/rendering/keybinding-hints.js";
+import { initTheme, theme } from "../src/core/theme/theme.js";
 import { PromptContextLine } from "../src/modes/interactive/components/prompt-context-line.js";
 import { SubagentSummaryLine } from "../src/modes/interactive/components/subagent-summary-line.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
-import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 interface DetailMode {
 	toolOutputExpanded: boolean;

@@ -1,5 +1,5 @@
 import { Clickable, type Component, Container, Text, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { type ThemeColor, theme } from "../theme/theme.js";
+import { type ThemeColor, theme } from "../../../core/theme/theme.js";
 
 class EventSummary implements Component {
 	constructor(

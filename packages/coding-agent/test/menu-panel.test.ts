@@ -1,12 +1,12 @@
 import { Container } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it } from "vitest";
+import { initTheme } from "../src/core/theme/theme.js";
 import {
 	inlineMenuPanelTopRuleRows,
 	MenuPanel,
 	MenuSearchInput,
 } from "../src/modes/interactive/components/menu-panel.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 describe("MenuPanel inline separator rule", () => {
 	beforeAll(() => {

@@ -1,5 +1,5 @@
 import { blendColor, isLightColor, type Rgb, rgbTo256 } from "@earendil-works/pi-tui";
-import { theme } from "../theme/theme.js";
+import { theme } from "../../../core/theme/theme.js";
 
 /** How far a selected row lifts off the canvas; lower reads more transparent. */
 const HIGHLIGHT_LIFT = 0.08;

@@ -14,6 +14,7 @@ import {
 	isMcpConnectionOutcomeMessage,
 	MCP_CONNECTION_OUTCOME_CUSTOM_TYPE,
 } from "../src/core/messages.js";
+import { initTheme, theme } from "../src/core/theme/theme.js";
 import type { AgentConnectionSessionEvent } from "../src/modes/agent-connection/index.js";
 import { buildConversationComponents } from "../src/modes/interactive/components/conversation-components.js";
 import {
@@ -21,7 +22,6 @@ import {
 	McpConnectionOutcomeMessageComponent,
 } from "../src/modes/interactive/components/mcp-connection-outcome-message.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
-import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 // The connect flows verify through the real verifyMcpConnection seam; the
 // emit-site tests pin each outcome variant by controlling it directly.

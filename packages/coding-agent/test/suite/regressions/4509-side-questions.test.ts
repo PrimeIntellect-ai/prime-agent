@@ -2,9 +2,9 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { Container } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { type SideQuestionEvent, startSideQuestion } from "../../../src/core/side-question.js";
+import { initTheme } from "../../../src/core/theme/theme.js";
 import { BashExecutionComponent } from "../../../src/modes/interactive/components/bash-execution.js";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
-import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { createHarness } from "../harness.js";
 
 type Host = Record<string, unknown>;

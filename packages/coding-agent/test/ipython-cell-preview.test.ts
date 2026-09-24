@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { initTheme, preloadCodeHighlighter, theme } from "../src/core/theme/theme.js";
 import { IPythonCellComponent } from "../src/modes/interactive/components/ipython-cell.js";
-import { initTheme, preloadCodeHighlighter, theme } from "../src/modes/interactive/theme/theme.js";
 
 type CellState = ConstructorParameters<typeof IPythonCellComponent>[0];
 

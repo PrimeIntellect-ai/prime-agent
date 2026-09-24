@@ -3,7 +3,7 @@ import type { Component } from "@earendil-works/pi-tui";
 import { Box, Clickable, Container, Markdown, type MarkdownTheme, Spacer, Text } from "@earendil-works/pi-tui";
 import type { MessageRenderer } from "../../../core/extensions/types.js";
 import type { CustomMessage } from "../../../core/messages.js";
-import { getMarkdownTheme, theme } from "../theme/theme.js";
+import { getMarkdownTheme, theme } from "../../../core/theme/theme.js";
 
 export class CustomMessageComponent extends Container {
 	private message: CustomMessage<unknown>;

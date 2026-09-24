@@ -1,8 +1,8 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, it } from "vitest";
+import { initTheme, preloadCodeHighlighter, theme } from "../src/core/theme/theme.js";
 import { PromptContextLine } from "../src/modes/interactive/components/prompt-context-line.js";
-import { initTheme, preloadCodeHighlighter, theme } from "../src/modes/interactive/theme/theme.js";
 
 describe("PromptContextLine", () => {
 	beforeAll(async () => {

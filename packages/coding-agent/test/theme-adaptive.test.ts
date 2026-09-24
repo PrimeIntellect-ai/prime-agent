@@ -1,6 +1,6 @@
 import { clearDefaultTerminalColors, setDefaultTerminalColors } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { getEditorTheme, initTheme, setThemeInstance, Theme, theme } from "../src/modes/interactive/theme/theme.js";
+import { getEditorTheme, initTheme, setThemeInstance, Theme, theme } from "../src/core/theme/theme.js";
 
 type Rgb = { r: number; g: number; b: number };
 

@@ -16,9 +16,9 @@ import {
 import chalk from "chalk";
 import { type Static, type TProperties, Type } from "typebox";
 import type { Validator } from "typebox/compile";
-import { getCustomThemesDir, getThemesDir } from "../../../config.js";
-import type { SourceInfo } from "../../../core/source-info.js";
-import { closeWatcher, watchWithErrorHandler } from "../../../utils/fs-watch.js";
+import { getCustomThemesDir, getThemesDir } from "../../config.js";
+import { closeWatcher, watchWithErrorHandler } from "../../utils/fs-watch.js";
+import type { SourceInfo } from "../source-info.js";
 
 // ============================================================================
 // Types & Schema

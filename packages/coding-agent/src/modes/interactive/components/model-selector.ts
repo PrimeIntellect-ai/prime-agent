@@ -19,8 +19,8 @@ import {
 } from "@earendil-works/pi-tui";
 import type { ModelRegistry } from "../../../core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../../../core/prime-inference-auth.js";
-import { theme } from "../theme/theme.js";
-import { keyHint } from "./keybinding-hints.js";
+import { keyHint } from "../../../core/rendering/keybinding-hints.js";
+import { theme } from "../../../core/theme/theme.js";
 import {
 	getInlineTrailingWidth,
 	getMenuListLayout,

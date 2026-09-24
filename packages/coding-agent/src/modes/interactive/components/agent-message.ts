@@ -7,7 +7,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { type AgentSessionMessage, formatAgentMessageParticipant } from "../../../core/agent-messages.js";
-import { getMarkdownTheme, theme } from "../theme/theme.js";
+import { getMarkdownTheme, theme } from "../../../core/theme/theme.js";
 
 /** `◆ <label> · <participant>[ · <preview>]` summary line shared by received and sent agent-message UI. */
 export function agentMessageSummaryLine(label: string, participant: string, preview?: string): string {

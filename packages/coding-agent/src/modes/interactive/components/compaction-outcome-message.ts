@@ -1,6 +1,6 @@
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import type { CompactionOutcomeMessage } from "../../../core/messages.js";
-import { theme } from "../theme/theme.js";
+import { theme } from "../../../core/theme/theme.js";
 
 /** Renders a durable unsuccessful automatic-compaction outcome. */
 export class CompactionOutcomeMessageComponent extends Container {

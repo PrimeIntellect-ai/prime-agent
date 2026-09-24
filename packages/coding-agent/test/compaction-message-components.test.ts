@@ -3,10 +3,10 @@ import stripAnsi from "strip-ansi";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { convertToLlm, createCompactionOutcomeMessage, createCompactionSummaryMessage } from "../src/core/messages.js";
+import { getMarkdownTheme, initTheme, theme } from "../src/core/theme/theme.js";
 import { CompactionOutcomeMessageComponent } from "../src/modes/interactive/components/compaction-outcome-message.js";
 import { CompactionSummaryMessageComponent } from "../src/modes/interactive/components/compaction-summary-message.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
-import { getMarkdownTheme, initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 describe("compact compaction messages", () => {
 	beforeEach(() => {

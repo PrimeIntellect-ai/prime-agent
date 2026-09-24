@@ -9,8 +9,8 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { McpPluginView } from "../../../core/mcp/service-catalog.js";
-import { theme } from "../theme/theme.js";
-import { keyText } from "./keybinding-hints.js";
+import { keyText } from "../../../core/rendering/keybinding-hints.js";
+import { theme } from "../../../core/theme/theme.js";
 import {
 	getMenuListLayout,
 	inlineMenuPanelTopRuleRows,

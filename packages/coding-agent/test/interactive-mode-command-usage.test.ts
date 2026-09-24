@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { initTheme } from "../src/core/theme/theme.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 type SubmitContext = {
 	defaultEditor: { onSubmit?: (text: string) => Promise<void> };

@@ -19,6 +19,7 @@ import {
 	resolvePrimeInferenceAuthConfig,
 } from "../../core/prime-inference-auth.js";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.js";
+import { theme } from "../../core/theme/theme.js";
 import { SERPER_CREDENTIAL_ID, SERPER_CREDENTIAL_NAME } from "../../core/websearch-credential.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { LoginDialogComponent } from "./components/login-dialog.js";
@@ -30,7 +31,6 @@ import {
 } from "./components/oauth-selector.js";
 import { OnboardingChoiceComponent } from "./components/onboarding-choice.js";
 import { PrimeTeamSelectorComponent } from "./components/prime-team-selector.js";
-import { theme } from "./theme/theme.js";
 
 export type AuthenticationResult =
 	| {

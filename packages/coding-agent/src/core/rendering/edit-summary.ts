@@ -2,12 +2,12 @@ import { isAbsolute } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import type { EditToolDetails } from "../../../core/tools/edit.js";
-import { generateDiffString } from "../../../core/tools/edit-diff.js";
-import type { IpythonToolDetails } from "../../../core/tools/ipython.js";
-import { resolveToCwd } from "../../../core/tools/path-utils.js";
-import { canonicalizePath, formatPathRelativeToCwdOrAbsolute } from "../../../utils/paths.js";
+import { canonicalizePath, formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.js";
 import { theme } from "../theme/theme.js";
+import type { EditToolDetails } from "../tools/edit.js";
+import { generateDiffString } from "../tools/edit-diff.js";
+import type { IpythonToolDetails } from "../tools/ipython.js";
+import { resolveToCwd } from "../tools/path-utils.js";
 
 export interface FileChangeSummary {
 	path: string;

@@ -11,9 +11,9 @@ import { type ContextTreeNode, loadContextTreeChildrenFromDisk } from "../src/co
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { initTheme } from "../src/core/theme/theme.js";
 import { addAssistantUsage, cloneUsage, emptyUsage } from "../src/core/usage.js";
 import { formatContextTree } from "../src/modes/interactive/components/context-tree-format.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { getCodingAgentFixtureModel } from "./fixture-models.js";
 import { createTestResourceLoader } from "./utilities.js";
 

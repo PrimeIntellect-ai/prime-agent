@@ -1,6 +1,6 @@
 import { Box, type ClickRegion, type Component, Markdown, Text, visibleWidth } from "@earendil-works/pi-tui";
+import { getMarkdownTheme, theme } from "../../../core/theme/theme.js";
 import type { AgentConnectionSideQuestionEvent } from "../../agent-connection/types.js";
-import { getMarkdownTheme, theme } from "../theme/theme.js";
 
 interface SideQuestionTurnState {
 	kind: "turn";

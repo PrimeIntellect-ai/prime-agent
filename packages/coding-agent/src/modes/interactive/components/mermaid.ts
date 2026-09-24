@@ -1,7 +1,7 @@
 import { type MermaidArt, render, type Span } from "grok-mermaid";
 import { Marked, type Token } from "marked";
 import type { MermaidRenderingMode } from "../../../core/settings-manager.js";
-import type { Theme } from "../theme/theme.js";
+import type { Theme } from "../../../core/theme/theme.js";
 
 const markdownParser = new Marked();
 

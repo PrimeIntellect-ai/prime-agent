@@ -15,10 +15,10 @@ import {
 } from "@earendil-works/pi-tui";
 import { CONFIG_DIR_NAME } from "../../../config.js";
 import type { PathMetadata, ResolvedPaths, ResolvedResource } from "../../../core/package-manager.js";
+import { rawKeyHint } from "../../../core/rendering/keybinding-hints.js";
 import type { PackageSource, SettingsManager } from "../../../core/settings-manager.js";
-import { theme } from "../theme/theme.js";
+import { theme } from "../../../core/theme/theme.js";
 import { DynamicBorder } from "./dynamic-border.js";
-import { rawKeyHint } from "./keybinding-hints.js";
 
 type ResourceType = "extensions" | "skills" | "prompts" | "themes";
 

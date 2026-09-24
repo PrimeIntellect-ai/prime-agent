@@ -5,7 +5,7 @@ import type {
 	ExtensionWidgetOptions,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.js";
-import { type Theme, theme } from "../interactive/theme/theme.js";
+import { type Theme, theme } from "../../core/theme/theme.js";
 import type { RpcExtensionUIRequest, RpcExtensionUIResponse } from "./rpc-types.js";
 
 export interface RpcExtensionUiBridge {

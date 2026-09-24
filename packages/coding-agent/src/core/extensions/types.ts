@@ -40,7 +40,6 @@ import type {
 	TUI,
 } from "@earendil-works/pi-tui";
 import type { Static, TSchema } from "typebox";
-import type { Theme } from "../../modes/interactive/theme/theme.js";
 import type { BashResult } from "../bash-executor.js";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index.js";
 import type { EventBus } from "../event-bus.js";
@@ -60,6 +59,7 @@ import type {
 import type { SlashCommandInfo } from "../slash-commands.js";
 import type { SourceInfo } from "../source-info.js";
 import type { BuildSystemPromptOptions } from "../system-prompt.js";
+import type { Theme } from "../theme/theme.js";
 import type { BashOperations } from "../tools/bash.js";
 import type { EditToolDetails } from "../tools/edit.js";
 import type {

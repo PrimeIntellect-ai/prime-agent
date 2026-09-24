@@ -1,10 +1,10 @@
 import { type Component, type Focusable, getKeybindings, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { keyText } from "../../../core/rendering/keybinding-hints.js";
+import { theme } from "../../../core/theme/theme.js";
 import type { AgentConnectionRlmChildAgentSnapshot } from "../../agent-connection/index.js";
 import { collectSubagentDescendantSummaries } from "../../agents-view/agents-view-state.js";
 import { type AgentRosterStatus, classifyAgentStatus } from "../../daemon/agent-roster.js";
 import { classifySessionRosterStatus, type SessionSummary } from "../../daemon/daemon-session-list.js";
-import { theme } from "../theme/theme.js";
-import { keyText } from "./keybinding-hints.js";
 
 export interface SubagentSummaryCounts {
 	total: number;

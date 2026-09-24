@@ -12,6 +12,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createAgentSessionMessage } from "../../../src/core/agent-messages.js";
 import { KeybindingsManager } from "../../../src/core/keybindings.js";
 import { createAsyncBashCompletionMessage, createRefinementOutcomeMessage } from "../../../src/core/messages.js";
+import { initTheme, stopThemeWatcher } from "../../../src/core/theme/theme.js";
 import type {
 	AgentConnection,
 	AgentConnectionSessionContext,
@@ -25,7 +26,6 @@ import {
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.js";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
 import { createInteractiveModeUiServices } from "../../../src/modes/interactive/interactive-mode-services.js";
-import { initTheme, stopThemeWatcher } from "../../../src/modes/interactive/theme/theme.js";
 import { createHarness, type Harness } from "../harness.js";
 
 type ModeControls = {

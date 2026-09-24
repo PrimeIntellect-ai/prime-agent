@@ -1,6 +1,6 @@
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.js";
-import { theme } from "../theme/theme.js";
+import { theme } from "../../../core/theme/theme.js";
 
 /**
  * Footer component for the prime brand TUI.

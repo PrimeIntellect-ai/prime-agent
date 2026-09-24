@@ -9,13 +9,13 @@ import { createAgentSessionMessage } from "../../../src/core/agent-messages.js";
 import { KeybindingsManager } from "../../../src/core/keybindings.js";
 import { createAsyncBashCompletionMessage } from "../../../src/core/messages.js";
 import { SessionManager } from "../../../src/core/session-manager.js";
+import { initTheme, stopThemeWatcher } from "../../../src/core/theme/theme.js";
 import type { AgentConnection, AgentConnectionSessionEvent } from "../../../src/modes/agent-connection/index.js";
 import { BashExecutionComponent } from "../../../src/modes/interactive/components/bash-execution.js";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.js";
 import { SideQuestionComponent } from "../../../src/modes/interactive/components/side-question.js";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
 import { createInteractiveModeUiServices } from "../../../src/modes/interactive/interactive-mode-services.js";
-import { initTheme, stopThemeWatcher } from "../../../src/modes/interactive/theme/theme.js";
 import { createHarness, type Harness } from "../harness.js";
 
 const output = "preview-one\npreview-two\npreview-three\nFULL_TOOL_OUTPUT";

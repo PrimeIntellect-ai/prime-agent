@@ -160,6 +160,18 @@ import { parseNewSessionCommand } from "../../core/new-session-command.js";
 import { PRIME_INFERENCE_PROVIDER_ID, resolvePrimeAgentTracesBaseUrl } from "../../core/prime-inference-auth.js";
 import { resolvePrimeInferencePostLoginModelAction } from "../../core/prime-inference-model-selection.js";
 import { parseCommandArgs } from "../../core/prompt-templates.js";
+import {
+	type FileChangeSummary,
+	formatTotalChangeSummary,
+	mergeTurnFileChanges,
+} from "../../core/rendering/edit-summary.js";
+import {
+	formatConversationDetailStatus,
+	formatKeyText,
+	keyHint,
+	keyText,
+	rawKeyHint,
+} from "../../core/rendering/keybinding-hints.js";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.js";
 import { SessionImportFileNotFoundError } from "../../core/session-import-errors.js";
 import { resolveSessionPath, SessionSelectorError, SessionSelectorNotFoundError } from "../../core/session-resolver.js";
@@ -177,6 +189,23 @@ import {
 	captureOnboardingCompleted,
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
+import {
+	getAvailableThemes,
+	getAvailableThemesWithPaths,
+	getEditorTheme,
+	getMarkdownTheme,
+	getThemeByName,
+	initTheme,
+	onThemeChange,
+	setRegisteredThemes,
+	setTheme,
+	setThemeInstance,
+	stopThemeWatcher,
+	Theme,
+	type ThemeColor,
+	theme,
+} from "../../core/theme/theme.js";
+import { setWorkingPulseFrame, WORKING_ICON_INTERVAL_MS } from "../../core/theme/working-icon.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
 import { PRIME_COMPACT_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
@@ -243,20 +272,12 @@ import { CustomMessageComponent } from "./components/custom-message.js";
 import { DaxnutsComponent } from "./components/daxnuts.js";
 import { DynamicBorder } from "./components/dynamic-border.js";
 import { EarendilAnnouncementComponent } from "./components/earendil-announcement.js";
-import { type FileChangeSummary, formatTotalChangeSummary, mergeTurnFileChanges } from "./components/edit-summary.js";
 import { ExtensionEditorComponent } from "./components/extension-editor.js";
 import { ExtensionInputComponent } from "./components/extension-input.js";
 import { ExtensionSelectorComponent } from "./components/extension-selector.js";
 import { FooterComponent } from "./components/footer.js";
 import { HeartbeatManagerComponent } from "./components/heartbeat-manager.js";
 import { InjectedPromptMessageComponent, isInjectedPromptMessage } from "./components/injected-prompt-message.js";
-import {
-	formatConversationDetailStatus,
-	formatKeyText,
-	keyHint,
-	keyText,
-	rawKeyHint,
-} from "./components/keybinding-hints.js";
 import {
 	MalformedMcpConnectionOutcomeMessageComponent,
 	McpConnectionOutcomeMessageComponent,
@@ -319,23 +340,6 @@ import { isOnboardingModelReady, type OnboardingStartupState, shouldRunOnboardin
 import type { ClientPromptStashStore, PromptStash, PromptStashState } from "./prompt-stash-state.js";
 import { QueueSelection, type QueueSelectionItem } from "./queue-selection.js";
 import { formatResumeHint } from "./resume-hint.js";
-import {
-	getAvailableThemes,
-	getAvailableThemesWithPaths,
-	getEditorTheme,
-	getMarkdownTheme,
-	getThemeByName,
-	initTheme,
-	onThemeChange,
-	setRegisteredThemes,
-	setTheme,
-	setThemeInstance,
-	stopThemeWatcher,
-	Theme,
-	type ThemeColor,
-	theme,
-} from "./theme/theme.js";
-import { setWorkingPulseFrame, WORKING_ICON_INTERVAL_MS } from "./theme/working-icon.js";
 
 interface Expandable {
 	setExpanded(expanded: boolean): void;

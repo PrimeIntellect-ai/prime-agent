@@ -3,8 +3,8 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import chalk from "chalk";
 import { CONFIG_DIR_NAME, getBundledSkillsDir } from "../config.js";
-import { loadThemeFromPath, type Theme } from "../modes/interactive/theme/theme.js";
 import type { ResourceDiagnostic } from "./diagnostics.js";
+import { loadThemeFromPath, type Theme } from "./theme/theme.js";
 
 export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.js";
 

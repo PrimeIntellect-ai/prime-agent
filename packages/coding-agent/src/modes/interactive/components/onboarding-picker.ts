@@ -1,5 +1,5 @@
 import { type Component, type Focusable, getKeybindings, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { getResolvedThemeColors, theme } from "../theme/theme.js";
+import { getResolvedThemeColors, theme } from "../../../core/theme/theme.js";
 import { MenuSearchInput } from "./menu-panel.js";
 import { isOnboardingExitKey } from "./onboarding-exit.js";
 import { onboardingHighlightBackground } from "./onboarding-highlight.js";

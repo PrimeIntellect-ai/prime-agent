@@ -1,5 +1,5 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { type ThemeColor, theme } from "../theme/theme.js";
+import { type ThemeColor, theme } from "../../../core/theme/theme.js";
 
 const ARG_TOKEN_PATTERN = /@"[^"\n]*"|@(?:\\[^\s\x1b]|[^\s\x1b|])+|--[A-Za-z0-9][A-Za-z0-9-]*/g;
 /** Also matches a bare `--` end-of-options separator; only used for argument-taking slash commands. */

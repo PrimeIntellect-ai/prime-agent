@@ -1,0 +1,1 @@
+- Moved the theme module from interactive mode into core, so daemon workers, print mode, and the SDK no longer load interactive-mode code to read theme colors.

@@ -1,6 +1,6 @@
 import { Box, Container, Text } from "@earendil-works/pi-tui";
 import { builtinSlashCommandTakesArgument, parseSlashCommand } from "../../../core/slash-commands.js";
-import { theme } from "../theme/theme.js";
+import { theme } from "../../../core/theme/theme.js";
 import { styleArgumentTokens } from "./prompt-highlight.js";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";

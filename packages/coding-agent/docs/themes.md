@@ -52,7 +52,7 @@ vim ~/.prime/agent/themes/my-theme.json
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+  "$schema": "https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/packages/coding-agent/src/core/theme/theme-schema.json",
   "name": "my-theme",
   "vars": {
     "primary": "#00aaff",
@@ -127,7 +127,7 @@ vim ~/.prime/agent/themes/my-theme.json
 
 ```json
 {
-  "$schema": "https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+  "$schema": "https://raw.githubusercontent.com/PrimeIntellect-ai/prime-agent/main/packages/coding-agent/src/core/theme/theme-schema.json",
   "name": "my-theme",
   "vars": {
     "blue": "#0066cc",
@@ -301,5 +301,5 @@ echo $COLORTERM  # Should output "truecolor" or "24bit"
 ## Examples
 
 See the built-in themes:
-- [dark.json](../src/modes/interactive/theme/dark.json)
-- [light.json](../src/modes/interactive/theme/light.json)
+- [dark.json](../src/core/theme/dark.json)
+- [light.json](../src/core/theme/light.json)

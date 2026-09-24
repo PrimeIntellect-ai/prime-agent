@@ -6,6 +6,7 @@ import type { AgentSessionRuntimeConfig } from "../src/core/agent-session-config
 import type { ModelRegistry } from "../src/core/model-registry.js";
 import type { SessionInfo } from "../src/core/session-manager.js";
 import type { SettingsManager } from "../src/core/settings-manager.js";
+import type { Theme } from "../src/core/theme/theme.js";
 import {
 	AgentsViewMode,
 	createAgentsViewListCommand,
@@ -51,7 +52,6 @@ import {
 	transitionAgentsViewScope,
 } from "../src/modes/index.js";
 import type { InteractiveModeUiServices } from "../src/modes/interactive/interactive-mode-services.js";
-import type { Theme } from "../src/modes/interactive/theme/theme.js";
 import * as paths from "../src/utils/paths.js";
 import { createDeferred } from "./suite/scheduling.js";
 

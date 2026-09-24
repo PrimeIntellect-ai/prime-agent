@@ -7,9 +7,9 @@ import type {
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.js";
 import type { SubagentRuntimeHost } from "../../core/rlm-runtime.js";
+import { type Theme, theme } from "../../core/theme/theme.js";
 import { createAgentConnectionState } from "../agent-connection/snapshot.js";
 import type { AgentConnectionState } from "../agent-connection/types.js";
-import { type Theme, theme } from "../interactive/theme/theme.js";
 import type { ActiveSessionState } from "./active-session-state.js";
 import { execEnvForSession, withClientEnv } from "./daemon-client-env.js";
 import {

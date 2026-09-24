@@ -1,0 +1,1 @@
+- Moved the diff, edit-summary, visual-truncate, and keybinding-hint renderers from interactive mode into core, so the built-in tools no longer pull interactive-mode modules into headless runs.

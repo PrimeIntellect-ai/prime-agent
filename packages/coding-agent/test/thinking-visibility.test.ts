@@ -3,8 +3,8 @@ import { setKeybindings } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { initTheme } from "../src/core/theme/theme.js";
 import { AssistantMessageComponent } from "../src/modes/interactive/components/assistant-message.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 describe("thinking visibility", () => {
 	beforeAll(() => {

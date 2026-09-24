@@ -2,8 +2,8 @@ import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { Container, type Focusable, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import type { AuthStorage } from "../../../core/auth-storage.js";
 import type { ModelRegistry } from "../../../core/model-registry.js";
-import { theme } from "../theme/theme.js";
-import { keyText } from "./keybinding-hints.js";
+import { keyText } from "../../../core/rendering/keybinding-hints.js";
+import { theme } from "../../../core/theme/theme.js";
 import { ModelSelectorComponent } from "./model-selector.js";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./oauth-selector.js";
 

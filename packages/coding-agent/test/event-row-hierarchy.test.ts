@@ -2,9 +2,9 @@ import { setKeybindings } from "@earendil-works/pi-tui";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { AgentSessionMessage } from "../src/core/agent-messages.js";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { initTheme, theme } from "../src/core/theme/theme.js";
 import { AgentMessageComponent } from "../src/modes/interactive/components/agent-message.js";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.js";
-import { initTheme, theme } from "../src/modes/interactive/theme/theme.js";
 
 /**
  * Conversation event rows keep the leading label colored and render the

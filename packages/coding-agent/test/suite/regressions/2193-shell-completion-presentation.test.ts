@@ -6,6 +6,7 @@ import stripAnsi from "strip-ansi";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { type CustomMessage, createAsyncBashCompletionMessage } from "../../../src/core/messages.js";
+import { initTheme } from "../../../src/core/theme/theme.js";
 import {
 	buildConversationComponents,
 	createShellCompletionComponent,
@@ -16,7 +17,6 @@ import {
 } from "../../../src/modes/interactive/components/shell-completion.js";
 import { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.js";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.js";
-import { initTheme } from "../../../src/modes/interactive/theme/theme.js";
 import { createHarness, type Harness } from "../harness.js";
 
 const ui = { requestRender: vi.fn() } as unknown as TUI;

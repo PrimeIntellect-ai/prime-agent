@@ -50,7 +50,7 @@ export function copyBinaryAssets(destination) {
 		LICENSE: join(root, "LICENSE"),
 		"prime-agent-runtime": join(root, "prime-agent-runtime"),
 		skills: join(packageDir, "skills"),
-		theme: join(packageDir, "src/modes/interactive/theme"),
+		theme: join(packageDir, "src/core/theme"),
 		assets: join(packageDir, "src/modes/interactive/assets"),
 		"export-html": join(packageDir, "src/core/export-html"),
 		docs: join(packageDir, "docs"),

@@ -9,7 +9,7 @@ import {
 	latestIncidentStallTimeoutBySubject,
 	parseIncidentLogLine,
 } from "../../cli/incident.js";
-import { theme } from "../interactive/theme/theme.js";
+import { theme } from "../../core/theme/theme.js";
 
 /**
  * Daemon incident notices for the agents view.

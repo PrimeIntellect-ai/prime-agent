@@ -9,9 +9,9 @@
 
 import { DefaultPackageManager } from "../../core/package-manager.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
+import { theme } from "../../core/theme/theme.js";
 import { spawnHidden } from "../../utils/child-process.js";
 import { checkForNewPiVersion } from "../../utils/version-check.js";
-import { theme } from "../interactive/theme/theme.js";
 
 export interface StartupNotices {
 	/** Newer Prime Agent version available, if any. */

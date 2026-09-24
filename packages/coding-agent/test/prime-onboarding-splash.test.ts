@@ -2,8 +2,8 @@ import { setKeybindings } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
+import { initTheme } from "../src/core/theme/theme.js";
 import { PrimeOnboardingSplashComponent } from "../src/modes/interactive/components/prime-onboarding-splash.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 import { PRIME_COMPACT_BUTTERFLY_LOGO } from "../src/themes/prime-logo.js";
 
 const logoLines = PRIME_COMPACT_BUTTERFLY_LOGO.split("\n");

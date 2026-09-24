@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { initTheme } from "../src/core/theme/theme.js";
 import { TopBar } from "../src/modes/interactive/components/top-bar.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 beforeEach(() => {
 	initTheme("dark");

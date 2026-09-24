@@ -13,12 +13,12 @@ import { ModelRegistry } from "../src/core/model-registry.js";
 import { PRIME_INFERENCE_PROVIDER_ID } from "../src/core/prime-inference-auth.js";
 import { createAgentSession } from "../src/core/sdk.js";
 import { SessionManager } from "../src/core/session-manager.js";
+import { initTheme } from "../src/core/theme/theme.js";
 import type { AuthenticationResult } from "../src/modes/interactive/auth-flows.js";
 import { ProviderAuthFlows, type ProviderAuthFlowsHost } from "../src/modes/interactive/auth-flows.js";
 import { ExtensionSelectorComponent } from "../src/modes/interactive/components/extension-selector.js";
 import { LoginDialogComponent } from "../src/modes/interactive/components/login-dialog.js";
 import { OAuthSelectorComponent } from "../src/modes/interactive/components/oauth-selector.js";
-import { initTheme } from "../src/modes/interactive/theme/theme.js";
 
 function jsonResponse(body: unknown, status: number = 200): Response {
 	return new Response(JSON.stringify(body), {

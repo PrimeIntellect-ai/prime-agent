@@ -5,7 +5,7 @@ import type { ExtensionCommandContext, ExtensionRunner, ToolDefinition } from ".
 import type { ModelRegistry } from "../../core/model-registry.js";
 import type { SessionManager } from "../../core/session-manager.js";
 import type { SettingsManager } from "../../core/settings-manager.js";
-import type { Theme } from "./theme/theme.js";
+import type { Theme } from "../../core/theme/theme.js";
 
 /**
  * Local UI services that are intentionally separate from AgentConnection.

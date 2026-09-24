@@ -7,10 +7,10 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { KeybindingsManager } from "../src/core/keybindings.js";
 import { McpConnectionStore } from "../src/core/mcp/connection-store.js";
 import type { McpPluginView, McpServiceDescriptor } from "../src/core/mcp/service-catalog.js";
+import { initTheme, preloadCodeHighlighter } from "../src/core/theme/theme.js";
 import { McpTokenPastePanelComponent } from "../src/modes/interactive/components/mcp-token-paste-panel.js";
 import { ServiceCatalogPickerComponent } from "../src/modes/interactive/components/service-catalog-picker.js";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.js";
-import { initTheme, preloadCodeHighlighter } from "../src/modes/interactive/theme/theme.js";
 import { createHarness, type Harness } from "./suite/harness.js";
 
 function viewFixture(overrides: Partial<McpPluginView> = {}): McpPluginView {

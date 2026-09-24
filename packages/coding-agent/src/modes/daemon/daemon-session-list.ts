@@ -296,7 +296,7 @@ export function summaryForActiveSession(
 	hasRegisteredCronJob = false,
 ): SessionSummary {
 	const session = activeSession.runtime.session;
-	const metadata = activeSession.runtime.metadata ?? { kind: "top-level" as const };
+	const metadata = activeSession.runtime.metadata;
 	let modified = savedSession?.modified.toISOString();
 	if (!modified && session.sessionFile) {
 		try {
@@ -518,7 +518,7 @@ export function sessionDisplayLabels(activeSession: ActiveSessionState): {
 	firstMessage: string | undefined;
 } {
 	const session = activeSession.runtime.session;
-	const metadata = activeSession.runtime.metadata ?? { kind: "top-level" as const };
+	const metadata = activeSession.runtime.metadata;
 	return {
 		sessionName: session.sessionName,
 		firstMessage:
@@ -702,7 +702,7 @@ export function activeActivityForSession(activeSession: ActiveSessionState): Ses
 	}
 	// A finished subagent is resident but never gets a summarizer verdict, so don't hold
 	// it at "working" waiting for one — a not-busy subagent is simply idle/done.
-	if (activeSession.runtime.metadata?.kind === "subagent") {
+	if (activeSession.runtime.metadata.kind === "subagent") {
 		return "idle";
 	}
 	// An empty session never gets a summarizer verdict; don't hold it at "working" forever.
@@ -731,7 +731,7 @@ export function inactiveLifecycleForSession(session: SessionInfo): SessionLifecy
 
 export function activeLifecycleForSession(activeSession: ActiveSessionState): SessionLifecycle {
 	// A resident subagent is a spawned worker, not a user draft; it is visible before its first message lands.
-	if (activeSession.runtime.metadata?.kind === "subagent") return "live";
+	if (activeSession.runtime.metadata.kind === "subagent") return "live";
 	// Lifecycle drives agents-view visibility and is message-based: a session
 	// becomes live once a message is sent. A message-less session is a draft (hidden
 	// from the view) even if the user changed its model/name first — that config is

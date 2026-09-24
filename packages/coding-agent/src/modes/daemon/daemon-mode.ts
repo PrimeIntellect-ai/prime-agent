@@ -116,6 +116,7 @@ import { resolveSessionPath } from "../../core/session-resolver.js";
 import type { SessionStats } from "../../core/session-stats.js";
 import { SettingsManager } from "../../core/settings-manager.js";
 import { type SideQuestionRun, startSideQuestion } from "../../core/side-question.js";
+import { initTheme } from "../../core/theme/theme.js";
 import { isProcessAlive, spawnHidden, waitForChildProcess } from "../../utils/child-process.js";
 import { tryAcquireDirLock } from "../../utils/dir-lock.js";
 import { killTrackedDetachedChildren } from "../../utils/shell.js";
@@ -127,7 +128,6 @@ import {
 import { createAgentConnectionToolDefinition } from "../agent-connection/tool-definition.js";
 import type { AgentConnectionHeartbeat, AgentConnectionRlmChildAgentSnapshot } from "../agent-connection/types.js";
 import { waitForHeadlessCompletion } from "../headless-completion.js";
-import { initTheme } from "../interactive/theme/theme.js";
 import { attachJsonlLineReader, serializeJsonLine } from "../rpc/jsonl.js";
 import { encodePrivateFrame, PrivateFrameDecoder } from "../session-worker/private-framing.js";
 import {
