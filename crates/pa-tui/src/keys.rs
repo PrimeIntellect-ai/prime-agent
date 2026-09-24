@@ -501,7 +501,7 @@ mod tests {
     fn super_modified_special_keys_keep_their_identity() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(false);
         let cases = [
             (KeyCode::Enter, KeyModifiers::SUPER, "super+enter"),
