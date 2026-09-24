@@ -4500,8 +4500,9 @@ impl SessionUi {
             .map(|tier| {
                 let description = DESCRIPTIONS
                     .iter()
-                    .find(|(choice, _)| *choice == tier)
-                    .map(|(_, description)| *description)
+                    .find_map(|(choice, description)| {
+                        (*choice == tier).then_some(*description)
+                    })
                     .unwrap_or("");
                 let description = if tier == current {
                     format!("{description} (current)")
