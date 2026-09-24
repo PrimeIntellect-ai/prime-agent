@@ -36,7 +36,14 @@ fn workspace_root() -> PathBuf {
 
 #[derive(serde::Deserialize)]
 struct Workflow {
+    #[serde(default)]
+    concurrency: Option<Concurrency>,
     jobs: BTreeMap<String, Job>,
+}
+
+#[derive(serde::Deserialize)]
+struct Concurrency {
+    group: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -294,6 +301,24 @@ fn the_workflow_wires_the_channel_manifest_producer() {
                 "Refresh the rolling nightly release (the nightly channel's discoverable base)",
             ),
         "the tag release attaches before the rolling refresh"
+    );
+    // The nightly refreshes serialize under one concurrency group (stable
+    // releases keep per-tag groups), and the refresh refuses to clobber a
+    // newer rolling beta.json (Macroscope: an older run must never overwrite
+    // the newest completed tag's beta.json).
+    let group = workflow
+        .concurrency
+        .as_ref()
+        .and_then(|concurrency| concurrency.group.as_deref())
+        .expect("the workflow declares a concurrency group");
+    assert_eq!(
+        group, "release-${{ contains(github.ref_name, '-') && 'nightly' || github.ref }}",
+        "beta promotions serialize under the shared nightly group"
+    );
+    assert!(nightly_run.contains("sort -V"), "{nightly_run}");
+    assert!(
+        nightly_run.contains("skipping the refresh"),
+        "{nightly_run}"
     );
 }
 

@@ -208,7 +208,11 @@ exactly one channel manifest per tag —
   base nightly installs record (`.install-source`) and resolve `beta.json` +
   its archives against — GitHub's `latest/download/` alias structurally
   serves only the latest non-prerelease release, so the nightly channel has
-  no discoverable address there (Bugbot: nightly clients get a 404);
+  no discoverable address there (Bugbot: nightly clients get a 404). Beta
+  promotions serialize under one concurrency group (`release-nightly`) and
+  the refresh refuses to clobber a newer rolling `beta.json` (newest-wins),
+  so the rolling release always serves the newest completed beta
+  (Macroscope: an older run must never overwrite the newest one);
 
 shaped as `{"version": "v<ver>", "binaries": [...], "binaries_v2": [...]}` where each row is
 `{"platform", "file", "sha256"}` and the file names are the alias-named archives above. The

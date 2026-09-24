@@ -15,7 +15,13 @@ on:
 permissions: {}
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Stable releases run per-tag. -beta* tags share one group so their
+  # promotions serialize: the rolling nightly refresh must never interleave
+  # (an older beta's --clobber would otherwise land after a newer one -
+  # Macroscope: the nightly release can serve an older beta.json than the
+  # newest completed tag). cancel-in-progress stays false: queued betas run
+  # one after another, newest last.
+  group: release-${{ contains(github.ref_name, '-') && 'nightly' || github.ref }}
   cancel-in-progress: false
 
 env:
@@ -311,6 +317,20 @@ jobs:
           # against. The rolling release is a prerelease itself, so it can
           # never take the Latest pointer either.
           if gh release view nightly >/dev/null 2>&1; then
+            # Newest-wins guard: a re-run of an older tag must never clobber a
+            # newer rolling beta.json (the concurrency group serializes live
+            # runs; this guards re-runs).
+            guard="$(mktemp -d)"
+            if gh release download nightly --pattern beta.json \
+                 --output-dir "$guard" >/dev/null 2>&1 \
+               && [ -s "$guard/beta.json" ]; then
+              current="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$guard/beta.json")"
+              newest="$(printf '%s\n%s\n' "$current" "$RELEASE_VERSION" | sort -V | tail -1)"
+              if [ "$newest" != "$RELEASE_VERSION" ]; then
+                echo "the rolling nightly release already serves $current >= $RELEASE_VERSION; skipping the refresh"
+                exit 0
+              fi
+            fi
             gh release upload nightly \
               release-out/prime-agent-*.tar.gz \
               release-out/SHA256SUMS \
