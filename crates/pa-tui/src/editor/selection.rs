@@ -210,10 +210,10 @@ impl Editor {
             self.cursor_col.max(line_start + 1)
         };
         self.push_undo_snapshot();
-        let head = char_prefix(line, col - 1);
-        let first = char_at(line, col - 1).unwrap_or_default().to_string();
-        let second = char_at(line, col).unwrap_or_default().to_string();
-        let tail = char_suffix(line, col + 1);
+        let head = char_prefix(&line, col - 1);
+        let first = char_at(&line, col - 1).unwrap_or_default().to_string();
+        let second = char_at(&line, col).unwrap_or_default().to_string();
+        let tail = char_suffix(&line, col + 1);
         self.lines[self.cursor_line] = format!("{head}{second}{first}{tail}");
         self.set_cursor_col(col + 1);
         self.emit(EditorEvent::Changed(self.get_text()));
