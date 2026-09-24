@@ -464,25 +464,28 @@ impl AgentSessionEngine {
         let route = self
             .resolve_image_turn_route(carries_images)
             .map_err(|error| format!("{error:#}"))?;
-        let armed = route.map(|resolved| {
-            let agent_model = json_round_trip(&resolved.model)
-                .ok_or_else(|| "model conversion failed".to_string())?;
-            ImageRoute {
-                target: ProviderTarget {
-                    service_tier: resolved.service_tier,
-                    api_key: self.resolve_request_api_key(&resolved.model),
-                    model: resolved.model.clone(),
-                },
-                agent_override: pa_agent::agent::AgentModelOverride {
-                    thinking_level: map_thinking_level(resolved.thinking_level),
-                    model: agent_model,
-                },
+        let armed = match route {
+            Some(resolved) => {
+                let agent_model = json_round_trip(&resolved.model)
+                    .ok_or_else(|| "model conversion failed".to_string())?;
+                Some(ImageRoute {
+                    target: ProviderTarget {
+                        service_tier: resolved.service_tier,
+                        api_key: self.resolve_request_api_key(&resolved.model),
+                        model: resolved.model.clone(),
+                    },
+                    agent_override: pa_agent::agent::AgentModelOverride {
+                        thinking_level: map_thinking_level(resolved.thinking_level),
+                        model: agent_model,
+                    },
+                })
             }
-        });
+            None => None,
+        };
         *self
             .image_route
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = armed?;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = armed;
         Ok(())
     }
 
