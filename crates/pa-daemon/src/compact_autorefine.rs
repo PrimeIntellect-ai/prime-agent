@@ -112,7 +112,7 @@ impl AgentSessionEngine {
         // racing rebuild; the round's gates are read before the call.
         let engine = {
             let guard = self.session.blocking_lock();
-            guard.as_deref().map(std::sync::Arc::clone)
+            guard.clone()
         };
         let Some(engine) = engine else {
             return Ok(None);
