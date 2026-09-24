@@ -160,6 +160,11 @@ pub(crate) enum BashActivityUpdate {
         /// The failure came from a tail fetch (the view supersedes it on
         /// the next successful fetch) rather than a kill.
         fetch: bool,
+        /// The detail-open generation the failed tail fetch was issued
+        /// under: like the tail responses, a late fetch failure from an
+        /// earlier open of the same row never lands on the newer one
+        /// (a kill owns no generation and stays `None`).
+        generation: Option<u64>,
     },
 }
 
@@ -5945,6 +5950,7 @@ impl SessionUi {
                 message,
                 activity_id,
                 fetch,
+                generation,
                 ..
             } => {
                 // An in-view action's failure surfaces in the open bash
@@ -5958,7 +5964,7 @@ impl SessionUi {
                 };
                 if view.bash_view.is_some() && detail_matches {
                     if let Some(bash_view) = view.bash_view.as_mut() {
-                        bash_view.set_error(message, fetch);
+                        bash_view.set_error(message, fetch, generation);
                     }
                 } else {
                     self.error_row(&message, view);
@@ -6066,6 +6072,7 @@ impl SessionUi {
                         message: format!("Bash output: {error:#}"),
                         activity_id: Some(response_id),
                         fetch: true,
+                        generation: Some(generation),
                     });
                 }
             }
@@ -6137,6 +6144,7 @@ impl SessionUi {
                                 message: format!("Could not kill bash command: {error:#}"),
                                 activity_id: Some(error_id),
                                 fetch: false,
+                                generation: None,
                             });
                         }
                     }

@@ -299,10 +299,17 @@ impl BashView {
     }
 
     /// Surface a fetch or kill failure (the host's error channel). A
-    /// failed lazy load releases its in-flight claim so a later up press
-    /// can retry; `fetch` marks a tail-fetch failure, which the next
-    /// successful fetch supersedes.
-    pub fn set_error(&mut self, error: String, fetch: bool) {
+    /// fetch failure carries the detail-open generation it was issued
+    /// under — like the tail responses, a late error from an earlier
+    /// open of the same row never lands on the newer open (and never
+    /// releases its in-flight load claim). A failed lazy load that DOES
+    /// land releases its in-flight claim so a later up press can retry;
+    /// `fetch` marks a tail-fetch failure, which the next successful
+    /// fetch supersedes.
+    pub fn set_error(&mut self, error: String, fetch: bool, generation: Option<u64>) {
+        if fetch && generation.is_some_and(|generation| generation != self.detail_generation) {
+            return;
+        }
         self.loading_more = false;
         self.error = Some(error);
         self.fetch_error = fetch;
@@ -1800,7 +1807,7 @@ mod tests {
                 BashViewAction::LoadMore {
                     generation, lines, ..
                 } => {
-                    view.set_error("kernel stalled".to_string(), true);
+                    view.set_error("kernel stalled".to_string(), true, Some(generation));
                     assert!(view.error.is_some());
                     assert!(!view.loading_more, "the failure releases the claim");
                     assert_eq!(view.tail_window, lines);
@@ -1855,7 +1862,7 @@ mod tests {
 
         // A kill error keeps its lifecycle: a tail landing never clears
         // it (only the registry refresh does).
-        view.set_error("Could not kill bash command: gone".to_string(), false);
+        view.set_error("Could not kill bash command: gone".to_string(), false, None);
         assert!(view.error.is_some());
         view.set_output("a", &tail.join("\n"), view.detail_generation);
         assert!(
@@ -1864,6 +1871,47 @@ mod tests {
         );
         view.clear_error();
         assert!(view.error.is_none());
+    }
+
+    /// A late fetch error from an earlier open of the same row never
+    /// lands on the newly reopened detail (the generation gate the tail
+    /// responses already had): it never shows, and never releases the
+    /// newer open's in-flight load claim. A kill error owns no
+    /// generation and keeps its landing.
+    #[test]
+    fn a_late_fetch_error_never_lands_on_a_reopened_detail() {
+        let mut view = BashView::new(activities(), 40);
+        view.handle_key("enter", &kb());
+        let first_generation = view.detail_generation;
+        // Back out and reopen the same row while a load is in flight
+        // under the new open.
+        view.handle_key("left", &kb());
+        view.handle_key("enter", &kb());
+        assert_ne!(view.detail_generation, first_generation);
+        view.loading_more = true;
+        // The earlier open's late fetch error never lands.
+        view.set_error(
+            "stale fetch failure".to_string(),
+            true,
+            Some(first_generation),
+        );
+        assert!(view.error.is_none(), "the stale error never shows");
+        assert!(
+            view.loading_more,
+            "a prior open's error never releases the current claim"
+        );
+        // The current open's fetch error lands and releases the claim.
+        view.set_error(
+            "current fetch failure".to_string(),
+            true,
+            Some(view.detail_generation),
+        );
+        assert_eq!(view.error.as_deref(), Some("current fetch failure"));
+        assert!(!view.loading_more);
+        // A kill error owns no generation: it still lands on the open
+        // detail (its lifecycle is the registry refresh).
+        view.set_error("Could not kill bash command: nope".to_string(), false, None);
+        assert!(view.error.is_some());
     }
 
     /// A one-row output region (the designed minimum under a long
