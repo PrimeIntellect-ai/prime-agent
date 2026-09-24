@@ -47,6 +47,7 @@ impl MockSupervisor {
         write_json(&mut writer, &hello);
 
         let mut line = String::new();
+        let mut served_turns = 0usize;
         loop {
             line.clear();
             match reader.read_line(&mut line) {
@@ -99,7 +100,8 @@ impl MockSupervisor {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    serve_turn(&mut writer, &prompt);
+                    served_turns += 1;
+                    serve_turn(&mut writer, &prompt, served_turns);
                 }
                 "detach" => {
                     write_json(
@@ -132,9 +134,14 @@ impl MockSupervisor {
 /// One live streamed turn: an assistant message with hidden thinking and
 /// `calls` ipython tool calls, the execution lifecycle for each call, the
 /// turn end, and the agent drain.
-fn serve_turn(writer: &mut UnixStream, prompt: &str) {
+fn serve_turn(writer: &mut UnixStream, prompt: &str, turn: usize) {
     let event = |payload: Value| json!({ "type": "session_event", "activeSessionId": "s1", "event": payload });
     let calls = if prompt.contains("short") { 4 } else { 6 };
+    // Tool-call ids are unique per invocation (the real daemon's ids are
+    // fresh per call): the TUI upserts streamed cards BY ID, so a reused
+    // id updates the earlier invocation's card instead of opening a new
+    // one.
+    let call_id = |index: usize| format!("live{turn}_c{index}");
     // The daemon echoes the submitted prompt as the turn's user message:
     // the TUI renders the user row from this event.
     write_json(
@@ -148,7 +155,7 @@ fn serve_turn(writer: &mut UnixStream, prompt: &str) {
         .map(|index| {
             json!({
                 "type": "toolCall",
-                "id": format!("live_c{index}"),
+                "id": call_id(index),
                 "name": "ipython",
                 "arguments": { "code": format!("print({index})") },
             })
@@ -180,7 +187,7 @@ fn serve_turn(writer: &mut UnixStream, prompt: &str) {
             writer,
             &event(json!({
                 "type": "tool_execution_start",
-                "toolCallId": format!("live_c{index}"),
+                "toolCallId": call_id(index),
                 "toolName": "ipython",
                 "args": { "code": format!("print({index})") },
             })),
@@ -201,7 +208,7 @@ fn serve_turn(writer: &mut UnixStream, prompt: &str) {
             writer,
             &event(json!({
                 "type": "tool_execution_end",
-                "toolCallId": format!("live_c{index}"),
+                "toolCallId": call_id(index),
                 "result": {
                     "content": [{ "type": "text", "text": format!("out {index}") }],
                     "details": details,
