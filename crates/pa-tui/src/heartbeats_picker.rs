@@ -1617,7 +1617,7 @@ mod tests {
         let mut catalog = entries();
         while catalog.len() < 10 {
             let mut extra = job_value(&format!("hb-{}", catalog.len()), "rlm_heartbeat", "active");
-            extra["job"]["label"] = json!(format!("job {}", catalog.len()));
+            extra["job"]["label"] = serde_json::json!(format!("job {}", catalog.len()));
             let job = parse_heartbeat_job(&extra["job"]).expect("job");
             catalog.push(HeartbeatEntry {
                 job,

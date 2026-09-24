@@ -1187,7 +1187,7 @@ mod tests {
     #[test]
     fn a_clipped_tail_keeps_the_newest_lines() {
         let mut catalog = activities();
-        catalog[0].command = "run"; // short command, long output
+        catalog[0].command = "run".to_string(); // short command, long output
         let mut view = BashView::new(catalog, 20);
         view.handle_key("enter", &kb());
         let tail: Vec<String> = (1..=30).map(|n| format!("line-{n:02}")).collect();

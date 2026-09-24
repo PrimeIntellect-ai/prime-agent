@@ -5906,10 +5906,6 @@ impl SessionUi {
         }
     }
 
-    /// Fetch the session-scoped heartbeat catalog (TS
-    /// `refreshHeartbeatCatalog`'s fetch + `getScopedHeartbeats`): the
-    /// selector-less supervisor catalog, scoped to this session and its
-
     /// Scope a fetched catalog to THIS session only (operator scoping:
     /// nested sessions' heartbeats do not surface in the dock, the
     /// panel, or the `/heartbeats` view — a sanctioned divergence from
