@@ -536,6 +536,13 @@ export class AgentDaemon {
 	private socketIdentity?: DaemonSocketIdentity;
 	private readonly clients = new Set<DaemonSocketClient>();
 	private readonly sessions = new Map<string, ActiveSessionState>();
+	/**
+	 * Serializes image-model pin changes per session, so two rapid commands land
+	 * in submission order: a pin waits for the model refresh before it is
+	 * validated, and a clear that arrives during that wait must not be undone by
+	 * the pin resuming afterwards.
+	 */
+	private readonly imageModelChangeQueues = new WeakMap<ActiveSessionState, Promise<unknown>>();
 	private readonly openingSessions = new Map<string, Promise<ActiveSessionState>>();
 	/** Covers path resolution through publication in openingSessions, before the runtime promise exists. */
 	private readonly reservingSessionOpens = new Map<string, Promise<void>>();
@@ -4232,6 +4239,34 @@ export class AgentDaemon {
 		}
 	}
 
+	/**
+	 * Apply one image-model pin change in submission order. A pin refreshes the
+	 * catalog before it is validated, so without a queue a clear that lands
+	 * during that await would be undone by the pin resuming afterwards.
+	 */
+	private applyImageModelChange(
+		state: ActiveSessionState,
+		imageModel: string | undefined,
+	): Promise<Model<Api> | undefined> {
+		const session = state.runtime.session;
+		const applied = (this.imageModelChangeQueues.get(state) ?? Promise.resolve()).then(async () => {
+			if (imageModel !== undefined) {
+				// Refresh first so a reference authenticated since the catalog was
+				// last read still resolves, mirroring set_model. The refresh
+				// resolves while its background fetch keeps running, so wait for
+				// it before the pin is validated against a stale list.
+				await session.modelRegistry.refreshAvailableModels();
+				await session.modelRegistry.waitForPendingModelRefreshes(IMAGE_MODEL_PIN_READINESS_TIMEOUT_MS);
+			}
+			return session.setImageModelOverride(imageModel);
+		});
+		this.imageModelChangeQueues.set(
+			state,
+			applied.catch(() => undefined),
+		);
+		return applied;
+	}
+
 	private async handleCommand(
 		client: DaemonSocketClient,
 		command: DaemonCommand,
@@ -5280,16 +5315,7 @@ export class AgentDaemon {
 
 			case "set_image_model": {
 				const state = this.getSessionState(command.activeSessionId);
-				const session = state.runtime.session;
-				if (command.imageModel !== null) {
-					// Refresh first so a reference authenticated since the catalog was
-					// last read still resolves, mirroring set_model. The refresh
-					// resolves while its background fetch keeps running, so wait for
-					// it before the pin is validated against a stale list.
-					await session.modelRegistry.refreshAvailableModels();
-					await session.modelRegistry.waitForPendingModelRefreshes(IMAGE_MODEL_PIN_READINESS_TIMEOUT_MS);
-				}
-				const imageModel = session.setImageModelOverride(command.imageModel ?? undefined);
+				const imageModel = await this.applyImageModelChange(state, command.imageModel ?? undefined);
 				return success(command.id, "set_image_model", imageModel ?? null);
 			}
 

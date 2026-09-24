@@ -3,7 +3,7 @@
  * image model reads the images, and only its text reaches the session.
  */
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
@@ -42,6 +42,8 @@ interface ImageTurnHarness {
 		replyDuringRead?: string;
 		/** Start another agent message turn that keeps streaming through the read. */
 		concurrentTurnDuringRead?: boolean;
+		/** Leave the read's temp directory unwritable so removing it throws. */
+		unremovableTempDir?: boolean;
 	}) => void;
 	dispose: () => void;
 }
@@ -102,6 +104,8 @@ function createImageTurnHarness(
 		resourceLoader: createTestResourceLoader(),
 	});
 	const spawns: ImageTurnHarness["spawns"] = [];
+	// Temp directories the test made unwritable, restored so cleanup can remove them.
+	const blockedTempDirs: string[] = [];
 	const children = session as unknown as {
 		runRlmChild: (prompt: string, kwargs: Record<string, unknown>) => Promise<{ rlm_child_id: string }>;
 		collectRlmChildren: (targets: string[], timeoutMs: number) => Promise<{ results: unknown[] }>;
@@ -149,6 +153,16 @@ function createImageTurnHarness(
 							}),
 						});
 					}
+					if (options.unremovableTempDir) {
+						// The reading is in hand by now, so a directory that still holds
+						// files but denies writes makes the cleanup rmSync fail the way a
+						// locked temp directory does.
+						const readDir = spawns.at(-1)?.prompt.match(/(\S*prime-agent-image-turn-[^/\s]+)\/image-1\./)?.[1];
+						if (readDir) {
+							chmodSync(readDir, 0o500);
+							blockedTempDirs.push(readDir);
+						}
+					}
 					return {
 						results: [
 							{
@@ -174,6 +188,10 @@ function createImageTurnHarness(
 		},
 		dispose: () => {
 			session.dispose();
+			for (const blocked of blockedTempDirs.splice(0)) {
+				chmodSync(blocked, 0o700);
+				rmSync(blocked, { recursive: true, force: true });
+			}
 			rmSync(dir, { recursive: true, force: true });
 		},
 	};
@@ -224,6 +242,20 @@ describe("image turns on a text-only session model", () => {
 				JSON.stringify(message.content).includes("A dashboard with a red error banner."),
 			),
 		).toBe(true);
+	});
+
+	it("keeps the reading when the temp directory cannot be removed", async () => {
+		const harness = harnessFor(SET);
+		harness.spawnChild({ reading: "A tall bridge at sunset.", unremovableTempDir: true });
+		// The read succeeded before the cleanup ran, so the turn must resolve.
+		await harness.session.prompt("what does this show?", { images: [IMAGE] });
+		const readDir = harness.spawns.at(-1)?.prompt.match(/(\S*prime-agent-image-turn-[^/\s]+)\/image-1\./)?.[1] ?? "";
+		// The removal really failed, so the turn survived a cleanup error rather
+		// than a cleanup that quietly worked.
+		expect(readDir).not.toBe("");
+		expect(existsSync(readDir)).toBe(true);
+		expect(contentText(userContents(harness.session).at(-1) ?? [])).toContain("A tall bridge at sunset.");
+		expect(harness.spawns).toHaveLength(1);
 	});
 
 	it("leaves the actionable settings error in place when no image model resolves", async () => {

@@ -2961,7 +2961,15 @@ export class AgentSession {
 			// One child per turn, deleted once its reading is in hand: the image turn
 			// leaves no child behind to collect, and the materialized files go with it.
 			if (childId) await this.deleteRlmSubagent(childId).catch(() => undefined);
-			rmSync(dir, { recursive: true, force: true });
+			try {
+				rmSync(dir, { recursive: true, force: true });
+			} catch (error) {
+				// The reading is already in hand, so a cleanup failure must not fail
+				// the turn: the materialized files are left for the OS to reclaim.
+				console.warn(
+					`Warning: could not remove the image-turn temp directory ${dir}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 		}
 	}
 
