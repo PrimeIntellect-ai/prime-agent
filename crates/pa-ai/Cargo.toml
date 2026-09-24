@@ -44,3 +44,6 @@ tokio = { workspace = true, features = ["test-util", "macros"] }
 # Wire tests only: the WS handshake accept key (SHA-1 of key + GUID); the
 # same version the graph resolves for tokio-tungstenite's rustls chain.
 sha1 = "0.10"
+
+[lints]
+workspace = true

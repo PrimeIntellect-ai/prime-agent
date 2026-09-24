@@ -39,6 +39,15 @@ futures = "0.3"
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
+[workspace.lints.clippy]
+redundant_clone = "warn"
+clone_on_copy = "warn"
+assigning_clones = "warn"
+unnecessary_to_owned = "warn"
+inline_format_args = "warn"
+collapsible_if = "warn"
+redundant_closure_for_method_calls = "warn"
+
 # Shipping posture, pinned: symbols kept (the TS binary ships unstripped too),
 # thin LTO plus 4 codegen units for cross-crate inlining in the hot render
 # path, line tables so release backtraces stay actionable.

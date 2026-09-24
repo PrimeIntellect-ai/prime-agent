@@ -35,3 +35,6 @@ futures = { workspace = true }
 crossterm = "0.28"
 nix = { version = "0.29", features = ["term", "signal", "fs"] }
 url = "2"
+
+[lints]
+workspace = true
