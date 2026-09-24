@@ -36,6 +36,15 @@ const CONNECT_TIMEOUT_MS: u64 = 3_000;
 /// Hello handshake budget. A daemon loading a very large session can take
 /// well over the 3s TS default to greet.
 const HELLO_TIMEOUT_MS: u64 = 15_000;
+/// Connect attempts before a connect/handshake failure surfaces (the
+/// fatal error paths the operator hit: "Timed out after 15000ms waiting
+/// for the Prime Agent daemon handshake" exited their TUI on the FIRST
+/// miss at box load). A loaded or restarting daemon usually greets within
+/// the retry window; the caller's error path only runs after the last
+/// attempt.
+pub(crate) const CONNECT_ATTEMPTS: u32 = 3;
+/// The first retry's backoff; each further attempt doubles it.
+const CONNECT_RETRY_BACKOFF_MS: u64 = 1_000;
 
 /// A non-response frame forwarded to the UI event loop. Payloads that are
 /// owned by the session engine stay raw JSON (`Value`) so the client keeps
@@ -433,6 +442,32 @@ impl DaemonClient {
         &self.socket_path
     }
 
+    /// [`Self::connect`] with bounded retries and doubling backoff: a
+    /// missed hello (a loaded daemon mid-fanout, a supervisor coming up
+    /// after a restart) is a hiccup, not a fatal condition — the one-shot
+    /// connect cost the operator their TUI twice on 2026-09-24 ("Timed
+    /// out after 15000ms waiting for the Prime Agent daemon handshake").
+    /// The caller's error path (fatal exit or view fallback) only runs
+    /// after the last attempt.
+    pub async fn connect_with_retry(
+        socket_path: &Path,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<DaemonClientEvent>)> {
+        let mut delay = CONNECT_RETRY_BACKOFF_MS;
+        for attempt in 1..=CONNECT_ATTEMPTS {
+            match DaemonClient::connect(socket_path).await {
+                Ok(pair) => return Ok(pair),
+                Err(error) => {
+                    if attempt == CONNECT_ATTEMPTS {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    delay = delay.saturating_mul(2);
+                }
+            }
+        }
+        unreachable!("the attempt range is non-empty")
+    }
+
     /// Protocol identity negotiated in the hello handshake.
     pub fn protocol(&self) -> &DaemonProtocolInfo {
         &self.protocol
@@ -780,6 +815,16 @@ pub fn is_daemon_rejection(error: &anyhow::Error) -> bool {
     error
         .chain()
         .any(|cause| cause.downcast_ref::<RequestRejected>().is_some())
+}
+
+/// Whether an error is a response/handshake timeout ("Timed out after
+/// Nms waiting for the Prime Agent daemon (response|handshake)"): a
+/// transient under-load failure, not a protocol error — the caller
+/// degrades (retry or surface the queued state) instead of exiting.
+pub fn is_daemon_timeout(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.to_string().contains("Timed out after"))
 }
 
 /// Unwrap a settled response into its `data`, surfacing the daemon

@@ -611,10 +611,18 @@ impl SessionReconnect {
 /// The interactive loop's reconnect driver (spec §10.2): attempts with
 /// doubling backoff inside the 10-minute window; the user can leave with
 /// Ctrl+C at any point (UI input keeps flowing through the same loop).
+/// The same driver also serves an UNEXPECTED connection loss (the
+/// supervisor connection died mid-run with no update in flight — a daemon
+/// hiccup at load, 2026-09-24: the one-shot path exited the operator's
+/// TUI with "the daemon connection closed"): the pane keeps its
+/// transcript and editor and retries instead of dying.
 struct ReconnectLoop {
     deadline: tokio::time::Instant,
     next_attempt: tokio::time::Instant,
     delay: Duration,
+    /// Whether this driver serves an unexpected loss (the expiry and
+    /// failure notes name it, not an update restart).
+    lost: bool,
 }
 
 impl ReconnectLoop {
@@ -624,6 +632,19 @@ impl ReconnectLoop {
             deadline: tokio::time::Instant::now() + RECONNECT_WINDOW,
             next_attempt: tokio::time::Instant::now() + delay,
             delay,
+            lost: false,
+        }
+    }
+
+    /// The unexpected-loss variant: same window, same backoff, its own
+    /// expiry note.
+    fn start_lost() -> Self {
+        let delay = Duration::from_secs(1);
+        ReconnectLoop {
+            deadline: tokio::time::Instant::now() + RECONNECT_WINDOW,
+            next_attempt: tokio::time::Instant::now() + delay,
+            delay,
+            lost: true,
         }
     }
 
@@ -691,7 +712,7 @@ async fn run_interactive_surface(
     // The TS theme emits raw ANSI color codes regardless of NO_COLOR; match
     // that so the same terminal renders the same frames either way.
     crossterm::style::force_color_output(true);
-    let (client, mut events) = DaemonClient::connect(&options.socket_path)
+    let (client, mut events) = DaemonClient::connect_with_retry(&options.socket_path)
         .await
         .with_context(|| "the interactive UI could not attach to the daemon")?;
     // Background notes (a failed abort request) fold into the transcript
@@ -846,6 +867,22 @@ async fn run_interactive_surface(
                         ..Default::default()
                     });
                 }
+            }
+            // A response/handshake timeout (the daemon alive but slow at
+            // load: "Timed out after Nms waiting for the Prime Agent daemon
+            // response") is a hiccup, not a protocol failure: the same
+            // session-picker fallback, never a fatal exit that loses the
+            // user's pane (operator directive 2026-09-24 — the attach
+            // timeout at box load exited the TUI).
+            if crate::daemon_client::is_daemon_timeout(&error) {
+                exit_guard.cancel();
+                let frames = renderer.finish(&mut view, true);
+                return Ok(InteractiveOutcome {
+                    return_to_agents_view: true,
+                    agents_view_notice: Some(format!("{error:#} — pick a session to continue.")),
+                    frames,
+                    ..Default::default()
+                });
             }
             // Any other daemon refusal (a create the daemon refused for a
             // saved-session open, an admission refusal, ...) gets the same
@@ -1397,9 +1434,20 @@ async fn run_interactive_surface(
                             // Already reconnecting: the dead channel's
                             // terminal None frames are expected.
                         } else {
-                            session.note("the daemon connection closed", &mut view);
-                            session.exit_reason = "daemon_closed";
-                            running = false;
+                            // An unexpected connection loss (no update in
+                            // flight) is a daemon hiccup, not a session
+                            // end: the pane keeps its transcript and
+                            // retries with the same bounded window and
+                            // backoff as the update restart. The user
+                            // can leave at any point; the window expires
+                            // into the honest exit note.
+                            session.note_as(
+                                "the daemon connection closed — reconnecting…",
+                                crate::chat::StatusKind::Warning,
+                                &mut view,
+                            );
+                            reconnect = Some(ReconnectLoop::start_lost());
+                            session.dirty = true;
                         }
                     }
                 }
@@ -1469,17 +1517,26 @@ async fn run_interactive_surface(
                     continue;
                 };
                 if tokio::time::Instant::now() > state.deadline {
-                    session.note(
-                        "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
-                        &mut view,
-                    );
-                    session.exit_reason = "update_reconnect_failed";
+                    if state.lost {
+                        session.note(
+                            "could not reconnect to the daemon within 10 minutes — run `prime-agent attach` to resume.",
+                            &mut view,
+                        );
+                        session.exit_reason = "daemon_reconnect_failed";
+                    } else {
+                        session.note(
+                            "could not reconnect to the daemon within 10 minutes — the update finished but this window is detached. Run `prime-agent attach` to resume.",
+                            &mut view,
+                        );
+                        session.exit_reason = "update_reconnect_failed";
+                    }
                     session.dirty = true;
                     running = false;
                     continue;
                 }
                 // One reconnect attempt: bounded connect, hello, reattach
                 // by durable id (§10.4-§10.5).
+                let lost = state.lost;
                 let attempt = tokio::time::timeout(
                     Duration::from_secs(RECONNECT_ATTEMPT_TIMEOUT_S),
                     DaemonClient::connect(&options.socket_path),
@@ -1498,6 +1555,13 @@ async fn run_interactive_surface(
                                 events_closed = false;
                                 session.reconnect = None;
                                 reconnect = None;
+                                if lost {
+                                    session.note_as(
+                                        "reconnected to the daemon",
+                                        crate::chat::StatusKind::Info,
+                                        &mut view,
+                                    );
+                                }
                                 session.dirty = true;
                             }
                             Ok(Err(error)) => {
