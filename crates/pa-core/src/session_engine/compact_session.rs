@@ -44,9 +44,12 @@ pub struct CompactOptions<'a> {
 }
 
 /// The history summary's completion budget (TS `generateSummary`:
-/// `Math.floor(0.8 * reserveTokens)`).
+/// `Math.floor(0.8 * reserveTokens)`): multiply before dividing so
+/// sub-5 budgets round toward the true floor instead of collapsing to
+/// zero (`/ 5 * 4` truncates first and yields 0 for reserves 1–4, and
+/// 4 for 9 where the TS floor is 7).
 pub(crate) fn history_summary_completion_budget(reserve_tokens: u64) -> u64 {
-    reserve_tokens / 5 * 4
+    reserve_tokens.saturating_mul(4) / 5
 }
 
 /// The split-turn prefix summary's completion budget (TS
@@ -382,8 +385,11 @@ pub async fn execute_compaction(
     // prefix and re-read their whole input at peak price — route them to
     // the configured auxiliary model when it is set, usable, and its
     // known window fits the exact requests this run will issue; fall back
-    // to the session model otherwise (the pre-#2411 behavior).
-    let (model, api_key) = match options.auxiliary {
+    // to the session model otherwise (the pre-#2411 behavior). The
+    // resolution reads settings.json/models.json/auth storage (and a
+    // `!command` secret key resolves a subprocess when configured), so it
+    // runs on the blocking pool, never the async executor.
+    let (model, api_key, summary_headers) = match options.auxiliary {
         Some(context) => {
             let required = estimate_summary_request_tokens(
                 &history,
@@ -393,16 +399,33 @@ pub async fn execute_compaction(
                 options.custom_instructions,
                 options.settings.reserve_tokens,
             );
-            let routed = super::auxiliary_model::resolve_auxiliary_model(
-                context,
-                "compaction summary",
-                &options.model,
-                options.api_key.clone(),
-                Some(required),
-            );
-            (routed.model, routed.api_key)
+            let join = {
+                let context = context.clone();
+                let session_model = options.model.clone();
+                let session_api_key = options.api_key.clone();
+                tokio::task::spawn_blocking(move || {
+                    super::auxiliary_model::resolve_auxiliary_model(
+                        &context,
+                        "compaction summary",
+                        &session_model,
+                        session_api_key,
+                        Some(required),
+                    )
+                })
+            };
+            // A JoinError (the closure panicked) degrades to the session
+            // fallback; the resolver itself never panics — every unusable
+            // selector resolves to the fallback with the warning.
+            let routed =
+                join.await
+                    .unwrap_or_else(|_| super::auxiliary_model::ResolvedAuxiliaryModel {
+                        model: options.model.clone(),
+                        api_key: options.api_key.clone(),
+                        headers: None,
+                    });
+            (routed.model, routed.api_key, routed.headers)
         }
-        None => (options.model.clone(), options.api_key.clone()),
+        None => (options.model.clone(), options.api_key.clone(), None),
     };
     let history_max_tokens = history_summary_completion_budget(options.settings.reserve_tokens);
     let turn_prefix_max_tokens =
@@ -427,6 +450,7 @@ pub async fn execute_compaction(
         complete_summary_call(
             &model,
             api_key.clone(),
+            summary_headers.clone(),
             history_max_tokens,
             request,
             "Summarization failed",
@@ -441,6 +465,7 @@ pub async fn execute_compaction(
         let slice = complete_summary_call(
             &model,
             api_key.clone(),
+            summary_headers.clone(),
             turn_prefix_max_tokens,
             request,
             "Turn prefix summarization failed",

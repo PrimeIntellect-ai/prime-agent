@@ -344,7 +344,10 @@ pub async fn generate_branch_summary(
     // estimates the request the SESSION model would issue (its window
     // sizes the slice); the routed model then re-slices with its own
     // window, exactly like TS.
-    let (routed_model, api_key) = match auxiliary {
+    // The resolution reads settings/models/auth (and a `!command` secret
+    // key resolves a subprocess when configured), so it runs on the
+    // blocking pool, never the async executor.
+    let (routed_model, api_key, summary_headers) = match auxiliary {
         Some(context) => {
             let required = estimate_branch_summary_request_tokens(
                 entries,
@@ -353,16 +356,33 @@ pub async fn generate_branch_summary(
                 custom_instructions,
                 replace_instructions,
             );
-            let routed = super::auxiliary_model::resolve_auxiliary_model(
-                context,
-                "branch summary",
-                model,
-                api_key.clone(),
-                Some(required),
-            );
-            (routed.model, routed.api_key)
+            let join = {
+                let context = context.clone();
+                let session_model = model.clone();
+                let session_api_key = api_key.clone();
+                tokio::task::spawn_blocking(move || {
+                    super::auxiliary_model::resolve_auxiliary_model(
+                        &context,
+                        "branch summary",
+                        &session_model,
+                        session_api_key,
+                        Some(required),
+                    )
+                })
+            };
+            // A JoinError (the closure panicked) degrades to the session
+            // fallback; the resolver itself never panics — every unusable
+            // selector resolves to the fallback with the warning.
+            let routed =
+                join.await
+                    .unwrap_or_else(|_| super::auxiliary_model::ResolvedAuxiliaryModel {
+                        model: model.clone(),
+                        api_key: api_key.clone(),
+                        headers: None,
+                    });
+            (routed.model, routed.api_key, routed.headers)
         }
-        None => (model.clone(), api_key.clone()),
+        None => (model.clone(), api_key.clone(), None),
     };
     let model = &routed_model;
     let context_window = if model.context_window > 0 {
@@ -410,6 +430,7 @@ pub async fn generate_branch_summary(
         pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
             max_tokens: Some(BRANCH_SUMMARY_MAX_TOKENS),
             api_key,
+            headers: summary_headers.map(|headers| headers.into_iter().collect()),
             ..Default::default()
         });
     let response = match pa_ai::complete_simple(model, &context, Some(stream_options)).await {

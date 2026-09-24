@@ -20,12 +20,16 @@ pub struct AuxiliaryModelContext {
     pub agent_dir: PathBuf,
 }
 
-/// One routed summarizer target: the model the pass runs on and the key it
-/// sends (TS `_resolveAuxiliaryModel`'s `{ model, apiKey }`).
+/// One routed summarizer target: the model the pass runs on, the key it
+/// sends, and the merged request headers its provider needs (TS
+/// `_resolveAuxiliaryModel`'s `{ model, apiKey, headers }`). The session
+/// fallback carries no headers — today's session-model summarizer path
+/// never wired them.
 #[derive(Debug, Clone)]
 pub struct ResolvedAuxiliaryModel {
     pub model: Model,
     pub api_key: Option<String>,
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// The fallback warning (TS `_resolveAuxiliaryModel`'s `console.warn`).
@@ -56,6 +60,7 @@ pub fn resolve_auxiliary_model(
     let fallback = || ResolvedAuxiliaryModel {
         model: session_model.clone(),
         api_key: session_api_key.clone(),
+        headers: None,
     };
     let settings = crate::settings::SettingsManager::create(&context.cwd, &context.agent_dir);
     // A malformed or whitespace value behaves as unset (TS
@@ -111,6 +116,7 @@ pub fn resolve_auxiliary_model(
     ResolvedAuxiliaryModel {
         model,
         api_key: resolved.api_key,
+        headers: resolved.headers,
     }
 }
 
@@ -207,6 +213,8 @@ mod tests {
         // The auxiliary call runs on the auxiliary model's own key, never
         // the session's.
         assert_eq!(routed.api_key.as_deref(), Some("aux-key"));
+        // The fallback carries no headers.
+        assert_eq!(routed.headers, None);
     }
 
     #[test]
