@@ -370,6 +370,9 @@ pub enum HeadlessStep {
     /// Type text character by character (raw editor input, so autocomplete
     /// and editor state react exactly as to a keystroke).
     Type(String),
+    /// A bracketed-paste payload (the same editor paste path a terminal's
+    /// paste takes, including the large-paste marker rules).
+    Paste(String),
     /// Materialize the parked editor suggestions — the state a live user
     /// gets after pausing typing for one input-idle tick, so the next step
     /// (typically `Enter`) completes against the open dropdown. A burst of
@@ -2056,6 +2059,11 @@ impl Renderer {
                                     if ui_tx.send(UiInput::Key(key)).is_err() {
                                         return;
                                     }
+                                }
+                            }
+                            HeadlessStep::Paste(text) => {
+                                if ui_tx.send(UiInput::Paste(text)).is_err() {
+                                    return;
                                 }
                             }
                             HeadlessStep::SettleIdle => {

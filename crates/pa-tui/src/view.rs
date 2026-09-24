@@ -222,6 +222,40 @@ pub struct AgentView {
     pub toasts: crate::toast::Toasts,
 }
 
+/// Clip the editor selection to one rendered chunk (view.rs): the
+/// selection's (line, col) bounds become a char range within `text` — the
+/// chunk of `source_line` starting at `source_start`. `None` when the
+/// selection does not touch this chunk. Lines fully inside the selection
+/// highlight whole; the boundary lines clip at the selection's columns.
+fn chunk_selection(
+    selection: Option<((usize, usize), (usize, usize))>,
+    source_line: usize,
+    source_start: usize,
+    text: &str,
+) -> Option<(usize, usize)> {
+    let ((start_line, start_col), (end_line, end_col)) = selection?;
+    if source_line < start_line || source_line > end_line {
+        return None;
+    }
+    let chunk_chars = text.chars().count();
+    // The start column is a source-line column (it converts to the
+    // chunk's coordinates); a fully-covered line selects to the chunk's
+    // end directly, and the END line's column converts like the start.
+    let lo = if source_line == start_line {
+        start_col.saturating_sub(source_start)
+    } else {
+        0
+    };
+    let hi = if source_line == end_line {
+        end_col.saturating_sub(source_start)
+    } else {
+        chunk_chars
+    };
+    let hi = hi.min(chunk_chars);
+    let lo = lo.min(chunk_chars);
+    (lo < hi).then_some((lo, hi))
+}
+
 impl AgentView {
     /// TS `isCompactAgentMessageNeighbor`: agent messages, tool calls (the
     /// ipython cells included), bash executions, and shell completions
@@ -1086,6 +1120,7 @@ impl AgentView {
         }
         // TS `CustomEditor.render`: a bare `--` separator highlights only
         // while the first line opens with an argument-taking slash command.
+        let selection = self.editor.selection_range();
         let editor_lines = self.editor.get_lines();
         let registry = SlashCommandRegistry::builtin_cached();
         let include_bare_separator = editor_lines
@@ -1136,6 +1171,7 @@ impl AgentView {
                 &self.theme,
                 text,
                 &highlights,
+                chunk_selection(selection, line.source_line, line.source_start, text),
                 cursor_pos,
                 bg,
             ));
@@ -2626,5 +2662,40 @@ mod tests {
             "the content rows shift below the header pair: {:?}",
             joined[header_row + 2]
         );
+    }
+}
+
+#[cfg(test)]
+mod chunk_selection_tests {
+    use super::chunk_selection;
+
+    /// A fully-covered line highlights to the chunk's own end (the
+    /// chunk-local length), not `chunk length - source start` — wrapped
+    /// continuations keep their highlight (Bugbot round-1 fix).
+    #[test]
+    fn wrapped_chunks_on_fully_covered_lines_highlight_to_their_end() {
+        let sel = Some(((0, 10), (2, 5)));
+        // A wrapped continuation chunk of line 1 (source cols 20..30).
+        let range = chunk_selection(sel, 1, 20, "wrapped text");
+        assert_eq!(range, Some((0, 12)), "the whole chunk highlights");
+        // The selection's ending line converts its source column.
+        let range = chunk_selection(sel, 2, 0, "abcde");
+        assert_eq!(range, Some((0, 5)));
+        // A chunk the selection ends before does not highlight.
+        let range = chunk_selection(sel, 2, 6, "fgh");
+        assert_eq!(range, None);
+        // The starting line clips at its start column: a chunk that
+        // begins exactly where the selection does is fully covered, and a
+        // chunk the selection starts AFTER stays clear.
+        let range = chunk_selection(sel, 0, 0, "01234567890123456789");
+        assert_eq!(range, Some((10, 20)));
+        let range = chunk_selection(sel, 0, 10, "0123456789");
+        assert_eq!(
+            range,
+            Some((0, 10)),
+            "the selection starts at this chunk's start"
+        );
+        let range = chunk_selection(sel, 0, 5, "01234");
+        assert_eq!(range, None, "the selection starts after this chunk ends");
     }
 }

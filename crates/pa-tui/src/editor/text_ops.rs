@@ -5,6 +5,12 @@ use super::*;
 
 impl Editor {
     pub(crate) fn handle_backspace(&mut self) {
+        // A selection backspaces the selection, like every standard
+        // editor (the whole selection is one undo step).
+        if self.has_selection() {
+            self.delete_selection().ok();
+            return;
+        }
         self.history_index = -1;
         self.last_action = None;
         let line = self.lines[self.cursor_line].clone();
@@ -42,6 +48,10 @@ impl Editor {
     }
 
     pub(crate) fn handle_forward_delete(&mut self) {
+        if self.has_selection() {
+            self.delete_selection().ok();
+            return;
+        }
         self.history_index = -1;
         self.last_action = None;
         let current_line = self.lines[self.cursor_line].clone();
@@ -70,6 +80,10 @@ impl Editor {
     }
 
     pub(crate) fn delete_to_start_of_line(&mut self) {
+        if self.has_selection() {
+            self.delete_selection().ok();
+            return;
+        }
         self.history_index = -1;
         let current_line = self.lines[self.cursor_line].clone();
         // The kill starts after the hidden bang prefix (TS
@@ -107,6 +121,10 @@ impl Editor {
     }
 
     pub(crate) fn delete_to_end_of_line(&mut self) {
+        if self.has_selection() {
+            self.delete_selection().ok();
+            return;
+        }
         self.history_index = -1;
         let current_line = self.lines[self.cursor_line].clone();
         let line_len = current_line.chars().count();
@@ -137,6 +155,10 @@ impl Editor {
     }
 
     pub(crate) fn delete_word_backwards(&mut self) {
+        if self.has_selection() {
+            self.delete_selection().ok();
+            return;
+        }
         self.history_index = -1;
         let current_line = self.lines[self.cursor_line].clone();
         if self.cursor_col == 0 {
@@ -175,6 +197,10 @@ impl Editor {
     }
 
     pub(crate) fn delete_word_forward(&mut self) {
+        if self.has_selection() {
+            self.delete_selection().ok();
+            return;
+        }
         self.history_index = -1;
         let current_line = self.lines[self.cursor_line].clone();
         let line_len = current_line.chars().count();
@@ -213,6 +239,11 @@ impl Editor {
         if self.kill_ring.is_empty() {
             return;
         }
+        // A yank inserts at the cursor like typing: any active selection
+        // collapses first, or the stale anchor would cover different
+        // text than the highlight and the next keystroke would splice the
+        // wrong range.
+        self.selection_anchor = None;
         self.push_undo_snapshot();
         let text = self.kill_ring.peek().unwrap_or_default().to_string();
         self.insert_yanked_text(&text);
@@ -224,6 +255,7 @@ impl Editor {
         if self.last_action.as_ref() != Some(&LastAction::Yank) || self.kill_ring.len() <= 1 {
             return;
         }
+        self.selection_anchor = None;
         self.push_undo_snapshot();
         self.delete_yanked_text();
         self.kill_ring.rotate();

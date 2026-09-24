@@ -354,6 +354,7 @@ Method: every TS file in `packages/tui/src` read in full; each behavior located 
 | keybindings.ts:211 | Config file load, legacy-name migration, JSON rewrite | crates/pa-tui/src/keybindings.rs:499 (`migrate_keybindings_config`) | MATCHES | — |
 | kill-ring.ts:8 | `KillRing` push/peek/rotate/accumulate | crates/pa-tui/src/editor/kill_ring.rs:8 | MATCHES | — |
 | undo-stack.ts:7 | `UndoStack` clone-on-push | crates/pa-tui/src/editor/mod.rs:338 (`EditorSnapshot` push/pop) | MATCHES | — |
+| — (no TS counterpart) | SANCTIONED DIVERGENCE (operator ask 2026-09-24, per the #289 precedent): redo, the shift+arrow selection families, select-all, cut/copy of the selection, Ctrl+Home/End and Cmd+Up/Down doc jumps, Ctrl+Up/Down paragraph jumps, and Ctrl+T transposition — the standard keyboard-only editing set the TS editor lacks | crates/pa-tui/src/editor/selection.rs + mod.rs (`redo`), motion.rs (doc/paragraph), text_ops.rs (selection deletes), keybindings.rs (the `tui.editor.*` additions), keys.rs (SUPER decode) | FORWARD | prompt-editor-keybinds |
 | mouse.ts:32 | SGR parse, wheel/button codes, modifier/motion bits, `isMouseSequence` | crates/pa-tui/src/mouse.rs:51 | MATCHES | — |
 | selection-metadata.ts:71 | Table-cell selection markers (`_pi:table:` start/end/cell) | MISSING (no `_pi:table:` handling anywhere) | MISSING | mouse-select |
 | selection-metadata.ts:80 | `extractTableCellSelectionRegions` | MISSING | MISSING | mouse-select |
