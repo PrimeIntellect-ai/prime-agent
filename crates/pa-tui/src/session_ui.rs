@@ -7073,12 +7073,27 @@ impl SessionUi {
                 match command.as_str() {
                     "model" => {
                         self.open_model_picker(view, partial.trim()).await?;
+                        // The flag belongs to the mounted picker: the
+                        // model picker always mounts here, so a guard is
+                        // belt-and-braces, but the failed-open contract
+                        // stays symmetric with the mcp arm.
+                        if view.model_picker.is_none() {
+                            self.picker_restored_draft = false;
+                        }
                         self.track_menu_opened("model", "tab");
                         self.dirty = true;
                         return Ok(());
                     }
                     "mcp" => {
                         self.open_mcp_view("/mcp", view, partial.trim()).await?;
+                        // A failed roster load leaves no view mounted:
+                        // the editor keeps the restored draft (nothing
+                        // lost), but the flag must not leak into the NEXT
+                        // picker — its clear-on-apply semantics belong to
+                        // the typed partial, not this draft.
+                        if view.mcp_view.is_none() {
+                            self.picker_restored_draft = false;
+                        }
                         self.track_menu_opened("mcp", "tab");
                         self.dirty = true;
                         return Ok(());
