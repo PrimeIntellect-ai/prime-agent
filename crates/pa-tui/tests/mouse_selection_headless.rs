@@ -312,7 +312,7 @@ fn top_layout() -> (usize, usize, usize, usize, usize, usize) {
     let (_, answer_row, answer_col, _) =
         locate(&probe, "answer 1").expect("answer 1 rendered below row 0");
     let (_, ctx_row, ctx_col, _) =
-        locate(&probe, "Collapsed mode").expect("the prompt-context row rendered");
+        locate(&probe, "Details mode").expect("the prompt-context row rendered");
     (row0, col0, answer_row, answer_col, ctx_row, ctx_col)
 }
 

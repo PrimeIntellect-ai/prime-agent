@@ -1831,7 +1831,7 @@ mod tests {
         assert!(frame.iter().all(|l| str_width(&text_of(l)) <= 80));
         let joined = frame.iter().map(text_of).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("prime agent v0.0.0"));
-        assert!(joined.contains("Collapsed mode (Ctrl+O to expand)"));
+        assert!(joined.contains("Details mode (Ctrl+O to expand)"));
         assert!(joined.contains(">"));
     }
 
@@ -2088,7 +2088,7 @@ mod tests {
         assert!(frame.len() == 24 && inline.len() != frame.len());
         // The dock rows ride at the end (prompt context, editor, tray).
         let joined = inline.iter().map(text_of).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("Collapsed mode"));
+        assert!(joined.contains("Details mode"));
     }
 
     #[test]
@@ -2101,7 +2101,7 @@ mod tests {
         assert_eq!(frame.len(), 40);
         // The editor prompt sits above the (empty) tray row.
         let joined = frame.iter().map(text_of).collect::<Vec<_>>().join("\n");
-        assert!(joined.contains("Collapsed mode"));
+        assert!(joined.contains("Details mode"));
     }
 
     fn view_with(entries: Vec<ChatEntry>) -> AgentView {
@@ -2250,8 +2250,8 @@ mod tests {
             tokens_before: 12345,
             custom_instructions: Some("the goal".to_string()),
         }]);
-        // Collapsed at the default `overview`: the header plus the
-        // whitespace-collapsed EventSummary, never the token metadata.
+        // Collapsed at the startup `details` (TS #2447): the header plus
+        // the whitespace-collapsed EventSummary, never the token metadata.
         let collapsed = transcript_text(&mut view, 80);
         assert!(collapsed.contains("\u{25c6} Context compacted"));
         assert!(collapsed.contains("## Summary the session story, first line"));
@@ -2259,12 +2259,6 @@ mod tests {
         // The row is cacheable; the first render stored it. A detail
         // change must re-flow it (the cache drops wholesale), or the
         // block would stay collapsed forever.
-        view.detail = view.detail.next();
-        let details = transcript_text(&mut view, 80);
-        assert!(
-            !details.contains("Compacted from"),
-            "detail `details` keeps the block collapsed: {details}"
-        );
         view.detail = view.detail.next();
         let expanded = transcript_text(&mut view, 80);
         assert!(
@@ -2277,12 +2271,19 @@ mod tests {
             expanded.contains("Summary"),
             "the expanded markdown body renders: {expanded}"
         );
-        // The cycle wraps to `overview`: the block collapses again.
+        // The cycle wraps through `overview` (the other collapsed level):
+        // the block collapses again.
         view.detail = view.detail.next();
         let collapsed_again = transcript_text(&mut view, 80);
         assert!(
             !collapsed_again.contains("Compacted from"),
             "the cycle back to `overview` collapses the block: {collapsed_again}"
+        );
+        view.detail = Detail::Details;
+        let at_details = transcript_text(&mut view, 80);
+        assert!(
+            !at_details.contains("Compacted from"),
+            "the middle `details` level keeps the block collapsed too: {at_details}"
         );
     }
 
