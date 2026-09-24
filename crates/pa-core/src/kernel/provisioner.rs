@@ -35,7 +35,7 @@ use crate::kernel::state_snapshot::{manifest_path_in, snapshot_path_in};
 /// thrash the FS past the ready-handshake window.
 fn default_kernel_boot_concurrency() -> usize {
     let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
+        .map(std::num::NonZero::get)
         .unwrap_or(4);
     16.min((cores * 2).max(4))
 }
@@ -66,7 +66,7 @@ where
     let permits = {
         let mut guard = BOOT_PERMITS
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard
             .get_or_insert_with(|| {
                 Arc::new(tokio::sync::Semaphore::new(
@@ -201,7 +201,7 @@ impl IpythonKernelProvisioner {
         self.inner
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// The kernel manager, once a startup has completed successfully.
@@ -371,7 +371,7 @@ fn emit_startup_progress(
     let mut state = inner
         .state
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     state.last_startup_message = Some(message.to_string());
     for listener in &state.startup_listeners {
         listener(message);
@@ -449,7 +449,7 @@ async fn run_startup(
                 if inner
                     .state
                     .lock()
-                    .unwrap_or_else(|p| p.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .disposed
                     || !startup_failure_is_retryable(&error)
                     || remaining_retries == 0
@@ -477,7 +477,7 @@ async fn run_startup(
         let mut state = inner
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.startup = None;
         state.startup_listeners.clear();
         state.last_startup_message = None;
@@ -509,7 +509,7 @@ async fn run_startup(
         let mut state = inner
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.last_startup_failure = None;
         state.manager = Some(manager);
     }
@@ -640,7 +640,7 @@ async fn start_kernel_impl(
             inner
                 .state
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .dispose_snapshot
         };
         let _ = manager
@@ -704,7 +704,7 @@ async fn start_kernel_impl(
                 inner
                     .state
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .dispose_snapshot
             };
             let _ = manager
@@ -729,7 +729,7 @@ async fn start_kernel_impl(
                 inner
                     .state
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .dispose_snapshot
             };
             let _ = manager
@@ -747,7 +747,7 @@ async fn start_kernel_impl(
                 inner
                     .state
                     .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .dispose_snapshot
             };
             let _ = manager
@@ -769,7 +769,7 @@ async fn start_kernel_impl(
         inner
             .state
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .last_restore = Some(restore);
     }
     Ok(manager)

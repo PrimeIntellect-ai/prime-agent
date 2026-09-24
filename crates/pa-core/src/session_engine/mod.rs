@@ -29,6 +29,7 @@ pub mod provider_retry;
 pub mod refine;
 pub mod rlm_host;
 pub mod rlm_notices;
+pub mod rlm_usage;
 pub mod runtime;
 pub mod runtime_wiring;
 pub mod session_commands;
@@ -753,7 +754,7 @@ impl AgentSession {
     pub async fn queue_next_turn_row(&self, message: pa_types::session::CustomMessage) {
         self.pending_next_turn_rows
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(message);
     }
 
@@ -772,13 +773,13 @@ impl AgentSession {
             let mut own = self
                 .pending_next_turn_rows
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             own.drain(..).collect()
         };
         {
             let mut next = shared
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             // The shared mailbox is authoritative: rows parked pre-build
             // (a restore that finished during construction) come first,
             // then anything this session queued before adoption.
@@ -793,7 +794,7 @@ impl AgentSession {
     pub async fn take_next_turn_rows(&self) -> Vec<pa_agent::types::AgentMessage> {
         self.pending_next_turn_rows
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .drain(..)
             .filter_map(|row| session_message_to_loop(&SessionAgentMessage::Custom(row)))
             .collect()
@@ -1194,7 +1195,10 @@ mod tests {
                 .collect();
             (messages.clone(), kinds)
         };
-        let roles: Vec<&str> = end_messages.iter().map(|message| message.role()).collect();
+        let roles: Vec<&str> = end_messages
+            .iter()
+            .map(pa_agent::types::AgentMessage::role)
+            .collect();
         assert_eq!(roles, vec!["custom", "user", "assistant"]);
         let AgentMessage::Custom(custom) = &end_messages[0] else {
             panic!("expected digest custom row");

@@ -6,6 +6,11 @@
 //! override, a seeded cursor); the splash mounts one for the trace question
 //! and owns the pane until it is answered; the answer and the completion
 //! flag persist through [`crate::interactive::OnboardingSink`].
+//!
+//! Fresh installs never mount this pane: trace sharing is on by default
+//! (the `run_onboarding_phase` skip in `crate::interactive`), so the
+//! splash appears only for a home that explicitly opted out before
+//! completing onboarding.
 
 use crate::keybindings::KeybindingsManager;
 use crate::keys::KeyId;

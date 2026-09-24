@@ -7,7 +7,10 @@ impl AgentView {
         #[cfg(test)]
         super::layout::ENTRY_VISITS.with(|count| count.set(count.get() + 1));
         let entry = &self.chat[index];
-        let preceded_by_tool = index > 0 && matches!(self.chat[index - 1], ChatEntry::Tool(_));
+        // TS `precededByToolActivity` = `isCompactAgentMessageNeighbor` of
+        // the previous row: a tool call, agent message, bash execution, or
+        // shell completion all count.
+        let preceded_by_tool = index > 0 && self.is_compact_neighbor(&self.chat[index - 1]);
         let spacing = self.entry_spacing(index, entry, index == 0, preceded_by_tool);
         match entry {
             ChatEntry::Status { text, .. } => {
@@ -63,7 +66,7 @@ impl AgentView {
             }
             ChatEntry::ClientMarkdown { text } => {
                 let mut style = crate::markdown::MarkdownStyle::from_theme(&self.theme);
-                style.code_block_indent = self.code_block_indent.clone();
+                style.code_block_indent.clone_from(&self.code_block_indent);
                 3 + crate::markdown::markdown_row_count(
                     text.trim(),
                     width.saturating_sub(2).max(1),
@@ -261,7 +264,7 @@ mod tests {
             view.detail = detail;
             for width in [0, 1, 7, 20, 80] {
                 for (index, entry) in view.chat.iter().enumerate() {
-                    let preceded = index > 0 && matches!(view.chat[index - 1], ChatEntry::Tool(_));
+                    let preceded = index > 0 && view.is_compact_neighbor(&view.chat[index - 1]);
                     assert_eq!(
                         view.count_entry_rows(index, width),
                         view.render_entry(index, entry, width, index == 0, preceded)

@@ -157,8 +157,8 @@ pub fn build_groups(resolved: &ResolvedPaths) -> Vec<ResourceGroup> {
             metadata: resource.metadata.clone(),
             resource_type,
             display_name: display_name(&resource.path, resource_type),
-            group_key: group_key.clone(),
-            subgroup_key: subgroup_key.clone(),
+            group_key,
+            subgroup_key,
         });
     };
     for resource in &resolved.extensions {
@@ -322,10 +322,10 @@ fn toggle_package_resource(
             .any(|key| object.contains_key(*key));
         if !has_filters {
             // A filter-less package collapses back to its source string.
-            entry = serde_json::Value::String(source.to_string());
+            entry = serde_json::Value::String(source);
         }
     }
-    let mut updated_packages = packages.clone();
+    let mut updated_packages = packages;
     updated_packages[index] = entry;
     if project {
         settings.set_project_packages(updated_packages);

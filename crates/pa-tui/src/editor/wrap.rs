@@ -98,7 +98,7 @@ pub fn is_atomic_marker(seg: &str) -> bool {
 /// length; a malformed head yields `None`.
 pub(crate) fn parse_paste_marker(s: &str) -> Option<(usize, usize)> {
     let rest = s.strip_prefix("[paste #")?;
-    let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
     if digits == 0 {
         return None;
     }
@@ -110,13 +110,13 @@ pub(crate) fn parse_paste_marker(s: &str) -> Option<(usize, usize)> {
     // ` (+<N> lines | <N> chars)]`
     let suffix = rest[digits..].strip_prefix(' ')?;
     let suffix_len = if let Some(tail) = suffix.strip_prefix('+') {
-        let n = tail.bytes().take_while(|b| b.is_ascii_digit()).count();
+        let n = tail.bytes().take_while(u8::is_ascii_digit).count();
         if n == 0 || !tail[n..].starts_with(" lines]") {
             return None;
         }
         2 + n + " lines]".len()
     } else {
-        let n = suffix.bytes().take_while(|b| b.is_ascii_digit()).count();
+        let n = suffix.bytes().take_while(u8::is_ascii_digit).count();
         if n == 0 || !suffix[n..].starts_with(" chars]") {
             return None;
         }
@@ -198,7 +198,7 @@ pub(crate) fn segment_with_markers(
 /// the marker, or `None` when the head is malformed.
 fn parse_image_marker(s: &str) -> Option<usize> {
     let rest = s.strip_prefix("[image #")?;
-    let digits = rest.bytes().take_while(|b| b.is_ascii_digit()).count();
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
     if digits == 0 || !rest[digits..].starts_with(']') {
         return None;
     }

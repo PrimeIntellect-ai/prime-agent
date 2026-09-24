@@ -49,6 +49,10 @@ impl Generation {
             && *self == Self::of(&std::fs::metadata(path)?))
     }
 }
+/// The snapshot format version. 4: the older-path stats fold child usage
+/// attributions (v3 sidecars carry pre-fold totals and must not serve).
+pub(super) const SNAPSHOT_VERSION: u32 = 4;
+
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Snapshot {
     pub version: u32,
@@ -84,7 +88,7 @@ pub(super) fn load(path: &Path, file: &File, stats: &mut WindowReadStats) -> Opt
     // the eviction re-lock.
     let live = live_snapshots().lock().ok()?.get(path).cloned();
     if let Some(snapshot) = live {
-        if snapshot.version == 3 && snapshot.generation.valid(file, path).ok()? {
+        if snapshot.version == SNAPSHOT_VERSION && snapshot.generation.valid(file, path).ok()? {
             stats.cache_bytes += serde_json::to_vec(&snapshot).ok()?.len() as u64;
             return Some(snapshot);
         }
@@ -93,7 +97,7 @@ pub(super) fn load(path: &Path, file: &File, stats: &mut WindowReadStats) -> Opt
     let data = std::fs::read(cache_path(path)).ok()?;
     stats.cache_bytes += data.len() as u64;
     let snapshot: Snapshot = serde_json::from_slice(&data).ok()?;
-    if snapshot.version != 3 || !snapshot.generation.valid(file, path).ok()? {
+    if snapshot.version != SNAPSHOT_VERSION || !snapshot.generation.valid(file, path).ok()? {
         return None;
     }
     live_snapshots()
@@ -195,7 +199,7 @@ pub fn append_cached(path: &Path, bytes: &[u8], ownership: AppendOwnership) -> i
             snapshots.remove(path);
             return Ok(());
         }
-        snapshot.leaf = id.to_owned();
+        id.clone_into(&mut snapshot.leaf);
         super::window::update_snapshot(snapshot, &entry);
     }
     snapshot.generation = generation;

@@ -114,7 +114,7 @@ pub fn handle_public_command(args: &[String]) -> PublicCommandResult {
     }
 
     let Some(command) = args.first() else {
-        return continue_with(args.clone());
+        return continue_with(args);
     };
     let command = command.as_str();
 
@@ -911,7 +911,7 @@ mod update_options_tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Option<UpdateInvocation> {
-        let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+        let args: Vec<String> = args.iter().map(std::string::ToString::to_string).collect();
         parse_update_options(&args)
     }
 

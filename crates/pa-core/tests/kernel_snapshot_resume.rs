@@ -277,7 +277,7 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
     };
     let _guard = FAUX_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let fixture = fixture();
 
     // ---- Session one: define state through a real ipython cell, then end.
@@ -411,7 +411,7 @@ async fn fresh_session_without_snapshot_stays_lazy_without_the_flag() {
     };
     let _guard = FAUX_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let fixture = fixture();
     let faux = faux_session(vec![text_step("ok")]);
     let session_manager = SessionManager::persisted(&fixture.cwd, &fixture.sessions_dir);

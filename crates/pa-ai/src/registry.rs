@@ -47,7 +47,7 @@ pub fn register_api_provider(provider: Arc<dyn Provider>, source_id: Option<&str
         provider.api().to_string(),
         RegisteredProvider {
             provider,
-            source_id: source_id.map(|s| s.to_string()),
+            source_id: source_id.map(std::string::ToString::to_string),
         },
     );
 }

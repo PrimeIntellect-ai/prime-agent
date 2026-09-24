@@ -62,7 +62,7 @@ pub fn resolve_prime_inference_auth_config() -> PrimeInferenceAuthConfig {
 
 /// TS `normalizeBaseUrl`: trim, strip trailing slashes and the `/api/v1`
 /// suffix, defaulting to the production API.
-fn normalize_base_url(value: Option<&str>) -> String {
+pub(super) fn normalize_base_url(value: Option<&str>) -> String {
     let fallback = match value.map(str::trim).filter(|value| !value.is_empty()) {
         Some(value) => value,
         None => DEFAULT_PRIME_API_BASE_URL,
@@ -100,6 +100,17 @@ pub trait PrimeHttp: Send + Sync {
         api_key: &str,
         timeout_ms: u64,
     ) -> Pin<Box<dyn Future<Output = Result<PrimeHttpResponse, String>> + Send>>;
+
+    /// One POST of a JSON body (TS the browser challenge's generate and
+    /// status requests over `fetchPrimeAuth`): the bearer carries the
+    /// challenge's status token or is absent for the generate request.
+    fn post_json<'a>(
+        &'a self,
+        url: &'a str,
+        body: &'a str,
+        bearer: Option<&'a str>,
+        timeout_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<PrimeHttpResponse, String>> + Send + 'a>>;
 }
 
 /// The production transport (reqwest over rustls, the catalog fetch's
@@ -138,6 +149,39 @@ impl PrimeHttp for ReqwestPrimeHttp {
             Ok(PrimeHttpResponse { status, body })
         })
     }
+
+    fn post_json<'a>(
+        &'a self,
+        url: &'a str,
+        body: &'a str,
+        bearer: Option<&'a str>,
+        timeout_ms: u64,
+    ) -> Pin<Box<dyn Future<Output = Result<PrimeHttpResponse, String>> + Send + 'a>> {
+        Box::pin(async move {
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_millis(timeout_ms))
+                .build()
+                .map_err(|error| error.to_string())?;
+            let mut request = client
+                .post(url)
+                .header("content-type", "application/json")
+                .header("accept", "application/json")
+                .body(body.to_string());
+            if let Some(bearer) = bearer {
+                request = request.header("authorization", format!("Bearer {bearer}"));
+            }
+            let response = request.send().await.map_err(|error| {
+                if error.is_timeout() {
+                    "Prime Inference request timed out".to_string()
+                } else {
+                    error.to_string()
+                }
+            })?;
+            let status = response.status().as_u16();
+            let body = response.text().await.map_err(|error| error.to_string())?;
+            Ok(PrimeHttpResponse { status, body })
+        })
+    }
 }
 
 /// The prime-cli credential reuse candidate (TS `PrimeCliConfig` +
@@ -168,7 +212,7 @@ fn string_field(data: &serde_json::Value, key: &str) -> Option<String> {
 
 /// TS `readResponseMessage`: the error body's `error.message`, `detail`,
 /// or `message`, the raw text, or the status phrase.
-fn read_response_message(status: u16, body: &str) -> String {
+pub(super) fn read_response_message(status: u16, body: &str) -> String {
     if body.trim().is_empty() {
         return reqwest::StatusCode::from_u16(status)
             .ok()
@@ -234,13 +278,15 @@ fn parse_prime_team(value: &serde_json::Value) -> Option<PrimeTeamCredential> {
     })
 }
 
-/// TS `checkPrimeScopeAccess` (scope `inference`): the stored or pasted key
-/// must carry the inference write permission.
-pub async fn check_prime_inference_access(
+/// TS `checkPrimeScopeAccess`: the stored or pasted key must carry the
+/// scope's write permission (the error text names the scope label).
+pub(super) async fn check_prime_scope_access(
     http: &dyn PrimeHttp,
     base_url: &str,
     api_key: &str,
     timeout_ms: u64,
+    scope_name: &str,
+    scope_label: &str,
 ) -> Result<(), PrimeAccessError> {
     let url = format!("{}/api/v1/user/whoami", normalize_base_url(Some(base_url)));
     let response = http
@@ -274,22 +320,38 @@ pub async fn check_prime_inference_access(
             message: "Prime token is missing permission scope data".to_string(),
         }));
     };
-    let Some(inference) = scope
-        .get("inference")
-        .filter(|inference| inference.is_object())
-    else {
+    let Some(scoped) = scope.get(scope_name).filter(|scoped| scoped.is_object()) else {
         return Err(PrimeAccessError::Denied(PrimeAccessFailure {
             status: None,
-            message: "Prime token is missing inference permissions".to_string(),
+            message: format!("Prime token is missing {scope_label} permissions"),
         }));
     };
-    if inference.get("write") != Some(&serde_json::Value::Bool(true)) {
+    if scoped.get("write") != Some(&serde_json::Value::Bool(true)) {
         return Err(PrimeAccessError::Denied(PrimeAccessFailure {
             status: None,
-            message: "Prime token does not have inference write permission".to_string(),
+            message: format!("Prime token does not have {scope_label} write permission"),
         }));
     }
     Ok(())
+}
+
+/// TS `checkPrimeInferenceAccess` (scope `inference`): the stored or pasted
+/// key must carry the inference write permission.
+pub async fn check_prime_inference_access(
+    http: &dyn PrimeHttp,
+    base_url: &str,
+    api_key: &str,
+    timeout_ms: u64,
+) -> Result<(), PrimeAccessError> {
+    check_prime_scope_access(
+        http,
+        base_url,
+        api_key,
+        timeout_ms,
+        "inference",
+        "inference",
+    )
+    .await
 }
 
 /// TS `fetchPrimeTeams`: the key's teams, paginated at 100 a page.
@@ -328,7 +390,7 @@ pub async fn fetch_prime_teams(
         }
         let total = data
             .get("total_count")
-            .and_then(|count| count.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(teams.len() as u64);
         if batch.is_empty() || teams.len() as u64 >= total {
             return Ok(teams);
@@ -395,6 +457,26 @@ mod tests {
             _api_key: &str,
             _timeout_ms: u64,
         ) -> Pin<Box<dyn Future<Output = Result<PrimeHttpResponse, String>> + Send>> {
+            let url = url.to_string();
+            let entry = self.0.lock().unwrap().pop_front();
+            Box::pin(async move {
+                match entry {
+                    Some((expected_url, response)) if expected_url == url => Ok(response),
+                    Some((expected_url, _)) => {
+                        panic!("unexpected request {url}, scripted {expected_url}")
+                    }
+                    None => panic!("no scripted response for {url}"),
+                }
+            })
+        }
+
+        fn post_json<'a>(
+            &'a self,
+            url: &'a str,
+            _body: &'a str,
+            _bearer: Option<&'a str>,
+            _timeout_ms: u64,
+        ) -> Pin<Box<dyn Future<Output = Result<PrimeHttpResponse, String>> + Send + 'a>> {
             let url = url.to_string();
             let entry = self.0.lock().unwrap().pop_front();
             Box::pin(async move {

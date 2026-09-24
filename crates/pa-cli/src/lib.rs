@@ -32,6 +32,7 @@ pub(crate) mod prompt_command;
 pub(crate) mod provider_login;
 pub(crate) mod public_command;
 pub(crate) mod session_export;
+pub(crate) mod traces_login;
 
 /// The runtime boundary: everything a mode-runner crate implements to plug
 /// into the `prime-agent` binary, plus the entry point that drives it.
@@ -290,7 +291,7 @@ fn main_impl(args: Vec<String>, runtime: &dyn mode::Runtime) -> Result<i32, Stri
         verbose: parsed.verbose,
         offline: parsed.offline,
         agents_view_requested: public_command.explicit_agents_view,
-        attach_agent: public_command.attach_agent.clone(),
+        attach_agent: public_command.attach_agent,
     };
 
     match runtime.run(&options) {

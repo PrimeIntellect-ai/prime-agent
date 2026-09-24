@@ -295,7 +295,7 @@ pub fn set_autonomous_limits(state: &mut AutonomousRuntimeState, config: &AgentA
     }
     if let Some(gates) = &config.gates {
         if let Some(commands) = &gates.commands {
-            state.gates.commands = commands.clone();
+            state.gates.commands.clone_from(commands);
         }
         state.gates.max_retries = normalize_limit(gates.max_retries, state.gates.max_retries);
         state.gates.timeout_ms = normalize_limit(gates.timeout_ms, state.gates.timeout_ms);

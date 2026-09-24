@@ -374,7 +374,7 @@ mod tests {
         // 2x1 image at 20 cells wide: 180px wide, height scaled to 90px,
         // ceil(90/18) = 5 rows.
         assert_eq!(rows.len(), 5);
-        assert!(rows[..4].iter().all(|row| row.is_empty()));
+        assert!(rows[..4].iter().all(Vec::is_empty));
         let text = styled_text(rows.last().unwrap());
         assert!(text.starts_with("\x1b[4A"));
         assert!(text.contains("\x1b_Ga=T,f=100,q=2,C=1,c=20,r=5,i="));
@@ -412,7 +412,7 @@ mod tests {
         let rows = image.render(80);
         // 80 cells wide at 9px = 720px; scale = 80; height = 7200px = 400 rows.
         assert!(rows.len() > 2);
-        assert!(rows[..rows.len() - 1].iter().all(|row| row.is_empty()));
+        assert!(rows[..rows.len() - 1].iter().all(Vec::is_empty));
         let last = styled_text(rows.last().unwrap());
         let offset = rows.len() - 1;
         assert!(last.starts_with(&format!("\x1b[{offset}A")));

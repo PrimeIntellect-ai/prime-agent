@@ -237,8 +237,8 @@ impl ProviderAuth {
             begin_login: None,
             agent_dir: Some(self.agent_dir.clone()),
             get_catalog_sources: Some(Box::new({
-                let cwd = catalog_cwd.clone();
-                let agent_dir = catalog_agent_dir.clone();
+                let cwd = catalog_cwd;
+                let agent_dir = catalog_agent_dir;
                 move || {
                     let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
                     settings

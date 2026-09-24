@@ -162,6 +162,7 @@ fn legacy_read_session_info(path: &Path) -> Option<SessionInfo> {
         all_messages_text,
         agent_status,
         usage: usage_scan.summary(),
+        deleted_descendant_usage: None,
     })
 }
 
@@ -249,7 +250,7 @@ fn cache_rejects_replacement_and_same_length_in_place_rewrite() {
     append_rows(&path, &[header.clone(), row("alpha"), stamp.clone()]);
     assert_fold_matches(&path);
     let _first = read_session_info(&path).unwrap();
-    append_rows(&replacement, &[header.clone(), row("bravo"), stamp.clone()]);
+    append_rows(&replacement, &[header, row("bravo"), stamp]);
     fs::rename(&replacement, &path).unwrap();
     assert_fold_matches(&path);
     assert_eq!(

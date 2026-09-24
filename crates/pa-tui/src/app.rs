@@ -235,6 +235,9 @@ pub fn dispatch_events(editor: &mut Editor, on_submit: &mut dyn FnMut(&str)) {
                 on_submit(&text);
             }
             EditorEvent::Changed(_) | EditorEvent::AutocompleteToggled(_) => {}
+            // This minimal harness owns no terminal clipboard channel;
+            // the full session UI (session_ui.rs) performs the copy.
+            EditorEvent::ClipboardWrite(_) => {}
         }
     }
 }

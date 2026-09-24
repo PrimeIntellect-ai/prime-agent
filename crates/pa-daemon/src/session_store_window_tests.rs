@@ -1,5 +1,103 @@
 use super::*;
 
+/// The attribution fold survives the windowed fast open on both sides of
+/// the compaction boundary: an in-window attribution folds into its
+/// retained assistant row, an attribution targeting a discarded-prefix
+/// assistant folds into that raw row too (the fold runs on every read;
+/// the windowed store never loads the row). The windowed store's
+/// `session_stats` equals the full open's — the ACTIVE totals (TS
+/// `buildSessionContext` cuts `state.messages` at the compaction, so
+/// pre-cut spend — own or attributed — stays out; the discarded prefix's
+/// folded aggregate survives only on the whole-file surfaces), never
+/// losing or double-counting the attributed child spend on either path.
+#[test]
+fn windowed_open_folds_attributions_on_both_sides_of_the_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl");
+    let mut full = SessionFile::create("/tmp", None, 0);
+    full.set_path(path.clone());
+    let old = full.append_message(json!({
+        "role":"assistant", "provider":"openai", "model":"test", "api":"openai-responses",
+        "content":[{"type":"text","text":"old"}], "stopReason":"stop", "timestamp":0,
+        "usage":{"input":100,"output":10,"cacheRead":5,"cacheWrite":0,"totalTokens":115,
+        "cost":{"input":0.1,"output":0.01,"cacheRead":0.0,"cacheWrite":0.0,"total":0.11}}
+    }));
+    let mut kept = String::new();
+    for i in 0..220 {
+        let id = full
+            .append_message(json!({"role":"user","content":format!("message {i}"),"timestamp":i}));
+        if i == 210 {
+            kept = id;
+        }
+    }
+    let kept_assistant = full.append_message(json!({
+        "role":"assistant", "provider":"openai", "model":"test", "api":"openai-responses",
+        "content":[{"type":"text","text":"kept"}], "stopReason":"stop", "timestamp":221,
+        "usage":{"input":7,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":9,
+        "cost":{"input":0.0,"output":0.0,"cacheRead":0.0,"cacheWrite":0.0,"total":0.0}}
+    }));
+    full.append_entry(
+        "compaction",
+        json!({"summary":"summary","firstKeptEntryId":kept,"tokensBefore":10000}),
+    );
+    full.append_entry(
+        "child_usage_attributed",
+        json!({
+            "targetId": kept_assistant, "origin": "spawn_task",
+            "childUsage":{"input":3,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":4,
+            "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0.03}},
+            "aggregateUsage":{"input":10,"output":3,"cacheRead":0,"cacheWrite":0,"totalTokens":9,
+            "cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0.03}}
+        }),
+    );
+    full.append_entry(
+        "child_usage_attributed",
+        json!({
+            "targetId": old, "origin": "spawn_task",
+            "childUsage":{"input":50,"output":5,"cacheRead":0,"cacheWrite":0,"totalTokens":55,
+            "cost":{"input":0.05,"output":0.005,"cacheRead":0,"cacheWrite":0,"total":0.055}},
+            "aggregateUsage":{"input":150,"output":15,"cacheRead":5,"cacheWrite":0,"totalTokens":115,
+            "cost":{"input":0.15,"output":0.015,"cacheRead":0,"cacheWrite":0,"total":0.165}}
+        }),
+    );
+    full.append_message(json!({"role":"user","content":"after","timestamp":222}));
+    full.rewrite().unwrap();
+
+    let windowed = SessionFile::open_windowed(&path).unwrap();
+    assert!(windowed.window.is_some());
+    // The retained target folded on the windowed path too (raw entries carry
+    // the attribution rows; the metadata parse order cannot hide the fold).
+    assert_eq!(
+        windowed.entry(&kept_assistant).unwrap().fields["message"]["usage"]["input"],
+        json!(10)
+    );
+    // The pre-cut target's fold also rides its raw row (the fold runs on
+    // every read, either side of the boundary), and the windowed store
+    // never loads that row — the discarded prefix stays discarded.
+    let full = SessionFile::open(&path).unwrap();
+    assert_eq!(
+        full.entry(&old).unwrap().fields["message"]["usage"]["input"],
+        json!(150)
+    );
+    assert!(windowed.entry(&old).is_none());
+    // Windowed and full opens agree on the ACTIVE stats: TS
+    // `buildSessionContext` cuts `state.messages` at the compaction
+    // boundary, so the pre-cut ancestry — including its attribution-folded
+    // aggregate — is spend the active stats must not report; the in-window
+    // attribution rides the folded rows, and neither path loses or
+    // double-counts the attributed spend. (The pre-cut fold survives on
+    // the whole-file surfaces — the saved rows, `/context`.)
+    assert_eq!(
+        crate::session_stats::session_stats(&windowed, None),
+        crate::session_stats::session_stats(&full, None)
+    );
+    let stats = crate::session_stats::session_stats(&full, None);
+    assert_eq!(stats["tokens"]["input"], json!(10));
+    assert_eq!(stats["tokens"]["output"], json!(3));
+    assert_eq!(stats["tokens"]["cacheRead"], json!(0));
+    assert_eq!(stats["cost"].as_f64(), Some(0.03));
+}
+
 #[test]
 fn window_preserves_transcript_metadata_and_append_then_hydrate() {
     let dir = tempfile::tempdir().unwrap();

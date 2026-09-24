@@ -301,7 +301,7 @@ pub fn supported_client_capabilities() -> &'static [&'static str] {
 pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
     supported_client_capabilities()
         .iter()
-        .map(|cap| cap.to_string())
+        .map(std::string::ToString::to_string)
         .chain(
             [
                 "delete_rlm_subagent",
@@ -325,9 +325,8 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
                 "direct_peer_transport",
             ]
             .iter()
-            .map(|cap| cap.to_string()),
+            .map(std::string::ToString::to_string),
         )
-        .map(|cap| cap.to_string())
         .collect()
 }
 
@@ -447,6 +446,25 @@ pub fn response_success(id: Option<&str>, command: &str, data: Option<Value>) ->
         error_info: None,
     }
 }
+
+/// A create rejection the worker typed on the wire (`errorInfo`): the
+/// create relay answers the worker's message verbatim, never under the
+/// untyped `session worker create failed:` wrap - the typed text is the
+/// user-facing refusal (the session-hold rejection), and the client
+/// renders or acts on the wire info itself.
+#[derive(Debug)]
+pub(crate) struct TypedCreateRejection {
+    pub message: String,
+    pub error_info: DaemonErrorInfo,
+}
+
+impl std::fmt::Display for TypedCreateRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TypedCreateRejection {}
 
 pub fn response_failure(
     id: Option<&str>,

@@ -216,8 +216,10 @@ fn supervisor_end_to_end_scripted_session_lifecycle() {
         })
     );
     assert_eq!(
-        hello["schemaId"].as_str().map(|v| v.to_string()),
-        Some("protocol-7-schema-29-a5c9d20f8b13".to_string())
+        hello["schemaId"]
+            .as_str()
+            .map(std::string::ToString::to_string),
+        Some("protocol-7-schema-30-8e4b17c2a9f5".to_string())
     );
     assert!(hello["supervisorOwnerToken"].is_string());
     assert!(hello["supervisorProcessStartId"]
@@ -1224,7 +1226,10 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
         .cloned()
         .collect();
     data_keys.sort();
-    let mut sorted_golden: Vec<String> = golden_data_keys.iter().map(|k| k.to_string()).collect();
+    let mut sorted_golden: Vec<String> = golden_data_keys
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect();
     sorted_golden.sort();
     assert_eq!(data_keys, sorted_golden, "attach result key set");
     // The transcript is gone from the streamed result.
@@ -1272,7 +1277,7 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
         .cloned()
         .collect();
     begin_keys.sort();
-    let mut sorted_begin_golden = golden_begin_keys.clone();
+    let mut sorted_begin_golden = golden_begin_keys;
     sorted_begin_golden.sort();
     assert_eq!(begin_keys, sorted_begin_golden, "begin key set");
     assert_eq!(begin["purpose"], "attach");
@@ -1351,7 +1356,7 @@ fn chunked_snapshot_attach_streams_begin_chunk_end() {
         .cloned()
         .collect();
     end_keys.sort();
-    let mut sorted_end_golden = golden_end_keys.clone();
+    let mut sorted_end_golden = golden_end_keys;
     sorted_end_golden.sort();
     assert_eq!(end_keys, sorted_end_golden, "end key set");
     assert_eq!(end["chunkCount"], serde_json::json!(chunks.len()));

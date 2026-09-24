@@ -154,7 +154,7 @@ emitted and flushed before the TUI starts.
 | property | type | notes |
 |---|---|---|
 | `duration_ms` | number | onboarding-task creation → completion |
-| `outcome` | string | `success` (the Rust onboarding flow is the trace question; no error/abort path exists yet) |
+| `outcome` | string | `success` (fresh homes complete the flow silently — trace sharing ships pre-configured; the retained opt-out question has no error/abort path yet) |
 | `auth_category` | string | `none` (no auth step in the flow) |
 | `provider_category` | string | `unknown` |
 
@@ -167,9 +167,10 @@ session's current worker (the stale-id rebind).
 
 | property | type | notes |
 |---|---|---|
-| `kind` | string | `worker_spawned`, `worker_exited`, `worker_restarted`, `attach`, `reattach`, `detach`, `sessions_archived`, `worker_children_closed`, `session_rebound`, `catalog_refresh`, `saved_sessions_usage`, `compaction_abort_declared`, `worker_adoption` |
+| `kind` | string | `worker_spawned`, `worker_exited`, `worker_restarted`, `attach`, `reattach`, `detach`, `sessions_archived`, `worker_children_closed`, `session_rebound`, `catalog_refresh`, `saved_sessions_usage`, `deleted_child_usage_captured`, `compaction_abort_declared`, `worker_adoption` |
 | `exit_reason` | string | only for `worker_exited`: `normal` / `crash` |
-| `count` | number | only for `sessions_archived`, `worker_children_closed`, `catalog_refresh`, `saved_sessions_usage`, and `compaction_abort_declared` (always 1): how many sessions the sweep moved to the archive / how many resident RLM children the supervisor closed with a hard-killed parent worker / how many models the resolved no-cold-start chain serves after the daemon's startup catalog refresh / how many served saved-session rows carry a usage summary / one wedged-worker compaction the supervisor declared aborted |
+| `count` | number | only for `sessions_archived`, `worker_children_closed`, `catalog_refresh`, `saved_sessions_usage`, `deleted_child_usage_captured`, and `compaction_abort_declared` (always 1): how many sessions the sweep moved to the archive / how many resident RLM children the supervisor closed with a hard-killed parent worker / how many models the resolved no-cold-start chain serves after the daemon's startup catalog refresh / how many served saved-session rows carry a usage summary / how many tombstoned ledger edges received the deletion's durable usage amendment / one wedged-worker compaction the supervisor declared aborted |
+| `source` | string | only for `deleted_child_usage_captured`: `rlm_delete` (the kill route's finalize), `saved_delete` (the saved-session delete's pre-unlink tombstone), `adoption` (an interrupted delete finished from the ledger tombstone at boot) |
 | `boot` | string | only for `worker_adoption`: `plain` / `update` — the boot the descriptor-adoption pass ran under |
 | `adopted_live` | number | only for `worker_adoption`: descriptors whose live socket the pass adopted |
 | `revived` | number | only for `worker_adoption`: dead descriptors relaunched (busy evidence on a plain boot, kept worker on an update boot) |
@@ -205,6 +206,24 @@ ONLY — never tool names, arguments, results, or pasted credential material.
 |---|---|---|
 | `action` | string | `config` / `refresh` / `paste-install` |
 | `server_name` | string | server id from settings / ACP admission / the resolved service catalog |
+
+### `rlm child usage attributed`
+
+One durable `child_usage_attributed` row landed in the parent session: the
+RLM producer folded a recursive child's billable usage batch into the
+parent assistant row that spawned it (the `rlm child usage` accounting
+feature's adoption signal). Primitives only — never prompt, session, or
+file content.
+
+| property | type | notes |
+|---|---|---|
+| `session_id` | string | as above |
+| `origin` | string | `spawn_task` / `agent_message` / `direct_user` (the triggering prompt's label) |
+| `input_tokens` | number | the batch's usage totals |
+| `output_tokens` | number | |
+| `cache_read_tokens` | number | |
+| `cache_write_tokens` | number | |
+| `cost` | number | the batch's cost total |
 
 ### `tool executed`
 
@@ -378,16 +397,16 @@ subagent inspection surface; emitted once per open action).
 
 ### `tui activity opened`
 
-The user opened an activity surface from the session view: the unified
-panel itself (dock Enter, a second Alt+A, or a dock group's Enter) or a
-group's management view from the panel (the scoped agents view, the
-heartbeats view, a bash output tail). The goal indicator is read-only and
-does not emit this event. No command, output, prompt, or goal content is
-collected.
+The user opened an activity view from the dock (the operator's
+direct-navigation redesign): dock Enter or a second Alt+A opens the
+focused group's own view directly — the scoped agents view, the
+heartbeats view, or the bash view (the grouped panel is gone). The goal
+indicator is read-only and does not emit this event. No command, output,
+prompt, or goal content is collected.
 
 | property | type | notes |
 |---|---|---|
-| `kind` | string | `panel` / `subagents` / `heartbeats` / `bash` |
+| `kind` | string | `subagents` / `heartbeats` / `bash` |
 
 ### `tui menu opened`
 

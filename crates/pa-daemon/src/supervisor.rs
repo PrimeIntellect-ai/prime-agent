@@ -15,9 +15,9 @@ use std::time::Duration;
 use anyhow::{anyhow, bail, Context, Result};
 use futures::future::join_all;
 use pa_types::daemon::{
-    DaemonCommand, DaemonErrorInfo, DaemonOutbound, DaemonWorkerDescriptor, DaemonWorkerLifecycle,
-    DurableDaemonCreateCommand, SnapshotPurpose, UpdateId, UpdatePreparedMarker,
-    UpdateTimeoutBudget,
+    DaemonCommand, DaemonErrorInfo, DaemonOutbound, DaemonSessionLifecycle, DaemonWorkerDescriptor,
+    DaemonWorkerLifecycle, DurableDaemonCreateCommand, SnapshotPurpose, UpdateId,
+    UpdatePreparedMarker, UpdateTimeoutBudget,
 };
 use pa_types::platform::transport::{bind_transport, connect_transport, TransportStream};
 use serde_json::{json, Value};
@@ -38,7 +38,7 @@ use crate::protocol::{
     command_active_session_id, command_type_name, current_protocol_info,
     default_server_capabilities, parse_supervisor_command_line, response_failure, response_line,
     response_success, DaemonResponse, DaemonRuntimeIdentity, EnvelopeParseError,
-    DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
+    TypedCreateRejection, DAEMON_APP_VERSION, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
 };
 use crate::registry::{ResidentWorker, SessionRegistry, WorkerRegistration, WorkerRequest};
 use crate::session_store::list_sessions;
@@ -113,6 +113,10 @@ pub struct SupervisorOptions {
 pub(crate) enum ClientRouting {
     /// Every connected client (e.g. `daemon_closing`).
     Broadcast,
+    /// Every connected client except one (the shutdown initiator receives its
+    /// `daemon_closing` through the command response instead, so the
+    /// broadcast cannot overtake that response or duplicate the frame).
+    BroadcastExcept { connection_id: String },
     /// Clients attached to the session.
     AttachedSession { active_session_id: String },
     /// Clients holding a roster subscription (`roster_subscribe`).
@@ -144,14 +148,38 @@ pub struct Supervisor {
     /// The supervisor's agent roster (classified entries; the roster arms
     /// live in `supervisor_roster.rs`).
     pub(crate) roster: std::sync::Mutex<crate::agent_roster::AgentRoster>,
+    /// In-flight registration-seed tasks (each `worker_register`'s
+    /// background family walk). A `roster_subscribe` drains and awaits
+    /// them before building its snapshot: a seeded row's push must
+    /// never overtake the snapshot answer (a client that applies the
+    /// push first and then the snapshot would lose the rows).
+    pub(crate) pending_registration_seeds: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// In-flight saved-session renames (TS `pendingSessionNames`): one
     /// reservation per `[depth, parent, name]` scope, so a concurrent
     /// rename of the same name fails the second caller.
     pub(crate) pending_session_names: std::sync::Mutex<std::collections::HashSet<String>>,
     shutting_down: AtomicBool,
-    /// Wakes the accept loop when [`Supervisor::begin_shutdown`] sets the
-    /// flag: a listening socket blocks in `accept` until a client connects,
-    /// so the shutdown must interrupt it for the process to exit.
+    /// Whether some path has taken ownership of the one terminal stop pass.
+    /// `shutting_down` flips synchronously when the shutdown command is
+    /// accepted; this flag ensures exactly one connection runs
+    /// `begin_shutdown`, even if several clients notice the shutdown.
+    shutdown_started: AtomicBool,
+    /// The connection that accepted the one terminal shutdown request. Only
+    /// this connection may run the stop pass from its response-write or
+    /// disconnect paths; another client disconnecting in the response window
+    /// cannot preempt the acknowledgement or turn an update restart into a
+    /// terminal worker-descriptor sweep.
+    shutdown_owner: std::sync::Mutex<Option<String>>,
+    /// The accept loop's exit flag. `shutting_down` refuses new work the
+    /// moment a terminal stop begins, but the loop itself must stay up
+    /// until [`Supervisor::begin_shutdown`] has stopped every resident
+    /// worker: an inbound connection must not fall it out mid-stop and
+    /// orphan the workers that pass is still shutting down.
+    accept_exit: AtomicBool,
+    /// Wakes the accept loop when [`Supervisor::begin_shutdown`] sets
+    /// [`Self::accept_exit`]: a listening socket blocks in `accept` until
+    /// a client connects, so the completed shutdown must interrupt it for
+    /// the process to exit.
     shutdown_notify: tokio::sync::Notify,
     log: paths::RotatingLog,
     /// Memoized ledger over the default sessions dir (ledgers are per
@@ -259,8 +287,12 @@ impl Supervisor {
             registry: SessionRegistry::new(),
             events,
             roster: std::sync::Mutex::new(crate::agent_roster::AgentRoster::new()),
+            pending_registration_seeds: std::sync::Mutex::new(Vec::new()),
             pending_session_names: std::sync::Mutex::new(std::collections::HashSet::new()),
             shutting_down: AtomicBool::new(false),
+            shutdown_started: AtomicBool::new(false),
+            shutdown_owner: std::sync::Mutex::new(None),
+            accept_exit: AtomicBool::new(false),
             shutdown_notify: tokio::sync::Notify::new(),
             log,
             rlm_ledger: tokio::sync::Mutex::new(None),
@@ -325,6 +357,17 @@ impl Supervisor {
     fn note_catalog_refresh(&self, count: usize) {
         if let Some(client) = &*self.telemetry.lock().unwrap() {
             pa_core::session_engine::telemetry::track_catalog_refresh(client, count);
+        }
+    }
+
+    /// Emit the deleted-child usage capture's `daemon event` (schema v1,
+    /// kind `deleted_child_usage_captured`): source + count, primitives
+    /// only.
+    pub(crate) fn note_deleted_child_usage_captured(&self, source: &str, count: usize) {
+        if let Some(client) = &*self.telemetry.lock().unwrap() {
+            pa_core::session_engine::telemetry::track_deleted_child_usage_captured(
+                client, source, count,
+            );
         }
     }
 
@@ -599,7 +642,7 @@ impl Supervisor {
             });
         }
 
-        while !self.shutting_down.load(Ordering::SeqCst) {
+        while !self.accept_exit.load(Ordering::SeqCst) {
             let stream = tokio::select! {
                 accepted = listener.accept() => match accepted {
                     Ok(accepted) => accepted,
@@ -735,6 +778,14 @@ impl Supervisor {
                 failed,
             );
         }
+        // The boot roster seed runs exactly once, in the background, now
+        // that adoption settled: the registry's residents are the seed
+        // roots. TS awaits its seed before adoption; the Rust daemon
+        // deliberately accepts before and during adoption, so the seed
+        // follows the pass and its one `roster_update` publish carries
+        // the rows to early subscribers. Tests drain the pending-seed
+        // barrier for completion.
+        self.spawn_roster_boot_seed();
     }
 
     /// Adopt one persisted worker descriptor. Serialized against worker
@@ -1018,14 +1069,17 @@ impl Supervisor {
                 resident.note_retired();
                 self.registry.remove(&resident.worker_id).await;
                 self.registry.forget(&resident.worker_id).await;
-                self.remove_roster_worker(&resident.worker_id);
+                // The give-up settles the dead worker's rows exactly like
+                // a stop (a subagent under a surviving root passivates and
+                // keeps its model/thinking/cwd; everything else is
+                // removed). No ledger reseed, no transcript read.
+                let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();
+                self.passivate_roster_worker(&resident.worker_id, ephemeral)
+                    .await;
                 self.log_line(&format!(
                     "session worker {} failed after {failures} consecutive failures",
                     resident.worker_id
                 ));
-                // The dead worker's transcript stays a passive family row
-                // while any resident root anchors it (the seed walk).
-                self.seed_roster_ledger().await;
                 return;
             }
             let backoff_ms = (BASE_BACKOFF_MS << (failures - 1).min(7)).min(MAX_BACKOFF_MS);
@@ -1164,13 +1218,26 @@ impl Supervisor {
         }
         if !response.success {
             // Same rule as the route error above: a worker whose create
-            // replay failed must not be left running.
+            // replay failed must not be left running. A typed rejection
+            // relays verbatim and logs the conflict like the launch path.
             let mut child = child;
             let _ = child.kill().await;
-            return Err(anyhow!(
-                "worker create failed on relaunch: {}",
-                response.error.unwrap_or_default()
-            ));
+            return Err(match response.error_info {
+                Some(error_info) => {
+                    let message = response.error.clone().unwrap_or_default();
+                    let headline = message.lines().next().unwrap_or_default();
+                    self.log_line(&format!("relaunch create refused — {headline}"));
+                    TypedCreateRejection {
+                        message,
+                        error_info,
+                    }
+                    .into()
+                }
+                None => anyhow!(
+                    "worker create failed on relaunch: {}",
+                    response.error.unwrap_or_default()
+                ),
+            });
         }
         // The create replay consumed the terminal record when the
         // disclosure it carried is durable (persisted by this replay, or
@@ -1287,7 +1354,13 @@ impl Supervisor {
         }
         {
             let mut descriptor = resident.descriptor.lock().await;
-            descriptor.pid = child.id().unwrap_or(0) as u64;
+            // Capture the child's start identity alongside its pid (TS
+            // `getProcessStartId(childPid)` at spawn): the identity-aware
+            // holder checks can only recognize a recycled pid when the
+            // descriptor carries the start id the original holder had.
+            let child_pid = child.id().unwrap_or(0);
+            descriptor.pid = child_pid as u64;
+            descriptor.process_start_id = crate::protocol::process_start_id(child_pid);
             descriptor.lifecycle = DaemonWorkerLifecycle::Starting;
             let _ = persist_worker(&resident.descriptor_path, &descriptor);
         }
@@ -1356,7 +1429,10 @@ impl Supervisor {
                     eprintln!(
                         "[supervisor] wrote worker frame {}: {:?}",
                         request.command_type,
-                        written.as_ref().map(|_| "ok").map_err(|e| e.to_string())
+                        written
+                            .as_ref()
+                            .map(|_| "ok")
+                            .map_err(std::string::ToString::to_string)
                     );
                 }
                 if written.is_err() {
@@ -1757,6 +1833,14 @@ impl Supervisor {
         else {
             return Err(anyhow!("launch_worker requires a create command"));
         };
+        // The shutdown gate: a create dispatched while the supervisor is
+        // stopping must never launch a worker the stop pass would miss (a
+        // late create racing a shutdown would otherwise orphan its worker
+        // process). The command surfaces the same failure as any refused
+        // create.
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return Err(anyhow!("Supervisor is shutting down"));
+        }
         let config_object = config.as_ref().and_then(Value::as_object);
         let cwd_value = config_object
             .and_then(|config| config.get("cwd"))
@@ -1971,10 +2055,46 @@ impl Supervisor {
             let _ = child.kill().await;
             let _ = std::fs::remove_file(&descriptor_path);
             self.registry.remove(&worker_id).await;
-            return Err(anyhow!(
-                "session worker create failed: {}",
-                response.error.unwrap_or_default()
-            ));
+            // A typed worker rejection relays verbatim - the typed text is
+            // the user-facing refusal (the session-hold rejection the
+            // lease raises against a live foreign holder) - and the daemon
+            // logs the detected conflict itself, not just the raw
+            // session-worker failure: the rotating log beside the socket
+            // is where a refused create leaves its record. The wrap stays
+            // for untyped failures, whose text is context the raw error
+            // lacks.
+            return Err(match response.error_info {
+                Some(error_info) => {
+                    let message = response.error.clone().unwrap_or_default();
+                    // The typed rejection's text is multi-line (the
+                    // actionable refusal); the log keeps one record per
+                    // line, so only its headline rides the log line (the
+                    // full text reached the client on the wire).
+                    let headline = message.lines().next().unwrap_or_default();
+                    match &error_info {
+                        pa_types::daemon::DaemonErrorInfo::SessionAlreadyActive {
+                            session_path,
+                            active_session_id,
+                        } => self.log_line(&format!(
+                            "create refused: session file {session_path} is already active{} — {headline}",
+                            active_session_id
+                                .as_deref()
+                                .map(|id| format!(" in {id}"))
+                                .unwrap_or_default(),
+                        )),
+                        _ => self.log_line(&format!("create refused — {headline}")),
+                    }
+                    TypedCreateRejection {
+                        message,
+                        error_info,
+                    }
+                    .into()
+                }
+                None => anyhow!(
+                    "session worker create failed: {}",
+                    response.error.unwrap_or_default()
+                ),
+            });
         }
         // The create response is authoritative: a sessioned create must
         // carry a non-empty session file before it can succeed (the
@@ -2022,7 +2142,7 @@ impl Supervisor {
                 // The durable create command must reopen the same session
                 // file on relaunch, or a respawned worker would create a
                 // fresh session and lose history.
-                descriptor.create_command.session_path = Some(session_file.clone());
+                descriptor.create_command.session_path = Some(session_file);
             }
             // The binding table learns the durable identity here: a create
             // over a session file another worker owned (the session
@@ -2081,6 +2201,7 @@ impl Supervisor {
         let mut reader = BufReader::new(reader);
         let mut line = String::new();
         let mut events = self.events.subscribe();
+        let connection_id = client_id.clone();
         // Connection state shared with the per-command dispatch tasks: the
         // envelope-overridden client id and the attached-session list (the
         // event arm reads the latter to route session events).
@@ -2119,6 +2240,7 @@ impl Supervisor {
                     let roster_subscribed = Arc::clone(&roster_subscribed);
                     let connection = Arc::clone(&connection);
                     let dispatch_tx = dispatch_tx.clone();
+                    let connection_id = connection_id.clone();
                     tokio::spawn(async move {
                         let (lines, stop) = supervisor
                             .dispatch_client(
@@ -2127,17 +2249,48 @@ impl Supervisor {
                                 &attached,
                                 &roster_subscribed,
                                 &connection,
+                                &connection_id,
                             )
                             .await;
-                        let _ = dispatch_tx.send((lines, stop));
+                        if dispatch_tx.send((lines, stop)).is_err() && stop {
+                            // The initiating connection left before its response
+                            // was selected. Only a terminal shutdown owns the
+                            // descriptor-deleting stop pass; an update restart
+                            // must leave its descriptors for the successor.
+                            let is_shutdown_owner = supervisor
+                                .shutdown_owner
+                                .lock()
+                                .unwrap()
+                                .as_deref()
+                                == Some(connection_id.as_str());
+                            if is_shutdown_owner
+                                && supervisor.shutting_down.load(Ordering::SeqCst)
+                                && !supervisor.accept_exit.load(Ordering::SeqCst)
+                            {
+                                supervisor.ensure_shutdown_started().await;
+                            }
+                        }
                     });
                 }
                 dispatched = dispatch_rx.recv() => {
                     let Some((lines, stop)) = dispatched else { break };
                     for outbound in lines {
-                        write_line(&mut writer, &outbound).await?;
+                        if let Err(error) = write_line(&mut writer, &outbound).await {
+                            // A failed response write must not strand the
+                            // shutdown: the stop pass still has to run.
+                            if stop {
+                                self.ensure_shutdown_started().await;
+                            }
+                            return Err(error);
+                        }
                     }
                     if stop {
+                        // The initiating client's response and daemon_closing
+                        // lines are flushed above; only now may the stop pass
+                        // end the runtime. The accept loop stays up until
+                        // begin_shutdown sets accept_exit, so worker stops
+                        // cannot be cut short by another inbound connection.
+                        self.ensure_shutdown_started().await;
                         break;
                     }
                 }
@@ -2146,6 +2299,9 @@ impl Supervisor {
                         Ok((routing, payload)) => {
                             let deliver = match &routing {
                                 ClientRouting::Broadcast => true,
+                                ClientRouting::BroadcastExcept {
+                                    connection_id: excluded,
+                                } => excluded.as_str() != connection_id.as_str(),
                                 ClientRouting::AttachedSession { active_session_id } => {
                                     attached.lock().unwrap().iter().any(|id| id == active_session_id)
                                 }
@@ -2154,7 +2310,24 @@ impl Supervisor {
                                 }
                             };
                             if deliver {
-                                write_line(&mut writer, &payload).await?;
+                                if let Err(error) = write_line(&mut writer, &payload).await {
+                                    // An event-write failure must not strand an
+                                    // accepted shutdown: if this connection owns
+                                    // the stop, it still starts the pass.
+                                    let is_shutdown_owner = self
+                                        .shutdown_owner
+                                        .lock()
+                                        .unwrap()
+                                        .as_deref()
+                                        == Some(connection_id.as_str());
+                                    if is_shutdown_owner
+                                        && self.shutting_down.load(Ordering::SeqCst)
+                                        && !self.accept_exit.load(Ordering::SeqCst)
+                                    {
+                                        self.ensure_shutdown_started().await;
+                                    }
+                                    return Err(error);
+                                }
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(_)) => continue,
@@ -2162,6 +2335,20 @@ impl Supervisor {
                     }
                 }
             }
+        }
+        // A shutdown command may have been accepted just before this client
+        // disconnected (or its response write failed). Only the connection
+        // that accepted the shutdown may run the stop pass from this
+        // fallback: another client disconnecting in the response window
+        // must not preempt the acknowledgement or turn an update restart
+        // into a terminal descriptor sweep.
+        let is_shutdown_owner =
+            self.shutdown_owner.lock().unwrap().as_deref() == Some(connection_id.as_str());
+        if is_shutdown_owner
+            && self.shutting_down.load(Ordering::SeqCst)
+            && !self.accept_exit.load(Ordering::SeqCst)
+        {
+            self.ensure_shutdown_started().await;
         }
         // Detach from every attached session on disconnect (a TUI exit does
         // not stop the session; the worker keeps running).
@@ -2193,6 +2380,7 @@ impl Supervisor {
         attached: &Arc<std::sync::Mutex<Vec<String>>>,
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
+        connection_id: &str,
     ) -> (Vec<Value>, bool) {
         let envelope = match parse_supervisor_command_line(line) {
             Ok(envelope) => envelope,
@@ -2251,6 +2439,22 @@ impl Supervisor {
             }
         }
         let type_name = command_type_name(&envelope.command).to_string();
+        // Terminal shutdown admission gate: once the shutdown command has
+        // flipped `shutting_down`, no later client command may reach a
+        // worker (the stop pass may already be retiring it). The command
+        // that started the shutdown passed this point before it set the
+        // gate, so its own response path is unaffected.
+        if self.shutting_down.load(Ordering::SeqCst) {
+            return (
+                vec![response_line(&response_failure(
+                    Some(&command_id),
+                    &type_name,
+                    "Supervisor is shutting down",
+                    None,
+                ))],
+                false,
+            );
+        }
         // Update-prepare watchdog on any later command (spec §5): a prepared
         // transaction whose marker expired returns the supervisor to Serving
         // before the command is served.
@@ -2293,6 +2497,7 @@ impl Supervisor {
                 attached,
                 roster_subscribed,
                 connection,
+                connection_id,
                 command_id,
                 type_name,
             )
@@ -2313,6 +2518,7 @@ impl Supervisor {
         attached: &Arc<std::sync::Mutex<Vec<String>>>,
         roster_subscribed: &Arc<std::sync::atomic::AtomicBool>,
         connection: &Arc<crate::input_pause_lease::ClientConnectionState>,
+        connection_id: &str,
         command_id: String,
         type_name: String,
     ) -> (Vec<Value>, bool) {
@@ -2323,11 +2529,22 @@ impl Supervisor {
                 let mut lines = vec![response_line(&response)];
                 // daemon_closing goes to every client before the exit.
                 let closing = json!({ "type": "daemon_closing", "reason": "shutdown" });
-                let _ = self
-                    .events
-                    .send((ClientRouting::Broadcast, closing.clone()));
+                let _ = self.events.send((
+                    ClientRouting::BroadcastExcept {
+                        connection_id: connection_id.to_string(),
+                    },
+                    closing.clone(),
+                ));
                 lines.push(closing);
-                self.begin_shutdown().await;
+                // Answer first, then shut down: the connection loop writes
+                // these lines before it awaits begin_shutdown, so the client
+                // always receives the response and daemon_closing before the
+                // stop pass can end the process. The shutdown gate flips
+                // synchronously here — before the response is written — so
+                // no create dispatched after the shutdown can slip past it
+                // and launch a worker the stop pass would miss.
+                *self.shutdown_owner.lock().unwrap() = Some(connection_id.to_string());
+                self.shutting_down.store(true, Ordering::SeqCst);
                 (lines, true)
             }
             DaemonCommand::List {
@@ -2395,15 +2612,28 @@ impl Supervisor {
                         ))],
                         false,
                     ),
-                    Err(error) => (
-                        vec![response_line(&response_failure(
-                            Some(&command_id),
-                            &type_name,
-                            &error.to_string(),
-                            None,
-                        ))],
-                        false,
-                    ),
+                    Err(error) => {
+                        // A typed worker rejection carries its wire info to
+                        // the client (the TS `serializeDaemonError` shape);
+                        // untyped failures stay the bare string.
+                        let (message, error_info) =
+                            match error.downcast_ref::<TypedCreateRejection>() {
+                                Some(rejection) => (
+                                    rejection.message.clone(),
+                                    Some(rejection.error_info.clone()),
+                                ),
+                                None => (error.to_string(), None),
+                            };
+                        (
+                            vec![response_line(&response_failure(
+                                Some(&command_id),
+                                &type_name,
+                                &message,
+                                error_info,
+                            ))],
+                            false,
+                        )
+                    }
                 }
             }
             DaemonCommand::GetDirectWorkerTransport {
@@ -3142,9 +3372,7 @@ impl Supervisor {
                         "sessions": sessions,
                     }
                 });
-                let _ = self
-                    .events
-                    .send((ClientRouting::Broadcast, closing.clone()));
+                let _ = self.events.send((ClientRouting::Broadcast, closing));
                 // The response is written before the accept loop exits (the
                 // write path is the dispatch channel; the 100ms drain only
                 // orders the exit behind it - the coordinator's Booting
@@ -3177,6 +3405,11 @@ impl Supervisor {
     /// workers from them. Contrast `begin_shutdown`, which deletes
     /// descriptors for a terminal stop.
     fn exit_for_update(self: &Arc<Self>) {
+        // The update exit is already complete: publish the accept-loop exit
+        // before the general shutdown gate, so a client disconnect can never
+        // observe the transient `shutting_down && !accept_exit` window and
+        // mistake the update restart for a terminal stop pass.
+        self.accept_exit.store(true, Ordering::SeqCst);
         self.shutting_down.store(true, Ordering::SeqCst);
         self.shutdown_notify.notify_one();
     }
@@ -3301,8 +3534,19 @@ impl Supervisor {
                 roster.note_worker_generation(&resident.worker_id, &replacement);
             }
             descriptor.pid = *pid;
-            descriptor.socket_path = socket_path.clone();
-            descriptor.worker_instance_id = worker_instance_id.clone();
+            // Refresh the identity from the live registrant (TS captures
+            // an identity while the process is known alive): a supervisor
+            // restart re-adopts the worker, and a pid that was recycled in
+            // between must not keep the old holder's identity. An
+            // unobservable start id keeps the previous value (a possibly
+            // live worker is never orphaned on a transient lookup failure).
+            if let Some(start_id) = crate::protocol::process_start_id(*pid as u32) {
+                descriptor.process_start_id = Some(start_id);
+            }
+            descriptor.socket_path.clone_from(socket_path);
+            descriptor
+                .worker_instance_id
+                .clone_from(&worker_instance_id);
             if let Some(session_id) = &registration.session_id {
                 descriptor.root_session_id = Some(session_id.clone());
             }
@@ -3354,6 +3598,24 @@ impl Supervisor {
         // Registration rebuilt the resident: refresh its roster entry from
         // the live worker so the roster reflects the re-registered state.
         self.refresh_roster_entry(&resident).await;
+        // A worker that registers after the boot seed (a supervisor
+        // restart's re-registration, a mid-tree resume, a wakened ledger
+        // child) publishes its passive ledger family in the background:
+        // TS reseeds the family when the worker's first roster snapshot
+        // applies (`applyWorkerRosterSnapshot`), and this port's workers
+        // push only their own summary, so the daemon walks the family
+        // here instead. Registration answers on the client's open path -
+        // the seed never blocks it.
+        let family_root = {
+            let descriptor = resident.descriptor.lock().await;
+            descriptor
+                .session_file
+                .clone()
+                .or_else(|| descriptor.create_command.session_path.clone())
+        };
+        if let Some(root) = family_root {
+            self.spawn_roster_registration_seed(Path::new(&root));
+        }
         response_success(
             Some(command_id),
             type_name,
@@ -3541,6 +3803,27 @@ impl Supervisor {
             .filter(|info| !scope_current || info.cwd == cwd)
             .collect::<Vec<_>>();
         infos.append(&mut merged);
+        // Every row - scanned or passive-merged - carries its tombstoned
+        // descendants' spend (TS `withPassiveRlmDescendantInfos`'s
+        // deleted-usage half): one bucket read per list, attached by
+        // canonical parent path so the agents-view recursive rollup bills
+        // deleted subagents to the parent that spent them. A broken ledger
+        // degrades to bare rows, exactly like the passive merge above.
+        match ledger.deleted_descendant_usage_by_parent() {
+            Ok(bucket) => {
+                for info in infos.iter_mut() {
+                    let path = crate::lease::canonical_session_path(&info.path)
+                        .to_string_lossy()
+                        .to_string();
+                    info.deleted_descendant_usage = bucket.get(&path).cloned();
+                }
+            }
+            Err(error) => {
+                self.log_line(&format!(
+                    "Could not attach deleted-descendant usage: {error:#}"
+                ));
+            }
+        }
         let total = infos.len();
         let mut lines = Vec::new();
         for (index, info) in infos.iter().enumerate() {
@@ -3805,12 +4088,6 @@ impl Supervisor {
         command: &DaemonCommand,
         client_id: String,
     ) -> Result<Value> {
-        if let DaemonCommand::Create {
-            name: Some(name), ..
-        } = command
-        {
-            self.assert_session_name_available(name).await?;
-        }
         // The per-file open single-flight (TS `openingWorkers`): one
         // create at a time per session file. A concurrent open waits
         // behind this one and then reuses the worker it launched — both
@@ -3821,17 +4098,46 @@ impl Supervisor {
         // client attaches next) instead of launching a second worker over
         // the same file — a launch the runtime session lease would reject
         // with `Session is already active`. `None` keeps the launch path.
+        // The seam runs BEFORE the name check (TS reserves names only on
+        // the fresh-launch path): a named open of an already-active
+        // session reuses it — its own name is not a conflict.
         if let Some(summary) = self
             .reuse_live_worker_for_create(command, &client_id)
             .await?
         {
             return Ok(summary);
         }
-        let (resident, create_summary) = self.launch_worker(command, Some(client_id)).await?;
+        if let DaemonCommand::Create {
+            name: Some(name), ..
+        } = command
+        {
+            self.assert_session_name_available(name).await?;
+        }
+        // TS daemon-supervisor.ts: only a `client_owned`-lifecycle create
+        // is client-owned (`ownerClientId = command.lifecycle ===
+        // "client_owned" ? clientId : undefined`); unspecified and
+        // `Resident` lifecycles are unowned. Every RLM child spawn
+        // declares `Resident`, so a spawned child never inherits the
+        // spawning client's ownership: passivation deletes an owned
+        // worker's rows, and a stopped child under a surviving root must
+        // passivate instead (the walk e2e asserts the passive row
+        // survives the kill). A `None`-lifecycle create being owner-
+        // marked would hide its live session from every other client
+        // (`assertWorkerAccessibleToClient`), so it stays unowned too.
+        let create_lifecycle = match command {
+            DaemonCommand::Create { lifecycle, .. } => *lifecycle,
+            _ => None,
+        };
+        let owner_client_id = match create_lifecycle {
+            Some(DaemonSessionLifecycle::ClientOwned) => Some(client_id),
+            _ => None,
+        };
+        let (resident, create_summary) = self.launch_worker(command, owner_client_id).await?;
         // The launch registered its worker (the registry insert precedes
-        // the spawn): the single-flight releases here so a concurrent
-        // open's classification finds the freshly-launched resident.
-        drop(_opening_guard);
+        // the spawn). The single-flight stays held through the spawn
+        // admission below: an admission failure tears the resident down,
+        // and a concurrent open that had just reused it would hold a
+        // summary for a worker that no longer exists.
         // Spawn admission is the moment the supervisor knows the child's
         // edge firsthand. The ledger is the only topology store, so the
         // append's outcome is load-bearing: admission fails if the spawn
@@ -3852,6 +4158,9 @@ impl Supervisor {
             let _ = self.stop_worker(&resident).await;
             return Err(error);
         }
+        // The admission settled: the single-flight may release (a
+        // concurrent open's classification now finds a durable resident).
+        drop(_opening_guard);
         // The response still matches attach/list rows exactly: prefer a
         // fresh get_state, but a degraded one falls back to the
         // authoritative create summary instead of failing the spawn (the
@@ -3871,12 +4180,27 @@ impl Supervisor {
         // stale-delta watermark for the resident.
         self.write_roster_summary_for_resident(&resident, &summary)
             .await;
-        // The spawn append is a ledger-append moment: the new edge can be
-        // the first time this family is live in the roster (a resumed
-        // parent, a supervisor restart), so the seed runs here too - after
-        // the fresh child's own row, so it only touches genuinely passive
-        // descendants (TS `seedRosterLedger` skips present rows).
-        self.seed_roster_ledger().await;
+        // The new root's passive family renders immediately from the
+        // ledger edges - no transcript read on the event path - then one
+        // bounded background hydration fills each newly seeded row's
+        // durable display fields (cwd, model, thinking level) and
+        // publishes them as one update. A fresh session has no family;
+        // the guards skip every row another surface already seeded. The
+        // root is the CREATE response's session file (the authoritative
+        // durable path, exactly what admission reads): a get_state that
+        // answers mid-replay without its session file must not skip a
+        // resume's family, and a live get_state file that differs is
+        // still the same session.
+        if let Some(root) = summary
+            .get("sessionFile")
+            .and_then(Value::as_str)
+            .or_else(|| create_summary.get("sessionFile").and_then(Value::as_str))
+        {
+            let seeded = self.seed_roster_family_edges(Path::new(&root)).await;
+            if !seeded.is_empty() {
+                self.spawn_seeded_hydration(seeded);
+            }
+        }
         Ok(summary)
     }
 
@@ -4332,7 +4656,7 @@ impl Supervisor {
                                 *supports_extension_ui,
                             );
                             if let Some(client) = data.get_mut("client") {
-                                client["capabilities"] = json!(client_capabilities.clone());
+                                client["capabilities"] = json!(client_capabilities);
                             }
                             if wants_chunked(&client_capabilities) {
                                 let purpose = if matches!(command, DaemonCommand::Reattach { .. }) {
@@ -4378,8 +4702,15 @@ impl Supervisor {
                             let deleted_child = rest
                                 .get("rlmLedgerDelete")
                                 .and_then(Value::as_str)
-                                .map(str::to_string);
-                            self.finalize_worker_stop(&resident, deleted_child.as_deref())
+                                .and_then(crate::rlm_ledger::RlmLedgerDeleteReason::from_wire)
+                                .map(|_| crate::stop_cleanup::DeletedChild {
+                                    child_id: rest
+                                        .get("rlmChildId")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                });
+                            self.finalize_worker_stop(&resident, deleted_child.as_ref())
                                 .await;
                         }
                     }
@@ -4440,18 +4771,33 @@ impl Supervisor {
         // scheduled jobs die with the registration
         // (`cancelEphemeralWorkerScheduledJobs`) — every remove-descriptor
         // stop of an owned worker, including the degraded-create cleanups.
-        if resident.descriptor.lock().await.owner_client_id.is_some() {
+        let ephemeral = resident.descriptor.lock().await.owner_client_id.is_some();
+        if ephemeral {
             self.finalize_owned_stop(resident).await;
         }
         self.registry.remove(&resident.worker_id).await;
         self.registry.forget(&resident.worker_id).await;
-        self.remove_roster_worker(&resident.worker_id);
-        // A plain stop carries no ledger tombstone: the child's passive
-        // row must survive the stop for subscribers (TS keeps the
-        // passivated row in the worker's roster push; the Rust
-        // equivalent reseeds it from the ledger here). A tombstoned
-        // child no longer has a live edge, so the seed skips it.
-        self.seed_roster_ledger().await;
+        // TS `flipWorkerRosterEntriesInactive`: the stopped worker's rows
+        // settle in place (a subagent under a surviving root passivates
+        // and keeps its model/thinking/cwd; a tombstoned child, a queued
+        // child, an ephemeral worker's rows, and the top-level row
+        // itself are removed). No ledger reseed, no transcript read.
+        self.passivate_roster_worker(&resident.worker_id, ephemeral)
+            .await;
+    }
+
+    /// Run the one terminal stop pass, whichever connection first reaches it.
+    ///
+    /// The shutdown command sets `shutting_down` synchronously, but the stop
+    /// pass still has to start even if its initiating client disconnects or
+    /// the response write fails. `shutdown_started` is the one-owner gate:
+    /// the first caller runs `begin_shutdown`; every later observer returns
+    /// immediately instead of duplicating the worker stops.
+    async fn ensure_shutdown_started(self: &Arc<Self>) {
+        if self.shutdown_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.begin_shutdown().await;
     }
 
     async fn begin_shutdown(self: &Arc<Self>) {
@@ -4465,8 +4811,10 @@ impl Supervisor {
             let _ = std::fs::remove_file(&resident.descriptor_path);
         }
         self.registry.clear().await;
-        // Wake the accept loop only after the workers stopped, so the process
-        // cannot exit mid-stop and orphan a live worker.
+        // The workers are all stopped now, so the accept loop may exit;
+        // setting the gate alone is not enough — an inbound connection
+        // could otherwise fall the loop out mid-stop.
+        self.accept_exit.store(true, Ordering::SeqCst);
         self.shutdown_notify.notify_one();
     }
 }
@@ -4711,6 +5059,15 @@ fn saved_session_row(info: &crate::session_store::SessionInfo) -> Value {
     if let Some(usage) = &info.usage {
         object.insert("usage".to_string(), json!(usage));
     }
+    // TS #2506 `serializeSavedSessionInfo`'s optional
+    // `deletedDescendantUsage`: the recursive spend of ledger-tombstoned
+    // descendants (the listing arm attaches it from the spawn ledger's
+    // bucket). The agents-view recursive cost rollup adds it to this
+    // row's own cost — the deleted child keeps no row anywhere, its
+    // spend bills here exactly once.
+    if let Some(deleted) = &info.deleted_descendant_usage {
+        object.insert("deletedDescendantUsage".to_string(), json!(deleted));
+    }
     // The persisted thinking level rides the catalog row too: the TUI merges
     // it into live summaries that lack one (the same enrichment as `model`).
     if let Some(level) = &info.thinking_level {
@@ -4824,6 +5181,40 @@ mod tests {
     /// `list_saved_sessions` catalog row) carry the persisted thinking
     /// level: the agents-view Model column renders "model:level" for
     /// sessions without a live worker, top-level and subagent alike.
+    /// TS #2506's `serializeSavedSessionInfo`: the listing arm's bucket
+    /// attach publishes `deletedDescendantUsage` on the saved row - the
+    /// agents-view recursive rollup's deleted-descendant term. Absent
+    /// rows (no tombstoned descendants) carry no field, matching the
+    /// optional wire shape.
+    #[test]
+    fn saved_session_rows_publish_deleted_descendant_usage() {
+        let dir = std::env::temp_dir().join(format!("pa-saved-dd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut session = crate::session_store::SessionFile::create("/tmp", None, 0);
+        let path = dir.join(format!("{}.jsonl", session.session_id()));
+        session.set_path(path.clone());
+        session.rewrite().unwrap();
+        let mut info = crate::session_store::read_session_info(&path).unwrap();
+        assert!(
+            info.deleted_descendant_usage.is_none(),
+            "the file scan never sets the ledger-derived field"
+        );
+        info.deleted_descendant_usage = Some(crate::session_usage::SessionUsageSummary {
+            input_tokens: 1_100,
+            output_tokens: 110,
+            cost: 0.5,
+        });
+        let row = saved_session_row(&info);
+        assert_eq!(
+            row["deletedDescendantUsage"],
+            json!({ "inputTokens": 1_100, "outputTokens": 110, "cost": 0.5 })
+        );
+        // Absent again: the field never rides as a null.
+        info.deleted_descendant_usage = None;
+        let row = saved_session_row(&info);
+        assert!(row.get("deletedDescendantUsage").is_none());
+    }
+
     #[test]
     fn saved_session_rows_carry_the_persisted_thinking_level() {
         let dir = std::env::temp_dir().join(format!("pa-saved-tl-{}", uuid::Uuid::new_v4()));
@@ -4935,5 +5326,167 @@ mod tests {
         let _ = std::fs::remove_file(&socket);
         drop(listener);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The boot roster seed runs exactly once, in the background, once
+    /// adoption settles: the adoption pass hands back the seed task's
+    /// handle, and the seed roots are the registry's residents. An empty
+    /// descriptor dir adopts nothing; the pre-registered root anchors the
+    /// family the seed must publish.
+    #[tokio::test]
+    async fn adoption_settles_then_seeds_the_roster_once() {
+        let dir = std::env::temp_dir().join(format!("pa-adopt-seed-{}", uuid::Uuid::new_v4()));
+        let agent_dir = dir.join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let root_file = sessions_dir.join("root-1.jsonl");
+        let child_file = sessions_dir.join("sub-9.jsonl");
+        for path in [&root_file, &child_file] {
+            std::fs::write(
+                path,
+                "{\"type\":\"session\",\"version\":3,\"id\":\"persisted-id\",\"timestamp\":\"t\",\"cwd\":\"/the/real/cwd\"}\n{\"type\":\"model_change\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"t\",\"provider\":\"p\",\"modelId\":\"m\"}\n{\"type\":\"thinking_level_change\",\"id\":\"t1\",\"parentId\":\"m1\",\"timestamp\":\"t\",\"thinkingLevel\":\"high\"}\n",
+            )
+            .unwrap();
+        }
+        let supervisor = Arc::new(
+            Supervisor::new(SupervisorOptions {
+                socket_path: dir.join("daemon.sock"),
+                agent_dir: agent_dir.clone(),
+            })
+            .unwrap(),
+        );
+        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
+        ledger
+            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+                child_id: "sub-9".to_string(),
+                parent: root_file.to_string_lossy().to_string(),
+                child: child_file.to_string_lossy().to_string(),
+                depth: 1,
+                name: "lane".to_string(),
+            })
+            .unwrap();
+        let descriptor = pa_types::daemon::DaemonWorkerDescriptor {
+            version: 1,
+            worker_id: "w-root".to_string(),
+            pid: 4242,
+            process_start_id: None,
+            socket_path: "/tmp/none.sock".to_string(),
+            recovery_journal_path: "/tmp/none.jsonl".to_string(),
+            orphan_process_journal_path: None,
+            supervisor_socket_path: "/tmp/none.sock".to_string(),
+            authentication_token: "root-token".to_string(),
+            worker_instance_id: None,
+            root_active_session_id: "w-root".to_string(),
+            owner_client_id: None,
+            root_session_id: None,
+            session_file: Some(root_file.to_string_lossy().to_string()),
+            session_dir: Some(sessions_dir.to_string_lossy().to_string()),
+            telemetry_disabled: Some(true),
+            created_at: "t".to_string(),
+            updated_at: "t".to_string(),
+            lifecycle: DaemonWorkerLifecycle::Ready,
+            create_command: pa_types::daemon::DurableDaemonCreateCommand {
+                session_path: None,
+                no_session: None,
+                rest: Default::default(),
+            },
+            consecutive_failures: 0,
+            stop_requested_at: None,
+            archive_on_stop: None,
+            last_failure_at: None,
+            last_error: None,
+            rest: Default::default(),
+        };
+        supervisor
+            .registry
+            .insert(ResidentWorker::new(
+                "w-root".to_string(),
+                descriptor,
+                root_file.with_extension("descriptor.json"),
+            ))
+            .await;
+
+        // Adoption adopts nothing (the descriptor dir is empty) and hands
+        // back the boot seed task; the seed publishes the anchored family.
+        supervisor
+            .adopt_persisted_workers(AdoptionBoot::PlainStartup)
+            .await;
+        crate::supervisor_roster_seed::tests::drain_pending_seeds_for_tests(&supervisor).await;
+        let row = supervisor
+            .roster
+            .lock()
+            .unwrap()
+            .entries()
+            .into_iter()
+            .find(|entry| entry.summary.get("rlmChildId").and_then(Value::as_str) == Some("sub-9"))
+            .expect("the boot seed hydrated the family");
+        assert_eq!(row.summary["cwd"], "/the/real/cwd");
+        assert_eq!(
+            row.summary["model"],
+            json!({ "provider": "p", "modelId": "m" })
+        );
+        assert_eq!(row.summary["thinkingLevel"], json!("high"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The shutdown gate: a create dispatched while the supervisor stops
+    /// must fail instead of launching a worker the stop pass would miss
+    /// (a late create racing a shutdown would orphan its worker process).
+    #[tokio::test]
+    async fn a_create_while_shutting_down_is_refused() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        supervisor.shutting_down.store(true, Ordering::SeqCst);
+        let create = DaemonCommand::Create {
+            id: None,
+            session_path: None,
+            continue_recent: None,
+            no_session: None,
+            name: None,
+            config: None,
+            telemetry_disabled: None,
+            runtime_metadata: None,
+            lifecycle: None,
+            env: None,
+            launch_env: None,
+            rest: Default::default(),
+        };
+        let refused = supervisor
+            .launch_worker(&create, None)
+            .await
+            .err()
+            .expect("the shutting-down supervisor accepted a create");
+        assert_eq!(
+            refused.to_string(),
+            "Supervisor is shutting down",
+            "the refusal error: {refused:#}"
+        );
+    }
+
+    /// The shutdown gate and the accept loop's exit flag are separate: the
+    /// gate refuses creates the moment a terminal stop begins, but the
+    /// loop must stay up until begin_shutdown finishes stopping the workers.
+    #[tokio::test]
+    async fn begin_shutdown_sets_the_accept_exit_after_the_stop_pass() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let options = SupervisorOptions {
+            socket_path: dir.path().join("daemon.sock"),
+            agent_dir: dir.path().join("agent"),
+        };
+        let supervisor = Arc::new(Supervisor::new(options).expect("supervisor"));
+        supervisor.shutting_down.store(true, Ordering::SeqCst);
+        assert!(
+            !supervisor.accept_exit.load(Ordering::SeqCst),
+            "the gate alone must not exit the accept loop"
+        );
+        supervisor.begin_shutdown().await;
+        assert!(
+            supervisor.accept_exit.load(Ordering::SeqCst),
+            "the completed stop pass must exit the accept loop"
+        );
     }
 }

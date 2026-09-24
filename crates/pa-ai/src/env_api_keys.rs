@@ -55,7 +55,7 @@ pub fn find_env_keys(provider: &str) -> Option<Vec<String>> {
                 .map(|v| !v.is_empty())
                 .unwrap_or(false)
         })
-        .map(|env_var| env_var.to_string())
+        .map(std::string::ToString::to_string)
         .collect();
     if found.is_empty() {
         None

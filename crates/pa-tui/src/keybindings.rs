@@ -64,11 +64,21 @@ pub const TUI_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
     ),
     (
         "tui.editor.cursorLineStart",
-        def!(&["home", "ctrl+a"], "Move to line start", scope "editor"),
+        // "super+left" is the macOS Cmd+Left line-start key (a prompt-
+        // editor-keybinds addition; see the divergence note above).
+        def!(
+            &["home", "ctrl+a", "super+left"],
+            "Move to line start",
+            scope "editor"
+        ),
     ),
     (
         "tui.editor.cursorLineEnd",
-        def!(&["end", "ctrl+e"], "Move to line end", scope "editor"),
+        def!(
+            &["end", "ctrl+e", "super+right"],
+            "Move to line end",
+            scope "editor"
+        ),
     ),
     (
         "tui.editor.jumpForward",
@@ -115,7 +125,138 @@ pub const TUI_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
         "tui.editor.yankPop",
         def!(&["alt+y"], "Yank pop", scope "editor"),
     ),
-    ("tui.editor.undo", def!(&["ctrl+-"], "Undo", scope "editor")),
+    (
+        "tui.editor.undo",
+        def!(&["ctrl+-", "super+z"], "Undo", scope "editor"),
+    ),
+    // SANCTIONED DIVERGENCE from TS (operator ask 2026-09-24, documented
+    // per the #289 precedent): the ids below have no TS counterpart — the
+    // TS editor's key set stops at the bindings above. The prompt bar
+    // carries the full standard text-editing set instead: redo, selection
+    // (shift+arrow families, select-all), document/paragraph jumps, word
+    // selection, cut/copy of the selection, and character transposition.
+    // The `super+` defaults are the macOS Cmd keys (the kitty protocol
+    // delivers them as the SUPER modifier); every binding stays
+    // user-configurable through keybindings.json exactly like the rest.
+    (
+        "tui.editor.redo",
+        def!(
+            &["ctrl+shift+z", "super+shift+z"],
+            "Redo",
+            scope "editor"
+        ),
+    ),
+    (
+        "tui.editor.cursorDocStart",
+        def!(&["ctrl+home", "super+up"], "Move to start of text", scope "editor"),
+    ),
+    (
+        "tui.editor.cursorDocEnd",
+        def!(&["ctrl+end", "super+down"], "Move to end of text", scope "editor"),
+    ),
+    (
+        "tui.editor.cursorParagraphUp",
+        def!(&["ctrl+up"], "Move one paragraph up", scope "editor"),
+    ),
+    (
+        "tui.editor.cursorParagraphDown",
+        def!(&["ctrl+down"], "Move one paragraph down", scope "editor"),
+    ),
+    (
+        "tui.editor.selectAll",
+        def!(&["super+a", "ctrl+shift+a"], "Select all text", scope "editor"),
+    ),
+    (
+        "tui.editor.selectLeft",
+        def!(&["shift+left"], "Select left by character", scope "editor"),
+    ),
+    (
+        "tui.editor.selectRight",
+        def!(&["shift+right"], "Select right by character", scope "editor"),
+    ),
+    (
+        "tui.editor.selectUp",
+        def!(&["shift+up"], "Select up one line", scope "editor"),
+    ),
+    (
+        "tui.editor.selectDown",
+        def!(&["shift+down"], "Select down one line", scope "editor"),
+    ),
+    (
+        "tui.editor.selectWordLeft",
+        def!(
+            &["shift+alt+left", "shift+ctrl+left"],
+            "Select left by word",
+            scope "editor"
+        ),
+    ),
+    (
+        "tui.editor.selectWordRight",
+        def!(
+            &["shift+alt+right", "shift+ctrl+right"],
+            "Select right by word",
+            scope "editor"
+        ),
+    ),
+    (
+        "tui.editor.selectLineStart",
+        def!(&["shift+home"], "Select to start of line", scope "editor"),
+    ),
+    (
+        "tui.editor.selectLineEnd",
+        def!(&["shift+end"], "Select to end of line", scope "editor"),
+    ),
+    (
+        "tui.editor.selectParagraphUp",
+        def!(&["shift+ctrl+up"], "Select up one paragraph", scope "editor"),
+    ),
+    (
+        "tui.editor.selectParagraphDown",
+        // `shift+ctrl+down` is `tui.viewport.follow` (the fullscreen
+        // transcript key the session dispatch consumes before the editor),
+        // so the paragraph-select default is `shift+alt+down` instead.
+        def!(
+            &["shift+alt+down"],
+            "Select down one paragraph",
+            scope "editor"
+        ),
+    ),
+    (
+        "tui.editor.selectDocStart",
+        def!(
+            &["shift+ctrl+home", "super+shift+up"],
+            "Select to start of text",
+            scope "editor"
+        ),
+    ),
+    (
+        "tui.editor.selectDocEnd",
+        def!(
+            &["shift+ctrl+end", "super+shift+down"],
+            "Select to end of text",
+            scope "editor"
+        ),
+    ),
+    (
+        "tui.editor.transposeChars",
+        def!(&["ctrl+t"], "Swap the characters around the cursor", scope "editor"),
+    ),
+    (
+        "tui.editor.cutSelection",
+        def!(
+            &["ctrl+x", "super+x"],
+            "Cut the selection to the clipboard",
+            scope "editor"
+        ),
+    ),
+    (
+        "tui.editor.copySelection",
+        def!(
+            &["ctrl+shift+c", "super+c"],
+            "Copy the selection to the clipboard",
+            scope "editor"
+        ),
+    ),
     (
         "tui.input.newLine",
         def!(&["shift+enter"], "Insert newline", scope "editor"),
@@ -768,7 +909,7 @@ impl KeybindingsManager {
                             })
                         })
                     })
-                    .map(|k| k.to_string())
+                    .map(ToString::to_string)
                     .collect(),
             };
             self.resolved.insert(id.to_string(), keys);
@@ -891,6 +1032,9 @@ fn format_key_text_on(key: &str, platform: LabelPlatform) -> String {
                     // macOS labels the modifier after the keyboard row
                     // (Option), like TS formatKeyPart's darwin branch.
                     "alt" if platform.is_macos() => "Option".to_string(),
+                    // The macOS Cmd key — a prompt-editor-keybinds label
+                    // addition (TS never renders a super binding).
+                    "super" if platform.is_macos() => "Cmd".to_string(),
                     other => {
                         let mut c = other.chars();
                         match c.next() {
@@ -916,7 +1060,7 @@ mod tests {
             .map(|(id, keys)| {
                 (
                     id.to_string(),
-                    keys.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
+                    keys.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 )
             })
             .collect()
@@ -1068,8 +1212,44 @@ mod tests {
         // The unknown claim frees nothing (no definition owns it).
         assert_eq!(
             kb.get_keys("tui.editor.cursorLineStart"),
-            vec!["home".to_string(), "ctrl+a".to_string()]
+            vec![
+                "home".to_string(),
+                "ctrl+a".to_string(),
+                "super+left".to_string()
+            ]
         );
+    }
+
+    /// The prompt-editor-keybinds additions (documented divergence from
+    /// the TS table): redo, the selection families, the doc/paragraph
+    /// jumps, cut/copy, and transpose resolve with their defaults, and a
+    /// user override replaces them like any other binding.
+    #[test]
+    fn editor_keybind_parity_defaults_resolve() {
+        let kb = KeybindingsManager::new();
+        assert!(kb.matches("ctrl+shift+z", "tui.editor.redo"));
+        assert!(kb.matches("shift+left", "tui.editor.selectLeft"));
+        assert!(kb.matches("shift+down", "tui.editor.selectDown"));
+        assert!(kb.matches("shift+alt+right", "tui.editor.selectWordRight"));
+        assert!(kb.matches("shift+end", "tui.editor.selectLineEnd"));
+        assert!(kb.matches("shift+alt+down", "tui.editor.selectParagraphDown"));
+        // `shift+ctrl+down` is the viewport-follow key: it must not also
+        // claim the editor's paragraph-select (the session dispatch owns
+        // it first, so binding both would make the editor default dead).
+        assert!(!kb.matches("shift+ctrl+down", "tui.editor.selectParagraphDown"));
+        assert!(kb.matches("ctrl+t", "tui.editor.transposeChars"));
+        assert!(kb.matches("ctrl+x", "tui.editor.cutSelection"));
+        assert!(kb.matches("ctrl+shift+c", "tui.editor.copySelection"));
+        assert!(kb.matches("ctrl+home", "tui.editor.cursorDocStart"));
+        assert!(kb.matches("ctrl+end", "tui.editor.cursorDocEnd"));
+        // A user rebind replaces the default set.
+        let rebound =
+            KeybindingsManager::with_user_bindings(cfg(&[("tui.editor.redo", &["ctrl+r"])]));
+        assert!(rebound.matches("ctrl+r", "tui.editor.redo"));
+        assert!(!rebound.matches("ctrl+shift+z", "tui.editor.redo"));
+        // The same-scope freeing still applies: ctrl+r is the heartbeats
+        // key in the app scope, so it keeps its binding there.
+        assert!(rebound.matches("ctrl+r", "app.heartbeats.open"));
     }
 
     #[test]

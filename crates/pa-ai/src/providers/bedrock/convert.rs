@@ -385,7 +385,7 @@ pub fn map_thinking_level_to_effort(model: &Model, level: ModelThinkingLevel) ->
         .thinking_level_map
         .as_ref()
         .and_then(|map| map.get(&effective))
-        .and_then(|value| value.clone());
+        .and_then(std::clone::Clone::clone);
     match mapped.as_deref() {
         Some("low") => return "low",
         Some("medium") => return "medium",

@@ -1,7 +1,7 @@
 //! Generation-certified active session windows. Cold reads scan metadata to root;
 //! warm reads touch only the canonical header and the retained transcript suffix.
 //! JSONL remains authoritative; historical consumers explicitly hydrate.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -137,6 +137,41 @@ pub struct WindowStats {
     pub cost: f64,
 }
 
+/// One older-path assistant row's spend-relevant usage: the walk records
+/// raw rows, and an attribution targeting the row replaces it with the
+/// cumulative aggregate before the totals sum (TS
+/// `applyChildUsageAttributions` over the discarded prefix).
+#[derive(Debug, Clone, Copy, Default)]
+struct OlderPathUsage {
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    cost: f64,
+}
+
+impl OlderPathUsage {
+    fn from_usage(usage: &serde_json::Value) -> Self {
+        let field = |name: &str| {
+            usage
+                .get(name)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_default()
+        };
+        Self {
+            input: field("input"),
+            output: field("output"),
+            cache_read: field("cacheRead"),
+            cache_write: field("cacheWrite"),
+            cost: usage
+                .get("cost")
+                .and_then(|cost| cost.get("total"))
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or_default(),
+        }
+    }
+}
+
 /// An active compacted window plus verified settings from its older ancestry.
 /// The underlying JSONL is never rewritten by this reader.
 pub struct WindowedSessionStore {
@@ -199,7 +234,8 @@ impl WindowedSessionStore {
         let mut metadata_entries = Vec::new();
         let mut message_count = 0;
         let mut older_path_stats = WindowStats::default();
-        let mut older_costs = Vec::new();
+        let mut older_usage: Vec<(String, OlderPathUsage)> = Vec::new();
+        let mut older_aggregates: HashMap<String, OlderPathUsage> = HashMap::new();
         let mut first_user_line = None;
         let mut expected: Option<String> = None;
         let mut leaf_id = None;
@@ -267,6 +303,31 @@ impl WindowedSessionStore {
                         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
                 );
             }
+            if meta.kind == "child_usage_attributed" {
+                // Capture the aggregate wherever the row sits (retained or
+                // discarded region): an attribution targeting an older-path
+                // assistant is dropped from the retained metadata (its target
+                // never loads), and only this capture keeps the older stats
+                // from losing the attributed spend. The walk runs
+                // newest-first, so the FIRST aggregate seen per target is the
+                // last in file order — the cumulative aggregate the TS fold
+                // ends with.
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+                    // A malformed aggregate (null, a scalar) must not
+                    // replace a valid row usage with zeros — the session
+                    // store fold skips non-objects the same way.
+                    if let (Some(target), Some(aggregate)) = (
+                        value.get("targetId").and_then(serde_json::Value::as_str),
+                        value
+                            .get("aggregateUsage")
+                            .filter(|aggregate| aggregate.is_object()),
+                    ) {
+                        older_aggregates
+                            .entry(target.to_owned())
+                            .or_insert_with(|| OlderPathUsage::from_usage(aggregate));
+                    }
+                }
+            }
             let Some(id) = meta.id.as_deref() else {
                 return Ok(None);
             };
@@ -275,7 +336,7 @@ impl WindowedSessionStore {
             }
             if leaf_id.is_none() {
                 leaf_id = Some(id.to_owned());
-                expected = leaf_id.clone();
+                expected.clone_from(&leaf_id);
             }
             let on_path = expected.as_deref() == Some(id);
             if on_path {
@@ -296,37 +357,28 @@ impl WindowedSessionStore {
                                         .count()
                                         as u64;
                                 }
-                                if let Some(usage) = &message.usage {
-                                    older_path_stats.input += usage
-                                        .get("input")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .unwrap_or_default();
-                                    older_path_stats.output += usage
-                                        .get("output")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .unwrap_or_default();
-                                    older_path_stats.cache_read += usage
-                                        .get("cacheRead")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .unwrap_or_default();
-                                    older_path_stats.cache_write += usage
-                                        .get("cacheWrite")
-                                        .and_then(serde_json::Value::as_u64)
-                                        .unwrap_or_default();
-                                    older_costs.push(
-                                        usage
-                                            .get("cost")
-                                            .and_then(|cost| cost.get("total"))
-                                            .and_then(serde_json::Value::as_f64)
-                                            .unwrap_or_default(),
-                                    );
-                                }
+                                // Recorded per row, not summed inline: an
+                                // attribution targeting this older assistant
+                                // replaces its usage with the cumulative
+                                // aggregate (TS
+                                // `applyChildUsageAttributions` — assignment,
+                                // not merge: a row that never carried usage
+                                // still gets the aggregate inserted), and the
+                                // totals sum the folded rows after the walk.
+                                older_usage.push((
+                                    id.to_owned(),
+                                    message
+                                        .usage
+                                        .as_ref()
+                                        .map(OlderPathUsage::from_usage)
+                                        .unwrap_or_default(),
+                                ));
                             }
                             _ => {}
                         }
                     }
                 }
-                expected = meta.parent_id.clone();
+                expected.clone_from(&meta.parent_id);
                 if let Some(message) = meta
                     .message
                     .as_ref()
@@ -430,10 +482,20 @@ impl WindowedSessionStore {
             .enumerate()
             .filter_map(|(index, row)| keep.contains(&index).then_some(row))
             .collect();
-        older_path_stats.cost = older_costs
-            .into_iter()
-            .rev()
-            .fold(0.0, |total, cost| total + cost);
+        // Fold the older path before summing, oldest-first (the cost sum's
+        // float order matches the pre-fold walk): an attributed assistant
+        // reports its cumulative aggregate — the same fold the retained
+        // window applies at load — so the windowed stats carry the child
+        // spend attributed to pre-window assistants instead of losing it
+        // (`get_session_stats` sums these rows with the in-window walk).
+        for (id, usage) in older_usage.iter().rev() {
+            let folded = older_aggregates.get(id).unwrap_or(usage);
+            older_path_stats.input += folded.input;
+            older_path_stats.output += folded.output;
+            older_path_stats.cache_read += folded.cache_read;
+            older_path_stats.cache_write += folded.cache_write;
+            older_path_stats.cost += folded.cost;
+        }
         let first_user_message = first_user_line
             .and_then(|line| serde_json::from_slice::<serde_json::Value>(&line).ok())
             .and_then(|row| row.get("message").cloned());
@@ -443,7 +505,7 @@ impl WindowedSessionStore {
             return Ok(None);
         };
         let snapshot = Snapshot {
-            version: 3,
+            version: window_cache::SNAPSHOT_VERSION,
             generation: generation.clone(),
             header: serde_json::to_string(&retained[0])?,
             start: retained_start,
@@ -606,7 +668,7 @@ impl WindowedSessionStore {
         self.settings.service_tier = self.snapshot.tier;
         self.settings.model.clone_from(&self.snapshot.model);
         if let Some(id) = entry.id() {
-            self.leaf_id = id.to_owned();
+            id.clone_into(&mut self.leaf_id);
         }
         self.entries.push(entry);
     }
@@ -731,7 +793,7 @@ pub(super) fn update_snapshot(snapshot: &mut Snapshot, entry: &FileEntry) {
     }
     match entry {
         FileEntry::ThinkingLevelChange { payload, .. } => {
-            snapshot.thinking = payload.thinking_level.clone();
+            snapshot.thinking.clone_from(&payload.thinking_level);
             snapshot.thinking_present = true;
         }
         FileEntry::ServiceTierChange { payload, .. } => {

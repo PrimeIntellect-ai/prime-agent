@@ -388,6 +388,22 @@ fn sender_endpoint_from_summary(summary: &Value, client_id: &str) -> Value {
             sender["sessionName"] = json!(name);
         }
     }
+    // The durable parent edge rides the supervisor-routed endpoint too (the
+    // peer transport's sender block already carries it), so the receiving
+    // session can label the delivery by its TRUE relationship.
+    for field in [
+        "parentActiveSessionId",
+        "parentSessionId",
+        "parentSessionPath",
+    ] {
+        if let Some(value) = summary
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            sender[field] = json!(value);
+        }
+    }
     sender
 }
 
@@ -410,6 +426,43 @@ mod tests {
     use pa_types::daemon::{
         DaemonWorkerDescriptor, DaemonWorkerLifecycle, DurableDaemonCreateCommand,
     };
+
+    /// The supervisor sender endpoint carries the source session's durable
+    /// parent edge, so the receiving worker can label the delivery by its
+    /// TRUE relationship (the peer transport's sender block matches).
+    #[test]
+    fn sender_endpoint_carries_the_durable_parent_edge() {
+        let sender = sender_endpoint_from_summary(
+            &json!({
+                "activeSessionId": "ddd444",
+                "sessionId": "sess-kid",
+                "sessionName": "kid",
+                "runtimeKind": "subagent",
+                "parentActiveSessionId": "aaa111",
+                "parentSessionId": "sess-a",
+                "parentSessionPath": "/agent/sessions/sess-a.jsonl",
+            }),
+            "client-1",
+        );
+        assert_eq!(sender["parentActiveSessionId"], "aaa111");
+        assert_eq!(sender["parentSessionId"], "sess-a");
+        assert_eq!(sender["parentSessionPath"], "/agent/sessions/sess-a.jsonl");
+
+        // A top-level source carries no parent edge: the endpoint omits the
+        // fields entirely.
+        let root = sender_endpoint_from_summary(
+            &json!({
+                "activeSessionId": "aaa111",
+                "sessionId": "sess-a",
+                "runtimeKind": "top-level",
+                "parentActiveSessionId": "",
+            }),
+            "client-1",
+        );
+        assert!(root.get("parentSessionId").is_none());
+        assert!(root.get("parentSessionPath").is_none());
+        assert!(root.get("parentActiveSessionId").is_none());
+    }
 
     fn resident(worker_id: &str) -> Arc<ResidentWorker> {
         ResidentWorker::new(
@@ -557,6 +610,7 @@ mod tests {
             depth: 1,
             name: "kid".to_string(),
             deleted: None,
+            deleted_usage: None,
         };
         for selector in ["kid", "sub-kid1", "sess-kid"] {
             assert!(ledger_edge_matches(&edge, selector), "{selector}");

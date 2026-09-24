@@ -106,7 +106,7 @@ fn parse_daemon_command(command: &str, args: &[String]) -> Result<ParsedDaemonCo
 }
 
 fn default_socket_path() -> PathBuf {
-    pa_daemon::socket::default_daemon_socket_path()
+    crate::config::resolve_daemon_socket_path(None)
 }
 
 /// `normalizeSocketPath`: lexically resolve against the current directory.
@@ -642,7 +642,7 @@ mod tests {
     use super::*;
 
     fn args(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| s.to_string()).collect()
+        list.iter().map(std::string::ToString::to_string).collect()
     }
 
     #[test]

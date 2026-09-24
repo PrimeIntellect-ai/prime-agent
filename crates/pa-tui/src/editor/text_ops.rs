@@ -5,6 +5,12 @@ use super::*;
 
 impl Editor {
     pub(crate) fn handle_backspace(&mut self) {
+        // A selection backspaces the selection, like every standard
+        // editor (the whole selection is one undo step).
+        if self.has_selection() {
+            self.delete_selection().ok();
+            return;
+        }
         self.history_index = -1;
         self.last_action = None;
         let line = self.lines[self.cursor_line].clone();
@@ -22,7 +28,7 @@ impl Editor {
                 .unwrap_or(1);
             let (before, after) = split_at_char(&line, self.cursor_col);
             let before = char_prefix(&before, before.chars().count() - last_len);
-            self.lines[self.cursor_line] = format!("{}{}", before, after);
+            self.lines[self.cursor_line] = format!("{before}{after}");
             self.set_cursor_col(self.cursor_col.saturating_sub(last_len));
         } else if line_start > 0 && line.chars().count() == line_start {
             self.push_undo_snapshot();
@@ -32,7 +38,7 @@ impl Editor {
             self.push_undo_snapshot();
             let current_line = self.lines[self.cursor_line].clone();
             let previous_line = self.lines[self.cursor_line - 1].clone();
-            self.lines[self.cursor_line - 1] = format!("{}{}", previous_line, current_line);
+            self.lines[self.cursor_line - 1] = format!("{previous_line}{current_line}");
             self.lines.remove(self.cursor_line);
             self.cursor_line -= 1;
             self.set_cursor_col(previous_line.chars().count());
@@ -42,6 +48,10 @@ impl Editor {
     }
 
     pub(crate) fn handle_forward_delete(&mut self) {
+        if self.has_selection() {
+            self.delete_selection().ok();
+            return;
+        }
         self.history_index = -1;
         self.last_action = None;
         let current_line = self.lines[self.cursor_line].clone();
@@ -58,11 +68,11 @@ impl Editor {
             // removed — an atomic marker goes whole).
             let (before, after) = split_at_char(&current_line, self.cursor_col);
             let after = char_suffix(&after, first_len);
-            self.lines[self.cursor_line] = format!("{}{}", before, after);
+            self.lines[self.cursor_line] = format!("{before}{after}");
         } else if self.cursor_line < self.lines.len() - 1 {
             self.push_undo_snapshot();
             let next_line = self.lines[self.cursor_line + 1].clone();
-            self.lines[self.cursor_line] = format!("{}{}", current_line, next_line);
+            self.lines[self.cursor_line] = format!("{current_line}{next_line}");
             self.lines.remove(self.cursor_line + 1);
         }
         self.emit(EditorEvent::Changed(self.get_text()));
@@ -70,6 +80,10 @@ impl Editor {
     }
 
     pub(crate) fn delete_to_start_of_line(&mut self) {
+        if self.has_selection() {
+            self.delete_selection().ok();
+            return;
+        }
         self.history_index = -1;
         let current_line = self.lines[self.cursor_line].clone();
         // The kill starts after the hidden bang prefix (TS
@@ -86,7 +100,7 @@ impl Editor {
             self.last_action = Some(LastAction::Kill);
             let before = char_prefix(&current_line, line_start);
             let after = char_suffix(&current_line, self.cursor_col);
-            self.lines[self.cursor_line] = format!("{}{}", before, after);
+            self.lines[self.cursor_line] = format!("{before}{after}");
             self.set_cursor_col(line_start);
         } else if self.cursor_line > 0 {
             self.push_undo_snapshot();
@@ -97,7 +111,7 @@ impl Editor {
             );
             self.last_action = Some(LastAction::Kill);
             let previous_line = self.lines[self.cursor_line - 1].clone();
-            self.lines[self.cursor_line - 1] = format!("{}{}", previous_line, current_line);
+            self.lines[self.cursor_line - 1] = format!("{previous_line}{current_line}");
             self.lines.remove(self.cursor_line);
             self.cursor_line -= 1;
             self.set_cursor_col(previous_line.chars().count());
@@ -107,6 +121,10 @@ impl Editor {
     }
 
     pub(crate) fn delete_to_end_of_line(&mut self) {
+        if self.has_selection() {
+            self.delete_selection().ok();
+            return;
+        }
         self.history_index = -1;
         let current_line = self.lines[self.cursor_line].clone();
         let line_len = current_line.chars().count();
@@ -129,7 +147,7 @@ impl Editor {
             );
             self.last_action = Some(LastAction::Kill);
             let next_line = self.lines[self.cursor_line + 1].clone();
-            self.lines[self.cursor_line] = format!("{}{}", current_line, next_line);
+            self.lines[self.cursor_line] = format!("{current_line}{next_line}");
             self.lines.remove(self.cursor_line + 1);
         }
         self.emit(EditorEvent::Changed(self.get_text()));
@@ -137,6 +155,10 @@ impl Editor {
     }
 
     pub(crate) fn delete_word_backwards(&mut self) {
+        if self.has_selection() {
+            self.delete_selection().ok();
+            return;
+        }
         self.history_index = -1;
         let current_line = self.lines[self.cursor_line].clone();
         if self.cursor_col == 0 {
@@ -149,7 +171,7 @@ impl Editor {
                 );
                 self.last_action = Some(LastAction::Kill);
                 let previous_line = self.lines[self.cursor_line - 1].clone();
-                self.lines[self.cursor_line - 1] = format!("{}{}", previous_line, current_line);
+                self.lines[self.cursor_line - 1] = format!("{previous_line}{current_line}");
                 self.lines.remove(self.cursor_line);
                 self.cursor_line -= 1;
                 self.set_cursor_col(previous_line.chars().count());
@@ -167,7 +189,7 @@ impl Editor {
             self.last_action = Some(LastAction::Kill);
             let before = char_prefix(&head, delete_from);
             let rest = char_suffix(&current_line, old_cursor_col);
-            self.lines[self.cursor_line] = format!("{}{}", before, rest);
+            self.lines[self.cursor_line] = format!("{before}{rest}");
             self.set_cursor_col(delete_from);
         }
         self.emit(EditorEvent::Changed(self.get_text()));
@@ -175,6 +197,10 @@ impl Editor {
     }
 
     pub(crate) fn delete_word_forward(&mut self) {
+        if self.has_selection() {
+            self.delete_selection().ok();
+            return;
+        }
         self.history_index = -1;
         let current_line = self.lines[self.cursor_line].clone();
         let line_len = current_line.chars().count();
@@ -188,7 +214,7 @@ impl Editor {
                 );
                 self.last_action = Some(LastAction::Kill);
                 let next_line = self.lines[self.cursor_line + 1].clone();
-                self.lines[self.cursor_line] = format!("{}{}", current_line, next_line);
+                self.lines[self.cursor_line] = format!("{current_line}{next_line}");
                 self.lines.remove(self.cursor_line + 1);
             }
         } else {
@@ -203,7 +229,7 @@ impl Editor {
             self.kill_ring.push(&deleted, false, was_kill);
             self.last_action = Some(LastAction::Kill);
             let (_, after) = split_at_char(&current_line, delete_to);
-            self.lines[self.cursor_line] = format!("{}{}", before, after);
+            self.lines[self.cursor_line] = format!("{before}{after}");
         }
         self.emit(EditorEvent::Changed(self.get_text()));
         self.refresh_autocomplete_after_edit(false);
@@ -213,6 +239,11 @@ impl Editor {
         if self.kill_ring.is_empty() {
             return;
         }
+        // A yank inserts at the cursor like typing: any active selection
+        // collapses first, or the stale anchor would cover different
+        // text than the highlight and the next keystroke would splice the
+        // wrong range.
+        self.selection_anchor = None;
         self.push_undo_snapshot();
         let text = self.kill_ring.peek().unwrap_or_default().to_string();
         self.insert_yanked_text(&text);
@@ -224,6 +255,7 @@ impl Editor {
         if self.last_action.as_ref() != Some(&LastAction::Yank) || self.kill_ring.len() <= 1 {
             return;
         }
+        self.selection_anchor = None;
         self.push_undo_snapshot();
         self.delete_yanked_text();
         self.kill_ring.rotate();
@@ -239,7 +271,7 @@ impl Editor {
         if parts.len() == 1 {
             let current_line = self.lines[self.cursor_line].clone();
             let (before, after) = split_at_char(&current_line, self.cursor_col);
-            self.lines[self.cursor_line] = format!("{}{}{}", before, text, after);
+            self.lines[self.cursor_line] = format!("{before}{text}{after}");
             self.set_cursor_col(self.cursor_col + text.chars().count());
         } else {
             let current_line = self.lines[self.cursor_line].clone();
@@ -259,7 +291,7 @@ impl Editor {
     }
 
     fn delete_yanked_text(&mut self) {
-        let Some(yanked) = self.kill_ring.peek().map(|s| s.to_string()) else {
+        let Some(yanked) = self.kill_ring.peek().map(str::to_string) else {
             return;
         };
         let parts: Vec<&str> = yanked.split('\n').collect();
@@ -268,14 +300,14 @@ impl Editor {
             let delete_len = yanked.chars().count();
             let (before, after) = split_at_char(&current_line, self.cursor_col);
             let before = char_prefix(&before, before.chars().count() - delete_len);
-            self.lines[self.cursor_line] = format!("{}{}", before, after);
+            self.lines[self.cursor_line] = format!("{before}{after}");
             self.set_cursor_col(self.cursor_col.saturating_sub(delete_len));
         } else {
             let start_line = self.cursor_line - (parts.len() - 1);
             let start_col = self.lines[start_line].chars().count() - parts[0].chars().count();
             let after_cursor = char_suffix(&self.lines[self.cursor_line], self.cursor_col);
             let before_yank = char_prefix(&self.lines[start_line], start_col);
-            let replacement = format!("{}{}", before_yank, after_cursor);
+            let replacement = format!("{before_yank}{after_cursor}");
             self.lines.drain(start_line..=self.cursor_line);
             self.lines.insert(start_line, replacement);
             self.cursor_line = start_line;

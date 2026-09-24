@@ -24,22 +24,44 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             return None;
         }
     }
+    // TS ids support super/hyper/meta combos (keys.ts
+    // formatKeyNameWithModifiers) but no TS keybinding binds one, so a
+    // TS-keyed binding never matches them. The prompt-editor keybind lane
+    // (2026-09-24, documented divergence) binds the macOS Cmd keys: the
+    // kitty protocol delivers them as the SUPER modifier, so a
+    // SUPER-modified key resolves to its `super+<key>` id — anything
+    // unbound still matches nothing. HYPER/META stay undecoded: no
+    // binding names one and terminals never deliver the bits on their own.
     if key
         .modifiers
-        .intersects(KeyModifiers::SUPER | KeyModifiers::HYPER | KeyModifiers::META)
+        .intersects(KeyModifiers::HYPER | KeyModifiers::META)
     {
-        // TS ids support super/hyper/meta combos but no keybinding binds
-        // one (keys.ts formatKeyNameWithModifiers); a super-modified key
-        // matches nothing instead of falling through to the bare key.
         return None;
     }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let super_key = key.modifiers.contains(KeyModifiers::SUPER);
     let base = match key.code {
         KeyCode::Char(c) => {
             if ctrl {
-                return Some(ctrl_char_id(c, alt, shift));
+                return Some(ctrl_char_id(c, alt, shift, super_key));
+            }
+            if super_key {
+                // The plain-super identity (macOS Cmd with the kitty
+                // protocol delivering it): `super+a` select-all and
+                // `super+z` undo style bindings, with shift/alt kept when
+                // the terminal sent them.
+                let shift_prefix = if shift || c.is_ascii_uppercase() {
+                    "shift+"
+                } else {
+                    ""
+                };
+                let alt_prefix = if alt { "alt+" } else { "" };
+                return Some(format!(
+                    "{alt_prefix}{shift_prefix}super+{}",
+                    c.to_ascii_lowercase()
+                ));
             }
             if alt {
                 if c == '\r' || c == '\n' {
@@ -104,6 +126,20 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             return Some(c.to_string());
         }
         KeyCode::Enter => {
+            // The super prefix keeps Cmd-modified keys their own identity
+            // (unbound combos match nothing instead of falling through to
+            // the bare action and submitting).
+            if super_key {
+                let mut s = String::new();
+                if shift {
+                    s.push_str("shift+");
+                }
+                if alt {
+                    s.push_str("alt+");
+                }
+                s.push_str("super+enter");
+                return Some(s);
+            }
             if alt {
                 "alt+enter"
             } else if shift {
@@ -113,6 +149,13 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             }
         }
         KeyCode::Tab => {
+            if super_key {
+                return Some(if shift {
+                    "shift+super+tab".into()
+                } else {
+                    "super+tab".into()
+                });
+            }
             if shift {
                 "shift+tab"
             } else {
@@ -120,6 +163,14 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
             }
         }
         KeyCode::Backspace => {
+            if super_key {
+                return Some(match (ctrl, alt) {
+                    (true, true) => "ctrl+alt+super+backspace".into(),
+                    (true, false) => "ctrl+super+backspace".into(),
+                    (false, true) => "alt+super+backspace".into(),
+                    (false, false) => "super+backspace".into(),
+                });
+            }
             if alt {
                 "alt+backspace"
             } else if ctrl {
@@ -129,19 +180,31 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
                 "backspace"
             }
         }
-        KeyCode::Esc => "escape",
-        KeyCode::Left => return Some(modified_name("left", ctrl, alt, shift)),
-        KeyCode::Right => return Some(modified_name("right", ctrl, alt, shift)),
-        KeyCode::Up => return Some(modified_name("up", ctrl, alt, shift)),
-        KeyCode::Down => return Some(modified_name("down", ctrl, alt, shift)),
-        KeyCode::Home => return Some(modified_name("home", ctrl, alt, shift)),
-        KeyCode::End => return Some(modified_name("end", ctrl, alt, shift)),
-        KeyCode::PageUp => return Some(modified_name("pageUp", ctrl, alt, shift)),
-        KeyCode::PageDown => return Some(modified_name("pageDown", ctrl, alt, shift)),
-        KeyCode::Delete => return Some(modified_name("delete", ctrl, alt, shift)),
-        KeyCode::Insert => return Some(modified_name("insert", ctrl, alt, shift)),
-        KeyCode::F(n) => return Some(modified_name(&format!("f{n}"), ctrl, alt, shift)),
+        KeyCode::Esc => {
+            if super_key {
+                return Some("super+escape".into());
+            }
+            "escape"
+        }
+        KeyCode::Left => return Some(modified_name("left", ctrl, alt, shift, super_key)),
+        KeyCode::Right => return Some(modified_name("right", ctrl, alt, shift, super_key)),
+        KeyCode::Up => return Some(modified_name("up", ctrl, alt, shift, super_key)),
+        KeyCode::Down => return Some(modified_name("down", ctrl, alt, shift, super_key)),
+        KeyCode::Home => return Some(modified_name("home", ctrl, alt, shift, super_key)),
+        KeyCode::End => return Some(modified_name("end", ctrl, alt, shift, super_key)),
+        KeyCode::PageUp => return Some(modified_name("pageUp", ctrl, alt, shift, super_key)),
+        KeyCode::PageDown => return Some(modified_name("pageDown", ctrl, alt, shift, super_key)),
+        KeyCode::Delete => return Some(modified_name("delete", ctrl, alt, shift, super_key)),
+        KeyCode::Insert => return Some(modified_name("insert", ctrl, alt, shift, super_key)),
+        KeyCode::F(n) => return Some(modified_name(&format!("f{n}"), ctrl, alt, shift, super_key)),
         KeyCode::BackTab => {
+            if super_key {
+                return Some(if alt {
+                    "shift+alt+super+tab".into()
+                } else {
+                    "shift+super+tab".into()
+                });
+            }
             if alt {
                 // The merged meta-wrapped `ESC ESC [ Z` (Option+Shift+Tab with
                 // option-as-meta): TS's double-ESC branch strips alt and
@@ -184,25 +247,32 @@ pub fn key_event_to_id(key: &KeyEvent) -> Option<KeyId> {
 ///   `ctrl+-` are bound in the editor). The remap stays legacy-only:
 ///   under the kitty protocol the same Char+CTRL events are the real
 ///   CSI-u ctrl+digit keys.
-fn ctrl_char_id(c: char, alt: bool, shift: bool) -> String {
+fn ctrl_char_id(c: char, alt: bool, shift: bool, super_key: bool) -> String {
     let lower = c.to_ascii_lowercase();
     let shifted = shift || c.is_ascii_uppercase();
+    let super_prefix = if super_key { "super+" } else { "" };
     if shifted {
         return if alt {
-            format!("shift+ctrl+alt+{lower}")
+            format!("shift+ctrl+alt+{super_prefix}{lower}")
         } else {
-            format!("shift+ctrl+{lower}")
+            format!("shift+ctrl+{super_prefix}{lower}")
         };
     }
     if !alt && lower == 'j' {
-        return if crate::enhanced_keys::kitty_active() {
+        return if super_key {
+            if crate::enhanced_keys::kitty_active() {
+                "shift+super+enter".to_string()
+            } else {
+                "super+enter".to_string()
+            }
+        } else if crate::enhanced_keys::kitty_active() {
             "shift+enter".to_string()
         } else {
             "enter".to_string()
         };
     }
     if alt {
-        return format!("ctrl+alt+{lower}");
+        return format!("ctrl+alt+{super_prefix}{lower}");
     }
     if !crate::enhanced_keys::kitty_active() {
         match lower {
@@ -212,10 +282,10 @@ fn ctrl_char_id(c: char, alt: bool, shift: bool) -> String {
             _ => {}
         }
     }
-    format!("ctrl+{lower}")
+    format!("ctrl+{super_prefix}{lower}")
 }
 
-fn modified_name(name: &str, ctrl: bool, alt: bool, shift: bool) -> String {
+fn modified_name(name: &str, ctrl: bool, alt: bool, shift: bool, super_key: bool) -> String {
     let mut s = String::new();
     if shift {
         s.push_str("shift+");
@@ -225,6 +295,9 @@ fn modified_name(name: &str, ctrl: bool, alt: bool, shift: bool) -> String {
     }
     if alt {
         s.push_str("alt+");
+    }
+    if super_key {
+        s.push_str("super+");
     }
     s.push_str(name);
     s
@@ -383,7 +456,7 @@ mod tests {
         // enhanced-keys module's state lock pattern.
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(false);
         let ctrl_bracket = KeyEvent::new(KeyCode::Char('5'), KeyModifiers::CONTROL);
         assert_eq!(key_event_to_id(&ctrl_bracket).as_deref(), Some("ctrl+]"));
@@ -406,7 +479,7 @@ mod tests {
     fn raw_lf_maps_by_kitty_mode() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let ctrl_j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
         crate::enhanced_keys::set_kitty_active_for_tests(true);
         assert_eq!(key_event_to_id(&ctrl_j).as_deref(), Some("shift+enter"));
@@ -420,17 +493,58 @@ mod tests {
         assert_eq!(key_event_to_id(&ctrl_alt_j).as_deref(), Some("ctrl+alt+j"));
     }
 
-    /// Super/hyper/meta combos match nothing (TS supports the ids but no
-    /// keybinding binds one); the bare key must not leak through.
+    /// Super-modified SPECIAL keys keep their super identity (Bugbot
+    /// round-1 fix): an unbound Cmd combo must match nothing instead of
+    /// falling through to the bare action — Cmd+Enter submitting the
+    /// prompt or Cmd+Backspace deleting a character would be surprising.
     #[test]
-    fn super_modified_keys_match_nothing() {
-        use KeyModifiers as M;
-        let super_k = KeyEvent::new(KeyCode::Char('k'), M::SUPER);
-        assert_eq!(key_event_to_id(&super_k), None);
-        let super_up = KeyEvent::new(KeyCode::Up, M::SUPER);
-        assert_eq!(key_event_to_id(&super_up), None);
-        let hyper_a = KeyEvent::new(KeyCode::Char('a'), M::HYPER | M::META);
-        assert_eq!(key_event_to_id(&hyper_a), None);
+    fn super_modified_special_keys_keep_their_identity() {
+        let _guard = crate::enhanced_keys::TEST_STATE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::enhanced_keys::set_kitty_active_for_tests(false);
+        let cases = [
+            (KeyCode::Enter, KeyModifiers::SUPER, "super+enter"),
+            (
+                KeyCode::Enter,
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                "shift+super+enter",
+            ),
+            (KeyCode::Backspace, KeyModifiers::SUPER, "super+backspace"),
+            (
+                KeyCode::Backspace,
+                KeyModifiers::SUPER | KeyModifiers::CONTROL,
+                "ctrl+super+backspace",
+            ),
+            (KeyCode::Tab, KeyModifiers::SUPER, "super+tab"),
+            (KeyCode::Esc, KeyModifiers::SUPER, "super+escape"),
+            (KeyCode::BackTab, KeyModifiers::SUPER, "shift+super+tab"),
+            (
+                KeyCode::Char('j'),
+                KeyModifiers::CONTROL | KeyModifiers::SUPER,
+                "super+enter",
+            ),
+        ];
+        for (code, modifiers, expected) in cases {
+            let event = KeyEvent::new(code, modifiers);
+            assert_eq!(key_event_to_id(&event).as_deref(), Some(expected));
+        }
+        // None of them reach the bare actions.
+        let kb = crate::keybindings::KeybindingsManager::new();
+        for id in ["super+enter", "shift+super+enter", "super+backspace"] {
+            assert!(
+                !kb.matches(id, "tui.input.submit"),
+                "{id} must not submit the prompt"
+            );
+            assert!(
+                !kb.matches(id, "tui.editor.deleteCharBackward"),
+                "{id} must not delete"
+            );
+            assert!(
+                !kb.matches(id, "app.input.clear"),
+                "{id} must not trigger the escape ladder"
+            );
+        }
     }
 
     /// Shift+tab keeps its TS id (`\x1b[Z` -> "shift+tab"; crossterm
@@ -451,7 +565,7 @@ mod tests {
     fn rxvt_alt_arrow_folds_map_to_arrows_outside_kitty() {
         let _guard = crate::enhanced_keys::TEST_STATE_LOCK
             .lock()
-            .unwrap_or_else(|p| p.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         crate::enhanced_keys::set_kitty_active_for_tests(false);
         let alt = |c: char, shift: bool| {
             let mut modifiers = KeyModifiers::ALT;
@@ -510,5 +624,83 @@ mod tests {
         let wrapped = KeyEvent::new(KeyCode::BackTab, KeyModifiers::ALT);
         assert_eq!(key_event_to_id(&plain).as_deref(), Some("shift+tab"));
         assert_eq!(key_event_to_id(&wrapped).as_deref(), Some("shift+alt+tab"));
+    }
+
+    /// The macOS Cmd keys arrive as the SUPER modifier under the kitty
+    /// protocol (prompt-editor-keybinds): every identity keeps its `super+`
+    /// prefix so the Cmd bindings (undo/redo, select-all, line and doc
+    /// jumps, cut/copy) match — an unbound one still matches nothing.
+    #[test]
+    fn super_modified_keys_decode_to_super_ids() {
+        let cases = [
+            (
+                KeyCode::Char('z'),
+                KeyModifiers::SUPER,
+                "super+z",
+                "Cmd+Z undo",
+            ),
+            (
+                // A kitty terminal reports Cmd+Shift+Z through the shifted
+                // alternate: crossterm resolves it to Char('Z') with SHIFT
+                // cleared, so the id carries the shift from the produced
+                // character.
+                KeyCode::Char('Z'),
+                KeyModifiers::SUPER,
+                "shift+super+z",
+                "Cmd+Shift+Z redo family",
+            ),
+            (
+                KeyCode::Left,
+                KeyModifiers::SUPER,
+                "super+left",
+                "Cmd+Left line start",
+            ),
+            (
+                KeyCode::Up,
+                KeyModifiers::SUPER,
+                "super+up",
+                "Cmd+Up doc start",
+            ),
+            (
+                KeyCode::Home,
+                KeyModifiers::CONTROL,
+                "ctrl+home",
+                "Ctrl+Home doc start",
+            ),
+            (
+                KeyCode::Down,
+                KeyModifiers::SUPER | KeyModifiers::SHIFT,
+                "shift+super+down",
+                "Cmd+Shift+Down select to doc end",
+            ),
+        ];
+        for (code, modifiers, expected, what) in cases {
+            let event = KeyEvent::new(code, modifiers);
+            assert_eq!(key_event_to_id(&event).as_deref(), Some(expected), "{what}");
+        }
+        // The new ids resolve against the registry defaults.
+        let kb = crate::keybindings::KeybindingsManager::new();
+        assert!(kb.matches("super+z", "tui.editor.undo"));
+        assert!(kb.matches("ctrl+shift+z", "tui.editor.redo"));
+        assert!(kb.matches("shift+super+z", "tui.editor.redo"));
+        // A ctrl+super combo (Cmd+Ctrl+Shift+Z) is its own identity: it
+        // matches nothing (no binding names all three modifiers).
+        assert!(!kb.matches("shift+ctrl+super+z", "tui.editor.redo"));
+        assert!(kb.matches("super+a", "tui.editor.selectAll"));
+        assert!(kb.matches("super+left", "tui.editor.cursorLineStart"));
+        assert!(kb.matches("super+right", "tui.editor.cursorLineEnd"));
+        assert!(kb.matches("super+up", "tui.editor.cursorDocStart"));
+        assert!(kb.matches("super+down", "tui.editor.cursorDocEnd"));
+        assert!(kb.matches("ctrl+up", "tui.editor.cursorParagraphUp"));
+        assert!(kb.matches("ctrl+down", "tui.editor.cursorParagraphDown"));
+        assert!(kb.matches("shift+super+down", "tui.editor.selectDocEnd"));
+        assert!(kb.matches("super+x", "tui.editor.cutSelection"));
+        assert!(kb.matches("super+c", "tui.editor.copySelection"));
+        // The shift+arrow selection families.
+        assert!(kb.matches("shift+left", "tui.editor.selectLeft"));
+        assert!(kb.matches("shift+up", "tui.editor.selectUp"));
+        assert!(kb.matches("shift+ctrl+left", "tui.editor.selectWordLeft"));
+        assert!(kb.matches("shift+home", "tui.editor.selectLineStart"));
+        assert!(kb.matches("shift+ctrl+home", "tui.editor.selectDocStart"));
     }
 }

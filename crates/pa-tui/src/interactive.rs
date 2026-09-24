@@ -370,6 +370,9 @@ pub enum HeadlessStep {
     /// Type text character by character (raw editor input, so autocomplete
     /// and editor state react exactly as to a keystroke).
     Type(String),
+    /// A bracketed-paste payload (the same editor paste path a terminal's
+    /// paste takes, including the large-paste marker rules).
+    Paste(String),
     /// Materialize the parked editor suggestions — the state a live user
     /// gets after pausing typing for one input-idle tick, so the next step
     /// (typically `Enter`) completes against the open dropdown. A burst of
@@ -424,8 +427,12 @@ async fn run_onboarding_phase(
     renderer: &mut Renderer,
     exit_guard: &ExitGuard,
 ) -> Result<bool> {
-    // TS model-ready branch: a user who already opted into traces sees no
-    // flow at all — the flow completes silently and marks itself seen.
+    // Sharing is on unless the user opted out, so a fresh install always
+    // takes this branch: the flow completes silently, nothing is drawn,
+    // and the session screen owns the first frame. The question below
+    // mounts only for a home that explicitly opted out before completing
+    // onboarding (TS parity: `askOnboardingTraceOptIn` skips when already
+    // enabled).
     if task.sink.agent_traces_enabled() {
         let _ = task.sink.mark_onboarding_complete();
         return Ok(false);
@@ -700,6 +707,10 @@ async fn run_interactive_surface(
     // The `/reload` task reports here; the loop folds the client-side
     // re-reads (keybindings, theme) and the outcome row.
     let (reload_tx, mut reload_rx) = mpsc::unbounded_channel::<crate::session_ui::ReloadNote>();
+    // The `/traces upload-all` sweep reports here; the loop folds the live
+    // progress into the status row and the settled summary.
+    let (traces_upload_tx, mut traces_upload_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::TracesUploadNote>();
     // The background model-catalog refresh (`get_model_catalog`) reports
     // here; the loop folds it into the picker catalog and any open picker.
     let (catalog_tx, mut catalog_rx) =
@@ -710,6 +721,11 @@ async fn run_interactive_surface(
     let (heartbeats_tx, mut heartbeats_rx) =
         mpsc::unbounded_channel::<crate::session_ui::HeartbeatsUpdate>();
     let (bash_tx, mut bash_rx) = mpsc::unbounded_channel::<crate::session_ui::BashActivityUpdate>();
+    // Background slash-command-catalog refreshes (`get_commands`) report
+    // here; the loop folds the session's skill commands into the
+    // autocomplete provider.
+    let (commands_tx, mut commands_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::CommandCatalogUpdate>();
     // The double-Ctrl+C force-quit guard: the terminal reader observes the
     // pair even while this loop is wedged in a daemon request, and a plain
     // std-thread watchdog enforces the exit deadline without the runtime.
@@ -773,10 +789,12 @@ async fn run_interactive_surface(
         compaction_abort_tx,
         share_tx,
         reload_tx,
+        traces_upload_tx,
         catalog_tx,
         crate::session_ui::ActivityUpdates {
             heartbeats: heartbeats_tx,
             bash: bash_tx,
+            commands: commands_tx,
         },
     )
     .await
@@ -872,8 +890,10 @@ async fn run_interactive_surface(
     // switch) returns to the editor when its chat reopens.
     session.restore_prompt_stash_on_open(&mut view);
     // First-run onboarding owns the pane before the session screen (TS
-    // `runStartupOnboarding`, model-ready branch: splash + trace question).
-    // Headless harness runs have no terminal to draw it on and skip it.
+    // `runStartupOnboarding`, model-ready branch). A fresh install ships
+    // trace sharing pre-configured, so this completes silently without
+    // drawing; only an explicit opt-out that never completed onboarding
+    // mounts the splash + trace question.
     if let Some(task) = options.onboarding.clone() {
         let exit_requested =
             run_onboarding_phase(&task, &mut view, &mut ui_rx, &mut renderer, &exit_guard).await?;
@@ -1053,6 +1073,14 @@ async fn run_interactive_surface(
                             session.run_terminal_login(&mut view).await?;
                             renderer.resume()?;
                         }
+                        // A parked `/traces login` (or the enable arm's
+                        // login-first step): the flow prompts on the plain
+                        // terminal, like the provider logins.
+                        if session.pending_traces_login() {
+                            renderer.suspend(&mut view)?;
+                            session.run_traces_login(&mut view).await?;
+                            renderer.resume()?;
+                        }
                         // A `/update` run: the child processes own the plain
                         // terminal, and a successful self-update replaces this
                         // process with the updated CLI (never returns).
@@ -1143,6 +1171,16 @@ async fn run_interactive_surface(
                         if session.pending_update() {
                             renderer.suspend(&mut view)?;
                             session.run_update(&mut view).await?;
+                            renderer.resume()?;
+                        }
+                        // A parked `/traces login` (or the enable arm's
+                        // login-first step): the flow prompts on the plain
+                        // terminal, like the provider logins (the Submit
+                        // path needs the same handoff the Key path has —
+                        // headless plans drive commands as submissions).
+                        if session.pending_traces_login() {
+                            renderer.suspend(&mut view)?;
+                            session.run_traces_login(&mut view).await?;
                             renderer.resume()?;
                         }
                     }
@@ -1238,6 +1276,7 @@ async fn run_interactive_surface(
             && !session.dirty
             && !session.share_pending()
             && !session.reload_pending()
+            && !session.traces_upload_pending()
         {
             break;
         }
@@ -1390,6 +1429,11 @@ async fn run_interactive_surface(
                     session.apply_reload_outcome(outcome, &mut view).await;
                 }
             }
+            maybe_traces_upload = traces_upload_rx.recv() => {
+                if let Some(note) = maybe_traces_upload {
+                    session.apply_traces_upload_note(note, &mut view);
+                }
+            }
             maybe_catalog = catalog_rx.recv() => {
                 if let Some(update) = maybe_catalog {
                     session.apply_model_catalog(update, &mut view);
@@ -1403,6 +1447,11 @@ async fn run_interactive_surface(
             maybe_bash = bash_rx.recv() => {
                 if let Some(update) = maybe_bash {
                     session.apply_bash_activity(update, &mut view);
+                }
+            }
+            maybe_commands = commands_rx.recv() => {
+                if let Some(update) = maybe_commands {
+                    session.apply_command_catalog(update, &mut view);
                 }
             }
             _reconnect_tick = async {
@@ -1628,6 +1677,13 @@ async fn run_interactive_surface(
             hint_painted = false;
         }
 
+        // The action toasts auto-dismiss on their TTL: once one goes, the
+        // overlay repaints away (the same tick-driven repaint the exit
+        // hint's expiry uses).
+        if view.toasts.prune_expired(Instant::now()) {
+            session.dirty = true;
+        }
+
         // The tray override row (the Ctrl+C exit hint, or the streaming
         // follow-up hint over a draft) follows the session's hint state on
         // every frame. Refreshed here — after the select, right before
@@ -1793,7 +1849,7 @@ async fn run_interactive_surface(
 /// Seed the static chrome state for a fresh interactive run: splash
 /// version/cwd, top-bar name, and the `manage` hint for persisted sessions.
 fn apply_startup_chrome(view: &mut AgentView, options: &InteractiveOptions) {
-    view.chrome.version = options.version.clone();
+    view.chrome.version.clone_from(&options.version);
     view.chrome.cwd = options.cwd.to_string_lossy().to_string();
     view.chrome.chat_name = crate::chrome::display_name(&view.chrome.cwd);
     view.chrome.show_manage = !options.no_session;
@@ -1820,8 +1876,8 @@ async fn check_tmux_keyboard_setup() -> Option<String> {
         )
         .await
         .ok()
-        .and_then(|joined| joined.ok())
-        .and_then(|output| output.ok())
+        .and_then(Result::ok)
+        .and_then(Result::ok)
         .and_then(|output| {
             if output.status.success() {
                 Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -2003,6 +2059,11 @@ impl Renderer {
                                     if ui_tx.send(UiInput::Key(key)).is_err() {
                                         return;
                                     }
+                                }
+                            }
+                            HeadlessStep::Paste(text) => {
+                                if ui_tx.send(UiInput::Paste(text)).is_err() {
+                                    return;
                                 }
                             }
                             HeadlessStep::SettleIdle => {

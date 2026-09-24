@@ -107,11 +107,15 @@ pub(crate) fn session_status_label(summary: &Value) -> String {
 /// The model column text: the bare model id plus `:level` when a thinking
 /// level is active ("off" reads as noise and stays bare).
 pub(crate) fn session_model(summary: &Value) -> String {
+    // Live workers publish the model object with `id` (the engine's
+    // `model_metadata`); seeded roster rows and saved-session rows carry
+    // `modelId` (the persisted selector). Both read as the full model id.
     let Some(id) = get_str(summary, "model").or_else(|| {
         summary
             .get("model")
-            .and_then(|model| model.get("id"))
+            .and_then(|model| model.get("id").or_else(|| model.get("modelId")))
             .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
     }) else {
         return "-".to_string();
     };
@@ -389,18 +393,40 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
         .filter(|(position, _)| find_parent_index(records, &index.by_key, *position).is_none())
         .map(|(position, _)| position)
         .collect();
-    for position in 0..order.len() {
+    // A growing `order` needs a re-evaluated bound: a `0..order.len()`
+    // range captures the roots' length once, and every depth-2+ descendant
+    // would silently drop out of the rollup walk (its cost vanishing from
+    // every ancestor's total).
+    let mut slot = 0;
+    while slot < order.len() {
         for child in index
             .children_by_parent
-            .get(&order[position])
+            .get(&order[slot])
             .into_iter()
             .flatten()
         {
             order.push(*child);
         }
+        slot += 1;
     }
     let mut rollups = vec![Rollup::default(); records.len()];
     for position in order.iter().rev() {
+        // The deleted-descendant bucket is read INDEPENDENTLY of the own
+        // cost: an orchestrator parent with no own billable work (the
+        // own-zero gate omits `usage` entirely) still bills its deleted
+        // descendants' spend — the bucket carried inside the own-cost
+        // Option would drop with it.
+        let deleted_descendants = records[*position]
+            .saved
+            .as_ref()
+            .and_then(|saved| saved.get("deletedDescendantUsage"))
+            .and_then(|deleted| deleted.get("cost"))
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        // Deleted subagents keep no row, and their spend is already
+        // subtracted from the parent's own usage by the attribution
+        // entries: without this term a deletion erases the money from
+        // the subtree total (TS #2506's `computeRecursiveRollups`).
         let own_cost = records[*position]
             .daemon
             .as_ref()
@@ -415,7 +441,8 @@ pub fn compute_rollups(records: &[UnifiedRecord]) -> HashMap<String, Rollup> {
                     .and_then(|usage| usage.get("cost"))
                     .and_then(Value::as_f64)
             })
-            .unwrap_or(0.0);
+            .unwrap_or(0.0)
+            + deleted_descendants;
         let mut rollup = Rollup {
             cost: own_cost,
             descendant_count: 0,
@@ -991,7 +1018,7 @@ fn finalize_base(a: &BaseRow, b: &BaseRow) -> std::cmp::Ordering {
 /// when the drilled-in child returns to it.
 pub fn ancestor_session_ids(rows: &[AgentsViewRow], parent_identity: Option<&str>) -> Vec<String> {
     let mut ancestors: Vec<String> = Vec::new();
-    let mut parent = parent_identity.map(str::to_string);
+    let mut parent = parent_identity;
     let mut guard = 0;
     while let Some(identity) = parent {
         guard += 1;
@@ -1013,7 +1040,7 @@ pub fn ancestor_session_ids(rows: &[AgentsViewRow], parent_identity: Option<&str
                 .unwrap_or_default()
                 .to_string(),
         );
-        parent = row.parent_identity.clone();
+        parent = row.parent_identity.as_deref();
     }
     ancestors
 }
@@ -1084,7 +1111,7 @@ pub fn resolve_selection(
         return bounded;
     }
     rows.iter()
-        .position(|row| row.selectable())
+        .position(AgentsViewRow::selectable)
         .unwrap_or(bounded)
 }
 
@@ -1134,8 +1161,40 @@ mod tests {
     ) -> Vec<AgentsViewRow> {
         let records = reconcile_unified_sessions(roster, &[]);
         let rollups = compute_rollups(&records);
-        let expanded: HashSet<String> = expanded.iter().map(|id| id.to_string()).collect();
+        let expanded: HashSet<String> = expanded.iter().map(ToString::to_string).collect();
         build_rows(&records, scope, &expanded, &rollups, None)
+    }
+
+    /// The Model column reads every wire shape of the model selector: a
+    /// bare string, a live worker's `model.id`, and a seeded or
+    /// saved-session row's `model.modelId` — always the full
+    /// `model:thinking` string, never a truncated `provider/` blob.
+    #[test]
+    fn session_model_reads_every_wire_shape() {
+        let bare = json!({"model": "internal/glm-5.3-fast", "thinkingLevel": "high"});
+        assert_eq!(session_model(&bare), "glm-5.3-fast:high");
+        let live = json!({
+            "model": {"id": "internal/glm-5.3-fast", "name": "GLM", "provider": "prime-inference"},
+            "thinkingLevel": "high",
+        });
+        assert_eq!(session_model(&live), "glm-5.3-fast:high");
+        let seeded = json!({
+            "model": {"provider": "prime-inference", "modelId": "internal/glm-5.3-fast"},
+            "thinkingLevel": "high",
+        });
+        assert_eq!(session_model(&seeded), "glm-5.3-fast:high");
+        // "off" reads as noise: the bare model id, no suffix.
+        let off = json!({
+            "model": {"id": "internal/glm-5.3-fast"},
+            "thinkingLevel": "off",
+        });
+        assert_eq!(session_model(&off), "glm-5.3-fast");
+        assert_eq!(session_model(&json!({})), "-");
+        assert_eq!(
+            session_model(&json!({"model": {"provider": "p"}, "thinkingLevel": "high"})),
+            "-",
+            "an empty id stays empty — never a `p/`-style blob"
+        );
     }
 
     #[test]
@@ -1418,6 +1477,82 @@ mod tests {
         let parent = rollups.get("file:/x/p.jsonl").expect("parent rollup");
         assert_eq!(parent.cost, 0.75);
         assert_eq!(parent.descendant_count, 1);
+
+        // The numeric fixture (TS #2506): own $0 + deleted child $0.40 +
+        // its deleted grandchild $0.10 (the saved row's
+        // deletedDescendantUsage bucket, $0.50 post-order) + live child
+        // $0.20 + surviving grandchild $0.30 => the parent's recursive
+        // cost EXACTLY $1.00. The deleted children keep no rows: without
+        // the bucket term the same tree bills $0.50 (the money vanished -
+        // the bug), and a bucket stacked on an own-cost that already
+        // carries attributed spend bills $1.50 (the double).
+        let deleted = json!({
+            "inputTokens": 1_100, "outputTokens": 110, "cost": 0.50
+        });
+        let saved_parent = json!({
+            "path": "/x/p.jsonl", "id": "p",
+            "usage": { "inputTokens": 0, "outputTokens": 0, "cost": 0.0 },
+            "deletedDescendantUsage": deleted,
+        });
+        let fixture_roster = vec![
+            roster_entry(
+                "p",
+                "idle",
+                json!({
+                    "sessionId": "p", "lifecycle": "live", "activeSessionId": "p-live",
+                    "sessionFile": "/x/p.jsonl", "runtimeKind": "top-level",
+                    "messageCount": 1, "usage": { "cost": 0.0 },
+                }),
+            ),
+            roster_entry(
+                "c2",
+                "idle",
+                json!({
+                    "sessionId": "c2", "lifecycle": "live", "activeSessionId": "c2-live",
+                    "sessionFile": "/x/c2.jsonl", "runtimeKind": "subagent",
+                    "rlmChildId": "child-c2",
+                    "parentActiveSessionId": "p-live",
+                    "parentSessionId": "p", "parentSessionPath": "/x/p.jsonl",
+                    "messageCount": 1, "usage": { "cost": 0.2 },
+                }),
+            ),
+            roster_entry(
+                "gc2",
+                "idle",
+                json!({
+                    "sessionId": "gc2", "lifecycle": "live", "activeSessionId": "gc2-live",
+                    "sessionFile": "/x/gc2.jsonl", "runtimeKind": "subagent",
+                    "rlmChildId": "child-gc2",
+                    "parentActiveSessionId": "c2-live",
+                    "parentSessionId": "c2", "parentSessionPath": "/x/c2.jsonl",
+                    "messageCount": 1, "usage": { "cost": 0.3 },
+                }),
+            ),
+        ];
+        let fixture_records =
+            reconcile_unified_sessions(&fixture_roster, std::slice::from_ref(&saved_parent));
+        let fixture_rollups = compute_rollups(&fixture_records);
+        let fixture_parent = fixture_rollups
+            .get("file:/x/p.jsonl")
+            .expect("parent rollup");
+        assert!(
+            (fixture_parent.cost - 1.00).abs() < 1e-9,
+            "own 0 + deleted bucket 0.50 + live child subtree 0.50 = 1.00, got {}",
+            parent.cost
+        );
+        // Without the bucket the deleted spend vanishes (the pre-fix bug).
+        let bare = json!({
+            "path": "/x/p.jsonl", "id": "p",
+            "usage": { "inputTokens": 0, "outputTokens": 0, "cost": 0.0 },
+        });
+        let bare_records = reconcile_unified_sessions(&fixture_roster, std::slice::from_ref(&bare));
+        let bare_rollups = compute_rollups(&bare_records);
+        let bare_parent = bare_rollups.get("file:/x/p.jsonl").expect("parent rollup");
+        assert!(
+            (bare_parent.cost - 0.50).abs() < 1e-9,
+            "no bucket: only the live subtree bills, got {}",
+            bare_parent.cost
+        );
         let rows = rows_for(&roster, None, &[]);
         // The parent's Cost column shows the recursive total (TS
         // `recursiveCost`), and the details layout carries it.

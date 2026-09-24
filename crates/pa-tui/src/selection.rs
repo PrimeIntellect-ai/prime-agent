@@ -197,6 +197,13 @@ impl SelectionState {
         self.frame = None;
     }
 
+    /// Whether a drag is in progress (an anchor armed, not yet ended): the
+    /// transient overlays (the action toasts) sit a drag out so a
+    /// selection never reads rows the overlay covers.
+    pub(crate) fn is_dragging(&self) -> bool {
+        self.anchor.is_some() && self.mode.is_some()
+    }
+
     fn has_selection(&self) -> bool {
         ordered_selection(self.anchor, self.head).is_some()
     }
@@ -674,7 +681,7 @@ mod tests {
     }
 
     fn rendered_row(frame: &[Line], row: usize) -> String {
-        row_text(frame.get(row).map(|l| l.as_slice()).unwrap_or(&[]))
+        row_text(frame.get(row).map(Vec::as_slice).unwrap_or(&[]))
     }
 
     /// A transcript window row: the top bar sits at row 0, so the first

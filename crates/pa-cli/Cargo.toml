@@ -26,8 +26,21 @@ path = "src/main.rs"
 [dev-dependencies]
 tempfile = "3"
 base64 = "0.22"
+# The traces login tests encrypt the challenge result with the flow's own
+# public key (same versions the workspace resolves for the engine).
+rsa = { version = "0.9", features = ["sha2", "pem"] }
+sha2 = "0.10"
 libc = "0.2"
 futures = { workspace = true }
 crossterm = "0.28"
 nix = { version = "0.29", features = ["term", "signal", "fs"] }
 url = "2"
+
+[lints.clippy]
+redundant_clone = "warn"
+clone_on_copy = "warn"
+assigning_clones = "warn"
+unnecessary_to_owned = "warn"
+uninlined_format_args = "warn"
+collapsible_if = "warn"
+redundant_closure_for_method_calls = "warn"

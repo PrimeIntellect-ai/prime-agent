@@ -137,7 +137,7 @@ async fn read_via_xclip() -> Option<ClipboardImage> {
     if let Some(preferred) = select_supported_image_mime_type(&targets) {
         candidates.push(preferred);
     }
-    candidates.extend(SUPPORTED_IMAGE_MIME_TYPES.iter().map(|t| t.to_string()));
+    candidates.extend(SUPPORTED_IMAGE_MIME_TYPES.iter().map(ToString::to_string));
     for mime_type in candidates {
         let bytes = run_command(
             "xclip",

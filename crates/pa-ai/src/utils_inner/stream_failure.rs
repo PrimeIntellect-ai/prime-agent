@@ -609,8 +609,8 @@ pub fn stream_failure_from_stop_reason(
             Some(reason) => classify_stream_failure(Some(reason), None),
             None => StreamFailureKind::Unknown,
         },
-        provider_error_type: raw_stop_reason.map(|s| s.to_string()),
-        request_id: request_id.map(|s| s.to_string()),
+        provider_error_type: raw_stop_reason.map(std::string::ToString::to_string),
+        request_id: request_id.map(std::string::ToString::to_string),
         status: None,
         retry_after_ms: None,
         raw: None,
@@ -772,7 +772,6 @@ fn extract_parts_from_http(error: &ProviderHttpError) -> ExtractedParts {
     // then its class `name` stand in for the provider error type when the
     // body does not carry one.
     let provider_error_type = body_type
-        .clone()
         .or_else(|| error.provider_error_type.clone())
         .or_else(|| error.sdk_name.clone());
     let mut kind = classify_stream_failure(

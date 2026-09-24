@@ -280,6 +280,7 @@ mod tests {
                 depth: 1,
                 name: "worker-a".to_string(),
                 deleted: None,
+                deleted_usage: None,
             },
             info,
             metadata: RlmChildMetadata::default(),
@@ -301,6 +302,7 @@ mod tests {
                 depth: 1,
                 name: "worker-b".to_string(),
                 deleted: None,
+                deleted_usage: None,
             },
             info: plain_info,
             metadata: RlmChildMetadata::default(),
@@ -337,6 +339,7 @@ mod tests {
                 depth: 1,
                 name: "worker-c".to_string(),
                 deleted: None,
+                deleted_usage: None,
             },
             info,
             metadata: RlmChildMetadata::default(),
@@ -444,11 +447,11 @@ mod tests {
         // Saved children of the walk are not re-listed as passive rows.
         let roots = vec![
             RosterWalkRoot {
-                session_file: parent.clone(),
+                session_file: parent,
                 active_session_id: None,
             },
             RosterWalkRoot {
-                session_file: child.clone(),
+                session_file: child,
                 active_session_id: None,
             },
         ];

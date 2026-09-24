@@ -83,7 +83,7 @@ pub fn resolve_credentials(profile: Option<&str>) -> Option<AwsCredentials> {
         });
     }
     let profile = profile
-        .map(|profile| profile.to_string())
+        .map(std::string::ToString::to_string)
         .or_else(|| env("AWS_PROFILE"))
         .unwrap_or_else(|| "default".to_string());
     let home = pa_types::platform::home_dir()?;
@@ -220,7 +220,7 @@ pub fn sigv4_headers(
 /// Port of `getConfiguredBedrockRegion`.
 pub fn get_configured_bedrock_region(region: Option<&str>) -> Option<String> {
     region
-        .map(|region| region.to_string())
+        .map(std::string::ToString::to_string)
         .or_else(|| env("AWS_REGION"))
         .or_else(|| env("AWS_DEFAULT_REGION"))
 }

@@ -235,7 +235,7 @@ fn handle_chunk(
     // Fallback: some providers (e.g., Moonshot) return usage in choice.usage.
     if !chunk
         .get("usage")
-        .map(|usage| usage.is_object())
+        .map(serde_json::Value::is_object)
         .unwrap_or(false)
     {
         if let Some(usage) = choice.get("usage") {
@@ -299,7 +299,7 @@ fn handle_chunk(
     // Tool calls.
     if let Some(tool_calls) = delta.get("tool_calls").and_then(|value| value.as_array()) {
         for tool_call in tool_calls {
-            let stream_index = tool_call.get("index").and_then(|value| value.as_u64());
+            let stream_index = tool_call.get("index").and_then(serde_json::Value::as_u64);
             let id = tool_call.get("id").and_then(|value| value.as_str());
             let index = state.ensure_tool_call_block(stream_index, id, writer);
             if let Some(AssistantContent::ToolCall(block)) = state.output.content.get_mut(index) {
@@ -353,7 +353,7 @@ fn handle_chunk(
             if !detail.is_object() {
                 continue;
             }
-            let explicit_index = detail.get("index").and_then(|value| value.as_u64());
+            let explicit_index = detail.get("index").and_then(serde_json::Value::as_u64);
             let index = explicit_index.unwrap_or(state.next_reasoning_details_index);
             state.next_reasoning_details_index = state.next_reasoning_details_index.max(index + 1);
             let previous = state
@@ -651,7 +651,7 @@ async fn run_stream(
     if base_options
         .signal
         .as_ref()
-        .map(|signal| signal.is_cancelled())
+        .map(tokio_util::sync::CancellationToken::is_cancelled)
         .unwrap_or(false)
     {
         return Err(ProviderError::Aborted);

@@ -778,10 +778,7 @@ fn plain_boot_revives_only_journal_busy_workers() {
 
     // The idle-at-exit session is skipped with a log line and stays off
     // the roster.
-    let skip_line = format!(
-        "session worker {idle_session} was idle at exit; not revived",
-        idle_session = idle_session
-    );
+    let skip_line = format!("session worker {idle_session} was idle at exit; not revived");
     let deadline = Instant::now() + Duration::from_secs(5);
     while !std::fs::read_to_string(&log_path)
         .unwrap_or_default()
@@ -810,6 +807,7 @@ fn plain_boot_revives_only_journal_busy_workers() {
 
     // Shutdown takes the restarted supervisor and the relaunched worker
     // down (the relaunch persisted the new pid in the descriptor).
+    let relaunched = load_worker_descriptor(&agent_dir, &socket, &busy_session);
     client2.send_command("sd", json!({ "type": "shutdown" }));
     let shutdown = client2.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
@@ -818,7 +816,6 @@ fn plain_boot_revives_only_journal_busy_workers() {
         assert!(Instant::now() < deadline, "restarted supervisor exited");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let relaunched = load_worker_descriptor(&agent_dir, &socket, &busy_session);
     let deadline = Instant::now() + Duration::from_secs(10);
     while process_alive(relaunched.pid) {
         assert!(
@@ -1005,6 +1002,7 @@ fn update_boot_revives_only_roster_kept_workers() {
         "only the roster-kept session came back"
     );
 
+    let relaunched = load_worker_descriptor(&agent_dir, &socket, &sessions[0]);
     client2.send_command("sd", json!({ "type": "shutdown" }));
     let shutdown = client2.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
@@ -1013,7 +1011,6 @@ fn update_boot_revives_only_roster_kept_workers() {
         assert!(Instant::now() < deadline, "restarted supervisor exited");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let relaunched = load_worker_descriptor(&agent_dir, &socket, &sessions[0]);
     let deadline = Instant::now() + Duration::from_secs(10);
     while process_alive(relaunched.pid) {
         assert!(
@@ -1328,6 +1325,7 @@ fn plain_boot_still_revives_fresh_busy_evidence() {
     }
 
     let (mut client, _hello) = Client::connect(&socket);
+    let relaunched = load_worker_descriptor(&agent_dir, &socket, &fixture.worker_id);
     client.send_command("sd", json!({ "type": "shutdown" }));
     let shutdown = client.read_response("sd");
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
@@ -1336,7 +1334,6 @@ fn plain_boot_still_revives_fresh_busy_evidence() {
         assert!(Instant::now() < deadline, "supervisor exited");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let relaunched = load_worker_descriptor(&agent_dir, &socket, &fixture.worker_id);
     let deadline = Instant::now() + Duration::from_secs(10);
     while process_alive(relaunched.pid) {
         assert!(

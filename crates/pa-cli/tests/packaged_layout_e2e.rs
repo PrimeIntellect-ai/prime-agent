@@ -405,6 +405,31 @@ fn packaging_dry_run_produces_artifact() {
     )
     .unwrap();
 
+    // The bundled catalog assets (catalog port C): the packer hard-fails
+    // without validated assets, so the dry-run generates the offline
+    // fixture snapshot first (deterministic, stdlib-only — the same mode
+    // the CI build jobs use) and passes it through.
+    let assets = tempfile::TempDir::new().expect("catalog assets dir");
+    let bundle = Command::new("python3")
+        .arg(
+            repo_root()
+                .join("scripts")
+                .join("release")
+                .join("bundle_catalog.py"),
+        )
+        .arg("generate")
+        .arg("--fixture")
+        .arg("--out")
+        .arg(assets.path())
+        .output()
+        .expect("generate the bundled catalog fixture");
+    assert_eq!(
+        bundle.status.code(),
+        Some(0),
+        "fixture generation failed: {}",
+        String::from_utf8_lossy(&bundle.stderr)
+    );
+
     let out = tempfile::TempDir::new().expect("packaging out dir");
     let result = Command::new("python3")
         .arg(repo_root().join("scripts").join("package_release.py"))
@@ -412,6 +437,8 @@ fn packaging_dry_run_produces_artifact() {
         .arg(tree.path())
         .arg("--binary")
         .arg(env!("CARGO_BIN_EXE_prime-agent"))
+        .arg("--catalog-assets")
+        .arg(assets.path())
         .arg("--out-dir")
         .arg(out.path())
         .output()
@@ -457,6 +484,16 @@ fn packaging_dry_run_produces_artifact() {
         "skills missing"
     );
     assert!(stage.join("LICENSE").is_file(), "license missing");
+    // The bundled catalog assets ride beside the executable (spec §3.2
+    // layer 2: the runtime resolves <packageDir>/models.bundled.json).
+    assert!(
+        stage.join("models.bundled.json").is_file(),
+        "bundled model catalog missing from the staged layout"
+    );
+    assert!(
+        stage.join("mcp-services.bundled.json").is_file(),
+        "bundled MCP service catalog missing from the staged layout"
+    );
     // .venv handling (the TS installer exclusion set): dev caches never ship.
     assert!(
         !stage.join("prime-agent-runtime").join(".venv").exists(),

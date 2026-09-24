@@ -35,9 +35,13 @@ pub fn build_base_options(
             None => default_request_max_tokens(model),
         },
         signal: base.signal,
-        api_key: Some(api_key.map(|key| key.to_string()).unwrap_or_default())
-            .filter(|key| !key.is_empty())
-            .or(base.api_key),
+        api_key: Some(
+            api_key
+                .map(std::string::ToString::to_string)
+                .unwrap_or_default(),
+        )
+        .filter(|key| !key.is_empty())
+        .or(base.api_key),
         transport: base.transport,
         service_tier: base.service_tier,
         cache_retention: base.cache_retention,

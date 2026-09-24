@@ -186,7 +186,7 @@ fn write_synthetic_family(agent_dir: &Path, children: usize) -> (PathBuf, usize)
         write_child_session(
             &child_path,
             &child_id,
-            &format!("worker-{:04}", index),
+            &format!("worker-{index:04}"),
             &format!("child task {index}"),
         );
         records.push_str(
@@ -393,12 +393,16 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
     assert_eq!(child_entry["summary"]["parentSessionPath"], parent_file);
 
     // Shutdown the child worker: a plain kill, no ledger tombstone. The
-    // kill's pushes and its response interleave in either order on the
-    // wire, so the lines are read raw and DRAINED until both the k1
-    // response and the seeded passive-row push have arrived: breaking on
-    // the first seeded roster row would assert a kill failure whenever
-    // that push lands before the response (an ordering race, not a
-    // product bug).
+    // stop passivates the anchored child (TS
+    // `flipWorkerRosterEntriesInactive`): the row settles as an inactive
+    // entry preserving its durable display fields, and no removal push
+    // ever carries it (the remove+reseed this replaced deleted and
+    // re-created the row). The kill's pushes and its response interleave
+    // in either order on the wire, so the lines are read raw and DRAINED
+    // until both the k1 response and the passivated-row push have
+    // arrived: breaking on the first passive roster row would assert a
+    // kill failure whenever that push lands before the response (an
+    // ordering race, not a product bug).
     client.send(&json!({
         "type": "command",
         "id": "k1",
@@ -407,7 +411,7 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
     }));
     let mut kill_ok = false;
     let mut removal_seen = false;
-    let mut seeded_row: Option<Value> = None;
+    let mut passivated_row: Option<Value> = None;
     loop {
         let line = client.read_line_bounded(Duration::from_secs(15));
         if line["type"] == "roster_update" {
@@ -425,25 +429,33 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
                     })
                     .cloned()
             }) {
-                seeded_row = Some(entry);
+                passivated_row = Some(entry);
             }
         } else if line.get("id").and_then(Value::as_str) == Some("k1") {
             kill_ok = line["success"] == true;
         }
-        if kill_ok && seeded_row.is_some() {
+        if kill_ok && passivated_row.is_some() {
             break;
         }
     }
     assert!(kill_ok, "kill failed");
-    let seeded = seeded_row.expect("seeded passive row");
-    assert!(removal_seen, "the removal push never arrived");
+    let seeded = passivated_row.expect("passivated child row");
+    assert!(
+        !removal_seen,
+        "passivation must not remove the anchored child"
+    );
     let seeded_summary = &seeded["summary"];
     assert!(seeded_summary["activeSessionId"].is_null());
     assert_eq!(seeded_summary["runtimeKind"], "subagent");
     assert_eq!(seeded_summary["rlmChildId"], handle.rlm_child_id);
     assert_eq!(seeded_summary["sessionName"], "worker-a");
     assert_eq!(seeded_summary["parentSessionPath"], parent_file);
-    assert_eq!(seeded_summary["messageCount"], 0);
+    // The passivated row preserves the durable summary the resident row
+    // carried (only the live-runtime fields strip).
+    assert_eq!(
+        seeded_summary["messageCount"],
+        child_entry["summary"]["messageCount"]
+    );
 
     // A fresh subscriber sees the full family immediately: the seeded
     // child plus the still-resident parent.
@@ -462,7 +474,10 @@ async fn subscribe_after_spawn_then_shutdown_seeds_the_passive_child() {
         .find(|entry| entry["agentId"] == json!(child_agent_id))
         .unwrap_or_else(|| panic!("seeded child missing from the snapshot: {roster:?}"));
     assert_eq!(seeded_entry["status"], "inactive");
-    assert_eq!(seeded_entry["summary"]["messageCount"], 0);
+    assert_eq!(
+        seeded_entry["summary"]["messageCount"],
+        child_entry["summary"]["messageCount"]
+    );
     let parent_entry = roster
         .iter()
         .find(|entry| entry["agentId"] == json!(parent_session_id))

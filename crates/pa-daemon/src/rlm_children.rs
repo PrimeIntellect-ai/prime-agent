@@ -25,6 +25,7 @@ use pa_core::session_engine::rlm_host::{
 use pa_core::session_engine::rlm_notices::{
     create_rlm_child_terminal_notice, RlmChildTerminalNotice,
 };
+use pa_core::session_engine::rlm_usage::{RlmChildUsageReport, RlmChildUsageSink};
 use pa_types::daemon::{DaemonCommand, DaemonSessionLifecycle, PromptInput};
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
@@ -97,6 +98,14 @@ const WATCH_POLL_INTERVAL_MS: u64 = 2_000;
 /// Consecutive failed worker polls before settling an unreachable child as
 /// errored; roster reads must never attempt their own worker recovery.
 const WATCH_MAX_UNREACHABLE_POLLS: u32 = 150;
+
+/// How long a follow-up usage watcher waits for a delivered message to
+/// start the child's turn before retiring (a queued delivery the child
+/// never picks up attributes nothing).
+const FOLLOWUP_START_GRACE_MS: u64 = 30_000;
+/// Poll cadence while a follow-up usage watcher waits for the turn to
+/// start.
+const FOLLOWUP_START_POLL_MS: u64 = 2_000;
 /// The parent identity children are spawned from: recursion bounds, the
 /// inherited model selector and thinking level, and the parent session's
 /// persistence identity.
@@ -176,6 +185,22 @@ struct ChildRecord {
     /// and no terminal notice is owed to a session that is being torn
     /// down.
     closed_by_parent: bool,
+    /// The child's durable session file: the usage walk's source.
+    session_file: Option<String>,
+    /// Rows of [`ChildRecord::session_file`] already folded into the
+    /// parent's attribution rows. The walk resumes here, so repeated
+    /// observation never double-bills a child.
+    attributed_rows: usize,
+    /// A follow-up usage watcher is live for this retained child
+    /// (delayed agent messaging after the task run settled).
+    usage_watch_live: bool,
+    /// A delivery arrived while the follow-up usage watcher was live:
+    /// the live watcher observes this delivery's turn too (re-arms at
+    /// its settle) instead of a second watcher stacking behind it.
+    usage_rearm: bool,
+    /// Serializes usage emissions for this child (read, cursor advance,
+    /// and sink delivery) without holding the record lock across them.
+    emit_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl ChildRecord {
@@ -232,6 +257,11 @@ struct SupervisorChildSessionsInner {
     /// spawn/create_session refusals emit through the engine's shared
     /// lazily-built client.
     model_refusal_telemetry: std::sync::Arc<crate::model_allowlist::ModelRefusalTelemetry>,
+    /// The engine's child-usage attribution producer (wired once the
+    /// session engine is built; observation emits per-origin batches
+    /// into it — the producer owns the target row and the durable
+    /// append).
+    usage_sink: std::sync::Mutex<Option<std::sync::Arc<dyn RlmChildUsageSink>>>,
 }
 
 impl Clone for SupervisorChildSessions {
@@ -260,6 +290,7 @@ impl SupervisorChildSessions {
                 turn_done: tokio::sync::watch::Sender::new(0),
                 settle_hook: std::sync::Mutex::new(None),
                 model_refusal_telemetry,
+                usage_sink: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -277,6 +308,15 @@ impl SupervisorChildSessions {
     /// behind descendant work re-evaluates when descendants settle.
     pub fn set_settle_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
         *self.inner.settle_hook.lock().expect("settle hook lock") = Some(hook);
+    }
+
+    /// Wire the engine's child-usage attribution producer: the child
+    /// observation sites (settle, staleness slices, and the
+    /// capture-before-unlink teardown paths) deliver per-origin batches
+    /// into this sink (TS `flushPendingChildUsageAttribution`'s Rust
+    /// seam — the producer owns the target row and the durable append).
+    pub fn set_usage_sink(&self, sink: Arc<dyn RlmChildUsageSink>) {
+        *self.inner.usage_sink.lock().expect("usage sink lock") = Some(sink);
     }
 
     /// Whether any tracked child run is still unsettled (TS
@@ -396,6 +436,19 @@ impl SupervisorChildSessions {
         identities
     }
 
+    /// Re-arm usage observation for one of this session's children after
+    /// an agent message was delivered to it (delayed messaging: a
+    /// follow-up turn on a settled child; TS keeps the child's
+    /// subscription alive, so every completion attributes). No-op for a
+    /// target that is not one of this session's children or a child
+    /// already under observation.
+    pub async fn observe_child_usage(&self, target: &str) {
+        let Some(record) = self.inner.find_record(target).await else {
+            return;
+        };
+        SupervisorChildSessionsInner::arm_usage_watch(&self.inner, &record).await;
+    }
+
     /// Record that `child_active_session_id` sent an agent message to this
     /// parent since its task was admitted. The settle watcher reads the
     /// flag before delivering a no-reply terminal notice (TS
@@ -435,6 +488,11 @@ impl SupervisorChildSessions {
                 prompt_admitted: true,
                 error: None,
                 closed_by_parent: false,
+                session_file: None,
+                attributed_rows: 0,
+                usage_watch_live: false,
+                usage_rearm: false,
+                emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             })));
     }
 
@@ -523,7 +581,7 @@ impl SupervisorChildSessionsInner {
         let hook = self
             .settle_hook
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         if let Some(hook) = hook {
             std::thread::spawn(move || hook());
@@ -885,6 +943,11 @@ impl SupervisorChildSessionsInner {
             if record.lock().await.closed_by_parent {
                 return;
             }
+            // Slice-top usage flush: rows of turns that completed since the
+            // last slice land here (TS flushes pending usage at each child
+            // `agent_end`; the slice cadence bounds crash loss to one
+            // slice, the TS staleness window's role).
+            self.emit_child_usage(record).await;
             let active_session_id = record.lock().await.active_session_id.clone();
             // One bounded idle-wait slice: a slice that times out while the
             // child still runs re-slices; the returned slice means the child
@@ -909,6 +972,10 @@ impl SupervisorChildSessionsInner {
                     continue;
                 }
                 self.refresh_record(record).await;
+                // The run's final rows are attributed before the terminal
+                // notice rides the parent's follow-up route (TS: the run
+                // task's `finally` flushes pending usage at settlement).
+                self.emit_child_usage(record).await;
                 self.deliver_settle_notice(record).await;
                 // A settled child releases an owed goal continuation (TS
                 // `_maybeResumeGoalContinuationAfterRlmWork` at the child
@@ -932,6 +999,9 @@ impl SupervisorChildSessionsInner {
                             state.settled_status = Some("error");
                             state.error = Some("Child worker unreachable".to_string());
                         }
+                        // A dead child keeps whatever rows its file already
+                        // holds; capture them before the terminal notice.
+                        self.emit_child_usage(record).await;
                         self.deliver_settle_notice(record).await;
                         self.fire_settle_hook();
                         return;
@@ -1000,6 +1070,262 @@ impl SupervisorChildSessionsInner {
         }
     }
 
+    /// Deliver the child's unattributed usage rows to the attribution
+    /// producer as one per-origin report (TS
+    /// `flushPendingChildUsageAttribution`'s observation seam; the
+    /// producer folds the batches into the spawning parent assistant row
+    /// and appends the durable `child_usage_attributed` rows). The cursor
+    /// advances past every parsed row — attributed or not — so repeated
+    /// observation never double-bills; without a wired sink nothing is
+    /// read or consumed. A torn trailing line (a concurrent append) is
+    /// skipped and lands on the next read.
+    async fn emit_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) {
+        let sink = self.usage_sink.lock().expect("usage sink lock").clone();
+        let Some(sink) = sink else {
+            return;
+        };
+        // One emission at a time per child — an interleaved re-read would
+        // double-bill, and an interleaved DELIVERY would break the durable
+        // rows' cumulative aggregate chain (the reader fold keeps the last
+        // row's aggregate, so the second observer's rows would silently
+        // drop out of the folded row). The emission lock spans the whole
+        // flow; the record lock itself only ever frames short snapshots,
+        // so the watcher polls and close paths never wait behind a big
+        // file read.
+        // Two statements on purpose: the record guard of the first drops
+        // at its statement end, BEFORE the emit lock awaits — an emitter
+        // that already holds the emit lock re-locks the record to advance
+        // the cursor, so a record guard alive across the emit-lock wait
+        // would deadlock the two.
+        let emit_lock = record.lock().await.emit_lock.clone();
+        let emit_guard = emit_lock.lock().await;
+        let (rlm_child_id, session_file, from) = {
+            let record_guard = record.lock().await;
+            (
+                record_guard.rlm_child_id.clone(),
+                record_guard
+                    .session_file
+                    .clone()
+                    .filter(|path| !path.is_empty()),
+                record_guard.attributed_rows,
+            )
+        };
+        let Some(session_file) = session_file else {
+            return;
+        };
+        // The open+parse is a blocking read of a file that can reach tens
+        // of megabytes: run it on the blocking pool, never the async
+        // worker (a slow file read must not stall unrelated tasks on the
+        // runtime).
+        let path = PathBuf::from(session_file);
+        let joined =
+            tokio::task::spawn_blocking(move || crate::session_store::SessionFile::open(&path))
+                .await
+                .ok();
+        let Some(Ok(store)) = joined else {
+            // Same failure contract as before: a torn or unreadable file
+            // leaves the cursor untouched — the next observation retries.
+            return;
+        };
+        let (batches, next) = crate::rlm_child_usage::child_usage_batches(store.entries(), from);
+        {
+            let mut record_guard = record.lock().await;
+            record_guard.attributed_rows = next;
+        }
+        if batches.is_empty() {
+            return;
+        }
+        sink.record(RlmChildUsageReport {
+            rlm_child_id,
+            batches,
+        })
+        .await;
+        drop(emit_guard);
+    }
+
+    /// Drop one child's attribution registration after its final
+    /// observation (the close and delete paths call this once their last
+    /// cursor walk completed — TS keeps a child's subscription alive only
+    /// while the child lives, so sequential children must not accumulate
+    /// registrations in the producer).
+    async fn forget_child_usage(&self, record: &Arc<Mutex<ChildRecord>>) {
+        let sink = self.usage_sink.lock().expect("usage sink lock").clone();
+        let Some(sink) = sink else {
+            return;
+        };
+        let rlm_child_id = record.lock().await.rlm_child_id.clone();
+        sink.forget(&rlm_child_id).await;
+    }
+
+    /// Start the follow-up usage watcher for a settled child that is busy
+    /// again — a retained child running a delayed agent-message turn. TS
+    /// keeps the child subscription alive after run settlement; the
+    /// Rust task-run watcher retired at settle, so this observation-only
+    /// watcher covers the follow-up turn's usage. It never touches the
+    /// run status, notices, or the settle hook.
+    async fn arm_usage_watch(this: &Arc<Self>, record: &Arc<Mutex<ChildRecord>>) {
+        {
+            let mut record = record.lock().await;
+            if record.closed_by_parent {
+                return;
+            }
+            if record.usage_watch_live {
+                // A watcher is already observing this child (armed for an
+                // earlier delivery): ask IT to observe this delivery's
+                // turn too, instead of arming a second watcher — the live
+                // watcher retires only when no delivery is owed, so a
+                // turn queued behind the one under observation never goes
+                // unobserved.
+                record.usage_rearm = true;
+                return;
+            }
+            record.usage_watch_live = true;
+        }
+        let watcher = Arc::clone(this);
+        let record = Arc::clone(record);
+        tokio::spawn(async move {
+            watcher.watch_child_usage(record).await;
+        });
+    }
+
+    /// Observe follow-up turns' usage: wait for the child to sit idle
+    /// once (the arm can land mid-run — a message delivered during the
+    /// task run queues behind it), wait for the delivered turn to start
+    /// (bounded — a delivery the child never picks up attributes
+    /// nothing), then idle-wait slices until the turn settles, emitting
+    /// observed rows along the way exactly like the task-run watcher's
+    /// slices. A delivery that arrived while this watcher was live
+    /// re-arms it for another turn instead of arming a second watcher,
+    /// so consecutive follow-up turns each get an observation.
+    async fn watch_child_usage(self: Arc<Self>, record: Arc<Mutex<ChildRecord>>) {
+        loop {
+            // Phase 0: the child must sit idle once before the delivered
+            // turn can start (the run in flight at arm time is NOT the
+            // delivered turn; retiring on its settle would leave the
+            // queued follow-up unobserved).
+            let mut unreachable_polls: u32 = 0;
+            loop {
+                if record.lock().await.closed_by_parent {
+                    record.lock().await.usage_watch_live = false;
+                    return;
+                }
+                let active_session_id = record.lock().await.active_session_id.clone();
+                match self.child_busy(&active_session_id).await {
+                    Ok(false) => break,
+                    Ok(true) => {}
+                    Err(_) => {
+                        unreachable_polls += 1;
+                        if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
+                            // A dead child keeps whatever rows its file
+                            // already holds; capture them, then stop.
+                            self.emit_child_usage(&record).await;
+                            record.lock().await.usage_watch_live = false;
+                            return;
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(FOLLOWUP_START_POLL_MS)).await;
+            }
+            // Phase 1: the delivered turn must start before it can be
+            // observed.
+            let start_deadline = Instant::now() + Duration::from_millis(FOLLOWUP_START_GRACE_MS);
+            let mut turn_started = false;
+            loop {
+                if record.lock().await.closed_by_parent {
+                    record.lock().await.usage_watch_live = false;
+                    return;
+                }
+                let active_session_id = record.lock().await.active_session_id.clone();
+                match self.child_busy(&active_session_id).await {
+                    Ok(true) => {
+                        turn_started = true;
+                        break;
+                    }
+                    Ok(false) if Instant::now() >= start_deadline => break,
+                    Ok(false) => {}
+                    Err(_) if Instant::now() >= start_deadline => break,
+                    Err(_) => {}
+                }
+                tokio::time::sleep(Duration::from_millis(FOLLOWUP_START_POLL_MS)).await;
+            }
+            if !turn_started {
+                // The turn never showed busy: it either completed
+                // between two polls (its rows are on disk — bill them) or
+                // the delivery never started a turn (the cursor walk is a
+                // no-op). Observe once before the tail decides whether
+                // another delivery is owed — the TS subscription never
+                // stops observing a live child.
+                self.emit_child_usage(&record).await;
+            } else {
+                // Phase 2: slice-wait until the turn settles (the
+                // task-run watcher's cadence, minus its settle
+                // bookkeeping).
+                let mut unreachable_polls: u32 = 0;
+                loop {
+                    if record.lock().await.closed_by_parent {
+                        break;
+                    }
+                    let active_session_id = record.lock().await.active_session_id.clone();
+                    self.wait_for_child(
+                        &active_session_id,
+                        Duration::from_millis(WATCH_WAIT_SLICE_MS),
+                    )
+                    .await;
+                    match self.child_busy(&active_session_id).await {
+                        Ok(false) => {
+                            // Settle grace: the delivered-turn pop races
+                            // the idle snapshot (the queue and the busy
+                            // flag change under different locks on the
+                            // far side of a socket).
+                            tokio::time::sleep(Duration::from_millis(WATCH_SETTLE_GRACE_MS)).await;
+                            if matches!(self.child_busy(&active_session_id).await, Ok(false)) {
+                                self.emit_child_usage(&record).await;
+                                break;
+                            }
+                        }
+                        Ok(true) => {
+                            // Mid-turn rows landed since the last slice.
+                            self.emit_child_usage(&record).await;
+                            unreachable_polls = 0;
+                        }
+                        Err(_) => {
+                            unreachable_polls += 1;
+                            if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
+                                // A dead child keeps whatever rows its
+                                // file already holds; capture them, then
+                                // stop.
+                                self.emit_child_usage(&record).await;
+                                break;
+                            }
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
+                }
+            }
+            // The tail: a delivery that arrived while this watcher was
+            // live re-arms it for another turn (the flag was set instead
+            // of a second watcher); otherwise the observation retires.
+            // The flag read, its clear, and the live-flag clear happen in
+            // ONE record-lock section: an arm racing the tail either
+            // sees the live flag still set (its re-arm request is
+            // consumed here and this watcher loops) or sees it already
+            // clear (it spawns a fresh watcher) — the decision can never
+            // strand a re-arm request behind a retired watcher.
+            let rearm = {
+                let mut record = record.lock().await;
+                let rearm = record.usage_rearm;
+                record.usage_rearm = false;
+                if !rearm {
+                    record.usage_watch_live = false;
+                }
+                rearm
+            };
+            if !rearm {
+                return;
+            }
+        }
+    }
+
     /// Abort one child's live run (see
     /// [`SupervisorChildSessions::cancel_child_run`], the TS
     /// `cancelRlmChildRun` walk): claim the terminal notice, settle the
@@ -1033,6 +1359,10 @@ impl SupervisorChildSessionsInner {
                 record.settled_status = Some("cancelled");
                 record.error = Some("Cancelled by user".to_string());
             }
+            // Capture before the abort: the completed turns' usage (the
+            // aborted turn's partial row folds nowhere — TS skips
+            // error/aborted completions) must not die with the run.
+            self.emit_child_usage(record).await;
             let abort = DaemonCommand::Abort {
                 id: None,
                 active_session_id: active_session_id.clone(),
@@ -1075,6 +1405,10 @@ impl SupervisorChildSessionsInner {
             if running {
                 return Ok("running");
             }
+            // Capture before the unlink: a deleted child's already-durable
+            // rows are its only remaining spend record on the parent side
+            // (the ledger snapshot lane reads the frozen file separately).
+            self.emit_child_usage(record).await;
             let command = DaemonCommand::Kill {
                 id: None,
                 active_session_id: active_session_id.clone(),
@@ -1086,6 +1420,17 @@ impl SupervisorChildSessionsInner {
             self.command(&command, KILL_TIMEOUT_MS)
                 .await
                 .with_context(|| format!("kill RLM child \"{child_id}\""))?;
+            // Rows can land between the pre-kill capture and the kill
+            // reaching the worker (a settle racing the kill): the
+            // post-kill walk is the last observation, matching the close
+            // path — the cursor keeps it free of double-billing. The
+            // registration drops with the child.
+            self.emit_child_usage(record).await;
+            self.forget_child_usage(record).await;
+            // Any live usage watcher retires with the record: a follow-up
+            // watch must not keep polling the killed worker after the
+            // delete (the close path sets the same flag).
+            record.lock().await.closed_by_parent = true;
             self.children
                 .lock()
                 .await
@@ -1112,20 +1457,40 @@ impl SupervisorChildSessionsInner {
                 record.closed_by_parent = true;
                 record.notice_delivered = true;
             }
+            // Capture before the close: the teardown settles each run (TS
+            // flushes in the run `finally`); nothing observes the child
+            // after the kill.
+            self.emit_child_usage(record).await;
             let active_session_id = record.lock().await.active_session_id.clone();
             if let Err(error) = self.kill_child(&active_session_id, reason).await {
                 if unknown_session(&error).is_some() {
                     // Already gone: TS `closeSessionOnce`'s `sessions.has`
                     // check turns a missing child into a no-op success.
+                    // The dead worker's file is frozen — the pre-kill walk
+                    // covered its rows; the registration drops with it.
+                    self.forget_child_usage(record).await;
                     self.children
                         .lock()
                         .await
                         .retain(|candidate| !Arc::ptr_eq(candidate, record));
                     continue;
                 }
+                // A failed close keeps the child tracked so the caller
+                // can retry (its registration stays — it can still
+                // observe).
                 close_error.get_or_insert(error);
                 continue;
             }
+            // Rows can land between the pre-kill capture and the kill
+            // reaching the worker (a turn that completed just before the
+            // kill aborted the in-flight one): the post-kill walk is the
+            // last observation — nothing observes the child after the
+            // kill. The cursor keeps the second walk free of
+            // double-billing, and the registration drops with the child
+            // (TS keeps a child's subscription alive only while the child
+            // lives).
+            self.emit_child_usage(record).await;
+            self.forget_child_usage(record).await;
             self.children
                 .lock()
                 .await
@@ -1135,6 +1500,19 @@ impl SupervisorChildSessionsInner {
             Some(error) => Err(error),
             None => Ok(()),
         }
+    }
+
+    /// The one record matching a selector, or `None` (the send hook's
+    /// silent miss: a delivered message may target a non-child family
+    /// member).
+    async fn find_record(&self, target: &str) -> Option<Arc<Mutex<ChildRecord>>> {
+        let children = self.children.lock().await;
+        for record in children.iter() {
+            if record.lock().await.matches(target) {
+                return Some(Arc::clone(record));
+            }
+        }
+        None
     }
 
     /// The one record matching a selector, or the TS selector errors
@@ -1325,6 +1703,11 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 prompt_admitted: false,
                 error: None,
                 closed_by_parent: false,
+                session_file: created.session_file.clone(),
+                attributed_rows: 0,
+                usage_watch_live: false,
+                usage_rearm: false,
+                emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
             };
             let record = Arc::new(Mutex::new(record));
             this.children.lock().await.push(Arc::clone(&record));
@@ -1500,9 +1883,23 @@ impl RlmSubagentHost for SupervisorChildSessions {
             };
             drop(record_guard);
             let was_running = record.lock().await.settled_status.is_none();
+            // Capture before the kill: a deleted running child's durable
+            // rows are its last observable spend on the parent side.
+            this.emit_child_usage(&record).await;
             this.command(&command, KILL_TIMEOUT_MS)
                 .await
                 .with_context(|| format!("kill RLM child \"{target}\""))?;
+            // Rows can land between the pre-kill capture and the kill
+            // reaching the worker (a turn that completed just before the
+            // kill aborted the in-flight one): the post-kill walk is the
+            // LAST observation — after this the record closes and no
+            // watcher reads the file again. The cursor keeps the second
+            // walk free of double-billing.
+            this.emit_child_usage(&record).await;
+            // The final observation landed: the registration drops (TS
+            // keeps a child's subscription alive only while the child
+            // lives).
+            this.forget_child_usage(&record).await;
             // The watcher owns an Arc to this record; deleting the roster
             // row alone cannot stop its polling loop.
             record.lock().await.closed_by_parent = true;
@@ -1559,6 +1956,16 @@ impl RlmSubagentHost for SupervisorChildSessions {
             let mut results = Vec::with_capacity(records.len());
             for record in &records {
                 this.refresh_record(record).await;
+                // A settled child that is busy again runs a follow-up turn
+                // (delayed messaging): re-arm usage observation — the
+                // task-run watcher retired at its settle. A roster read
+                // settles nothing here; the arm only observes usage.
+                if record.lock().await.settled_status.is_some() {
+                    let active_session_id = record.lock().await.active_session_id.clone();
+                    if matches!(this.child_busy(&active_session_id).await, Ok(true)) {
+                        SupervisorChildSessionsInner::arm_usage_watch(&this, record).await;
+                    }
+                }
                 let still_running = record.lock().await.settled_status.is_none();
                 if still_running {
                     // Wait inside the shared budget, then re-read the child:
@@ -1971,5 +2378,158 @@ mod watch_tests {
         let extra =
             tokio::time::timeout(std::time::Duration::from_secs(2), follow_up_rx.recv()).await;
         assert!(extra.is_err(), "a replied child must not deliver a notice");
+    }
+}
+
+#[cfg(test)]
+mod usage_emit_tests {
+    use super::*;
+    use pa_core::session_engine::rlm_usage::RlmChildUsageReport;
+    use std::sync::Arc;
+
+    /// A capturing sink: reports land in a shared vector for assertions.
+    #[derive(Default)]
+    struct CapturingSink(std::sync::Mutex<Vec<RlmChildUsageReport>>);
+
+    impl pa_core::session_engine::rlm_usage::RlmChildUsageSink for CapturingSink {
+        fn record(
+            &self,
+            report: RlmChildUsageReport,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            let reports = &self.0;
+            Box::pin(async move {
+                reports.lock().expect("reports lock").push(report);
+            })
+        }
+
+        fn forget(
+            &self,
+            _rlm_child_id: &str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {})
+        }
+    }
+
+    /// A child record aimed at a real temp child session file.
+    fn record_with_file(child_id: &str, session_file: &Path) -> Arc<Mutex<ChildRecord>> {
+        Arc::new(Mutex::new(ChildRecord {
+            rlm_child_id: child_id.to_string(),
+            session_name: "child".to_string(),
+            active_session_id: "child-live".to_string(),
+            session_id: None,
+            session_dir: String::new(),
+            label: "child".to_string(),
+            started_at_ms: 0,
+            settled_status: None,
+            answer_preview: None,
+            answer_captured: false,
+            replied_since_task: false,
+            notice_delivered: false,
+            prompt_admitted: true,
+            error: None,
+            closed_by_parent: false,
+            session_file: Some(session_file.display().to_string()),
+            attributed_rows: 0,
+            usage_watch_live: false,
+            usage_rearm: false,
+            emit_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        }))
+    }
+
+    fn registry() -> SupervisorChildSessions {
+        let tmp = tempfile::tempdir().unwrap();
+        let socket = tmp.path().join("supervisor.sock");
+        std::mem::forget(tmp);
+        SupervisorChildSessions::new(
+            Arc::new(SupervisorLink::new(socket)),
+            std::path::PathBuf::from("/agent"),
+            "parent-live".to_string(),
+            std::sync::Arc::new(crate::model_allowlist::ModelRefusalTelemetry::new(
+                std::path::PathBuf::from("/agent"),
+                /*telemetry_disabled*/ true,
+            )),
+        )
+    }
+
+    /// A child session file: the task prompt (first user row) plus the
+    /// captured completion (50,208 input + 2,929 output, $0.0089957 — the
+    /// branch-verified TS fixture row's child usage).
+    fn child_file(dir: &Path) -> PathBuf {
+        let path = dir.join("child.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"session","id":"child-1","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/tmp","version":3}"#, "\n",
+                r#"{"type":"message","id":"u1","parentId":null,"timestamp":"2026-09-23T00:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"the task"}],"timestamp":0}}"#, "\n",
+                r#"{"type":"message","id":"a1","parentId":"u1","timestamp":"2026-09-23T00:00:02.000Z","message":{"role":"assistant","content":[],"stopReason":"toolUse","usage":{"input":50208,"output":2929,"cacheRead":0,"cacheWrite":0,"totalTokens":53137,"cost":{"input":0.0075312,"output":0.0014645,"cacheRead":0,"cacheWrite":0,"total":0.0089957}}}}"#, "\n",
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    /// One emit reads the child's rows past the cursor, delivers the
+    /// per-origin report, and consumes the rows; a second emit delivers
+    /// nothing (no double billing).
+    #[tokio::test]
+    async fn emit_reads_once_and_advances_the_cursor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = child_file(tmp.path());
+        let sessions = registry();
+        let sink = Arc::new(CapturingSink::default());
+        sessions.set_usage_sink(sink.clone());
+        let record = record_with_file("sub-emit1", &file);
+
+        sessions.inner.emit_child_usage(&record).await;
+        let reports = sink.0.lock().expect("reports lock").clone();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].rlm_child_id, "sub-emit1");
+        let [(origin, usage)] = reports[0].batches[..] else {
+            panic!("one batch: {:?}", reports[0].batches);
+        };
+        assert_eq!(origin, pa_types::session::ChildUsageOrigin::SpawnTask);
+        assert_eq!(usage.input, 50_208);
+        assert_eq!(usage.output, 2_929);
+        assert!((usage.cost.total.as_f64() - 0.0089957).abs() < 1e-9);
+        let consumed = record.lock().await.attributed_rows;
+        assert!(consumed > 0);
+
+        // The cursor consumed the rows: nothing re-delivers.
+        sessions.inner.emit_child_usage(&record).await;
+        let reports = sink.0.lock().expect("reports lock").clone();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(record.lock().await.attributed_rows, consumed);
+    }
+
+    /// Without a wired sink nothing is read or consumed: the rows stay
+    /// attributable once the producer is wired.
+    #[tokio::test]
+    async fn emit_without_a_sink_consumes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = child_file(tmp.path());
+        let sessions = registry();
+        let record = record_with_file("sub-emit2", &file);
+
+        sessions.inner.emit_child_usage(&record).await;
+        assert_eq!(record.lock().await.attributed_rows, 0);
+    }
+
+    /// A record without a session file (the test seam's shape) observes
+    /// nothing, and a missing file is a silent no-op (the child may not
+    /// have materialized its file yet).
+    #[tokio::test]
+    async fn emit_tolerates_missing_and_absent_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = registry();
+        let sink = Arc::new(CapturingSink::default());
+        sessions.set_usage_sink(sink.clone());
+        let missing = record_with_file("sub-emit3", &tmp.path().join("absent.jsonl"));
+        sessions.inner.emit_child_usage(&missing).await;
+        assert_eq!(sink.0.lock().expect("reports lock").len(), 0);
+
+        let no_file = record_with_file("sub-emit4", &tmp.path().join("x.jsonl"));
+        no_file.lock().await.session_file = None;
+        sessions.inner.emit_child_usage(&no_file).await;
+        assert_eq!(sink.0.lock().expect("reports lock").len(), 0);
     }
 }

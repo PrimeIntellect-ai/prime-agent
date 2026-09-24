@@ -375,8 +375,8 @@ fn resolve_dropped_ancestor(
     let mut path: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut current = Some(start.to_string());
-    while let Some(id) = current {
-        if let Some(answer) = resolved.get(&id) {
+    while let Some(ref id) = current {
+        if let Some(answer) = resolved.get(id.as_str()) {
             let answer = answer.clone();
             for node in path {
                 resolved.insert(node, answer.clone());
@@ -386,12 +386,12 @@ fn resolve_dropped_ancestor(
         if !seen.insert(id.clone()) {
             // The first repeated id of THIS walk — the outcome for this
             // child, memoized for no one else.
-            return Some(id);
+            return Some(id.clone());
         }
-        match dropped_parent.get(&id) {
+        match dropped_parent.get(id.as_str()) {
             Some(next) => {
-                path.push(id);
-                current = next.clone();
+                path.push(id.clone());
+                current.clone_from(next);
             }
             None => {
                 let answer = Some(id.clone());
@@ -652,7 +652,7 @@ impl SessionManager {
     pub fn has_thinking_level(&self) -> bool {
         self.window
             .as_ref()
-            .is_some_and(|window| window.has_thinking_level())
+            .is_some_and(super::window::WindowedSessionStore::has_thinking_level)
             || self
                 .active_branch_entries()
                 .iter()
@@ -662,7 +662,7 @@ impl SessionManager {
     pub fn has_service_tier(&self) -> bool {
         self.window
             .as_ref()
-            .is_some_and(|window| window.has_service_tier())
+            .is_some_and(super::window::WindowedSessionStore::has_service_tier)
             || self
                 .active_branch_entries()
                 .iter()
@@ -726,7 +726,7 @@ impl SessionManager {
             .iter()
             .rev()
             .find_map(|line| match serde_json::from_str::<FileEntry>(line) {
-                Ok(FileEntry::GitState { payload, .. }) => Some(payload.git.clone()),
+                Ok(FileEntry::GitState { payload, .. }) => Some(payload.git),
                 _ => None,
             })
     }
@@ -750,7 +750,7 @@ impl SessionManager {
             .iter()
             .rev()
             .find_map(|line| match serde_json::from_str::<FileEntry>(line) {
-                Ok(FileEntry::AgentStatus { payload, .. }) => Some(payload.status.clone()),
+                Ok(FileEntry::AgentStatus { payload, .. }) => Some(payload.status),
                 _ => None,
             })
     }
@@ -758,7 +758,7 @@ impl SessionManager {
     pub fn has_non_bootstrap_entries(&self) -> bool {
         self.window
             .as_ref()
-            .is_some_and(|window| window.has_non_bootstrap_entries())
+            .is_some_and(super::window::WindowedSessionStore::has_non_bootstrap_entries)
             || self.file_entries.iter().any(|entry| {
                 !matches!(
                     entry,
@@ -834,7 +834,7 @@ impl SessionManager {
 
             // Empty or corrupted (no valid header): truncate and start fresh.
             if entries.is_empty() {
-                let explicit_path = path.clone();
+                let explicit_path = path;
                 self.new_session(&NewSessionOptions::default());
                 self.session_file = Some(explicit_path);
                 self.rewrite_file();
@@ -930,7 +930,7 @@ impl SessionManager {
         self.leaf_id = None;
         self.flushed = false;
         if self.persist {
-            self.session_file = session_file.clone();
+            self.session_file.clone_from(&session_file);
         }
         session_file
     }
@@ -1153,7 +1153,7 @@ impl SessionManager {
         let session_id = create_session_id();
         let target = get_session_file_path(&dir, &session_id);
         self.session_dir = dir;
-        self.session_id = session_id.clone();
+        self.session_id.clone_from(&session_id);
         self.session_file = Some(target.clone());
         self.persist = true;
         let timestamp = format_iso_now();
@@ -1518,20 +1518,23 @@ impl SessionManager {
         aggregate_usage: pa_types::ai::Usage,
         origin: Option<ChildUsageOrigin>,
     ) -> std::io::Result<String> {
-        let target_index = self
-            .by_id
-            .get(target_id)
-            .copied()
-            .filter(|&index| {
-                matches!(
-                    self.file_entries[index],
-                    FileEntry::Message {
-                        message: AgentMessage::Assistant(_),
-                        ..
-                    }
-                )
-            })
-            .unwrap_or_else(|| panic!("Assistant message entry {target_id} not found"));
+        let target_index = self.by_id.get(target_id).copied().filter(|&index| {
+            matches!(
+                self.file_entries[index],
+                FileEntry::Message {
+                    message: AgentMessage::Assistant(_),
+                    ..
+                }
+            )
+        });
+        let target_index = target_index.ok_or_else(|| {
+            // TS `appendChildUsageAttribution` throws the same text; the
+            // caller treats a failed append as recoverable bookkeeping.
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Assistant message entry {target_id} not found"),
+            )
+        })?;
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
         self.append_entry(FileEntry::ChildUsageAttributed {
@@ -1782,7 +1785,7 @@ mod tests {
             timestamp: 0,
             rest: Default::default(),
         });
-        manager.append_message(assistant.clone()).unwrap();
+        manager.append_message(assistant).unwrap();
         let file = manager.get_session_file().unwrap().to_path_buf();
         // Simulate crash damage: torn tail (no trailing newline).
         let content = std::fs::read_to_string(&file).unwrap();

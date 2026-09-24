@@ -15,6 +15,42 @@ pub const ENV_AGENT_DIR: &str = "PRIME_AGENT_CODING_AGENT_DIR";
 /// `PRIME_AGENT_SESSION_DIR`: overrides the session directory.
 pub const ENV_SESSION_DIR: &str = "PRIME_AGENT_SESSION_DIR";
 
+/// `PRIME_AGENT_DAEMON_SOCKET`: overrides the daemon socket path when no
+/// explicit `--daemon-socket` flag is given. The `prime-agent-rust`
+/// launcher pins it, so the Rust product's daemon runs beside - never
+/// on, never replacing - the TypeScript product's daemon: the two
+/// products share the session store (`~/.prime/agent`) but not the
+/// daemon, and a Rust CLI that found the TS daemon on the default socket
+/// would treat the schema-id mismatch as a stale daemon and shut it down
+/// when idle.
+pub const ENV_DAEMON_SOCKET: &str = "PRIME_AGENT_DAEMON_SOCKET";
+
+/// The daemon socket path: an explicit `--daemon-socket` flag wins, then
+/// [`ENV_DAEMON_SOCKET`], then the per-user default.
+pub fn resolve_daemon_socket_path(daemon_socket: Option<&str>) -> PathBuf {
+    daemon_socket
+        .map(expand_tilde_path)
+        .or_else(|| {
+            std::env::var_os(ENV_DAEMON_SOCKET)
+                .filter(|value| !value.is_empty())
+                .as_deref()
+                .map(expand_tilde_path_os)
+        })
+        .unwrap_or_else(pa_daemon::socket::default_daemon_socket_path)
+}
+
+/// [`expand_tilde_path`] over a raw environment value: a tilde-prefixed
+/// value expands against the home dir; anything else passes through as
+/// the original bytes — a `to_string_lossy` here would silently rewrite a
+/// non-UTF-8 socket path (U+FFFD) and point the CLI at a socket nobody
+/// is serving.
+pub fn expand_tilde_path_os(value: &std::ffi::OsStr) -> PathBuf {
+    if value.to_str().is_some_and(|path| path.starts_with('~')) {
+        return expand_tilde_path(&value.to_string_lossy());
+    }
+    PathBuf::from(value)
+}
+
 /// `PRIME_AGENT_CODING_AGENT_SESSION_DIR`: legacy session-dir override.
 pub const ENV_LEGACY_SESSION_DIR: &str = "PRIME_AGENT_CODING_AGENT_SESSION_DIR";
 
@@ -114,6 +150,27 @@ pub fn is_truthy_env_flag(value: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Precedence: an explicit `--daemon-socket` flag wins over the
+    /// `PRIME_AGENT_DAEMON_SOCKET` environment, which wins over the
+    /// per-user default. The env is what the `prime-agent-rust` launcher
+    /// pins, so the flag/env/default order is the co-existence contract:
+    /// an explicit flag still overrides what any launcher installed.
+    #[test]
+    fn daemon_socket_resolution_prefers_flag_then_env_then_default() {
+        let default = pa_daemon::socket::default_daemon_socket_path();
+        std::env::set_var(ENV_DAEMON_SOCKET, "/tmp/rust-launcher.sock");
+        assert_eq!(
+            resolve_daemon_socket_path(None),
+            PathBuf::from("/tmp/rust-launcher.sock")
+        );
+        assert_eq!(
+            resolve_daemon_socket_path(Some("/tmp/flag.sock")),
+            PathBuf::from("/tmp/flag.sock")
+        );
+        std::env::remove_var(ENV_DAEMON_SOCKET);
+        assert_eq!(resolve_daemon_socket_path(None), default);
+    }
 
     #[test]
     fn expands_tilde() {

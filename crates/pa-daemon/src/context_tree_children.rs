@@ -49,8 +49,11 @@ pub type TombstonedChildren = HashMap<PathBuf, HashSet<String>>;
 
 /// The artifact tree root every session's children live under
 /// (`child_session_dir` writes `<agent-dir>/session-artifacts/<id>/...`).
+pub const RLM_SESSION_ARTIFACTS_DIR: &str = "session-artifacts";
+
+/// The artifact tree root path for one agent dir.
 pub fn session_artifacts_dir(agent_dir: &Path) -> PathBuf {
-    agent_dir.join("session-artifacts")
+    agent_dir.join(RLM_SESSION_ARTIFACTS_DIR)
 }
 
 /// Build one child node from its persisted session dir (TS
@@ -162,7 +165,7 @@ fn child_session_dirs(dir: &Path) -> Vec<PathBuf> {
         return Vec::new();
     };
     let mut dirs: Vec<(std::time::SystemTime, PathBuf)> = entries
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|entry| entry.file_name().to_string_lossy().starts_with("sub-"))
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
         .filter_map(|entry| {
@@ -182,7 +185,7 @@ fn newest_session_files(dir: &Path) -> Vec<PathBuf> {
         return Vec::new();
     };
     let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
-        .filter_map(|entry| entry.ok())
+        .filter_map(std::result::Result::ok)
         .filter(|entry| entry.file_name().to_string_lossy().ends_with(".jsonl"))
         .filter_map(|entry| {
             let mtime = entry.metadata().ok()?.modified().ok()?;
@@ -341,7 +344,7 @@ mod tests {
         ];
         let content = lines
             .iter()
-            .map(|value| value.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(child_dir.join(format!("{session_id}.jsonl")), content).unwrap();
@@ -527,7 +530,7 @@ mod tests {
         ];
         let content = lines
             .iter()
-            .map(|value| value.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join("\n");
         std::fs::write(child_dir.join("01a0child-0000.jsonl"), content).unwrap();

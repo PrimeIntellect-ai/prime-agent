@@ -20,6 +20,10 @@ pa-agent.workspace = true
 pa-telemetry.workspace = true
 base64 = "0.22"
 fancy-regex = "0.14"
+# The traces browser login's auth challenge (RSA-2048 keypair, OAEP-SHA256
+# result decrypt; sha2 matches the workspace's version, pem for the SPKI
+# wire form).
+rsa = { version = "0.9", features = ["sha2", "pem"] }
 libc = "0.2"
 nix = { version = "0.29", features = ["signal", "process", "user", "fs", "dir"] }
 tokio-util = "0.7"
@@ -38,7 +42,19 @@ ignore = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
+# The traces rate-gate test runs on paused tokio time (the 12s platform
+# interval auto-advances).
+tokio = { workspace = true, features = ["test-util"] }
 
 [[test]]
 name = "golden_system_prompt"
 path = "tests/golden/system_prompt.rs"
+
+[lints.clippy]
+redundant_clone = "warn"
+clone_on_copy = "warn"
+assigning_clones = "warn"
+unnecessary_to_owned = "warn"
+uninlined_format_args = "warn"
+collapsible_if = "warn"
+redundant_closure_for_method_calls = "warn"

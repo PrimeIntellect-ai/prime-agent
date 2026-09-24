@@ -666,7 +666,7 @@ mod tests {
             session
                 .append_compaction(pa_types::session::CompactionEntry {
                     summary: "summary".to_string(),
-                    first_kept_entry_id: first_kept.clone(),
+                    first_kept_entry_id: first_kept,
                     tokens_before: 10,
                     ..Default::default()
                 })
@@ -1178,7 +1178,7 @@ mod tests {
         session
             .append_compaction(pa_types::session::CompactionEntry {
                 summary: "summary".to_string(),
-                first_kept_entry_id: first_kept.clone(),
+                first_kept_entry_id: first_kept,
                 tokens_before: 10,
                 ..Default::default()
             })

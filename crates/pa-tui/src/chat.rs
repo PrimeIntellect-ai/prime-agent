@@ -217,7 +217,7 @@ pub fn format_working_elapsed(total_secs: u64) -> String {
         return format!("{secs}s");
     }
     if hours == 0 {
-        return format!("{mins}m {:02}s", secs);
+        return format!("{mins}m {secs:02}s");
     }
     let days = hours / 24;
     if days == 0 {

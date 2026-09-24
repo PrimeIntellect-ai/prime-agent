@@ -130,7 +130,7 @@ impl Sandbox {
         .unwrap();
         Self {
             _dir: dir,
-            root: root.clone(),
+            root,
             cwd,
             agent_dir,
             npm_shim,

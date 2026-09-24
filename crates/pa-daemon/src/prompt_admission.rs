@@ -88,7 +88,7 @@ impl PromptAdmissionTable {
         let mut admissions = self
             .admissions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if admissions.contains_key(&key) {
             return Err(format!(
                 "Prompt admission id is already in use: {admission_id}"
@@ -110,7 +110,7 @@ impl PromptAdmissionTable {
         let admissions = self
             .admissions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         admissions.get(key).map(f)
     }
 
@@ -118,7 +118,7 @@ impl PromptAdmissionTable {
         let mut admissions = self
             .admissions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         admissions.get_mut(key).map(f)
     }
 
@@ -136,7 +136,7 @@ impl PromptAdmissionTable {
         let mut admissions = self
             .admissions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if admissions.contains_key(to) {
             return false;
         }
@@ -161,7 +161,7 @@ impl PromptAdmissionTable {
         let admissions = self
             .admissions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut keys = admissions.keys().filter(|key| key.ends_with(&suffix));
         let first = keys.next()?.clone();
         keys.next().is_none().then_some(first)
@@ -170,7 +170,7 @@ impl PromptAdmissionTable {
     fn remove(&self, key: &str) {
         self.admissions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(key);
     }
 
@@ -180,7 +180,7 @@ impl PromptAdmissionTable {
         let mut admissions = self
             .admissions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for admission in admissions.values_mut() {
             if admission.status == AdmissionStatus::Waiting {
                 admission.status = AdmissionStatus::Cancelled;
@@ -553,7 +553,7 @@ impl WorkerAdmissions {
     fn register(&self, admission_id: &str) {
         self.admissions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(admission_id.to_string(), AdmissionStatus::Waiting);
     }
 
@@ -562,7 +562,7 @@ impl WorkerAdmissions {
         let mut admissions = self
             .admissions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(status) = admissions.get_mut(admission_id) {
             if *status == AdmissionStatus::Waiting {
                 *status = AdmissionStatus::Owned;
@@ -574,7 +574,7 @@ impl WorkerAdmissions {
     pub(crate) fn clear(&self, admission_id: &str) {
         self.admissions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(admission_id);
     }
 
@@ -585,7 +585,7 @@ impl WorkerAdmissions {
         let mut admissions = self
             .admissions
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match admissions.get_mut(admission_id) {
             None => None,
             Some(status) => {

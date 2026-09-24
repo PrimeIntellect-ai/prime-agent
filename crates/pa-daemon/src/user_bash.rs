@@ -13,7 +13,7 @@
 
 use std::io::Write;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -38,6 +38,10 @@ const SPILL_PREFIX: &str = "pa-bash";
 pub(crate) struct UserBash {
     /// The user-bash claim (execute_bash only; TS `runUserBash` guard).
     running: AtomicBool,
+    /// Awaited bash runs in flight (TS `_bashAbortControllers.size`:
+    /// `execute_bash_and_wait` runs count toward `isBashRunning` without
+    /// claiming the exclusive user slot).
+    awaited: AtomicUsize,
     /// An abort was requested: the settled result reports cancelled.
     abort_requested: AtomicBool,
     /// The in-flight process (user bash or an awaited run): `abort_bash`
@@ -49,6 +53,7 @@ impl UserBash {
     pub(crate) fn new() -> Self {
         Self {
             running: AtomicBool::new(false),
+            awaited: AtomicUsize::new(0),
             abort_requested: AtomicBool::new(false),
             child: Mutex::new(None),
         }
@@ -73,8 +78,20 @@ impl UserBash {
         self.running.store(false, Ordering::SeqCst);
     }
 
+    /// Whether a user bash or an awaited bash run is in flight (TS
+    /// `isBashRunning`: `_bashAbortControllers.size > 0 ||
+    /// `_userBashRunning`).
     pub(crate) fn is_running(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
+        self.running.load(Ordering::SeqCst) || self.awaited.load(Ordering::SeqCst) > 0
+    }
+
+    /// Count one awaited run (`execute_bash_and_wait`) toward
+    /// [`Self::is_running`]; the awaited path owns no exclusive slot. The
+    /// returned bracket decrements on drop, so a run future dropped
+    /// mid-await (a task teardown) cannot leave the count stuck on.
+    pub(crate) fn begin_awaited(&self) -> AwaitedRun<'_> {
+        self.awaited.fetch_add(1, Ordering::SeqCst);
+        AwaitedRun { user_bash: self }
     }
 
     /// Kill the in-flight process (TS `abortBash` aborts every
@@ -291,6 +308,12 @@ impl Worker {
         };
         let user_bash = Arc::clone(&self.user_bash);
         let command = command.to_string();
+        // The awaited run counts toward the session's `isBashRunning` (TS's
+        // `executeBash` registers an abort controller, so the flag is true
+        // for its whole duration); it owns no exclusive slot, so a streamed
+        // user bash is not blocked by it. The bracket releases the count on
+        // drop, so a dropped run future cannot leave the flag stuck on.
+        let _awaited = user_bash.begin_awaited();
         let end = run_bash(RunBash {
             command: &command,
             cwd: &cwd,
@@ -301,6 +324,13 @@ impl Worker {
             on_chunk: None,
         })
         .await;
+        drop(_awaited);
+        // The awaited path emits no session events, so the live roster
+        // feed has no trigger of its own — TS's `execute_bash_and_wait`
+        // flushes in the command's `finally`; the port enqueues the same
+        // flush here (the summary composes fresh, so the settled run reads
+        // idle on the roster).
+        self.roster_pushes.push();
         if let Some(error) = &end.error_message {
             return response_failure(None, "execute_bash_and_wait", error, None);
         }
@@ -349,6 +379,19 @@ fn merge_identity(mut event: Value, identity: &Value) -> Value {
         }
     }
     event
+}
+
+/// The drop-bracket [`UserBash::begin_awaited`] returns: one awaited run's
+/// contribution to the `isBashRunning` flag, released even when the run's
+/// future is dropped mid-await.
+pub(crate) struct AwaitedRun<'a> {
+    user_bash: &'a UserBash,
+}
+
+impl Drop for AwaitedRun<'_> {
+    fn drop(&mut self) {
+        self.user_bash.awaited.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// The TS `BashResult` wire shape.
@@ -551,10 +594,10 @@ async fn run_bash(run: RunBash<'_>) -> BashEnd {
     let mut stream = match Arc::try_unwrap(stream) {
         Ok(mutex) => mutex
             .into_inner()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
         Err(stream) => stream
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone_stream(),
     };
     let full_output = stream.chunks.join("");
@@ -908,6 +951,73 @@ mod tests {
         assert_eq!(
             response.error.as_deref(),
             Some("execute_bash_and_wait requires a command")
+        );
+    }
+
+    /// The awaited-run bracket releases its count on drop even when the
+    /// run's future never completes (a task teardown mid-await must not
+    /// leave `isBashRunning` stuck on).
+    #[test]
+    fn an_abandoned_awaited_run_releases_the_flag() {
+        let user_bash = UserBash::new();
+        assert!(!user_bash.is_running());
+        {
+            let _awaited = user_bash.begin_awaited();
+            assert!(user_bash.is_running());
+        }
+        assert!(
+            !user_bash.is_running(),
+            "the dropped bracket left the awaited count stuck on"
+        );
+    }
+
+    /// The awaited run counts toward the session's `isBashRunning` (TS's
+    /// `executeBash` registers an abort controller for the run's
+    /// duration): the flag reads true while it runs and false once it
+    /// settles — without claiming the exclusive user slot.
+    #[tokio::test]
+    async fn an_awaited_bash_run_reports_running_to_the_connection_state() {
+        let cwd = tempfile::tempdir().expect("tempdir");
+        let worker = created_worker(cwd.path()).await;
+        let runner = std::sync::Arc::clone(&worker);
+        let run = tokio::spawn(async move {
+            runner
+                .dispatch(
+                    "execute_bash_and_wait",
+                    &json!({ "activeSessionId": "bash-session", "command": "sleep 1" }),
+                )
+                .await
+        });
+        let mut saw_running = false;
+        for _ in 0..100 {
+            let state = worker
+                .dispatch(
+                    "get_connection_state",
+                    &json!({ "activeSessionId": "bash-session" }),
+                )
+                .await;
+            if state.data.expect("state data")["isBashRunning"] == json!(true) {
+                saw_running = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            saw_running,
+            "the awaited run never reported isBashRunning to the connection state"
+        );
+        let response = run.await.expect("the awaited run task panicked");
+        assert!(response.success, "failed: {response:?}");
+        let state = worker
+            .dispatch(
+                "get_connection_state",
+                &json!({ "activeSessionId": "bash-session" }),
+            )
+            .await;
+        assert_eq!(
+            state.data.expect("state data")["isBashRunning"],
+            json!(false),
+            "the settled run left the flag on"
         );
     }
 
