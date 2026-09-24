@@ -1,1 +1,0 @@
-- Parked quota-blocked sessions now resume from a wake that survives aborts, restarts, and daemon-delivered wakes instead of clearing the park or stalling the resume, and a park no longer fails an active goal: the goal resumes with the task at the wake.
