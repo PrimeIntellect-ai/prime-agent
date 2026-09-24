@@ -192,7 +192,7 @@ fn sent_agent_message_labels_and_participant_fallbacks() {
         let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
         let text = text_of(&lines[1]);
         assert!(
-            text.contains(&format!("\u{25c6} {label} \u{b7} to child worker-active")),
+            text.contains(&format!("\u{2709} {label} \u{b7} to child worker-active")),
             "got: {text}"
         );
     }
