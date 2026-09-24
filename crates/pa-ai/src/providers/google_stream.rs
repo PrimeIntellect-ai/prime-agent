@@ -207,7 +207,7 @@ impl GoogleStreamState {
                             thought_signature: part
                                 .get("thoughtSignature")
                                 .and_then(|value| value.as_str())
-                                .map(|signature| signature.to_string()),
+                                .map(std::string::ToString::to_string),
                             rest: Default::default(),
                         };
 
@@ -256,7 +256,7 @@ impl GoogleStreamState {
             let get = |field: &str| {
                 usage_metadata
                     .get(field)
-                    .and_then(|value| value.as_u64())
+                    .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0)
             };
             let prompt_tokens = get("promptTokenCount");

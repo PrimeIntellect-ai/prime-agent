@@ -193,7 +193,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(|signal| signal.is_cancelled())
+        .map(tokio_util::sync::CancellationToken::is_cancelled)
         .unwrap_or(false)
     {
         return Err(ProviderError::Aborted);
@@ -258,7 +258,7 @@ async fn run_stream(
                         .base
                         .signal
                         .as_ref()
-                        .map(|signal| signal.is_cancelled())
+                        .map(tokio_util::sync::CancellationToken::is_cancelled)
                         .unwrap_or(false)
                     {
                         return Err(ProviderError::Aborted);
@@ -270,7 +270,7 @@ async fn run_stream(
                         .base
                         .signal
                         .as_ref()
-                        .map(|signal| signal.is_cancelled())
+                        .map(tokio_util::sync::CancellationToken::is_cancelled)
                         .unwrap_or(false);
                     // Only reset the chain while nothing was streamed yet:
                     // after the first event the retry would duplicate
@@ -318,7 +318,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(|signal| signal.is_cancelled())
+        .map(tokio_util::sync::CancellationToken::is_cancelled)
         .unwrap_or(false)
     {
         return Err(ProviderError::Aborted);
@@ -364,7 +364,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(|signal| signal.is_cancelled())
+        .map(tokio_util::sync::CancellationToken::is_cancelled)
         .unwrap_or(false)
     {
         return Err(ProviderError::Aborted);
@@ -474,7 +474,7 @@ async fn run_websocket_attempt(
                 .base
                 .signal
                 .as_ref()
-                .map(|signal| signal.is_cancelled())
+                .map(tokio_util::sync::CancellationToken::is_cancelled)
                 .unwrap_or(false)
             {
                 keep_connection = false;

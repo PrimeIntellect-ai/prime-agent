@@ -146,7 +146,7 @@ pub(crate) fn build_params(
                     // TS `thinkingLevelMap?.off !== null`: only an explicit
                     // null suppresses the disable; a missing key or map still
                     // disables reasoning.
-                    if !off.is_some_and(|value| value.is_none()) {
+                    if !off.is_some_and(std::option::Option::is_none) {
                         if compat.supports_reasoning_effort {
                             let off_value = off
                                 .and_then(|value| value.as_deref())
@@ -179,7 +179,7 @@ pub(crate) fn build_params(
                     // TS `thinkingLevelMap?.off !== null`: only an explicit
                     // null suppresses the disable; a missing key or map still
                     // sends the off value.
-                    if !off.is_some_and(|value| value.is_none()) {
+                    if !off.is_some_and(std::option::Option::is_none) {
                         let off_value = off
                             .and_then(|value| value.as_deref())
                             .unwrap_or("none")
