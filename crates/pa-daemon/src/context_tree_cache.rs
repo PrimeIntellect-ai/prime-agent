@@ -236,8 +236,11 @@ impl ContextTreeCache {
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         state.as_ref().map(|walk| walk.session_id.clone())
                     };
-                    let served_elsewhere = serving.is_some_and(|serving| serving != request.0);
-                    if served_elsewhere || serving.is_none() {
+                    let served_elsewhere = match &serving {
+                        Some(serving) => *serving != request.0,
+                        None => true,
+                    };
+                    if served_elsewhere {
                         *cache
                             .pending
                             .lock()
