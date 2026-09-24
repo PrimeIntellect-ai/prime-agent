@@ -21,8 +21,10 @@ use crate::{Line, Span};
 const PREFERRED_VISIBLE: usize = 8;
 
 /// Rows the list reserves outside its items (the inline geometry: rule,
-/// title, blank, column header, scroll indicator, blank, hint, rule).
-const LIST_FRAME_ROWS: usize = 8;
+/// title, blank, column header, blank, hint, rule — the conditional
+/// scroll-indicator row rides `menu_list_layout`'s scroll reservation,
+/// never counted twice).
+const LIST_FRAME_ROWS: usize = 7;
 
 /// The detail pane's labeled-pair row budget.
 const MAX_DETAIL_ROWS: usize = 5;
@@ -106,9 +108,11 @@ enum Mode {
 pub enum BashViewAction {
     Close,
     /// Enter on a list row: the host fetches the row's output tail and
-    /// delivers it back with [`BashView::set_output`].
+    /// delivers it back with [`BashView::set_output`]; `generation`
+    /// stamps the open it was issued under.
     OpenDetail {
         id: String,
+        generation: u64,
     },
     /// Enter on the cancel action: the host runs `kill_kernel_bash` and
     /// refreshes the registry.
@@ -124,6 +128,11 @@ pub struct BashView {
     /// The latest registry snapshot (the host's 2s refresh keeps it
     /// current).
     activities: Vec<BashActivity>,
+    /// The detail drill-in's open generation: each open increments it,
+    /// and the host stamps its tail requests with the generation they
+    /// were issued under — a late response from an earlier open of the
+    /// same row never overwrites the newer one's output.
+    detail_generation: u64,
     selected_id: Option<String>,
     mode: Mode,
     /// The fetched output tail of the open detail row: `Some` once the
@@ -138,6 +147,7 @@ impl BashView {
     pub fn new(activities: Vec<BashActivity>, viewport_rows: usize) -> Self {
         let mut view = BashView {
             activities,
+            detail_generation: 0,
             selected_id: None,
             mode: Mode::List,
             output_tail: None,
@@ -151,9 +161,6 @@ impl BashView {
     /// A landed registry refresh: replace the rows, keep the selection on
     /// the surviving id, and drop a detail pane whose row vanished.
     pub fn apply_activities(&mut self, activities: Vec<BashActivity>) {
-        // A landed snapshot supersedes any shown error: a retried kill or
-        // the next 2s poll proves the failure gone.
-        self.error = None;
         self.activities = activities;
         let selected = self.selected_id.clone();
         let exists = selected
@@ -175,9 +182,10 @@ impl BashView {
     }
 
     /// The fetched output tail of one row (the host's `tail_kernel_bash`
-    /// response); a tail for a closed or different pane is ignored.
-    pub fn set_output(&mut self, id: &str, tail: &str) {
-        if self.detail_id().as_deref() != Some(id) {
+    /// response); a tail for a closed pane, a different row, or an
+    /// earlier open of the same row is ignored.
+    pub fn set_output(&mut self, id: &str, tail: &str, generation: u64) {
+        if self.detail_id().as_deref() != Some(id) || self.detail_generation != generation {
             return;
         }
         let lines: Vec<String> = tail.lines().map(clean_line).collect();
@@ -194,6 +202,13 @@ impl BashView {
     /// Surface a fetch or kill failure (the host's error channel).
     pub fn set_error(&mut self, error: String) {
         self.error = Some(error);
+    }
+
+    /// A landed REGISTRY update supersedes a shown error (a retried kill
+    /// proves the failure gone): the host calls this only when the
+    /// registry itself changed, not on unrelated dock repaints.
+    pub fn clear_error(&mut self) {
+        self.error = None;
     }
 
     /// The selected row's index (first when unset).
@@ -292,8 +307,12 @@ impl BashView {
                         id: id.clone(),
                         action_index: 0,
                     };
+                    self.detail_generation = self.detail_generation.wrapping_add(1);
                     self.output_tail = None;
-                    return BashViewAction::OpenDetail { id };
+                    return BashViewAction::OpenDetail {
+                        id,
+                        generation: self.detail_generation,
+                    };
                 }
                 BashViewAction::None
             }
@@ -409,10 +428,22 @@ impl BashView {
             return lines;
         };
         let name = single_line(&activity.command);
-        // The drill-in's command block is the EXACT command (the raw
-        // string: embedded newlines and spacing stay verbatim); only the
-        // title cell single-lines for the identity row.
-        let command_exact = activity.command.clone();
+        // The drill-in's command block is the EXACT command — embedded
+        // newlines and spacing stay verbatim — with the non-newline
+        // control characters scrubbed: a command carrying an escape
+        // sequence never executes terminal control operations when
+        // rendered (only the title cell single-lines for identity).
+        let command_exact: String = activity
+            .command
+            .chars()
+            .map(|character| {
+                if character.is_control() && character != '\n' {
+                    ' '
+                } else {
+                    character
+                }
+            })
+            .collect();
         let subtitle = if activity.running() {
             "running".to_string()
         } else {
@@ -452,8 +483,12 @@ impl BashView {
         let command_wrapped = wrap_text(&command_exact, command_width);
         let mut command_rows = 0usize;
         let mut command_clipped = false;
-        if left >= 4 {
-            command_rows = (left - 3).min(command_wrapped.len());
+        // The command renders only when the output block's own minimum
+        // (its label plus a line, 3 rows) still fits beside it: the
+        // fetched tail is the drill-in's point and never loses its
+        // section to a long command.
+        if left >= 6 {
+            command_rows = (left - 5).min(command_wrapped.len());
             if command_wrapped.len() > command_rows {
                 // The leading marker rides inside the block's own budget:
                 // the clip never overspends the viewport.
@@ -504,8 +539,8 @@ impl BashView {
                     // marker says so), never the newest output.
                     let mut shown = output.len().min(output_rows);
                     let mut clipped = false;
-                    if output.len() > shown {
-                        shown = shown.saturating_sub(1).max(1);
+                    if output.len() > shown && shown > 1 {
+                        shown -= 1;
                         clipped = true;
                     }
                     if clipped {
@@ -1006,10 +1041,15 @@ mod tests {
     #[test]
     fn enter_opens_the_detail_and_the_cancel_action() {
         let mut view = BashView::new(activities(), 24);
-        assert_eq!(
-            view.handle_key("enter", &kb()),
-            BashViewAction::OpenDetail { id: "a".into() }
-        );
+        let action = view.handle_key("enter", &kb());
+        let BashViewAction::OpenDetail {
+            id: open_id,
+            generation: first_generation,
+        } = &action
+        else {
+            panic!("the first enter opens the detail: {action:?}");
+        };
+        assert_eq!(open_id, "a");
         assert_eq!(
             view.mode,
             Mode::Detail {
@@ -1025,11 +1065,13 @@ mod tests {
         assert_eq!(view.handle_key("left", &kb()), BashViewAction::None);
         assert_eq!(view.mode, Mode::List);
         view.handle_key("down", &kb());
-        assert_eq!(
-            view.handle_key("enter", &kb()),
-            BashViewAction::OpenDetail { id: "b".into() }
-        );
+        let action = view.handle_key("enter", &kb());
+        let BashViewAction::OpenDetail { id: open_id, .. } = &action else {
+            panic!("the finished row opens its detail: {action:?}");
+        };
+        assert_eq!(open_id, "b");
         assert_eq!(view.handle_key("enter", &kb()), BashViewAction::None);
+        let _ = first_generation;
     }
 
     /// The drill-in renders the exact command, the labeled facts, the
@@ -1039,7 +1081,11 @@ mod tests {
         let mut view = BashView::new(activities(), 40);
         view.handle_key("enter", &kb());
         // The tail lands for the open row.
-        view.set_output("a", "line one\n\x1b[31mred\x1b[0m\nline three");
+        view.set_output(
+            "a",
+            "line one\n\x1b[31mred\x1b[0m\nline three",
+            view.detail_generation,
+        );
         let frame = view.render(&theme(), 70, &kb());
         let text = frame_text(&frame);
         let joined = text.join("\n");
@@ -1072,11 +1118,11 @@ mod tests {
     fn stale_and_empty_tails_are_handled() {
         let mut view = BashView::new(activities(), 40);
         view.handle_key("enter", &kb());
-        view.set_output("b", "wrong row");
+        view.set_output("b", "wrong row", view.detail_generation);
         let frame = view.render(&theme(), 70, &kb());
         let text = frame_text(&frame);
         assert!(text.iter().any(|row| row.contains("Fetching output")));
-        view.set_output("a", "");
+        view.set_output("a", "", view.detail_generation);
         let frame = view.render(&theme(), 70, &kb());
         let text = frame_text(&frame);
         assert!(text.iter().any(|row| row.contains("No output yet")));
@@ -1145,7 +1191,7 @@ mod tests {
         let mut view = BashView::new(catalog, 20);
         view.handle_key("enter", &kb());
         let tail: Vec<String> = (1..=30).map(|n| format!("line-{n:02}")).collect();
-        view.set_output("a", &tail.join("\n"));
+        view.set_output("a", &tail.join("\n"), view.detail_generation);
         let frame = view.render(&theme(), 70, &kb());
         let text = frame_text(&frame);
         assert!(frame.len() <= 20, "the drill-in fits: {}", frame.len());
@@ -1175,13 +1221,40 @@ mod tests {
     fn fetched_output_keeps_its_leading_spacing() {
         let mut view = BashView::new(activities(), 40);
         view.handle_key("enter", &kb());
-        view.set_output("a", "    indented line\nplain line");
+        view.set_output("a", "    indented line\nplain line", view.detail_generation);
         let frame = view.render(&theme(), 70, &kb());
         let text = frame_text(&frame);
         assert!(
             text.iter().any(|row| row.contains("    indented line")),
             "leading spacing stays: {text:?}"
         );
+    }
+
+    /// A late tail from an earlier open of the same row never overwrites
+    /// the newer open's output (the generation token).
+    #[test]
+    fn a_stale_generation_never_overwrites_the_reopened_detail() {
+        let mut view = BashView::new(activities(), 40);
+        view.handle_key("enter", &kb());
+        let first_generation = view.detail_generation;
+        view.set_output("a", "first fetch", first_generation);
+        // Back out and reopen the same row: a new generation.
+        view.handle_key("left", &kb());
+        view.handle_key("enter", &kb());
+        assert_ne!(view.detail_generation, first_generation);
+        // The earlier open's late response is ignored.
+        view.set_output("a", "stale fetch", first_generation);
+        let frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        assert!(
+            !text.iter().any(|row| row.contains("stale fetch")),
+            "the stale generation never lands: {text:?}"
+        );
+        // The current generation's response lands.
+        view.set_output("a", "fresh fetch", view.detail_generation);
+        let frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        assert!(text.iter().any(|row| row.contains("fresh fetch")));
     }
 
     #[test]

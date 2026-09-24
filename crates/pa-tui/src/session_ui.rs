@@ -136,6 +136,9 @@ pub(crate) enum BashActivityUpdate {
     Tail {
         session: String,
         activity_id: String,
+        /// The detail-open generation the request was issued under: a
+        /// late tail from an earlier open never lands on a newer one.
+        generation: u64,
         tail: String,
     },
     /// A background action settled; re-issue the list from the main loop so
@@ -3186,7 +3189,7 @@ impl SessionUi {
                     return Ok(());
                 }
                 self.track_command_used("heartbeats");
-                self.open_heartbeats_view(view, None).await;
+                self.open_heartbeats_view(view);
             }
             other => {
                 self.note(
@@ -5527,14 +5530,23 @@ impl SessionUi {
                 if self.bash_activities == data {
                     return;
                 }
+                // A landed REGISTRY update supersedes a shown error (a
+                // retried kill settles here); the unrelated dock repaints
+                // never clear it.
                 self.bash_activities = data;
+                if let Some(bash_view) = view.bash_view.as_mut() {
+                    bash_view.clear_error();
+                }
                 self.update_subagent_summary(view);
             }
             BashActivityUpdate::Tail {
-                activity_id, tail, ..
+                activity_id,
+                tail,
+                generation,
+                ..
             } => {
                 if let Some(bash_view) = view.bash_view.as_mut() {
-                    bash_view.set_output(&activity_id, &tail);
+                    bash_view.set_output(&activity_id, &tail, generation);
                 }
             }
             BashActivityUpdate::Error {
@@ -5595,7 +5607,7 @@ impl SessionUi {
     /// redesign): the focused group opens its own view directly — the
     /// scoped agents view for subagents, the heartbeats view, or the
     /// bash view — with no intermediate grouped list.
-    async fn open_dock_group_view(&mut self, view: &mut AgentView) {
+    fn open_dock_group_view(&mut self, view: &mut AgentView) {
         match self.activity_group {
             crate::chrome::ActivityGroup::Subagents => {
                 self.emit_activity_opened("subagents");
@@ -5614,7 +5626,7 @@ impl SessionUi {
             }
             crate::chrome::ActivityGroup::Heartbeats => {
                 self.emit_activity_opened("heartbeats");
-                self.open_heartbeats_view(view, None).await;
+                self.open_heartbeats_view(view);
             }
             crate::chrome::ActivityGroup::Bash => {
                 self.emit_activity_opened("bash");
@@ -5641,10 +5653,12 @@ impl SessionUi {
             Some(BashViewAction::Close) => {
                 view.bash_view = None;
             }
-            Some(BashViewAction::OpenDetail { id }) => {
+            Some(BashViewAction::OpenDetail { id, generation }) => {
                 // The request runs off the key loop (a stalled kernel
                 // must not freeze the TUI behind the request bound): the
-                // tail lands on the open view through the update channel.
+                // tail lands on the open view through the update channel,
+                // stamped with this open's generation so a late response
+                // from an earlier open never overwrites it.
                 let client = self.client.clone();
                 let session = self.active_session_id.clone();
                 let tx = self.bash_updates.clone();
@@ -5665,6 +5679,7 @@ impl SessionUi {
                                 let _ = tx.send(BashActivityUpdate::Tail {
                                     session,
                                     activity_id: response_id,
+                                    generation,
                                     tail: tail.to_string(),
                                 });
                             }
@@ -5831,25 +5846,6 @@ impl SessionUi {
     /// Fetch the session-scoped heartbeat catalog (TS
     /// `refreshHeartbeatCatalog`'s fetch + `getScopedHeartbeats`): the
     /// selector-less supervisor catalog, scoped to this session and its
-    /// live RLM children, sorted, or the fetch error that replaces it.
-    async fn fetch_scoped_heartbeats(&self) -> (Vec<HeartbeatEntry>, Option<String>) {
-        let request = DaemonCommand::HeartbeatsList {
-            id: None,
-            active_session_id: None,
-            rest: Default::default(),
-        };
-        match self
-            .bounded_request(Duration::from_millis(UI_REQUEST_TIMEOUT_MS), request)
-            .await
-        {
-            Ok(data) => {
-                let mut heartbeats = self.scope_heartbeats(parse_heartbeats(&data));
-                sort_heartbeats(&mut heartbeats);
-                (heartbeats, None)
-            }
-            Err(error) => (Vec::new(), Some(format!("{error:#}"))),
-        }
-    }
 
     /// Scope a fetched catalog to THIS session only (operator scoping:
     /// nested sessions' heartbeats do not surface in the dock, the
@@ -5966,30 +5962,22 @@ impl SessionUi {
         }
     }
 
-    /// Fetch the scoped catalog and open the `/heartbeats` view over it
-    /// (TS `showHeartbeatManager`): the fetch error opens over the cached
-    /// catalog with the failure surfaced inside the view (stale-while-
-    /// revalidate), and the activity dock follows the landed catalog.
-    /// `preselect` carries the caller's chosen heartbeat row into
-    /// the view's selection.
-    async fn open_heartbeats_view(&mut self, view: &mut AgentView, preselect: Option<String>) {
-        // The direct fetch is the newest snapshot: bump the epoch so an
-        // in-flight background response never overwrites this catalog.
-        self.heartbeat_refresh_epoch += 1;
-        let (fetched, fetch_error) = self.fetch_scoped_heartbeats().await;
-        let heartbeats = if fetch_error.is_some() {
-            self.heartbeat_catalog.clone()
-        } else {
-            fetched
-        };
-        self.heartbeat_catalog = heartbeats.clone();
+    /// Open the `/heartbeats` view over the CACHED catalog at once (TS
+    /// `showHeartbeatManager`'s mount): the keypress never waits on the
+    /// daemon — a non-blocking refresh lands through the update channel,
+    /// and stale-while-revalidate keeps the mounted catalog on failure
+    /// (the error surfaces inside the open view only). The picker owns
+    /// the frame: the dock's focus hands off, so closing the picker
+    /// returns to the editor, not the dock.
+    fn open_heartbeats_view(&mut self, view: &mut AgentView) {
+        self.subagents_focused = false;
         view.heartbeats_picker = Some(HeartbeatsPicker::new(
-            heartbeats,
-            fetch_error,
-            preselect,
+            self.heartbeat_catalog.clone(),
+            None,
+            None,
             picker_viewport_rows(view.terminal_rows()),
         ));
-        self.sync_activity_dock(view);
+        self.spawn_heartbeat_refresh();
         self.dirty = true;
     }
 
@@ -6594,7 +6582,7 @@ impl SessionUi {
                 // The dock is the direct launcher: Enter opens the
                 // focused group's own view (the operator's redesign —
                 // the grouped activity panel is gone).
-                self.open_dock_group_view(view).await;
+                self.open_dock_group_view(view);
                 return Ok(());
             }
             if id == "left" || id == "right" {
@@ -6659,7 +6647,7 @@ impl SessionUi {
             .keybindings()
             .matches(&id, "app.heartbeats.open")
         {
-            self.open_heartbeats_view(view, None).await;
+            self.open_heartbeats_view(view);
             return Ok(());
         }
         if view.editor.keybindings().matches(&id, "app.input.clear") {

@@ -23,8 +23,10 @@ use crate::{Line, Span};
 const PREFERRED_VISIBLE: usize = 8;
 
 /// Rows the list reserves outside its items (the inline geometry: rule,
-/// title, blank, column header, scroll indicator, blank, hint, rule).
-const LIST_FRAME_ROWS: usize = 8;
+/// title, blank, column header, blank, hint, rule — the conditional
+/// scroll-indicator row rides `menu_list_layout`'s scroll reservation,
+/// never counted twice).
+const LIST_FRAME_ROWS: usize = 7;
 
 /// The detail pane's labeled-pair row budget.
 const MAX_DETAIL_ROWS: usize = 6;
@@ -626,11 +628,14 @@ impl HeartbeatsPicker {
 
     /// The list's visible-row budget (TS `getListLayout`, inline shape).
     fn visible_items(&self) -> usize {
+        // Both error blocks render two rows each when present (the
+        // fetch failure and the action failure stack in the footer).
         let reserved = LIST_FRAME_ROWS
-            + if self.error.is_some() || self.fetch_error.is_some() {
-                2
-            } else {
-                0
+            + match (self.error.is_some(), self.fetch_error.is_some()) {
+                (true, true) => 4,
+                (some, _) if some => 2,
+                (_, true) => 2,
+                _ => 0,
             };
         // The shared layout floors at one row so a picker never reads
         // empty; this view must never render past its viewport, so a
@@ -1586,6 +1591,54 @@ mod tests {
             text.iter().filter(|row| row.trim() == "\u{2026}").count() == 0,
             "no lone marker: {text:?}"
         );
+    }
+
+    /// The scroll-indicator row is reserved exactly once: a scrolling
+    /// viewport uses every row it can hold (the frame constant excludes
+    /// the conditional indicator; menu_list_layout reserves it).
+    #[test]
+    fn a_scrolling_viewport_uses_every_row() {
+        let mut catalog = entries();
+        while catalog.len() < 10 {
+            let mut extra = job_value(&format!("hb-{}", catalog.len()), "rlm_heartbeat", "active");
+            extra["job"]["label"] = json!(format!("job {}", catalog.len()));
+            let job = parse_heartbeat_job(&extra["job"]).expect("job");
+            catalog.push(HeartbeatEntry {
+                job,
+                session_name: None,
+                first_message: None,
+            });
+        }
+        let picker = HeartbeatsPicker::new(catalog, None, None, 12);
+        let frame = picker.render(&theme(), 70, &kb());
+        assert_eq!(
+            frame.len(),
+            12,
+            "the scrolling pane spends the viewport exactly: {:#?}",
+            frame
+                .iter()
+                .map(|line| line
+                    .iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// A double failure (fetch error + action error) reserves both footer
+    /// blocks: the list never renders past the viewport.
+    #[test]
+    fn double_errors_reserve_both_footer_blocks() {
+        let mut picker = HeartbeatsPicker::new(entries(), None, None, 14);
+        picker.set_fetch_error(Some("daemon busy".to_string()));
+        picker.set_action_error("management failed".to_string());
+        let frame = picker.render(&theme(), 70, &kb());
+        assert!(frame.len() <= 14, "the pane fits: {}", frame.len());
+        let text = frame_text(&frame);
+        assert!(text.iter().any(|row| row.contains("daemon busy")));
+        assert!(text
+            .iter()
+            .any(|row| row.contains("Error: management failed")));
     }
 
     #[test]
