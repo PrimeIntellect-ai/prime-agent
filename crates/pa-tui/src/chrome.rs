@@ -571,11 +571,24 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
     }
     // Only live bash runs count in the dock's indicator (operator
     // scoping); the bash view keeps the finished rows.
-    let bash = vec![theme.fg_span(ThemeColor::Muted, format!("▸ {} bash", dock.bash_running))];
     let groups = [
         (ActivityGroup::Subagents, subagents),
         (ActivityGroup::Heartbeats, heartbeats),
-        (ActivityGroup::Bash, bash),
+        // Only live bash runs count in the dock's indicator (operator
+        // scoping); the bash view keeps the finished rows. The label is
+        // "shell(s)" (operator directive via #2677): the tool name stays
+        // bash() everywhere else.
+        (
+            ActivityGroup::Bash,
+            vec![theme.fg_span(
+                ThemeColor::Muted,
+                format!(
+                    "▸ {} shell{}",
+                    dock.bash_running,
+                    if dock.bash_running == 1 { "" } else { "s" }
+                ),
+            )],
+        ),
     ];
     let mut line = vec![Span::raw(" ")];
     for (index, (group, spans)) in groups.iter().enumerate() {
@@ -663,7 +676,7 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             text,
-            " ◆ 95 subagents · ● 2 running · ◐ 93 idle  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 bash  ·  goal 18k/40k"
+            " ◆ 95 subagents · ● 2 running · ◐ 93 idle  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  goal 18k/40k"
         );
         // A running count of zero still renders: a long idle roster must
         // read as quiet, not as uniformly busy.
@@ -681,7 +694,7 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             text,
-            " ◆ 2 subagents · ● 0 running · ◐ 2 idle  ·  ◷ 1 heartbeat  ·  ▸ 0 bash"
+            " ◆ 2 subagents · ● 0 running · ◐ 2 idle  ·  ◷ 1 heartbeat  ·  ▸ 0 shells"
         );
         // A dead-only roster keeps the dock mounted and its Subagents
         // group selectable (finished subagents are browsable history):
@@ -711,7 +724,7 @@ mod tests {
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
-        assert!(text.contains("▸ 0 bash"));
+        assert!(text.contains("▸ 0 shells"));
         assert!(render_activity_dock(&ActivityDock::default(), &theme, 100).is_none());
     }
 

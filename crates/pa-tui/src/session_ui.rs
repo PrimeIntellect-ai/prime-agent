@@ -486,11 +486,12 @@ pub(crate) struct SessionUi {
     /// process-group suspend: the interactive loop performs the cycle
     /// right after dispatch, because the renderer is the loop's terminal.
     suspend_requested: bool,
-    /// A client command a selector resolved to (the `/mcp` view's Enter:
-    /// TS `authenticate` runs the login flow): the interactive loop
-    /// dispatches it through the ordinary submit path right after the key,
-    /// so the terminal-suspending auth flows keep their bracket.
-    pending_client_command: Option<String>,
+    /// The `/mcp` view's internal auth resolution (its Enter on a
+    /// connection, or the inline paste panel — the args for the client
+    /// auth commands, e.g. `login <server>`): dispatched by the loop
+    /// through the auth seam with its terminal-suspension bracket, never
+    /// through the typed-command path.
+    pending_mcp_auth: Option<String>,
     /// Whether this run already reported its first suspend cycle.
     suspend_adoption_emitted: bool,
     /// The armed selection auto-scroll (TS `selectionAutoScroll*`): a drag
@@ -679,7 +680,7 @@ impl SessionUi {
             side_bash_discarded: None,
             side_bash_counter: 0,
             suspend_requested: false,
-            pending_client_command: None,
+            pending_mcp_auth: None,
             suspend_adoption_emitted: false,
             selection_auto_scroll: None,
             selection_adoption_emitted: false,
@@ -2533,36 +2534,21 @@ impl SessionUi {
                     }
                 }
             }
-            // `/model [search]` (TS `handleModelCommand` →
-            // `showConfigurationMenu("models")`): open the inline menu
-            // panel over the cached catalog, the search term prefilled as
-            // its filter; a refresh fires in the background when the
-            // snapshot is stale (forced when a search argument rides the
-            // command) and lands into the open picker.
+            // `/model` opens the model picker (menu-only: the TS
+            // `handleModelCommand` inline-arg form — an exact match applies
+            // directly, anything else prefills the search — is deliberately
+            // removed; a partial + Tab opens the picker filtered instead,
+            // and a submitted argument is the usage error).
             "model" => {
                 self.track_command_used("model");
-                let current = self.current_model(view);
-                let thinking_level = self
-                    .picker_initial_thinking_level(current.as_ref(), view)
-                    .await;
-                let options = ModelPickerOptions {
-                    models: self.model_catalog.clone(),
-                    current,
-                    configured_providers: self.model_configured_providers.clone(),
-                    recent_models: self.model_recent_models.clone(),
-                    thinking_level,
-                    viewport_rows: picker_viewport_rows(view.terminal_rows()),
-                };
-                // TS `handleModelCommand` always opens the menu (an empty
-                // catalog renders the empty panel).
-                let crate::model_picker::ModelCommandOutcome::Open(picker) =
-                    ModelPicker::open(options, &resolved.args);
-                view.model_picker = Some(*picker);
-                // TS `refreshModels(initialModelSearch !== undefined)`.
-                let force = !resolved.args.trim().is_empty();
-                if self.model_refresh_due(force) {
-                    self.spawn_model_catalog_refresh();
+                if !resolved.args.trim().is_empty() {
+                    view.editor
+                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
+                    self.error_row("Usage: /model (Tab filters the picker)", view);
+                    return Ok(());
                 }
+                self.open_model_picker(view, "").await?;
+                self.track_menu_opened("model", "command");
             }
             // `/effort [level]` (TS `handleEffortCommand`): the
             // session's thinking levels drive the outcome — a model
@@ -2826,7 +2812,7 @@ impl SessionUi {
             // prefills its search field like TS's initial search.
             "plugins" => {
                 self.track_command_used("plugins");
-                self.open_mcp_view("/plugins", view).await?;
+                self.open_mcp_view("/plugins", view, "").await?;
                 let search = resolved.args.trim();
                 if !search.is_empty() {
                     if let Some(mcp) = view.mcp_view.as_mut() {
@@ -4884,37 +4870,97 @@ impl SessionUi {
         self.escape_repeat_until = Some(Instant::now() + ESCAPE_REPEAT_WINDOW_MS);
     }
 
-    /// `/mcp` (TS `handleMcpCommand`): the bare command opens the inline
-    /// connections view over the daemon's roster (TS opens the
-    /// configuration menu's MCP Connections tab); `login`/`logout <name>`
-    /// run the composition root's auth flow (only the login prompts on
-    /// the terminal, so `needs_terminal_suspension` covers it); anything
-    /// else keeps the usage note.
+    /// `/mcp` (menu-only: the bare command opens the inline connections
+    /// view; a submitted argument is the usage error; the view resolves
+    /// its own auth through the internal seam).
     async fn handle_mcp_command(
         &mut self,
         resolved: &pa_types::slash_commands::ResolvedSlashCommand,
         view: &mut AgentView,
     ) -> Result<()> {
         self.track_command_used("mcp");
-        if resolved.args.trim().is_empty() {
-            return self.open_mcp_view("/mcp", view).await;
-        }
-        let Some(auth) = self.client_auth.clone() else {
-            self.note("/mcp is not available in this client yet", view);
+        // `/mcp` is menu-only: the TS `handleMcpCommand` typed subcommands
+        // (login/logout/...) are deliberately removed — the connections
+        // view resolves its own auth internally, and a submitted argument
+        // is the usage error. A partial + Tab opens the view filtered.
+        if !resolved.args.trim().is_empty() {
+            view.editor
+                .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
+            self.error_row("Usage: /mcp (Tab filters the menu)", view);
             return Ok(());
-        };
-        let note = crate::client_auth::run_mcp_auth_command(auth.0.as_ref(), &resolved.args).await;
-        self.note(&note, view);
+        }
+        self.open_mcp_view("/mcp", view, "").await?;
+        self.track_menu_opened("mcp", "command");
         Ok(())
     }
 
+    /// Run one internal MCP auth request (the `/mcp` view's resolution):
+    /// the client auth commands own the flow; an unavailable auth client
+    /// reports the TS note.
+    pub(crate) async fn run_mcp_auth(&mut self, args: &str, view: &mut AgentView) {
+        let Some(auth) = self.client_auth.clone() else {
+            self.note("/mcp is not available in this client yet", view);
+            return;
+        };
+        let note = crate::client_auth::run_mcp_auth_command(auth.0.as_ref(), args).await;
+        self.note(&note, view);
+    }
+
+    /// Open the `/model` picker over the cached catalog, its search
+    /// prefilled with `search` (the Tab-intercepted partial; empty for the
+    /// bare command). A refresh fires in the background when the snapshot
+    /// is stale (forced when a search rides the open) and lands into the
+    /// open picker.
+    async fn open_model_picker(&mut self, view: &mut AgentView, search: &str) -> Result<()> {
+        let current = self.current_model(view);
+        let thinking_level = self
+            .picker_initial_thinking_level(current.as_ref(), view)
+            .await;
+        let options = ModelPickerOptions {
+            models: self.model_catalog.clone(),
+            current,
+            configured_providers: self.model_configured_providers.clone(),
+            recent_models: self.model_recent_models.clone(),
+            thinking_level,
+            viewport_rows: picker_viewport_rows(view.terminal_rows()),
+        };
+        // TS `handleModelCommand` always opens the menu (an empty catalog
+        // renders the empty panel).
+        let crate::model_picker::ModelCommandOutcome::Open(picker) =
+            ModelPicker::open(options, search);
+        view.model_picker = Some(*picker);
+        // TS `refreshModels(initialModelSearch !== undefined)`.
+        let force = !search.trim().is_empty();
+        if self.model_refresh_due(force) {
+            self.spawn_model_catalog_refresh();
+        }
+        Ok(())
+    }
+
+    /// Report a menu surface opening (`tui menu opened`, fire-and-forget
+    /// like the other adoption seams): `menu` names the surface (`model`,
+    /// `mcp`), `source` how it opened (`command`, `tab`).
+    fn track_menu_opened(&self, menu: &'static str, source: &'static str) {
+        if let Some(telemetry) = self.telemetry.clone() {
+            tokio::spawn(async move {
+                telemetry.menu_opened(menu, source).await;
+            });
+        }
+    }
+
     /// Open the inline `/mcp` connections view over the daemon's
-    /// `get_mcp_connections` roster. The request carries the kernel's tool
-    /// listing (it opens each connected generic server, bounded), so it
-    /// gets the wider deadline.
+    /// `get_mcp_connections` roster, its filter prefilled with `search`
+    /// (the Tab-intercepted partial). The request carries the kernel's
+    /// tool listing (it opens each connected generic server, bounded), so
+    /// it gets the wider deadline.
     /// `command` names the entry the user ran (`/mcp` or `/plugins`), so a
     /// failed roster load reports the command that failed.
-    async fn open_mcp_view(&mut self, command: &str, view: &mut AgentView) -> Result<()> {
+    async fn open_mcp_view(
+        &mut self,
+        command: &str,
+        view: &mut AgentView,
+        search: &str,
+    ) -> Result<()> {
         let data = match self
             .bounded_request(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS * 4),
@@ -4932,19 +4978,24 @@ impl SessionUi {
                 return Ok(());
             }
         };
-        view.mcp_view = Some(crate::mcp_view::McpView::from_response(
+        let mut mcp_view = crate::mcp_view::McpView::from_response(
             &data,
             picker_viewport_rows(view.terminal_rows()),
-        ));
+        );
+        if !search.trim().is_empty() {
+            mcp_view.set_search(search);
+        }
+        view.mcp_view = Some(mcp_view);
         self.dirty = true;
         Ok(())
     }
 
     /// One key press while the `/mcp` connections view is open: Esc or
-    /// Ctrl+C close it; Enter resolves to the selected connection's login
-    /// (dispatched as a client command after the key returns, so the auth
-    /// flow keeps the terminal-suspension bracket); everything else
-    /// navigates or edits the search field.
+    /// Ctrl+C close it; Enter (or the paste panel) resolves the selected
+    /// connection by parking `pending_mcp_auth`, which the input loop
+    /// runs once the key handler returns (so the auth flow keeps the
+    /// terminal-suspension bracket); everything else navigates or edits
+    /// the search field.
     async fn handle_mcp_view_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
@@ -4968,16 +5019,22 @@ impl SessionUi {
             Some(crate::mcp_view::McpViewAction::Select(server)) => {
                 view.mcp_view = None;
                 self.dirty = true;
+                // The Tab path leaves the typed `/mcp <partial>` behind;
+                // resolving fulfills the command (a Cancel keeps it).
+                view.editor.set_text("");
                 // TS `authenticate`: Enter runs the connection's login
-                // flow — the same command path as `/mcp login <name>`.
-                self.pending_client_command = Some(format!("/mcp login {server}"));
+                // flow. The typed-command arg path is gone, so the view
+                // resolves through the internal auth seam instead of a
+                // submitted `/mcp login <name>` string.
+                self.pending_mcp_auth = Some(format!("login {server}"));
             }
             Some(crate::mcp_view::McpViewAction::Paste(server)) => {
                 view.mcp_view = None;
                 self.dirty = true;
+                view.editor.set_text("");
                 // The inline paste panel's client surface: prompt for the
                 // token, store it bound to the service endpoint, verify.
-                self.pending_client_command = Some(format!("/mcp paste {server}"));
+                self.pending_mcp_auth = Some(format!("paste {server}"));
             }
             None => {}
         }
@@ -4986,14 +5043,15 @@ impl SessionUi {
 
     /// Whether dispatching this input needs the terminal handed over
     /// (raw-mode off, alternate screen left) so the auth flow can prompt.
-    pub(crate) fn needs_terminal_suspension(&self, text: &str) -> bool {
-        let Some((name, args)) = pa_types::slash_commands::parse_slash_command(text) else {
-            return false;
-        };
-        if name != "mcp" || self.client_auth.is_none() {
+    /// `args` is the auth-args form (the `/mcp` view's internal
+    /// resolution, e.g. `login <name>`): a login suspends, a paste
+    /// prompts on the plain terminal too (its token prompt reads
+    /// stdin), so both hand the terminal over.
+    pub(crate) fn mcp_auth_needs_terminal(&self, args: &str) -> bool {
+        if self.client_auth.is_none() {
             return false;
         }
-        matches!(args.split_whitespace().next(), Some("login"))
+        mcp_auth_args_need_terminal(args)
     }
 
     /// `/resume <selector>`: a session file path, an `<id>.jsonl` under the
@@ -5223,6 +5281,11 @@ impl SessionUi {
             }
             Some(ModelPickerAction::Apply(applied)) => {
                 view.model_picker = None;
+                // The Tab path leaves the typed `/model <partial>` behind in
+                // the editor; the command path's submission already drained
+                // it. Applying fulfills the command either way, so the
+                // editor clears (a Cancel keeps the partial for editing).
+                view.editor.set_text("");
                 self.apply_model_selection(&applied.provider, &applied.model_id, view)
                     .await;
                 // A user-edited effort applies after the model switch (TS
@@ -6430,11 +6493,13 @@ impl SessionUi {
         std::mem::take(&mut self.suspend_requested)
     }
 
-    /// Take the pending client command a selector resolved to (the `/mcp`
-    /// view's Enter): the interactive loop dispatches it through the
-    /// ordinary submit path, so the auth flows keep the suspend bracket.
-    pub(crate) fn take_pending_client_command(&mut self) -> Option<String> {
-        self.pending_client_command.take()
+    /// Take the pending MCP auth request the connections view resolved to
+    /// (its Enter on a connection, or the inline paste panel): the args
+    /// run through the client auth commands directly — the typed-command
+    /// arg path is gone (`/mcp` is menu-only), so the view never resolves
+    /// through a submitted `/mcp <args>` string.
+    pub(crate) fn take_pending_mcp_auth(&mut self) -> Option<String> {
+        self.pending_mcp_auth.take()
     }
 
     /// Report the run's first suspend cycle (`tui suspend used`),
@@ -6651,7 +6716,21 @@ impl SessionUi {
             return Ok(());
         }
         if view.editor.keybindings().matches(&id, "app.input.clear") {
-            view.editor.cancel_autocomplete();
+            // The completion surface consumes Esc: the open dropdown
+            // closes, and a parked request (Tab before the input-idle
+            // tick materializes it) cancels before it can open the menu —
+            // either way the key stops there. The abort ladder (the
+            // escape-repeat arming and `interrupt_running_work`) runs only
+            // when no menu is open or about to open — closing a menu must
+            // never abort a running turn (the TS base editor consumes
+            // `tui.select.cancel` inside the dropdown; the TS
+            // custom-editor overlay propagates Esc to the interrupt after
+            // closing, the behavior this deliberately removes).
+            if view.editor.is_showing_autocomplete() || view.editor.has_pending_autocomplete() {
+                view.editor.cancel_autocomplete();
+                self.clear_ctrl_c_hint();
+                return Ok(());
+            }
             self.clear_ctrl_c_hint();
             // TS `handleEscape`: an open side-question pane owns the key —
             // the running turn aborts and the pane closes; the armed
@@ -6917,6 +6996,56 @@ impl SessionUi {
             }
             self.dirty = true;
             return Ok(());
+        }
+        // Tab in a picker-command argument context opens that command's
+        // menu prefilled with the typed partial: `/model <partial>` Tab
+        // opens the model picker filtered to the match, `/mcp <partial>`
+        // Tab the connections view filtered. The menu-only commands have
+        // no typed-arg execution, so the partial's only destination is the
+        // picker's filter. An open completion dropdown keeps its own Tab
+        // (apply the selection); the interception is the no-menu path.
+        if view.editor.keybindings().matches(&id, "tui.input.tab")
+            && !view.editor.is_showing_autocomplete()
+        {
+            if let Some((command, partial)) = view.editor.picker_argument_context() {
+                // The menu takes the Tab: a completion request parked by
+                // this same press (before the idle tick) must not
+                // materialize a dropdown over the menu on the next tick.
+                view.editor.cancel_autocomplete();
+                // The menu also takes the frame from a queue browse: the
+                // parked message keeps its text (the typed partial is the
+                // command being fulfilled now), and the next Enter submits
+                // a prompt instead of routing into apply_queue_selection,
+                // which would delete or replace the still-selected message.
+                // Ending the browse restores the stashed draft like every
+                // other leave-browse path (Esc, an applied queue edit), so
+                // the editor never strands the browsed message's text and
+                // a failed menu open loses nothing: the draft returns.
+                if matches!(command.as_str(), "model" | "mcp") {
+                    if self.queue_selection.has_draft() {
+                        let draft = self.queue_selection.reset();
+                        view.editor.set_text(&draft);
+                    } else {
+                        self.queue_selection.reset();
+                    }
+                    self.sync_queue_selection(view);
+                }
+                match command.as_str() {
+                    "model" => {
+                        self.open_model_picker(view, partial.trim()).await?;
+                        self.track_menu_opened("model", "tab");
+                        self.dirty = true;
+                        return Ok(());
+                    }
+                    "mcp" => {
+                        self.open_mcp_view("/mcp", view, partial.trim()).await?;
+                        self.track_menu_opened("mcp", "tab");
+                        self.dirty = true;
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
         }
         // TS `CustomEditor.handleInput`'s move-below-prompt hook
         // (`onMoveBelowPrompt` -> `focusSubagentSummary`): Down at the end
@@ -8314,6 +8443,13 @@ async fn create_session(
         .ok_or_else(|| anyhow!("the daemon did not report a session id for the new session"))
 }
 
+/// The auth-args subcommands that prompt on the plain terminal: a login
+/// (OAuth/device flow) and a paste (its token prompt reads stdin from the
+/// terminal). Anything else (logout, malformed args) stays in-band.
+fn mcp_auth_args_need_terminal(args: &str) -> bool {
+    matches!(args.split_whitespace().next(), Some("login" | "paste"))
+}
+
 /// The retry-episode collapse (SANCTIONED DIVERGENCE from TS, operator
 /// ruling 2026-09-23): pop the trailing failed-attempt error row the
 /// retry supersedes, so the ONE line the episode shows while it runs is
@@ -8555,6 +8691,28 @@ mod loader_token_tests {
         stats.tokens += 100;
         stats.duration_ms += 500;
         assert_eq!(stats.average_rate(), 200.0);
+    }
+}
+
+#[cfg(test)]
+mod mcp_auth_terminal_tests {
+    use super::mcp_auth_args_need_terminal;
+
+    /// The inline paste panel's `paste <server>` prompts for the token on
+    /// the plain terminal (its read of stdin cannot happen under the raw
+    /// renderer), so it needs the same hand-over as a login.
+    #[test]
+    fn login_and_paste_need_the_terminal() {
+        assert!(mcp_auth_args_need_terminal("login anthropic"));
+        assert!(mcp_auth_args_need_terminal("paste anthropic"));
+    }
+
+    /// A logout and a bare/unknown subcommand stay in-band.
+    #[test]
+    fn logout_and_malformed_args_stay_in_band() {
+        assert!(!mcp_auth_args_need_terminal("logout anthropic"));
+        assert!(!mcp_auth_args_need_terminal(""));
+        assert!(!mcp_auth_args_need_terminal("refresh anthropic"));
     }
 }
 

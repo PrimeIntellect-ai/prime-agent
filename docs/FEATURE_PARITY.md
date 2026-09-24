@@ -421,9 +421,9 @@ Method: every TS file in `packages/tui/src` read in full; each behavior located 
 | components/editor.ts:521 | Render surface: borders, scroll indicators `↑ N more`, prompt prefix, bg padding | crates/pa-tui/src/view.rs:806 (CustomEditor bg-surface variant; no `───` border variant) | MATCHES | — |
 | components/editor.ts:2389 | Autocomplete trigger matrix (/, @, #, word chars, refresh-after-edit cancel rules) | crates/pa-tui/src/editor/autocomplete.rs:66 + crates/pa-tui/src/editor/autocomplete.rs:182 (no `regular && !hasCompletionContext` cancel) | PARTIAL | autocomplete-fd (new) |
 | components/editor.ts:2157 | `getBestAutocompleteMatchIndex` (exact → first prefix) | crates/pa-tui/src/autocomplete.rs:352 | MATCHES | — |
-| components/editor.ts:2187 | Tab completion: slash-name vs forced file | crates/pa-tui/src/editor/autocomplete.rs:105 | MATCHES | — |
+| components/editor.ts:2187 | Tab completion: slash-name vs forced file | crates/pa-tui/src/editor/autocomplete.rs:105 (**deliberate divergence**: Tab on an empty/whitespace-only prompt is a no-op — no cwd listing menu; `/model`/`/mcp` argument contexts open their picker filtered instead) | PARTIAL | — |
 | components/editor.ts:2205 | Async suggestion request (AbortController, 20ms symbol debounce, staleness checks) | crates/pa-tui/src/editor/autocomplete.rs:93 + crates/pa-tui/src/editor/mod.rs:180 (`PendingAutocomplete` parked until input-idle; no 20ms symbol debounce) | PARTIAL | autocomplete-fd (new) |
-| components/select-list.ts:48 | `SelectList` render: columns, description inline, scroll info, wrap description | crates/pa-tui/src/autocomplete.rs:372 (`AutocompleteState::render`) | MATCHES | — |
+| components/select-list.ts:48 | `SelectList` render: columns, description inline, scroll info, wrap description | crates/pa-tui/src/autocomplete.rs:372 (`AutocompleteState::render` — **deliberate divergence**: renders through the shared menu panel grammar: `›` marker rows with the soft selection band, right-aligned muted trailing, `(n/m)` scroll row, wrapped description block) | PARTIAL | — |
 | components/select-list.ts:189 | Metadata item: argumentHint + sourceTag columns | crates/pa-tui/src/autocomplete.rs:449 (`render_item` handles argumentHint; **sourceTag not rendered**) | PARTIAL | autocomplete-fd (new) |
 | components/select-list.ts:60 | `setFilter` (prefix filter, reset selection) | MISSING (dropdown re-filters via provider per keystroke; menu-panel pickers keep own filter) | PARTIAL | autocomplete-fd (new) |
 | components/settings-list.ts:34 | `SettingsList` (label/value rows, cycle, submenu, search) | crates/pa-tui/src/config_selector.rs (config selector surface; no generic submenu component) | PARTIAL | model-fix |
@@ -666,7 +666,7 @@ TS reference: packages/coding-agent/src/modes/interactive/ (read-only). Rust wor
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4907-4911 | /btw dispatch | crates/pa-tui/src/session_ui.rs (dispatch_client_command "btw" arm; /side resolves by alias) | MATCHES | - |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4912-4921 | /settings -> showSettingsSelector | MISSING | MISSING | settings-menu (proposed) |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4922-4931 | /scoped-models -> showModelsSelector | MISSING | MISSING | model-fix |
-| packages/coding-agent/src/modes/interactive/interactive-mode.ts:4932-4937 | /model [search] -> handleModelCommand | crates/pa-tui/src/session_ui.rs:1285-1309 | IN-FLIGHT | model-fix |
+| packages/coding-agent/src/modes/interactive/interactive-mode.ts:4932-4937 | /model [search] -> handleModelCommand | crates/pa-tui/src/session_ui.rs (menu-only: bare `/model` opens the picker; **deliberate divergence** — the TS inline-arg exact-match apply is removed, a submitted argument is the usage error, `/model <partial>` + Tab opens the picker filtered) | PARTIAL | model-fix |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4938-4942 | /effort -> handleEffortCommand | crates/pa-tui/src/session_ui.rs:1314-1363 + effort_picker.rs | IN-FLIGHT | thinking-level |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4943-4951 | /fast -> handleFastCommand | MISSING | MISSING | model-fix |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:4952-4956 | /export -> handleExportCommand | crates/pa-tui/src/session_ui.rs:1401-1404,1468-1514 | MATCHES |  |
@@ -689,7 +689,7 @@ TS reference: packages/coding-agent/src/modes/interactive/ (read-only). Rust wor
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5098-5108 | /tree -> showTreeSelector | crates/pa-tui/src/session_ui.rs:1364-1372,1632-1791 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5109-5118 | /login -> showConfigurationMenu(providers) | MISSING (client_auth handle is /mcp-only: session_ui.rs:216-217) | MISSING | clip-auth-cmds |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5119-5128 | /logout -> showLogoutSelector | MISSING | MISSING | clip-auth-cmds |
-| packages/coding-agent/src/modes/interactive/interactive-mode.ts:5129-5133 | /mcp -> handleMcpCommand | crates/pa-tui/src/session_ui.rs:1393-1397,1952-1966 (login/logout only) | IN-FLIGHT | mcp-view |
+| packages/coding-agent/src/modes/interactive/interactive-mode.ts:5129-5133 | /mcp -> handleMcpCommand | crates/pa-tui/src/session_ui.rs (menu-only: bare `/mcp` opens the connections view; **deliberate divergence** — the typed login/logout subcommands are removed, a submitted argument is the usage error, `/mcp <partial>` + Tab opens the view filtered; the view's Enter resolves auth internally) | PARTIAL | mcp-view |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5134-5143 | /clear alias (arg refused) | crates/pa-tui/src/session_ui.rs:1243-1251 | MATCHES |  |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5144-5156 | /new with parseNewSessionCommand options (name, initial prompt, cwd override) | crates/pa-tui/src/session_ui.rs:1246-1251 (args ignored) | PARTIAL | utility-commands |
 | packages/coding-agent/src/modes/interactive/interactive-mode.ts:5157-5161 | /resume [selector] -> agents view or resume | crates/pa-tui/src/session_ui.rs:1260-1278,1981-1997 (no agents-view fallback on bad selector) | PARTIAL |  |
@@ -840,7 +840,7 @@ Method: every TS method in scope read in full; the Rust implementing code locate
 | interactive-mode.ts:6639 | echoLocalCommand (local command echoed as user message) | crates/pa-tui/src/session_ui.rs:1424-1440 (/hotkeys only) | PARTIAL | info-commands |
 | interactive-mode.ts:6650 | addMessageToEditorHistory | MISSING | MISSING | transcript-extras |
 | interactive-mode.ts:7078 | getUserInput (input promise / agentsViewRequest guard) | crates/pa-tui/src/interactive.rs:581-616 (UiInput queue) | MATCHES | — |
-| interactive-mode.ts:7095 | handleEscape (arm + interrupt-or-clear) | crates/pa-tui/src/session_ui.rs (arm/tree/clear/draft-restore + the first-Escape interrupt ladder) | PARTIAL | interrupt-paths |
+| interactive-mode.ts:7095 | handleEscape (arm + interrupt-or-clear) | crates/pa-tui/src/session_ui.rs (arm/tree/clear/draft-restore + the first-Escape interrupt ladder; **deliberate divergence**: an open completion menu consumes Esc — it closes the menu and never interrupts, where the TS custom-editor propagates Esc to the interrupt after closing) | PARTIAL | interrupt-paths |
 | interactive-mode.ts:7116 | armEscapeRepeat/takeEscapeRepeatAction/clearEscapeRepeat (500ms window) | crates/pa-tui/src/session_ui.rs:1927-1947 | MATCHES | — |
 | interactive-mode.ts:7145 | handleCtrlC/handleInterruptKey (first press abort + hint) | crates/pa-tui/src/session_ui.rs:2718-2753 | MATCHES | — |
 | interactive-mode.ts:7160 | interruptOrClearInput (abort retry/bash/compaction/branch-summary/side-question/stream) | crates/pa-tui/src/session_ui.rs (AbortAndSendQueued/AbortCompaction/AbortSideQuestion/AbortBash; AbortRetry/AbortBranchSummary still unsent) | PARTIAL | interrupt-paths |
@@ -878,7 +878,7 @@ Method: every TS method in scope read in full; the Rust implementing code locate
 | interactive-mode.ts:7906 | showFullPaneOverlay (full-width overlay surface) | crates/pa-tui/src/view.rs:946-951 (onboarding pane only) | PARTIAL | heartbeats-menu |
 | interactive-mode.ts:7910 | showSettingsSelector (/settings menu + 20+ settings callbacks) | MISSING | MISSING | settings-menu |
 | interactive-mode.ts:6410 | isInlinePickerOpen (tray hidden while picker open) | crates/pa-tui/src/view.rs:952-989 (picker dock has no tray) | MATCHES | — |
-| interactive-mode.ts:8076 | handleModelCommand (open model picker, search arg) | crates/pa-tui/src/session_ui.rs:1285-1309 | MATCHES | — |
+| interactive-mode.ts:8076 | handleModelCommand (open model picker, search arg) | crates/pa-tui/src/session_ui.rs (menu-only: bare `/model` opens the picker; **deliberate divergence** — the exact-match inline apply is removed, a submitted argument is the usage error, Tab opens the picker filtered) | PARTIAL | model-fix |
 | interactive-mode.ts:8098 | findExactModelMatch (exact /model arg applies directly) | MISSING (always opens picker with prefilled filter) | MISSING | model-fix |
 | interactive-mode.ts:8116 | applySelectedModel (setModel + default persist) | crates/pa-tui/src/session_ui.rs:2380-2416 | PARTIAL | model-fix |
 | interactive-mode.ts:8133 | applyModelSwitchUiState (state patch + footer/autocomplete rebuild) | crates/pa-tui/src/session_ui.rs:2472-2493 (refresh_model_label) | MATCHES | — |
@@ -927,7 +927,7 @@ Method: every TS method in scope read in full; the Rust implementing code locate
 | auth-flows.ts:81 | isApiKeyLoginProvider | MISSING | MISSING | clip-auth-cmds |
 | interactive-mode.ts:9118 | showInlineAuthPanel (panel stack, reset abort) | MISSING | MISSING | clip-auth-cmds |
 | interactive-mode.ts:9185 | prepareForModelSelectionAfterLogin (post-login default model) | MISSING | MISSING | clip-auth-cmds |
-| interactive-mode.ts:9235 | handleMcpCommand (login/logout + management + list) | crates/pa-tui/src/session_ui.rs:1952-1964 (login/logout only) | IN-FLIGHT | mcp-view |
+| interactive-mode.ts:9235 | handleMcpCommand (login/logout + management + list) | crates/pa-tui/src/session_ui.rs (menu-only: `/mcp` opens the connections view; **deliberate divergence** — typed subcommands rejected as the usage error; the view's own Enter/Paste run the auth commands internally) | PARTIAL | mcp-view |
 | interactive-mode.ts:9297 | reloadAfterMcpChange (reload + "run /reload" deferral) | MISSING (no /reload to run) | IN-FLIGHT | mcp-view |
 | interactive-mode.ts:9310 | showLogoutSelector (/logout) | MISSING | MISSING | clip-auth-cmds |
 | interactive-mode.ts:9319 | handleUpdateCommand (spawn update, self-update relaunch) | MISSING | MISSING | utility-commands |

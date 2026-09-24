@@ -1,8 +1,14 @@
-//! Inline menu-panel primitives (the inline paths of TS `menu-panel.ts`):
-//! the bordered search field, the `›`-marker menu rows with right-aligned
-//! trailing segments, and the shared truncate/pad budgeting. The `/model`
-//! picker renders through these; the same geometry serves any future
-//! inline menu surface.
+//! The inline menu panel: the ONE menu component every picker and
+//! completion surface renders through. The inline paths of TS
+//! `menu-panel.ts` — the bordered search field, the `›`-marker menu rows
+//! with right-aligned trailing segments (muted or status-colored), the
+//! shared truncate/pad budgeting — plus the status rows every menu frame
+//! shares: the `(n/m)` scroll indicator, the no-match row, and the key
+//! hint row. The `/model` picker, the `/mcp` connections view, the
+//! provider selectors, the activity panel, and the editor's
+//! slash-command/file completion dropdown all compose these primitives,
+//! so selection highlight, padding, and status rows read as one visual
+//! grammar across every menu.
 
 use crate::theme::{Theme, ThemeColor};
 use crate::width::{str_width, truncate_line};
@@ -11,45 +17,93 @@ use crate::{Line, Span};
 /// The field prompt (TS `Input` renders `"> "`).
 const FIELD_PROMPT: &str = "> ";
 
+/// One right-aligned trailing segment of a menu row: `text` joined into the
+/// row's trailing cluster, colored by the theme when the surface carries a
+/// status vocabulary (mcp connection states), muted otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MenuSegment<'a> {
+    pub text: &'a str,
+    pub color: Option<ThemeColor>,
+}
+
+impl<'a> MenuSegment<'a> {
+    /// A muted segment (the TS `MenuRow` inline trailing).
+    pub fn muted(text: &'a str) -> Self {
+        Self { text, color: None }
+    }
+
+    /// A status segment with its theme color.
+    pub fn themed(color: ThemeColor, text: &'a str) -> Self {
+        Self {
+            text,
+            color: Some(color),
+        }
+    }
+}
+
 /// Trailing segments are joined with `" · "` and shrink from the front when
 /// the row is too narrow (TS `reduceInlineTrailingSegments`).
-fn reduce_trailing_segments<'a>(segments: &[&'a str], budget: usize) -> Vec<&'a str> {
-    let mut current: Vec<&str> = segments
+fn reduce_trailing_segments<'a>(
+    segments: &[MenuSegment<'a>],
+    budget: usize,
+) -> Vec<MenuSegment<'a>> {
+    let mut current: Vec<MenuSegment> = segments
         .iter()
         .copied()
-        .filter(|segment| !segment.is_empty())
+        .filter(|segment| !segment.text.is_empty())
         .collect();
-    while current.len() > 1 && str_width(&current.join(" · ")) > budget {
+    while current.len() > 1 && str_width(&segments_text(&current)) > budget {
         current.remove(0);
     }
     current
 }
 
+fn segments_text(segments: &[MenuSegment<'_>]) -> String {
+    segments
+        .iter()
+        .map(|segment| segment.text)
+        .collect::<Vec<&str>>()
+        .join(" · ")
+}
+
 /// Rendered width of a trailing cluster at the given row width, mirroring how
 /// the row degrades and truncates it (TS `getInlineTrailingWidth`). Pickers
 /// use this to budget row content.
-pub(crate) fn trailing_width(segments: &[&str], width: usize) -> usize {
+pub(crate) fn trailing_width(segments: &[MenuSegment<'_>], width: usize) -> usize {
     let inner_width = width.saturating_sub(2).max(1);
     let budget = inner_width.saturating_sub(5).max(1);
     let reduced = reduce_trailing_segments(segments, budget);
     if reduced.is_empty() {
         return 0;
     }
-    str_width(&reduced.join(" · ")).min(budget)
+    str_width(&segments_text(&reduced)).min(budget)
 }
 
-/// Render the trailing cluster: segments joined with `" · "`, muted, shrunk
-/// from the front and truncated to the row's trailing budget (TS
-/// `MenuRow.getInlineTrailing`).
-pub(crate) fn trailing_spans(theme: &Theme, segments: &[&str], inner_width: usize) -> Line {
+/// Render the trailing cluster: segments joined with `" · "`, shrunk from
+/// the front and truncated to the row's trailing budget (TS
+/// `MenuRow.getInlineTrailing`); each segment carries its own theme color,
+/// muted by default.
+pub(crate) fn trailing_spans(
+    theme: &Theme,
+    segments: &[MenuSegment<'_>],
+    inner_width: usize,
+) -> Line {
     let budget = inner_width.saturating_sub(5).max(1);
     let reduced = reduce_trailing_segments(segments, budget);
     if reduced.is_empty() {
         return Vec::new();
     }
-    let mut line = vec![theme.fg_span(ThemeColor::Muted, reduced.join(" · "))];
-    line = truncate_line(&line, budget, "\u{2026}");
-    line
+    let mut line: Line = Vec::with_capacity(reduced.len() * 2);
+    for (index, segment) in reduced.iter().enumerate() {
+        if index > 0 {
+            line.push(theme.fg_span(ThemeColor::Muted, " \u{b7} ".to_string()));
+        }
+        match segment.color {
+            Some(color) => line.push(theme.fg_span(color, segment.text)),
+            None => line.push(theme.fg_span(ThemeColor::Muted, segment.text)),
+        }
+    }
+    truncate_line(&line, budget, "\u{2026}")
 }
 
 /// One inline menu row (TS `MenuRow.renderContent`, inline mode): the `›`
@@ -59,7 +113,7 @@ pub(crate) fn menu_row(
     theme: &Theme,
     width: usize,
     primary: Line,
-    trailing: &[&str],
+    trailing: &[MenuSegment<'_>],
     selected: bool,
 ) -> Line {
     // Trailing rows run flush to the right edge; the trailing cell leaves a
@@ -342,5 +396,129 @@ pub(crate) fn menu_list_layout(
         capacity(extra).min(preferred).max(1)
     } else {
         without_scroll
+    }
+}
+
+/// The scroll-indicator status row: the selection's position in the full
+/// list, `  (n/m)` muted, aligned with the rows' inner column. Menus show
+/// it once the window cannot hold every item (model picker, mcp view,
+/// completion dropdown). Like every status row, it truncates to the
+/// frame width, so a narrow overlay never spills past its dock.
+pub(crate) fn scroll_row(theme: &Theme, width: usize, position: usize, total: usize) -> Line {
+    let line = vec![theme.fg_span(ThemeColor::Muted, format!("  ({position}/{total})"))];
+    truncate_line(&line, width, "")
+}
+
+/// The no-match status row: `  {message}` muted, aligned with the rows'
+/// inner column, shown when a filter empties the list. Like every status
+/// row, it truncates to the frame width.
+pub(crate) fn no_match_row(theme: &Theme, width: usize, message: &str) -> Line {
+    let line = vec![
+        Span::raw("  "),
+        theme.fg_span(ThemeColor::Muted, message.to_string()),
+    ];
+    truncate_line(&line, width, "")
+}
+
+/// The key-hint status row: ` {hint}` dim, truncated to the frame width.
+/// Each surface composes its own hint text (its key vocabulary); the row's
+/// look is the shared grammar.
+pub(crate) fn hint_row(theme: &Theme, width: usize, hint: &str) -> Line {
+    let line = vec![
+        Span::raw(" "),
+        theme.fg_span(ThemeColor::Dim, hint.to_string()),
+    ];
+    truncate_line(&line, width, "")
+}
+
+/// One detail-block row: the selected item's metadata under the list,
+/// truncated to the frame width (marked) and padded to the full row; the
+/// content's own spans carry the color and leading indent.
+pub(crate) fn detail_row(theme: &Theme, width: usize, content: Line) -> Line {
+    let _ = theme;
+    let mut line = truncate_line(&content, width, "\u{2026}");
+    let used = crate::width::spans_width(&line);
+    if used < width {
+        line.push(Span::raw(" ".repeat(width - used)));
+    }
+    line
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theme::{ColorMode, Theme};
+
+    fn theme() -> Theme {
+        Theme::builtin("prime", ColorMode::TrueColor)
+    }
+
+    fn row_text(line: &Line) -> String {
+        line.iter().map(|span| span.content.as_str()).collect()
+    }
+
+    #[test]
+    fn menu_rows_carry_muted_and_status_trailing() {
+        let theme = theme();
+        let muted = [
+            MenuSegment::muted("current"),
+            MenuSegment::muted("provider"),
+        ];
+        let row = menu_row(&theme, 60, vec![Span::raw("label")], &muted, false);
+        let text = row_text(&row);
+        // Unselected rows carry the blank marker column.
+        assert!(text.starts_with("  "));
+        assert!(text.contains("label"));
+        assert!(text.ends_with("current · provider"));
+        let status = [MenuSegment::themed(ThemeColor::Success, "connected")];
+        let row = menu_row(&theme, 60, vec![Span::raw("label")], &status, true);
+        let text = row_text(&row);
+        assert!(text.starts_with("\u{203a}"));
+        assert!(text.ends_with("connected"));
+    }
+
+    #[test]
+    fn status_rows_share_the_frame_grammar() {
+        let theme = theme();
+        assert_eq!(row_text(&scroll_row(&theme, 40, 3, 17)), "  (3/17)");
+        assert_eq!(
+            row_text(&no_match_row(&theme, 40, "No matching models")),
+            "  No matching models"
+        );
+        let hint = hint_row(&theme, 60, "Enter select · Esc close");
+        assert!(row_text(&hint).starts_with(" Enter select"));
+    }
+
+    /// Every status row truncates to the frame width: a narrow menu never
+    /// emits a row wider than its dock (the completion overlay renders
+    /// the rows straight into the editor dock, so an unclamped `(n/m)`
+    /// would overwrite the adjacent terminal cells).
+    #[test]
+    fn status_rows_never_exceed_the_frame_width() {
+        let theme = theme();
+        for row in [
+            scroll_row(&theme, 6, 1, 482),
+            no_match_row(&theme, 6, "No matching commands"),
+        ] {
+            assert!(
+                crate::width::spans_width(&row) <= 6,
+                "the row clamps to the frame width: {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn trailing_segments_shrink_from_the_front() {
+        let segments = [
+            MenuSegment::muted("a-long-first-segment"),
+            MenuSegment::muted("mid"),
+            MenuSegment::muted("end"),
+        ];
+        // At a narrow width the front segments drop off until the joined
+        // cluster fits the budget (width 12 -> inner 10 -> budget 5: only
+        // "end" survives).
+        assert_eq!(trailing_width(&segments, 12), 3);
+        // Wide rows keep every segment.
+        assert_eq!(trailing_width(&segments, 60), 32);
     }
 }
