@@ -92,7 +92,7 @@ fn js_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(bool) => *bool,
-        Value::Number(number) => number.as_f64().map(|number| number != 0.0).unwrap_or(true),
+        Value::Number(number) => number.as_f64().map_or(true, |number| number != 0.0),
         Value::String(text) => !text.is_empty(),
         _ => true,
     }
