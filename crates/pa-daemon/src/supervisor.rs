@@ -2167,8 +2167,21 @@ impl Supervisor {
                             .await;
                         if dispatch_tx.send((lines, stop)).is_err() && stop {
                             // The initiating connection left before its response
-                            // was selected. The stop pass must still run.
-                            supervisor.ensure_shutdown_started().await;
+                            // was selected. Only a terminal shutdown owns the
+                            // descriptor-deleting stop pass; an update restart
+                            // must leave its descriptors for the successor.
+                            let is_shutdown_owner = supervisor
+                                .shutdown_owner
+                                .lock()
+                                .unwrap()
+                                .as_deref()
+                                == Some(connection_id.as_str());
+                            if is_shutdown_owner
+                                && supervisor.shutting_down.load(Ordering::SeqCst)
+                                && !supervisor.accept_exit.load(Ordering::SeqCst)
+                            {
+                                supervisor.ensure_shutdown_started().await;
+                            }
                         }
                     });
                 }
