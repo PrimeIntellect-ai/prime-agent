@@ -2704,6 +2704,17 @@ impl SessionEngine for AgentSessionEngine {
         &self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<Value>> + Send + '_>> {
         Box::pin(async move {
+            // The TS session (and its resource loader) exists from create, so
+            // `get_commands` always sees the skill list. This port builds
+            // the core session lazily, so a read before any turn builds it
+            // now (the async build path, like `system_prompt`; the create
+            // prewarm usually already finished it).
+            if let Ok(model) = self.resolve_model() {
+                if let Err(error) = self.ensure_core_session_async(&model).await {
+                    eprintln!("get_commands session build failed: {error:#}");
+                    return Vec::new();
+                }
+            }
             let guard = self.session.lock().await;
             let Some(engine) = guard.as_deref() else {
                 return Vec::new();
@@ -8854,6 +8865,99 @@ fn run_prompts(
         );
     }
     (engine, events)
+}
+
+/// `get_commands` enumerates the session's skills as `skill:<name>`
+/// commands (TS `createAgentConnectionCommands`) — including before the
+/// first prompt: the read seam demand-builds the core session (the TS
+/// session exists from create), so the client's slash menu sees the
+/// skill inventory right after attach. The faux provider registers under
+/// `FAUX_TEST_LOCK` on a blocking thread (the lock is std, so it never
+/// rides an await); the first model resolution there is the registration,
+/// and the demand-build's resolution reads the cached model.
+#[tokio::test]
+async fn get_commands_enumerates_skills_before_the_first_prompt() {
+    let (engine, _dir) = tokio::task::spawn_blocking(|| {
+        let _faux = FAUX_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        let skill_dir = agent_dir.join("skills").join("demo-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: Demo the slash menu wiring\n---\nRun the demo.",
+        )
+        .unwrap();
+        let engine = AgentSessionEngine::new(AgentEngineConfig {
+            cwd: dir.path().to_path_buf(),
+            agent_dir,
+            provider: None,
+            model: None,
+            api_key: None,
+            thinking: None,
+            session_dir: None,
+            session_file: None,
+            faux_script: Some(
+                json!({ "engine": "faux", "responses": [{ "text": "ok" }] }).to_string(),
+            ),
+            supervisor_link: None,
+            telemetry_disabled: None,
+            cron_store: None,
+            queued_steering_probe: None,
+        })
+        .unwrap();
+        let engine = std::sync::Arc::new(engine);
+        engine.register_arc();
+        // Register the faux provider under the lock (this resolution is
+        // the registration); the async section then resolves the cached
+        // model without re-registering.
+        let model = engine.resolve_model().expect("faux model");
+        drop(model);
+        (engine, dir)
+    })
+    .await
+    .expect("engine build join");
+    // No prompt ran: the read seam must build the session itself.
+    assert!(engine.session.lock().await.is_none());
+    use crate::engine::SessionEngine as _;
+    let commands = engine.connection_commands().await;
+    assert!(
+        engine.session.lock().await.is_some(),
+        "the read built the session"
+    );
+    let skill_commands: Vec<&serde_json::Value> = commands
+        .iter()
+        .filter(|command| command.get("source").and_then(Value::as_str) == Some("skill"))
+        .collect();
+    // The checkout's own bundled skills (the packaged `skills/` layout)
+    // enumerate too, so the assertion is on the test's own skill, not the
+    // count.
+    let command = skill_commands
+        .iter()
+        .find(|command| command.get("name").and_then(Value::as_str) == Some("skill:demo-skill"))
+        .unwrap_or_else(|| panic!("the demo skill enumerated: {commands:?}"));
+    assert_eq!(
+        command.get("description").and_then(Value::as_str),
+        Some("Demo the slash menu wiring")
+    );
+    assert_eq!(
+        command
+            .get("sourceInfo")
+            .and_then(|info| info.get("scope"))
+            .and_then(Value::as_str),
+        Some("user")
+    );
+    // Every skill command carries the `skill:` name form and its source
+    // info (the menu row's source label reads them).
+    for command in &skill_commands {
+        assert!(command
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name.starts_with("skill:")));
+        assert!(command.get("sourceInfo").is_some());
+    }
 }
 
 /// The TS replacement teardown (`teardownForReplacement` -> `teardownCurrent`

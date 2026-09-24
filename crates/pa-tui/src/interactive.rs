@@ -370,6 +370,9 @@ pub enum HeadlessStep {
     /// Type text character by character (raw editor input, so autocomplete
     /// and editor state react exactly as to a keystroke).
     Type(String),
+    /// A bracketed-paste payload (the same editor paste path a terminal's
+    /// paste takes, including the large-paste marker rules).
+    Paste(String),
     /// Materialize the parked editor suggestions — the state a live user
     /// gets after pausing typing for one input-idle tick, so the next step
     /// (typically `Enter`) completes against the open dropdown. A burst of
@@ -424,8 +427,12 @@ async fn run_onboarding_phase(
     renderer: &mut Renderer,
     exit_guard: &ExitGuard,
 ) -> Result<bool> {
-    // TS model-ready branch: a user who already opted into traces sees no
-    // flow at all — the flow completes silently and marks itself seen.
+    // Sharing is on unless the user opted out, so a fresh install always
+    // takes this branch: the flow completes silently, nothing is drawn,
+    // and the session screen owns the first frame. The question below
+    // mounts only for a home that explicitly opted out before completing
+    // onboarding (TS parity: `askOnboardingTraceOptIn` skips when already
+    // enabled).
     if task.sink.agent_traces_enabled() {
         let _ = task.sink.mark_onboarding_complete();
         return Ok(false);
@@ -714,6 +721,11 @@ async fn run_interactive_surface(
     let (heartbeats_tx, mut heartbeats_rx) =
         mpsc::unbounded_channel::<crate::session_ui::HeartbeatsUpdate>();
     let (bash_tx, mut bash_rx) = mpsc::unbounded_channel::<crate::session_ui::BashActivityUpdate>();
+    // Background slash-command-catalog refreshes (`get_commands`) report
+    // here; the loop folds the session's skill commands into the
+    // autocomplete provider.
+    let (commands_tx, mut commands_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::CommandCatalogUpdate>();
     // The double-Ctrl+C force-quit guard: the terminal reader observes the
     // pair even while this loop is wedged in a daemon request, and a plain
     // std-thread watchdog enforces the exit deadline without the runtime.
@@ -782,6 +794,7 @@ async fn run_interactive_surface(
         crate::session_ui::ActivityUpdates {
             heartbeats: heartbeats_tx,
             bash: bash_tx,
+            commands: commands_tx,
         },
     )
     .await
@@ -877,8 +890,10 @@ async fn run_interactive_surface(
     // switch) returns to the editor when its chat reopens.
     session.restore_prompt_stash_on_open(&mut view);
     // First-run onboarding owns the pane before the session screen (TS
-    // `runStartupOnboarding`, model-ready branch: splash + trace question).
-    // Headless harness runs have no terminal to draw it on and skip it.
+    // `runStartupOnboarding`, model-ready branch). A fresh install ships
+    // trace sharing pre-configured, so this completes silently without
+    // drawing; only an explicit opt-out that never completed onboarding
+    // mounts the splash + trace question.
     if let Some(task) = options.onboarding.clone() {
         let exit_requested =
             run_onboarding_phase(&task, &mut view, &mut ui_rx, &mut renderer, &exit_guard).await?;
@@ -1432,6 +1447,11 @@ async fn run_interactive_surface(
             maybe_bash = bash_rx.recv() => {
                 if let Some(update) = maybe_bash {
                     session.apply_bash_activity(update, &mut view);
+                }
+            }
+            maybe_commands = commands_rx.recv() => {
+                if let Some(update) = maybe_commands {
+                    session.apply_command_catalog(update, &mut view);
                 }
             }
             _reconnect_tick = async {
@@ -2039,6 +2059,11 @@ impl Renderer {
                                     if ui_tx.send(UiInput::Key(key)).is_err() {
                                         return;
                                     }
+                                }
+                            }
+                            HeadlessStep::Paste(text) => {
+                                if ui_tx.send(UiInput::Paste(text)).is_err() {
+                                    return;
                                 }
                             }
                             HeadlessStep::SettleIdle => {

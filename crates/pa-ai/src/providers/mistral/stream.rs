@@ -496,10 +496,15 @@ impl MistralStreamState {
             output.usage.output = completion;
             output.usage.cache_read = 0;
             output.usage.cache_write = 0;
+            // TS `totalTokens || input + output`: an explicitly reported zero
+            // is falsy, so only a positive reported total is kept. The sum
+            // saturates — TS doubles never wrap, and a Rust u64 must not
+            // panic (debug) or wrap to a wrong total (release).
             output.usage.total_tokens = usage
                 .get("total_tokens")
                 .and_then(Value::as_u64)
-                .unwrap_or(input + completion);
+                .filter(|total| *total > 0)
+                .unwrap_or(input.saturating_add(completion));
             calculate_cost(model, &mut output.usage, None);
         }
 
@@ -808,5 +813,79 @@ mod tests {
         );
         assert_eq!(map_chat_stop_reason(Some("error")), StopReason::Error);
         assert_eq!(map_chat_stop_reason(Some("whatever")), StopReason::Stop);
+    }
+
+    /// TS `mistral.ts` assigns `usage.totalTokens = chunk.usage.totalTokens ||
+    /// input + output`, so an explicitly reported zero total is falsy and
+    /// falls back to the prompt/completion sum; a positive reported total is
+    /// kept verbatim.
+    #[test]
+    fn usage_total_tokens_explicit_zero_falls_back_to_sum() {
+        use serde_json::json;
+
+        let model = Model {
+            id: "mistral-large-latest".into(),
+            name: "mistral-large".into(),
+            api: API_MISTRAL_CONVERSATIONS.to_string(),
+            provider: "mistral".into(),
+            base_url: "https://api.mistral.ai".into(),
+            reasoning: false,
+            thinking_level_map: None,
+            input: vec![crate::types::ModelInput::Text],
+            cost: crate::types::zero_model_cost(),
+            context_window: 128_000,
+            max_tokens: 8192,
+            featured: None,
+            headers: None,
+            compat: None,
+        };
+        let (writer, _stream) = create_assistant_message_event_stream();
+        let mut state = MistralStreamState::new();
+        let mut output = crate::event_stream::initial_assistant_message(
+            API_MISTRAL_CONVERSATIONS,
+            "mistral",
+            &model.id,
+        );
+
+        state.handle_chunk(
+            &json!({
+                "id": "usage-1",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 0},
+            }),
+            &model,
+            &mut output,
+            &writer,
+        );
+        assert_eq!(
+            output.usage,
+            Usage {
+                input: 10,
+                output: 5,
+                total_tokens: 15,
+                ..Usage::default()
+            }
+        );
+
+        state.handle_chunk(
+            &json!({
+                "id": "usage-2",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 99},
+            }),
+            &model,
+            &mut output,
+            &writer,
+        );
+        assert_eq!(output.usage.total_tokens, 99);
+
+        state.handle_chunk(
+            &json!({
+                "id": "usage-3",
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            }),
+            &model,
+            &mut output,
+            &writer,
+        );
+        assert_eq!(output.usage.total_tokens, 15);
     }
 }

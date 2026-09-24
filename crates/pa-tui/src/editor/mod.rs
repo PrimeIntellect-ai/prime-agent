@@ -10,6 +10,7 @@
 //! `text_ops` (deletion/yank), `motion` (cursor movement), `input` (key
 //! dispatch), `autocomplete`, and `layout` (rendering-facing layout).
 
+use crate::autocomplete::SlashCommandEntry;
 use crate::keybindings::KeybindingsManager;
 use crate::width::is_whitespace_char;
 use std::collections::HashMap;
@@ -24,6 +25,7 @@ mod layout;
 mod motion;
 #[cfg(test)]
 mod paste_tests;
+mod selection;
 mod text_ops;
 mod text_utils;
 mod wrap;
@@ -57,6 +59,7 @@ struct EditorSnapshot {
     cursor_col: usize,
     pastes: HashMap<usize, String>,
     paste_counter: usize,
+    selection_anchor: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +94,10 @@ pub enum EditorEvent {
     Submitted(String),
     /// Autocomplete overlay visibility changed.
     AutocompleteToggled(bool),
+    /// A selection cut/copy asks the host to write `text` to the system
+    /// clipboard (the kill ring already holds it; the OSC 52/platform
+    /// copy chain lives with the host, which owns the terminal).
+    ClipboardWrite(String),
 }
 
 /// The multi-line editor.
@@ -105,6 +112,11 @@ pub struct Editor {
     history_index: isize,
     kill_ring: KillRing,
     undo_stack: Vec<EditorSnapshot>,
+    redo_stack: Vec<EditorSnapshot>,
+    /// The selection anchor (TS has no editor selection; this is the
+    /// prompt-editor-keybinds forward feature — the selection spans the
+    /// anchor to the cursor). `None` = no selection.
+    selection_anchor: Option<(usize, usize)>,
     last_action: Option<LastAction>,
     jump_mode: Option<JumpDirection>,
     preferred_visual_col: Option<usize>,
@@ -153,6 +165,8 @@ impl Editor {
             history_index: -1,
             kill_ring: KillRing::default(),
             undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            selection_anchor: None,
             last_action: None,
             jump_mode: None,
             preferred_visual_col: None,
@@ -204,6 +218,26 @@ impl Editor {
     pub fn set_autocomplete_hidden_commands(&mut self, hidden: std::collections::HashSet<String>) {
         if let Some(provider) = self.autocomplete_provider.as_mut() {
             provider.set_hidden_commands(hidden);
+        }
+    }
+
+    /// Replace the provider's `skill:` commands (TS
+    /// `setupAutocompleteProvider` rebuilds the command list with the
+    /// session's skills; this port swaps the list on the installed
+    /// provider). The open dropdown — if any — drops, because its rows
+    /// came from the old catalog (TS `setAutocompleteProvider` cancels
+    /// too), but a PARKED request stays: the host loop materializes it
+    /// against the new provider, so a `/` typed while the catalog
+    /// refresh was still in flight still opens its menu (Cursor thread:
+    /// the swap must not eat the parked request).
+    pub fn set_autocomplete_skill_commands(&mut self, skills: Vec<SlashCommandEntry>) {
+        let was_showing = self.autocomplete.is_some();
+        self.autocomplete = None;
+        if was_showing {
+            self.emit(EditorEvent::AutocompleteToggled(false));
+        }
+        if let Some(provider) = self.autocomplete_provider.as_mut() {
+            provider.set_skill_commands(skills);
         }
     }
 
@@ -288,6 +322,15 @@ impl Editor {
         (self.cursor_line, self.cursor_col)
     }
 
+    /// Test-only direct cursor placement: the runtime paths position the
+    /// cursor only through the motions, but the model tests need to start
+    /// from an arbitrary position.
+    #[cfg(test)]
+    pub(crate) fn set_cursor_for_tests(&mut self, line: usize, col: usize) {
+        self.cursor_line = line;
+        self.set_cursor_col(col);
+    }
+
     /// The prompt prefix the first line renders in place of its leading
     /// `!`/`!!` (TS `CustomEditor.getPromptPrefix`): `! ` / `!! ` when the
     /// first line opens a bang command, `None` for the default `> `.
@@ -359,6 +402,8 @@ impl Editor {
         let col = self.lines[self.cursor_line].chars().count();
         self.set_cursor_col(col);
         self.scroll_offset = 0;
+        // A whole-text replacement has no spanning selection left.
+        self.selection_anchor = None;
         self.emit(EditorEvent::Changed(self.get_text()));
     }
 
@@ -367,6 +412,10 @@ impl Editor {
             return;
         }
         self.cancel_autocomplete();
+        // The injected text lands at the cursor: a stale selection anchor
+        // would make the NEXT keystroke splice a wrong range, so the
+        // selection collapses first.
+        self.selection_anchor = None;
         self.push_undo_snapshot();
         self.last_action = None;
         self.history_index = -1;
@@ -431,13 +480,35 @@ impl Editor {
     // ---- undo / kill ring -----------------------------------------------
 
     fn push_undo_snapshot(&mut self) {
-        self.undo_stack.push(EditorSnapshot {
+        // A new edit invalidates the redo history (standard editor
+        // semantics; the TS product has no redo at all).
+        self.redo_stack.clear();
+        self.undo_stack.push(self.current_snapshot());
+    }
+
+    /// The undoable state of the editor right now.
+    fn current_snapshot(&self) -> EditorSnapshot {
+        EditorSnapshot {
             lines: self.lines.clone(),
             cursor_line: self.cursor_line,
             cursor_col: self.cursor_col,
             pastes: self.pastes.clone(),
             paste_counter: self.paste_counter,
-        });
+            selection_anchor: self.selection_anchor,
+        }
+    }
+
+    fn apply_snapshot(&mut self, snapshot: EditorSnapshot) {
+        self.lines = snapshot.lines;
+        self.cursor_line = snapshot.cursor_line;
+        self.cursor_col = snapshot.cursor_col;
+        self.pastes = snapshot.pastes;
+        self.paste_counter = snapshot.paste_counter;
+        self.selection_anchor = snapshot.selection_anchor;
+        self.last_action = None;
+        self.preferred_visual_col = None;
+        self.emit(EditorEvent::Changed(self.get_text()));
+        self.refresh_autocomplete_after_edit(true);
     }
 
     fn undo(&mut self) {
@@ -445,15 +516,20 @@ impl Editor {
         let Some(snapshot) = self.undo_stack.pop() else {
             return;
         };
-        self.lines = snapshot.lines;
-        self.cursor_line = snapshot.cursor_line;
-        self.cursor_col = snapshot.cursor_col;
-        self.pastes = snapshot.pastes;
-        self.paste_counter = snapshot.paste_counter;
-        self.last_action = None;
-        self.preferred_visual_col = None;
-        self.emit(EditorEvent::Changed(self.get_text()));
-        self.refresh_autocomplete_after_edit(true);
+        self.redo_stack.push(self.current_snapshot());
+        self.apply_snapshot(snapshot);
+    }
+
+    /// Redo the last undone edit (standard editor semantics; no TS
+    /// counterpart — the TS editor has no redo). Each undone edit lands
+    /// on the redo stack, and any new edit clears it.
+    fn redo(&mut self) {
+        self.history_index = -1;
+        let Some(snapshot) = self.redo_stack.pop() else {
+            return;
+        };
+        self.undo_stack.push(self.current_snapshot());
+        self.apply_snapshot(snapshot);
     }
 
     // ---- text mutation ---------------------------------------------------
@@ -464,12 +540,19 @@ impl Editor {
 
     fn insert_character_opts(&mut self, ch: &str, skip_undo_coalescing: bool) {
         self.history_index = -1;
+        // Typing over an active selection replaces it in one undo step:
+        // the snapshot below is taken with the selection still in place,
+        // so undo restores the original text in a single press.
+        let replacing = !skip_undo_coalescing && self.has_selection();
         if !skip_undo_coalescing {
             let is_ws = ch.chars().any(is_whitespace_char);
-            if is_ws || self.last_action.as_ref() != Some(&LastAction::TypeWord) {
+            if replacing || is_ws || self.last_action.as_ref() != Some(&LastAction::TypeWord) {
                 self.push_undo_snapshot();
             }
             self.last_action = Some(LastAction::TypeWord);
+        }
+        if replacing {
+            self.remove_selection();
         }
         let line = self.lines[self.cursor_line].clone();
         let (before, after) = split_at_char(&line, self.cursor_col);
@@ -512,6 +595,10 @@ impl Editor {
         self.history_index = -1;
         self.last_action = None;
         self.push_undo_snapshot();
+        // A newline over a selection replaces it (one undo step).
+        if self.has_selection() {
+            self.remove_selection();
+        }
         let current_line = self.lines[self.cursor_line].clone();
         let (before, after) = split_at_char(&current_line, self.cursor_col);
         self.lines[self.cursor_line] = before;
@@ -541,6 +628,8 @@ impl Editor {
         self.history_index = -1;
         self.scroll_offset = 0;
         self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.selection_anchor = None;
         self.last_action = None;
         self.emit(EditorEvent::Changed(String::new()));
         self.emit(EditorEvent::Submitted(result));
@@ -554,7 +643,6 @@ impl Editor {
         self.cancel_autocomplete();
         self.history_index = -1;
         self.last_action = None;
-        self.push_undo_snapshot();
 
         // A tmux popup can re-encode control bytes inside the paste as
         // CSI-u Ctrl+letter sequences; decode them before the per-char
@@ -565,6 +653,22 @@ impl Editor {
             .filter(|&c| c == '\n' || (c as u32) >= 32)
             .collect();
         let mut filtered = filtered_raw;
+        // A payload that filters to nothing (control-only bytes, empty
+        // bracketed paste) changes nothing: no undo step, no selection
+        // removal — the editor stays exactly as it was.
+        if filtered.is_empty() {
+            return PasteDisposition::Inline;
+        }
+        self.push_undo_snapshot();
+        // Pasting over a selection replaces it (one undo step; undo of a
+        // paste-then-selection-paste restores the whole original text).
+        // The removal runs BEFORE the path-space check below: the check
+        // inspects the character before the INSERTION point, which after
+        // a selection replace is the selection's start, not the live
+        // cursor a forward selection leaves behind.
+        if self.has_selection() {
+            self.remove_selection();
+        }
         // File paths get a leading space when following a word char.
         if filtered.starts_with(['/', '~', '.']) {
             let line = &self.lines[self.cursor_line];
@@ -963,5 +1067,111 @@ mod tests {
         let layout = e.layout_text(20);
         assert_eq!(layout[0].text, "echo hi", "the raw prefix stays hidden");
         assert_eq!(layout[0].source_start, 2);
+    }
+
+    // ---- redo / doc motion / transpose (prompt-editor-keybinds) ---------
+
+    /// Undo then redo round-trips a typed word.
+    #[test]
+    fn redo_restores_an_undone_edit() {
+        let mut e = ed();
+        for c in "hello".chars() {
+            e.handle_input(&c.to_string());
+        }
+        e.handle_input("ctrl+-");
+        assert_eq!(e.get_text(), "");
+        e.handle_input("ctrl+shift+z");
+        assert_eq!(e.get_text(), "hello");
+    }
+
+    /// A paste undo then redo: undo removes the whole paste, redo restores
+    /// it (the operator's paste->undo->redo family).
+    #[test]
+    fn redo_restores_an_undone_paste() {
+        let mut e = ed();
+        e.set_text("draft ");
+        e.handle_paste("pasted");
+        assert_eq!(e.get_text(), "draft pasted");
+        e.handle_input("ctrl+-");
+        assert_eq!(e.get_text(), "draft ");
+        e.handle_input("ctrl+shift+z");
+        assert_eq!(e.get_text(), "draft pasted");
+        // The mac Cmd keys arrive as the super modifier: the same family.
+        e.handle_input("super+z");
+        assert_eq!(e.get_text(), "draft ");
+        e.handle_input("super+shift+z");
+        assert_eq!(e.get_text(), "draft pasted");
+    }
+
+    /// Any new edit clears the redo history.
+    #[test]
+    fn a_new_edit_clears_the_redo_stack() {
+        let mut e = ed();
+        for c in "ab".chars() {
+            e.handle_input(&c.to_string());
+        }
+        e.handle_input("ctrl+-");
+        assert_eq!(e.get_text(), "");
+        e.handle_input("c");
+        e.handle_input("ctrl+shift+z");
+        // The redo stack is empty: the redo press did nothing.
+        assert_eq!(e.get_text(), "c");
+    }
+
+    /// Ctrl+Home / Ctrl+End jump to the buffer edges; the mac
+    /// super+up/down aliases land the same way.
+    #[test]
+    fn doc_motions_reach_the_buffer_edges() {
+        let mut e = ed();
+        e.set_text("alpha\nbeta\ngamma");
+        e.handle_input("ctrl+end");
+        assert_eq!(e.get_cursor(), (2, 5));
+        e.handle_input("ctrl+home");
+        assert_eq!(e.get_cursor(), (0, 0));
+        e.handle_input("super+down");
+        assert_eq!(e.get_cursor(), (2, 5));
+        e.handle_input("super+up");
+        assert_eq!(e.get_cursor(), (0, 0));
+    }
+
+    /// Ctrl+Up / Ctrl+Down move one blank-line-separated paragraph.
+    #[test]
+    fn paragraph_motions_skip_blank_lines() {
+        let mut e = ed();
+        e.set_text("p1 line one\np1 line two\n\np2 line one\np2 line two");
+        // From inside paragraph 1: up lands at its start, down at its end.
+        e.set_cursor_for_tests(1, 11);
+        e.handle_input("ctrl+up");
+        assert_eq!(e.get_cursor(), (0, 0));
+        e.handle_input("ctrl+down");
+        assert_eq!(e.get_cursor(), (1, 11));
+        // Already at the paragraph's end: down goes to the next
+        // paragraph's end, up to the current paragraph's start, and a
+        // second up to the previous paragraph's start.
+        e.handle_input("ctrl+down");
+        assert_eq!(e.get_cursor(), (4, 11));
+        e.handle_input("ctrl+up");
+        assert_eq!(e.get_cursor(), (3, 0));
+        e.handle_input("ctrl+up");
+        assert_eq!(e.get_cursor(), (0, 0));
+    }
+
+    /// Ctrl+T transposes the characters around the cursor, readline-style.
+    #[test]
+    fn transpose_swaps_around_the_cursor() {
+        let mut e = ed();
+        e.set_text("abdc");
+        // Cursor between the d/c typo: the pair swaps.
+        e.set_cursor_for_tests(0, 3);
+        e.handle_input("ctrl+t");
+        assert_eq!(e.get_text(), "abcd");
+        assert_eq!(e.get_cursor(), (0, 4));
+        // At the line end, the last two swap (readline's behavior).
+        e.set_cursor_for_tests(0, 4);
+        e.handle_input("ctrl+t");
+        assert_eq!(e.get_text(), "abdc");
+        // Undo restores the previous state in one press.
+        e.handle_input("ctrl+-");
+        assert_eq!(e.get_text(), "abcd");
     }
 }

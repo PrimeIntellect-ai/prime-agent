@@ -134,6 +134,44 @@ pub(crate) fn already_active_line(holder: &str, session_path: &Path) -> String {
     )
 }
 
+/// The suggested `--resume <holder>` argument, shell-quoted so a holder id
+/// the daemon or a roster row controls can never break the suggested
+/// command (or inject a second one). Unix: POSIX single quotes with the
+/// embedded-quote escape - the exact form a shell round-trips
+/// byte-identically, and inert for the hex ids the product mints.
+/// Windows: the CRT parser's backslash/quote rules PLUS cmd.exe's own
+/// metacharacters (both documented in the arm below).
+pub(crate) fn quoted_resume_arg(id: &str) -> String {
+    #[cfg(windows)]
+    {
+        // Two parsers see a pasted command on Windows: the CRT argument
+        // parser (a backslash run before a quote folds 2n -> n, so every
+        // backslash doubles and every embedded quote escapes - neither
+        // can terminate the argument) and cmd.exe itself (every `"`
+        // toggles its quote state, exposing the separator metacharacters
+        // to command interpretation - so each of cmd's separators is
+        // ^-escaped, which renders it literal even in a toggle-out).
+        // The caret itself escapes FIRST (its own occurrences double),
+        // then the separators get their single ^ - a later caret pass would
+        // double the carets just inserted and un-escape the separators
+        // again (`^^&` leaves `&` live inside a toggle-out).
+        let cmd_escaped = id.replace('^', "^^");
+        let cmd_escaped = ['&', '|', '<', '>']
+            .iter()
+            .fold(cmd_escaped, |escaped, metachar| {
+                escaped.replace(*metachar, &format!("^{metachar}"))
+            });
+        format!(
+            "--resume \"{}\"",
+            cmd_escaped.replace('\\', "\\\\").replace('"', "\\\"")
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        format!("--resume '{}'", id.replace('\'', "'\\''"))
+    }
+}
+
 /// The descriptive refusal for a holder the live roster identifies: the
 /// TS first line, then the holder's identity and the next steps (attach
 /// to the live session instead of reopening the file).
@@ -151,8 +189,8 @@ pub fn already_active_error(holder: &SessionHolder, session_path: &Path) -> Stri
     }
     lines.push(identity);
     lines.push(format!(
-        "Attach to it instead: prime-agent --resume {}",
-        holder.id
+        "Attach to it instead: prime-agent {}",
+        quoted_resume_arg(&holder.id)
     ));
     lines.push("Or wait: the file unlocks when that session exits.".to_string());
     lines.join("\n")
@@ -183,19 +221,22 @@ pub fn decorate_interactive_refusal(
                 identity.push_str(&format!(" \u{b7} model {model}"));
             }
             format!(
-                "{identity} \u{b7} Attach instead: prime-agent --resume {} \u{b7} The file unlocks when that session exits",
-                h.id
+                "{identity} \u{b7} Attach instead: prime-agent {} \u{b7} The file unlocks when that session exits",
+                quoted_resume_arg(&h.id)
             )
         }
         None if owner.starts_with("another process") => format!(
             "The holder is {owner} \u{b7} It unlocks when that process exits \u{b7} Browse live sessions: prime-agent agents"
         ),
-        // A session-id holder the roster cannot see right now (an
-        // unreachable or restarting worker): the first line names the
-        // session, so the guidance must match it — never claim the
-        // holder is not a daemon session.
+        // A session-id holder the roster cannot see (a leftover worker of a
+        // dead daemon holding the runtime lease, or another daemon's
+        // worker on a shared agent dir): "retry shortly" would be a false
+        // promise - no worker on THIS daemon will ever answer that id - so
+        // the guidance names what the holder can be and the two real ways
+        // around it (the holder's exit unlocks the file; a daemon boot
+        // reaps same-socket leftovers, clearing the stale lease).
         None => format!(
-            "Holder: session {owner} (not answering on this daemon right now - retry shortly) \u{b7} Attach: prime-agent --resume {owner} once it responds"
+            "Holder: session {owner} (no worker on this daemon serves it - another daemon's worker or a leftover process holds the file) \u{b7} Restarting this daemon reaps same-socket leftovers \u{b7} The file unlocks when that process exits"
         ),
     };
     format!("{first} \u{b7} {guidance}")
@@ -264,7 +305,7 @@ mod tests {
             file.display()
         )));
         assert!(text.contains("Holder: session holder-1 \u{201c}lane work\u{201d} \u{b7} cwd /w"));
-        assert!(text.contains("Attach to it instead: prime-agent --resume holder-1"));
+        assert!(text.contains("Attach to it instead: prime-agent --resume 'holder-1'"));
         assert!(text.contains("the file unlocks when that session exits"));
     }
 
@@ -279,8 +320,9 @@ mod tests {
             model: None,
         };
         let text = already_active_error(&holder, Path::new("/s/a.jsonl"));
-        assert!(text
-            .contains("Holder: session live-9\nAttach to it instead: prime-agent --resume live-9"));
+        assert!(text.contains(
+            "Holder: session live-9\nAttach to it instead: prime-agent --resume 'live-9'"
+        ));
     }
 
     /// The roster extraction tolerates the payload wrapper.
@@ -385,23 +427,103 @@ mod decorate_tests {
             "{text}"
         );
         assert!(
-            text.contains("Attach instead: prime-agent --resume abc123"),
+            text.contains("Attach instead: prime-agent --resume 'abc123'"),
             "{text}"
         );
     }
 
     /// A session-id holder the roster cannot see gets session-shaped
-    /// guidance (never the not-a-session contradiction).
+    /// guidance that does not promise a retry that cannot succeed: the
+    /// holder is named as foreign (another daemon's worker or a leftover
+    /// process), with the two real ways around it (a daemon boot reaps
+    /// same-socket leftovers; the holder's exit unlocks the file).
     #[test]
     fn an_unseen_session_holder_gets_session_guidance() {
         let original = "Session is already active in 4be64bca6a0a: /tmp/s.jsonl";
         let text = decorate_interactive_refusal(original, None, "4be64bca6a0a");
         assert!(
-            text.contains("Holder: session 4be64bca6a0a (not answering on this daemon right now"),
+            text.contains("Holder: session 4be64bca6a0a (no worker on this daemon serves it"),
             "{text}"
         );
-        assert!(text.contains("prime-agent --resume 4be64bca6a0a"), "{text}");
+        assert!(
+            text.contains("Restarting this daemon reaps same-socket leftovers"),
+            "{text}"
+        );
+        assert!(
+            text.contains("The file unlocks when that process exits"),
+            "{text}"
+        );
+        // The false promise is gone: no retry hint for a holder this
+        // daemon cannot reach.
+        assert!(!text.contains("retry shortly"), "{text}");
         assert!(!text.contains("not a session on this daemon"), "{text}");
+    }
+
+    /// The suggested command quotes the holder id: a roster- or
+    /// daemon-controlled id with spaces or quotes can never break the
+    /// suggestion (or smuggle a second argument into it).
+    #[test]
+    fn the_resume_suggestion_quotes_a_hostile_holder_id() {
+        // The holder the roster identifies (the Some arm) names the id in
+        // the suggested command: the hostile id must ride single-quoted.
+        let holder = SessionHolder {
+            id: "245ddb974b6d; rm -rf /".to_string(),
+            name: None,
+            cwd: None,
+            model: None,
+        };
+        let original = "Session is already active in 245ddb974b6d; rm -rf /: /tmp/s.jsonl";
+        let text =
+            decorate_interactive_refusal(original, Some(holder.clone()), "245ddb974b6d; rm -rf /");
+        assert!(
+            text.contains("--resume '245ddb974b6d; rm -rf /'"),
+            "the hostile id rides single-quoted: {text}"
+        );
+        assert!(
+            !text.contains("--resume 245ddb974b6d;"),
+            "no unquoted splice survives: {text}"
+        );
+        // The print-mode refusal quotes the same way.
+        let printed = already_active_error(&holder, Path::new("/tmp/s.jsonl"));
+        assert!(
+            printed.contains("--resume '245ddb974b6d; rm -rf /'"),
+            "the print-mode line quotes too: {printed}"
+        );
+        // The embedded-quote escape: an id carrying a single quote still
+        // round-trips as ONE argument.
+        assert_eq!(
+            quoted_resume_arg("it's"),
+            "--resume 'it'\\''s'",
+            "the POSIX escape form"
+        );
+        #[cfg(windows)]
+        {
+            // The cmd separator stays ^-escaped with a SINGLE caret (the
+            // caret pass runs first, so it never re-escapes its own
+            // insertions - the `^^&` un-escape regression).
+            let quoted = quoted_resume_arg("a & b");
+            assert!(
+                quoted.contains("^&"),
+                "the separator rides a single caret: {quoted}"
+            );
+            assert!(
+                !quoted.contains("^^&"),
+                "no doubled caret un-escapes the separator: {quoted}"
+            );
+            // An id's OWN caret doubles (cmd's literal-caret escape).
+            let caret = quoted_resume_arg("a^b");
+            assert!(
+                caret.contains("a^^b"),
+                "the id's own caret doubles: {caret}"
+            );
+        }
+        // The unseen-holder arm (no roster row) suggests the daemon-restart
+        // path instead - it never interpolates the id into a command.
+        let unseen = decorate_interactive_refusal(original, None, "245ddb974b6d; rm -rf /");
+        assert!(
+            !unseen.contains("--resume"),
+            "the unseen arm suggests no command to splice into: {unseen}"
+        );
     }
 
     /// A process holder keeps the process-shaped guidance.

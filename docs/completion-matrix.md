@@ -321,19 +321,29 @@ Splash + "Share agent traces with Prime Intellect?" notice, answerable,
 persisted completion flag (`pa-tui/src/onboarding.rs`;
 `pa-tui/src/interactive.rs` L186-207). Battery-verified
 (`runs/20260917T062810Z` f1: "first-run splash + trace-sharing notice
-rendered and answerable on both sides").
+rendered and answerable on both sides"). Sanctioned divergence (Kevin,
+2026-09-24): a fresh install ships sharing pre-configured ON, so the flow
+completes silently and the session owns the first frame — the splash +
+question mounts only for an explicit opt-out that never completed
+onboarding, and the persisted flag gates the task mount forever after
+(it never returns); `/traces` stays the change path.
 
 ## 19. Trace sharing - partial
 
-The opt-in setting persists (`set_agent_traces_enabled`,
-`pa-tui/src/interactive.rs` L62) and `/traces` (the command the onboarding
-note advertises) is ported (`pa-tui/src/traces.rs` + the composition-root
-hook `pa-cli/src/client_traces.rs`): the TS status block, the on/off
-settings writes, and the credential/endpoint rows. The trace upload
-subsystem (TS `core/agent-traces.ts`: outbox, credential flow, session
-upload) does not exist in Rust; the upload/preview/login arms keep the TS
-state shapes (missing-credential errors, the no-session-file status) and
-report the unported backend.
+Sharing ships pre-configured ON (Kevin's 2026-09-24 product decision;
+sanctioned divergence — TS defaults off and asks on first run): the
+default IS the configuration (nothing is written until the user opts
+out), the opt-out persists (`set_agent_traces_enabled`,
+`crates/pa-core/src/settings/manager.rs`), and `/traces` (the command the
+onboarding note advertises) is ported (`pa-tui/src/traces.rs` + the
+composition-root hook `pa-cli/src/client_traces.rs`): the TS status
+block, the on/off settings writes, and the credential/endpoint rows. The
+trace upload family (#2691: credential precedence, session preview,
+single-session upload with its durable outbox cursor, the upload-all
+sweep) is ported in `crates/pa-core/src/agent_traces.rs`; the unported
+remainder is the daemon-side automatic upload (TS
+`installAgentTraceUpload`: the debounced controller, the startup
+catch-up, the semantic-edges outbox kind).
 
 ## 20. Eval / verifiers Prime flow - partial
 

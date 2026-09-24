@@ -124,6 +124,16 @@ pub(crate) struct HeartbeatsUpdate {
 pub(crate) struct ActivityUpdates {
     pub heartbeats: mpsc::UnboundedSender<HeartbeatsUpdate>,
     pub bash: mpsc::UnboundedSender<BashActivityUpdate>,
+    pub commands: mpsc::UnboundedSender<CommandCatalogUpdate>,
+}
+
+/// A landed `get_commands` refresh (TS `refreshCommandCatalogForCurrentSession`
+/// over `connectionCommands`): the session's `skill:` commands for the
+/// autocomplete provider. A response from an older refresh (a rebind raced
+/// a fetch) never applies — the epoch drops it.
+pub(crate) struct CommandCatalogUpdate {
+    pub epoch: u64,
+    pub skill_commands: Vec<crate::autocomplete::SlashCommandEntry>,
 }
 
 /// Kernel-bash channel frames: list snapshots refresh the dock and the
@@ -157,6 +167,14 @@ pub(crate) enum BashActivityUpdate {
         /// one row): a late failure lands only on that row's open detail
         /// pane, never on whichever row the user switched to.
         activity_id: Option<String>,
+        /// The failure came from a tail fetch (the view supersedes it on
+        /// the next successful fetch) rather than a kill.
+        fetch: bool,
+        /// The detail-open generation the failed tail fetch was issued
+        /// under: like the tail responses, a late fetch failure from an
+        /// earlier open of the same row never lands on the newer one
+        /// (a kill owns no generation and stays `None`).
+        generation: Option<u64>,
     },
 }
 
@@ -411,6 +429,17 @@ pub(crate) struct SessionUi {
     /// Monotonic epoch of the newest heartbeat refresh; an older
     /// response never overwrites a newer catalog.
     heartbeat_refresh_epoch: u64,
+    /// Where background `get_commands` refreshes deliver the session's
+    /// skill commands (the run loop folds them into the autocomplete
+    /// provider).
+    command_updates: mpsc::UnboundedSender<CommandCatalogUpdate>,
+    /// Monotonic epoch of the newest command-catalog refresh; an older
+    /// response (a rebind raced the fetch) never applies to the current
+    /// session's provider.
+    command_refresh_epoch: u64,
+    /// The session's fetched skill commands (the `enableSkillCommands`
+    /// toggle re-applies them without a daemon round trip).
+    skill_commands_cache: Vec<crate::autocomplete::SlashCommandEntry>,
     /// The current Python bash() registry snapshot from the owning kernel.
     bash_activities: Value,
     /// Monotonic id of the latest issued kernel-bash list request; a late
@@ -684,6 +713,9 @@ impl SessionUi {
             heartbeat_refresh_in_flight: false,
             heartbeat_refresh_queued: false,
             heartbeat_refresh_epoch: 0,
+            command_updates: activity_updates.commands,
+            command_refresh_epoch: 0,
+            skill_commands_cache: Vec::new(),
             bash_activities: serde_json::json!({"activities": []}),
             bash_list_epoch: 0,
             bash_updates: activity_updates.bash,
@@ -907,6 +939,11 @@ impl SessionUi {
         // refreshes the catalog on every chat open).
         self.heartbeat_catalog.clear();
         self.spawn_heartbeat_refresh();
+        // The slash-command catalog is session-scoped too (TS
+        // `refreshConnectionCatalog` fetches `get_commands` on every
+        // rebind): the skill commands land in the autocomplete provider
+        // when the response arrives.
+        self.spawn_command_catalog_refresh();
         // The bash registry is kernel-owned and session-scoped: the previous
         // session's rows are not this one's (the next poll refills).
         self.bash_activities = serde_json::json!({"activities": []});
@@ -1034,14 +1071,12 @@ impl SessionUi {
             .iter()
             .filter(|activity| activity.running())
             .count();
-        // The dock's subagent count stays live-only: dead registry rows
-        // (passivated children the ledger still seeds) never bloat the
-        // indicator — running and idle are the activities to act on.
-        let live = counts.running + counts.idle;
+        // The dock's subagent count is the live running count only:
+        // idle and dead registry rows (passivated children the ledger
+        // still seeds) never bloat the indicator — they render in the
+        // scoped agents view.
         let dock = crate::chrome::ActivityDock {
-            subagents: live,
             subagents_running: counts.running,
-            subagents_idle: counts.idle,
             subagents_total: counts.total,
             heartbeats: self.heartbeat_catalog.len(),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
@@ -4141,6 +4176,22 @@ impl SessionUi {
                     value,
                     view,
                 );
+                // TS `onEnableSkillCommandsChange` calls
+                // `setupAutocompleteProvider()` immediately: the cached
+                // skill list re-applies under the new setting value
+                // (no daemon round trip — the list the last refresh
+                // fetched is still the session's inventory).
+                let enabled = self
+                    .client_settings
+                    .as_ref()
+                    .is_some_and(|settings| settings.enable_skill_commands());
+                let skills = if enabled {
+                    self.skill_commands_cache.clone()
+                } else {
+                    Vec::new()
+                };
+                view.editor.set_autocomplete_skill_commands(skills);
+                self.dirty = true;
             }
             "builtin-skills" => {
                 self.persist_bool_setting(
@@ -4646,6 +4697,9 @@ impl SessionUi {
                 // TS `refreshConnectionCatalog`: the daemon's model catalog
                 // re-fetch lands through the run loop's channel.
                 self.spawn_model_catalog_refresh();
+                // The same refresh re-fetches the slash-command catalog
+                // (skills the reload may have changed).
+                self.spawn_command_catalog_refresh();
                 // TS `showStatus`: tracked, so a back-to-back status
                 // (e.g. the `/thinking` unavailable row) rewrites it in
                 // place.
@@ -5941,6 +5995,8 @@ impl SessionUi {
             BashActivityUpdate::Error {
                 message,
                 activity_id,
+                fetch,
+                generation,
                 ..
             } => {
                 // An in-view action's failure surfaces in the open bash
@@ -5954,7 +6010,7 @@ impl SessionUi {
                 };
                 if view.bash_view.is_some() && detail_matches {
                     if let Some(bash_view) = view.bash_view.as_mut() {
-                        bash_view.set_error(message);
+                        bash_view.set_error(message, fetch, generation);
                     }
                 } else {
                     self.error_row(&message, view);
@@ -6024,6 +6080,51 @@ impl SessionUi {
         }
     }
 
+    /// Fetch one bash activity's output tail off the key loop (a stalled
+    /// kernel must not freeze the TUI behind the request bound): the
+    /// response lands on the open view through the update channel,
+    /// stamped with the detail-open generation it was issued under (the
+    /// open's first window or a later lazy load's grown one — the view
+    /// owns the window policy).
+    fn spawn_bash_tail_fetch(&self, activity_id: String, generation: u64, lines: u32) {
+        let client = self.client.clone();
+        let session = self.active_session_id.clone();
+        let tx = self.bash_updates.clone();
+        tokio::spawn(async move {
+            let response_id = activity_id.clone();
+            let result = client
+                .request_ok(DaemonCommand::TailKernelBash {
+                    id: None,
+                    active_session_id: session.clone(),
+                    activity_id,
+                    lines: Some(lines),
+                    rest: Default::default(),
+                })
+                .await;
+            match result {
+                Ok(data) => {
+                    if let Some(tail) = data.get("tail").and_then(Value::as_str) {
+                        let _ = tx.send(BashActivityUpdate::Tail {
+                            session,
+                            activity_id: response_id,
+                            generation,
+                            tail: tail.to_string(),
+                        });
+                    }
+                }
+                Err(error) => {
+                    let _ = tx.send(BashActivityUpdate::Error {
+                        session,
+                        message: format!("Bash output: {error:#}"),
+                        activity_id: Some(response_id),
+                        fetch: true,
+                        generation: Some(generation),
+                    });
+                }
+            }
+        });
+    }
+
     /// One key press while the bash view is open: the view owns the frame
     /// the same way as the heartbeats view; its actions run the kernel
     /// bash requests off the key loop.
@@ -6043,45 +6144,25 @@ impl SessionUi {
                 view.bash_view = None;
             }
             Some(BashViewAction::OpenDetail { id, generation }) => {
-                // The request runs off the key loop (a stalled kernel
-                // must not freeze the TUI behind the request bound): the
-                // tail lands on the open view through the update channel,
-                // stamped with this open's generation so a late response
-                // from an earlier open never overwrites it.
-                let client = self.client.clone();
-                let session = self.active_session_id.clone();
-                let tx = self.bash_updates.clone();
-                tokio::spawn(async move {
-                    let response_id = id.clone();
-                    let result = client
-                        .request_ok(DaemonCommand::TailKernelBash {
-                            id: None,
-                            active_session_id: session.clone(),
-                            activity_id: id,
-                            lines: Some(crate::bash_view::TAIL_LINES),
-                            rest: Default::default(),
-                        })
-                        .await;
-                    match result {
-                        Ok(data) => {
-                            if let Some(tail) = data.get("tail").and_then(Value::as_str) {
-                                let _ = tx.send(BashActivityUpdate::Tail {
-                                    session,
-                                    activity_id: response_id,
-                                    generation,
-                                    tail: tail.to_string(),
-                                });
-                            }
-                        }
-                        Err(error) => {
-                            let _ = tx.send(BashActivityUpdate::Error {
-                                session,
-                                message: format!("Bash output: {error:#}"),
-                                activity_id: Some(response_id),
-                            });
-                        }
-                    }
-                });
+                // The lazy tail: the open asks for the first window only
+                // (FIRST_TAIL_LINES); the detail's upward scroll grows
+                // the window on demand (LoadMore below). The request runs
+                // off the key loop (a stalled kernel must not freeze the
+                // TUI behind the request bound): the tail lands on the
+                // open view through the update channel, stamped with this
+                // open's generation so a late response from an earlier
+                // open never overwrites it.
+                self.spawn_bash_tail_fetch(id, generation, crate::bash_view::FIRST_TAIL_LINES);
+            }
+            Some(BashViewAction::LoadMore {
+                id,
+                generation,
+                lines,
+            }) => {
+                // The detail scrolled to the top of its loaded window:
+                // re-fetch the row's output with the grown window (the
+                // view owns the growth policy, capped by the wire).
+                self.spawn_bash_tail_fetch(id, generation, lines);
             }
             Some(BashViewAction::Kill { id }) => {
                 let client = self.client.clone();
@@ -6108,6 +6189,8 @@ impl SessionUi {
                                 session,
                                 message: format!("Could not kill bash command: {error:#}"),
                                 activity_id: Some(error_id),
+                                fetch: false,
+                                generation: None,
                             });
                         }
                     }
@@ -6300,6 +6383,85 @@ impl SessionUi {
                 }
             }
         });
+    }
+
+    /// Fetch the session's slash-command catalog in the background (TS
+    /// `refreshConnectionCatalog`'s `getCommands` arm, best-effort with a
+    /// bounded wait like the heartbeat refresh): the response carries the
+    /// `skill:` commands the autocomplete provider lists. A fetch races a
+    /// rebind silently — the epoch drops the stale response at fold time.
+    pub(crate) fn spawn_command_catalog_refresh(&mut self) {
+        self.command_refresh_epoch += 1;
+        let epoch = self.command_refresh_epoch;
+        // TS's rebind completes only after the fresh catalog lands
+        // (`refreshConnectionCatalog` is awaited before the provider
+        // rebuild), so the menu never serves the previous session's
+        // skills. The clear rides the same FIFO channel ahead of the
+        // fetch's response (this send completes before the spawn below
+        // runs), so the old rows drop immediately and the fresh fetch
+        // repopulates — a rebind never offers stale cross-session
+        // commands.
+        let _ = self.command_updates.send(CommandCatalogUpdate {
+            epoch,
+            skill_commands: Vec::new(),
+        });
+        let updates = self.command_updates.clone();
+        let client = self.client.clone();
+        let active_session_id = self.active_session_id.clone();
+        tokio::spawn(async move {
+            let request = DaemonCommand::GetCommands {
+                id: None,
+                active_session_id,
+                rest: Default::default(),
+            };
+            let fetched = tokio::time::timeout(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                client.request_ok(request),
+            )
+            .await;
+            let skill_commands = match fetched {
+                Ok(Ok(data)) => crate::autocomplete::skill_command_entries(&data),
+                // TS `refreshCommandCatalogForCurrentSession` clears the
+                // catalog on failure (`connectionCommands = []`); the
+                // attach-time fetch keeps nothing either.
+                Ok(Err(_)) | Err(_) => Vec::new(),
+            };
+            let _ = updates.send(CommandCatalogUpdate {
+                epoch,
+                skill_commands,
+            });
+        });
+    }
+
+    /// Fold a landed command-catalog refresh into the session (TS
+    /// `refreshConnectionCatalog` -> `setupAutocompleteProvider`): the
+    /// `skill:` commands replace the provider's list — gated by the
+    /// `enableSkillCommands` setting (TS default true) — and a stale
+    /// epoch never applies.
+    pub(crate) fn apply_command_catalog(
+        &mut self,
+        update: CommandCatalogUpdate,
+        view: &mut AgentView,
+    ) {
+        if update.epoch < self.command_refresh_epoch {
+            return;
+        }
+        // The cache keeps the raw fetch (the toggle re-applies it under
+        // the setting's new value); the setting gates only what the
+        // provider lists. The TS default (true) applies when the
+        // composition root supplies no settings seam.
+        self.skill_commands_cache = update.skill_commands;
+        let skills = if self
+            .client_settings
+            .as_ref()
+            .is_none_or(|settings| settings.enable_skill_commands())
+        {
+            self.skill_commands_cache.clone()
+        } else {
+            Vec::new()
+        };
+        view.editor.set_autocomplete_skill_commands(skills);
+        self.dirty = true;
     }
 
     /// Fold a landed heartbeat-catalog refresh into the session: re-scope
@@ -6933,12 +7095,17 @@ impl SessionUi {
             )
         };
         if page_up {
+            // The viewport consumes the key before the editor, so the
+            // editor's own page arms never run: collapse a selection
+            // here or it survives the scroll as a stale replace range.
+            view.editor.clear_selection();
             view.scroll_by(-(view.page_size() as isize));
             self.track_scroll("page_up", view.is_following());
             self.dirty = true;
             return Ok(());
         }
         if page_down {
+            view.editor.clear_selection();
             view.scroll_by(view.page_size() as isize);
             self.track_scroll("page_down", view.is_following());
             self.dirty = true;
@@ -7051,6 +7218,15 @@ impl SessionUi {
             if view.editor.is_showing_autocomplete() || view.editor.has_pending_autocomplete() {
                 view.editor.cancel_autocomplete();
                 self.clear_ctrl_c_hint();
+                return Ok(());
+            }
+            // An active selection consumes the first Escape (standard
+            // editors' drop-the-selection press): the interrupt/clear
+            // ladder runs on the next press.
+            if view.editor.has_selection() {
+                view.editor.clear_selection();
+                self.clear_ctrl_c_hint();
+                self.dirty = true;
                 return Ok(());
             }
             self.clear_ctrl_c_hint();
@@ -7401,6 +7577,11 @@ impl SessionUi {
             && view.editor.is_cursor_at_end()
             && self.focus_subagents_summary(view)
         {
+            // The focus leaves the editor with the selection active: a
+            // later keystroke would fall back through to the editor and
+            // replace the stale range, so the selection collapses with
+            // the handoff.
+            view.editor.clear_selection();
             self.dirty = true;
             return Ok(());
         }
@@ -7411,18 +7592,72 @@ impl SessionUi {
             self.clear_ctrl_c_hint();
         }
         for event in view.editor.take_events() {
-            if let crate::editor::EditorEvent::Submitted(text) = event {
-                if self.queue_selection.is_browsing() {
-                    // Enter steers the selected parked message: the edit
-                    // replaces it and moves it onto the steering lane
-                    // (TS `applyQueueSelection(text, "steering")`).
-                    self.apply_queue_selection(&text, QueueLane::Steering, view)
-                        .await?;
-                } else {
-                    view.editor.add_to_history(&text);
-                    self.submit_prompt(&text, SubmitBehavior::Steer, view)
-                        .await?;
+            match event {
+                crate::editor::EditorEvent::Submitted(text) => {
+                    if self.queue_selection.is_browsing() {
+                        // Enter steers the selected parked message: the edit
+                        // replaces it and moves it onto the steering lane
+                        // (TS `applyQueueSelection(text, "steering")`).
+                        self.apply_queue_selection(&text, QueueLane::Steering, view)
+                            .await?;
+                    } else {
+                        view.editor.add_to_history(&text);
+                        self.submit_prompt(&text, SubmitBehavior::Steer, view)
+                            .await?;
+                    }
                 }
+                crate::editor::EditorEvent::ClipboardWrite(text) => {
+                    // A selection cut/copy. On a live terminal it takes
+                    // TS `copySelection`'s shape exactly: the OSC 52
+                    // sequence goes straight to the terminal (it works
+                    // locally, over SSH, and through tmux
+                    // `set-clipboard`), the same write the mouse
+                    // selection's `copy_selection` below performs. The
+                    // platform-tool chain (child processes whose
+                    // `wait()` has no timeout) never runs on this path:
+                    // a stalled xclip/wl-copy/pbcopy can neither freeze
+                    // the prompt nor leak an unkillable blocking task,
+                    // and no background task accumulates. The toast is
+                    // success-only; a failed write shows the error row.
+                    // A headless run has no terminal to write to and no
+                    // stalling children (the tools fail to spawn
+                    // instantly), so it keeps the synchronous platform
+                    // chain and its captured OSC sink stays verifiable.
+                    if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+                        use std::io::Write;
+                        // The sequence goes through `osc52::sequence`, so
+                        // the encoded-payload cap applies to this path
+                        // like every other OSC 52 write: an oversized
+                        // sequence desynchronizes the terminal, so the
+                        // copy reports failure instead of writing it.
+                        match crate::osc52::sequence(&text) {
+                            Some(sequence) => {
+                                let mut out = std::io::stdout();
+                                match out.write_all(sequence.as_bytes()) {
+                                    Ok(()) => {
+                                        let _ = out.flush();
+                                        self.toast("Copied selection to clipboard", view);
+                                    }
+                                    Err(error) => {
+                                        self.error_row(
+                                            &format!("Failed to copy selection: {error}"),
+                                            view,
+                                        );
+                                    }
+                                }
+                            }
+                            None => {
+                                self.error_row("Failed to copy selection to clipboard", view);
+                            }
+                        }
+                    } else {
+                        match crate::clipboard::copy_to_clipboard(&text, &mut self.osc_sink) {
+                            Ok(()) => self.toast("Copied selection to clipboard", view),
+                            Err(message) => self.error_row(&message, view),
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         self.dirty = true;
