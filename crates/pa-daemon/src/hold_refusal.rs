@@ -375,13 +375,13 @@ Session: ts01ab";
     fn the_footer_reads_the_session_name_and_the_path_fallback() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let file = dir.path().join("session.jsonl");
+        // One JSON object per line (JSONL): a line that continues onto
+        // the next is an invalid entry the loader silently skips.
         std::fs::write(
             &file,
             concat!(
-                "{\"type\":\"session\",\"version\":3,\"id\":\"sess01\",\n",
-                "\"timestamp\":\"2026-09-24T00:00:00Z\",\"cwd\":\"/w\"}\n",
-                "{\"type\":\"session_info\",\"id\":\"e1\",\n",
-                "\"timestamp\":\"2026-09-24T00:00:01Z\",\"name\":\"lane work\"}\n"
+                "{\"type\":\"session\",\"version\":3,\"id\":\"sess01\",\"timestamp\":\"2026-09-24T00:00:00Z\",\"cwd\":\"/w\"}\n",
+                "{\"type\":\"session_info\",\"id\":\"e1\",\"timestamp\":\"2026-09-24T00:00:01Z\",\"name\":\"lane work\"}\n"
             ),
         )
         .expect("write session file");
@@ -401,8 +401,8 @@ Session: ts01ab";
         };
         let message = refusal_for_flavor(HolderFlavor::TypeScriptProduct, &hold, Some(&file));
         assert!(
-            message.ends_with(&format!("Session: {}", file.display())),
-            "without a holder id the footer names the file: {message}"
+            message.ends_with(&format!("Session: {} (lane work)", file.display())),
+            "without a holder id the footer names the file and its name: {message}"
         );
     }
 
