@@ -203,6 +203,7 @@ impl BashView {
             tail_window: FIRST_TAIL_LINES,
             tail_complete: false,
             loading_more: false,
+            open_retry: false,
             scroll_from_end: 0,
             detail_region_rows: std::cell::Cell::new(0),
             error: None,
@@ -222,6 +223,7 @@ impl BashView {
         self.tail_window = FIRST_TAIL_LINES;
         self.tail_complete = false;
         self.loading_more = false;
+        self.open_retry = false;
         self.scroll_from_end = 0;
     }
 
@@ -263,7 +265,9 @@ impl BashView {
         let lines: Vec<String> = tail.lines().map(clean_line).collect();
         // A landed window supersedes a shown fetch error (the retry — or
         // the fresh open — proves the failure gone); a kill error keeps
-        // its registry-refresh lifecycle.
+        // its registry-refresh lifecycle. A landed window also releases
+        // the open retry's in-flight claim.
+        self.open_retry = false;
         if self.fetch_error {
             self.error = None;
             self.fetch_error = false;
@@ -324,11 +328,13 @@ impl BashView {
                     .map(|(_, output)| output.len() as u32)
                     .unwrap_or(FIRST_TAIL_LINES);
             }
-            // Only a fetch failure releases the in-flight load claim:
-            // a kill error knows nothing about the load's fate, and a
-            // duplicate load racing the still-in-flight one could let
-            // either response overwrite the other's scroll state.
+            // Only a fetch failure releases the in-flight claims (the
+            // lazy load's, the open retry's): a kill error knows nothing
+            // about the fetches' fate, and a duplicate racing the still-
+            // in-flight one could let either response overwrite the
+            // other's scroll state.
             self.loading_more = false;
+            self.open_retry = false;
         }
         self.error = Some(error);
         self.fetch_error = fetch;
@@ -434,6 +440,13 @@ impl BashView {
             // the detail view). While the open fetch is still in flight
             // (no error shown), Up does nothing.
             if self.fetch_error {
+                // One retry at a time: the claim holds until the retry
+                // lands or fails, so key repeats never stack duplicate
+                // same-generation fetches.
+                if self.open_retry {
+                    return BashViewAction::None;
+                }
+                self.open_retry = true;
                 return BashViewAction::OpenDetail {
                     id,
                     generation: self.detail_generation,
@@ -2053,7 +2066,8 @@ mod tests {
             Some(generation),
         );
         assert!(view.fetch_error);
-        // An Up press retries the open fetch under the same generation.
+        // An Up press retries the open fetch under the same generation -
+        // once: the in-flight claim holds key repeats at bay.
         assert_eq!(
             view.handle_key("up", &kb()),
             BashViewAction::OpenDetail {
@@ -2061,12 +2075,43 @@ mod tests {
                 generation,
             }
         );
-        // The retry lands: the fetch error clears and the output shows.
+        assert!(view.open_retry, "the retry claim is held");
+        for _ in 0..5 {
+            assert_eq!(
+                view.handle_key("up", &kb()),
+                BashViewAction::None,
+                "key repeats never stack duplicate retries"
+            );
+        }
+        // The retry lands: the claim and the fetch error clear and the
+        // output shows.
         view.set_output("a", "line one", generation);
         assert!(view.error.is_none(), "the retry supersedes the fetch error");
+        assert!(!view.open_retry);
         let frame = view.render(&theme(), 70, &kb());
         let text = frame_text(&frame);
         assert!(text.iter().any(|row| row.contains("line one")));
+
+        // A retry that FAILS releases the claim for the next Up (and the
+        // new failure replaces the shown error); a kill error meanwhile
+        // never touches it.
+        view.set_error("Bash output: again".to_string(), true, Some(generation));
+        assert!(view.fetch_error);
+        assert!(!view.open_retry, "the failed retry releases the claim");
+        assert_eq!(
+            view.handle_key("up", &kb()),
+            BashViewAction::OpenDetail {
+                id: "a".to_string(),
+                generation,
+            }
+        );
+        view.set_error("Could not kill bash command: nope".to_string(), false, None);
+        assert!(
+            view.open_retry,
+            "a kill error never releases the retry claim"
+        );
+        view.set_output("a", "line two", generation);
+        assert!(!view.open_retry);
     }
 
     /// A one-row output region (the designed minimum under a long
