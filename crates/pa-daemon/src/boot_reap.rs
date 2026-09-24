@@ -207,9 +207,12 @@ fn identity_current(target: &ReapTarget) -> bool {
 /// signal meant for the process that exited - the fd pins the exact
 /// process, whatever the pid table does afterwards.
 async fn stop_target(target: &ReapTarget) -> ReapOutcome {
-    if !identity_current(target) || !crate::lease::is_process_alive(target.pid).unwrap_or(false) {
-        return ReapOutcome::AlreadyGone;
-    }
+    // The handle opens BEFORE the identity check and the check runs WHILE
+    // it is held: a target that dies and has its pid recycled in between
+    // would otherwise leave the handle pinning the REPLACEMENT - open
+    // first, then verify the pid still names our process, and only then
+    // does any signal ride the held fd (a signal through this fd can
+    // reach the pinned process and nothing else, ever).
     let Some(pidfd) = pa_core::platform::process::open_pidfd(target.pid) else {
         // The kernel-held handle is unavailable (an unsupported platform,
         // an old kernel, or a process that just exited): the conservative
@@ -222,6 +225,10 @@ async fn stop_target(target: &ReapTarget) -> ReapOutcome {
         }
         return ReapOutcome::AlreadyGone;
     };
+    if !identity_current(target) || !crate::lease::is_process_alive(target.pid).unwrap_or(false) {
+        pa_core::platform::process::close_pidfd(pidfd);
+        return ReapOutcome::AlreadyGone;
+    }
     if pa_core::platform::process::pidfd_signal(pidfd, pa_core::platform::process::Signal::Term) {
         if await_gone(target, TERM_GRACE).await {
             pa_core::platform::process::close_pidfd(pidfd);
