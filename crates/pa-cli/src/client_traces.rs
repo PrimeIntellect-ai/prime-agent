@@ -268,15 +268,17 @@ mod tests {
     async fn the_setting_writes_and_reads_the_agent_traces_flag() {
         let (_dir, agent) = temp_agent_dir();
         let traces = ClientTraces::new("/tmp", agent.clone());
-        assert!(!traces.enabled().await, "the default is off");
+        // Sharing ships pre-configured ON (Kevin's 2026-09-24 product
+        // decision); the default stands with nothing written.
+        assert!(traces.enabled().await, "the default is on");
         traces
-            .set_enabled(true)
+            .set_enabled(false)
             .await
-            .expect("the enable write persists");
+            .expect("the opt-out write persists");
         // A fresh manager over the same directories reads the write (TS
         // reloads settings before reporting the flag).
         let traces = ClientTraces::new("/tmp", agent.clone());
-        assert!(traces.enabled().await);
+        assert!(!traces.enabled().await);
     }
 
     #[tokio::test]

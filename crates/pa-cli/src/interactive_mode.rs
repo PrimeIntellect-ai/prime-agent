@@ -26,7 +26,8 @@ struct SettingsOnboardingSink {
     agent_dir: PathBuf,
     /// When the onboarding task was created: the `onboarding completed`
     /// duration measures sink creation to completion (the TUI starts the
-    /// flow right away; the trace-question flow is the whole onboarding).
+    /// flow right away; the flow is silent on fresh homes and only the
+    /// retained opt-out question shows the pane).
     created_at: std::time::Instant,
 }
 
@@ -44,9 +45,10 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
     fn mark_onboarding_complete(&self) -> Result<()> {
         let mut settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
         settings.set_onboarding_shown(true)?;
-        // `onboarding completed` (schema v1): the Rust onboarding flow is the
-        // trace question, so outcome is always success and no auth/provider
-        // step runs (auth_category `none`). Best-effort like all telemetry.
+        // `onboarding completed` (schema v1): fresh homes complete the flow
+        // silently (sharing is pre-configured), so outcome is always success
+        // and no auth/provider step runs (auth_category `none`). Best-effort
+        // like all telemetry.
         if !crate::mode::telemetry_disabled(&settings) {
             let client =
                 pa_core::session_engine::telemetry::build_client(&settings, &self.agent_dir);
@@ -65,14 +67,17 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
 }
 
 /// TS `shouldRunOnboarding` + `isOnboardingModelReady`: first run is defined
-/// by the settings flag alone, but the flow only shows the trace question
-/// (no login sequence) when the startup model resolves and has configured
-/// auth. The startup model follows the TS `findInitialModel` chain —
+/// by the settings flag alone; the task mounts only when the startup model
+/// resolves and has configured auth (no login sequence). A fresh home
+/// ships trace sharing pre-configured, so the flow completes silently
+/// without any question; the trace question remains for a user who
+/// explicitly opted out before completing onboarding. The startup model
+/// follows the TS `findInitialModel` chain —
 /// explicit flags, the `--models` scope, the saved settings default, the
 /// featured default, the first available model — so a flagless launch with
-/// a configured default reaches the trace question exactly like TS. The
-/// TS non-ready path (sign-in + provider picker) is not ported yet: a
-/// first launch that resolves no usable model skips the notice.
+/// a configured default mounts the task exactly like TS. The TS non-ready
+/// path (sign-in + provider picker) is not ported yet: a first launch that
+/// resolves no usable model skips the notice.
 fn onboarding_task(options: &RunOptions) -> Option<pa_tui::interactive::OnboardingTask> {
     let config = &options.config;
     let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
@@ -1340,8 +1345,9 @@ mod tests {
         settings.set_onboarding_shown(false).expect("reset flag");
 
         // Flagless launch: a models.json provider key + saved default model
-        // resolve the startup model, so the trace question shows (TS
-        // `isOnboardingModelReady` over the `findInitialModel` chain).
+        // resolve the startup model, so the onboarding task mounts (TS
+        // `isOnboardingModelReady` over the `findInitialModel` chain); on a
+        // fresh home it completes silently (no trace question).
         std::fs::write(
             agent.join("models.json"),
             r#"{ "providers": {
@@ -1370,7 +1376,7 @@ mod tests {
         assert!(onboarding_task(&options).is_some());
 
         // Explicit flags that resolve to a provider without configured auth
-        // leave the model not ready: no trace question. TS `validateConfig`
+        // leave the model not ready: no onboarding task. TS `validateConfig`
         // requires an "apiKey" for custom providers, but a `!command` key
         // that fails resolves to nothing (TS `resolveConfigValue`), so the
         // provider stays unauthenticated.

@@ -506,6 +506,111 @@ async fn tui_attaches_prompts_streams_lists_and_switches() {
     drop(supervisor);
 }
 
+/// The product's settings-backed onboarding persistence (the
+/// `SettingsOnboardingSink` glue over the public settings manager, minus
+/// the best-effort telemetry the e2e harness has no client for).
+struct FreshHomeOnboardingSink {
+    cwd: PathBuf,
+    agent_dir: PathBuf,
+}
+
+impl pa_tui::interactive::OnboardingSink for FreshHomeOnboardingSink {
+    fn agent_traces_enabled(&self) -> bool {
+        pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
+            .get_agent_traces_enabled()
+    }
+
+    fn set_agent_traces_enabled(&self, enabled: bool) -> anyhow::Result<()> {
+        pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
+            .set_agent_traces_enabled(enabled)
+    }
+
+    fn mark_onboarding_complete(&self) -> anyhow::Result<()> {
+        pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
+            .set_onboarding_shown(true)
+    }
+}
+
+/// A fresh install ships trace sharing pre-configured ON (Kevin's
+/// 2026-09-24 product decision; sanctioned divergence from TS, which
+/// defaults off and asks). The first-run onboarding completes silently:
+/// no trace dialog owns the pane, the submitted prompt goes straight to
+/// the session, and the persisted state reads back shown + enabled with
+/// the default standing unwritten (no `agentTraces` key — the default IS
+/// the configuration, like the compaction toggle).
+#[tokio::test]
+async fn fresh_home_completes_onboarding_silently_without_the_trace_dialog() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    let script = serde_json::json!({ "responses": [
+        { "text": "hello fresh home", "delayMs": 20 },
+    ] });
+    std::fs::write(
+        dir.path().join("script.json"),
+        serde_json::to_string(&script).expect("script json"),
+    )
+    .expect("script.json");
+
+    // The task mounts exactly as the product's model-ready gate builds it;
+    // the sink persists through the real settings manager.
+    let mut options = base_options(&supervisor, dir.path(), &session_dir);
+    options.onboarding = Some(pa_tui::interactive::OnboardingTask {
+        sink: std::sync::Arc::new(FreshHomeOnboardingSink {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: agent_dir.clone(),
+        }),
+    });
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        ],
+        width: 100,
+        height: 30,
+    };
+    let outcome =
+        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
+            .await
+            .expect("interactive run");
+
+    // The session owned the pane from the first frame: the submission went
+    // to the editor and the scripted turn rendered. (With the old
+    // default-off flow, this submission was consumed by the trace dialog
+    // and the turn never ran.)
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains("hello fresh home"),
+        "the session started directly and completed its first turn:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Share agent traces"),
+        "the trace-sharing dialog never rendered:\n{rendered}"
+    );
+
+    // The flow completed silently: shown is set, sharing stays enabled,
+    // and nothing was written for it on a fresh home.
+    let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+    assert!(
+        settings.get_onboarding_shown(),
+        "the silent flow marked onboarding shown"
+    );
+    assert!(
+        settings.get_agent_traces_enabled(),
+        "a fresh home shares traces (the pre-configured default)"
+    );
+    let persisted =
+        std::fs::read_to_string(agent_dir.join("settings.json")).expect("global settings file");
+    assert!(
+        !persisted.contains("agentTraces"),
+        "the default stood without a written key:\n{persisted}"
+    );
+    drop(supervisor);
+}
+
 /// The product launch path: `ensure_daemon_running` spawns a detached
 /// `prime-agent --mode daemon` when nothing is listening, then the TUI
 /// attaches through it.
