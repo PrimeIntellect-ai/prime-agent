@@ -16,7 +16,7 @@ use std::time::Instant;
 enum Sink {
     Off,
     Stderr,
-    File(std::fs::File),
+    File(std::sync::Mutex<std::fs::File>),
 }
 
 static SINK: OnceLock<Sink> = OnceLock::new();
@@ -30,7 +30,7 @@ fn sink() -> &'static Sink {
             .create(true)
             .append(true)
             .open(&path)
-            .map(Sink::File)
+            .map(|file| Sink::File(std::sync::Mutex::new(file)))
             .unwrap_or(Sink::Off),
     })
 }
@@ -59,6 +59,9 @@ pub fn trace(phase: &str, detail: serde_json::Value) {
             let _ = writeln!(std::io::stderr(), "compaction-trace: {line}");
         }
         Sink::File(file) => {
+            let mut file = file
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let _ = writeln!(file, "compaction-trace: {line}");
         }
         Sink::Off => {}
