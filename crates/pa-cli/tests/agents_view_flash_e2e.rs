@@ -341,7 +341,7 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
                             "name": "Mock 1",
                             "api": "openai-completions",
                             "reasoning": true,
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096
                         }
                     ]
