@@ -525,6 +525,11 @@ pub(crate) struct SessionUi {
     /// through the auth seam with its terminal-suspension bracket, never
     /// through the typed-command path.
     pending_mcp_auth: Option<String>,
+    /// The Tab-interception path restored the stashed browse draft into
+    /// the editor when it opened the picker, so the editor holds the
+    /// user's draft, not the command's typed partial: a picker apply
+    /// fulfills the command but must keep the draft.
+    picker_restored_draft: bool,
     /// Whether this run already reported its first suspend cycle.
     suspend_adoption_emitted: bool,
     /// The armed selection auto-scroll (TS `selectionAutoScroll*`): a drag
@@ -718,6 +723,7 @@ impl SessionUi {
             side_bash_counter: 0,
             suspend_requested: false,
             pending_mcp_auth: None,
+            picker_restored_draft: false,
             suspend_adoption_emitted: false,
             selection_auto_scroll: None,
             selection_adoption_emitted: false,
@@ -5303,14 +5309,21 @@ impl SessionUi {
             Some(crate::mcp_view::McpViewAction::None) => {}
             Some(crate::mcp_view::McpViewAction::Cancel) => {
                 view.mcp_view = None;
+                self.picker_restored_draft = false;
                 self.dirty = true;
             }
             Some(crate::mcp_view::McpViewAction::Select(server)) => {
                 view.mcp_view = None;
                 self.dirty = true;
                 // The Tab path leaves the typed `/mcp <partial>` behind;
-                // resolving fulfills the command (a Cancel keeps it).
-                view.editor.set_text("");
+                // resolving fulfills the command (a Cancel keeps it). The
+                // browse-restore path holds the user's draft instead —
+                // the resolution fulfills the command, the draft stays.
+                if self.picker_restored_draft {
+                    self.picker_restored_draft = false;
+                } else {
+                    view.editor.set_text("");
+                }
                 // TS `authenticate`: Enter runs the connection's login
                 // flow. The typed-command arg path is gone, so the view
                 // resolves through the internal auth seam instead of a
@@ -5320,7 +5333,11 @@ impl SessionUi {
             Some(crate::mcp_view::McpViewAction::Paste(server)) => {
                 view.mcp_view = None;
                 self.dirty = true;
-                view.editor.set_text("");
+                if self.picker_restored_draft {
+                    self.picker_restored_draft = false;
+                } else {
+                    view.editor.set_text("");
+                }
                 // The inline paste panel's client surface: prompt for the
                 // token, store it bound to the service endpoint, verify.
                 self.pending_mcp_auth = Some(format!("paste {server}"));
@@ -5566,6 +5583,7 @@ impl SessionUi {
             Some(ModelPickerAction::None) => {}
             Some(ModelPickerAction::Cancel) => {
                 view.model_picker = None;
+                self.picker_restored_draft = false;
                 self.dirty = true;
             }
             Some(ModelPickerAction::Apply(applied)) => {
@@ -5573,8 +5591,15 @@ impl SessionUi {
                 // The Tab path leaves the typed `/model <partial>` behind in
                 // the editor; the command path's submission already drained
                 // it. Applying fulfills the command either way, so the
-                // editor clears (a Cancel keeps the partial for editing).
-                view.editor.set_text("");
+                // editor clears (a Cancel keeps the partial for editing) —
+                // except the browse-restore path, where the editor holds the
+                // user's restored draft, not the partial: the pick fulfills
+                // the command and the draft stays.
+                if self.picker_restored_draft {
+                    self.picker_restored_draft = false;
+                } else {
+                    view.editor.set_text("");
+                }
                 self.apply_model_selection(&applied.provider, &applied.model_id, view)
                     .await;
                 // A user-edited effort applies after the model switch (TS
@@ -7322,6 +7347,7 @@ impl SessionUi {
                     if self.queue_selection.has_draft() {
                         let draft = self.queue_selection.reset();
                         view.editor.set_text(&draft);
+                        self.picker_restored_draft = true;
                     } else {
                         self.queue_selection.reset();
                     }
@@ -7330,12 +7356,27 @@ impl SessionUi {
                 match command.as_str() {
                     "model" => {
                         self.open_model_picker(view, partial.trim()).await?;
+                        // The flag belongs to the mounted picker: the
+                        // model picker always mounts here, so a guard is
+                        // belt-and-braces, but the failed-open contract
+                        // stays symmetric with the mcp arm.
+                        if view.model_picker.is_none() {
+                            self.picker_restored_draft = false;
+                        }
                         self.track_menu_opened("model", "tab");
                         self.dirty = true;
                         return Ok(());
                     }
                     "mcp" => {
                         self.open_mcp_view("/mcp", view, partial.trim()).await?;
+                        // A failed roster load leaves no view mounted:
+                        // the editor keeps the restored draft (nothing
+                        // lost), but the flag must not leak into the NEXT
+                        // picker — its clear-on-apply semantics belong to
+                        // the typed partial, not this draft.
+                        if view.mcp_view.is_none() {
+                            self.picker_restored_draft = false;
+                        }
                         self.track_menu_opened("mcp", "tab");
                         self.dirty = true;
                         return Ok(());
