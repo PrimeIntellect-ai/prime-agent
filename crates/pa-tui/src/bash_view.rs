@@ -1,13 +1,18 @@
-//! The dedicated bash view (the operator's 2026-09-23 redesign): the
-//! session's kernel bash registry — the background commands the agent's
-//! REPL started — as a columned table (command, duration, pid, status),
-//! and Enter on a row opens the detail drill-in: the exact command, all
-//! output fetched so far, and the actions (cancel the running command) in
-//! the same up/down-selectable control pattern as the `/mcp` view. The
-//! selected row washes a little past its text (the onboarding choice
-//! treatment), never the whole terminal width. Pure presentation and
-//! selection: the host owns the 2s registry refresh, fetches the output
-//! tail, and executes the kill.
+//! The dedicated bash view (the operator's 2026-09-23 redesign, refined
+//! 2026-09-24): the session's kernel bash registry — the background
+//! commands the agent's REPL started — as a columned table (command,
+//! duration, pid, status) that hugs its content width (the columns never
+//! stretch to the terminal edge), and Enter on a row opens the detail
+//! drill-in (the operator's refined shape): one metadata row (pid,
+//! started, duration, status), the exact command, and the fetched output
+//! tail in a scrollable region — up/down walk the output, and reaching
+//! the top of the loaded window lazily loads more of the tail (the
+//! window starts at [`FIRST_TAIL_LINES`] and doubles on each load up to
+//! the 200-line wire cap). The status colors code the rows (running
+//! green, finished dim, failed red). The pane runs all the way to the
+//! bottom of the screen: nothing rides below the shortcuts hint. Pure
+//! presentation and selection: the host owns the 2s registry refresh,
+//! fetches the output tails, and executes the kill.
 
 use serde_json::Value;
 
@@ -21,19 +26,23 @@ use crate::{Line, Span};
 const PREFERRED_VISIBLE: usize = 8;
 
 /// Rows the list reserves outside its items (the inline geometry: rule,
-/// title, blank, column header, blank, hint, rule — the conditional
+/// title, blank, column header, blank, hint — the conditional
 /// scroll-indicator row rides `menu_list_layout`'s scroll reservation,
-/// never counted twice).
-const LIST_FRAME_ROWS: usize = 7;
-
-/// The detail pane's labeled-pair row budget.
-const MAX_DETAIL_ROWS: usize = 5;
+/// never counted twice). The pane runs to the bottom of the screen: no
+/// rule rides below the hint.
+const LIST_FRAME_ROWS: usize = 6;
 
 /// The command column's width cap.
 const COMMAND_CAP: usize = 44;
 
-/// The lines the host asks the kernel's `tail` for (the wire's own cap,
-/// a u32 on the `tail_kernel_bash` payload).
+/// The lines the open detail asks for first (the lazy tail: the pane
+/// shows the newest output and loads more of it on upward scroll, so a
+/// finished task's full output never loads up front).
+pub const FIRST_TAIL_LINES: u32 = 50;
+
+/// The lines the host's `tail_kernel_bash` request can carry at most (the
+/// wire's own cap, a u32 on the payload): the load-more window doubles up
+/// to this and stops.
 pub const TAIL_LINES: u32 = 200;
 
 /// An opaque kernel bash id and its latest catalog metadata (the
@@ -102,22 +111,32 @@ pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Mode {
     List,
-    Detail { id: String, action_index: usize },
+    Detail { id: String },
 }
 
 /// One key press while the view is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BashViewAction {
     Close,
-    /// Enter on a list row: the host fetches the row's output tail and
-    /// delivers it back with [`BashView::set_output`]; `generation`
-    /// stamps the open it was issued under.
+    /// Enter on a list row: the host fetches the row's output tail
+    /// ([`FIRST_TAIL_LINES`] lines) and delivers it back with
+    /// [`BashView::set_output`]; `generation` stamps the open it was
+    /// issued under.
     OpenDetail {
         id: String,
         generation: u64,
     },
-    /// Enter on the cancel action: the host runs `kill_kernel_bash` and
-    /// refreshes the registry.
+    /// Up at the top of the loaded output window (the lazy tail): the
+    /// host re-fetches the row's output with the grown `lines` window
+    /// and delivers it back the same way, stamped with the same open's
+    /// `generation`.
+    LoadMore {
+        id: String,
+        generation: u64,
+        lines: u32,
+    },
+    /// Enter in the detail on the cancel action: the host runs
+    /// `kill_kernel_bash` and refreshes the registry.
     Kill {
         id: String,
     },
@@ -137,9 +156,32 @@ pub struct BashView {
     detail_generation: u64,
     selected_id: Option<String>,
     mode: Mode,
-    /// The fetched output tail of the open detail row: `Some` once the
-    /// tail landed (empty output included), `None` while fetching.
+    /// The fetched output window of the open detail row: `Some` once a
+    /// tail landed (empty output included), `None` while the open fetch
+    /// is in flight.
     output_tail: Option<(String, Vec<String>)>,
+    /// The tail window the current detail open holds: it starts at
+    /// [`FIRST_TAIL_LINES`] and each lazy load doubles it up to
+    /// [`TAIL_LINES`].
+    tail_window: u32,
+    /// The loaded window holds everything the wire can still give: set
+    /// when a response came back shorter than its request (the kernel
+    /// retained buffer's own end) or the wire's line cap was reached.
+    /// Upward scroll at the top then shows the leading marker instead of
+    /// issuing another fetch.
+    tail_complete: bool,
+    /// A lazy load-more fetch is in flight: the marker stays and the up
+    /// key does not stack a second request.
+    loading_more: bool,
+    /// The output region's scroll position: how many lines the window
+    /// rides lifted off the newest output (0 = bottom-anchored on the
+    /// newest lines).
+    scroll_from_end: usize,
+    /// The output region's rendered height from the last paint: the key
+    /// loop's scroll math walks the same window the pane rendered (a
+    /// render always precedes a key press; 0 means nothing painted yet
+    /// and the region cannot scroll).
+    detail_region_rows: std::cell::Cell<usize>,
     error: Option<String>,
     viewport_rows: usize,
 }
@@ -153,11 +195,28 @@ impl BashView {
             selected_id: None,
             mode: Mode::List,
             output_tail: None,
+            tail_window: FIRST_TAIL_LINES,
+            tail_complete: false,
+            loading_more: false,
+            scroll_from_end: 0,
+            detail_region_rows: std::cell::Cell::new(0),
             error: None,
             viewport_rows,
         };
         view.selected_id = view.activities.first().map(|row| row.id.clone());
         view
+    }
+
+    /// Reset the open detail's fetched-output state (new open, back to
+    /// the list, or the row vanished): the next open starts from a fresh
+    /// [`FIRST_TAIL_LINES`] window, bottom-anchored, with nothing in
+    /// flight.
+    fn reset_detail_output(&mut self) {
+        self.output_tail = None;
+        self.tail_window = FIRST_TAIL_LINES;
+        self.tail_complete = false;
+        self.loading_more = false;
+        self.scroll_from_end = 0;
     }
 
     /// A landed registry refresh: replace the rows, keep the selection on
@@ -171,10 +230,10 @@ impl BashView {
         if !exists {
             self.selected_id = self.activities.first().map(|row| row.id.clone());
         }
-        if let Mode::Detail { id, .. } = self.mode.clone() {
+        if let Mode::Detail { id } = self.mode.clone() {
             if !self.activities.iter().any(|row| row.id == id) {
                 self.mode = Mode::List;
-                self.output_tail = None;
+                self.reset_detail_output();
             }
         }
         self.output_tail = self
@@ -183,15 +242,40 @@ impl BashView {
             .filter(|(id, _)| self.activities.iter().any(|row| row.id == *id));
     }
 
-    /// The fetched output tail of one row (the host's `tail_kernel_bash`
-    /// response); a tail for a closed pane, a different row, or an
-    /// earlier open of the same row is ignored.
+    /// A fetched output window of one row (the host's `tail_kernel_bash`
+    /// response); a window for a closed pane, a different row, or an
+    /// earlier open of the same row is ignored. The open fetch
+    /// bottom-anchors the region; a lazy load-more's larger window keeps
+    /// the scroll anchored so the region continues into the newly loaded
+    /// older lines, and a window that grew nothing keeps the current one
+    /// (the retained buffer's end — or the wire's byte cap — was
+    /// reached).
     pub fn set_output(&mut self, id: &str, tail: &str, generation: u64) {
         if self.detail_id().as_deref() != Some(id) || self.detail_generation != generation {
             return;
         }
         let lines: Vec<String> = tail.lines().map(clean_line).collect();
-        self.output_tail = Some((id.to_string(), lines));
+        if self.loading_more {
+            self.loading_more = false;
+            let loaded = self.output_tail.as_ref().map(|(_, output)| output.len());
+            if loaded.is_some_and(|loaded| lines.len() > loaded) {
+                // The region keeps walking into the newly loaded lines:
+                // the user pressed up at the loaded top, so the window
+                // lands anchored just above where it stopped (measured
+                // from the end, one old window's height back).
+                self.scroll_from_end = loaded.unwrap_or(0);
+                self.output_tail = Some((id.to_string(), lines));
+            }
+        } else {
+            self.scroll_from_end = 0;
+            self.output_tail = Some((id.to_string(), lines));
+        }
+        let loaded = self
+            .output_tail
+            .as_ref()
+            .map(|(_, output)| output.len())
+            .unwrap_or(0);
+        self.tail_complete = loaded < self.tail_window as usize || self.tail_window >= TAIL_LINES;
     }
 
     pub(crate) fn detail_id(&self) -> Option<String> {
@@ -201,8 +285,11 @@ impl BashView {
         }
     }
 
-    /// Surface a fetch or kill failure (the host's error channel).
+    /// Surface a fetch or kill failure (the host's error channel). A
+    /// failed lazy load releases its in-flight claim so a later up press
+    /// can retry.
     pub fn set_error(&mut self, error: String) {
+        self.loading_more = false;
         self.error = Some(error);
     }
 
@@ -238,8 +325,9 @@ impl BashView {
         }
     }
 
-    /// One key id (the picker pattern: up/down move, Enter opens or runs,
-    /// back returns, cancel closes).
+    /// One key id (the picker pattern: up/down move — in the detail they
+    /// scroll the output region — Enter opens or runs, back returns,
+    /// cancel closes).
     pub fn handle_key(&mut self, key: &str, kb: &KeybindingsManager) -> BashViewAction {
         if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
             return BashViewAction::Close;
@@ -250,6 +338,7 @@ impl BashView {
             }
             self.mode = Mode::List;
             self.error = None;
+            self.reset_detail_output();
             return BashViewAction::None;
         }
         if kb.matches(key, "tui.select.up") || kb.matches(key, "tui.select.down") {
@@ -258,8 +347,7 @@ impl BashView {
             } else {
                 1
             };
-            self.move_selection(delta);
-            return BashViewAction::None;
+            return self.move_selection(delta);
         }
         if kb.matches(key, "tui.select.confirm") {
             return self.confirm_selection();
@@ -267,37 +355,74 @@ impl BashView {
         BashViewAction::None
     }
 
-    /// Move the selection: the list walks rows by id, the detail pane
-    /// walks its action rows by index.
-    fn move_selection(&mut self, delta: isize) {
+    /// Up/down: the list walks rows by id; the detail scrolls the output
+    /// region (up toward the older lines, down back to the newest), and
+    /// up at the top of the loaded window lazily loads more of the tail.
+    fn move_selection(&mut self, delta: isize) -> BashViewAction {
         match self.mode.clone() {
             Mode::List => {
                 if self.activities.is_empty() {
-                    return;
+                    return BashViewAction::None;
                 }
                 let index = self.selected_index() as isize;
                 let next = (index + delta).clamp(0, self.activities.len() as isize - 1) as usize;
                 self.selected_id = Some(self.activities[next].id.clone());
+                BashViewAction::None
             }
-            Mode::Detail { id, action_index } => {
-                let Some(activity) = self.find_activity(&id) else {
-                    return;
-                };
-                let count = Self::available_actions(activity).len();
-                if count == 0 {
-                    return;
+            Mode::Detail { .. } => self.scroll_output(delta),
+        }
+    }
+
+    /// Scroll the detail's output region: up lifts the window off the
+    /// newest lines, down lowers it back; up at the loaded top issues the
+    /// lazy load-more (the window doubles up to the wire's line cap) or
+    /// stops at the retained buffer's beginning.
+    fn scroll_output(&mut self, delta: isize) -> BashViewAction {
+        let Mode::Detail { id } = self.mode.clone() else {
+            return BashViewAction::None;
+        };
+        let Some(output) = self
+            .output_tail
+            .as_ref()
+            .filter(|(tail_id, _)| tail_id == &id)
+            .map(|(_, output)| output.len())
+        else {
+            // Nothing fetched yet: the open fetch owns the region.
+            return BashViewAction::None;
+        };
+        let height = self.detail_region_rows.get();
+        if height == 0 {
+            return BashViewAction::None;
+        }
+        let from_end = self.scroll_from_end.min(output.saturating_sub(height));
+        if delta < 0 {
+            if from_end < output.saturating_sub(height) {
+                self.scroll_from_end = from_end + 1;
+                return BashViewAction::None;
+            }
+            // At the top of the loaded window: load more of the tail.
+            if !self.tail_complete && !self.loading_more {
+                let next = self.tail_window.saturating_mul(2).min(TAIL_LINES);
+                if next > self.tail_window {
+                    self.tail_window = next;
+                    self.loading_more = true;
+                    return BashViewAction::LoadMore {
+                        id,
+                        generation: self.detail_generation,
+                        lines: next,
+                    };
                 }
-                let next = (action_index as isize + delta).clamp(0, count as isize - 1) as usize;
-                self.mode = Mode::Detail {
-                    id,
-                    action_index: next,
-                };
+                self.tail_complete = true;
             }
+            BashViewAction::None
+        } else {
+            self.scroll_from_end = from_end.saturating_sub(1);
+            BashViewAction::None
         }
     }
 
     /// Enter on the list opens the row's detail drill-in (the host fetches
-    /// the output tail); Enter on the cancel action runs the kill.
+    /// the output tail); Enter in the detail runs the cancel action.
     fn confirm_selection(&mut self) -> BashViewAction {
         match self.mode.clone() {
             Mode::List => {
@@ -305,12 +430,9 @@ impl BashView {
                     return BashViewAction::None;
                 };
                 if self.find_activity(&id).is_some() {
-                    self.mode = Mode::Detail {
-                        id: id.clone(),
-                        action_index: 0,
-                    };
+                    self.mode = Mode::Detail { id: id.clone() };
                     self.detail_generation = self.detail_generation.wrapping_add(1);
-                    self.output_tail = None;
+                    self.reset_detail_output();
                     return BashViewAction::OpenDetail {
                         id,
                         generation: self.detail_generation,
@@ -318,19 +440,17 @@ impl BashView {
                 }
                 BashViewAction::None
             }
-            Mode::Detail { id, action_index } => {
+            Mode::Detail { id } => {
                 let Some(activity) = self.find_activity(&id) else {
                     self.mode = Mode::List;
-                    self.output_tail = None;
+                    self.reset_detail_output();
                     return BashViewAction::None;
                 };
-                if Self::available_actions(activity)
-                    .get(action_index)
-                    .is_some()
-                {
-                    return BashViewAction::Kill { id };
+                if Self::available_actions(activity).is_empty() {
+                    BashViewAction::None
+                } else {
+                    BashViewAction::Kill { id }
                 }
-                BashViewAction::None
             }
         }
     }
@@ -358,9 +478,7 @@ impl BashView {
     pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         match &self.mode {
             Mode::List => self.render_list(theme, width, kb),
-            Mode::Detail { id, action_index } => {
-                self.render_detail(theme, width, kb, id, *action_index)
-            }
+            Mode::Detail { id } => self.render_detail(theme, width, kb, id),
         }
     }
 
@@ -411,18 +529,17 @@ impl BashView {
         lines
     }
 
-    /// The detail drill-in: the exact command (wrapped, never
-    /// truncated), the labeled facts, all output fetched so far, and the
-    /// action rows in the `/mcp` view's control pattern. A short viewport
-    /// shrinks the pairs first, then the command block, then the output
-    /// tail — the action rows never yield.
+    /// The detail drill-in (the operator's refined shape): one metadata
+    /// row (pid, started, duration, status), the exact command, and the
+    /// fetched output in a scrollable region — nothing else. A short
+    /// viewport shrinks the command first, then the output region — the
+    /// action row and the hint never yield.
     fn render_detail(
         &self,
         theme: &Theme,
         width: usize,
         kb: &KeybindingsManager,
         id: &str,
-        action_index: usize,
     ) -> Vec<Line> {
         let Some(activity) = self.find_activity(id) else {
             let mut lines = pane_header_lines(theme, width, "Bash", &[], None);
@@ -433,81 +550,50 @@ impl BashView {
             lines.extend(self.pane_footer(theme, width, &self.detail_hint(kb)));
             return lines;
         };
-        let name = single_line(&scrub_controls(&activity.command));
         // The drill-in's command block is the EXACT command — embedded
         // newlines and spacing stay verbatim — with the non-newline
         // control characters scrubbed: a command carrying an escape
         // sequence never executes terminal control operations when
-        // rendered (only the title cell single-lines for identity).
+        // rendered.
         let command_exact = scrub_controls(&activity.command);
-        let subtitle = if activity.running() {
-            "running".to_string()
-        } else {
-            match activity.exit_code {
-                Some(code) => format!("exit {code}"),
-                None => activity.status.clone(),
-            }
-        };
-        let mut lines = pane_header_lines(theme, width, &name, &[], Some(&subtitle));
         let actions = Self::available_actions(activity);
-        let pairs = detail_pairs(activity);
         let error_rows = if self.error.is_some() { 2 } else { 0 };
-        // The pane's fixed rows: the header block (rule, title, subtitle,
-        // blank), the actions block (blank + rows), the footer (blank,
-        // hint, rule), and the error rows when present. The command,
-        // pairs, and output blocks ride the remaining budget in priority
-        // order — the exact command, the output tail, then the labeled
-        // pairs — and a block that cannot fit renders not at all.
-        let fixed = 4
-            + 3
-            + error_rows
-            + if actions.is_empty() {
-                0
-            } else {
-                1 + actions.len()
-            };
+        // The pane's fixed rows: the rule, the metadata row, the blank
+        // under the command, the blank over the hint, the hint, the
+        // actions block (blank + row), and the error block when present.
+        // The command and the output region ride the remaining budget in
+        // that order — the output keeps at least one row, so a long
+        // command clips before the region starves.
+        let fixed = 5 + if actions.is_empty() { 0 } else { 2 } + error_rows;
         let budget = self.viewport_rows.saturating_sub(fixed);
-        // The pairs cap at a quarter of the budget so they never squeeze
-        // the content blocks (they are the drill-in's least load-bearing
-        // facts).
-        let pairs_rows = pairs.len().min(MAX_DETAIL_ROWS).min(budget / 4);
-        let mut left = budget.saturating_sub(if pairs_rows > 0 { 1 + pairs_rows } else { 0 });
-        // The exact command wraps at the pane's content width; its block
-        // renders only when its label and at least one line fit beside
-        // the output block's own minimum.
         let command_width = width.saturating_sub(4).max(10);
         let command_wrapped = wrap_text(&command_exact, command_width);
-        let mut command_rows = 0usize;
-        let mut command_clipped = false;
-        // The command renders only when the output block's own minimum
-        // (its label plus a line, 3 rows) still fits beside it: the
-        // fetched tail is the drill-in's point and never loses its
-        // section to a long command.
-        if left >= 6 {
-            command_rows = (left - 5).min(command_wrapped.len());
-            if command_wrapped.len() > command_rows {
-                // The trailing marker rides inside the block's own budget
-                // (a clipped block spends exactly its lines + marker):
-                // the clip never overspends the viewport.
-                command_rows = command_rows.saturating_sub(1).max(1);
-                command_clipped = true;
-            }
-            left -= 2 + command_rows + usize::from(command_clipped);
-        }
-        let output_rows = left.saturating_sub(2).max(if left >= 3 { 1 } else { 0 });
+        let command_rows = if budget >= 1 {
+            command_wrapped.len().min(budget - 1)
+        } else {
+            0
+        };
+        let command_clipped = command_wrapped.len() > command_rows;
+        let output_rows = budget.saturating_sub(command_rows);
+        let mut lines = Vec::new();
+        lines.push(vec![
+            theme.fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width.max(1)))
+        ]);
+        lines.push(metadata_row(theme, width, activity));
         if command_rows > 0 {
-            lines.push(Vec::new());
-            lines.push(vec![
-                Span::raw("  "),
-                theme.fg_span(ThemeColor::Dim, "Command".to_string()),
-            ]);
-            for line in command_wrapped[..command_rows].iter() {
+            let mut shown = command_rows;
+            if command_clipped {
+                // The trailing marker rides inside the block's own
+                // budget (a clipped block spends exactly its lines +
+                // marker): the clip never overspends the viewport, and
+                // the command's tail is what a clip drops.
+                shown = command_rows.saturating_sub(1);
+            }
+            for line in command_wrapped[..shown].iter() {
                 let mut row = vec![Span::raw("  ")];
                 row.extend(line.iter().cloned());
                 lines.push(truncate_line(&row, width, ""));
             }
-            // The marker trails the kept head: the command's tail is
-            // what a clip drops.
             if command_clipped {
                 lines.push(vec![
                     Span::raw("  "),
@@ -515,41 +601,45 @@ impl BashView {
                 ]);
             }
         }
-        if pairs_rows > 0 {
-            lines.push(Vec::new());
-            lines.extend(detail_block_lines(theme, width, &pairs[..pairs_rows]));
-        }
-        // The output block: the fetched tail, a fetching note while the
-        // tail is in flight, or the empty-output note once it landed.
+        lines.push(Vec::new());
+        // The output region: the fetched window (scrollable — the newest
+        // lines ride at the bottom, the `\u{2026}` marker rides over the
+        // first row whenever content continues above, the `\u{2193}`
+        // marker rides under the last row while the window sits lifted
+        // off the newest output), a fetching note while the open fetch is
+        // in flight, or the empty-output note once it landed.
         if output_rows > 0 {
-            lines.push(Vec::new());
-            lines.push(vec![
-                Span::raw("  "),
-                theme.fg_span(ThemeColor::Dim, "Output".to_string()),
-            ]);
             let tail = self
                 .output_tail
                 .as_ref()
                 .filter(|(tail_id, _)| tail_id == id);
             match tail {
                 Some((_, output)) if !output.is_empty() => {
-                    // The fetched tail is already the newest window: a
-                    // short viewport drops the OLDEST lines (the leading
-                    // marker says so), never the newest output.
-                    let mut shown = output.len().min(output_rows);
-                    let mut clipped = false;
-                    if output.len() > shown && shown > 1 {
-                        shown -= 1;
-                        clipped = true;
+                    let len = output.len();
+                    let from_end = self.scroll_from_end.min(len.saturating_sub(output_rows));
+                    // The pre-marker window: the `output_rows` rows the
+                    // region covers, lifted `from_end` lines off the
+                    // newest output (0 = the newest line rides the
+                    // region's bottom).
+                    let window_start = len.saturating_sub(output_rows + from_end);
+                    // More above: older loaded lines the window scrolled
+                    // past, or a lazily loadable tail window.
+                    let more_top = window_start > 0 || !self.tail_complete;
+                    // More below: the window sits lifted off the newest
+                    // output (a scrolled-up view).
+                    let more_bottom = from_end > 0;
+                    // A marker replaces its edge row of the window: the
+                    // newest output never slides off the bottom when the
+                    // leading marker renders.
+                    let content = output_rows - usize::from(more_top) - usize::from(more_bottom);
+                    let start = window_start + usize::from(more_top);
+                    let shown = content.min(len - start);
+                    let mut rows: Vec<Line> = Vec::with_capacity(output_rows);
+                    if more_top {
+                        rows.push(marker_line(theme, width, "\u{2026}"));
                     }
-                    if clipped {
-                        lines.push(vec![
-                            Span::raw("  "),
-                            theme.fg_span(ThemeColor::Dim, "\u{2026}".to_string()),
-                        ]);
-                    }
-                    for line in output[output.len() - shown..].iter() {
-                        lines.push(truncate_line(
+                    for line in &output[start..start + shown] {
+                        rows.push(truncate_line(
                             &vec![
                                 Span::raw("  "),
                                 theme.fg_span(ThemeColor::Muted, line.clone()),
@@ -558,34 +648,47 @@ impl BashView {
                             "",
                         ));
                     }
+                    while rows.len() < output_rows - usize::from(more_bottom) {
+                        rows.push(Vec::new());
+                    }
+                    if more_bottom {
+                        rows.push(marker_line(theme, width, "\u{2193}"));
+                    }
+                    lines.extend(rows);
                 }
-                Some((_, _)) => lines.push(vec![
-                    Span::raw("  "),
-                    theme.fg_span(ThemeColor::Dim, "No output yet".to_string()),
-                ]),
-                None => lines.push(vec![
-                    Span::raw("  "),
-                    theme.fg_span(ThemeColor::Dim, "Fetching output\u{2026}".to_string()),
-                ]),
+                Some((_, _)) => {
+                    lines.push(vec![
+                        Span::raw("  "),
+                        theme.fg_span(ThemeColor::Dim, "No output yet".to_string()),
+                    ]);
+                    lines.extend(std::iter::repeat(Vec::new()).take(output_rows - 1));
+                }
+                None => {
+                    lines.push(vec![
+                        Span::raw("  "),
+                        theme.fg_span(ThemeColor::Dim, "Fetching output\u{2026}".to_string()),
+                    ]);
+                    lines.extend(std::iter::repeat(Vec::new()).take(output_rows - 1));
+                }
             }
         }
+        // The cancel action: one row while the command runs (the
+        // region's scroll owns up/down; Enter runs it).
         if !actions.is_empty() {
             lines.push(Vec::new());
-            for (index, (label, description)) in actions.iter().enumerate() {
-                lines.push(action_row(
-                    theme,
-                    width,
-                    label,
-                    description,
-                    index == action_index,
-                ));
-            }
+            let (label, description) = &actions[0];
+            lines.push(action_row(theme, width, label, description, true));
         }
         lines.extend(self.pane_footer(theme, width, &self.detail_hint(kb)));
         lines.truncate(self.viewport_rows.max(1));
+        // The key loop's scroll math walks the same region the pane
+        // rendered: record its height after the truncation above (a
+        // sub-frame viewport may have cut the region short).
+        let total = fixed + command_rows + output_rows;
+        let rendered = output_rows.saturating_sub(total.saturating_sub(self.viewport_rows));
+        self.detail_region_rows.set(rendered);
         lines
     }
-
     /// The list's bottom hint line.
     fn list_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
@@ -602,25 +705,43 @@ impl BashView {
         )
     }
 
-    /// The detail pane's bottom hint line.
+    /// The detail pane's bottom hint line: the region's scroll keys, and
+    /// the run key only while the open row still offers its cancel
+    /// action.
     fn detail_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
                 .map(|key| format_key_text(&key))
                 .unwrap_or_else(|| fallback.to_string())
         };
-        format!(
-            "{}/{} move \u{b7} {} run \u{b7} {} back \u{b7} {} close",
+        let up_down = format!(
+            "{}/{}",
             key("tui.select.up", "\u{2191}"),
-            key("tui.select.down", "\u{2193}"),
-            key("tui.select.confirm", "Enter"),
-            key("app.modal.back", "\u{2190}"),
-            key("tui.select.cancel", "Esc"),
-        )
+            key("tui.select.down", "\u{2193}")
+        );
+        let running = self
+            .detail_id()
+            .and_then(|id| self.find_activity(&id))
+            .is_some_and(|activity| !Self::available_actions(activity).is_empty());
+        if running {
+            format!(
+                "{up_down} scroll \u{b7} {} run \u{b7} {} back \u{b7} {} close",
+                key("tui.select.confirm", "Enter"),
+                key("app.modal.back", "\u{2190}"),
+                key("tui.select.cancel", "Esc"),
+            )
+        } else {
+            format!(
+                "{up_down} scroll \u{b7} {} back \u{b7} {} close",
+                key("app.modal.back", "\u{2190}"),
+                key("tui.select.cancel", "Esc"),
+            )
+        }
     }
 
-    /// The pane footer: the error row, a blank, the hint line, the
-    /// bottom border.
+    /// The pane footer: the error block, a blank, and the hint line —
+    /// the pane runs all the way to the bottom of the screen, so nothing
+    /// rides below the shortcuts hint (no bottom border).
     fn pane_footer(&self, theme: &Theme, width: usize, hint: &str) -> Vec<Line> {
         let mut lines = Vec::new();
         if let Some(error) = &self.error {
@@ -629,9 +750,6 @@ impl BashView {
         }
         lines.push(Vec::new());
         lines.push(hint_line(theme, width, hint));
-        lines.push(vec![
-            theme.fg_span(ThemeColor::BorderMuted, "\u{2500}".repeat(width.max(1)))
-        ]);
         lines
     }
 }
@@ -710,8 +828,9 @@ impl Columns {
     }
 
     /// One columned row: the command, the duration, the pid, and the
-    /// status word in its status color. The selected row's wash hugs the
-    /// columns plus a little trailing pad.
+    /// status word in its status color (running green, a nonzero exit
+    /// red — failed — everything else dim). The selected row's wash hugs
+    /// the columns plus a little trailing pad.
     fn activity_row(
         &self,
         theme: &Theme,
@@ -719,11 +838,7 @@ impl Columns {
         activity: &BashActivity,
         selected: bool,
     ) -> Line {
-        let status_color = if activity.running() {
-            ThemeColor::Success
-        } else {
-            ThemeColor::Dim
-        };
+        let status_color = status_state_color(activity);
         let mut row = vec![Span::raw(if selected { "\u{203a}" } else { " " })];
         row.push(Span::raw(" "));
         let command = plain_cell(
@@ -781,53 +896,73 @@ fn action_row(theme: &Theme, width: usize, label: &str, description: &str, selec
     )
 }
 
-/// The detail drill-in's labeled pairs.
-fn detail_pairs(activity: &BashActivity) -> Vec<(&'static str, String)> {
-    let mut pairs = Vec::new();
+/// The status state's color (the operator's color-coding directive, on
+/// the existing status vocabulary): running green, a settled nonzero
+/// exit red — the failed state — everything else dim.
+fn status_state_color(activity: &BashActivity) -> ThemeColor {
+    if activity.running() {
+        ThemeColor::Success
+    } else if activity.exit_code.is_some_and(|code| code != 0) {
+        ThemeColor::Error
+    } else {
+        ThemeColor::Dim
+    }
+}
+
+/// The drill-in's one metadata row (the operator's refined shape): pid,
+/// started, and duration joined by dim dots, with the status dot and
+/// word trailing in its state color — the facts that frame the command,
+/// one row, not a block of labeled pairs.
+fn metadata_row(theme: &Theme, width: usize, activity: &BashActivity) -> Line {
+    let mut row = vec![Span::raw("  ")];
+    let mut items: Vec<(&'static str, String)> = Vec::new();
     if let Some(pid) = activity.pid {
-        pairs.push(("pid", pid.to_string()));
+        items.push(("pid ", pid.to_string()));
     }
     if let Some(started) = activity.started_at.as_deref() {
-        pairs.push((
-            "started",
+        items.push((
+            "started ",
             crate::heartbeats_picker::format_timestamp(started),
         ));
     }
     if let Some(ms) = activity.duration_ms {
-        pairs.push(("duration", format!("{ms}ms")));
+        items.push(("duration ", format_duration(Some(ms))));
     }
-    if let Some(code) = activity.exit_code {
-        pairs.push(("exit", code.to_string()));
+    for (index, (label, value)) in items.iter().enumerate() {
+        if index > 0 {
+            row.push(theme.fg_span(ThemeColor::Dim, " \u{b7} ".to_string()));
+        }
+        row.push(theme.fg_span(ThemeColor::Dim, label.to_string()));
+        row.push(theme.fg_span(ThemeColor::Muted, value.clone()));
     }
-    pairs
+    // The status rides last in its state color: the dot from the shared
+    // status vocabulary and the current subtitle word (`running`, `exit
+    // N`, or the wire's own status).
+    if !items.is_empty() {
+        row.push(theme.fg_span(ThemeColor::Dim, " \u{b7} ".to_string()));
+    }
+    let (dot, _) = status_dot(&activity.status);
+    let status_word = if activity.running() {
+        "running".to_string()
+    } else {
+        match activity.exit_code {
+            Some(code) => format!("exit {code}"),
+            None => activity.status.clone(),
+        }
+    };
+    row.push(theme.fg_span(status_state_color(activity), format!("{dot} {status_word}")));
+    truncate_line(&row, width, "")
 }
 
-/// Render a `(label, value)` detail block: the dim label column padded
-/// against muted values, one row per pair.
-fn detail_block_lines(theme: &Theme, width: usize, pairs: &[(&'static str, String)]) -> Vec<Line> {
-    if pairs.is_empty() {
-        return Vec::new();
-    }
-    let label_width = pairs
-        .iter()
-        .map(|(label, _)| label.chars().count())
-        .max()
-        .unwrap_or(0)
-        .min(16);
-    pairs
-        .iter()
-        .map(|(label, value)| {
-            truncate_line(
-                &vec![
-                    Span::raw("  "),
-                    theme.fg_span(ThemeColor::Dim, format!("{label:<label_width$}  ")),
-                    theme.fg_span(ThemeColor::Muted, value.clone()),
-                ],
-                width,
-                "",
-            )
-        })
-        .collect()
+/// A dim region marker row (`\u{2026}` over the region's first row while
+/// output continues above it, `\u{2193}` under the last while the window
+/// sits lifted off the newest output).
+fn marker_line(theme: &Theme, width: usize, marker: &str) -> Line {
+    let line = vec![
+        Span::raw("  "),
+        theme.fg_span(ThemeColor::Dim, marker.to_string()),
+    ];
+    truncate_line(&line, width, "")
 }
 
 /// `single_line`: collapse all whitespace runs to single spaces.
@@ -949,11 +1084,26 @@ mod tests {
         ]}))
     }
 
+    /// A finished row with a nonzero exit (the failed state).
+    fn failed_activities() -> Vec<BashActivity> {
+        parse_bash_activities(&json!({"activities": [
+            {"id":"f","command":"grep -rn panic src/","pid":7,"startedAt":"2026-09-22T01:00:00Z","status":"finished","exitCode":2,"durationMs":5_612},
+        ]}))
+    }
+
     fn frame_text(frame: &[Line]) -> Vec<String> {
         frame
             .iter()
             .map(|line| line.iter().map(|span| span.content.as_str()).collect())
             .collect()
+    }
+
+    /// The span styles of one frame row, for the color assertions.
+    fn row_text(frame: &[Line], needle: &str) -> Option<Line> {
+        frame
+            .iter()
+            .find(|line| line.iter().any(|span| span.content.contains(needle)))
+            .cloned()
     }
 
     #[test]
@@ -1004,10 +1154,47 @@ mod tests {
         );
         assert!(text
             .iter()
-            .any(|row| row.contains("↑/↓ move · Enter open · Esc close")));
+            .any(|row| row.contains("\u{2191}/\u{2193} move \u{b7} Enter open \u{b7} Esc close")));
         for line in &frame {
             assert!(crate::width::spans_width(line) <= 70);
         }
+    }
+
+    /// The table hugs its content width (the operator's 2026-09-24
+    /// directive): the columns never stretch to the terminal edge — the
+    /// rows, the header, and even the selected row's wash all stop before
+    /// the end of the screen.
+    #[test]
+    fn the_table_hugs_its_content_width() {
+        let view = BashView::new(activities(), 24);
+        let frame = view.render(&theme(), 120, &kb());
+        for line in &frame {
+            let used = crate::width::spans_width(line);
+            // Only the pane's top rule spans the frame; every table row
+            // (header, plain, selected) stops well short of the edge.
+            let is_rule = line.len() == 1 && line[0].content.starts_with("\u{2500}");
+            assert!(
+                is_rule || used < 120,
+                "a content row never reaches the terminal edge: {used}"
+            );
+        }
+        let selected = frame
+            .iter()
+            .find(|line| {
+                line.iter()
+                    .any(|span| span.style.bg.is_some() && span.content.contains("cargo"))
+            })
+            .expect("the selected row carries the wash");
+        let used = crate::width::spans_width(selected);
+        assert!(
+            used < 120 && used >= crate::menu_panel::MIN_HUG_WIDTH,
+            "the wash hugs the columns plus a little pad, never the width: {used}"
+        );
+        let header = frame
+            .iter()
+            .find(|line| line.iter().any(|span| span.content.contains("Duration")))
+            .expect("the column header");
+        assert!(crate::width::spans_width(header) < 120);
     }
 
     /// The selected row's wash hugs the columns plus a little trailing
@@ -1036,8 +1223,95 @@ mod tests {
         assert!(plain.iter().all(|span| span.style.bg.is_none()));
     }
 
+    /// The status column color-codes the rows (the operator's
+    /// color-coding directive): running green, a nonzero exit red — the
+    /// failed state — a clean exit dim. The selected row's wash patches a
+    /// background onto its spans, so the color check compares the
+    /// foreground only.
+    #[test]
+    fn the_status_column_color_codes_the_states() {
+        let success = theme().fg_style(ThemeColor::Success).fg;
+        let dim = theme().fg_style(ThemeColor::Dim).fg;
+        let error = theme().fg_style(ThemeColor::Error).fg;
+
+        let view = BashView::new(activities(), 24);
+        let frame = view.render(&theme(), 90, &kb());
+        let running = row_text(&frame, "\u{25cf} running").expect("the running row");
+        assert!(running.iter().any(|span| span.style.fg == success));
+        let finished = row_text(&frame, "\u{25cb} finished").expect("the finished row");
+        assert!(finished.iter().any(|span| span.style.fg == dim));
+        assert!(finished.iter().all(|span| span.style.fg != error));
+
+        let view = BashView::new(failed_activities(), 24);
+        let frame = view.render(&theme(), 90, &kb());
+        let failed = row_text(&frame, "\u{25cb} finished").expect("the failed row");
+        assert!(failed.iter().any(|span| span.style.fg == error));
+        assert!(failed.iter().all(|span| span.style.fg != success));
+    }
+
+    /// The pane runs all the way to the bottom of the screen (the
+    /// operator's 2026-09-24 directive): the shortcuts hint is the pane's
+    /// last row, and nothing — no blank, no rule — rides below it. A
+    /// tall catalog fills the whole budget (the truncate keeps exactly
+    /// the viewport rows), and a short catalog still ends on the hint
+    /// (the dock's frame pads the rows above).
+    #[test]
+    fn the_pane_runs_to_the_bottom() {
+        let rows: Vec<BashActivity> = (0..20)
+            .map(|n| BashActivity {
+                id: format!("run-{n}"),
+                command: format!("command {n}"),
+                pid: Some(n + 1),
+                started_at: None,
+                status: "finished".to_string(),
+                exit_code: Some(0),
+                duration_ms: Some(u64::from(n) * 1_000),
+            })
+            .collect();
+        for viewport in [10usize, 16, 24] {
+            let view = BashView::new(rows.clone(), viewport);
+            let frame = view.render(&theme(), 70, &kb());
+            // The pane never renders past its budget; its last row is the
+            // hint (the dock anchors the pane's rows on the screen's
+            // bottom — the rows above are the transcript, never a gap
+            // below the shortcuts).
+            assert!(frame.len() <= viewport, "never past the budget");
+            let text = frame_text(&frame);
+            let last_row = text.last().expect("the hint row");
+            assert!(
+                last_row.contains("close"),
+                "the shortcuts hint rides the pane's last row: {last_row}"
+            );
+            assert!(
+                !last_row.trim().is_empty() && !last_row.contains("\u{2500}"),
+                "no rule or blank below the shortcuts: {last_row}"
+            );
+            let second_to_last = &text[text.len() - 2];
+            assert!(
+                second_to_last.trim().is_empty(),
+                "the one blank above the hint stays: {second_to_last}"
+            );
+        }
+        // A short catalog: the pane ends on the hint, never on a rule.
+        let view = BashView::new(activities(), 24);
+        let frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        let last_row = text.last().expect("the hint row");
+        assert!(last_row.contains("close"));
+        assert!(!last_row.contains("\u{2500}"));
+        // The detail pane too.
+        let mut view = BashView::new(activities(), 16);
+        view.handle_key("enter", &kb());
+        let frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        let last_row = text.last().expect("the detail hint row");
+        assert!(last_row.contains("close"));
+        assert!(!last_row.contains("\u{2500}"));
+    }
+
     /// Enter on a list row opens the detail drill-in and asks the host
-    /// for the output tail; Enter on the cancel action runs the kill.
+    /// for the output tail; Enter in the detail on the cancel action runs
+    /// the kill.
     #[test]
     fn enter_opens_the_detail_and_the_cancel_action() {
         let mut view = BashView::new(activities(), 24);
@@ -1053,8 +1327,7 @@ mod tests {
         assert_eq!(
             view.mode,
             Mode::Detail {
-                id: "a".to_string(),
-                action_index: 0
+                id: "a".to_string()
             }
         );
         assert_eq!(
@@ -1074,13 +1347,14 @@ mod tests {
         let _ = first_generation;
     }
 
-    /// The drill-in renders the exact command, the labeled facts, the
-    /// fetched output, and the cancel action in the `/mcp` pattern.
+    /// The drill-in is the operator's refined shape: ONE metadata row
+    /// (pid, started, duration together with the status), then the exact
+    /// command, then the output — no labeled-pair blocks, no section
+    /// labels, no duplicated title.
     #[test]
-    fn the_detail_renders_command_output_and_actions() {
+    fn the_detail_is_one_metadata_row_the_command_and_the_output() {
         let mut view = BashView::new(activities(), 40);
         view.handle_key("enter", &kb());
-        // The tail lands for the open row.
         view.set_output(
             "a",
             "line one\n\x1b[31mred\x1b[0m\nline three",
@@ -1089,27 +1363,86 @@ mod tests {
         let frame = view.render(&theme(), 70, &kb());
         let text = frame_text(&frame);
         let joined = text.join("\n");
-        // The exact command renders in full (not the column's truncation).
-        assert!(joined.contains("cargo build --release"));
-        // The labeled facts.
-        assert!(text
+        // The one metadata row carries pid, started, duration, and the
+        // status together.
+        assert!(
+            text.iter().any(|row| {
+                row.contains("pid 42")
+                    && row.contains("started")
+                    && row.contains("3.4s")
+                    && row.contains("running")
+            }),
+            "one metadata row with the facts together: {text:?}"
+        );
+        // No labeled pairs, no section labels, no duplicate title.
+        assert!(!text.iter().any(|row| row.contains("  Command")));
+        assert!(!text.iter().any(|row| row.contains("  Output")));
+        assert_eq!(
+            text.iter()
+                .filter(|row| row.contains("cargo build --release"))
+                .count(),
+            1,
+            "the command renders once, not again as a title: {text:?}"
+        );
+        // The output renders under the command, control characters
+        // scrubbed.
+        let command_index = text
             .iter()
-            .any(|row| row.starts_with("  pid") && row.contains("42")));
-        assert!(text
+            .position(|row| row.contains("cargo build --release"))
+            .expect("the command row");
+        let output_index = text
             .iter()
-            .any(|row| row.starts_with("  duration") && row.contains("3412ms")));
-        // The output renders, control characters scrubbed.
-        assert!(joined.contains("line one"));
+            .position(|row| row.contains("line one"))
+            .expect("the output row");
+        assert!(
+            output_index > command_index,
+            "the output rides under the command"
+        );
         assert!(joined.contains("red"));
         assert!(!joined.contains("\x1b"));
-        // The action row.
+        // The cancel action and the scroll hint.
         assert!(text.iter().any(|row| row.contains("Cancel command")));
-        assert!(text
+        assert!(text.iter().any(|row| row.contains(
+            "\u{2191}/\u{2193} scroll \u{b7} Enter run \u{b7} \u{2190} back \u{b7} Esc close"
+        )));
+    }
+
+    /// The metadata row's status rides in its state color: the running
+    /// row green, the failed exit red.
+    #[test]
+    fn the_detail_status_color_codes_the_state() {
+        let mut view = BashView::new(activities(), 40);
+        view.handle_key("enter", &kb());
+        let frame = view.render(&theme(), 70, &kb());
+        let metadata = row_text(&frame, "running").expect("the metadata row");
+        assert!(metadata
             .iter()
-            .any(|row| row.contains("Terminate the running process")));
-        assert!(text
+            .any(|span| span.style == theme().fg_style(ThemeColor::Success)));
+
+        let mut view = BashView::new(failed_activities(), 40);
+        view.handle_key("enter", &kb());
+        let frame = view.render(&theme(), 70, &kb());
+        let metadata = row_text(&frame, "exit 2").expect("the failed metadata row");
+        assert!(metadata
             .iter()
-            .any(|row| row.contains("↑/↓ move · Enter run · ← back · Esc close")));
+            .any(|span| span.style == theme().fg_style(ThemeColor::Error)));
+    }
+
+    /// The finished row's drill-in carries no run key (nothing to run)
+    /// and no action row.
+    #[test]
+    fn the_finished_detail_has_no_action_and_no_run_hint() {
+        let mut view = BashView::new(activities(), 40);
+        view.handle_key("down", &kb());
+        view.handle_key("enter", &kb());
+        let frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        assert!(!text.iter().any(|row| row.contains("Cancel command")));
+        assert!(
+            text.iter().any(|row| row
+                .contains("\u{2191}/\u{2193} scroll \u{b7} \u{2190} back \u{b7} Esc close")),
+            "no run key without an action: {text:?}"
+        );
     }
 
     /// A tail for another row never lands in the open pane, and an empty
@@ -1182,10 +1515,27 @@ mod tests {
         assert!(text.iter().any(|row| row.contains("Cancel command")));
     }
 
-    /// The clipped tail drops the OLDEST lines: the newest output always
-    /// renders, with a leading marker for the hidden head.
+    /// A short viewport shrinks the command first, then the output — the
+    /// action row and the hint never yield.
     #[test]
-    fn a_clipped_tail_keeps_the_newest_lines() {
+    fn a_tight_viewport_keeps_the_output_minimum_over_the_command() {
+        let mut catalog = activities();
+        catalog[0].command = "word ".repeat(80);
+        let mut view = BashView::new(catalog, 12);
+        view.handle_key("enter", &kb());
+        let frame = view.render(&theme(), 70, &kb());
+        assert!(frame.len() <= 12, "the drill-in fits: {}", frame.len());
+        let text = frame_text(&frame);
+        assert!(text.iter().any(|row| row.contains("word")));
+        assert!(text.iter().any(|row| row.contains("Cancel command")));
+        assert!(text.iter().any(|row| row.contains("Fetching output")));
+    }
+
+    /// The region's default view is the newest output: a tail taller than
+    /// the region drops the OLDEST lines (the leading marker says so),
+    /// never the newest.
+    #[test]
+    fn the_region_anchors_on_the_newest_output() {
         let mut catalog = activities();
         catalog[0].command = "run".to_string(); // short command, long output
         let mut view = BashView::new(catalog, 20);
@@ -1198,6 +1548,263 @@ mod tests {
         let joined = text.join(" ");
         assert!(joined.contains("line-30"), "the newest line renders");
         assert!(!joined.contains("line-01"), "the oldest drops first");
+        // The leading marker rides over the first region row.
+        let marker = text
+            .iter()
+            .position(|row| row.trim() == "\u{2026}")
+            .expect("the leading marker");
+        let newest = text
+            .iter()
+            .position(|row| row.contains("line-30"))
+            .expect("the newest row");
+        assert!(marker < newest, "the marker rides above the content");
+    }
+
+    /// Up scrolls the region toward the older lines (a `\u{2193}` marker
+    /// rides under the last row), and down walks back to the newest.
+    #[test]
+    fn the_region_scrolls_up_and_down() {
+        let mut catalog = activities();
+        catalog[0].command = "run".to_string();
+        let mut view = BashView::new(catalog, 24);
+        view.handle_key("enter", &kb());
+        let tail: Vec<String> = (1..=40).map(|n| format!("line-{n:02}")).collect();
+        view.set_output("a", &tail.join("\n"), view.detail_generation);
+        // A paint records the region's height; the keys walk the same
+        // window (the real flow paints before keys arrive).
+        let _ = view.render(&theme(), 70, &kb());
+        let mut frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        assert!(text.iter().any(|row| row.contains("line-40")));
+        assert!(!text.iter().any(|row| row.contains("line-02")));
+
+        view.handle_key("up", &kb());
+        frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        assert!(
+            text.iter().any(|row| row.contains("line-25")),
+            "one up reveals the next older line: {text:?}"
+        );
+        assert!(
+            !text.iter().any(|row| row.contains("line-40")),
+            "the lifted window's newest edge hides under the trailing marker"
+        );
+        assert!(
+            text.iter().any(|row| row.trim() == "\u{2193}"),
+            "the trailing marker rides under a lifted window"
+        );
+        assert!(text.iter().any(|row| row.contains("\u{2026}")));
+
+        view.handle_key("down", &kb());
+        frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        assert!(
+            text.iter().any(|row| row.contains("line-40")),
+            "down walks back to the newest output"
+        );
+        assert!(
+            !text.iter().any(|row| row.trim() == "\u{2193}"),
+            "bottom-anchored again: no trailing marker"
+        );
+    }
+
+    /// Up at the top of the loaded window lazily loads more of the tail:
+    /// the window doubles (50 -> 100 -> 200, the wire's cap), the grown
+    /// response anchors the region just above where it stopped, and the
+    /// wire cap or a non-growing response ends the loads.
+    #[test]
+    fn up_at_the_loaded_top_lazily_loads_more_of_the_tail() {
+        let mut catalog = activities();
+        catalog[0].command = "run".to_string();
+        let mut view = BashView::new(catalog, 24);
+        view.handle_key("enter", &kb());
+        let first: Vec<String> = (1..=FIRST_TAIL_LINES)
+            .map(|n| format!("line-{n:03}"))
+            .collect();
+        view.set_output("a", &first.join("\n"), view.detail_generation);
+        let _ = view.render(&theme(), 70, &kb());
+        // A full window does not promise more: up walks the loaded lines.
+        assert_eq!(view.handle_key("up", &kb()), BashViewAction::None);
+
+        // Scroll to the loaded top: the next up issues the lazy load.
+        for _ in 0..FIRST_TAIL_LINES {
+            match view.handle_key("up", &kb()) {
+                BashViewAction::LoadMore { id, lines, .. } => {
+                    assert_eq!(id, "a");
+                    assert_eq!(lines, FIRST_TAIL_LINES * 2);
+                    // The grown window lands: it holds the same newest
+                    // lines plus the older ones prepended.
+                    let mut grown: Vec<String> = (1..=FIRST_TAIL_LINES * 2)
+                        .map(|n| format!("line-{n:03}"))
+                        .collect();
+                    grown.truncate(FIRST_TAIL_LINES as usize * 2);
+                    view.set_output("a", &grown.join("\n"), view.detail_generation);
+                    break;
+                }
+                BashViewAction::None => continue,
+                other => panic!("up only walks or loads: {other:?}"),
+            }
+        }
+        assert_eq!(view.tail_window, FIRST_TAIL_LINES * 2);
+        let frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        let joined = text.join(" ");
+        // The region continues into the older lines (anchored just above
+        // where the walk stopped), not back onto the newest output.
+        assert!(
+            joined.contains("line-049"),
+            "the region walks into the older lines: {joined}"
+        );
+        assert!(
+            !joined.contains("line-100"),
+            "the newest lines no longer fill the region: {joined}"
+        );
+        assert!(!view.tail_complete, "the grown window may still grow");
+
+        // Up at the top again: the last possible window.
+        for _ in 0..(FIRST_TAIL_LINES * 2 + 8) {
+            match view.handle_key("up", &kb()) {
+                BashViewAction::LoadMore { lines, .. } => {
+                    assert_eq!(lines, TAIL_LINES);
+                    let full: Vec<String> =
+                        (1..=TAIL_LINES).map(|n| format!("line-{n:03}")).collect();
+                    view.set_output("a", &full.join("\n"), view.detail_generation);
+                    break;
+                }
+                BashViewAction::None => continue,
+                other => panic!("up only walks or loads: {other:?}"),
+            }
+        }
+        assert_eq!(view.tail_window, TAIL_LINES);
+        assert!(view.tail_complete, "the wire's line cap is the end");
+        // No further loads: the up key just walks (or rests at the top).
+        for _ in 0..TAIL_LINES + 4 {
+            assert!(
+                matches!(view.handle_key("up", &kb()), BashViewAction::None),
+                "no loads past the wire cap"
+            );
+        }
+    }
+
+    /// A lazy load that grew nothing (the retained buffer's end, or the
+    /// wire's byte cap) completes the tail: no further loads, the window
+    /// stays.
+    #[test]
+    fn a_load_more_that_grew_nothing_completes_the_tail() {
+        let mut catalog = activities();
+        catalog[0].command = "run".to_string();
+        let mut view = BashView::new(catalog, 24);
+        view.handle_key("enter", &kb());
+        let tail: Vec<String> = (1..=FIRST_TAIL_LINES)
+            .map(|n| format!("line-{n:03}"))
+            .collect();
+        view.set_output("a", &tail.join("\n"), view.detail_generation);
+        let _ = view.render(&theme(), 70, &kb());
+        for _ in 0..FIRST_TAIL_LINES {
+            match view.handle_key("up", &kb()) {
+                BashViewAction::LoadMore {
+                    id,
+                    generation,
+                    lines,
+                } => {
+                    assert_eq!(id, "a");
+                    assert_eq!(generation, view.detail_generation);
+                    assert_eq!(lines, FIRST_TAIL_LINES * 2);
+                    // The kernel's retained buffer had nothing more.
+                    view.set_output("a", &tail.join("\n"), generation);
+                    break;
+                }
+                BashViewAction::None => continue,
+                other => panic!("up only walks or loads: {other:?}"),
+            }
+        }
+        assert!(view.tail_complete, "a non-growing response ends the loads");
+        assert!(!view.loading_more);
+        for _ in 0..FIRST_TAIL_LINES {
+            assert!(
+                matches!(view.handle_key("up", &kb()), BashViewAction::None),
+                "no further loads after completion"
+            );
+        }
+    }
+
+    /// A response shorter than the requested window is the retained
+    /// buffer's own end: the tail is complete and the up key never loads.
+    #[test]
+    fn a_short_window_completes_the_tail() {
+        let mut catalog = activities();
+        catalog[0].command = "run".to_string();
+        let mut view = BashView::new(catalog, 24);
+        view.handle_key("enter", &kb());
+        let tail: Vec<String> = (1..=20).map(|n| format!("line-{n:02}")).collect();
+        view.set_output("a", &tail.join("\n"), view.detail_generation);
+        assert!(view.tail_complete, "20 lines over a 50-line window");
+        let _ = view.render(&theme(), 70, &kb());
+        for _ in 0..30 {
+            assert!(
+                matches!(view.handle_key("up", &kb()), BashViewAction::None),
+                "a complete tail never loads more"
+            );
+        }
+        let frame = view.render(&theme(), 70, &kb());
+        let text = frame_text(&frame);
+        assert!(
+            text.iter().any(|row| row.contains("line-01")),
+            "the retained beginning renders once scrolled to the top"
+        );
+        assert!(
+            !text.iter().any(|row| row.trim() == "\u{2026}"),
+            "no continuation marker over a complete tail"
+        );
+    }
+
+    /// A fetch or load error surfaces in the pane and releases the
+    /// in-flight load claim so a later up press can retry.
+    #[test]
+    fn an_error_releases_the_load_claim() {
+        let mut catalog = activities();
+        catalog[0].command = "run".to_string();
+        let mut view = BashView::new(catalog, 24);
+        view.handle_key("enter", &kb());
+        let tail: Vec<String> = (1..=FIRST_TAIL_LINES)
+            .map(|n| format!("line-{n:03}"))
+            .collect();
+        view.set_output("a", &tail.join("\n"), view.detail_generation);
+        let _ = view.render(&theme(), 70, &kb());
+        let mut loaded = false;
+        for _ in 0..FIRST_TAIL_LINES {
+            match view.handle_key("up", &kb()) {
+                BashViewAction::LoadMore {
+                    generation, lines, ..
+                } => {
+                    view.set_error("kernel stalled".to_string());
+                    assert!(view.error.is_some());
+                    assert!(!view.loading_more, "the failure releases the claim");
+                    assert_eq!(view.tail_window, lines);
+                    assert_eq!(generation, view.detail_generation);
+                    loaded = true;
+                    break;
+                }
+                BashViewAction::None => continue,
+                other => panic!("up only walks or loads: {other:?}"),
+            }
+        }
+        assert!(loaded, "the up press issued the load");
+        // A retry issues a fresh load (the window keeps growing from the
+        // last requested size).
+        let mut retried = false;
+        for _ in 0..FIRST_TAIL_LINES {
+            match view.handle_key("up", &kb()) {
+                BashViewAction::LoadMore { lines, .. } => {
+                    assert_eq!(lines, FIRST_TAIL_LINES * 4);
+                    retried = true;
+                    break;
+                }
+                BashViewAction::None => continue,
+                other => panic!("up only walks or loads: {other:?}"),
+            }
+        }
+        assert!(retried, "the retry loads again");
     }
 
     /// The exact command renders verbatim: repeated spaces and embedded
@@ -1263,7 +1870,7 @@ mod tests {
     #[test]
     fn a_clipped_command_trails_the_marker_inside_the_budget() {
         let mut catalog = activities();
-        catalog[0].command = "word ".repeat(60);
+        catalog[0].command = "word ".repeat(200);
         let mut view = BashView::new(catalog, 18);
         view.handle_key("enter", &kb());
         let frame = view.render(&theme(), 70, &kb());
@@ -1285,6 +1892,7 @@ mod tests {
             text_idx > word_idx,
             "the marker trails the command: {text:?}"
         );
+        assert!(text.iter().any(|row| row.contains("Fetching output")));
     }
 
     /// A terminal shorter than the frame itself never renders past its

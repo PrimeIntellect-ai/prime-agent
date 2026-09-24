@@ -6024,6 +6024,49 @@ impl SessionUi {
         }
     }
 
+    /// Fetch one bash activity's output tail off the key loop (a stalled
+    /// kernel must not freeze the TUI behind the request bound): the
+    /// response lands on the open view through the update channel,
+    /// stamped with the detail-open generation it was issued under (the
+    /// open's first window or a later lazy load's grown one — the view
+    /// owns the window policy).
+    fn spawn_bash_tail_fetch(&self, activity_id: String, generation: u64, lines: u32) {
+        let client = self.client.clone();
+        let session = self.active_session_id.clone();
+        let tx = self.bash_updates.clone();
+        tokio::spawn(async move {
+            let response_id = activity_id.clone();
+            let result = client
+                .request_ok(DaemonCommand::TailKernelBash {
+                    id: None,
+                    active_session_id: session.clone(),
+                    activity_id,
+                    lines: Some(lines),
+                    rest: Default::default(),
+                })
+                .await;
+            match result {
+                Ok(data) => {
+                    if let Some(tail) = data.get("tail").and_then(Value::as_str) {
+                        let _ = tx.send(BashActivityUpdate::Tail {
+                            session,
+                            activity_id: response_id,
+                            generation,
+                            tail: tail.to_string(),
+                        });
+                    }
+                }
+                Err(error) => {
+                    let _ = tx.send(BashActivityUpdate::Error {
+                        session,
+                        message: format!("Bash output: {error:#}"),
+                        activity_id: Some(response_id),
+                    });
+                }
+            }
+        });
+    }
+
     /// One key press while the bash view is open: the view owns the frame
     /// the same way as the heartbeats view; its actions run the kernel
     /// bash requests off the key loop.
@@ -6043,45 +6086,25 @@ impl SessionUi {
                 view.bash_view = None;
             }
             Some(BashViewAction::OpenDetail { id, generation }) => {
-                // The request runs off the key loop (a stalled kernel
-                // must not freeze the TUI behind the request bound): the
-                // tail lands on the open view through the update channel,
-                // stamped with this open's generation so a late response
-                // from an earlier open never overwrites it.
-                let client = self.client.clone();
-                let session = self.active_session_id.clone();
-                let tx = self.bash_updates.clone();
-                tokio::spawn(async move {
-                    let response_id = id.clone();
-                    let result = client
-                        .request_ok(DaemonCommand::TailKernelBash {
-                            id: None,
-                            active_session_id: session.clone(),
-                            activity_id: id,
-                            lines: Some(crate::bash_view::TAIL_LINES),
-                            rest: Default::default(),
-                        })
-                        .await;
-                    match result {
-                        Ok(data) => {
-                            if let Some(tail) = data.get("tail").and_then(Value::as_str) {
-                                let _ = tx.send(BashActivityUpdate::Tail {
-                                    session,
-                                    activity_id: response_id,
-                                    generation,
-                                    tail: tail.to_string(),
-                                });
-                            }
-                        }
-                        Err(error) => {
-                            let _ = tx.send(BashActivityUpdate::Error {
-                                session,
-                                message: format!("Bash output: {error:#}"),
-                                activity_id: Some(response_id),
-                            });
-                        }
-                    }
-                });
+                // The lazy tail: the open asks for the first window only
+                // (FIRST_TAIL_LINES); the detail's upward scroll grows
+                // the window on demand (LoadMore below). The request runs
+                // off the key loop (a stalled kernel must not freeze the
+                // TUI behind the request bound): the tail lands on the
+                // open view through the update channel, stamped with this
+                // open's generation so a late response from an earlier
+                // open never overwrites it.
+                self.spawn_bash_tail_fetch(id, generation, crate::bash_view::FIRST_TAIL_LINES);
+            }
+            Some(BashViewAction::LoadMore {
+                id,
+                generation,
+                lines,
+            }) => {
+                // The detail scrolled to the top of its loaded window:
+                // re-fetch the row's output with the grown window (the
+                // view owns the growth policy, capped by the wire).
+                self.spawn_bash_tail_fetch(id, generation, lines);
             }
             Some(BashViewAction::Kill { id }) => {
                 let client = self.client.clone();
