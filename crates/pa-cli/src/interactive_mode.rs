@@ -1386,6 +1386,96 @@ mod tests {
         assert!(onboarding_task(&options).is_none());
     }
 
+    /// The product sink's persistence over the real settings files: the
+    /// retained-dialog home (sharing explicitly opted out, onboarding never
+    /// completed — the one home the question still mounts for) reads its
+    /// provisioned value through a fresh manager, the answer persists, and
+    /// the completion flag lands beside it. The next launch's gate reads
+    /// exactly this pair, so the question never re-mounts.
+    #[test]
+    fn settings_sink_persists_the_retained_dialog_answers() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        // The provisioned home: sharing opted out, telemetry off (the unit
+        // seam stays hermetic — no telemetry client for the completion event).
+        let mut provisioned = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+        provisioned
+            .set_agent_traces_enabled(false)
+            .expect("provision the opt-out");
+        provisioned
+            .set_telemetry_enabled(false)
+            .expect("telemetry off");
+
+        let sink = SettingsOnboardingSink {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: agent_dir.clone(),
+            created_at: std::time::Instant::now(),
+        };
+        assert!(
+            !sink.agent_traces_enabled(),
+            "the provisioned opt-out reads through a fresh manager"
+        );
+        sink.set_agent_traces_enabled(true).expect("answer Share");
+        sink.mark_onboarding_complete()
+            .expect("complete onboarding");
+
+        // The next launch reads the pair through its own fresh manager: the
+        // gate never mounts the task again and the standing choice survives.
+        let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+        assert!(settings.get_onboarding_shown(), "the flag persisted");
+        assert!(
+            settings.get_agent_traces_enabled(),
+            "the Share answer persisted with the flag"
+        );
+    }
+
+    /// A fresh home ships sharing pre-configured ON through the product sink
+    /// (the silent-completion branch's read): nothing is written for the
+    /// choice, and the silent completion persists only the flag.
+    #[test]
+    fn settings_sink_reads_the_fresh_home_default_and_completes_silently() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        let mut provisioned = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+        provisioned
+            .set_telemetry_enabled(false)
+            .expect("telemetry off");
+
+        let sink = SettingsOnboardingSink {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: agent_dir.clone(),
+            created_at: std::time::Instant::now(),
+        };
+        assert!(
+            sink.agent_traces_enabled(),
+            "a fresh home shares traces (the pre-configured default, nothing written)"
+        );
+        sink.mark_onboarding_complete().expect("silent completion");
+
+        let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+        assert!(
+            settings.get_onboarding_shown(),
+            "the silent flow marked onboarding shown"
+        );
+        // The choice stayed unwritten (the default IS the configuration):
+        // the storage serializes unset keys as null, so the assertion is on
+        // the value, not the key's presence.
+        let persisted =
+            std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings file");
+        let document: serde_json::Value = serde_json::from_str(&persisted).expect("settings json");
+        let agent_traces = document
+            .get("agentTraces")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        assert_eq!(
+            agent_traces,
+            serde_json::Value::Null,
+            "the default stood without a written value:\n{persisted}"
+        );
+    }
+
     #[test]
     fn build_tui_options_reads_code_block_indent_settings() {
         // `markdown.codeBlockIndent` rides InteractiveOptions at startup
