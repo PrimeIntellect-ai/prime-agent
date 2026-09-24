@@ -61,6 +61,11 @@ jobs:
     # stays a native build on the arm runner.
     container:
       image: ubuntu:22.04
+    # Container jobs run `run:` steps with the image's /bin/sh (dash on
+    # ubuntu:22.04), which rejects `set -o pipefail`; pin the steps to bash.
+    defaults:
+      run:
+        shell: bash
     permissions:
       contents: read
     timeout-minutes: 90

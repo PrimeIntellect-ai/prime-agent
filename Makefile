@@ -35,16 +35,17 @@ actionlint:
 # GLIBC baseline gate (the continuous.yml/release.yml build-gnu jobs): a
 # GNU/Linux artifact must not require symbols above GLIBC_2.35, the Ubuntu
 # 22.04 release baseline. No-op on non-GNU hosts; the authoritative gate runs
-# in CI inside the ubuntu:22.04 build container.
+# in CI inside the ubuntu:22.04 build container. POSIX sh throughout: make
+# runs recipes with /bin/sh, which is dash on Ubuntu (no [[ ]], no ==).
 glibc-gate:
-	@if [[ "$(TARGET)" == *-linux-gnu ]]; then \
+	@case "$(TARGET)" in *-linux-gnu) \
 		max_glibc="$$(objdump -T target/release/prime-agent | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1 || true)"; \
 		echo "highest GLIBC symbol required: $${max_glibc:-none}"; \
 		top="$$(printf '%s\nGLIBC_2.35\n' "$${max_glibc:-GLIBC_2.35}" | sort -Vu | tail -1)"; \
 		if [ "$$top" != "GLIBC_2.35" ]; then \
 			echo "binary requires $${max_glibc}, above the GLIBC_2.35 (Ubuntu 22.04) baseline" >&2; exit 1; \
-		fi; \
-	fi
+		fi \
+		;; esac
 
 # Perf wave + regression gate (benchmark.yml job, the local mirror): runs the
 # TS binary and a fresh release build side by side in a fresh Prime sandbox
