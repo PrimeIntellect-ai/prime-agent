@@ -281,7 +281,10 @@ impl AgentView {
             queue_selected: None,
             chat: Vec::new(),
             pending_bash: Vec::new(),
-            detail: Detail::Overview,
+            // TS #2447: a chat starts at the middle conversation-detail
+            // level (edit diffs expanded, thinking visible, tool output
+            // collapsed); Ctrl+O keeps cycling overview -> details -> all.
+            detail: Detail::Details,
             working: None,
             compaction: None,
             compaction_generation: 0,
@@ -1706,6 +1709,24 @@ mod tests {
     /// the shared `format_key_text`, so the row shows `Alt+\u{2191}` on
     /// Linux/Windows hosts and `Option+\u{2191}` on macOS (TS
     /// `formatKeyPart`'s darwin branch).
+    /// TS #2447: a fresh chat starts at the middle conversation-detail
+    /// level (`details`: edit diffs expanded, thinking visible, tool
+    /// output collapsed) instead of the most-collapsed overview; the
+    /// Ctrl+O cycle from there is unchanged (details -> all -> overview).
+    #[test]
+    fn a_chat_starts_at_the_middle_detail_level() {
+        let mut v = view();
+        assert_eq!(v.detail, Detail::Details, "the startup level is details");
+        assert!(v.detail.show_thinking());
+        assert!(v.detail.edit_diffs_expanded());
+        assert!(!v.detail.tool_output_expanded());
+        assert_eq!(v.detail.next(), Detail::All);
+        v.detail = v.detail.next();
+        assert_eq!(v.detail.next(), Detail::Overview);
+        v.detail = v.detail.next();
+        assert_eq!(v.detail.next(), Detail::Details);
+    }
+
     /// The `!`/`!!` prompt (TS `getBashPromptInfo` + `formatPromptPrefix`):
     /// the typed prefix hides behind the styled `! `/`!! ` prompt, later
     /// lines keep the prompt column, and the prompt carries the editor
