@@ -107,122 +107,6 @@ pub(crate) fn delete_session_file(path: &Path) -> Value {
     delete_session_file_after_file_removed(path, &|_| {})
 }
 
-#[cfg(test)]
-mod tombstone_usage_tests {
-    use super::*;
-    use serde_json::json;
-
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("pa-saved-del-{name}-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn write_child_with_usage(dir: &Path) -> PathBuf {
-        let mut session = SessionFile::create("/work", None, 0);
-        let path = dir.join(format!("{}.jsonl", session.session_id()));
-        session.set_path(path.clone());
-        session.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
-        session.rewrite().unwrap();
-        let usage_row = json!({
-            "type": "message", "id": "m1",
-            "message": {
-                "role": "assistant",
-                "usage": {
-                    "input": 2_000, "output": 200, "cacheRead": 0, "cacheWrite": 0,
-                    "totalTokens": 2_200,
-                    "cost": { "input": 0.35, "output": 0.05, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.4 }
-                }
-            }
-        });
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&path)
-                .unwrap();
-            use std::io::Write;
-            writeln!(file, "{usage_row}").unwrap();
-        }
-        path
-    }
-
-    /// The saved-session delete captures the spend while the file is alive
-    /// and rides it on the tombstone: the deleted-descendant bucket still
-    /// bills the parent after the transcript is gone (the Rust-side
-    /// instance of TS #2506's Macroscope race - a tombstone whose usage
-    /// read lands after the trash finds nothing).
-    #[test]
-    fn saved_session_delete_captures_usage_before_the_unlink() {
-        let root = temp_dir("capture");
-        let agent_dir = root.join("agent");
-        let sessions_dir = agent_dir.join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-        let parent = sessions_dir.join("p.jsonl");
-        let child = write_child_with_usage(&sessions_dir);
-        std::fs::write(&parent, "{}").unwrap();
-        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
-        ledger
-            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
-                child_id: "sub-1".to_string(),
-                parent: parent.to_string_lossy().to_string(),
-                child: child.to_string_lossy().to_string(),
-                depth: 1,
-                name: "lane".to_string(),
-            })
-            .unwrap();
-        // The delete (a known subagent): the tombstone captures pre-unlink.
-        let captured = tombstone_saved_session_delete(
-            &agent_dir,
-            &sessions_dir,
-            &child.to_string_lossy(),
-            Some("subagent"),
-        );
-        assert_eq!(captured, 1, "the one edge received the snapshot");
-        let edges = ledger.edges(true).unwrap();
-        assert_eq!(edges.len(), 1);
-        let snapshot = edges[0]
-            .deleted_usage
-            .clone()
-            .expect("the snapshot rides the tombstone");
-        assert!((snapshot.cost - 0.4).abs() < 1e-9);
-        // The file goes (the trash/unlink below the tombstone): the bucket
-        // survives the removal - the snapshot is the source, not the file.
-        std::fs::remove_file(&child).unwrap();
-        let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
-        let parent_key = crate::lease::canonical_session_path(&parent)
-            .to_string_lossy()
-            .to_string();
-        assert!(
-            (bucket[&parent_key].cost - 0.4).abs() < 1e-9,
-            "the spend survives the transcript's removal"
-        );
-    }
-
-    /// A positively top-level session never tombstones (no capture, no
-    /// bucket): the delete is a plain file removal.
-    #[test]
-    fn top_level_deletes_never_capture() {
-        let root = temp_dir("top-level");
-        let agent_dir = root.join("agent");
-        let sessions_dir = agent_dir.join("sessions");
-        std::fs::create_dir_all(&sessions_dir).unwrap();
-        let top = write_child_with_usage(&sessions_dir);
-        let captured = tombstone_saved_session_delete(
-            &agent_dir,
-            &sessions_dir,
-            &top.to_string_lossy(),
-            Some("top-level"),
-        );
-        assert_eq!(captured, 0, "nothing tombstoned, nothing captured");
-        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
-        assert!(
-            ledger.edges(true).unwrap().is_empty(),
-            "no edges, no tombstone"
-        );
-    }
-}
-
 /// TS `deleteSessionFile` with its `afterFileRemoved` hook: the hook runs
 /// once the file is gone but BEFORE the artifact partition's removal (the
 /// daemon's `cancelScheduledJobsForSessionFile`, which needs the partition
@@ -355,21 +239,6 @@ pub(crate) fn tombstone_saved_session_delete_captured(
             0
         }
     }
-}
-
-/// TS `tombstoneSavedSessionDelete`: the two phases in one call. The
-/// real delete handler keeps the phases SPLIT (the capture must ride
-/// the file being alive and the tombstone waits for the removal to
-/// succeed); only the tests use the combined shape.
-#[cfg(test)]
-pub(crate) fn tombstone_saved_session_delete(
-    agent_dir: &Path,
-    sessions_dir: &Path,
-    session_path: &str,
-    known_runtime_kind: Option<&str>,
-) -> usize {
-    let capture = capture_saved_session_delete(session_path, known_runtime_kind);
-    tombstone_saved_session_delete_captured(agent_dir, sessions_dir, session_path, &capture)
 }
 
 impl Supervisor {
@@ -1030,5 +899,135 @@ impl Worker {
             self.scheduled.wake().await;
         }
         response_success(None, "delete_saved_session", Some(result))
+    }
+}
+
+#[cfg(test)]
+mod tombstone_usage_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// TS `tombstoneSavedSessionDelete`: the two phases in one call. The
+    /// real delete handler keeps the phases SPLIT (the capture must ride
+    /// the file being alive and the tombstone waits for the removal to
+    /// succeed); only the tests use the combined shape.
+    fn tombstone_saved_session_delete(
+        agent_dir: &Path,
+        sessions_dir: &Path,
+        session_path: &str,
+        known_runtime_kind: Option<&str>,
+    ) -> usize {
+        let capture = capture_saved_session_delete(session_path, known_runtime_kind);
+        tombstone_saved_session_delete_captured(agent_dir, sessions_dir, session_path, &capture)
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pa-saved-del-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_child_with_usage(dir: &Path) -> PathBuf {
+        let mut session = SessionFile::create("/work", None, 0);
+        let path = dir.join(format!("{}.jsonl", session.session_id()));
+        session.set_path(path.clone());
+        session.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+        session.rewrite().unwrap();
+        let usage_row = json!({
+            "type": "message", "id": "m1",
+            "message": {
+                "role": "assistant",
+                "usage": {
+                    "input": 2_000, "output": 200, "cacheRead": 0, "cacheWrite": 0,
+                    "totalTokens": 2_200,
+                    "cost": { "input": 0.35, "output": 0.05, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.4 }
+                }
+            }
+        });
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .unwrap();
+            use std::io::Write;
+            writeln!(file, "{usage_row}").unwrap();
+        }
+        path
+    }
+
+    /// The saved-session delete captures the spend while the file is alive
+    /// and rides it on the tombstone: the deleted-descendant bucket still
+    /// bills the parent after the transcript is gone (the Rust-side
+    /// instance of TS #2506's Macroscope race - a tombstone whose usage
+    /// read lands after the trash finds nothing).
+    #[test]
+    fn saved_session_delete_captures_usage_before_the_unlink() {
+        let root = temp_dir("capture");
+        let agent_dir = root.join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let parent = sessions_dir.join("p.jsonl");
+        let child = write_child_with_usage(&sessions_dir);
+        std::fs::write(&parent, "{}").unwrap();
+        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
+        ledger
+            .append_spawn(crate::rlm_ledger::RlmSpawnInput {
+                child_id: "sub-1".to_string(),
+                parent: parent.to_string_lossy().to_string(),
+                child: child.to_string_lossy().to_string(),
+                depth: 1,
+                name: "lane".to_string(),
+            })
+            .unwrap();
+        // The delete (a known subagent): the tombstone captures pre-unlink.
+        let captured = tombstone_saved_session_delete(
+            &agent_dir,
+            &sessions_dir,
+            &child.to_string_lossy(),
+            Some("subagent"),
+        );
+        assert_eq!(captured, 1, "the one edge received the snapshot");
+        let edges = ledger.edges(true).unwrap();
+        assert_eq!(edges.len(), 1);
+        let snapshot = edges[0]
+            .deleted_usage
+            .clone()
+            .expect("the snapshot rides the tombstone");
+        assert!((snapshot.cost - 0.4).abs() < 1e-9);
+        // The file goes (the trash/unlink below the tombstone): the bucket
+        // survives the removal - the snapshot is the source, not the file.
+        std::fs::remove_file(&child).unwrap();
+        let bucket = ledger.deleted_descendant_usage_by_parent().unwrap();
+        let parent_key = crate::lease::canonical_session_path(&parent)
+            .to_string_lossy()
+            .to_string();
+        assert!(
+            (bucket[&parent_key].cost - 0.4).abs() < 1e-9,
+            "the spend survives the transcript's removal"
+        );
+    }
+
+    /// A positively top-level session never tombstones (no capture, no
+    /// bucket): the delete is a plain file removal.
+    #[test]
+    fn top_level_deletes_never_capture() {
+        let root = temp_dir("top-level");
+        let agent_dir = root.join("agent");
+        let sessions_dir = agent_dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let top = write_child_with_usage(&sessions_dir);
+        let captured = tombstone_saved_session_delete(
+            &agent_dir,
+            &sessions_dir,
+            &top.to_string_lossy(),
+            Some("top-level"),
+        );
+        assert_eq!(captured, 0, "nothing tombstoned, nothing captured");
+        let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
+        assert!(
+            ledger.edges(true).unwrap().is_empty(),
+            "no edges, no tombstone"
+        );
     }
 }

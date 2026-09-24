@@ -418,24 +418,11 @@ fn passivated_summary(summary: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rlm_ledger::RlmLedgerEdge;
     use crate::supervisor_roster_seed::tests::{
         append_family_edge, live_child_summary, register_root_worker, roster_fixture,
         roster_row_for_child, write_display_file,
     };
     use pa_types::daemon::agent_roster::AgentRosterStatus;
-
-    fn edge(child_id: &str, parent: &str, child: &str, depth: u32, name: &str) -> RlmLedgerEdge {
-        RlmLedgerEdge {
-            child_id: child_id.to_string(),
-            parent: parent.to_string(),
-            child: child.to_string(),
-            depth,
-            name: name.to_string(),
-            deleted: None,
-            deleted_usage: None,
-        }
-    }
 
     /// `roster_subscribe` is a pure in-memory snapshot: a family the
     /// ledger knows (with readable transcripts, unseeded) never enters
