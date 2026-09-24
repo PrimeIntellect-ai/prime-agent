@@ -256,20 +256,23 @@ impl Worker {
     /// Re-clamp the effective service tier for the engine's current model
     /// (TS `_clampServiceTierForModel` on a model switch, #2144's
     /// `clampServiceTier`): a preference the switched-to model does not
-    /// support degrades to `default`, the engine's request slot follows the
-    /// clamp, and the `service_tier_changed` session event follows the
-    /// flip. The stored preference keeps the requested tier, so switching
+    /// support degrades to `default`. The engine's request slot ALWAYS
+    /// follows the model switch (TS sets `agent.state.serviceTier` on
+    /// every switch — skipping the write would strand the slot on the
+    /// previous model's clamp after switching back to a capable model);
+    /// the `service_tier_changed` event fires only when the ACTIVE tier
+    /// moves. The stored preference keeps the requested tier, so switching
     /// back to (or resuming on) a capable model re-applies it.
     fn clamp_service_tier_for_model(&self) {
-        let (preference, clamped) = {
-            let core = self.core.lock().unwrap();
-            (
-                core.service_tier,
-                effective_service_tier(core.service_tier, self.engine.as_ref()),
-            )
+        let (clamped, previous_active) = {
+            let mut core = self.core.lock().unwrap();
+            let clamped = effective_service_tier(core.service_tier, self.engine.as_ref());
+            let previous_active = core.active_service_tier;
+            core.active_service_tier = clamped;
+            (clamped, previous_active)
         };
-        if clamped != preference {
-            self.engine.configure_service_tier(clamped);
+        self.engine.configure_service_tier(clamped);
+        if clamped != previous_active {
             self.emit_worker_event(json!({
                 "type": "service_tier_changed",
                 "serviceTier": service_tier_wire_name(clamped.unwrap_or(ServiceTier::Auto)),
@@ -398,10 +401,10 @@ impl Worker {
         let (preference_changed, effective_changed, cwd) = {
             let mut core = self.core.lock().unwrap();
             let preference = core.service_tier;
-            let previous_effective = effective_service_tier(preference, self.engine.as_ref())
-                .unwrap_or(ServiceTier::Auto);
+            let previous_active = core.active_service_tier;
             core.service_tier = Some(tier);
-            let effective_changed = previous_effective != effective;
+            core.active_service_tier = Some(effective);
+            let effective_changed = previous_active != Some(effective);
             let preference_changed = preference != Some(tier);
             let mut cwd = core.cwd.clone();
             if preference_changed {

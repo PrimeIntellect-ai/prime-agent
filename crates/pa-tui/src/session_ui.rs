@@ -305,6 +305,10 @@ pub(crate) struct SessionUi {
     /// seeded from the attach state and kept live by `service_tier_changed`
     /// events; the `/fast` toggle reads it.
     service_tier: Option<String>,
+    /// The current model's provider (TS `getCurrentModel()` keeps the full
+    /// model): the eligibility lookups over the TUI-side catalog disambiguate
+    /// same-id entries across providers with it.
+    current_model_provider: Option<String>,
     /// The client-process settings seam (`/settings`, `/fullscreen`);
     /// the composition root supplies it.
     client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
@@ -669,6 +673,7 @@ impl SessionUi {
                 .map(|settings| settings.fullscreen())
                 .unwrap_or(true),
             service_tier: None,
+            current_model_provider: None,
             speed_display_enabled: false,
             speed_stats: None,
             client_settings: options.client_settings.clone(),
@@ -922,6 +927,8 @@ impl SessionUi {
         self.session_name.clone_from(&reconstructed.session_name);
         self.service_tier.clone_from(&reconstructed.service_tier);
         view.chrome.service_tier = self.service_tier.clone();
+        self.current_model_provider
+            .clone_from(&reconstructed.model_provider);
         self.session_file = attach
             .snapshot
             .get("state")
@@ -4332,25 +4339,39 @@ impl SessionUi {
                         return;
                     }
                 };
-                self.daemon_switch(
-                    DaemonCommand::SetServiceTier {
-                        id: None,
-                        active_session_id: self.active_session_id.clone(),
-                        service_tier: Some(tier),
-                        rest: Default::default(),
-                    },
-                    view,
-                )
-                .await;
-                let state = self.connection_state(view).await;
-                if let Some(state) = state {
-                    if let Some(applied) = state.get("serviceTier").and_then(Value::as_str) {
-                        self.service_tier = Some(applied.to_string());
-                    }
+                let switched = self
+                    .bounded_request(
+                        Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                        DaemonCommand::SetServiceTier {
+                            id: None,
+                            active_session_id: self.active_session_id.clone(),
+                            service_tier: Some(tier),
+                            rest: Default::default(),
+                        },
+                    )
+                    .await;
+                if let Err(error) = switched {
+                    self.error_row(&format!("{error:#}"), view);
+                    return;
                 }
-                view.chrome.service_tier.clone_from(&self.service_tier);
+                // The status row reports what the session actually applied
+                // (TS `formatStatus(state.serviceTier)`); a state read that
+                // fails or omits the tier shows no success row (the
+                // `service_tier_changed` event refreshes the local tier
+                // when it lands).
+                let Some(state) = self.connection_state(view).await else {
+                    return;
+                };
+                let Some(applied) = state
+                    .get("serviceTier")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                else {
+                    return;
+                };
+                self.service_tier = Some(applied.clone());
+                view.chrome.service_tier = Some(applied.clone());
                 self.update_model_eligibility_filters(view);
-                let applied = self.service_tier.as_deref().unwrap_or("default");
                 self.note(
                     &format!("Default service tier: {value} (session: {applied})"),
                     view,
@@ -4435,11 +4456,19 @@ impl SessionUi {
     // /fullscreen, /reload)
     // ------------------------------------------------------------------
 
-    /// The catalog entry for the current model (the `/fast` eligibility
-    /// check needs the provider and api, not just the id).
+    /// The catalog entry for the current model (the `/fast` and `/tier`
+    /// eligibility checks need the provider and api, not just the id).
+    /// When the current provider is known (the session state reports it),
+    /// a same-id entry from another provider never wins the lookup.
     fn current_model_entry(&self, view: &AgentView) -> Option<&pa_types::ai::Model> {
         let model_id = view.chrome.model_id.as_deref()?;
-        self.model_catalog.iter().find(|model| model.id == model_id)
+        match self.current_model_provider.as_deref() {
+            Some(provider) => self
+                .model_catalog
+                .iter()
+                .find(|model| model.id == model_id && model.provider == provider),
+            None => self.model_catalog.iter().find(|model| model.id == model_id),
+        }
     }
 
     /// Recompute the model-eligibility autocomplete state (TS
@@ -4500,9 +4529,7 @@ impl SessionUi {
             .map(|tier| {
                 let description = DESCRIPTIONS
                     .iter()
-                    .find_map(|(choice, description)| {
-                        (*choice == tier).then_some(*description)
-                    })
+                    .find_map(|(choice, description)| (*choice == tier).then_some(*description))
                     .unwrap_or("");
                 let description = if tier == current {
                     format!("{description} (current)")
@@ -4628,15 +4655,23 @@ impl SessionUi {
             self.error_row(&format!("{error:#}"), view);
             return;
         }
-        let state = self.connection_state(view).await;
-        if let Some(state) = state {
-            if let Some(tier) = state.get("serviceTier").and_then(Value::as_str) {
-                self.service_tier = Some(tier.to_string());
-            }
-        }
-        view.chrome.service_tier.clone_from(&self.service_tier);
+        // The status row reports what the session actually applied (TS
+        // `formatStatus(state.serviceTier)`); a state read that fails or
+        // omits the tier shows no success row — the stale local tier must
+        // not report an apply that did not confirm.
+        let Some(state) = self.connection_state(view).await else {
+            return;
+        };
+        let Some(applied) = state
+            .get("serviceTier")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return;
+        };
+        self.service_tier = Some(applied.clone());
+        view.chrome.service_tier = Some(applied.clone());
         self.update_model_eligibility_filters(view);
-        let applied = self.service_tier.as_deref().unwrap_or("default");
         self.note(&format!("Service tier: {applied}"), view);
     }
 
@@ -6874,6 +6909,7 @@ impl SessionUi {
                 // so `/new` sessions start on it too (TS settings default).
                 self.model_selection.provider = Some(provider.to_string());
                 self.model_selection.model = Some(model_id.to_string());
+                self.current_model_provider = Some(provider.to_string());
                 self.refresh_model_label(model_id, view).await;
                 self.note(&format!("Model: {model_id}"), view);
             }
@@ -6974,6 +7010,11 @@ impl SessionUi {
                 .map(str::to_string)
                 .unwrap_or_else(|| picked_model_id.to_string());
             view.chrome.model_id = Some(model_id);
+            self.current_model_provider = data
+                .get("model")
+                .and_then(|model| model.get("provider"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
             self.dirty = true;
         }
     }

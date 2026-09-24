@@ -1148,9 +1148,12 @@ mod tests {
         // Completions models outside OpenRouter never take a tier.
         let direct = tier_model("openai", "openai-completions", "gpt-5.5");
         assert!(!supports_service_tier(&direct, Priority));
-        // supportsFastMode is the priority question.
+        // supportsFastMode is the priority question — and #2144 makes the
+        // OpenRouter completions models fast-mode-eligible too (their
+        // priority tier is accepted).
         assert!(supports_fast_mode(&codex));
-        assert!(!supports_fast_mode(&openrouter));
+        assert!(supports_fast_mode(&openrouter));
+        assert!(!supports_fast_mode(&codex_ineligible));
     }
 
     #[test]

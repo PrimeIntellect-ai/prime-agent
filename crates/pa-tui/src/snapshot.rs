@@ -46,6 +46,10 @@ pub struct Reconstructed {
     pub chat: Vec<ChatEntry>,
     /// Current model id (`state.model.id`), when the session reports one.
     pub model_id: Option<String>,
+    /// The current model's provider (`state.model.provider`), when the
+    /// session reports one — disambiguates same-id catalog entries across
+    /// providers for the model-eligibility lookups.
+    pub model_provider: Option<String>,
     /// Session display name.
     pub session_name: Option<String>,
     /// Session id of the persisted session file.
@@ -275,9 +279,15 @@ pub fn reconstruct(attach: &AttachData) -> Reconstructed {
         .and_then(|state| state.get("serviceTier"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let model_provider = state
+        .and_then(|state| state.get("model"))
+        .and_then(|model| model.get("provider"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
     Reconstructed {
         chat: messages,
         model_id,
+        model_provider,
         session_name,
         session_id,
         goal,

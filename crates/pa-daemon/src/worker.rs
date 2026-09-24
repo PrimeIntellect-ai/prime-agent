@@ -437,6 +437,12 @@ pub(crate) struct SessionCore {
     /// `None` is the settings default "auto"). The effective tier clamps
     /// `priority` to `default` on models without fast mode.
     pub(crate) service_tier: Option<pa_types::ai::ServiceTier>,
+    /// The ACTIVE tier the engine's request slot carries (the TS
+    /// `agent.state.serviceTier`): the preference clamped to the current
+    /// model. Diverges from `service_tier` only while the current model
+    /// does not support the requested tier; every model switch re-clamps
+    /// and updates it.
+    pub(crate) active_service_tier: Option<pa_types::ai::ServiceTier>,
     /// The queue delivery modes (TS `agent.steeringMode` / `followUpMode`):
     /// `"all"` or `"one-at-a-time"`. The steering default is `"all"`
     /// (every queued steer co-delivers as ONE turn at the next
@@ -521,6 +527,7 @@ impl SessionCore {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
+            active_service_tier: None,
             steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
@@ -976,6 +983,7 @@ impl Worker {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
+            active_service_tier: None,
             steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
@@ -2489,10 +2497,8 @@ impl Worker {
         // stored preference below keeps the requested tier, so resuming on
         // a capable model re-applies it (#2144).
         let configured_tier = restored_tier.unwrap_or(Some(service_tier));
-        self.engine.configure_service_tier(effective_service_tier(
-            configured_tier,
-            self.engine.as_ref(),
-        ));
+        let clamped_tier = effective_service_tier(configured_tier, self.engine.as_ref());
+        self.engine.configure_service_tier(clamped_tier);
         // The abort supervision's terminal record (the supervisor declared
         // a wedged run aborted and injected it into this create replay):
         // the rebuilt transcript discloses the abort with the same
@@ -2559,6 +2565,7 @@ impl Worker {
             }
             core.auto_compaction_enabled = auto_compaction_enabled;
             core.service_tier = configured_tier;
+            core.active_service_tier = clamped_tier;
             core.steering_mode.clone_from(&steering_mode);
             core.follow_up_mode.clone_from(&follow_up_mode);
             core.forced_all_steering = false;
@@ -4340,11 +4347,10 @@ impl Worker {
                 .engine
                 .effective_thinking_level()
                 .unwrap_or_else(|| "default".to_string()),
-            // The effective tier: the preference clamped to the model's
-            // support (`supportsServiceTier`; an unsupported tier degrades
-            // to `default`).
+            // The effective tier: the tracked ACTIVE tier (the preference
+            // clamped to the model's support at create/set/switch time).
             service_tier: crate::setting_switches::service_tier_wire_name(
-                effective_service_tier(core.service_tier, self.engine.as_ref())
+                core.active_service_tier
                     .unwrap_or(pa_types::ai::ServiceTier::Auto),
             )
             .to_string(),
@@ -8903,6 +8909,7 @@ mod turn_stream_tests {
             parent_session_id: None,
             child_script: None,
             service_tier: None,
+            active_service_tier: None,
             steering_mode: "all".to_string(),
             follow_up_mode: "one-at-a-time".to_string(),
             forced_all_steering: false,
