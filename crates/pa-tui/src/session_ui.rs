@@ -6419,7 +6419,7 @@ impl SessionUi {
         let skills = if self
             .client_settings
             .as_ref()
-            .map_or(true, |settings| settings.enable_skill_commands())
+            .is_none_or(|settings| settings.enable_skill_commands())
         {
             self.skill_commands_cache.clone()
         } else {
