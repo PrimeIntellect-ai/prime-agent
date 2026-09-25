@@ -841,6 +841,75 @@ impl Supervisor {
         self.spawn_roster_boot_seed();
     }
 
+    /// Complete a tombstoned stop for a worker encountered at adoption —
+    /// the boot scan's descriptor pass and a live re-registration alike
+    /// (TS `adoptOrRecoverWorker`'s `stopRequestedAt` branch: adoption
+    /// finishes the stop, never adopts the worker as healthy). The
+    /// tombstone's variant rides `archive_on_stop`: the kill stop
+    /// (`Some(true)`) is irreversible — its killed close cancels jobs,
+    /// archives the file, and cascades children; the per-session stop
+    /// (`Some(false)`) keeps the session resumable — its graceful
+    /// shutdown close and its schedule-cancel belt are all it owns.
+    async fn finish_tombstoned_stop(self: &Arc<Self>, resident: &Arc<ResidentWorker>, alive: bool) {
+        let kill_stop = resident.descriptor.lock().await.archive_on_stop == Some(true);
+        if alive {
+            // The worker outlived the stop (a crash between the tombstone
+            // and the forward, or a survivor of the escalation): connect
+            // to it and forward the ORIGINAL stop intent — kill for the
+            // kill stop, shutdown for the resumable per-session stop. A
+            // failed connect degrades to the dead-worker finalize below.
+            resident.intentional_stop.store(true, Ordering::SeqCst);
+            if self
+                .connect_worker(&resident, worker_connect_deadline())
+                .await
+                .is_ok()
+            {
+                let command = if kill_stop { "kill" } else { "shutdown" };
+                let _ = self
+                    .route_command(&resident, command, json!({}), ROUTE_TIMEOUT_MS)
+                    .await;
+            }
+        }
+        // TS `scheduleWorkerStopFinalization`: the interrupted stop's
+        // cleanup re-runs instead of a relaunch, honoring the variant.
+        if kill_stop {
+            // The descriptor survives an unsettled finalize (a later boot
+            // retries the archived-state belt); a settled stop deletes it.
+            let settled = self.finalize_worker_stop(&resident, None).await;
+            if settled {
+                let _ = std::fs::remove_file(&resident.descriptor_path);
+                self.log_line(&format!(
+                    "finished the tombstoned stop of session worker {}",
+                    resident.worker_id
+                ));
+            } else {
+                self.log_line(&format!(
+                    "tombstoned stop of session worker {} not settled; descriptor kept",
+                    resident.worker_id
+                ));
+            }
+        } else {
+            // The per-session stop's durable half is the ephemeral
+            // schedule cancel (no archived-state belt — the session stays
+            // resumable), and the descriptor dies only with a
+            // provably-gone process: the retire pass removes it once the
+            // escalation confirms death and keeps a survivor's tombstone
+            // for the next boot (never orphaning a live lease holder
+            // behind a deleted descriptor). Only an owned (ephemeral)
+            // stop cancels its tree — `stop_worker`'s own gate: a
+            // resident RLM child's preserved jobs must survive a parent's
+            // stop-driven death.
+            if resident.descriptor.lock().await.owner_client_id.is_some() {
+                self.finalize_owned_stop(&resident).await;
+            }
+            self.retire_worker_after_stop(&resident).await;
+            self.log_line(&format!(
+                "finished the tombstoned per-session stop of session worker {}",
+                resident.worker_id
+            ));
+        }
+    }
+
     /// Adopt one persisted worker descriptor. Serialized against worker
     /// self-registration by the per-worker adoption gate: whichever path
     /// arrives first (descriptor scan or live re-registration) builds the
@@ -872,63 +941,7 @@ impl Supervisor {
         // still-reachable worker as healthy (that would drop the stop and
         // leave the stopped session resident).
         if resident.descriptor.lock().await.stop_requested_at.is_some() {
-            // The tombstone's variant rides `archive_on_stop`: the kill
-            // stop (`Some(true)`) is irreversible — its killed close
-            // cancels jobs, archives the file, and cascades children; the
-            // per-session stop (`Some(false)`) keeps the session
-            // resumable — its graceful shutdown close and its
-            // schedule-cancel belt are all it owns.
-            let kill_stop = resident.descriptor.lock().await.archive_on_stop == Some(true);
-            if alive {
-                // The worker outlived the crash and may never have received
-                // the stop (the crash window is between the tombstone and
-                // the forward): connect to it and forward the ORIGINAL
-                // stop intent — kill for the kill stop, shutdown for the
-                // resumable per-session stop. A failed connect degrades
-                // to the dead-worker finalize below.
-                resident.intentional_stop.store(true, Ordering::SeqCst);
-                if self
-                    .connect_worker(&resident, worker_connect_deadline())
-                    .await
-                    .is_ok()
-                {
-                    let command = if kill_stop { "kill" } else { "shutdown" };
-                    let _ = self
-                        .route_command(&resident, command, json!({}), ROUTE_TIMEOUT_MS)
-                        .await;
-                }
-            }
-            // TS `scheduleWorkerStopFinalization`: the interrupted stop's
-            // cleanup re-runs instead of a relaunch, honoring the variant.
-            if kill_stop {
-                // The descriptor survives an unsettled finalize (a later
-                // boot retries the archived-state belt); a settled stop
-                // deletes it.
-                let settled = self.finalize_worker_stop(&resident, None).await;
-                if settled {
-                    let _ = std::fs::remove_file(&resident.descriptor_path);
-                    self.log_line(&format!(
-                        "finished the tombstoned stop of session worker {worker_id}"
-                    ));
-                } else {
-                    self.log_line(&format!(
-                        "tombstoned stop of session worker {worker_id} not settled; descriptor kept"
-                    ));
-                }
-            } else {
-                // The per-session stop's durable half is the ephemeral
-                // schedule cancel (no archived-state belt — the session
-                // stays resumable), and the descriptor dies only with a
-                // provably-gone process: the retire pass removes it once
-                // the escalation confirms death and keeps a survivor's
-                // tombstone for the next boot (never orphaning a live
-                // lease holder behind a deleted descriptor).
-                self.finalize_owned_stop(&resident).await;
-                self.retire_worker_after_stop(&resident).await;
-                self.log_line(&format!(
-                    "finished the tombstoned per-session stop of session worker {worker_id}"
-                ));
-            }
+            self.finish_tombstoned_stop(&resident, alive).await;
             return AdoptionOutcome::Stopped;
         }
         // The adoption answer plus the revival's spawned child, when one
@@ -3802,6 +3815,23 @@ impl Supervisor {
             descriptor,
             descriptor_path,
         );
+        // A tombstoned identity is mid-stop (TS `adoptOrRecoverWorker`'s
+        // stopRequestedAt branch): adoption finishes the stop — the
+        // original command forwarded, the variant's finalize belt, the
+        // descriptor retired with the process — and never adopts the
+        // worker as healthy (that would undo the stop and leave the
+        // stopped session held by the leftover process). The refusal is
+        // transient: the worker's next attempt reads the retired
+        // descriptor (or the still-tombstoned one) and converges on the
+        // stop's completion - the definitive verdict once the process is
+        // provably gone.
+        if resident.descriptor.lock().await.stop_requested_at.is_some() {
+            self.finish_tombstoned_stop(&resident, true).await;
+            return Err(anyhow!(
+                "session worker {} is stopping: the stop was forwarded; registration refused",
+                registration.active_session_id
+            ));
+        }
         self.connect_worker(&resident, worker_connect_deadline())
             .await?;
         // The self-registered worker's session already exists: routed

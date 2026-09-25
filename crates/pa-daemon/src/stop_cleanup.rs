@@ -362,13 +362,25 @@ impl Supervisor {
         resident: &Arc<ResidentWorker>,
     ) -> anyhow::Result<()> {
         let mut descriptor = resident.descriptor.lock().await;
+        let old_stop_requested_at = descriptor.stop_requested_at.clone();
+        let old_archive_on_stop = descriptor.archive_on_stop;
         if descriptor.stop_requested_at.is_none() {
             descriptor.stop_requested_at = Some(crate::util::now_iso());
         }
         if descriptor.archive_on_stop.is_none() {
             descriptor.archive_on_stop = Some(false);
         }
-        crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor)?;
+        if let Err(error) =
+            crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor)
+        {
+            // A failed persist rolls the in-memory mutation back: a later
+            // descriptor write must not carry a tombstone the rejected
+            // stop never durably set (adoption would finish a stop nobody
+            // requested).
+            descriptor.stop_requested_at = old_stop_requested_at;
+            descriptor.archive_on_stop = old_archive_on_stop;
+            return Err(error);
+        }
         drop(descriptor);
         resident
             .intentional_stop

@@ -574,7 +574,10 @@ mod tests {
 
         // The supervisor refuses the identity for good: the loop must
         // resolve the retirement signal and stop registering.
-        let stream = listener.accept().await.expect("first registration");
+        let stream = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("first registration within bounded window")
+            .expect("accept");
         let (reader, mut writer) = stream.split();
         let mut reader = BufReader::new(reader);
         writer
@@ -610,7 +613,10 @@ mod tests {
         // arrives within the backoff cadence.
         let config = test_config(dir.path(), &supervisor_socket);
         let handle = start(&config).expect("registration starts");
-        let stream = listener.accept().await.expect("first registration");
+        let stream = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("transient registration within bounded window")
+            .expect("accept");
         let (reader, mut writer) = stream.split();
         let mut reader = BufReader::new(reader);
         writer
