@@ -41,9 +41,16 @@ actionlint:
 # runs recipes with /bin/sh, which is dash on Ubuntu (no [[ ]], no ==).
 glibc-gate:
 	@case "$(TARGET)" in *-linux-gnu) \
-		max_glibc="$$(objdump -T target/release/prime-agent | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1 || true)"; \
-		echo "highest GLIBC symbol required: $${max_glibc:-none}"; \
-		top="$$(printf '%s\nGLIBC_2.35\n' "$${max_glibc:-GLIBC_2.35}" | sort -Vu | tail -1)"; \
+		if ! objdump -T target/release/prime-agent >/dev/null 2>&1; then \
+			echo "glibc-gate: unable to inspect target/release/prime-agent with objdump (build first - the dry-run targets run cargo build before this gate)" >&2; exit 1; \
+		fi; \
+		syms="$$(objdump -T target/release/prime-agent | grep -o 'GLIBC_[0-9.]*' || true)"; \
+		if [ -z "$$syms" ]; then \
+			echo "glibc-gate: no GLIBC symbols found in target/release/prime-agent - refusing to pass without evidence" >&2; exit 1; \
+		fi; \
+		max_glibc="$$(printf '%s\n' "$$syms" | sort -Vu | tail -1)"; \
+		echo "highest GLIBC symbol required: $${max_glibc}"; \
+		top="$$(printf '%s\nGLIBC_2.35\n' "$$max_glibc" | sort -Vu | tail -1)"; \
 		if [ "$$top" != "GLIBC_2.35" ]; then \
 			echo "binary requires $${max_glibc}, above the GLIBC_2.35 (Ubuntu 22.04) baseline" >&2; exit 1; \
 		fi \
