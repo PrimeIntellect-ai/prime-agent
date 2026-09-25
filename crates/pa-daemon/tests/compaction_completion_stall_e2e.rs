@@ -57,6 +57,8 @@ const CHECKPOINT_SUMMARY: &str = "the checkpoint summary";
 
 struct Supervisor {
     child: Child,
+    // Spawn bookkeeping only: the daemon binds the socket path; the test
+    // drives the daemon through the client port, never this field.
     #[allow(dead_code)]
     socket: PathBuf,
 }
@@ -274,6 +276,9 @@ fn write_sse(stream: &mut TcpStream, reply: String, usage: Value) -> std::io::Re
     )
 }
 
+// One Arc per captured concern keeps the mock's request handlers
+// independent (requests, turn timing/bodies, review timing, delays);
+// a parameter struct would only shuttle the same Arcs around.
 #[allow(clippy::too_many_arguments)]
 fn serve(
     mut stream: TcpStream,
@@ -328,6 +333,8 @@ fn serve(
     write_sse(&mut stream, reply, usage)
 }
 
+// The child is reaped in Supervisor::drop (kill + wait); clippy's
+// zombie_processes cannot see the Drop guard from the spawn site.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(socket: &Path, agent_dir: &Path, trace_path: &Path) -> Supervisor {
     std::fs::create_dir_all(agent_dir).expect("agent dir");

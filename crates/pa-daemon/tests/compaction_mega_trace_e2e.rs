@@ -25,6 +25,8 @@ const FATTEN_REPLY_CHARS: usize = 6 * 1024 * 1024;
 
 struct Supervisor {
     child: Child,
+    // Spawn bookkeeping only: the daemon binds the socket path; the test
+    // drives the daemon through the client port, never this field.
     #[allow(dead_code)]
     socket: PathBuf,
 }
@@ -175,6 +177,8 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
     )
 }
 
+// The child is reaped in Supervisor::drop (kill + wait); clippy's
+// zombie_processes cannot see the Drop guard from the spawn site.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(socket: &Path, agent_dir: &Path, trace_path: &Path) -> Supervisor {
     std::fs::create_dir_all(agent_dir).expect("agent dir");
@@ -299,6 +303,8 @@ fn read_trace(path: &Path) -> Vec<(String, u128, Value)> {
         .collect()
 }
 
+// Measurement harness, not a correctness test: seeds a ~50MB session
+// and prints the phase table; run explicitly with --ignored.
 #[test]
 #[ignore] // measurement harness: seeds ~50MB and prints the phase table
 fn mega_session_threshold_compaction_phase_measurement() {
