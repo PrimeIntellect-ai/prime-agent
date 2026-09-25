@@ -458,8 +458,7 @@ async fn poll_for_github_access_token(
                     .and_then(serde_json::Value::as_f64)
                     .filter(|seconds| *seconds > 0.0);
                 interval_ms = advertised
-                    .map(|seconds| (seconds * 1000.0) as u64)
-                    .unwrap_or((interval_ms + 5000).max(1000));
+                    .map_or((interval_ms + 5000).max(1000), |seconds| (seconds * 1000.0) as u64);
                 interval_multiplier = SLOW_DOWN_POLL_INTERVAL_MULTIPLIER;
                 continue;
             }
@@ -595,7 +594,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .get_mut(&request.url)
-                .and_then(|queue| queue.pop_front())
+                .and_then(std::collections::VecDeque::pop_front)
                 .or_else(|| self.fixed.get(&request.url).cloned())
                 .or_else(|| self.catch_all.clone());
             Box::pin(
@@ -607,7 +606,6 @@ mod tests {
     /// One scripted UI answer.
     enum ScriptedAnswer {
         Once(Option<String>),
-        Pending,
     }
 
     impl ScriptedAnswer {
@@ -625,7 +623,6 @@ mod tests {
                     let value = value.clone();
                     Box::pin(std::future::ready(value))
                 }
-                ScriptedAnswer::Pending => Box::pin(std::future::pending()),
             }
         }
     }
@@ -683,8 +680,7 @@ mod tests {
             if self.cancel_after_prompt {
                 self.cancelled.store(true, Ordering::Relaxed);
             }
-            let answer = self.prompt.future();
-            Box::pin(async move { answer.await })
+            self.prompt.future()
         }
 
         fn on_progress(&self, message: &str) {
@@ -954,10 +950,7 @@ mod tests {
     async fn the_refresh_exchanges_the_stored_github_token() {
         let http = ScriptedHttp::new().fixed(
             "https://api.github.com/copilot_internal/v2/token",
-            ScriptedHttp::entry(
-                200,
-                r#"{"token":"copilot-fresh","expires_at":4000000000}"#,
-            ),
+            ScriptedHttp::entry(200, r#"{"token":"copilot-fresh","expires_at":4000000000}"#),
         );
         let credentials = refresh_github_copilot_token(&http, "gh-old", None)
             .await

@@ -437,6 +437,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+    use tokio::io::AsyncWriteExt as _;
 
     /// A scripted transport: url -> response, recording every posted
     /// body. Unknown urls fail the request (the TS suite throws on
@@ -587,12 +588,9 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
             assert_eq!(prompt.message, PROMPT_MESSAGE);
             assert_eq!(prompt.placeholder.as_deref(), Some(REDIRECT_URI));
-            let answer = self
-                .prompt
+            self.prompt
                 .as_ref()
-                .map(ScriptedAnswer::future)
-                .unwrap_or_else(|| Box::pin(std::future::pending()));
-            Box::pin(async move { answer.await })
+                .map_or_else(|| Box::pin(std::future::pending()), ScriptedAnswer::future)
         }
 
         fn on_progress(&self, message: &str) {
@@ -808,7 +806,6 @@ mod tests {
         let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", CALLBACK_PORT))
             .await
             .expect("the flow's callback server accepts the redirect");
-        use tokio::io::AsyncWriteExt as _;
         stream
             .write_all(
                 format!("GET /callback?code=live-code&state={state} HTTP/1.1\r\nHost: localhost\r\n\r\n")

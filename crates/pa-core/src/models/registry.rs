@@ -435,8 +435,7 @@ impl ModelRegistry {
         let copilot_credential = self
             .auth
             .get_all()
-            .credential(crate::auth::GITHUB_COPILOT_PROVIDER_ID)
-            .cloned();
+            .credential(crate::auth::GITHUB_COPILOT_PROVIDER_ID);
         if let Some(AuthCredential::Oauth {
             access,
             enterprise_url,

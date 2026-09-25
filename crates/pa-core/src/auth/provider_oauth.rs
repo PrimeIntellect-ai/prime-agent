@@ -17,8 +17,7 @@ use std::sync::Arc;
 
 use pa_ai::oauth::{
     refresh_anthropic_token, refresh_github_copilot_token, refresh_openai_codex_token,
-    refresh_xai_token, CodexHttp, ProviderHttp, ProviderHttpResponse, ReqwestCodexHttp,
-    ReqwestProviderHttp,
+    refresh_xai_token, CodexHttp, ProviderHttp, ReqwestCodexHttp, ReqwestProviderHttp,
 };
 
 use crate::auth::types::{AuthCredential, AuthStorageData};

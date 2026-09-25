@@ -452,7 +452,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .get_mut(&request.url)
-                .and_then(|queue| queue.pop_front());
+                .and_then(std::collections::VecDeque::pop_front);
             Box::pin(
                 async move { response.ok_or_else(|| format!("{} was not scripted", request.url)) },
             )
