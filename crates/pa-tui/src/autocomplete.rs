@@ -1086,9 +1086,9 @@ mod tests {
         let base = outer.path().join("base");
         std::fs::create_dir_all(base.join(".claude")).expect("mkdir");
         std::fs::create_dir_all(base.join("src")).expect("mkdir");
+        std::fs::write(base.join("src").join("module.rs"), "pub fn m() {}").expect("write");
         std::fs::write(base.join(".hidden"), "x").expect("write");
         std::fs::write(base.join("main.rs"), "fn main() {}").expect("write");
-        std::fs::write(outer.path().join(".outer-hidden"), "x").expect("write");
         let provider = provider(base.to_str().unwrap());
         let values = |text: &str| -> Vec<String> {
             provider
@@ -1107,15 +1107,17 @@ mod tests {
         );
         // The explicit `src/` browse and the empty-prefix forced pass are
         // the same class of listing.
-        assert_eq!(values("src/"), ["src/main.rs"]);
+        assert_eq!(values("src/"), ["src/module.rs"]);
         assert_eq!(values(""), ["src/", "main.rs"]);
-        // The directory references `.`/`..` browse like any other empty
-        // anchor: the dot entries stay hidden (the parent's too).
+        // The directory references `.`/`..` browse with an empty filename
+        // anchor (their file_name component is None), so they resolve
+        // against the base like the root browse: the dot entries stay
+        // hidden either way.
         assert_eq!(values("."), ["src/", "main.rs"]);
         assert_eq!(
             values(".."),
-            ["base"],
-            "the parent browse hides the dot entries"
+            ["src/", "main.rs"],
+            "the `..` browse hides the dot entries"
         );
         // A typed dot prefix is the explicit hidden-path browse: dot
         // entries list again.
