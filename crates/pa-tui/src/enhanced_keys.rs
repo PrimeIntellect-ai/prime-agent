@@ -12,18 +12,18 @@
 //!
 //! The kitty query runs on a probe thread that holds no UI state: it
 //! blocks inside crossterm's terminal support check until the terminal
-//! answers (or its 2s budget lapses) while the fallback timer fires on
-//! the TS schedule. crossterm parks the response in its internal event
-//! queue, so the app reader never sees protocol bytes as key input.
-//! A late answer still upgrades to kitty — the TS response handler
-//! stays installed after the fallback fires too.
+//! answers (or its patched 250ms budget lapses) while the fallback timer
+//! fires on the TS schedule. Crossterm parks user keys in its internal event
+//! queue, so early typing is preserved; the app reader never sees protocol
+//! bytes as key input. An answer after the 150ms fallback but within the
+//! 250ms query window still upgrades to kitty. Replies arriving after that
+//! window are filtered by crossterm, and the terminal stays in legacy mode.
 //!
 //! The query runs ONCE per process (the first terminal surface), never
-//! again on a later start or resume: crossterm's support check holds the
-//! process-global event-reader lock for its full 2s budget on terminals
-//! that never answer the kitty query — the app reader's polls all fail
-//! their lock wait for that window, so a re-query at every start made
-//! the TUI input-blind for ~2s after every SIGCONT resume (and the
+//! again on a later start or resume: the support check holds the
+//! process-global event-reader lock for up to 250ms on silent terminals,
+//! so re-querying at every start would delay input after every SIGCONT
+//! resume (and the
 //! check's implicit raw-mode bracket can race the app's own suspend
 //! bracket). The terminal's kitty capability cannot change across a
 //! stop/continue of the same process, so the probe resolves once and
@@ -348,18 +348,17 @@ fn enable_kitty(out: &mut Stdout) {
 }
 
 /// The probe thread: hold the query open for the TS fallback window,
-/// then settle. An answer inside the window enables kitty; no answer
-/// settles with no enhanced modes (this port never arms the
-/// modifyOtherKeys fallback — see the module docs), and a late answer
-/// still upgrades (the TS response handler stays installed after the
-/// fallback fires too).
+/// then settle. An answer within crossterm's patched 250ms query window
+/// enables kitty; no answer settles with no enhanced modes (this port
+/// never arms the modifyOtherKeys fallback — see the module docs).
 fn spawn_kitty_probe() {
     let probe = std::thread::Builder::new()
         .name("tui-kitty-probe".to_string())
         .spawn(|| {
             let (answer_tx, answer_rx) = mpsc::channel();
             // crossterm's support check sends the query and blocks on the
-            // answer for its own 2s budget; it reads the tty through the
+            // answer for at most 250ms (the vendored crossterm patch). It reads
+            // the tty through the
             // shared internal reader, so the bytes it skips (user keys
             // typed during the window) stay queued for the app reader.
             let reader = std::thread::Builder::new()
