@@ -551,12 +551,11 @@ mod tests {
     fn a_typed_query_filters_the_rows_and_resets_the_scroll() {
         let mut picker = ProviderPicker::new(options(10));
         let kb = kb();
-        // Scroll down past the viewport, then type: the filter re-clamps
-        // the selection and resets the scroll to the top.
+        // Scroll down past the viewport, then type a matching query: the
+        // filter re-clamps the selection and resets the scroll to the top.
         for _ in 0..9 {
             picker.handle_key("down", &kb);
         }
-        picker.handle_key("d", &kb);
         picker.handle_key("7", &kb);
         let rows = picker.render(&theme(), 60);
         let text: Vec<String> = rows.iter().map(row_text).collect();
