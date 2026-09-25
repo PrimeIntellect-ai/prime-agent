@@ -1516,9 +1516,14 @@ async fn run_interactive_surface(
                 if reader_death.is_ok() && *reader_dead.borrow_and_update() {
                     // An update restart's close frame can race this signal
                     // (the reader emits the frame, then dies — the unbiased
-                    // select may run this arm first): the update's own
-                    // reconnect driver owns the recovery, and the loss
-                    // driver must not take over from it.
+                    // select may run this arm first): drain every frame the
+                    // reader already delivered — a pending `daemon_closing`
+                    // sets the update state — before deciding, so the
+                    // update's own reconnect driver owns the recovery and
+                    // the loss driver never takes over from it.
+                    while let Ok(event) = events.try_recv() {
+                        session.apply_client_event(event, &mut view);
+                    }
                     if session.reconnect.is_some() {
                         session.dirty = true;
                     } else if session.client.direct_session_id().is_some() {
@@ -1724,6 +1729,13 @@ async fn run_interactive_surface(
                                 events = fresh_events;
                                 events_closed = false;
                                 reader_dead = session.client.reader_dead();
+                                // The fresh connection owes nothing to the
+                                // old one's loss states: a retained
+                                // supervisor-loss flag or a session-plane
+                                // retry left over from before the reconnect
+                                // must not fire on the new link.
+                                supervisor_lost = false;
+                                session_reconnect = None;
                                 // Re-arm the loss watch for the fresh
                                 // connection: the new client's supervisor
                                 // reader can die later, and the one-shot

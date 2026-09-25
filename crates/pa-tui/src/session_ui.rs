@@ -2419,7 +2419,7 @@ impl SessionUi {
                     let direct_sent = crate::daemon_client::is_daemon_unreachable(&error)
                         && rendered
                             .to_lowercase()
-                            .contains("direct session connection");
+                            .contains("session connection closed");
                     if direct_sent {
                         self.error_row(
                             &format!(

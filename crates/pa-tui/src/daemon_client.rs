@@ -885,6 +885,7 @@ pub fn is_daemon_unreachable(error: &anyhow::Error) -> bool {
             cause.contains("daemon connection")
                 || cause.contains("prime agent daemon closed")
                 || cause.contains("direct session connection closed")
+                || cause.contains("the session connection closed")
         })
 }
 
