@@ -113,16 +113,26 @@ impl StartupModelProbe {
             Some(AuthSource::Fallback) => "fallback".to_string(),
             Some(AuthSource::Stale) => "stale".to_string(),
             None => {
-                let mut registry = pa_core::models::ModelRegistry::create(
-                    auth,
-                    self.agent_dir.join("models.json"),
-                );
-                if registry.get_api_key_and_headers(&model, None).ok {
-                    "models_json".to_string()
-                } else if self.api_key.is_some() {
+                // The `--api-key` flag rides as a runtime key the daemon
+                // installs; the registry's request-auth resolves a
+                // models.json provider key only when one actually
+                // resolves (`ok` alone is not evidence of a key).
+                if self.api_key.is_some() {
                     "runtime_api_key".to_string()
                 } else {
-                    "none".to_string()
+                    let mut registry = pa_core::models::ModelRegistry::create(
+                        auth,
+                        self.agent_dir.join("models.json"),
+                    );
+                    if registry
+                        .get_api_key_and_headers(&model, None)
+                        .api_key
+                        .is_some()
+                    {
+                        "models_json".to_string()
+                    } else {
+                        "none".to_string()
+                    }
                 }
             }
         };
