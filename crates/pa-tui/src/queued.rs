@@ -1,5 +1,7 @@
 //! The queued-message strip above the prompt dock (TS
-//! `updatePendingMessagesDisplay`): every human-typed steering/follow-up
+//! `updatePendingMessagesDisplay`): the picked-up prompt whose turn is
+//! still preparing renders as the "Starting" row (TS #2063), then every
+//! human-typed steering/follow-up
 //! message parked behind the running turn renders as a preview row - dim,
 //! with the TS prompt-highlight styling on top (a leading slash command
 //! in accent, `@path`/`--flag` argument tokens in their own colors) - with
@@ -11,10 +13,12 @@
 //! the queue is empty, so delivered messages make it disappear.
 //!
 //! The condensation is a SANCTIONED DIVERGENCE from TS (operator request,
-//! Kevin 2026-09-24, queue-condensed-display): TS renders every internal
-//! prompt as its own preview row too; Rust renders one summed-count row -
-//! "x agent messages, heartbeats, and other internal prompts queued" -
-//! so the visual queue prioritizes human-inserted prompts. The classifier
+//! Kevin 2026-09-24, queue-condensed-display; per-origin counts refined
+//! 2026-09-25): TS renders every internal prompt as its own preview row
+//! too; Rust renders one counted row naming each origin with its own
+//! plural-correct count - "1 agent message, 1 heartbeat, and 1 other
+//! internal prompt queued" - so the visual queue prioritizes
+//! human-inserted prompts. The classifier
 //! is TS `isLabeledQueuedPreview` on the preview string (the wire carries
 //! no provenance), so a human-typed prompt that begins with one of the
 //! internal labels condenses too - it still delivers, and the browse
@@ -34,40 +38,114 @@ use crate::Line;
 pub const STEERING_LABEL: &str = "Steering";
 /// The dim preview label for messages parked on the follow-up lane.
 pub const FOLLOW_UP_LABEL: &str = "Follow-up";
+/// The dim preview label for the picked-up prompt whose turn is preparing
+/// (TS #2063 `Starting`): the queued strip keeps showing the prompt the
+/// pump selected while it is still on its way into the conversation.
+pub const STARTING_LABEL: &str = "Starting";
 
-/// TS `HEARTBEAT_PROMPT_PREVIEW_LABEL` & co.: internal prompts that queue
-/// with their own visible label render as-is (no lane label prepended).
-const LABELED_PREVIEW_PREFIXES: [&str; 4] = [
-    "Heartbeat prompt: ",
-    "Goal context: ",
-    "Agent message received: ",
-    "Background command finished: ",
-];
-
-/// TS `isLabeledQueuedPreview`: the internal prompt labels never get the
-/// lane label prepended (they carry their own).
-fn is_labeled_queued_preview(message: &str) -> bool {
-    LABELED_PREVIEW_PREFIXES
-        .iter()
-        .any(|prefix| message.starts_with(prefix))
+/// The origin of a queued internal prompt, classified by its preview
+/// label (the wire carries no provenance - the label is the classifier):
+/// what the condensed row counts the prompt as.
+#[derive(Debug, Clone, Copy)]
+enum InternalPromptOrigin {
+    /// An `Agent message received: ` preview.
+    AgentMessage,
+    /// A `Heartbeat prompt: ` preview.
+    Heartbeat,
+    /// Every other internal prompt: `Goal context: ` and
+    /// `Background command finished: ` previews.
+    Other,
 }
 
-/// The summed count of the queued internal prompts across both lanes, or
+/// TS `HEARTBEAT_PROMPT_PREVIEW_LABEL` & co.: internal prompts that queue
+/// with their own visible label render as-is (no lane label prepended),
+/// each paired with the origin the condensed row counts it as.
+const LABELED_PREVIEW_PREFIXES: [(&str, InternalPromptOrigin); 4] = [
+    ("Heartbeat prompt: ", InternalPromptOrigin::Heartbeat),
+    ("Goal context: ", InternalPromptOrigin::Other),
+    (
+        "Agent message received: ",
+        InternalPromptOrigin::AgentMessage,
+    ),
+    ("Background command finished: ", InternalPromptOrigin::Other),
+];
+
+/// TS `isLabeledQueuedPreview`: the queued prompt's origin when it
+/// carries an internal label, `None` when it is human-typed.
+fn internal_prompt_origin(message: &str) -> Option<InternalPromptOrigin> {
+    LABELED_PREVIEW_PREFIXES
+        .iter()
+        .find(|(prefix, _)| message.starts_with(prefix))
+        .map(|(_, origin)| *origin)
+}
+
+/// The queued internal prompts' counts by origin across both lanes, or
 /// `None` when every queued message is human-typed.
-fn condensed_count(queue: &QueuedMessages) -> Option<usize> {
-    let count = queue
+#[derive(Debug, Default)]
+struct CondensedCounts {
+    agent_messages: usize,
+    heartbeats: usize,
+    other: usize,
+}
+
+impl CondensedCounts {
+    /// The counted row's text: each origin with queued prompts and its
+    /// count, plural-correct (only a count of one reads singular - a
+    /// listed `0` would read plural too), in the fixed agent-message,
+    /// heartbeat, other order, joined into one concise line. A
+    /// zero-count origin never lists.
+    fn row_text(&self) -> String {
+        let mut parts = [
+            (self.agent_messages, InternalPromptOrigin::AgentMessage),
+            (self.heartbeats, InternalPromptOrigin::Heartbeat),
+            (self.other, InternalPromptOrigin::Other),
+        ]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, origin)| {
+            let name = match origin {
+                InternalPromptOrigin::AgentMessage => "agent message",
+                InternalPromptOrigin::Heartbeat => "heartbeat",
+                InternalPromptOrigin::Other => "other internal prompt",
+            };
+            let plural = if count == 1 { "" } else { "s" };
+            format!("{count} {name}{plural}")
+        })
+        .collect::<Vec<_>>();
+        let last = parts.len() - 1;
+        if last > 0 {
+            parts[last] = format!("and {}", parts[last]);
+        }
+        // Two origins read "1 heartbeat and 1 other internal prompt" - the
+        // comma-list phrasing starts at three ("A, B, and C").
+        let list_separator = if parts.len() == 2 { " " } else { ", " };
+        format!("{} queued", parts.join(list_separator))
+    }
+}
+
+/// Count every queued internal prompt by origin across both lanes, or
+/// `None` when every queued message is human-typed.
+fn condensed_counts(queue: &QueuedMessages) -> Option<CondensedCounts> {
+    let mut counts = CondensedCounts::default();
+    for origin in queue
         .steering
         .iter()
         .chain(queue.follow_ups.iter())
-        .filter(|message| is_labeled_queued_preview(message))
-        .count();
-    (count > 0).then_some(count)
+        .filter_map(|message| internal_prompt_origin(message))
+    {
+        match origin {
+            InternalPromptOrigin::AgentMessage => counts.agent_messages += 1,
+            InternalPromptOrigin::Heartbeat => counts.heartbeats += 1,
+            InternalPromptOrigin::Other => counts.other += 1,
+        }
+    }
+    (counts.agent_messages + counts.heartbeats + counts.other > 0).then_some(counts)
 }
 
 /// TS `formatQueuedMessagePreview`: the lane label plus the message, or
 /// the message itself when it carries an internal label.
 pub fn format_queued_message_preview(message: &str, label: &str) -> String {
-    if is_labeled_queued_preview(message) {
+    if internal_prompt_origin(message).is_some() {
         message.to_string()
     } else {
         format!("{label}: {message}")
@@ -82,6 +160,14 @@ pub struct QueuedMessages {
     pub steering: Vec<String>,
     /// Messages delivered when the run goes idle (the follow-up key).
     pub follow_ups: Vec<String>,
+    /// The picked-up prompt whose turn is still preparing (TS #2063
+    /// `sessionActions.active` with `kind: "turn"` and
+    /// `phase: "preparing"`): the strip keeps it visible as its
+    /// "Starting" row until the turn's rows land — the prompt left its
+    /// lane at pickup, so without the row it would be visible nowhere
+    /// until the turn renders it. Not browsable: the browse affordances
+    /// walk the parked lanes only (the prompt is already delivered).
+    pub starting: Option<String>,
 }
 
 impl QueuedMessages {
@@ -123,10 +209,14 @@ pub struct QueueSelectionItem {
     pub text: String,
 }
 
-/// The strip rows (TS `queuedMessagesContainer`): one blank spacer, a
-/// truncated dim preview per human-typed queued message, the one
-/// condensed internal-prompt row, and the queue hint. Empty input renders
-/// no rows at all. `browse_key` is the effective binding display for
+/// The strip rows (TS `queuedMessagesContainer`): one blank spacer, the
+/// "Starting" row of a preparing turn (TS #2063) above a truncated dim
+/// preview per human-typed queued message, the one condensed
+/// internal-prompt row, and the queue hint. Empty input renders no rows
+/// at all — a preparing turn alone still renders its row (the strip is
+/// the only place the picked-up prompt is visible until its turn runs),
+/// but never the hint (there is nothing parked to browse).
+/// `browse_key` is the effective binding display for
 /// `app.message.navigateOlder` (user overrides show).
 pub fn render_queue(
     theme: &Theme,
@@ -134,29 +224,40 @@ pub fn render_queue(
     browse_key: &str,
     width: usize,
 ) -> Vec<Line> {
-    if queue.is_empty() {
+    if queue.is_empty() && queue.starting.is_none() {
         return Vec::new();
     }
     let mut rows = vec![Vec::new()];
-    // The human-typed previews (the non-labeled messages) render first
-    // and individually, so what the user parked stays explicit and
+    // The preparing turn's prompt renders first (TS #2063: a queued
+    // prompt leaves its lane at pickup, and its own pre-turn work can
+    // hold it out of the conversation for a while — the "Starting" row
+    // keeps it visible there until the turn begins).
+    if let Some(starting) = queue.starting.as_deref() {
+        rows.push(preview_row(theme, STARTING_LABEL, starting, width));
+    }
+    // The human-typed previews (the non-labeled messages) render
+    // individually, so what the user parked stays explicit and
     // prioritized above the condensed row.
     for message in queue
         .steering
         .iter()
-        .filter(|message| !is_labeled_queued_preview(message))
+        .filter(|message| internal_prompt_origin(message).is_none())
     {
         rows.push(preview_row(theme, STEERING_LABEL, message, width));
     }
     for message in queue
         .follow_ups
         .iter()
-        .filter(|message| !is_labeled_queued_preview(message))
+        .filter(|message| internal_prompt_origin(message).is_none())
     {
         rows.push(preview_row(theme, FOLLOW_UP_LABEL, message, width));
     }
-    if let Some(count) = condensed_count(queue) {
-        rows.push(condensed_row(theme, count, width));
+    if let Some(counts) = condensed_counts(queue) {
+        rows.push(condensed_row(theme, &counts, width));
+    }
+    if queue.is_empty() {
+        // A starting row alone carries no parked messages to browse.
+        return rows;
     }
     let hint = format!("\u{2570}\u{2500} {browse_key} to browse and edit queued messages");
     let hint_line: crate::Line = vec![
@@ -219,18 +320,14 @@ fn preview_row(theme: &Theme, label: &str, message: &str, width: usize) -> Line 
 }
 
 /// The condensed internal-prompt row (the sanctioned divergence, see the
-/// module docs): one dim line carrying the summed count of every queued
-/// internal prompt - agent messages, heartbeats, goal contexts, and
-/// background-command notices - instead of one preview row each, so the
-/// strip's per-message rows stay about the human prompts. Truncated and
-/// padded like a preview row.
-fn condensed_row(theme: &Theme, count: usize, width: usize) -> Line {
+/// module docs): one dim line carrying the queued internal prompts'
+/// counts by origin instead of one preview row each, so the strip's
+/// per-message rows stay about the human prompts. Truncated and padded
+/// like a preview row.
+fn condensed_row(theme: &Theme, counts: &CondensedCounts, width: usize) -> Line {
     let line: crate::Line = vec![
         crate::Span::raw(" ".repeat(width.min(1))),
-        crate::Span::styled(
-            format!("{count} agent messages, heartbeats, and other internal prompts queued"),
-            theme.fg_style(ThemeColor::Dim),
-        ),
+        crate::Span::styled(counts.row_text(), theme.fg_style(ThemeColor::Dim)),
     ];
     pad_line(truncate_line(&line, width.saturating_sub(1), "..."), width)
 }
@@ -411,12 +508,66 @@ mod tests {
         QueuedMessages {
             steering: vec!["turn right".to_string()],
             follow_ups: vec!["then summarize".to_string()],
+            starting: None,
         }
     }
 
     #[test]
     fn empty_queue_renders_no_rows() {
         assert!(render_queue(&theme(), &QueuedMessages::default(), "alt+up", 80).is_empty());
+    }
+
+    /// TS #2063 (RES-1306): a picked-up prompt leaves its lane at
+    /// delivery, so while its turn is still preparing the strip is the
+    /// only place it is visible — it renders as the "Starting" row, the
+    /// first row of the strip, and never carries the browse hint (nothing
+    /// is parked to browse).
+    #[test]
+    fn a_preparing_turn_renders_the_starting_row_alone() {
+        let queue = QueuedMessages {
+            steering: Vec::new(),
+            follow_ups: Vec::new(),
+            starting: Some("queued before compaction".to_string()),
+        };
+        let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        assert_eq!(rows.len(), 2, "spacer + the starting row, no hint");
+        let text: String = rows[1].iter().map(|span| span.content.as_str()).collect();
+        assert_eq!(text.trim(), "Starting: queued before compaction");
+    }
+
+    /// The "Starting" row renders above the parked lanes, and the hint
+    /// follows the parked lanes as before.
+    #[test]
+    fn the_starting_row_renders_above_the_parked_lanes() {
+        let queue = QueuedMessages {
+            steering: Vec::new(),
+            follow_ups: vec!["then summarize".to_string()],
+            starting: Some("queued before compaction".to_string()),
+        };
+        let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        assert_eq!(rows.len(), 4, "spacer + starting + follow-up + hint");
+        let starting: String = rows[1].iter().map(|span| span.content.as_str()).collect();
+        assert_eq!(starting.trim(), "Starting: queued before compaction");
+        let follow_up: String = rows[2].iter().map(|span| span.content.as_str()).collect();
+        assert_eq!(follow_up.trim(), "Follow-up: then summarize");
+        assert!(crate::ansi::line_to_ansi(&rows[3]).contains("to browse and edit queued messages"));
+    }
+
+    /// The strip drops the "Starting" row the moment the projection no
+    /// longer reports a preparing turn (the phase left `preparing`).
+    #[test]
+    fn the_starting_row_drops_with_the_projection() {
+        let rows = render_queue(
+            &theme(),
+            &QueuedMessages {
+                steering: Vec::new(),
+                follow_ups: Vec::new(),
+                starting: None,
+            },
+            "alt+up",
+            80,
+        );
+        assert!(rows.is_empty());
     }
 
     #[test]
@@ -456,6 +607,7 @@ mod tests {
         let queue = QueuedMessages {
             steering: vec!["/hotkeys".to_string()],
             follow_ups: vec!["fix @Cargo.toml --quiet".to_string()],
+            starting: None,
         };
         let theme = theme();
         let rows = render_queue(&theme, &queue, "alt+up", 80);
@@ -493,6 +645,7 @@ mod tests {
         let queue = QueuedMessages {
             steering: vec!["x".repeat(100)],
             follow_ups: Vec::new(),
+            starting: None,
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 30);
         assert_eq!(rows.len(), 3);
@@ -514,6 +667,7 @@ mod tests {
         let queue = QueuedMessages {
             steering: vec!["first line\nsecond line".to_string()],
             follow_ups: Vec::new(),
+            starting: None,
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         let text: String = rows[1].iter().map(|span| span.content.as_str()).collect();
@@ -543,6 +697,7 @@ mod tests {
                 "Agent message received: the research is done".to_string(),
             ],
             follow_ups: vec!["Goal context: milestone".to_string()],
+            starting: None,
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         assert_eq!(
@@ -553,8 +708,8 @@ mod tests {
         let text: String = rows[1].iter().map(|span| span.content.as_str()).collect();
         assert_eq!(
             text.trim(),
-            "3 agent messages, heartbeats, and other internal prompts queued",
-            "one line sums every queued internal prompt across both lanes"
+            "1 agent message, 1 heartbeat, and 1 other internal prompt queued",
+            "one line counts each origin across both lanes, each singular"
         );
         let joined = rows
             .iter()
@@ -584,6 +739,7 @@ mod tests {
                 "then summarize".to_string(),
                 "Background command finished: sleep done".to_string(),
             ],
+            starting: None,
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         assert_eq!(
@@ -603,8 +759,8 @@ mod tests {
         assert_eq!(texts[2].trim(), "Follow-up: then summarize");
         assert_eq!(
             texts[3].trim(),
-            "2 agent messages, heartbeats, and other internal prompts queued",
-            "the count sums the internal prompts only"
+            "1 heartbeat and 1 other internal prompt queued",
+            "the counts name the queued origins only - no agent message queued"
         );
         assert!(
             texts[4]
@@ -615,6 +771,43 @@ mod tests {
     }
 
     #[test]
+    fn condensed_row_counts_each_origin_with_correct_plurals() {
+        let queue = QueuedMessages {
+            steering: vec![
+                "Agent message received: one".to_string(),
+                "Agent message received: two".to_string(),
+                "Agent message received: three".to_string(),
+                "Heartbeat prompt: nudge".to_string(),
+                "Goal context: milestone".to_string(),
+                "Goal context: next".to_string(),
+            ],
+            follow_ups: vec!["Heartbeat prompt: again".to_string()],
+            starting: None,
+        };
+        let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        assert_eq!(rows.len(), 3);
+        let text: String = rows[1].iter().map(|span| span.content.as_str()).collect();
+        assert_eq!(
+            text.trim(),
+            "3 agent messages, 2 heartbeats, and 2 other internal prompts queued",
+            "each origin's count sums across both lanes and pluralizes"
+        );
+    }
+
+    #[test]
+    fn one_queued_agent_message_reads_singular() {
+        let queue = QueuedMessages {
+            steering: vec!["Agent message received: hi".to_string()],
+            follow_ups: Vec::new(),
+            starting: None,
+        };
+        let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        assert_eq!(rows.len(), 3);
+        let text: String = rows[1].iter().map(|span| span.content.as_str()).collect();
+        assert_eq!(text.trim(), "1 agent message queued");
+    }
+
+    #[test]
     fn condensed_row_truncates_to_the_width() {
         let queue = QueuedMessages {
             steering: vec![
@@ -622,6 +815,7 @@ mod tests {
                 "Agent message received: done".to_string(),
             ],
             follow_ups: vec![],
+            starting: None,
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 30);
         assert_eq!(rows.len(), 3);
@@ -644,6 +838,7 @@ mod tests {
                 "turn right".to_string(),
             ],
             follow_ups: vec!["then summarize".to_string()],
+            starting: None,
         };
         let mut selection = QueueSelection::default();
         // Browsing still walks every queued item newest-first, the
@@ -723,6 +918,7 @@ mod tests {
         let changed = QueuedMessages {
             steering: vec!["turn right".to_string()],
             follow_ups: vec!["edited".to_string()],
+            starting: None,
         };
         assert_eq!(
             selection.refresh_at(&changed, QueueLane::FollowUp, 0, "then summarize"),
@@ -736,6 +932,7 @@ mod tests {
         let mut queue = QueuedMessages {
             steering: vec!["one".to_string(), "two".to_string()],
             follow_ups: vec!["later".to_string()],
+            starting: None,
         };
         mirror_lane_move(&mut queue, QueueLane::Steering, 0, 1);
         assert_eq!(queue.steering, vec!["two", "one"]);

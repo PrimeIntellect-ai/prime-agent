@@ -332,6 +332,15 @@ impl UsageTotals {
         self.input + self.output + self.cache_read + self.cache_write
     }
 
+    /// Fold another parsed total into this one (the per-model tree sums).
+    fn add_fold(&mut self, other: &UsageTotals) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+        self.cost_total += other.cost_total;
+    }
+
     fn add(&mut self, other: &Value) {
         let u64_field = |value: &Value, field: &str| {
             value.get(field).and_then(Value::as_u64).unwrap_or_default()
@@ -373,7 +382,19 @@ impl ContextUsageSnapshot {
     }
 }
 
-/// One agent row of the context tree (TS `ContextTreeNode`).
+/// One model's own-usage bucket from the daemon's per-model fold
+/// (`ownUsageByModel`): the spend billed at that model's rates.
+#[derive(Debug, Clone, PartialEq)]
+struct ModelUsage {
+    provider: String,
+    id: String,
+    totals: UsageTotals,
+}
+
+/// One agent row of the context tree (TS `ContextTreeNode`), plus this
+/// port's per-model own-usage breakdown (a deliberate TS delta: a
+/// session that switches models mid-conversation — or hosts subagents on
+/// other models — shows which model billed what).
 #[derive(Debug, Clone, PartialEq)]
 struct ContextNode {
     id: String,
@@ -381,6 +402,7 @@ struct ContextNode {
     status: String,
     model: Option<(String, String)>,
     own_usage: UsageTotals,
+    own_usage_by_model: Vec<ModelUsage>,
     context_usage: Option<ContextUsageSnapshot>,
     children: Vec<ContextNode>,
 }
@@ -421,6 +443,25 @@ fn parse_context_node(value: &Value) -> ContextNode {
             Some((provider.to_string(), id.to_string()))
         }),
         own_usage: value.get("ownUsage").map(usage_from).unwrap_or_default(),
+        own_usage_by_model: value
+            .get("ownUsageByModel")
+            .and_then(Value::as_array)
+            .map(|buckets| {
+                buckets
+                    .iter()
+                    .filter_map(|bucket| {
+                        let provider = bucket.get("provider")?.as_str()?.to_string();
+                        let id = bucket.get("id")?.as_str()?.to_string();
+                        let totals = bucket.get("ownUsage").map(usage_from)?;
+                        Some(ModelUsage {
+                            provider,
+                            id,
+                            totals,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         context_usage,
         children: value
             .get("children")
@@ -573,6 +614,45 @@ fn sum_own_usage(node: &ContextNode, total: &mut UsageTotals) {
     }
 }
 
+/// The whole tree's own usage summed per model (the `/context` Cost
+/// section's breakdown): every node's per-model buckets fold into tree
+/// buckets keyed by `provider/id`, so a mid-conversation switch — or
+/// subagents on other models — shows each model's share of the total.
+/// `None` when a node with billable own usage carries no per-model fold
+/// (a foreign file): a partial breakdown would not add up to the
+/// displayed total, so the Cost section stays plain.
+fn sum_own_usage_by_model(node: &ContextNode, total: &mut Vec<ModelUsage>) {
+    for bucket in &node.own_usage_by_model {
+        if let Some(existing) = total
+            .iter_mut()
+            .find(|existing| existing.provider == bucket.provider && existing.id == bucket.id)
+        {
+            existing.totals.add_fold(&bucket.totals);
+        } else {
+            total.push(bucket.clone());
+        }
+    }
+    for child in &node.children {
+        sum_own_usage_by_model(child, total);
+    }
+}
+
+/// The tree's per-model buckets when they account for every billed row.
+fn tree_own_usage_by_model(root: &ContextNode) -> Option<Vec<ModelUsage>> {
+    fn billed(node: &ContextNode) -> bool {
+        node.own_usage.spent_tokens() > 0 || node.own_usage.cost_total > 0.0
+    }
+    fn covers(node: &ContextNode) -> bool {
+        (!billed(node) || !node.own_usage_by_model.is_empty()) && node.children.iter().all(covers)
+    }
+    if !covers(root) {
+        return None;
+    }
+    let mut total = Vec::new();
+    sum_own_usage_by_model(root, &mut total);
+    Some(total)
+}
+
 /// The `/context` rows (TS `formatContextTree`): the agent tree with own
 /// token/cost columns and per-agent context utilization, then the grand
 /// totals. `width` is the TS render width: `clamp(columns - 2, 60, 120)`.
@@ -600,6 +680,29 @@ pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
         .chain(["cost".len()])
         .max()
         .unwrap_or_default();
+    // The per-row model column — a deliberate TS delta (TS shows only the
+    // root's `Model:` line): the model decides the cost, so every agent
+    // row carries its bare model id, "-" when the node carries no model.
+    // The column appears only when at least one node has a model; a tree
+    // without model identity renders exactly the TS layout.
+    let model_cells: Vec<String> = rows
+        .iter()
+        .map(|row| match &row.node.model {
+            Some((_, id)) => id.rsplit('/').next().unwrap_or(id).to_string(),
+            None => "-".to_string(),
+        })
+        .collect();
+    let show_models = rows.iter().any(|row| row.node.model.is_some());
+    let model_width = if show_models {
+        model_cells
+            .iter()
+            .map(|cell| str_width(cell))
+            .chain(["model".len()])
+            .max()
+            .unwrap_or_default()
+    } else {
+        0
+    };
     let max_label = rows
         .iter()
         .map(|row| row.prefix.chars().count() + 2 + str_width(&row.node.label))
@@ -610,6 +713,7 @@ pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
             width
                 .saturating_sub(token_width)
                 .saturating_sub(cost_width)
+                .saturating_sub(model_width + if show_models { 2 } else { 0 })
                 .saturating_sub(28),
         ),
     );
@@ -622,13 +726,17 @@ pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
         ]);
         lines.push(vec![]);
     }
-    lines.push(vec![dim(format!(
-        "  {}  {}  {}  {}",
-        pad_end("agent", label_width),
+    let mut header = format!("  {}", pad_end("agent", label_width),);
+    if show_models {
+        header.push_str(&format!("  {}", pad_end("model", model_width)));
+    }
+    header.push_str(&format!(
+        "  {}  {}  {}",
         pad_start("tokens", token_width),
         pad_start("cost", cost_width),
         "context"
-    ))]);
+    ));
+    lines.push(vec![dim(header)]);
     for (index, row) in rows.iter().enumerate() {
         let label_space = label_width
             .saturating_sub(row.prefix.chars().count())
@@ -648,6 +756,10 @@ pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
             "{}  ",
             " ".repeat((label_width + 2).saturating_sub(label_used))
         )));
+        if show_models {
+            spans.push(dim(pad_end(&model_cells[index], model_width)));
+            spans.push(raw_span("  "));
+        }
         spans.push(raw_span(pad_start(&token_cells[index], token_width)));
         spans.push(raw_span("  "));
         spans.push(raw_span(
@@ -709,6 +821,27 @@ pub fn context_tree_rows(tree: &Value, width: usize) -> Vec<ClientLine> {
             dim("Total:"),
             raw_span(format!(" ${}", js_to_fixed(totals.cost_total, 4))),
         ]);
+        // The per-model breakdown (the model mix decides the cost): the
+        // whole tree's per-model buckets, most expensive model first.
+        // Rendered only when the daemon sent buckets and the tree used
+        // more than one model — a single-model tree already names its
+        // model in the `Model:` line and renders exactly TS.
+        let by_model = tree_own_usage_by_model(&root);
+        if let Some(mut by_model) = by_model.filter(|by_model| by_model.len() > 1) {
+            by_model.sort_by(|a, b| {
+                b.totals
+                    .cost_total
+                    .total_cmp(&a.totals.cost_total)
+                    .then_with(|| a.provider.cmp(&b.provider))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+            for bucket in &by_model {
+                lines.push(vec![
+                    dim(format!("{}/{}:", bucket.provider, bucket.id)),
+                    raw_span(format!(" ${}", js_to_fixed(bucket.totals.cost_total, 4))),
+                ]);
+            }
+        }
     }
 
     if let Some(root_context) = &root.context_usage {
@@ -1035,11 +1168,22 @@ mod tests {
                                "cacheWrite": 678, "cost": {"total": 1.2345}},
                 "contextUsage": {"tokens": 1250000, "contextWindow": 131072,
                                  "percent": 95.42},
+                "ownUsageByModel": [
+                    {"provider": "prime-inference", "id": "z-ai/glm-5.3",
+                     "ownUsage": {"input": 1234567, "output": 2345, "cacheRead": 12345,
+                                  "cacheWrite": 678, "cost": {"total": 1.2345}}}
+                ],
                 "children": [
                     {"id": "sub-1", "label": "run the verifier suite for parity",
                      "status": "done",
+                     "model": {"provider": "anthropic", "id": "claude-opus-4-6"},
                      "ownUsage": {"input": 500, "output": 60, "cacheRead": 0,
                                   "cacheWrite": 100, "cost": {"total": 0.009}},
+                     "ownUsageByModel": [
+                        {"provider": "anthropic", "id": "claude-opus-4-6",
+                         "ownUsage": {"input": 500, "output": 60, "cacheRead": 0,
+                                      "cacheWrite": 100, "cost": {"total": 0.009}}}
+                     ],
                      "totalUsage": {"input": 500, "output": 60, "cacheRead": 0,
                                     "cacheWrite": 100, "cost": {"total": 0.009}},
                      "contextUsage": {"tokens": 600, "contextWindow": 131072,
@@ -1072,11 +1216,11 @@ mod tests {
                 "",
                 "Model: prime-inference/z-ai/glm-5.3",
                 "",
-                "  agent                                                          tokens   cost  context",
-                "\u{25cf} my session                                                       1.2M  $1.23  \u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593} 95% (1.2M/131k)",
-                "\u{251c}\u{2500} \u{2713} run the verifier suite for parity                              660  $0.01  0% (600/131k)",
-                "\u{2514}\u{2500} \u{25c6} a very long child label that must truncate when the l...      1.5k  $0.02  -",
-                "   \u{2514}\u{2500} \u{2717} grandkid                                                     11  $0.00  unknown after compaction",
+                "  agent                                         model            tokens   cost  context",
+                "\u{25cf} my session                                    glm-5.3            1.2M  $1.23  \u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593}\u{2593} 95% (1.2M/131k)",
+                "\u{251c}\u{2500} \u{2713} run the verifier suite for parity          claude-opus-4-6     660  $0.01  0% (600/131k)",
+                "\u{2514}\u{2500} \u{25c6} a very long child label that must tr...    -                  1.5k  $0.02  -",
+                "   \u{2514}\u{2500} \u{2717} grandkid                                -                    11  $0.00  unknown after compaction",
                 "",
                 "Total: 1.3M tokens \u{b7} $1.26 across 4 agents",
                 "",
@@ -1092,6 +1236,90 @@ mod tests {
                 "",
                 "Context",
                 "Current: 1,250,000 / 131,072 (95.4%)",
+            ]
+        );
+        // The per-model breakdown STAYS OFF here: the root and sub-1
+        // carry buckets, but the two billed children without them would
+        // leave lines that do not add up to the displayed total — a
+        // partial breakdown degrades to the plain TS totals.
+    }
+
+    /// The operator's cost question end to end: a session that switches
+    /// models mid-conversation (sol -> opus, the switch's first request
+    /// re-caching the whole history) plus a subagent on a third model.
+    /// Every node's row carries its model, and the Cost section breaks
+    /// the total down per model, most expensive first. The fixture's
+    /// cost blocks are the provider-computed records (sol turn:
+    /// 100k\u{d7}$4/M + 2k\u{d7}$20/M = $0.44; the opus switch burst:
+    /// 5k\u{d7}$5/M + 1k\u{d7}$25/M + 104k cache-write\u{d7}$6.25/M =
+    /// $0.70; the opus cache-hit turn: 500\u{d7}$5/M + 800\u{d7}$25/M +
+    /// 110k cache-read\u{d7}$0.5/M = $0.0775; the glm subagent:
+    /// $0.023).
+    #[test]
+    fn context_tree_shows_per_model_costs_across_a_switch() {
+        let tree = json(
+            r#"{
+                "id": "root", "label": "switched session", "status": "active",
+                "model": {"provider": "anthropic", "id": "claude-opus-4-6"},
+                "ownUsage": {"input": 105500, "output": 3800, "cacheRead": 110000,
+                             "cacheWrite": 104000, "totalTokens": 221700,
+                             "cost": {"total": 1.2175}},
+                "ownUsageByModel": [
+                    {"provider": "openai", "id": "gpt-5.6-sol",
+                     "ownUsage": {"input": 100000, "output": 2000, "cacheRead": 0,
+                                  "cacheWrite": 0, "totalTokens": 1200,
+                                  "cost": {"total": 0.44}}},
+                    {"provider": "anthropic", "id": "claude-opus-4-6",
+                     "ownUsage": {"input": 5500, "output": 1800, "cacheRead": 110000,
+                                  "cacheWrite": 104000, "totalTokens": 220500,
+                                  "cost": {"total": 0.7775}}}
+                ],
+                "contextUsage": {"tokens": 221000, "contextWindow": 1000000,
+                                 "percent": 22.1},
+                "children": [
+                    {"id": "sub-1", "label": "scan the pricing tables", "status": "done",
+                     "model": {"provider": "prime-inference", "id": "internal/glm-5.3-fast"},
+                     "ownUsage": {"input": 1000, "output": 400, "cacheRead": 0,
+                                  "cacheWrite": 0, "totalTokens": 1400,
+                                  "cost": {"total": 0.023}},
+                     "ownUsageByModel": [
+                        {"provider": "prime-inference", "id": "internal/glm-5.3-fast",
+                         "ownUsage": {"input": 1000, "output": 400, "cacheRead": 0,
+                                      "cacheWrite": 0, "totalTokens": 1400,
+                                      "cost": {"total": 0.023}}}
+                     ],
+                     "children": []}
+                ]
+            }"#,
+        );
+        assert_eq!(
+            plain(&context_tree_rows(&tree, 120)),
+            vec![
+                "Context",
+                "",
+                "Model: anthropic/claude-opus-4-6",
+                "",
+                "  agent                         model            tokens   cost  context",
+                "\u{25cf} switched session              claude-opus-4-6    323k  $1.22  \u{2593}\u{2593}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591} 22% (221k/1.0M)",
+                "\u{2514}\u{2500} \u{2713} scan the pricing tables    glm-5.3-fast       1.4k  $0.02  -",
+                "",
+                "Total: 325k tokens \u{b7} $1.24 across 2 agents",
+                "",
+                "Tokens",
+                "Input: 106,500",
+                "Output: 4,200",
+                "Cache Read: 110,000",
+                "Cache Write: 104,000",
+                "Total: 324,700",
+                "",
+                "Cost",
+                "Total: $1.2405",
+                "anthropic/claude-opus-4-6: $0.7775",
+                "openai/gpt-5.6-sol: $0.4400",
+                "prime-inference/internal/glm-5.3-fast: $0.0230",
+                "",
+                "Context",
+                "Current: 221,000 / 1,000,000 (22.1%)",
             ]
         );
     }

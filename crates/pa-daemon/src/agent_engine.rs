@@ -294,6 +294,15 @@ pub struct AgentSessionEngine {
     link: Arc<crate::supervisor_link::SupervisorLink>,
     /// Supervisor-backed RLM children; `None` for standalone workers.
     pub(crate) children: Option<Arc<SupervisorChildSessions>>,
+    /// The live compaction summary-delta sink the worker installs (the
+    /// `compaction_summary_delta` broadcast seam): adopted onto every
+    /// built session at [`Self::adopt_built_session`], so every compaction
+    /// surface — the manual `compact` command, the threshold, overflow,
+    /// and requested auto arms — streams its summarizer deltas to the
+    /// attached clients. `None` for engine constructions without a worker
+    /// pump (tests, headless embeds): no streaming, no deltas.
+    compaction_summary_sink:
+        std::sync::Mutex<Option<pa_core::session_engine::compaction_exec::SummaryDeltaSink>>,
     /// The attribution producer the children registry's sink last got:
     /// the session's live children outlive an engine rebuild, and their
     /// spawn registrations live on the producer of the build that
@@ -580,6 +589,7 @@ impl AgentSessionEngine {
             faux_model: std::sync::OnceLock::new(),
             overflow_recovery: std::sync::Mutex::new(OverflowRecovery::default()),
             auto_compaction_abort: std::sync::Mutex::new(None),
+            compaction_summary_sink: std::sync::Mutex::new(None),
             model_refusal_telemetry,
         })
     }
@@ -652,6 +662,28 @@ impl AgentSessionEngine {
         Ok(())
     }
 
+    /// Install the worker's live compaction summary-delta sink (the
+    /// `compaction_summary_delta` broadcast seam): the worker calls this
+    /// once after the engine is built, capturing its event pump; every
+    /// built session adopts the sink at [`Self::adopt_built_session`], so
+    /// each compaction surface (the manual `compact` command, the
+    /// threshold, overflow, and requested auto arms) streams its
+    /// summarizer deltas to the attached clients while the summary
+    /// generates.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the sink slot's mutex is poisoned.
+    pub fn set_compaction_summary_sink(
+        &self,
+        sink: pa_core::session_engine::compaction_exec::SummaryDeltaSink,
+    ) {
+        *self
+            .compaction_summary_sink
+            .lock()
+            .expect("compaction summary sink lock") = Some(sink);
+    }
+
     /// Post-build adoption, shared by every build path (the async funnel
     /// and the turn-driven `session_agent` build): mirror the goal
     /// runtime, flush a depth override that landed before the build, and
@@ -662,6 +694,19 @@ impl AgentSessionEngine {
     /// branch and the session would start off the moved branch's entries.
     async fn adopt_built_session(&self, built: &CoreSessionEngine) -> anyhow::Result<()> {
         self.mirror_goal_runtime(built);
+        // The live compaction summary-delta sink (the worker's
+        // `compaction_summary_delta` broadcast): adopted onto the built
+        // session like the goal runtime mirrors, so every rebuild's
+        // compactions stream — the worker installs the sink before the
+        // first build and every built session takes the current slot.
+        if let Some(sink) = self
+            .compaction_summary_sink
+            .lock()
+            .expect("compaction summary sink lock")
+            .clone()
+        {
+            built.session.set_compaction_summary_sink(sink);
+        }
         // The in-run consult's mirror (deadlock-free reads: the session
         // mutex is held across compaction model turns, and the consult
         // runs inside one of them).
@@ -825,6 +870,13 @@ impl AgentSessionEngine {
         // target while a cwd/settings change waits for the prewarm.
         *self.provider_target.write().expect("provider target lock") = None;
         if let Some(engine) = built {
+            // The replacement teardown also drops the compact-trigger
+            // state with a version bump (TS teardown -> `requestAbort` ->
+            // `_autoRefineReviewAbort.abort()`): a background review round
+            // still in flight on this session resolves against the
+            // bumped version and never applies its edits or surfaces its
+            // rows.
+            engine.session.discard_compact_auto_refine();
             // The session's telemetry ends with it (the TS dispose
             // callback the replacement teardown runs); best-effort like
             // every end path, a failed flush never fails the teardown.
@@ -1425,12 +1477,32 @@ impl AgentSessionEngine {
             std::fs::create_dir_all(session_dir)?;
         }
         let cwd = self.cwd();
-        let session_manager = pa_core::session::manager::SessionManager::in_memory(&cwd);
         let session_file = self
             .session_file
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
+        // The engine session carries the session's own directory (the
+        // refine path's local harness state and the session's identity)
+        // while staying non-persisted: the worker owns the durable
+        // session file and mirrors the entries into it. The configured
+        // session dir leads; the session file's parent (the create
+        // command's sessionDir) is the daemon's own fallback — the
+        // engine config itself is built without one.
+        let session_manager = match self
+            .config
+            .session_dir
+            .as_deref()
+            .or_else(|| session_file.as_deref().and_then(std::path::Path::parent))
+        {
+            Some(session_dir) => {
+                pa_core::session::manager::SessionManager::in_memory_in_session_dir(
+                    &cwd,
+                    session_dir,
+                )
+            }
+            None => pa_core::session::manager::SessionManager::in_memory(&cwd),
+        };
         // Children inherit the parent model selector; the engine resolves
         // the model here, after the create command set the rest of the
         // parent identity.
@@ -2475,6 +2547,7 @@ impl SessionEngine for AgentSessionEngine {
                             "readFiles": result.read_files,
                             "modifiedFiles": result.modified_files,
                         })),
+                        model: result.model,
                     },
                 }
             }
@@ -3687,7 +3760,8 @@ impl AgentSessionEngine {
                 }
                 // TS `_scheduleAutoRefineAfterCompaction`: the compaction
                 // arms the compact-trigger review; the run stops on
-                // purpose, so the round services it before the `Done`.
+                // purpose, and the worker services the armed round off the
+                // turn's settle (the review never runs before the `Done`).
                 self.mark_compact_auto_refine_pending();
                 let entry = serde_json::to_value(&run.entry).unwrap_or(Value::Null);
                 // The wire result is the TS `CompactionResult` shape
@@ -3884,14 +3958,12 @@ impl AgentSessionEngine {
             match self.run_turn_boundary(emit) {
                 BoundaryRun::Cancelled => return,
                 BoundaryRun::StoppedForCompaction { compacted } => {
-                    // The requested compaction armed the trigger; the run
-                    // stops here, so the round services it before the
-                    // `Done` reaches attached clients (TS agent_end's
-                    // background scheduling, mapped onto the quiescent
-                    // boundary).
-                    if !self.run_compact_auto_refine(emit) {
-                        return;
-                    }
+                    // The requested compaction armed the trigger; the
+                    // round stays armed past this run: TS
+                    // `_scheduleAutoRefineAfterCompaction` schedules the
+                    // review in the background (never on the
+                    // completion path), and the worker services the
+                    // armed trigger off the turn's settle.
                     // TS `compact()`'s `didCompact` + active-goal branch:
                     // a compaction that ran re-consults the goal at the
                     // post-compaction boundary (`_goalContinuationAwaitsRlmWork
@@ -3920,15 +3992,14 @@ impl AgentSessionEngine {
             if self.run_auto_compaction(emit) == AutoCompactionRun::Cancelled {
                 return;
             }
-            // The compact-trigger round at the settled boundary (TS
-            // `_scheduleAutoRefineAfterAgentEnd`'s background review after
-            // the agent_end arms ran): a compaction armed earlier — the
-            // pre-turn arm, an overflow compact-and-retry, or this
-            // boundary's arms — services its review here, before the
-            // autonomous decision may queue a continuation.
-            if !self.run_compact_auto_refine(emit) {
-                return;
-            }
+            // The compact-trigger round is NOT consumed here: TS
+            // `_scheduleAutoRefineAfterAgentEnd` schedules the review as a
+            // background round (`setTimeout(0)`) that runs while the
+            // session is idle, never between the compaction and its
+            // settled turn — the worker services the armed trigger off
+            // the turn's settle (a review LLM call on this boundary held
+            // the queued next prompt behind the whole round; the
+            // compaction-completion-stall measurement pinned it).
             // TS `_getContinuationMessages` at the agent loop's natural
             // turn end: the goal continuation takes exclusive priority
             // over autonomous continuation, so the goal arm runs first

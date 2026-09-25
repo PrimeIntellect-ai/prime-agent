@@ -852,4 +852,101 @@ mod tests {
             release_tree_digest(&second).unwrap()
         );
     }
+
+    /// Serve one archive download from a fake local release endpoint and
+    /// return the endpoint's base URL plus a channel carrying the request
+    /// head. No fixed ports: the listener binds `127.0.0.1:0`.
+    async fn fake_release_endpoint(
+        body: Vec<u8>,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let (head_tx, head_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = [0u8; 4096];
+            let mut read = 0usize;
+            let head = loop {
+                let Ok(n) = socket.read(&mut buffer[read..]).await else {
+                    return;
+                };
+                read += n;
+                let head = String::from_utf8_lossy(&buffer[..read]).to_string();
+                if head.contains("\r\n\r\n") {
+                    break head;
+                }
+            };
+            let head_bytes = [
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+                &body,
+            ]
+            .concat();
+            let _ = socket.write_all(&head_bytes).await;
+            let _ = head_tx.send(head);
+        });
+        (format!("http://127.0.0.1:{port}"), head_rx)
+    }
+
+    #[tokio::test]
+    async fn downloads_verify_the_archive_digest_and_refuse_a_mismatch() {
+        let payload: Vec<u8> = b"release archive bytes".to_vec();
+        let sha = sha256_hex(&payload);
+        let budget = DownloadBudget {
+            total_ms: 10_000,
+            attempts: 1,
+        };
+        let destination_name = "update.tar.gz";
+        // The verified download lands the exact payload bytes at the
+        // destination and identifies the release updater.
+        {
+            let (base_url, head_rx) = fake_release_endpoint(payload.clone()).await;
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join(destination_name);
+            download_archive(
+                &format!("{base_url}/prime-agent-1.2.3.tar.gz"),
+                &sha,
+                &destination,
+                budget,
+                "prime-agent/1.2.2 (test)",
+            )
+            .await
+            .expect("the digest matches, the download completes");
+            assert_eq!(
+                std::fs::read(&destination).unwrap(),
+                payload,
+                "the staged archive is exactly the endpoint's payload"
+            );
+            let head = head_rx.await.expect("the head was captured").to_lowercase();
+            assert!(
+                head.contains("user-agent: prime-agent/1.2.2 (test)"),
+                "the request identifies the release updater: {head}"
+            );
+        }
+        // A digest mismatch refuses the payload: nothing lands, and no
+        // partial artifact stays behind.
+        {
+            let (base_url, _) = fake_release_endpoint(payload).await;
+            let dir = tempfile::tempdir().unwrap();
+            let destination = dir.path().join(destination_name);
+            let error = download_archive(
+                &format!("{base_url}/prime-agent-1.2.3.tar.gz"),
+                &format!("{sha}ff"),
+                &destination,
+                budget,
+                "prime-agent/1.2.2 (test)",
+            )
+            .await;
+            assert!(error.is_err(), "a wrong digest is never installed");
+            assert!(!destination.exists(), "a refused download lands nothing");
+        }
+    }
 }

@@ -55,6 +55,13 @@ pub enum DaemonErrorInfo {
     UpdatePrepareRefused {
         active_update_id: String,
     },
+    /// `set_model` resolved the model but its provider has no credential
+    /// (and none is stale): a sign-in refusal, not a dead end — the
+    /// client offers the provider's sign-in flow (the TUI's `/login`)
+    /// and retries the switch once the login lands.
+    ModelProviderUnauthenticated {
+        provider: String,
+    },
 }
 
 /// Saved-session row pushed by `session_list_item` progress events.

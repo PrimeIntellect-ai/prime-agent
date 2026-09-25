@@ -8,7 +8,7 @@ use super::compaction::{estimate_context_tokens, find_cut_point, CutPointResult}
 use super::compaction_exec::{
     build_summarization_request, build_turn_prefix_request, compaction_entry_for,
     complete_summary_call, details_for, file_ops_block, split_summary, summed_usage,
-    CompactionDetails, CompactionResult, SummarySlice, NO_PRIOR_HISTORY,
+    CompactionDetails, CompactionResult, SummaryDeltaSink, SummarySlice, NO_PRIOR_HISTORY,
 };
 use super::messages::convert_to_llm;
 use crate::session::manager::SessionManager;
@@ -41,6 +41,18 @@ pub struct CompactOptions<'a> {
     /// `auxiliaryModel` setting with a context-window fit check, falling
     /// back to the caller's session model. `None` keeps the session model.
     pub auxiliary: Option<&'a super::auxiliary_model::AuxiliaryModelContext>,
+    /// The live summary-delta sink ([`SummaryDeltaSink`]): the history
+    /// summarizer call streams its text deltas through it live, in
+    /// arrival order, and the run flushes the parts the live stream
+    /// cannot carry in order — a split turn's marker with its completed
+    /// turn-prefix summary (the concurrent call's raw chunks would
+    /// interleave out of final order) and the file-operations suffix —
+    /// so a client accumulating every delta holds exactly the summary
+    /// the run commits (the daemon's `compaction_summary_delta`
+    /// broadcast for the expanded TUI's live block). `None` keeps the
+    /// one-shot completion — the summarizer call itself is identical
+    /// either way; only the stream consumption differs.
+    pub summary_delta: Option<SummaryDeltaSink>,
 }
 
 /// The history summary's completion budget (TS `generateSummary`:
@@ -363,7 +375,21 @@ pub async fn execute_compaction(
         .iter()
         .filter_map(message_from_entry)
         .collect();
+    super::compaction_trace::trace(
+        "compact.cut_prepared",
+        serde_json::json!({
+            "entries": entries.len(),
+            "firstKeptEntryIndex": cut.first_kept_entry_index,
+            "isSplitTurn": cut.is_split_turn,
+            "historyMessages": history.len(),
+            "turnPrefixMessages": turn_prefix_messages.len(),
+        }),
+    );
     let tokens_before = context_tokens(&entries, session.get_leaf_id());
+    super::compaction_trace::trace(
+        "compact.tokens_before_computed",
+        serde_json::json!({ "tokensBefore": tokens_before }),
+    );
     let prev_compaction_index = entries[..cut.first_kept_entry_index]
         .iter()
         .rposition(|entry| matches!(entry, FileEntry::Compaction { .. }));
@@ -440,12 +466,29 @@ pub async fn execute_compaction(
     let history_max_tokens = history_summary_completion_budget(options.settings.reserve_tokens);
     let turn_prefix_max_tokens =
         turn_prefix_summary_completion_budget(options.settings.reserve_tokens);
+    super::compaction_trace::trace(
+        "compact.summarizer_request",
+        serde_json::json!({
+            "historyMaxTokens": history_max_tokens,
+            "turnPrefixMaxTokens": turn_prefix_max_tokens,
+        }),
+    );
     let history_call = async {
         // The stand-in applies only inside the split arm (TS
         // `messagesToSummarize.length > 0 ? generateSummary(...) : "No
         // prior history."` — the arm runs when a turn prefix exists); a
         // cut without a turn prefix makes the history call below.
         if cut.is_split_turn && !turn_prefix_messages.is_empty() && history.is_empty() {
+            // The literal stand-in is the history slice the live block
+            // carries too (the flush below appends the split marker and
+            // the prefix behind it, exactly like the committed summary).
+            if let Some(sink) = options.summary_delta.as_ref() {
+                sink(NO_PRIOR_HISTORY);
+            }
+            super::compaction_trace::trace(
+                "compact.summarizer_no_history",
+                serde_json::Value::Null,
+            );
             return Ok(SummarySlice {
                 summary: NO_PRIOR_HISTORY.to_string(),
                 usage: None,
@@ -463,6 +506,7 @@ pub async fn execute_compaction(
             summary_headers.clone(),
             history_max_tokens,
             request,
+            options.summary_delta.clone(),
             "Summarization failed",
         )
         .await
@@ -478,6 +522,14 @@ pub async fn execute_compaction(
             summary_headers.clone(),
             turn_prefix_max_tokens,
             request,
+            // The turn-prefix call never streams live: the split join
+            // runs it concurrently with the history call, and its chunks
+            // interleaved into the live sink would land out of the
+            // final order (the committed summary is history, split
+            // marker, prefix). The completed prefix flushes through the
+            // sink after the join, so the live block converges to the
+            // exact committed summary.
+            None,
             "Turn prefix summarization failed",
         )
         .await?;
@@ -486,6 +538,15 @@ pub async fn execute_compaction(
     let (history_slice, turn_prefix_slice) = tokio::join!(history_call, turn_prefix_call);
     let history_slice = history_slice?;
     let turn_prefix_slice = turn_prefix_slice?;
+    super::compaction_trace::trace(
+        "compact.summarizer_resolved",
+        serde_json::json!({
+            "summaryBytes": history_slice.summary.len()
+                + turn_prefix_slice
+                    .as_ref()
+                    .map_or(0, |slice| slice.summary.len()),
+        }),
+    );
 
     // The summarizer resolved while the run was aborted: the compaction is
     // cancelled before it commits (TS `_performCompaction`'s
@@ -497,6 +558,28 @@ pub async fn execute_compaction(
         return Err(pa_agent::abort::aborted_error());
     }
 
+    // The live block converges to the exact committed summary: the
+    // history streamed live above (its own call, in order), and the
+    // parts the live stream has not carried — the split marker with the
+    // completed turn-prefix summary (kept off the concurrent call so its
+    // chunks never interleave out of final order) and the
+    // file-operations suffix (which never flows through the summarizer)
+    // flush through the sink here, in the final summary's own order. A
+    // client accumulating every delta therefore holds precisely the text
+    // the settled `compaction_end` carries.
+    if let Some(sink) = options.summary_delta.as_ref() {
+        let mut remainder = match &turn_prefix_slice {
+            Some(prefix) => split_summary("", &prefix.summary),
+            None => String::new(),
+        };
+        remainder.push_str(&file_ops_block(
+            &details.read_files,
+            &details.modified_files,
+        ));
+        if !remainder.is_empty() {
+            sink(&remainder);
+        }
+    }
     // Result + persistence (TS `compact`): the split join carries the
     // turn-prefix summary behind the history summary under the TS marker,
     // and the file-operation block rides the summary on both paths.
@@ -527,6 +610,10 @@ pub async fn execute_compaction(
         .harness_digest
         .as_ref()
         .map(super::harness_digest::HarnessDigestInputs::render);
+    super::compaction_trace::trace(
+        "compact.digest_rendered",
+        serde_json::json!({ "digest": harness_digest.is_some() }),
+    );
     let entry = compaction_entry_for(
         &result,
         &details,
@@ -538,6 +625,13 @@ pub async fn execute_compaction(
     // snapshot ride on the durable row alongside the summary, boundary,
     // and token count.
     session.append_compaction(entry.clone())?;
+    super::compaction_trace::trace(
+        "compact.entry_appended",
+        serde_json::json!({
+            "firstKeptEntryId": first_kept_entry,
+            "persisted": session.is_persisted(),
+        }),
+    );
     Ok(CompactOutcome::Ran(Box::new(CompactRun {
         result,
         entry,
@@ -790,6 +884,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -962,6 +1057,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1018,6 +1114,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1135,6 +1232,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1397,6 +1495,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1424,6 +1523,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1551,6 +1651,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1584,6 +1685,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1644,6 +1746,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1670,6 +1773,199 @@ mod tests {
             Message::User(user) => assert!(user.content.text().contains("[compaction-summary]")),
             other => panic!("expected summary user message, got {other:?}"),
         }
+        registration.unregister();
+    }
+
+    /// The live summary-delta sink receives every summarizer text delta
+    /// as the model generates it (the daemon's `compaction_summary_delta`
+    /// broadcast): the deltas arrive in order, their concatenation is the
+    /// generated summary, and the final result still comes from the
+    /// terminal assistant message — the sink never gates the run, and
+    /// `None` keeps the one-shot completion untouched.
+    #[tokio::test]
+    async fn execute_compaction_streams_summary_deltas_to_the_sink() {
+        let registration = faux_registration();
+        let model = registration.get_model();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = session_with_turns(tmp.path(), 3);
+        let deltas: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let sink_deltas = std::sync::Arc::clone(&deltas);
+        let sink: SummaryDeltaSink = std::sync::Arc::new(move |delta| {
+            sink_deltas.lock().unwrap().push(delta.to_string());
+        });
+        let outcome = execute_compaction(
+            &mut session,
+            CompactOptions {
+                model,
+                api_key: None,
+                custom_instructions: None,
+                settings: super::super::compaction::CompactionSettings {
+                    keep_recent_tokens: 20,
+                    ..Default::default()
+                },
+                abort: None,
+                harness_digest: None,
+                auxiliary: None,
+                summary_delta: Some(sink),
+            },
+        )
+        .await
+        .unwrap();
+        let CompactOutcome::Ran(run) = outcome else {
+            panic!("expected the compaction to run");
+        };
+        let deltas = deltas.lock().unwrap().join("");
+        // The streamed deltas concatenate to exactly the generated
+        // summary text (the faux provider chunks the scripted response
+        // into provider-sized pieces; the sink receives each chunk).
+        assert!(!deltas.is_empty(), "the sink saw at least one delta");
+        assert_eq!(deltas, "## Goal\nsummarized goal");
+        // The convergence invariant: a client accumulating every delta
+        // holds exactly the committed summary the settled end carries.
+        assert_eq!(deltas, run.result.summary);
+        registration.unregister();
+    }
+
+    /// A split-turn compaction keeps the live stream in final order: the
+    /// history summary streams live (its own wire call, in order), the
+    /// concurrent turn-prefix call never streams its raw chunks (they
+    /// would interleave out of final order), and the split marker with
+    /// the completed prefix flushes through the sink as the final chunk —
+    /// so the accumulated stream converges to exactly the committed
+    /// summary (history, split marker, turn prefix), never a garbled
+    /// mixture.
+    #[tokio::test]
+    async fn split_turn_compaction_streams_in_final_order_and_converges() {
+        let registration = faux_registration();
+        let model = registration.get_model();
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = SessionManager::in_memory(tmp.path());
+        let user = |text: &str| {
+            AgentMessage::User(pa_types::ai::UserMessage {
+                content: UserContent::Text(text.to_string()),
+                timestamp: 0,
+                rest: Default::default(),
+            })
+        };
+        let reply = |text: &str| {
+            AgentMessage::Assistant(AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: text.to_string(),
+                        text_signature: None,
+                        rest: Default::default(),
+                    },
+                )],
+                api: "faux".to_string(),
+                provider: "faux".to_string(),
+                model: "compact-m".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: pa_types::ai::Usage::default(),
+                stop_reason: pa_types::ai::StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: Default::default(),
+            })
+        };
+        session.append_message(user("turn one")).unwrap();
+        session.append_message(reply("reply one")).unwrap();
+        session
+            .append_message(user(&format!("big turn {}", "x".repeat(4_000))))
+            .unwrap();
+        session
+            .append_message(reply(&format!("reply {}", "y".repeat(4_000))))
+            .unwrap();
+        session.append_message(user("turn three")).unwrap();
+        session.append_message(reply("reply three")).unwrap();
+        // The tiny keep-recent budget lands the cut on the big turn's
+        // assistant reply — a mid-turn (split) cut.
+        let (cut, _) = compute_cut(&session, 10);
+        assert!(cut.is_split_turn);
+
+        // Two scripted summaries (the factories answer in issue order,
+        // whichever call reaches the faux provider first).
+        registration.set_responses(vec![
+            pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+                "the history summary",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            )),
+            pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+                "the turn prefix summary",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            )),
+        ]);
+        let deltas: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let sink_deltas = std::sync::Arc::clone(&deltas);
+        let sink: SummaryDeltaSink = std::sync::Arc::new(move |delta| {
+            sink_deltas.lock().unwrap().push(delta.to_string());
+        });
+        let outcome = execute_compaction(
+            &mut session,
+            CompactOptions {
+                model,
+                api_key: None,
+                custom_instructions: None,
+                settings: super::super::compaction::CompactionSettings {
+                    keep_recent_tokens: 10,
+                    ..Default::default()
+                },
+                abort: None,
+                harness_digest: None,
+                auxiliary: None,
+                summary_delta: Some(sink),
+            },
+        )
+        .await
+        .unwrap();
+        let CompactOutcome::Ran(run) = outcome else {
+            panic!("expected the compaction to run");
+        };
+        assert_eq!(registration.call_count(), 2, "both wire calls ran");
+        // The committed summary decides which scripted response became
+        // the history and which the prefix (the factories answer in
+        // issue order, so the split marker's two halves identify them).
+        let summary = &run.result.summary;
+        let marker = "\n\n---\n\n**Turn Context (split turn):**\n\n";
+        let split = summary.split_once(marker).unwrap_or_else(|| {
+            panic!("the committed summary carries the split marker: {summary:?}")
+        });
+        let (history_text, prefix_text) = (split.0, split.1);
+        // The factories answer in issue order, so whichever scripted
+        // response the concurrent calls took is decided by the committed
+        // summary itself — the two halves are the two scripted texts.
+        let mut scripted = vec!["the history summary", "the turn prefix summary"];
+        scripted.sort_unstable();
+        let mut committed = vec![history_text, prefix_text];
+        committed.sort_unstable();
+        assert_eq!(committed, scripted);
+
+        let deltas = deltas.lock().unwrap().clone();
+        // Only the flush carries the split marker, and it is the final
+        // chunk (the prefix call's raw chunks never hit the sink).
+        let marker_positions: Vec<usize> = deltas
+            .iter()
+            .enumerate()
+            .filter(|(_, delta)| delta.contains(marker))
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            marker_positions,
+            vec![deltas.len() - 1],
+            "the split marker rides exactly one chunk, the final flush: {deltas:?}"
+        );
+        // Everything before the flush is pure history summary — the
+        // live view reads as the history generating, in order.
+        let live_history = deltas[..deltas.len() - 1].concat();
+        // The live view reads as the history summary generating, in
+        // order: a raw prefix chunk interleaving here would break the
+        // equality (the scripted texts differ).
+        assert_eq!(live_history, history_text, "deltas: {deltas:?}");
+        // The convergence invariant: the accumulated stream IS the
+        // committed summary (history, split marker, turn prefix).
+        assert_eq!(deltas.concat(), *summary);
         registration.unregister();
     }
 
@@ -1743,6 +2039,7 @@ mod tests {
                 abort: None,
                 harness_digest: Some(inputs),
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1815,6 +2112,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1856,6 +2154,7 @@ mod tests {
                 abort: Some(&signal),
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1910,6 +2209,7 @@ mod tests {
                 abort: Some(&signal),
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1944,6 +2244,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -1986,6 +2287,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -2092,6 +2394,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: None,
+                summary_delta: None,
             },
         )
         .await
@@ -2174,6 +2477,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: Some(&aux),
+                summary_delta: None,
             },
         )
         .await
@@ -2221,6 +2525,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: Some(&aux),
+                summary_delta: None,
             },
         )
         .await

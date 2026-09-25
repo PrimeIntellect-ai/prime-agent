@@ -15,7 +15,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use pa_types::daemon::{
     is_session_plane_daemon_command, DaemonCommand, DaemonCommandEnvelope, DaemonCommandFrameType,
-    DaemonProtocolInfo, DaemonResponse, DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION,
+    DaemonErrorInfo, DaemonProtocolInfo, DaemonResponse, DAEMON_PROTOCOL_NAME,
+    DAEMON_PROTOCOL_VERSION,
 };
 use serde_json::{Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -884,12 +885,15 @@ enum DirectRequestError {
 /// request, never about the connection: the interactive loop renders
 /// them inline and keeps running, while transport failures (dead
 /// socket, timeout, closed connection) stay fatal.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct RequestRejected {
     /// Wire `type` of the refused command, for the rendered message.
     pub command: String,
     /// The daemon's raw error string.
     pub message: String,
+    /// The typed structured failure info of the refusal, when the daemon
+    /// tagged one (`errorInfo`); `None` on plain message refusals.
+    pub error_info: Option<DaemonErrorInfo>,
 }
 
 impl std::fmt::Display for RequestRejected {
@@ -944,14 +948,32 @@ pub fn is_daemon_unreachable(error: &anyhow::Error) -> bool {
 /// refusal as a typed [`RequestRejected`] on failure.
 fn response_data_or_error(name: &str, response: DaemonResponse) -> Result<Value> {
     if !response.success {
+        let message = response
+            .error
+            .unwrap_or_else(|| "unknown error".to_string());
         return Err(anyhow::Error::new(RequestRejected {
             command: name.to_string(),
-            message: response
-                .error
-                .unwrap_or_else(|| "unknown error".to_string()),
+            message,
+            error_info: response.error_info,
         }));
     }
     Ok(response.data.unwrap_or(Value::Null))
+}
+
+/// The typed provider-unauthenticated refusal of a rejected request (the
+/// daemon's `set_model` on a model whose provider is not signed in): the
+/// provider id the client's sign-in flow should serve. `None` for every
+/// other refusal and transport failure.
+pub fn rejected_provider_unauthenticated(error: &anyhow::Error) -> Option<String> {
+    error
+        .chain()
+        .filter_map(|cause| cause.downcast_ref::<RequestRejected>())
+        .find_map(|rejected| match &rejected.error_info {
+            Some(DaemonErrorInfo::ModelProviderUnauthenticated { provider }) => {
+                Some(provider.clone())
+            }
+            _ => None,
+        })
 }
 
 /// Wire `type` tag of a command, for error messages.

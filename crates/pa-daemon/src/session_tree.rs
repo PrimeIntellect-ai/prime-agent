@@ -173,6 +173,7 @@ impl SessionFile {
         details: Option<Value>,
         from_hook: Option<bool>,
         usage: Option<Value>,
+        model: Option<(&str, &str)>,
     ) -> Result<String> {
         self.branch_to(from_id)?;
         let mut fields = json!({
@@ -185,6 +186,14 @@ impl SessionFile {
         }
         if let Some(usage) = usage {
             fields["usage"] = usage;
+        }
+        if let Some((provider, model_id)) = model {
+            // The serving model of the summary call (TS #2411's
+            // auxiliary routing): the per-model cost fold bills the
+            // row's spend on the model that billed it rather than the
+            // branch timeline.
+            fields["provider"] = json!(provider);
+            fields["modelId"] = json!(model_id);
         }
         self.persist_entry("branch_summary", fields)
     }
@@ -494,6 +503,7 @@ mod tests {
                 Some(json!({"readFiles": []})),
                 None,
                 None,
+                None,
             )
             .unwrap();
         let entry = store.entry(&summary).unwrap();
@@ -503,6 +513,33 @@ mod tests {
         assert_eq!(entry.fields["summary"], json!("explored"));
         // The summary is the new leaf.
         assert_eq!(store.leaf_id(), Some(summary.as_str()));
+    }
+
+    /// A summary served by an auxiliary model (TS #2411) persists its
+    /// serving identity on the entry: the per-model cost fold bills the
+    /// row on the model that billed it, not the branch timeline.
+    #[test]
+    fn branch_summary_entry_records_the_serving_model() {
+        let (_dir, mut store) = temp_store();
+        let a = message_entry(&mut store, "user", "first");
+        let summary = store
+            .append_branch_summary(
+                Some(&a),
+                "aux summary",
+                None,
+                None,
+                Some(json!({
+                    "input": 50, "output": 5, "cacheRead": 0, "cacheWrite": 0,
+                    "totalTokens": 55,
+                    "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
+                })),
+                Some(("anthropic", "aux-opus-4")),
+            )
+            .unwrap();
+        let entry = store.entry(&summary).unwrap();
+        assert_eq!(entry.fields["provider"], json!("anthropic"));
+        assert_eq!(entry.fields["modelId"], json!("aux-opus-4"));
+        assert_eq!(entry.fields["usage"]["totalTokens"], json!(55));
     }
 
     #[test]

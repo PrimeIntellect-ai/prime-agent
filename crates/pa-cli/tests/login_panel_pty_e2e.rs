@@ -74,6 +74,24 @@ fn login_panel_mcp_child_mode() {
     let _ = runtime.block_on(run_interactive(options, UiMode::Terminal));
 }
 
+/// The model-picker sign-in child half: the real interactive loop with a
+/// catalog whose one model comes from a provider the client does not
+/// count as signed in (the picker's "require sign in" discovery row) and
+/// a scripted provider-auth hook whose API-key login succeeds — the
+/// picked model must route through the login flow and apply after it.
+#[test]
+fn model_sign_in_child_mode() {
+    let Ok(socket) = std::env::var(CHILD_SOCKET_ENV) else {
+        return;
+    };
+    let options = model_sign_in_child_options(PathBuf::from(socket));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let _ = runtime.block_on(run_interactive(options, UiMode::Terminal));
+}
+
 /// The scripted provider-auth hook: the Prime Inference row and the
 /// panel-driven login (a progress line, then the team picker, then the
 /// TS status row).
@@ -235,6 +253,94 @@ fn mcp_child_options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
+/// The model-picker sign-in catalog: one model from a provider the client
+/// does not count as signed in (the operator's discovery path — the
+/// picker keeps the row visible, marked "require sign in").
+fn unauthenticated_catalog_model() -> pa_types::ai::Model {
+    serde_json::from_value(serde_json::json!({
+        "id": "glm-5.3-fast", "name": "GLM 5.3 Fast",
+        "api": "openai-completions", "provider": "zai",
+        "baseUrl": "https://example.invalid/v1", "reasoning": false,
+        "input": ["text"],
+        "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+        "contextWindow": 128_000, "maxTokens": 4096,
+    }))
+    .expect("mock model deserializes")
+}
+
+/// The model-picker sign-in provider-auth hook: the `zai` API-key row and
+/// a login that succeeds for any submitted key (the sign-in the picked
+/// model routes through).
+struct ScriptedModelPickerAuth;
+
+impl ProviderAuthCommands for ScriptedModelPickerAuth {
+    fn login_options(&self) -> ProviderRowsFuture {
+        let row = ProviderRow {
+            id: "zai".to_string(),
+            name: "ZAI".to_string(),
+            auth_type: AuthType::ApiKey,
+            status: None,
+            flow: AuthFlow::ApiKeyPrompt,
+        };
+        Box::pin(async move { vec![row] })
+    }
+
+    fn logout_options(&self) -> ProviderRowsFuture {
+        Box::pin(async move { Vec::new() })
+    }
+
+    fn login(
+        &self,
+        provider: &ProviderRow,
+        api_key: Option<&str>,
+    ) -> Pin<Box<dyn std::future::Future<Output = ProviderAuthOutcome> + Send>> {
+        let name = provider.name.clone();
+        // Own the borrowed key before the boxed future (the trait's
+        // future has no lifetime).
+        let api_key = api_key.map(str::to_string);
+        Box::pin(async move {
+            if api_key.as_deref().is_some_and(|key| !key.is_empty()) {
+                ProviderAuthOutcome::Status(format!("Saved API key for {name}."))
+            } else {
+                ProviderAuthOutcome::Error(format!(
+                    "Failed to save API key for {name}: API key cannot be empty."
+                ))
+            }
+        })
+    }
+
+    fn login_on_panel(
+        &self,
+        provider: &ProviderRow,
+        _panel: AuthPanelHandle,
+    ) -> Pin<Box<dyn std::future::Future<Output = ProviderAuthOutcome> + Send>> {
+        let name = provider.name.clone();
+        Box::pin(async move {
+            ProviderAuthOutcome::Error(format!("{name} login is not available in this build yet."))
+        })
+    }
+
+    fn logout(
+        &self,
+        _provider: &ProviderRow,
+    ) -> Pin<Box<dyn std::future::Future<Output = ProviderAuthOutcome> + Send>> {
+        Box::pin(async move { ProviderAuthOutcome::Cancelled })
+    }
+}
+
+/// The model-picker sign-in child's options: the unauthenticated-provider
+/// catalog, no configured providers (the picker marks the row), and the
+/// scripted provider-auth hook.
+fn model_sign_in_child_options(socket: PathBuf) -> InteractiveOptions {
+    InteractiveOptions {
+        model_catalog: vec![unauthenticated_catalog_model()],
+        provider_auth: Some(ProviderAuthCommandsHandle(Arc::new(
+            ScriptedModelPickerAuth,
+        ))),
+        ..child_options(socket)
+    }
+}
+
 /// The terminal takeover signatures the login flow must never emit: the
 /// alternate-screen leave (`?1049l`), the screen clear (`\x1b[2J`), and
 /// the SGR mouse-tracking release (the `renderer.suspend` bracket's
@@ -356,6 +462,66 @@ fn mcp_view_enter_login_renders_inline_without_a_terminal_takeover() {
     harness.finish();
 }
 
+/// The model-picker sign-in e2e (the operator's bug report): a model from
+/// a provider the user is not signed in to stays visible in the picker
+/// (marked "require sign in"), selecting it sends the switch, the
+/// daemon's typed not-signed-in refusal routes the provider's sign-in
+/// flow (the `/login` provider menu, preselected on the provider's row,
+/// then the API-key prompt), and a successful sign-in applies the model
+/// automatically (the `Model: <id>` status row after the login's own
+/// status row, never the old dead-end refusal).
+#[test]
+fn model_picker_routes_the_sign_in_flow_and_applies_after_login() {
+    let mut harness = LoginPanelHarness::start_model_sign_in();
+
+    harness.wait_from_start("\x1b[?1049h", "the startup alternate-screen enter");
+
+    // `/model` opens the picker: the unauthenticated provider's row stays
+    // visible and carries the sign-in marking (the TS "require sign in"
+    // trailing).
+    harness.write(b"/model\r");
+    harness.wait_from_start("Search models", "the model picker");
+    harness.wait_from_start("GLM 5.3 Fast", "the unauthenticated provider's model row");
+    harness.wait_from_start("require sign in", "the row's sign-in marking");
+
+    // Enter selects the model: the daemon's typed not-signed-in refusal
+    // routes the sign-in flow — the note explains why, the `/login`
+    // provider menu mounts, the provider's row is preselected.
+    let mark = harness.mark();
+    harness.write(b"\r");
+    harness.wait_from(
+        mark,
+        "Sign in to zai to use zai/glm-5.3-fast",
+        "the sign-in note",
+    );
+    harness.wait_from(mark, "Search providers", "the provider login menu");
+    harness.wait_from(mark, "ZAI", "the preselected provider row");
+
+    // Enter opens the API-key prompt; the submitted key signs in.
+    harness.write(b"\r");
+    harness.wait_from(mark, "Enter API key:", "the API-key prompt");
+    harness.write(b"sk-fake\r");
+
+    // The sign-in automatically applies the parked model. The login's
+    // status row and the switch's `Model:` row are back-to-back TS
+    // `showStatus` notes — the model note rewrites the login note in
+    // place (the last-wins rule), so the pty only ever carries the
+    // final row: the `Model:` retry landing is itself the proof the
+    // login succeeded (the retry fires only on the parked provider's
+    // successful login).
+    harness.wait_from(mark, "Model: glm-5.3-fast", "the automatic model retry");
+
+    // The old dead-end refusal never appeared: the daemon rejection the
+    // operator reported is gone from the whole flow.
+    let window = harness.window_since(mark);
+    assert!(
+        !find_subsequence(window, "Model not found".as_bytes()).is_some(),
+        "the sign-in route never surfaces the dead-end refusal"
+    );
+
+    harness.finish();
+}
+
 /// One pty-backed product child plus the mock supervisor it attaches to.
 struct LoginPanelHarness {
     child: Child,
@@ -374,6 +540,12 @@ impl LoginPanelHarness {
     /// The `/mcp`-view child (the client-auth hook + the roster).
     fn start_mcp() -> LoginPanelHarness {
         LoginPanelHarness::start_for("login_panel_mcp_child_mode")
+    }
+
+    /// The model-picker sign-in child (the unauthenticated catalog + the
+    /// provider-auth hook).
+    fn start_model_sign_in() -> LoginPanelHarness {
+        LoginPanelHarness::start_for("model_sign_in_child_mode")
     }
 
     fn start_for(child_test: &'static str) -> LoginPanelHarness {
@@ -534,6 +706,11 @@ impl MockSupervisor {
                 "clientId": "mock",
             }),
         );
+        // The model-picker sign-in child's set_model sequence: the
+        // unsigned provider's first switch answers with the daemon's
+        // typed refusal (the wire shape `resolve_set_model_selection`
+        // produces), the post-login retry succeeds.
+        let mut set_model_count = 0usize;
         let mut line = String::new();
         loop {
             line.clear();
@@ -571,6 +748,60 @@ impl MockSupervisor {
                 }
                 "attach" => {
                     write_json(&mut writer, &attach_data(id));
+                }
+                "set_model" => {
+                    set_model_count += 1;
+                    if set_model_count == 1 {
+                        // The not-signed-in class: the typed refusal the
+                        // TUI routes to the sign-in flow (never the old
+                        // dead-end "Model not found" text).
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "set_model",
+                                "success": false,
+                                "error": "Provider \"zai\" is not signed in. Sign in to the provider (the TUI's /login command), then set the model again.",
+                                "errorInfo": {
+                                    "code": "model_provider_unauthenticated",
+                                    "provider": "zai",
+                                },
+                            }),
+                        );
+                    } else {
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "set_model",
+                                "success": true,
+                                "data": {},
+                            }),
+                        );
+                    }
+                }
+                "get_model_catalog" => {
+                    // The model-picker sign-in child's catalog: the
+                    // unauthenticated provider's model stays listed
+                    // (discovery), the provider stays unconfigured (the
+                    // row keeps its "require sign in" marking and the
+                    // selection routes to the login flow).
+                    write_json(
+                        &mut writer,
+                        &json!({
+                            "type": "response",
+                            "id": id,
+                            "command": "get_model_catalog",
+                            "success": true,
+                            "data": {
+                                "models": [serde_json::to_value(unauthenticated_catalog_model())
+                                    .expect("mock model serializes")],
+                                "configuredProviders": [],
+                            }
+                        }),
+                    );
                 }
                 "get_mcp_connections" => {
                     // The roster the `/mcp` view renders: one connectable
