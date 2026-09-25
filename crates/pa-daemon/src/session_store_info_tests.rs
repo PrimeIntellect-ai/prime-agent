@@ -402,7 +402,7 @@ fn multi_round_appends_match_the_legacy_fold() {
             append_rows(
                 &path,
                 &[
-                    json!({"type":"message","id":format!("r{round}m{index}"),"timestamp":"2026-09-23T00:00:00.000Z","message":{"role": if index % 2 == 0 { "user" } else { "assistant" },"content":format!("round {round} message {index}"),"timestamp":1790110000000u64 + round as u64 * 1000 + index as u64}}),
+                    json!({"type":"message","id":format!("r{round}m{index}"),"timestamp":"2026-09-23T00:00:00.000Z","message":{"role": if index % 2 == 0 { "user" } else { "assistant" },"content":format!("round {round} message {index}"),"timestamp":1_790_110_000_000_u64 + round as u64 * 1000 + index as u64}}),
                 ],
             );
         }
@@ -441,7 +441,7 @@ fn a_failed_prefix_check_rescans_from_byte_zero() {
     append_rows(
         &path,
         &[
-            json!({"type":"message","id":"m1","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"grown","timestamp":1790110000000u64}}),
+            json!({"type":"message","id":"m1","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"grown","timestamp":1_790_110_000_000_u64}}),
         ],
     );
     // Force the mtime tick so the generation is not byte-equal.
