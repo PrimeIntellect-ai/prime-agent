@@ -566,11 +566,11 @@ fn land_marker(out: &mut Vec<crate::Span>, width: usize) {
 /// pickers' search fields, not an accent box.
 ///
 /// The row color-codes live activity (the operator's 2026-09-24
-/// directive): the subagents' running count rides a green `● x running`
-/// cluster, and every count-holding segment goes green while its count
-/// is above zero (heartbeats, shells, the active goal) and stays neutral
-/// at zero. The subagents segment renders the label only — the live
-/// running count moved into the green cluster, `#2705` semantics.
+/// directive): every count-holding segment goes green while its count
+/// is above zero (subagents, heartbeats, shells, the active goal) and
+/// stays neutral at zero. The subagents segment is one consolidated
+/// item — `◆ x subagents` (the operator's 2026-09-25 consolidation:
+/// the separate running cluster was redundant).
 pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) -> Option<Vec<Line>> {
     if !dock.visible() || width == 0 {
         return None;
@@ -587,22 +587,9 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
     };
     // The live-only number: the count of actively-running subagents
     // right now. Idle and finished descendants stay out of the
-    // indicator; they render in the scoped agents view. The count
-    // renders in green beside the label (the operator's
-    // `◆ subagents [green:● x running]` sketch).
-    let subagents = {
-        let (dot, color) = if dock.subagents_running > 0 {
-            ("\u{25cf}", ThemeColor::Success)
-        } else {
-            ("\u{25cb}", ThemeColor::Dim)
-        };
-        let mut spans = vec![theme.fg_span(ThemeColor::Muted, "◆ subagents".to_string())];
-        spans.extend(cluster(
-            &format!("{dot} {} running", dock.subagents_running),
-            color,
-        ));
-        spans
-    };
+    // indicator; they render in the scoped agents view. The count rides
+    // the label itself (the operator's `◆ x subagents` consolidation)
+    // in the dock's running color.
     let running_color = |count: usize| {
         if count > 0 {
             ThemeColor::Success
@@ -610,6 +597,10 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
             ThemeColor::Muted
         }
     };
+    let subagents = vec![theme.fg_span(
+        running_color(dock.subagents_running),
+        format!("◆ {} subagents", dock.subagents_running),
+    )];
     let mut heartbeats = vec![theme.fg_span(
         running_color(dock.heartbeats),
         format!(
@@ -731,23 +722,20 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             text,
-            " ◆ subagents · ● 2 running  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  Pursuing goal (0s)"
+            " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  Pursuing goal (0s)"
         );
-        // The color-coding (the operator's 2026-09-24 directive): the
-        // running-count cluster, every above-zero count segment, and the
-        // active goal render green.
+        // The color-coding (the operator's 2026-09-24 directive): every
+        // above-zero count segment and the active goal render green.
         let success = theme.fg_style(ThemeColor::Success).fg;
-        let muted = theme.fg_style(ThemeColor::Muted).fg;
         let colored = |text: &str, color| {
             frame[1]
                 .iter()
                 .any(|span| span.content.contains(text) && span.style.fg == color)
         };
-        assert!(colored("● 2 running", success));
+        assert!(colored("◆ 2 subagents", success));
         assert!(colored("◷ 3 heartbeats", success));
         assert!(colored("▸ 1 shell", success));
         assert!(colored("Pursuing goal", success));
-        assert!(colored("◆ subagents", muted));
         // A paused goal stays on the dock (the tray cluster is gone) in
         // the warning color — every live goal state keeps a surface.
         let dock = ActivityDock {
@@ -785,10 +773,7 @@ mod tests {
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
-        assert_eq!(
-            text,
-            " ◆ subagents · ○ 0 running  ·  ◷ 1 heartbeat  ·  ▸ 0 shells"
-        );
+        assert_eq!(text, " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells");
         // A dead-only roster keeps the dock mounted and its Subagents
         // group selectable (finished subagents are browsable history):
         // the rendered count stays running-only and reads zero.
@@ -803,7 +788,7 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             text,
-            " \u{25c6} subagents \u{b7} \u{25cb} 0 running  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells"
+            " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells"
         );
         // The zero segments stay neutral, never green.
         assert!(frame[1]
