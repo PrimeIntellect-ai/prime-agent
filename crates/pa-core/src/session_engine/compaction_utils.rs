@@ -15,6 +15,21 @@ pub struct FileOperations {
 
 /// Maximum files kept per summary block.
 const FILE_LIST_MAX_ENTRIES: usize = 200;
+/// Maximum combined characters the two file blocks may add to a summary
+/// (TS #2385 `FILE_LIST_MAX_COMBINED_CHARS`): repeated compactions merge
+/// the lists carried in the previous entry's details, so without a
+/// character cap the appended block grows without bound.
+const FILE_LIST_MAX_COMBINED_CHARS: usize = 6_000;
+
+/// Combined characters the two lists occupy (TS `fileListChars`: each
+/// path plus its newline in the block).
+fn file_list_chars(read_files: &[String], modified_files: &[String]) -> usize {
+    read_files
+        .iter()
+        .chain(modified_files)
+        .map(|file| file.chars().count() + 1)
+        .sum()
+}
 /// Maximum characters for a serialized tool result.
 const TOOL_RESULT_MAX_CHARS: usize = 2_000;
 /// Characters kept from the end of a truncated tool result.
@@ -59,7 +74,12 @@ pub fn extract_file_ops_from_message(message: &AgentMessage, file_ops: &mut File
     }
 }
 
-/// Final file lists: read-only files and modified files, sorted and capped.
+/// Final file lists: read-only files and modified files, sorted and
+/// capped. Both lists cap at [`FILE_LIST_MAX_ENTRIES`] (sorted, then
+/// truncated) and at [`FILE_LIST_MAX_COMBINED_CHARS`] combined characters
+/// (TS #2385): read-only entries are the least valuable and drop first,
+/// from the alphabetical end; modified entries drop only after the
+/// read-only list is empty.
 pub fn compute_file_lists(file_ops: &FileOperations) -> (Vec<String>, Vec<String>) {
     let mut modified: BTreeSet<String> = file_ops.edited.clone();
     modified.extend(file_ops.written.iter().cloned());
@@ -71,7 +91,20 @@ pub fn compute_file_lists(file_ops: &FileOperations) -> (Vec<String>, Vec<String
         .cloned()
         .collect();
     let modified_files: Vec<String> = modified.into_iter().take(FILE_LIST_MAX_ENTRIES).collect();
-    (read_only, modified_files)
+    let mut read_files = read_only;
+    while !read_files.is_empty()
+        && file_list_chars(&read_files, &modified_files) > FILE_LIST_MAX_COMBINED_CHARS
+    {
+        read_files.pop();
+    }
+    let mut modified_files = modified_files;
+    while !modified_files.is_empty()
+        && read_files.is_empty()
+        && file_list_chars(&read_files, &modified_files) > FILE_LIST_MAX_COMBINED_CHARS
+    {
+        modified_files.pop();
+    }
+    (read_files, modified_files)
 }
 
 /// Format file lists as XML tags (empty when no files).
@@ -93,6 +126,47 @@ pub fn format_file_operations(read_files: &[String], modified_files: &[String]) 
         return String::new();
     }
     format!("\n\n{}", sections.join("\n\n"))
+}
+
+/// Remove `<read-files>`/`<modified-files>` blocks from a stored summary
+/// (TS #2385 `stripFileListBlocks`). The blocks are re-appended
+/// mechanically after every summarization (`compute_file_lists` +
+/// [`format_file_operations`]) and the lists live on in the compaction
+/// entry's details; feeding the stale blocks back into the update prompt
+/// makes the model re-summarize them, so the lists compound and drift
+/// across repeated compactions. Strip them before a previous summary
+/// reaches the summarizer — the details plus the fresh append remain the
+/// single source of truth. Blocks mid-summary (hook- or handwritten
+/// summaries) strip too; the newlines introducing a block strip with it,
+/// and an open tag without its close never matched the TS regex, so it
+/// stays.
+pub fn strip_file_list_blocks(summary: &str) -> String {
+    let mut result = String::with_capacity(summary.len());
+    let mut rest = summary;
+    loop {
+        // The earliest open tag wins, mirroring the TS regex's scan.
+        let next = ["read-files", "modified-files"]
+            .iter()
+            .filter_map(|tag| rest.find(&format!("<{tag}>")).map(|pos| (pos, *tag)))
+            .min_by_key(|(pos, _)| *pos);
+        let Some((pos, tag)) = next else {
+            result.push_str(rest);
+            break;
+        };
+        let close = format!("</{tag}>");
+        let after_open = pos + tag.len() + 2;
+        let Some(close_offset) = rest[after_open..].find(&close) else {
+            result.push_str(rest);
+            break;
+        };
+        let end = after_open + close_offset + close.len();
+        // The block's introducing newlines strip with it (the regex's
+        // leading `(?:\n*)`).
+        let before = &rest[..pos];
+        result.push_str(before.trim_end_matches('\n'));
+        rest = &rest[end..];
+    }
+    result.trim_end().to_string()
 }
 
 /// Truncate keeping head and tail within the budget, marking the elision.
@@ -455,6 +529,91 @@ mod tests {
         ]
         .join("\n\n");
         assert_eq!(serialize_conversation(&messages), expected);
+    }
+
+    /// The combined character cap (TS #2385): the two file blocks may add
+    /// at most 6000 characters to a summary. Read-only entries are the
+    /// least valuable and drop first, from the alphabetical end; modified
+    /// entries drop only after the read-only list is empty.
+    #[test]
+    fn file_lists_cap_combined_chars_dropping_read_only_first() {
+        // 37-char entries: each contributes 38 chars, so the cap keeps
+        // 157 (157*38 = 5966; 158*38 = 6004).
+        let long: Vec<String> = (0..250).map(|i| format!("read-{i:032}")).collect();
+        let file_ops = FileOperations {
+            read: long.iter().cloned().collect(),
+            ..Default::default()
+        };
+        let (read_files, modified_files) = compute_file_lists(&file_ops);
+        assert_eq!(read_files, long[..157].to_vec());
+        assert!(file_list_chars(&read_files, &modified_files) <= FILE_LIST_MAX_COMBINED_CHARS);
+
+        // Read-only entries still present: modified entries never shed,
+        // even over the combined budget.
+        let file_ops = FileOperations {
+            read: long.iter().cloned().collect(),
+            edited: BTreeSet::from(["modified.rs".to_string()]),
+            ..Default::default()
+        };
+        let (read_files, modified_files) = compute_file_lists(&file_ops);
+        assert_eq!(read_files, long[..157].to_vec());
+        assert_eq!(modified_files, vec!["modified.rs".to_string()]);
+
+        // A modified-only list over the budget drops from its
+        // alphabetical end once the read-only list is empty. 36-char
+        // entries contribute 37 chars each, so the cap keeps 162
+        // (162*37 = 5994; 163*37 = 6031).
+        let modified_all: Vec<String> = (0..250).map(|i| format!("mod-{i:032}")).collect();
+        let file_ops = FileOperations {
+            edited: modified_all.iter().cloned().collect(),
+            ..Default::default()
+        };
+        let (read_files, modified_files) = compute_file_lists(&file_ops);
+        assert!(read_files.is_empty());
+        assert_eq!(modified_files, modified_all[..162].to_vec());
+
+        // Under the cap nothing drops.
+        let file_ops = FileOperations {
+            read: BTreeSet::from(["a.rs".to_string()]),
+            ..Default::default()
+        };
+        let (read_files, modified_files) = compute_file_lists(&file_ops);
+        assert_eq!(read_files, vec!["a.rs".to_string()]);
+        assert!(modified_files.is_empty());
+    }
+
+    /// The stored summary's file blocks strip before the update prompt (TS
+    /// #2385 `stripFileListBlocks`): end blocks, mid-summary blocks, and
+    /// blocks-only summaries; an open tag without its close never matched
+    /// the TS regex, so it stays.
+    #[test]
+    fn strip_file_list_blocks_removes_read_and_modified_blocks() {
+        // Blocks riding the end of a stored summary.
+        assert_eq!(
+            strip_file_list_blocks(
+                "the summary\n\n<read-files>\na.rs\nb.rs\n</read-files>\n\n<modified-files>\nc.rs\n</modified-files>"
+            ),
+            "the summary"
+        );
+        // Blocks mid-summary (hook- or handwritten summaries).
+        assert_eq!(
+            strip_file_list_blocks("before\n\n<modified-files>m.rs</modified-files>\n\nafter"),
+            "before\n\nafter"
+        );
+        // A summary that contained only file blocks leaves nothing.
+        assert_eq!(
+            strip_file_list_blocks(
+                "<read-files>\na.rs\n</read-files>\n\n<modified-files>\nb.rs\n</modified-files>"
+            ),
+            ""
+        );
+        // No blocks: unchanged except the trailing trim (TS `.trimEnd()`).
+        assert_eq!(strip_file_list_blocks("plain summary\n\n"), "plain summary");
+        // An open tag without its close stays.
+        assert_eq!(
+            strip_file_list_blocks("a <read-files> b"),
+            "a <read-files> b"
+        );
     }
 
     #[test]
