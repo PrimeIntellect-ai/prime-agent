@@ -34,9 +34,7 @@ use crate::kernel::state_snapshot::{manifest_path_in, snapshot_path_in};
 /// Above core count because boots are IO-bound, capped so a fan-out can't
 /// thrash the FS past the ready-handshake window.
 fn default_kernel_boot_concurrency() -> usize {
-    let cores = std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(4);
+    let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
     16.min((cores * 2).max(4))
 }
 
@@ -216,7 +214,7 @@ impl IpythonKernelProvisioner {
 
     /// Whether a kernel has finished starting and is currently running.
     pub fn has_running_kernel(&self) -> bool {
-        self.manager().map(|m| m.is_running()).unwrap_or(false)
+        self.manager().is_some_and(|m| m.is_running())
     }
 
     /// Start the kernel in the background. Failures are swallowed here and
@@ -333,7 +331,7 @@ impl IpythonKernelProvisioner {
     /// Dispose the kernel owned by this provisioner, including one still
     /// starting up. A still-queued boot drops out of the boot gate.
     pub async fn dispose(&self, options: Option<KernelShutdownOptions>) {
-        let snapshot = options.map(|o| o.snapshot).unwrap_or(true);
+        let snapshot = options.is_none_or(|o| o.snapshot);
         {
             let mut state = self.lock_state();
             state.dispose_snapshot = snapshot;
@@ -393,8 +391,7 @@ fn resolve_startup_retries() -> u32 {
         Ok(raw) => raw
             .trim()
             .parse::<u32>()
-            .map(|n| n.min(5))
-            .unwrap_or(DEFAULT_STARTUP_RETRIES),
+            .map_or(DEFAULT_STARTUP_RETRIES, |n| n.min(5)),
         Err(_) => DEFAULT_STARTUP_RETRIES,
     }
 }

@@ -152,7 +152,6 @@ fn message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
         )),
         // Prior compactions are kept context, not summarizer input; the new
         // compaction covers their retained span.
-        FileEntry::Compaction { .. } => None,
         _ => None,
     }
 }

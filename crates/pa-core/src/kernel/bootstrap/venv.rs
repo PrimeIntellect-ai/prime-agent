@@ -170,7 +170,6 @@ pub(crate) fn to_bootstrap_skill(skill: &KernelPythonSkill) -> BootstrapPythonSk
 pub(crate) fn normalize_python_skills(
     python_skills: &[KernelPythonSkill],
 ) -> Vec<BootstrapPythonSkill> {
-    let mut by_key: Vec<(String, BootstrapPythonSkill)> = Vec::new();
     fn add_skill(by_key: &mut Vec<(String, BootstrapPythonSkill)>, skill: BootstrapPythonSkill) {
         let key = format!("{}\u{0}{}", skill.import_name, skill.package_path);
         if by_key.iter().any(|(existing, _)| *existing == key) {
@@ -184,6 +183,7 @@ pub(crate) fn normalize_python_skills(
         }
         by_key.push((key, skill));
     }
+    let mut by_key: Vec<(String, BootstrapPythonSkill)> = Vec::new();
     for skill in python_skills {
         add_skill(&mut by_key, to_bootstrap_skill(skill));
     }
@@ -251,10 +251,7 @@ pub(crate) fn resolve_writable_kernel_venv_dir() -> anyhow::Result<PathBuf> {
     if std::fs::create_dir_all(primary.parent().unwrap_or(Path::new("/"))).is_ok() {
         return Ok(primary);
     }
-    if std::env::var("PRIME_AGENT_KERNEL_VENV")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-    {
+    if std::env::var("PRIME_AGENT_KERNEL_VENV").is_ok_and(|v| !v.is_empty()) {
         return Err(anyhow!(
             "couldn't create kernel venv parent directories for {}",
             primary.display()
@@ -635,10 +632,10 @@ pub(crate) async fn bootstrap_venv(
     let uv = ensure_uv()?;
     let python = kernel_venv_python(venv);
     let source_dir = resolve_runtime_source_dir();
-    let runtime_requirement = source_dir
-        .as_ref()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| RUNTIME_REQUIREMENT.to_string());
+    let runtime_requirement = source_dir.as_ref().map_or_else(
+        || RUNTIME_REQUIREMENT.to_string(),
+        |p| p.to_string_lossy().to_string(),
+    );
     let runtime_identity = resolve_runtime_identity();
 
     let venv_str = venv.to_string_lossy().to_string();

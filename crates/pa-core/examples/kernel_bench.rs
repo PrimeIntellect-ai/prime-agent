@@ -32,9 +32,10 @@ use pa_core::kernel::shared::{
 use pa_core::kernel::state_snapshot::{manifest_path_in, snapshot_path_in};
 
 fn skills_dir() -> PathBuf {
-    std::env::var("PA_BENCH_SKILLS_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../skills"))
+    std::env::var("PA_BENCH_SKILLS_DIR").map_or_else(
+        |_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../skills"),
+        PathBuf::from,
+    )
 }
 
 fn bench_python_skills() -> Vec<KernelPythonSkill> {

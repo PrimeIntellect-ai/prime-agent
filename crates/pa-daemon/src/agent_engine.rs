@@ -1057,23 +1057,22 @@ impl AgentSessionEngine {
             pa_core::models::SESSION_MODEL_RESTORE_READINESS_TIMEOUT_MS,
         )
         .await;
-        let (model, fallback_message) = match restored {
-            Some(restored) => (Some((restored.provider, restored.id)), None),
-            None => {
-                // The TS `modelFallbackMessage`: the restore miss is on the
-                // record — the startup chain owns the session, and the
-                // summary publishes what happened (never silent).
-                let fallback = self.startup_chain_model(&registry);
-                let message = match &fallback {
-                    Some(fallback) => format!(
-                        "Could not restore model {provider}/{model_id}. Using {}/{}",
-                        fallback.provider, fallback.id
-                    ),
-                    None => format!("Could not restore model {provider}/{model_id}"),
-                };
-                eprintln!("{message}");
-                (None, Some(message))
-            }
+        let (model, fallback_message) = if let Some(restored) = restored {
+            (Some((restored.provider, restored.id)), None)
+        } else {
+            // The TS `modelFallbackMessage`: the restore miss is on the
+            // record — the startup chain owns the session, and the
+            // summary publishes what happened (never silent).
+            let fallback = self.startup_chain_model(&registry);
+            let message = match &fallback {
+                Some(fallback) => format!(
+                    "Could not restore model {provider}/{model_id}. Using {}/{}",
+                    fallback.provider, fallback.id
+                ),
+                None => format!("Could not restore model {provider}/{model_id}"),
+            };
+            eprintln!("{message}");
+            (None, Some(message))
         };
         *self
             .restored_model
@@ -1588,10 +1587,10 @@ fn artifact_reference(
     artifact_type: &str,
     file_path: &str,
 ) -> Option<Value> {
+    use sha2::{Digest, Sha256};
     if file_path.is_empty() {
         return None;
     }
-    use sha2::{Digest, Sha256};
     let digest = Sha256::new()
         .chain_update(format!("{session_id}\0{artifact_type}\0{file_path}"))
         .finalize();
@@ -1640,10 +1639,10 @@ fn logical_artifact_path(cwd: &str, file_path: &str) -> String {
             return relative;
         }
     }
-    std::path::Path::new(file_path)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| "artifact".to_string())
+    std::path::Path::new(file_path).file_name().map_or_else(
+        || "artifact".to_string(),
+        |name| name.to_string_lossy().to_string(),
+    )
 }
 
 fn now_millis() -> u64 {
@@ -3095,26 +3094,25 @@ impl SessionEngine for AgentSessionEngine {
         // terminal notices). The plain turn records the accepted user
         // message; images ride as multimodal content blocks after the text
         // (TS prompt admission: the text part first, then the image parts).
-        let accepted = match &request.custom_message {
-            Some(custom) => EngineEvent::CustomMessage(custom.clone()),
-            None => {
-                let mut content = vec![json!({ "type": "text", "text": request.message })];
-                for image in &request.images {
-                    let mut block = match serde_json::to_value(image) {
-                        Ok(Value::Object(block)) => Value::Object(block),
-                        _ => continue,
-                    };
-                    if let Some(object) = block.as_object_mut() {
-                        object.insert("type".to_string(), json!("image"));
-                    }
-                    content.push(block);
+        let accepted = if let Some(custom) = &request.custom_message {
+            EngineEvent::CustomMessage(custom.clone())
+        } else {
+            let mut content = vec![json!({ "type": "text", "text": request.message })];
+            for image in &request.images {
+                let mut block = match serde_json::to_value(image) {
+                    Ok(Value::Object(block)) => Value::Object(block),
+                    _ => continue,
+                };
+                if let Some(object) = block.as_object_mut() {
+                    object.insert("type".to_string(), json!("image"));
                 }
-                EngineEvent::UserMessage(json!({
-                    "role": "user",
-                    "content": content,
-                    "timestamp": now_millis(),
-                }))
+                content.push(block);
             }
+            EngineEvent::UserMessage(json!({
+                "role": "user",
+                "content": content,
+                "timestamp": now_millis(),
+            }))
         };
         if !emit(accepted) {
             return;
@@ -3830,9 +3828,9 @@ impl AgentSessionEngine {
                     // TS `_checkCompaction` Case 1 at `agent_end`: a
                     // context-overflow error triggers one compact-and-retry
                     // attempt before the run ends.
-                    let arm = assistant
-                        .map(|assistant| self.run_overflow_compaction(&assistant, emit))
-                        .unwrap_or(OverflowArmRun::NotApplicable);
+                    let arm = assistant.map_or(OverflowArmRun::NotApplicable, |assistant| {
+                        self.run_overflow_compaction(&assistant, emit)
+                    });
                     match arm {
                         OverflowArmRun::RetryTurn => {
                             overflow_retry = true;
@@ -8675,11 +8673,10 @@ impl Drop for KernelEnvOverride {
 /// install).
 #[cfg(test)]
 fn live_kernel_python() -> Option<std::path::PathBuf> {
-    let candidate = std::path::PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = std::path::PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -8689,11 +8686,10 @@ fn live_kernel_python() -> Option<std::path::PathBuf> {
 
 #[cfg(test)]
 fn live_release_dir() -> Option<std::path::PathBuf> {
-    let releases = std::path::PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.local/share/prime-agent/releases"))
-            .unwrap_or_else(|_| "/home/ubuntu/.local/share/prime-agent/releases".to_string()),
-    );
+    let releases = std::path::PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
+        |home| format!("{home}/.local/share/prime-agent/releases"),
+    ));
     let Ok(entries) = std::fs::read_dir(&releases) else {
         eprintln!("no releases dir at {releases:?}; skipping live kernel test");
         return None;
@@ -8884,6 +8880,7 @@ fn run_prompts(
 /// and the demand-build's resolution reads the cached model.
 #[tokio::test]
 async fn get_commands_enumerates_skills_before_the_first_prompt() {
+    use crate::engine::SessionEngine as _;
     let (engine, _dir) = tokio::task::spawn_blocking(|| {
         let _faux = FAUX_TEST_LOCK
             .lock()
@@ -8928,7 +8925,6 @@ async fn get_commands_enumerates_skills_before_the_first_prompt() {
     .expect("engine build join");
     // No prompt ran: the read seam must build the session itself.
     assert!(engine.session.lock().await.is_none());
-    use crate::engine::SessionEngine as _;
     let commands = engine.connection_commands().await;
     assert!(
         engine.session.lock().await.is_some(),
@@ -9287,20 +9283,17 @@ fn assistant_updates_stream_live_while_the_turn_runs() {
         &|| false,
         &mut |event| {
             if let EngineEvent::AssistantUpdate { message, .. } = &event {
-                let text_len = message["content"]
-                    .as_array()
-                    .map(|blocks| {
-                        blocks
-                            .iter()
-                            .map(|block| {
-                                block
-                                    .get("text")
-                                    .and_then(Value::as_str)
-                                    .map_or(0, str::len)
-                            })
-                            .sum()
-                    })
-                    .unwrap_or(0);
+                let text_len = message["content"].as_array().map_or(0, |blocks| {
+                    blocks
+                        .iter()
+                        .map(|block| {
+                            block
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .map_or(0, str::len)
+                        })
+                        .sum()
+                });
                 updates.push((start.elapsed(), text_len));
             }
             true

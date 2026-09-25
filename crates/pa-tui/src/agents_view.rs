@@ -76,6 +76,12 @@ pub struct AgentsViewOptions {
     /// `AgentsViewMode` creates its own `KeybindingsManager`), the same
     /// contract as the session view.
     pub keybindings: crate::keybindings::KeybindingsManager,
+    /// The `showHardwareCursor` setting snapshot the view mounts with (TS
+    /// `AgentsViewMode` constructs its TUI with
+    /// `settingsManager.getShowHardwareCursor()`, default false): the
+    /// hardware cursor is positioned at the search caret for IME every
+    /// frame, but only shown when this is set.
+    pub show_hardware_cursor: bool,
 }
 
 /// The open action the run ended with (TS `AgentsViewRunResult`'s
@@ -401,13 +407,12 @@ impl AgentsViewMode {
         // status message.
         let mut scope_active = false;
         let scoped = match &self.options.scope {
-            Some(scope) if !self.scope_dropped => match scope_to_subtree(&records, scope) {
-                Some(scoped) => {
+            Some(scope) if !self.scope_dropped => {
+                if let Some(scoped) = scope_to_subtree(&records, scope) {
                     scope_active = true;
                     self.scope_depth = scope_depth(&records, scope);
                     Some(scoped)
-                }
-                None => {
+                } else {
                     self.scope_depth = None;
                     self.scope_dropped = true;
                     self.status = Some(
@@ -415,7 +420,7 @@ impl AgentsViewMode {
                     );
                     None
                 }
-            },
+            }
             _ => None,
         };
         self.scope_active = scope_active;
@@ -1269,6 +1274,14 @@ impl AgentsViewMode {
     /// headings count top-level agents only (TS `getDisplayRowsForSection`
     /// / `countRowsBySection`).
     fn render_list(&mut self, width: usize, max_rows: usize) -> Vec<Line> {
+        /// One rendered display entry of the sectioned list (TS
+        /// `DisplayItem`): the spacer between section blocks, a section
+        /// heading, or one row.
+        enum DisplayItem<'a> {
+            Spacer,
+            Heading(Section),
+            Row(&'a AgentsViewRow),
+        }
         if max_rows == 0 {
             return Vec::new();
         }
@@ -1279,14 +1292,6 @@ impl AgentsViewMode {
                 "No sessions match your search."
             };
             return vec![vec![self.theme.fg(ThemeColor::Dim, text.to_string())]];
-        }
-        /// One rendered display entry of the sectioned list (TS
-        /// `DisplayItem`): the spacer between section blocks, a section
-        /// heading, or one row.
-        enum DisplayItem<'a> {
-            Spacer,
-            Heading(Section),
-            Row(&'a AgentsViewRow),
         }
         let layout = build_layout(&self.rows, width);
         // The display-item sequence (TS `displayItems`): each non-empty
@@ -1309,9 +1314,7 @@ impl AgentsViewMode {
         // relevance-ordered run of hits (per-row icons carry the status),
         // not status section blocks. Without a query the sectioned
         // layout stays TS-identical.
-        if !self.query.trim().is_empty() {
-            display.extend(self.rows.iter().map(DisplayItem::Row));
-        } else {
+        if self.query.trim().is_empty() {
             for (section, count) in &counts {
                 if *count == 0 {
                     continue;
@@ -1330,6 +1333,8 @@ impl AgentsViewMode {
                     }
                 }
             }
+        } else {
+            display.extend(self.rows.iter().map(DisplayItem::Row));
         }
         // The viewport (TS `renderSessionRows`): reserve the column header
         // and its spacer, center the slice on the selected row, and clip
@@ -1348,8 +1353,7 @@ impl AgentsViewMode {
             .position(
                 |item| matches!(item, DisplayItem::Row(row) if Some(row.identity.as_str()) == selected_identity),
             )
-            .map(|index| index as isize)
-            .unwrap_or(-1);
+            .map_or(-1, |index| index as isize);
         let anchor = selected_display_index - (visible_rows / 2) as isize;
         let upper = display.len() as isize - visible_rows as isize;
         let start = anchor.min(upper).max(0) as usize;
@@ -1370,8 +1374,7 @@ impl AgentsViewMode {
                     let count = counts
                         .iter()
                         .find(|(count_section, _)| count_section == section)
-                        .map(|(_, count)| *count)
-                        .unwrap_or(0);
+                        .map_or(0, |(_, count)| *count);
                     vec![self.theme.fg(
                         ThemeColor::Muted,
                         truncate_text(&format!("{} ({count})", section_title(*section)), width),
@@ -1582,7 +1585,13 @@ fn truncate_line(line: Line, width: usize) -> Line {
 }
 
 enum Renderer {
-    Terminal(ratatui::Terminal<crate::hyperlinks::LinkBackend>),
+    Terminal {
+        term: ratatui::Terminal<crate::hyperlinks::LinkBackend>,
+        /// The `showHardwareCursor` setting snapshot the surface mounted
+        /// with (TS constructs the agents-view TUI with the live
+        /// `settingsManager.getShowHardwareCursor()`).
+        show_hardware_cursor: bool,
+    },
     Headless {
         width: u16,
         height: u16,
@@ -1596,6 +1605,7 @@ impl Renderer {
         ui_tx: mpsc::UnboundedSender<UiInput>,
         exit_guard: crate::exit_guard::ExitGuard,
         surface_mounted: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+        show_hardware_cursor: bool,
     ) -> Result<Renderer> {
         match ui {
             AgentsViewUiMode::Terminal => {
@@ -1644,16 +1654,23 @@ impl Renderer {
                 // screen is already blank). TS paints the new frame
                 // straight over the old one, so the clear escape must
                 // never reach the pane on its own: queue it with the
-                // cursor show and let the first draw's single flush carry
+                // cursor hide and let the first draw's single flush carry
                 // clear + frame together. A separate clear-and-flush here
                 // shows a blank pane for the whole render gap — a visible
-                // flicker on every surface switch.
+                // flicker on every surface switch. The cursor hides with
+                // the mount (TS `TUI.start` writes hideCursor, never a
+                // show): a shown cursor here sits visible at a stale
+                // position until the first frame decides the visibility,
+                // the exact window the cursor glitch shows in.
                 crossterm::queue!(
                     std::io::stdout(),
                     crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
-                    crossterm::cursor::Show
+                    crossterm::cursor::Hide
                 )?;
-                Ok(Renderer::Terminal(terminal))
+                Ok(Renderer::Terminal {
+                    term: terminal,
+                    show_hardware_cursor,
+                })
             }
             AgentsViewUiMode::Headless(plan) => {
                 let steps = plan.steps;
@@ -1691,16 +1708,27 @@ impl Renderer {
 
     fn draw(&mut self, mode: &mut AgentsViewMode) -> Option<(usize, usize)> {
         match self {
-            Renderer::Terminal(terminal) => {
-                let area = terminal.size().expect("terminal size");
+            Renderer::Terminal {
+                term,
+                show_hardware_cursor,
+            } => {
+                let area = term.size().expect("terminal size");
                 let (lines, cursor) = mode.render_frame(area.width as usize, area.height as usize);
                 crate::hyperlinks::install_frame(&lines);
-                terminal
-                    .draw(|f| {
-                        let area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
-                        let rendered: Vec<ratatui::text::Line<'static>> =
-                            lines.iter().map(crate::markdown::to_ratatui_line).collect();
-                        f.render_widget(ratatui::text::Text::from(rendered), area);
+                // TS cursor control: the hardware cursor is positioned at
+                // the focused caret for IME on every frame, but only shown
+                // when `showHardwareCursor` is on (default off). ratatui's
+                // `set_cursor_position` shows unconditionally, so only the
+                // show case may hand it the caret; the hidden case queues
+                // the bare MoveTo after the paint instead (TS positions
+                // the caret while the cursor stays hidden).
+                let show = *show_hardware_cursor;
+                term.draw(|f| {
+                    let area = ratatui::layout::Rect::new(0, 0, area.width, area.height);
+                    let rendered: Vec<ratatui::text::Line<'static>> =
+                        lines.iter().map(crate::markdown::to_ratatui_line).collect();
+                    f.render_widget(ratatui::text::Text::from(rendered), area);
+                    if show {
                         if let Some((row, col)) = cursor {
                             if row < area.height as usize && col < area.width as usize {
                                 f.set_cursor_position(ratatui::layout::Position::new(
@@ -1708,8 +1736,23 @@ impl Renderer {
                                 ));
                             }
                         }
-                    })
-                    .expect("draw frame");
+                    }
+                })
+                .expect("draw frame");
+                if !show {
+                    if let Some((row, col)) = cursor {
+                        if row < area.height as usize && col < area.width as usize {
+                            // execute! (not queue!): the position write must
+                            // flush now — the paint backend's flush already
+                            // ran inside `draw`, so a queued write would sit
+                            // in the stdout buffer until the next frame.
+                            let _ = crossterm::execute!(
+                                std::io::stdout(),
+                                crossterm::cursor::MoveTo(col as u16, row as u16)
+                            );
+                        }
+                    }
+                }
                 None
             }
             Renderer::Headless {
@@ -1740,7 +1783,14 @@ impl Renderer {
     /// onto the main screen.
     fn finish(self, preserve_alt_screen: bool) -> Vec<String> {
         match self {
-            Renderer::Terminal(_) => {
+            Renderer::Terminal { term, .. } => {
+                // ratatui's `Terminal` drop restores the cursor its last
+                // frame hid (the `hidden_cursor` flag): run the drop
+                // before the handoff's hide so the hide is the final
+                // word — TS `stop(preserveAltScreen)` leaves the cursor
+                // hidden for the surface taking the screen over. The
+                // real-exit arm ends shown for the shell either way.
+                drop(term);
                 if preserve_alt_screen {
                     // The enhanced-key modes release with the raw-mode
                     // bracket (TS `stop` on every exit, handoffs included).
@@ -1781,14 +1831,13 @@ async fn open_roster_link(
     mpsc::UnboundedReceiver<DaemonClientEvent>,
     Vec<Value>,
 )> {
-    let (mut client, mut events) = match link {
-        Some(AgentsViewLink { client, events }) => (client, events),
-        None => {
-            let link = AgentsViewLink::connect(&options.socket_path)
-                .await
-                .with_context(|| "the agents view could not attach to the daemon")?;
-            (link.client, link.events)
-        }
+    let (mut client, mut events) = if let Some(AgentsViewLink { client, events }) = link {
+        (client, events)
+    } else {
+        let link = AgentsViewLink::connect(&options.socket_path)
+            .await
+            .with_context(|| "the agents view could not attach to the daemon")?;
+        (link.client, link.events)
     };
     let roster_subscribe = || DaemonCommand::RosterSubscribe {
         id: None,
@@ -1840,8 +1889,8 @@ fn spawn_saved_catalog_fetch(
     cwd: PathBuf,
     session_dir: Option<PathBuf>,
 ) -> String {
-    let client = client.clone();
     static CATALOG_FETCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let client = client.clone();
     // The id rides the supervisor reader's `daemon_` namespace: the
     // socket-close failure pass (`fail_pending("daemon_", ..)`) must cover
     // the fetch too, or a dead connection leaves the long-running scan's
@@ -1962,7 +2011,13 @@ async fn run_agents_view_surface(
     // teardown must still hand the terminal back whole (the same
     // unwind-guard contract the session surface arms).
     let _surface_restore = crate::exit_restore::SurfaceRestore::armed();
-    let mut renderer = Renderer::setup(ui, ui_tx.clone(), exit_guard.clone(), &surface_mounted)?;
+    let mut renderer = Renderer::setup(
+        ui,
+        ui_tx.clone(),
+        exit_guard.clone(),
+        &surface_mounted,
+        options.show_hardware_cursor,
+    )?;
     // The first frame renders from the live roster the moment the surface
     // mounts (TS `applySessionList(this.rosterStore.summaries(), true)`
     // before its first `requestRender`): the saved-catalog fetch below
@@ -2151,7 +2206,7 @@ async fn run_agents_view_surface(
     // its teardown may take its full drain second while the app simply
     // waits, so the deadline covers only the leaves that end this process.
     let handing_off = mode.opened.is_some() || mode.new_session;
-    if matches!(renderer, Renderer::Terminal(_)) && !handing_off {
+    if matches!(renderer, Renderer::Terminal { .. }) && !handing_off {
         exit_guard.arm_for_exit();
     }
     // A selection hands the pane to the chat it opened (TS `result.type !== "exit"`);
@@ -2204,7 +2259,7 @@ async fn run_agents_view_surface(
             selected_row_identity: opened.as_ref().map(|row| row.selected_row_identity.clone()),
             selected_key: opened.as_ref().map(|row| row.selected_key.clone()),
             opened_rlm_depth: opened.as_ref().and_then(|row| row.rlm_depth),
-            opened_has_children: opened.as_ref().map(|row| row.has_children).unwrap_or(false),
+            opened_has_children: opened.as_ref().is_some_and(|row| row.has_children),
             status_message: opened.as_ref().and_then(|row| row.status_message.clone()),
         },
     })
@@ -2258,6 +2313,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         let row = |title: &str| AgentsViewRow {
             section: Section::Idle,
@@ -2459,6 +2515,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -2485,6 +2542,7 @@ mod tests {
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = roster;
         mode.rebuild_rows();
@@ -2507,6 +2565,7 @@ mod tests {
             selected_key: None,
             status_message: Some(notice.to_string()),
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.rebuild_rows();
         mode
@@ -2847,6 +2906,7 @@ the holder exits.";
             }),
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("s1", "idle", parent_summary("s1")),
@@ -2880,6 +2940,7 @@ the holder exits.";
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -2965,6 +3026,7 @@ the holder exits.";
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::with_user_bindings(cfg),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -3168,6 +3230,7 @@ the holder exits.";
             }),
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -3201,6 +3264,7 @@ the holder exits.";
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
@@ -3313,6 +3377,7 @@ the holder exits.";
             selected_key: None,
             status_message: None,
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.roster = roster;
         mode.rebuild_rows();

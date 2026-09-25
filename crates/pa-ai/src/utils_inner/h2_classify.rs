@@ -60,7 +60,7 @@ pub(crate) fn h2_error_shape(error: &h2::Error) -> H2ErrorShape {
     if error.is_go_away() {
         if error.is_remote() {
             return H2ErrorShape::RemoteGoAway {
-                code: error.reason().map(u32::from).unwrap_or(0),
+                code: error.reason().map_or(0, u32::from),
             };
         }
         if error.is_library() {
@@ -95,9 +95,8 @@ pub(crate) fn classify_h2_shape(shape: &H2ErrorShape) -> H2Failure {
         H2ErrorShape::RemoteReset { reason } => H2Failure::StreamReset {
             nghttp2_code: nghttp2_code_name(*reason),
         },
-        H2ErrorShape::LibraryViolation { .. } => H2Failure::Protocol,
+        H2ErrorShape::LibraryViolation { .. } | H2ErrorShape::Other => H2Failure::Protocol,
         H2ErrorShape::Io => H2Failure::Canceled,
-        H2ErrorShape::Other => H2Failure::Protocol,
     }
 }
 

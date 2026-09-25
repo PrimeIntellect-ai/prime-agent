@@ -356,8 +356,10 @@ impl SessionRegistry {
     ) -> Vec<Arc<ResidentWorker>> {
         let target = std::path::Path::new(session_file)
             .canonicalize()
-            .map(|path| path.to_string_lossy().to_string())
-            .unwrap_or_else(|_| session_file.to_string());
+            .map_or_else(
+                |_| session_file.to_string(),
+                |path| path.to_string_lossy().to_string(),
+            );
         let mut matches = Vec::new();
         for resident in self.list().await {
             let owned = resident
@@ -399,8 +401,7 @@ impl SessionRegistry {
         let mut registrations = self.registrations.lock().await;
         let epoch = registrations
             .get(&registration.active_session_id)
-            .map(|record| record.epoch + 1)
-            .unwrap_or(1);
+            .map_or(1, |record| record.epoch + 1);
         let record = RegistrationRecord {
             registration,
             registered_at: crate::util::now_iso(),

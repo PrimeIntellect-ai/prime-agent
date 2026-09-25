@@ -251,8 +251,9 @@ fn cost_from_config(config: &ModelCostConfig) -> ModelCost {
 }
 
 fn model_inputs(values: Option<&Vec<String>>) -> Vec<ModelInput> {
-    values
-        .map(|items| {
+    values.map_or_else(
+        || vec![ModelInput::Text],
+        |items| {
             items
                 .iter()
                 .map(|item| match item.as_str() {
@@ -260,8 +261,8 @@ fn model_inputs(values: Option<&Vec<String>>) -> Vec<ModelInput> {
                     _ => ModelInput::Text,
                 })
                 .collect()
-        })
-        .unwrap_or_else(|| vec![ModelInput::Text])
+        },
+    )
 }
 
 fn compat_from_value(value: Option<&serde_json::Value>) -> Option<ModelCompat> {
@@ -424,11 +425,10 @@ pub fn load_custom_models(
                 reasoning: model_def.reasoning.unwrap_or(false),
                 thinking_level_map: None,
                 input: model_inputs(model_def.input.as_ref()),
-                cost: model_def
-                    .cost
-                    .as_ref()
-                    .map(cost_from_config)
-                    .unwrap_or_else(|| cost_from_config(&ModelCostConfig::default())),
+                cost: model_def.cost.as_ref().map_or_else(
+                    || cost_from_config(&ModelCostConfig::default()),
+                    cost_from_config,
+                ),
                 context_window: model_def.context_window.unwrap_or(128_000),
                 max_tokens: model_def.max_tokens.unwrap_or(16_384),
                 featured: None,

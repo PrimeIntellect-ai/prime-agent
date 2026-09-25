@@ -77,17 +77,14 @@ fn wait_worker_socket(socket: &Path) {
 fn wait_exit(child: &mut Child, budget: Duration) -> bool {
     let deadline = Instant::now() + budget;
     loop {
-        match child.try_wait().expect("poll worker") {
-            Some(status) => {
-                assert!(status.success(), "worker exited with {status}");
-                return true;
+        if let Some(status) = child.try_wait().expect("poll worker") {
+            assert!(status.success(), "worker exited with {status}");
+            return true;
+        } else {
+            if Instant::now() >= deadline {
+                return false;
             }
-            None => {
-                if Instant::now() >= deadline {
-                    return false;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 }

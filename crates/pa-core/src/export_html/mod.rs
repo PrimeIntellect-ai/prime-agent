@@ -119,9 +119,7 @@ fn generate_html(data: &SessionExportData, theme: &theme::ExportTheme) -> String
 /// Write the export file and return the output path as the caller will
 /// report it (the given path verbatim, or the default name).
 fn write_export(html: &str, session_file: &Path, output_path: Option<&str>) -> Result<String> {
-    let output = output_path
-        .map(str::to_string)
-        .unwrap_or_else(|| default_html_output_path(session_file));
+    let output = output_path.map_or_else(|| default_html_output_path(session_file), str::to_string);
     std::fs::write(&output, html)?;
     Ok(output)
 }

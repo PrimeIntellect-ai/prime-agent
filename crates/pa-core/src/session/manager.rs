@@ -129,6 +129,7 @@ fn parses_as_json(line: &[u8]) -> bool {
 /// A bounded tail read gates the full repair scan: clean opens stay O(window).
 fn tail_looks_damaged(target_path: &Path) -> bool {
     use std::io::Read;
+    use std::io::Seek;
     let Ok(mut file) = std::fs::File::open(target_path) else {
         return false;
     };
@@ -140,7 +141,6 @@ fn tail_looks_damaged(target_path: &Path) -> bool {
     }
     let window_bytes = size.min(REPAIR_SUSPICION_WINDOW_BYTES);
     let mut window = vec![0u8; window_bytes];
-    use std::io::Seek;
     if file
         .seek(std::io::SeekFrom::Start((size - window_bytes) as u64))
         .is_err()
@@ -388,18 +388,15 @@ fn resolve_dropped_ancestor(
             // child, memoized for no one else.
             return Some(id.clone());
         }
-        match dropped_parent.get(id.as_str()) {
-            Some(next) => {
-                path.push(id.clone());
-                current.clone_from(next);
+        if let Some(next) = dropped_parent.get(id.as_str()) {
+            path.push(id.clone());
+            current.clone_from(next);
+        } else {
+            let answer = Some(id.clone());
+            for node in path {
+                resolved.insert(node, answer.clone());
             }
-            None => {
-                let answer = Some(id.clone());
-                for node in path {
-                    resolved.insert(node, answer.clone());
-                }
-                return answer;
-            }
+            return answer;
         }
     }
     // The chain ends at a null parent: every node on it re-links to the
@@ -961,17 +958,14 @@ impl SessionManager {
                 self.leaf_id = Some(id.to_string());
             }
             if let FileEntry::Label { payload, .. } = entry {
-                match &payload.label {
-                    Some(label) => {
-                        self.labels_by_id
-                            .insert(payload.target_id.clone(), label.clone());
-                        self.label_timestamps_by_id
-                            .insert(payload.target_id.clone(), entry.timestamp().to_string());
-                    }
-                    None => {
-                        self.labels_by_id.remove(&payload.target_id);
-                        self.label_timestamps_by_id.remove(&payload.target_id);
-                    }
+                if let Some(label) = &payload.label {
+                    self.labels_by_id
+                        .insert(payload.target_id.clone(), label.clone());
+                    self.label_timestamps_by_id
+                        .insert(payload.target_id.clone(), entry.timestamp().to_string());
+                } else {
+                    self.labels_by_id.remove(&payload.target_id);
+                    self.label_timestamps_by_id.remove(&payload.target_id);
                 }
             }
         }
@@ -1613,17 +1607,14 @@ impl SessionManager {
         label: Option<&str>,
         timestamp: &str,
     ) {
-        match label {
-            Some(label) => {
-                self.labels_by_id
-                    .insert(target_id.to_string(), label.to_string());
-                self.label_timestamps_by_id
-                    .insert(target_id.to_string(), timestamp.to_string());
-            }
-            None => {
-                self.labels_by_id.remove(target_id);
-                self.label_timestamps_by_id.remove(target_id);
-            }
+        if let Some(label) = label {
+            self.labels_by_id
+                .insert(target_id.to_string(), label.to_string());
+            self.label_timestamps_by_id
+                .insert(target_id.to_string(), timestamp.to_string());
+        } else {
+            self.labels_by_id.remove(target_id);
+            self.label_timestamps_by_id.remove(target_id);
         }
     }
 

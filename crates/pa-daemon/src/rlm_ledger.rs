@@ -162,7 +162,6 @@ fn parse_ledger_line(line: &str, index: usize) -> Result<Option<LedgerRecord>> {
     let child_id = || str_field(&record, "childId");
     let child = || str_field(&record, "child");
     match op {
-        "meta" => Ok(None),
         "spawn" => {
             let (Some(child_id), Some(parent), Some(child), Some(name)) = (
                 child_id(),
@@ -596,7 +595,7 @@ impl RlmSpawnLedger {
         for edge in &matching {
             match usage {
                 Some(usage) => {
-                    self.append_delete_with_usage(&edge.child_id, &edge.child, reason, usage)?
+                    self.append_delete_with_usage(&edge.child_id, &edge.child, reason, usage)?;
                 }
                 None => self.append_delete(&edge.child_id, &edge.child, reason)?,
             }
@@ -891,30 +890,27 @@ impl RlmSpawnLedger {
                     name,
                 } => {
                     let key = edge_key(&child_id, &child);
-                    match state.index.get(&key).copied() {
-                        Some(at) => {
-                            state.edges[at] = RlmLedgerEdge {
-                                child_id,
-                                parent,
-                                child,
-                                depth,
-                                name,
-                                deleted: None,
-                                deleted_usage: None,
-                            };
-                        }
-                        None => {
-                            state.index.insert(key.clone(), state.edges.len());
-                            state.edges.push(RlmLedgerEdge {
-                                child_id,
-                                parent,
-                                child,
-                                depth,
-                                name,
-                                deleted: None,
-                                deleted_usage: None,
-                            });
-                        }
+                    if let Some(at) = state.index.get(&key).copied() {
+                        state.edges[at] = RlmLedgerEdge {
+                            child_id,
+                            parent,
+                            child,
+                            depth,
+                            name,
+                            deleted: None,
+                            deleted_usage: None,
+                        };
+                    } else {
+                        state.index.insert(key.clone(), state.edges.len());
+                        state.edges.push(RlmLedgerEdge {
+                            child_id,
+                            parent,
+                            child,
+                            depth,
+                            name,
+                            deleted: None,
+                            deleted_usage: None,
+                        });
                     }
                 }
                 LedgerRecord::Rename {
@@ -1131,7 +1127,7 @@ fn file_identity(path: &Path) -> Result<Option<FileIdentity>> {
 }
 
 fn is_file(path: &Path) -> bool {
-    fs::metadata(path).map(|m| m.is_file()).unwrap_or(false)
+    fs::metadata(path).is_ok_and(|m| m.is_file())
 }
 
 /// One legacy `rlm-subagents.jsonl` registry entry (the pre-ledger topology
@@ -1958,7 +1954,7 @@ mod tests {
         // (its grandchild's fold) - inert: no row exists at a tombstoned
         // child's path to consume it. Live descendants never enter.
         assert!(
-            (bucket.get(&child_key).map(|d| d.cost).unwrap_or(0.0) - 0.10).abs() < 1e-9,
+            (bucket.get(&child_key).map_or(0.0, |d| d.cost) - 0.10).abs() < 1e-9,
             "the tombstoned intermediate keeps its inert TS key"
         );
         assert_eq!(bucket.len(), 2, "live descendants contribute no bucket");
