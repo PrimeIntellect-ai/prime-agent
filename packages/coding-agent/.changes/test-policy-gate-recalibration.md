@@ -1,0 +1,1 @@
+- `npm run check:test-policy` now scans test code embedded in generated child-process template strings, and `scripts/test-policy-baseline.json` freezes the pre-policy matches so they can only go down.
