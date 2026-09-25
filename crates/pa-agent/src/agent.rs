@@ -498,6 +498,7 @@ impl AgentInner {
         self: &Arc<Self>,
         shared: &Shared,
         skip_initial_steering_poll: bool,
+        model_override: Option<&AgentModelOverride>,
     ) -> AgentLoopConfig {
         let skip_poll = Arc::new(std::sync::Mutex::new(skip_initial_steering_poll));
         let steering_inner = Arc::clone(self);
@@ -527,13 +528,12 @@ impl AgentInner {
 
         // A routed run serves every LLM request on the override model with
         // its own thinking level (TS `createLoopConfig`'s `modelOverride`
-        // reads); the agent state keeps identifying the session model.
-        let override_config = self.model_override.lock().unwrap().clone();
-        let (model, reasoning) = match &override_config {
-            Some(override_config) => (
-                override_config.model.clone(),
-                override_config.thinking_level,
-            ),
+        // reads); the agent state keeps identifying the session model. The
+        // override is the run's own snapshot (read once per run, so a
+        // concurrent `set_model_override` cannot split the run's model from
+        // its request fields).
+        let (model, reasoning) = match model_override {
+            Some(routed) => (routed.model.clone(), routed.thinking_level),
             None => (shared.state.model.clone(), shared.state.thinking_level),
         };
         let mut config = AgentLoopConfig::new(model, Arc::clone(&self.convert_to_llm));
@@ -560,21 +560,23 @@ impl AgentInner {
     /// Port of `runWithLifecycle`.
     async fn run_with_lifecycle<F, Fut>(self: &Arc<Self>, executor: F) -> anyhow::Result<()>
     where
-        F: FnOnce(AbortSignal) -> Fut,
+        F: FnOnce(AbortSignal, Option<AgentModelOverride>) -> Fut,
         Fut: std::future::Future<Output = anyhow::Result<()>>,
     {
         let controller = AbortController::new();
         let (idle_tx, _idle_rx) = watch::channel(false);
-        // The model that serves the run when it starts tags its failures
-        // (TS `ActiveRun.model`); even a mid-run override change cannot
-        // re-attribute an in-flight request to a model that never saw it.
-        // Read before taking the run lock: the shared lock awaits, and a
-        // std guard must never ride it.
+        // The run's model-override snapshot, read ONCE (TS `ActiveRun.model`
+        // + `createLoopConfig`'s `modelOverride` read the same value in the
+        // same synchronous block): every LLM request of the run, and its
+        // failure attribution, follow this one snapshot, so a concurrent
+        // `set_model_override` cannot split the run's model from its
+        // request fields or re-attribute an in-flight request to a model
+        // that never saw it. Read before taking the run lock: the shared
+        // lock awaits, and a std guard must never ride it.
+        let run_override: Option<AgentModelOverride> = self.model_override.lock().unwrap().clone();
         let run_model = {
             let shared = self.shared.lock().await;
-            self.model_override
-                .lock()
-                .unwrap()
+            run_override
                 .as_ref()
                 .map_or_else(|| shared.state.model.clone(), |routed| routed.model.clone())
         };
@@ -598,7 +600,7 @@ impl AgentInner {
             shared.state.error_message = None;
         }
 
-        let result = executor(run_signal).await;
+        let result = executor(run_signal, run_override).await;
         if let Err(error) = &result {
             let aborted = self
                 .current_signal()
@@ -629,12 +631,12 @@ impl AgentInner {
         skip_initial_steering_poll: bool,
     ) -> anyhow::Result<()> {
         let inner = Arc::clone(self);
-        self.run_with_lifecycle(|signal| async move {
+        self.run_with_lifecycle(|signal, model_override| async move {
             let (context, config) = {
                 let shared = inner.shared.lock().await;
                 (
                     Self::snapshot_locked(&shared),
-                    inner.loop_config(&shared, skip_initial_steering_poll),
+                    inner.loop_config(&shared, skip_initial_steering_poll, model_override.as_ref()),
                 )
             };
             let emit: AgentEventSink = {
@@ -660,12 +662,12 @@ impl AgentInner {
 
     async fn run_continuation(self: &Arc<Self>) -> anyhow::Result<()> {
         let inner = Arc::clone(self);
-        self.run_with_lifecycle(|signal| async move {
+        self.run_with_lifecycle(|signal, model_override| async move {
             let (context, config) = {
                 let shared = inner.shared.lock().await;
                 (
                     Self::snapshot_locked(&shared),
-                    inner.loop_config(&shared, false),
+                    inner.loop_config(&shared, false, model_override.as_ref()),
                 )
             };
             let emit: AgentEventSink = {

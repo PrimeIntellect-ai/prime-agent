@@ -703,6 +703,11 @@ async fn start_kernel_impl(
             &bootstrap_code,
             ExecuteOptions {
                 signal: Some(dispose_signal.clone()),
+                // The skill-import report rides stdout at the END of the
+                // cell (after any module-init noise): keep the cap high
+                // enough that imported skills' import-time output cannot
+                // push it out of the buffer.
+                max_output_chars: Some(262_144),
                 ..Default::default()
             },
         )

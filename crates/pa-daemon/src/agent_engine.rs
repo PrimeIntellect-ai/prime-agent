@@ -464,6 +464,23 @@ impl AgentSessionEngine {
         let route = self
             .resolve_image_turn_route(carries_images)
             .map_err(|error| format!("{error:#}"))?;
+        let route = match route {
+            Some(resolved) => {
+                // The daemon's model allowlist is fail-closed on every model
+                // the session runs on (the switch, child-model, and failover
+                // paths all assert it): a routed image model excluded by
+                // `allowedModels` must not bypass it.
+                let selector = format!("{}/{}", resolved.model.provider, resolved.model.id);
+                let allowlist = crate::model_allowlist::load(&self.cwd(), &self.config.agent_dir);
+                if let Err(refusal) = crate::model_allowlist::assert_allowed(&allowlist, &selector)
+                {
+                    self.note_model_refused("image_route", &selector);
+                    return Err(format!("{refusal:#}"));
+                }
+                Some(resolved)
+            }
+            None => None,
+        };
         let armed = match route {
             Some(resolved) => {
                 let agent_model = json_round_trip(&resolved.model)
@@ -487,6 +504,18 @@ impl AgentSessionEngine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = armed;
         Ok(())
+    }
+
+    /// Whether an injected custom row attaches image blocks (TS
+    /// `messageCarriesImages` checks every delivered message's content, the
+    /// custom rows included): injected rows route like user turns.
+    fn custom_message_carries_images(message: &pa_types::session::CustomMessage) -> bool {
+        match &message.content {
+            pa_types::ai::UserContent::Blocks(blocks) => blocks
+                .iter()
+                .any(|block| matches!(block, pa_types::ai::UserContentBlock::Image(_))),
+            pa_types::ai::UserContent::Text(_) => false,
+        }
     }
 
     /// Apply the armed route to a model turn (after the session build, so
@@ -3322,7 +3351,7 @@ impl SessionEngine for AgentSessionEngine {
             TurnPrompt::User { images, batch, .. } => {
                 !images.is_empty() || batch.iter().any(|row| !row.images.is_empty())
             }
-            TurnPrompt::Injected(_) => false,
+            TurnPrompt::Injected(message) => custom_message_carries_images(message),
         };
         if let Err(refusal) = self.arm_image_turn_route(carries_images) {
             emit(EngineEvent::Done(Err(refusal)));
@@ -3475,7 +3504,15 @@ impl AgentSessionEngine {
         // that cannot serve them.
         let (candidates, serving_context_window) = match self.armed_image_route() {
             Some(route) => (
-                self.failover_candidates(&route.target.model),
+                // The routed episode's failover chain serves the SAME image
+                // capability (TS `_resolveBackupModel` rejects a text-only
+                // backup for a routed run): a same-id model without image
+                // input would silently downgrade the turn's images to
+                // placeholders.
+                self.failover_candidates(&route.target.model)
+                    .into_iter()
+                    .filter(|candidate| candidate.input.contains(&pa_types::ai::ModelInput::Image))
+                    .collect(),
                 route.target.model.context_window,
             ),
             None => (self.failover_candidates(&model), model.context_window),
@@ -3644,12 +3681,25 @@ impl AgentSessionEngine {
                         // The stream's provider target follows the switch
                         // (the same slot `set_model` swaps): the retried
                         // request hits the switched-to provider with its
-                        // resolved key.
+                        // resolved key. A routed episode keeps its clamped
+                        // tier (the route clamped the session's `priority`
+                        // down for a model without fast mode; the failover
+                        // provider must not un-clamp it), and the agent's
+                        // per-run override follows the switched-to model
+                        // (TS `_handleBackupModelRetry` moves the override
+                        // to the backup; the primary's route restores it).
+                        let armed = self.armed_image_route();
                         {
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
                             *target = Some(ProviderTarget {
-                service_tier: *self.service_tier.read().expect("service tier lock"),
+                                service_tier: match &armed {
+                                    Some(route) => route.target.service_tier,
+                                    None => *self
+                                        .service_tier
+                                        .read()
+                                        .expect("service tier lock"),
+                                },
                                 api_key: self.resolve_request_api_key(&next),
                                 model: next.clone(),
                             });
@@ -3658,6 +3708,16 @@ impl AgentSessionEngine {
                         agent
                             .set_thinking_level(map_thinking_level(clamped))
                             .await;
+                        if let Some(route) = &armed {
+                            let agent_model = json_round_trip(&next)
+                                .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
+                            agent.set_model_override(Some(
+                                pa_agent::agent::AgentModelOverride {
+                                    model: agent_model,
+                                    thinking_level: map_thinking_level(clamped),
+                                },
+                            ));
+                        }
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
                             session.append_model_change(&next.provider, &next.id)?;
@@ -3692,6 +3752,13 @@ impl AgentSessionEngine {
                         // state).
                         agent.set_model(agent_model).await;
                         agent.set_thinking_level(session_thinking).await;
+                        // A routed episode restores its override with the
+                        // primary (the failover switch moved it to the
+                        // backup; the episode keeps serving the routed
+                        // model).
+                        if let Some(route) = self.armed_image_route() {
+                            agent.set_model_override(Some(route.agent_override));
+                        }
                         if let Some(persistence) = persistence {
                             let mut session = persistence.lock().await;
                             session.append_model_change(

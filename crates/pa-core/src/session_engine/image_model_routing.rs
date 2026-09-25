@@ -12,17 +12,16 @@
 
 use std::sync::Arc;
 
-use pa_agent::types::{Model, ThinkingLevel};
-
 use crate::models::ResolvedImageModel;
 
 /// The routing decision for one dispatched batch (TS
-/// `resolveImageModelOverride` over the host's settings + registry):
-/// `Ok(None)` when the batch does not route, `Err` the actionable refusal
-/// that fails the turn.
-pub type ImageRouteDecisionFn = Arc<
-    dyn Fn(bool, &Model, ThinkingLevel) -> Result<Option<ResolvedImageModel>, String> + Send + Sync,
->;
+/// `resolveImageModelOverride` over the host's session model, settings,
+/// and registry): `Ok(None)` when the batch does not route, `Err` the
+/// actionable refusal that fails the turn. The host owns the
+/// session-model and per-request-field reads (the agent-state model
+/// descriptor is lossy - it carries no input modalities).
+pub type ImageRouteDecisionFn =
+    Arc<dyn Fn(bool) -> Result<Option<ResolvedImageModel>, String> + Send + Sync>;
 
 /// Swap the host's serving target to the routed image model, or restore
 /// the session target (`None`). Called with the fresh decision of every

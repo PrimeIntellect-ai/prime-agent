@@ -245,10 +245,14 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
     // image-attaching batches on a session model without image input
     // route to the configured image model or fail the turn with the
     // actionable refusal naming the setting.
+    // The routing decision reads the resolved session model and the
+    // requested thinking level (both fixed at build for a headless run).
     let image_model_router = headless_image_model_router(
         provider_target,
         config.cwd.clone(),
         config.agent_dir.clone(),
+        model.clone(),
+        resolve_thinking_level(config, &model),
     );
     let agent_model: AgentModel = json_round_trip(&model).ok_or("model conversion failed")?;
 
@@ -370,52 +374,45 @@ fn headless_image_model_router(
     >,
     cwd: std::path::PathBuf,
     agent_dir: std::path::PathBuf,
+    session_model: pa_types::ai::Model,
+    thinking_level: pa_types::ai::ModelThinkingLevel,
 ) -> pa_core::session_engine::image_model_routing::ImageModelRouter {
     let session_target = provider_target
         .read()
         .expect("provider target lock")
         .clone();
-    // The decide closure takes its own copy; the swap closure moves the
-    // original (the last use).
+    // The decide closure takes its own copies; the swap closure moves the
+    // originals (the last uses).
+    let decide_cwd = cwd.clone();
     let decide_agent_dir = agent_dir.clone();
-    let decide = {
-        std::sync::Arc::new(
-            move |carries_images: bool,
-                  session_model: &AgentModel,
-                  thinking_level: pa_agent::types::ThinkingLevel| {
-                if !carries_images {
-                    return Ok(None);
-                }
-                let session_model: pa_types::ai::Model = json_round_trip(session_model)
-                    .ok_or_else(|| "model conversion failed".to_string())?;
-                let settings = pa_core::settings::SettingsManager::create(&cwd, &decide_agent_dir);
-                let image_model_reference = settings.get_image_model();
-                let block_images = settings.get_block_images();
-                let auth = pa_core::auth::AuthStorage::create(&decide_agent_dir);
-                let mut registry = pa_core::models::ModelRegistry::create(
-                    auth,
-                    decide_agent_dir.join("models.json"),
-                );
-                registry.load_private_authorization_from_cache();
-                let available: Vec<pa_types::ai::Model> =
-                    registry.get_available().into_iter().cloned().collect();
-                pa_core::models::resolve_image_model_override(
-                    &pa_core::models::ImageModelRoutingInputs {
-                        session_model: &session_model,
-                        thinking_level:
-                            pa_core::session_engine::provider_adapter::model_thinking_level(
-                                thinking_level,
-                            ),
-                        service_tier: None,
-                        image_model_reference: image_model_reference.as_deref(),
-                        available_models: &available,
-                        has_configured_auth: &|model| registry.has_configured_auth(model),
-                        block_images,
-                    },
-                )
-            },
-        )
-    };
+    let decide = std::sync::Arc::new(
+        move |carries_images: bool| -> Result<Option<pa_core::models::ResolvedImageModel>, String> {
+            if !carries_images {
+                return Ok(None);
+            }
+            let settings =
+                pa_core::settings::SettingsManager::create(&decide_cwd, &decide_agent_dir);
+            let image_model_reference = settings.get_image_model();
+            let block_images = settings.get_block_images();
+            let auth = pa_core::auth::AuthStorage::create(&decide_agent_dir);
+            let mut registry =
+                pa_core::models::ModelRegistry::create(auth, decide_agent_dir.join("models.json"));
+            registry.load_private_authorization_from_cache();
+            let available: Vec<pa_types::ai::Model> =
+                registry.get_available().into_iter().cloned().collect();
+            pa_core::models::resolve_image_model_override(
+                &pa_core::models::ImageModelRoutingInputs {
+                    session_model: &session_model,
+                    thinking_level,
+                    service_tier: None,
+                    image_model_reference: image_model_reference.as_deref(),
+                    available_models: &available,
+                    has_configured_auth: &|model| registry.has_configured_auth(model),
+                    block_images,
+                },
+            )
+        },
+    );
     let swap_target = {
         let provider_target = std::sync::Arc::clone(&provider_target);
         std::sync::Arc::new(move |route: Option<&pa_core::models::ResolvedImageModel>| {

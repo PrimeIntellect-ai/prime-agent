@@ -255,9 +255,7 @@ impl AgentSession {
             return Ok(());
         };
         let carries_images = !images.is_empty() || batch.iter().any(|row| !row.images.is_empty());
-        let state = self.agent.state().await;
-        let route = (router.decide)(carries_images, &state.model, state.thinking_level)
-            .map_err(anyhow::Error::msg)?;
+        let route = (router.decide)(carries_images).map_err(anyhow::Error::msg)?;
         match &route {
             Some(resolved) => {
                 (router.swap_target)(Some(resolved));
@@ -814,9 +812,21 @@ impl AgentSession {
                 };
                 prompt_messages.push(user_prompt_message(&row_text, &row.images));
             }
-            self.agent
+            if let Err(error) = self
+                .agent
                 .prompt(pa_agent::agent::AgentPromptInput::Messages(prompt_messages))
-                .await?;
+                .await
+            {
+                // A concurrent admission won the agent's run slot: this
+                // prompt never started, so its route must not survive (the
+                // winner keeps its own fresh decision). TS decides per
+                // prepared action inside the same commit fence.
+                if let Some(router) = self.image_model_router.as_ref() {
+                    (router.swap_target)(None);
+                    self.agent.set_model_override(None);
+                }
+                return Err(error);
+            }
         }
         Ok(PromptOutcome::Prompt)
     }

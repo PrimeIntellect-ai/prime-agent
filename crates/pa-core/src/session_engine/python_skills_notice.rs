@@ -35,10 +35,26 @@ pub type UnavailablePythonSkills = BTreeMap<String, String>;
 /// Extract the unavailable-skill report a bootstrap cell printed, or
 /// `None` when the marker is absent, the JSON is malformed or not an
 /// object, or no entry carries a non-empty error (TS
-/// `parseUnavailablePythonSkills`).
+/// `parseUnavailablePythonSkills`). Every marker occurrence is tried from
+/// the LAST to the first: skill imports run arbitrary module
+/// initialization, and an imported skill printing the marker first must
+/// not swallow the real report (the remainder after the genuine marker
+/// parses as JSON; the remainder after a fake one does not).
 pub fn parse_unavailable_python_skills(stdout: &str) -> Option<UnavailablePythonSkills> {
-    let at = stdout.find(crate::kernel::PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER)?;
-    let raw = stdout[at + crate::kernel::PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER.len()..].trim();
+    let marker = crate::kernel::PYTHON_SKILL_IMPORT_ERROR_REPORT_MARKER;
+    let mut at = stdout.rfind(marker);
+    while let Some(found) = at {
+        let raw = stdout[found + marker.len()..].trim();
+        if let Some(errors) = parse_unavailable_python_skills_json(raw) {
+            return Some(errors);
+        }
+        at = stdout[..found].rfind(marker);
+    }
+    None
+}
+
+/// The report payload behind one marker occurrence.
+fn parse_unavailable_python_skills_json(raw: &str) -> Option<UnavailablePythonSkills> {
     let parsed: serde_json::Map<String, serde_json::Value> = serde_json::from_str(raw).ok()?;
     let mut errors = UnavailablePythonSkills::new();
     for (name, error) in parsed {
@@ -169,6 +185,26 @@ mod tests {
                     .into_iter()
                     .collect()
             )
+        );
+    }
+
+    #[test]
+    fn a_fake_marker_from_a_skill_import_cannot_swallows_the_report() {
+        // An imported skill prints the marker first (module-init noise); the
+        // genuine report after it still parses.
+        let stdout = format!("{MARKER}garbage-not-json\nnoise\n{MARKER}{{\"edit\":\"boom\"}}");
+        assert_eq!(
+            parse_unavailable_python_skills(&stdout),
+            Some(
+                [("edit".to_string(), "boom".to_string())]
+                    .into_iter()
+                    .collect()
+            )
+        );
+        // Only the fake marker present: no report.
+        assert_eq!(
+            parse_unavailable_python_skills(&format!("{MARKER}garbage-not-json")),
+            None
         );
     }
 
