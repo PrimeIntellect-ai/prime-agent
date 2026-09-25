@@ -195,10 +195,10 @@ mod tests {
     use super::*;
     use crate::types::{
         AssistantContent, AssistantMessage, ImageContent, TextContent, ThinkingContent, ToolCall,
-        ToolResultMessage, UserMessage, UserMessageContent, UserOrToolContent, Usage,
+        ToolResultMessage, Usage, UserMessage, UserMessageContent, UserOrToolContent,
     };
-    use serde_json::Map;
     use serde_json::json;
+    use serde_json::Map;
 
     fn test_model(context_window: u64, max_tokens: u64) -> Model {
         serde_json::from_value(json!({

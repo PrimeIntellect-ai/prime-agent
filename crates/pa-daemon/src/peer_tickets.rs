@@ -22,11 +22,11 @@ use pa_types::daemon::{
     DaemonPeerTransportTicket, DaemonWorkerCommand, DaemonWorkerLifecycle, DaemonWorkerPeerGrant,
 };
 
-use serde_json::Map;
 use crate::protocol::{response_failure, response_success, DaemonResponse};
 use crate::registry::ResidentWorker;
 use crate::supervisor::Supervisor;
 use crate::util;
+use serde_json::Map;
 
 /// TS `PEER_TRANSPORT_GRANT_TTL_MS`: how long a minted grant stays valid.
 pub(crate) const PEER_TRANSPORT_GRANT_TTL_MS: u64 = 10_000;

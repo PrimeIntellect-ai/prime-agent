@@ -657,9 +657,9 @@ pub fn compute_cut(session: &SessionManager, keep_recent_tokens: u64) -> (CutPoi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Map;
     use pa_types::ai::{AssistantMessage, UserContent};
     use pa_types::session::EntryBase;
+    use serde_json::Map;
 
     fn session_with_turns(cwd: &std::path::Path, turns: usize) -> SessionManager {
         let mut session = SessionManager::in_memory(cwd);

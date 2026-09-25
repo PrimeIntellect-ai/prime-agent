@@ -1105,8 +1105,8 @@ mod tests {
         let rows = crate::agents_view_forest::build_rows(
             &records,
             None,
-            &Default::default(),
-            &Default::default(),
+            &HashSet::default(),
+            &HashMap::default(),
             None,
         );
         let age = rows
