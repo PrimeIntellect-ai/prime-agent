@@ -7497,17 +7497,6 @@ impl SessionUi {
             self.handle_clipboard_image_paste(view).await;
             return Ok(());
         }
-        // The heartbeats-open action (default ctrl+r, TS the editor's
-        // `app.heartbeats.open` registration): open the `/heartbeats`
-        // management view from anywhere in the session.
-        if view
-            .editor
-            .keybindings()
-            .matches(&id, "app.heartbeats.open")
-        {
-            self.open_heartbeats_view(view);
-            return Ok(());
-        }
         if view.editor.keybindings().matches(&id, "app.input.clear") {
             // The completion surface consumes Esc: the open dropdown
             // closes, and a parked request (Tab before the input-idle

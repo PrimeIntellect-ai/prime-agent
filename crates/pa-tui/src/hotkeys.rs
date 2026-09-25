@@ -59,7 +59,6 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
     let select_model = key_display(kb, "app.model.select");
     let expand_tools = key_display(kb, "app.tools.expand");
     let focus_subagents = key_display(kb, "app.subagents.focus");
-    let manage_heartbeats = key_display(kb, "app.heartbeats.open");
     let external_editor = key_display(kb, "app.editor.external");
     let prompt_stash = key_display(kb, "app.prompt.stash");
     let follow_up = key_display(kb, "app.message.followUp");
@@ -136,7 +135,6 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
 | `{select_model}` | Open model selector |
 | `{expand_tools}` | Cycle overview → thinking + diffs → all output |
 | `{focus_subagents}` | Focus activity (←/→ select group, Enter open) |
-| `{manage_heartbeats}` | Manage heartbeats |
 | `{external_editor}` | Edit message in external editor |
 | `{prompt_stash}` | Stash or restore draft prompt |
 | `{follow_up}` | Queue follow-up message |
