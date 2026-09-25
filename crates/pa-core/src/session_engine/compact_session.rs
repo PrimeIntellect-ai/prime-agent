@@ -2431,6 +2431,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: Some(&aux),
+                summary_delta: None,
             },
         )
         .await
@@ -2478,6 +2479,7 @@ mod tests {
                 abort: None,
                 harness_digest: None,
                 auxiliary: Some(&aux),
+                summary_delta: None,
             },
         )
         .await
