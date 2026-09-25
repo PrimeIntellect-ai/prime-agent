@@ -120,6 +120,12 @@ pub fn worker_launch_env(
 }
 
 /// Build the worker create payload for a durable create command.
+///
+/// # Panics
+///
+/// Panics only on an internal invariant violation: the freshly built
+/// payload not being a JSON object (the `json!` literal always is, so the
+/// panic is not reachable in practice).
 pub fn create_command_payload(durable: &DurableDaemonCreateCommand) -> Value {
     let mut payload = json!({ "type": "create" });
     let object = payload.as_object_mut().expect("object literal");
@@ -136,6 +142,13 @@ pub fn create_command_payload(durable: &DurableDaemonCreateCommand) -> Value {
 }
 
 /// Validate a persisted descriptor against this supervisor socket.
+///
+/// # Errors
+///
+/// Returns an error when the descriptor has an unsupported version,
+/// belongs to another supervisor socket, or is missing required fields
+/// (worker id, pid, socket path, authentication token, or root active
+/// session id).
 pub fn validate_descriptor(
     descriptor: &WorkerDescriptor,
     supervisor_socket_path: &Path,
@@ -196,6 +209,13 @@ pub fn descriptor_dir(agent_dir: &Path, socket_path: &Path) -> PathBuf {
 }
 
 /// Write a file atomically with 0600 permissions (port of writeFileAtomicSync).
+///
+/// # Errors
+///
+/// Returns an error when the parent directory cannot be created, or when
+/// creating, writing, flushing, or syncing the temp file fails, or when
+/// the final rename onto `path` fails; the 0600 restriction is best
+/// effort and never fails the call.
 pub fn write_file_atomic(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -215,6 +235,13 @@ pub fn write_file_atomic(path: &Path, content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Persist the worker descriptor atomically with a fresh `updated_at`
+/// stamp.
+///
+/// # Errors
+///
+/// Returns an error when the descriptor cannot be serialized or the
+/// atomic write to `path` fails.
 pub fn persist_worker(path: &Path, descriptor: &WorkerDescriptor) -> Result<()> {
     let mut descriptor = descriptor.clone();
     descriptor.updated_at = crate::util::now_iso();
@@ -267,6 +294,12 @@ pub fn load_supervisor_config(
     Some(config)
 }
 
+/// Persist the supervisor config atomically.
+///
+/// # Errors
+///
+/// Returns an error when the config cannot be serialized or the atomic
+/// write to `path` fails.
 pub fn persist_supervisor_config(path: &Path, config: &PersistedSupervisorConfig) -> Result<()> {
     write_file_atomic(path, &serde_json::to_string_pretty(config)?)
 }

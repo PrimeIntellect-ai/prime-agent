@@ -136,6 +136,11 @@ pub trait StatusSession: Send + Sync {
     fn status_next_sequence(&mut self) -> u64;
     /// Persist a settled verdict as an `agent_status` session entry (TS
     /// `sessionManager.appendAgentStatus`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the verdict record cannot be serialized or
+    /// persisted; a session without a store answers `Ok(())`.
     fn status_append_agent_status(&mut self, status: &PersistedAgentStatus) -> anyhow::Result<()>;
     /// The latest persisted verdict, if the session ever recorded one.
     fn status_latest_agent_status(&self) -> Option<PersistedAgentStatus>;

@@ -80,6 +80,14 @@ pub struct CommandRecoveryJournal {
 }
 
 impl CommandRecoveryJournal {
+    /// Open the journal at `path` (creating the parent directory as needed)
+    /// and load the pending receipts from any existing records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the parent directory cannot be created; a
+    /// missing journal loads as empty, and the record load itself never
+    /// errors (lines truncated by a crash are skipped).
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -103,6 +111,12 @@ impl CommandRecoveryJournal {
 
     /// Record durable receipt before dispatch. Returns the prior state when the
     /// command was already journaled.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the receipt record cannot be appended (the
+    /// parent directory, the journal open, the serialization, the write,
+    /// or the sync fails).
     pub fn begin(
         &mut self,
         client_id: &str,
@@ -133,6 +147,14 @@ impl CommandRecoveryJournal {
         Ok(None)
     }
 
+    /// Record the settled command result; a later replay of the command
+    /// answers from it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no receipt was journaled for the command (a
+    /// result cannot be recorded first), when the result record cannot be
+    /// appended, or when the post-append compaction fails.
     pub fn record_result(
         &mut self,
         client_id: &str,
@@ -167,6 +189,13 @@ impl CommandRecoveryJournal {
         Ok(())
     }
 
+    /// Acknowledge the command: the durable receipt is no longer needed.
+    /// Acknowledging an unknown command is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the acknowledgment record cannot be appended
+    /// or the post-acknowledge compaction fails.
     pub fn acknowledge(&mut self, client_id: &str, command_id: &str) -> Result<()> {
         let key = Self::key(client_id, command_id);
         if !self.entries.contains_key(&key) {
@@ -351,6 +380,14 @@ pub struct WorkerRecoveryJournal {
 }
 
 impl WorkerRecoveryJournal {
+    /// Open the worker journal at `path` (creating the parent directory as
+    /// needed) and load the latest busy records and queue snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the parent directory cannot be created, or
+    /// when the journal exists but the queue-snapshot pass cannot read it
+    /// (a missing journal loads as empty).
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -363,6 +400,13 @@ impl WorkerRecoveryJournal {
         })
     }
 
+    /// Read the latest worker record per active session straight from a
+    /// journal file.
+    ///
+    /// # Errors
+    ///
+    /// Never errors: a missing or unreadable journal reads as an empty
+    /// set (the `Result` wrapper keeps the reading seam uniform).
     pub fn read_latest(path: &Path) -> Result<Vec<WorkerRecoveryRecord>> {
         Ok(parse_worker_records(path)?.into_values().collect())
     }
@@ -396,6 +440,11 @@ impl WorkerRecoveryJournal {
     /// in the same journal a later boot would read as revival evidence —
     /// stale busy evidence must not outlive the give-up that superseded
     /// it, or every boot re-storms the slot the cap already condemned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the journal cannot be opened or a settle
+    /// record cannot be appended.
     pub fn settle_busy_records(path: &Path, operation: &str) -> Result<()> {
         let mut journal = Self::open(path)?;
         let busy: Vec<WorkerRecoveryRecord> = journal
@@ -415,6 +464,13 @@ impl WorkerRecoveryJournal {
         Ok(())
     }
 
+    /// Record the latest busy/operation state for an active session; an
+    /// unchanged record is skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the record cannot be serialized or appended,
+    /// or when the all-idle compaction fails.
     pub fn record(
         &mut self,
         active_session_id: &str,
@@ -453,6 +509,11 @@ impl WorkerRecoveryJournal {
     }
 
     /// Persist the pending queue lanes; latest record wins per session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the snapshot record cannot be serialized or
+    /// appended.
     pub fn record_queue_snapshot(
         &mut self,
         active_session_id: &str,
@@ -485,6 +546,11 @@ impl WorkerRecoveryJournal {
 
     /// Read the latest queue snapshot for a session straight from a journal
     /// file (worker restore on a fresh process).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the journal exists but cannot be read (a
+    /// missing journal answers `Ok(None)`).
     pub fn read_queue_snapshot(
         path: &Path,
         active_session_id: &str,

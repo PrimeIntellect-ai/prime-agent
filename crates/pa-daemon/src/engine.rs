@@ -373,6 +373,12 @@ pub trait SessionEngine: Send + Sync {
     /// `Ok(None)` is every silent outcome — no trigger armed, a gate
     /// dropping it, the cooldown holding it, or a declined review.
     /// Engines without the compact-trigger machine never arm one.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the armed round itself fails (its model call); every
+    /// silent outcome stays `Ok(None)`, and engines without the
+    /// compact-trigger machine never error.
     fn consume_compact_auto_refine(
         &self,
     ) -> anyhow::Result<Option<pa_core::refinement::RefinementResult>> {
@@ -398,6 +404,12 @@ pub trait SessionEngine: Send + Sync {
     /// timeline, a plain branch move keeps faithful branch semantics).
     /// Engines without a persistent model context accept and ignore the
     /// branch.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the moved branch's live-context rebuild fails; the
+    /// parked-branch path (no session built yet) and the goal reload do
+    /// not error.
     fn rebuild_session_context(
         &self,
         branch_entries: Vec<pa_types::session::FileEntry>,
@@ -637,6 +649,12 @@ pub trait SessionEngine: Send + Sync {
     /// Adopt the RLM identity from the session's create command. Fails when a
     /// carried value is invalid (an unknown thinking level), so the create
     /// fails instead of a later turn.
+    ///
+    /// # Errors
+    ///
+    /// Errors when a carried thinking level is not a known level name, so
+    /// the create fails instead of a later turn; engines without an RLM
+    /// identity never error.
     fn configure_rlm_identity(&self, _identity: RlmSessionIdentity) -> Result<()> {
         Ok(())
     }
@@ -715,6 +733,13 @@ pub trait SessionEngine: Send + Sync {
     /// value is the TS `RefinementResult` wire object; engines without
     /// refinement support answer an error and the caller surfaces it as
     /// the command failure.
+    ///
+    /// # Errors
+    ///
+    /// Errors when the engine does not support refinement (the default
+    /// answer), or when model resolution, the session build, the
+    /// refinement round, or the result conversion fails; the caller
+    /// surfaces the error as the command failure.
     fn run_refinement(
         &self,
         options: pa_core::session_engine::refine::RefineOptions,
@@ -765,6 +790,12 @@ pub trait SessionEngine: Send + Sync {
     /// `set_rlm_max_depth` command). Returns the TS `SetRlmMaxDepthResult`
     /// wire object: `{ maxDepth, source, globalSaved }` plus `globalError`
     /// when the requested global settings write failed.
+    ///
+    /// # Errors
+    ///
+    /// The ported engines never error this command: the global settings
+    /// write failure rides the result's `globalError` field instead (the
+    /// TS shape), and the default engine answers the static result.
     fn set_rlm_max_depth(&self, max_depth: u64, global: bool) -> Result<Value> {
         let _ = global;
         Ok(json!({ "maxDepth": max_depth, "source": "chat", "globalSaved": false }))
@@ -1015,6 +1046,14 @@ struct SideQuestionScript {
 }
 
 impl ScriptedEngine {
+    /// Build the scripted engine from its JSON shape; every missing or
+    /// malformed script field takes its default.
+    ///
+    /// # Errors
+    ///
+    /// Never errors (the script shape is total and every field defaults);
+    /// the `Result` return keeps the constructor uniform with the other
+    /// builders.
     pub fn from_value(script: Value) -> Result<Self> {
         let responses = script
             .get("responses")
@@ -1105,6 +1144,13 @@ impl ScriptedEngine {
         })
     }
 
+    /// Build the scripted engine from a JSON file on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read or its JSON cannot
+    /// be parsed; the parsed value itself never errors (see
+    /// [`ScriptedEngine::from_value`]).
     pub fn from_file(path: &std::path::Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         Self::from_value(serde_json::from_str(&content)?)
