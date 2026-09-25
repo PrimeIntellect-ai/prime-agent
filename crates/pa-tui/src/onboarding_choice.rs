@@ -302,11 +302,13 @@ mod tests {
     fn selected_seed_clamps_into_the_options() {
         let options = || vec![option("a", None), option("b", None), option("c", None)];
         assert_eq!(
-            OnboardingChoice::new(options(), Some(2), OnboardingChoiceOptions::default()).selected(),
+            OnboardingChoice::new(options(), Some(2), OnboardingChoiceOptions::default())
+                .selected(),
             2
         );
         assert_eq!(
-            OnboardingChoice::new(options(), Some(99), OnboardingChoiceOptions::default()).selected(),
+            OnboardingChoice::new(options(), Some(99), OnboardingChoiceOptions::default())
+                .selected(),
             2
         );
         assert_eq!(
