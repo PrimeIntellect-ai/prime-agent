@@ -821,6 +821,12 @@ async fn run_interactive_surface(
     // failed abort into the transcript note and clears the stuck loader.
     let (compaction_abort_tx, mut compaction_abort_rx) =
         mpsc::unbounded_channel::<crate::session_ui::CompactionAbortNote>();
+    // A backgrounded prompt round trip reports here (TS `onSubmit`
+    // resolves `agentConnection.prompt` off the render path — the
+    // cleared editor paints before the daemon answers); the loop folds
+    // the settled outcome into the session.
+    let (prompt_tx, mut prompt_rx) =
+        mpsc::unbounded_channel::<crate::session_ui::PromptSubmitNote>();
     // The `/share` upload task reports here; the loop folds the outcome
     // into the transcript and clears the loader.
     let (share_tx, mut share_rx) = mpsc::unbounded_channel::<crate::session_ui::ShareNote>();
@@ -931,6 +937,7 @@ async fn run_interactive_surface(
         &options,
         notes_tx,
         compaction_abort_tx,
+        prompt_tx,
         share_tx,
         reload_tx,
         traces_upload_tx,
@@ -1211,8 +1218,16 @@ async fn run_interactive_surface(
                 let timeout_ms = *timeout_ms;
                 // A parked follow-up/steering message keeps the barrier waiting
                 // until the session delivers it (the queue strip must clear
-                // before the next step observes the frames).
-                if session.turn_active || !view.queued.is_empty() {
+                // before the next step observes the frames). A submit whose
+                // round trip is still armed holds the barrier too: the async
+                // submit resolves off the render path (the inline submit
+                // held the barrier by blocking the loop until its ack
+                // landed), so the outcome must land before the barrier can
+                // read idle.
+                if session.turn_active
+                    || !view.queued.is_empty()
+                    || session.prompt_submits_in_flight() > 0
+                {
                     if wait_idle_deadline.is_none() {
                         wait_idle_deadline =
                             Some(Instant::now() + Duration::from_millis(timeout_ms));
@@ -1537,6 +1552,7 @@ async fn run_interactive_surface(
         if headless_done
             && pending.is_empty()
             && !session.turn_active
+            && session.prompt_submits_in_flight() == 0
             && view.queued.is_empty()
             && wait_idle_deadline.is_none()
             && !session.dirty
@@ -1809,6 +1825,14 @@ async fn run_interactive_surface(
             maybe_commands = commands_rx.recv() => {
                 if let Some(update) = maybe_commands {
                     session.apply_command_catalog(update, &mut view);
+                }
+            }
+            maybe_prompt = prompt_rx.recv() => {
+                if let Some(note) = maybe_prompt {
+                    // Protocol corruption stays fatal exactly like the
+                    // inline submit's ladder (the handle-key catch's
+                    // "everything else" arm).
+                    session.apply_prompt_outcome(note, &mut view).await?;
                 }
             }
             _reconnect_tick = async {

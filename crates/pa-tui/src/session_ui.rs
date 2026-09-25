@@ -97,6 +97,40 @@ pub(crate) type TracesUploadNote = crate::traces::TraceUploadAllNote;
 /// inputs, or the failure message (TS `handleReloadCommand`'s outcome).
 pub(crate) type ReloadNote = Result<(), String>;
 
+/// One backgrounded prompt round trip's settled outcome (TS `onSubmit`
+/// awaits `agentConnection.prompt` off the render path: the cleared
+/// editor paints the frame immediately and the daemon answer folds back
+/// later): `Ok(())` is an admitted/queued prompt; the error is the
+/// daemon failure the inline await used to surface on the key path.
+pub(crate) struct PromptSubmitNote {
+    /// The submit-time active id: the outcome applies only while the
+    /// client still holds that session (a switch, a supersede rebind, or
+    /// a `/new` replaced it) — TS's staleness guard for a submit that
+    /// outlived its session.
+    pub(crate) active_session_id: String,
+    /// The submitted text (the draft restore and the rebind replay).
+    pub(crate) text: String,
+    /// The submit lane (the queued-input telemetry and the rebind replay).
+    pub(crate) behavior: SubmitBehavior,
+    /// The collected prompt images (the rebind replay sends the same set).
+    pub(crate) images: Option<serde_json::Value>,
+    /// Whether the turn was already active at submit time (the
+    /// queued-input telemetry's lane gate; the inline path read the same
+    /// flag after its await, which nothing could move while the loop was
+    /// blocked).
+    pub(crate) turn_was_active: bool,
+    /// The submit's generation (TS `inputSubmissionGeneration`): a newer
+    /// submit supersedes an older one's draft-restore right.
+    pub(crate) generation: u64,
+    /// Whether a failure may still rebind once (the replayed request is
+    /// the second and last attempt — the inline path's
+    /// `rebind_available`).
+    pub(crate) rebind_available: bool,
+    /// The settled request: admitted/queued on `Ok`; the daemon error
+    /// otherwise.
+    pub(crate) result: Result<(), anyhow::Error>,
+}
+
 /// One backgrounded compaction-abort outcome (the abort supervision's UI
 /// recovery): a failed abort request surfaces as the transcript note and
 /// clears the stuck compaction loader locally — when even the abort could
@@ -530,6 +564,18 @@ pub(crate) struct SessionUi {
     /// Compaction-abort outcomes from the backgrounded request (the abort
     /// supervision's UI recovery): a failed abort clears the stuck loader.
     compaction_abort_notes: mpsc::UnboundedSender<CompactionAbortNote>,
+    /// Where backgrounded prompt round trips deliver their outcomes (TS
+    /// `onSubmit` resolves `agentConnection.prompt` off the render path);
+    /// the run loop folds them through `apply_prompt_outcome`.
+    prompt_notes: mpsc::UnboundedSender<PromptSubmitNote>,
+    /// Monotonic submit generation (TS `inputSubmissionGeneration`): every
+    /// submit bumps it, and a failed one's draft-restore right dies under
+    /// any newer submit.
+    input_submission_generation: u64,
+    /// Armed prompt round trips (one per spawned request): the headless
+    /// idle and exit gates treat an in-flight submit as busy — the inline
+    /// submit held those gates by blocking the loop until the ack landed.
+    prompt_in_flight: usize,
     /// A succeeded compaction replaced the durable transcript (TS
     /// `rebuildChatFromMessages`): the next loop pass re-fetches it.
     pub(crate) transcript_stale: bool,
@@ -679,6 +725,7 @@ impl SessionUi {
         options: &InteractiveOptions,
         notes: mpsc::UnboundedSender<String>,
         compaction_abort_notes: mpsc::UnboundedSender<CompactionAbortNote>,
+        prompt_notes: mpsc::UnboundedSender<PromptSubmitNote>,
         share_notes: mpsc::UnboundedSender<ShareNote>,
         reload_notes: mpsc::UnboundedSender<ReloadNote>,
         traces_upload_notes: mpsc::UnboundedSender<crate::traces::TraceUploadAllNote>,
@@ -789,6 +836,9 @@ impl SessionUi {
             goal_view: GoalView::new(),
             notes,
             compaction_abort_notes,
+            prompt_notes,
+            input_submission_generation: 0,
+            prompt_in_flight: 0,
             transcript_stale: false,
             telemetry: options.telemetry.clone(),
             scroll_adoption_emitted: false,
@@ -2399,141 +2449,266 @@ impl SessionUi {
             return Ok(());
         }
         let images = self.collect_images_for(text, view);
-        // One rebind attempt per submit (never a loop): a prompt refused
-        // with the unknown-session error - the held active id was
-        // superseded by a worker replacement and the supervisor could not
-        // rebind it either - re-attaches by the DURABLE session id and
-        // replays the prompt ONCE. The failed attempt never reached a
-        // worker (the unknown-session refusal precedes any routing), so
-        // the replay is exactly-once by construction.
-        let mut rebind_available = true;
-        loop {
-            let result = self
-                .bounded_request(
-                    Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
-                    DaemonCommand::Prompt {
-                        id: None,
-                        active_session_id: self.active_session_id.clone(),
-                        message: text.to_string(),
-                        input: pa_types::daemon::PromptInput {
-                            content: None,
-                            images: images.clone(),
-                            streaming_behavior: Some(match behavior {
-                                SubmitBehavior::Steer => pa_types::daemon::StreamingBehavior::Steer,
-                                SubmitBehavior::FollowUp => {
-                                    pa_types::daemon::StreamingBehavior::FollowUp
-                                }
-                            }),
-                            queue_if_busy: Some(true),
-                            expand_prompt_templates: None,
-                            source: None,
-                            agent_message_id: None,
-                            custom_message: None,
-                            queue_key: None,
-                            prefix_messages: None,
-                            admission_id: None,
-                        },
-                        rest: Default::default(),
-                    },
-                )
-                .await;
-            match result {
-                Ok(_) => break,
-                Err(error) => {
-                    let rendered = format!("{error:#}");
-                    if rebind_available
-                        && rendered.contains("Unknown active session")
-                        && !self.session_id.is_empty()
-                    {
-                        rebind_available = false;
-                        let durable = self.session_id.clone();
-                        if self.attach_session(&durable).await.is_ok() {
-                            // The fresh attach snapshot owns the transcript;
-                            // the replayed prompt renders on top of it.
-                            self.rebuild_view(view, RebuildKind::Rebind);
-                            continue;
-                        }
-                    }
-                    if crate::daemon_client::is_daemon_timeout(&error) {
-                        // Sent but unanswered: the submission was on the
-                        // wire, so the turn may already be admitted and
-                        // running — restoring the draft would invite a
-                        // duplicate submission. The error row names the
-                        // uncertainty; the transcript's live turn (or the
-                        // next daemon answer) settles the truth.
-                        self.error_row(
-                            &format!(
-                                "{rendered} — the request was sent; the turn may still be in flight"
-                            ),
-                            view,
-                        );
-                        return Ok(());
-                    }
-                    // A DIRECT-link transport failure happened after the
-                    // frame was queued (`request_direct` sent it, the link
-                    // died answering): the daemon may have admitted the
-                    // turn — restoring the draft would invite a duplicate
-                    // submission, so the draft stays consumed (the timeout
-                    // arm's contract).
-                    let direct_sent = crate::daemon_client::is_daemon_unreachable(&error)
-                        && rendered
-                            .to_lowercase()
-                            .contains("session connection closed");
-                    if direct_sent {
-                        self.error_row(
-                            &format!(
-                                "{rendered} — the request may have been sent; the turn may still start"
-                            ),
-                            view,
-                        );
-                        return Ok(());
-                    }
-                    if crate::daemon_client::is_daemon_rejection(&error)
-                        || crate::daemon_client::is_daemon_unreachable(&error)
-                    {
-                        // TS `onSubmit`'s prompt catch: the daemon answered
-                        // with a refusal for THIS request (admission, queue
-                        // capacity, a superseded session the rebind could
-                        // not recover), or the connection refused the send
-                        // (nothing reached the daemon) — the `⚠ Error` row
-                        // surfaces it and the draft returns to the editor
-                        // (the submission never landed); a failed prompt
-                        // never exits the UI (the reconnect driver owns
-                        // the connection's recovery).
-                        self.error_row(&rendered, view);
-                        view.editor.set_text(text);
-                        return Ok(());
-                    }
-                    return Err(anyhow!("{rendered}"));
-                }
-            }
-        }
-        // A submission while a turn runs parks in the queue behind it: the
-        // queue strip shows the message until the session delivers it
-        // (adoption telemetry for the follow-up queue).
-        if self.turn_active {
-            if let Some(telemetry) = self.telemetry.clone() {
-                let lane = match behavior {
-                    SubmitBehavior::Steer => "steering",
-                    SubmitBehavior::FollowUp => "follow_up",
-                };
-                // The queued-input adoption event carries the session's
-                // queue delivery mode (`tui input queued`'s
-                // `steering_mode`): exposure under batched delivery is
-                // the multi-steer batch feature's adoption signal.
-                let steering_mode = self.steering_mode.clone();
-                tokio::spawn(async move {
-                    telemetry.queued_input(lane, steering_mode).await;
-                });
-            }
-        }
-        if !self.turn_active {
-            self.turn_active = true;
-        }
-        self.start_loader(view);
+        // TS `onSubmit` resolves the submit off the render path: the
+        // cleared editor paints THIS iteration's frame — the submit's
+        // daemon round trip never gates the first frame after Enter — and
+        // the request settles in the background, its outcome folding back
+        // through [`Self::apply_prompt_outcome`] with the same
+        // bookkeeping and error ladder the inline await ran on the key
+        // path.
+        self.input_submission_generation += 1;
+        let generation = self.input_submission_generation;
+        self.spawn_prompt_request(text.to_string(), behavior, images, true, generation);
         self.dirty = true;
         Ok(())
     }
+
+    /// Arm one prompt round trip in the background (TS `onSubmit`'s
+    /// `agentConnection.prompt` await runs off the render path): the
+    /// request carries the same envelope the inline await sent, and the
+    /// settled outcome reports through the prompt-submit channel the run
+    /// loop folds into the session. `rebind_available` is the inline
+    /// path's one-rebind budget: the first attempt may re-attach and
+    /// replay on the unknown-session refusal, a replay may not rebind
+    /// again (the replay is the second and last attempt).
+    fn spawn_prompt_request(
+        &mut self,
+        text: String,
+        behavior: SubmitBehavior,
+        images: Option<serde_json::Value>,
+        rebind_available: bool,
+        generation: u64,
+    ) {
+        let client = self.client.clone();
+        let notes = self.prompt_notes.clone();
+        let active_session_id = self.active_session_id.clone();
+        // The queued-input telemetry gates on the turn state at submit
+        // time (the inline path read the same flag right after its
+        // await, with the loop blocked so no event could move it); an
+        // earlier submit still in flight held `turn_active` true on the
+        // inline path too, so it counts here.
+        let turn_was_active = self.turn_active || self.prompt_in_flight > 0;
+        self.prompt_in_flight += 1;
+        let command = DaemonCommand::Prompt {
+            id: None,
+            active_session_id: active_session_id.clone(),
+            message: text.clone(),
+            input: pa_types::daemon::PromptInput {
+                content: None,
+                images: images.clone(),
+                streaming_behavior: Some(match behavior {
+                    SubmitBehavior::Steer => pa_types::daemon::StreamingBehavior::Steer,
+                    SubmitBehavior::FollowUp => pa_types::daemon::StreamingBehavior::FollowUp,
+                }),
+                queue_if_busy: Some(true),
+                expand_prompt_templates: None,
+                source: None,
+                agent_message_id: None,
+                custom_message: None,
+                queue_key: None,
+                prefix_messages: None,
+                admission_id: None,
+            },
+            rest: Default::default(),
+        };
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
+                client.request_ok(command),
+            )
+            .await
+            .map_err(|_| {
+                anyhow!(
+                    "timed out after {}ms waiting for the Prime Agent daemon response",
+                    UI_REQUEST_TIMEOUT_MS
+                )
+            })
+            .and_then(|result| result.map(|_| ()));
+            let _ = notes.send(PromptSubmitNote {
+                active_session_id,
+                text,
+                behavior,
+                images,
+                turn_was_active,
+                generation,
+                rebind_available,
+                result,
+            });
+        });
+    }
+
+    /// How many prompt round trips are armed (see
+    /// [`Self::prompt_in_flight`]): the headless idle and exit gates read
+    /// it so a submit whose ack has not landed never reads as idle.
+    pub(crate) fn prompt_submits_in_flight(&self) -> usize {
+        self.prompt_in_flight
+    }
+
+    /// Fold a backgrounded prompt outcome back into the session (the run
+    /// loop's channel arm): the admission bookkeeping and the error
+    /// ladder are the inline await's, moved off the key path — only the
+    /// timing changed.
+    pub(crate) async fn apply_prompt_outcome(
+        &mut self,
+        note: PromptSubmitNote,
+        view: &mut AgentView,
+    ) -> Result<()> {
+        self.prompt_in_flight = self.prompt_in_flight.saturating_sub(1);
+        // The submit's session is no longer the mounted one (a switch, a
+        // supersede rebind, or a `/new` replaced it — TS's staleness
+        // guard for a submit that outlived its session): the outcome
+        // never applies, and never restores a draft into another
+        // session's editor.
+        if note.active_session_id != self.active_session_id {
+            return Ok(());
+        }
+        match note.result {
+            Ok(()) => {
+                // A submission while a turn runs parks in the queue behind
+                // it: the queue strip shows the message until the session
+                // delivers it (adoption telemetry for the follow-up queue).
+                if note.turn_was_active {
+                    if let Some(telemetry) = self.telemetry.clone() {
+                        let lane = match note.behavior {
+                            SubmitBehavior::Steer => "steering",
+                            SubmitBehavior::FollowUp => "follow_up",
+                        };
+                        // The queued-input adoption event carries the session's
+                        // queue delivery mode (`tui input queued`'s
+                        // `steering_mode`): exposure under batched delivery is
+                        // the multi-steer batch feature's adoption signal.
+                        let steering_mode = self.steering_mode.clone();
+                        tokio::spawn(async move {
+                            telemetry.queued_input(lane, steering_mode).await;
+                        });
+                    }
+                }
+                if !self.turn_active {
+                    self.turn_active = true;
+                }
+                self.start_loader(view);
+                self.dirty = true;
+                Ok(())
+            }
+            Err(error) => {
+                let rendered = format!("{error:#}");
+                // One rebind attempt per submit (never a loop): a prompt
+                // refused with the unknown-session error - the held active
+                // id was superseded by a worker replacement and the
+                // supervisor could not rebind it either - re-attaches by
+                // the DURABLE session id and replays the prompt ONCE.
+                // The failed attempt never reached a worker (the
+                // unknown-session refusal precedes any routing), so the
+                // replay is exactly-once by construction.
+                if note.rebind_available
+                    && rendered.contains("Unknown active session")
+                    && !self.session_id.is_empty()
+                {
+                    let durable = self.session_id.clone();
+                    if self.attach_session(&durable).await.is_ok() {
+                        // The fresh attach snapshot owns the transcript;
+                        // the replayed prompt renders on top of it. The
+                        // replay keeps the submit's generation and spends
+                        // the rebind budget.
+                        self.rebuild_view(view, RebuildKind::Rebind);
+                        self.spawn_prompt_request(
+                            note.text.clone(),
+                            note.behavior,
+                            note.images.clone(),
+                            false,
+                            note.generation,
+                        );
+                        return Ok(());
+                    }
+                }
+                if crate::daemon_client::is_daemon_timeout(&error) {
+                    // Sent but unanswered: the submission was on the
+                    // wire, so the turn may already be admitted and
+                    // running — restoring the draft would invite a
+                    // duplicate submission. The error row names the
+                    // uncertainty; the transcript's live turn (or the
+                    // next daemon answer) settles the truth.
+                    self.error_row(
+                        &format!(
+                            "{rendered} — the request was sent; the turn may still be in flight"
+                        ),
+                        view,
+                    );
+                    return Ok(());
+                }
+                // A DIRECT-link transport failure happened after the
+                // frame was queued (`request_direct` sent it, the link
+                // died answering): the daemon may have admitted the
+                // turn — restoring the draft would invite a duplicate
+                // submission, so the draft stays consumed (the timeout
+                // arm's contract).
+                let direct_sent = crate::daemon_client::is_daemon_unreachable(&error)
+                    && rendered
+                        .to_lowercase()
+                        .contains("session connection closed");
+                if direct_sent {
+                    self.error_row(
+                        &format!(
+                            "{rendered} — the request may have been sent; the turn may still start"
+                        ),
+                        view,
+                    );
+                    return Ok(());
+                }
+                if crate::daemon_client::is_daemon_rejection(&error)
+                    || crate::daemon_client::is_daemon_unreachable(&error)
+                {
+                    // TS `onSubmit`'s prompt catch: the daemon answered
+                    // with a refusal for THIS request (admission, queue
+                    // capacity, a superseded session the rebind could
+                    // not recover), or the connection refused the send
+                    // (nothing reached the daemon) — the `⚠ Error` row
+                    // surfaces it and the draft returns to the editor
+                    // (the submission never landed); a failed prompt
+                    // never exits the UI (the reconnect driver owns
+                    // the connection's recovery).
+                    self.error_row(&rendered, view);
+                    self.restore_submitted_draft(&note.text, note.generation, view);
+                    return Ok(());
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Return a refused prompt's draft (TS `onSubmit`'s catch): the
+    /// empty editor under the submit's own generation takes the text
+    /// back — the async submit's outcome may land after the user
+    /// started typing or after a newer submit, and TS keeps the fresh
+    /// draft by retaining the failed one as the session's
+    /// restore-on-open head (`retainSubmittedDraft`) instead of
+    /// clobbering it.
+    fn restore_submitted_draft(&mut self, text: &str, generation: u64, view: &mut AgentView) {
+        if view.editor.get_text().trim().is_empty()
+            && generation == self.input_submission_generation
+        {
+            view.editor.set_text(text);
+            return;
+        }
+        let images: Vec<(u64, LoadedImage)> = collect_marked_images(&self.pasted_images, text)
+            .into_iter()
+            .map(|(id, image)| (id, image.clone()))
+            .collect();
+        let stash = PromptStash {
+            text: text.to_string(),
+            paste_snapshot: None,
+            images,
+            restore_on_open: true,
+        };
+        let mut store = self
+            .prompt_stash
+            .lock()
+            .expect("prompt stash store poisoned");
+        store
+            .for_session(&self.stash_session_id)
+            .stash_draft_head(stash);
+    }
+
 
     /// The working loader starts with a `Waiting` activity and a zero
     /// token count (TS `agent_start` resets the tracker).
