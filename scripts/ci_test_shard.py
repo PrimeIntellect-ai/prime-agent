@@ -20,10 +20,13 @@ with `test = false` is never run here either):
   example — example target with `test = true`: `cargo test --workspace`
           also runs its example tests, so each one is its own unit
           (`cargo test -p PKG --example NAME`)
-  examples/benches — compile parity targets: `cargo test --workspace` builds
-          example and bench targets without running them; the owning shard
-          reproduces exactly that with `--examples --no-run` / `--benches
-          --no-run`.
+  examples — compile parity target: `cargo test --workspace` builds every
+          example without running it; the owning shard reproduces exactly
+          that with `--examples --no-run`.
+  Bench targets are NOT enumerated: cargo test's default selection never
+  builds them (the Cargo book lists lib, bins, examples, and test targets
+  only), so a bench — e.g. a nightly-only `#[bench]` — must not gate what
+  the serial gate never compiled.
 
 Every unit runs as its own cargo invocation, streams live to the log, and is
 recorded in the shard manifest (JSON) the summary job audits: the union of
@@ -51,9 +54,9 @@ import zlib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-# `cargo test --workspace` builds examples and benches to prove they compile
-# but never runs them; the owning shard repeats the same build-only contract.
-COMPILE_ONLY_KINDS = ("examples", "benches")
+# `cargo test --workspace` builds every example to prove it compiles but
+# never runs it; the owning shard repeats the same build-only contract.
+COMPILE_ONLY_KINDS = ("examples",)
 
 
 def _target_flag(kind: str, name: str | None) -> list[str]:
@@ -97,7 +100,7 @@ def enumerate_units() -> list[dict]:
     units = []
     for pkg in packages:
         name = pkg["name"]
-        has_examples = has_benches = False
+        has_examples = False
         for target in pkg["targets"]:
             kinds = target["kind"]
             tname = target["name"]
@@ -114,16 +117,14 @@ def enumerate_units() -> list[dict]:
                     # with `test = true`; they are real test units here too.
                     units.append({"package": name, "kind": "example",
                                   "name": tname})
-            if "bench" in kinds:
-                has_benches = True
+            # bench targets: cargo test never selects them by default —
+            # deliberately NOT enumerated (see the module docstring).
         # Doc tests: one cargo `--doc` run covers every doctest=true target of
         # the package (lib and bins alike), matching the workspace behavior.
         if any(t.get("doctest", False) for t in pkg["targets"]):
             units.append({"package": name, "kind": "doc", "name": None})
         if has_examples:
             units.append({"package": name, "kind": "examples", "name": None})
-        if has_benches:
-            units.append({"package": name, "kind": "benches", "name": None})
     for unit in units:
         unit["id"] = _unit_id(unit["package"], unit["kind"], unit["name"])
         unit["target_args"] = _target_flag(unit["kind"], unit["name"])
