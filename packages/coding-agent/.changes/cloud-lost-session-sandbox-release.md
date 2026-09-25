@@ -1,0 +1,1 @@
+- Fixed a lost cloud session whose sandbox kept running with the agent dead; the liveness sweep now releases the platform sandbox instead of letting it burn until its deadline.

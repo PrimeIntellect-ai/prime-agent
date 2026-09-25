@@ -87,6 +87,8 @@ interface RegistryHarness {
 	/** The recording platform fake; tests flip sandbox status through setSandboxStatus. */
 	platform: DirectCloudServiceOptions["platform"];
 	setSandboxStatus: (status: string) => void;
+	/** Simulate the resident process dying inside a still-running sandbox. */
+	setProcessLost: (sessionUuid: string) => void;
 }
 
 function buildRegistry(
@@ -133,7 +135,7 @@ function buildRegistry(
 	const platform = {
 		createVmSandbox: async () => sandbox,
 		getSandbox: async () => ({ ...sandbox, status: sandboxStatus }),
-		deleteSandbox: async () => undefined,
+		deleteSandbox: vi.fn(async () => undefined),
 		getSandboxAuth: async () => ({
 			sandboxId: sandbox.id,
 			gatewayUrl: "https://gateway.example",
@@ -164,7 +166,7 @@ function buildRegistry(
 		}),
 		upload: async () => undefined,
 	};
-	const runningProcesses = options.runningProcesses ?? new Map<string, "running" | "exited">();
+	const runningProcesses = options.runningProcesses ?? new Map<string, "running" | "exited" | "lost">();
 	const vmStarts: RegistryHarness["vmStarts"] = [];
 	const processClient: CloudDelegationVmProcessClient = {
 		start: async (request) => {
@@ -180,8 +182,12 @@ function buildRegistry(
 			const state = runningProcesses.get(sessionUuid);
 			if (state === "running") return { state: "running" };
 			if (state === "exited") return { state: "exited", exitCode: 0 };
+			if (state === "lost") return { state: "lost" };
 			return { state: "unknown" };
 		},
+	};
+	const setProcessLost = (sessionUuid: string) => {
+		runningProcesses.set(sessionUuid, "lost");
 	};
 	const results: CloudDelegationResultsClient = {
 		fetch: async () => undefined,
@@ -313,6 +319,7 @@ function buildRegistry(
 		setSandboxStatus: (status: string) => {
 			sandboxStatus = status;
 		},
+		setProcessLost,
 	};
 }
 
@@ -1175,6 +1182,48 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 			// after this suite's afterEach removed the temp root. One
 			// setImmediate turn (the queue is FIFO and drains fully) runs any
 			// pending pass while the root still exists.
+			await new Promise((resolve) => setImmediate(resolve));
+		}
+	});
+
+	it("stops the orphaned sandbox when the resident process dies but the sandbox keeps running", async () => {
+		const root = temp();
+		const guestSessionId = "sess_sweep_orphan";
+		const daemon = await startGuestDaemon(root, 1, guestSessionId);
+		const harness = buildRegistry(root, join(root, "guest.sock"), { sweepIntervalMs: 50 });
+		try {
+			const info = await harness.registry.convertSession({ cwd: root, sessionId: guestSessionId });
+			const record = harness.store.get(info.sessionId)!;
+			await waitFor(
+				() => harness.registry.resolveActive(record.activeSessionId!)?.summary.execution !== undefined,
+				10_000,
+				"target ready",
+			);
+			const processUuid = record.residentProcessUuid;
+
+			// The fork-bomb shape: everything inside the sandbox dies while the
+			// sandbox itself keeps RUNNING. The sweep must mark the row lost
+			// AND release the platform sandbox instead of letting it burn until
+			// its deadline.
+			harness.setProcessLost(processUuid);
+			await waitFor(
+				() => harness.store.get(record.sessionId)?.observedLifecycle === "lost",
+				10_000,
+				"lost after sweep",
+			);
+			await waitFor(
+				() => harness.store.get(record.sessionId)?.cleanupState === "released",
+				10_000,
+				"sandbox released",
+			);
+			const stopped = harness.store.get(record.sessionId)!;
+			// The orphaned sandbox was actually released: the leak this
+			// regression pins is a running sandbox burning to its deadline.
+			expect(stopped.cleanupState).toBe("released");
+			expect(harness.platform?.deleteSandbox).toHaveBeenCalled();
+		} finally {
+			await harness.registry.dispose();
+			await daemon.stop().catch(() => undefined);
 			await new Promise((resolve) => setImmediate(resolve));
 		}
 	});

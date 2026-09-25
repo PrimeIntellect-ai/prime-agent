@@ -1482,6 +1482,27 @@ export class CloudSessionRegistry {
 				await session.attachment.stop().catch(() => undefined);
 				await this.disposeSession(session, { closeShadows: true, broadcast: true });
 				this.callbacks.broadcastCloudSessionUpdate(this.recordInfo(current));
+				// A lost resident whose sandbox keeps running would burn until
+				// its deadline with nothing inside to drain or stop it: the
+				// sweep releases the platform sandbox right away.
+				if (
+					current.observedLifecycle === "lost" &&
+					current.cleanupState !== "released" &&
+					current.sandboxStatus === "RUNNING" &&
+					current.sandboxId !== undefined
+				) {
+					const stopped = await this.service
+						.stopResidentSession(current.sessionId, true)
+						.catch((error: unknown) => {
+							this.callbacks.log(
+								`cloud lost-session sandbox stop failed for ${current.sessionId}: ${String(error)}`,
+							);
+							return undefined;
+						});
+					if (stopped !== undefined) {
+						this.callbacks.broadcastCloudSessionUpdate(this.recordInfo(stopped));
+					}
+				}
 			}
 		}
 	}
