@@ -617,8 +617,14 @@ async fn run_agents_view_flow(
         session_options.session = selection;
         session_options.session_rlm_depth = view.opened_rlm_depth;
         session_options.session_has_children = view.opened_has_children;
-        let outcome =
-            pa_tui::interactive::run_interactive(session_options, UiMode::Terminal).await?;
+        // The agents-view open route (TS `runAgentsViewLoop` ->
+        // `openAgentsViewSession`, TS #2391): the open waits through a
+        // daemon update restart instead of failing hard.
+        let outcome = pa_tui::interactive::run_interactive_agents_view_open(
+            session_options,
+            UiMode::Terminal,
+        )
+        .await?;
         if !outcome.session_id.is_empty() {
             anchor = Some(outcome.session_id.clone());
         }

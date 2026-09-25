@@ -87,6 +87,7 @@ pub mod tree_list;
 pub mod tree_nodes;
 pub mod tree_selector;
 pub mod update_command;
+pub(crate) mod update_restart_wait;
 pub mod user_message_selector;
 pub mod view;
 pub mod width;

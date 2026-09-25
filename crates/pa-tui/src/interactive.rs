@@ -750,9 +750,43 @@ impl ReconnectLoop {
 /// idempotent, so a return after the tail already ran (the startup
 /// refusal path finishes the surface itself) only re-emits the two
 /// unconditional tail bytes.
+/// The open route for one interactive run (TS `runAgentsViewLoop`'s
+/// open versus the CLI's own open): the agents-view open waits through a
+/// daemon update restart (TS #2391) instead of failing the open hard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionOpenRoute {
+    /// The CLI's open (`prime-agent`, `--resume`, `--attach`): a single
+    /// attempt, today's behavior — a preparing-restart create refusal
+    /// hands off to the agents view with the refusal as its status line.
+    Cli,
+    /// The agents view's open (TS `runAgentsViewLoop` ->
+    /// `openAgentsViewSession`): the open waits through the
+    /// update-restart window and retries against the successor.
+    AgentsView,
+}
+
+/// Run one interactive session (the CLI open route).
 pub async fn run_interactive(
     options: InteractiveOptions,
     ui: UiMode,
+) -> Result<InteractiveOutcome> {
+    run_interactive_route(options, ui, SessionOpenRoute::Cli).await
+}
+
+/// Run one interactive session opened from the agents view (TS #2391): the
+/// startup open waits through a daemon update restart instead of failing
+/// (see [`SessionOpenRoute::AgentsView`]).
+pub async fn run_interactive_agents_view_open(
+    options: InteractiveOptions,
+    ui: UiMode,
+) -> Result<InteractiveOutcome> {
+    run_interactive_route(options, ui, SessionOpenRoute::AgentsView).await
+}
+
+async fn run_interactive_route(
+    options: InteractiveOptions,
+    ui: UiMode,
+    route: SessionOpenRoute,
 ) -> Result<InteractiveOutcome> {
     // The headless harness drives the same dispatch on plain pipes: it
     // never owned the terminal, so its error returns must not run a
@@ -765,7 +799,7 @@ pub async fn run_interactive(
     // actually mounted.
     let surface_mounted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mounted = std::sync::Arc::clone(&surface_mounted);
-    match run_interactive_surface(options, ui, mounted).await {
+    match run_interactive_surface(options, ui, route, mounted).await {
         Ok(outcome) => Ok(outcome),
         Err(error) => {
             // Restore when THIS run changed the terminal state (the flag
@@ -790,12 +824,17 @@ pub async fn run_interactive(
 async fn run_interactive_surface(
     options: InteractiveOptions,
     ui: UiMode,
+    route: SessionOpenRoute,
     surface_mounted: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<InteractiveOutcome> {
     // The TS theme emits raw ANSI color codes regardless of NO_COLOR; match
     // that so the same terminal renders the same frames either way.
     crossterm::style::force_color_output(true);
-    let (client, mut events) = DaemonClient::connect_with_retry(&options.socket_path)
+    // The startup open's connection: the first open attempt below uses
+    // this one (a fresh-pane connect failure must stay a pre-mount
+    // failure, so the CLI open keeps its no-restore teardown), while a
+    // wait retry reconnects against the successor daemon.
+    let (client, events) = DaemonClient::connect_with_retry(&options.socket_path)
         .await
         .with_context(|| "the interactive UI could not attach to the daemon")?;
     // Background notes (a failed abort request) fold into the transcript
@@ -896,30 +935,67 @@ async fn run_interactive_surface(
             crate::app::draw(renderer, &mut view)?;
         }
     }
-    // The supervisor reader's death watch: the event channel itself stays
-    // open across a supervisor socket loss (the retained sender keeps it
-    // alive for direct reader pumps), so this watch is the observable
-    // signal the loop's reconnect driver arms on.
-    let mut reader_dead = client.reader_dead();
-    let mut session = match SessionUi::open(
-        client,
-        &options,
-        notes_tx,
-        compaction_abort_tx,
-        share_tx,
-        reload_tx,
-        traces_upload_tx,
-        catalog_tx,
-        auth_panel_tx,
-        crate::session_ui::ActivityUpdates {
-            heartbeats: heartbeats_tx,
-            bash: bash_tx,
-            commands: commands_tx,
+    // The startup open (TS `runAgentsViewLoop` -> `openAgentsViewSession`,
+    // TS #2391): an agents-view open that lands while the daemon prepares an
+    // update restart waits through the restart window (bounded, 500ms retry
+    // cadence, the attached-session reconnect budget) and retries against
+    // the successor instead of failing the open; the CLI route keeps the
+    // single attempt. The first attempt reuses the pre-mount connection; a
+    // retry reconnects fresh. Only the open waits — once the session is up,
+    // the reconnect loop owns the mid-chat restart window.
+    let mut first_connection = Some((client, events));
+    let open_outcome = crate::update_restart_wait::wait_through_update_restart(
+        route == SessionOpenRoute::AgentsView,
+        crate::update_restart_wait::DAEMON_UPDATE_RESTART_OPEN_WAIT_MS,
+        crate::update_restart_wait::DAEMON_UPDATE_RESTART_OPEN_RETRY_MS,
+        || {
+            // The attempt future owns everything it touches (an `async
+            // move` over clones taken here): an `FnMut` closure's captures
+            // may not escape into the returned future, so the synchronous
+            // body moves the pieces out instead.
+            let first = first_connection.take();
+            let options = options.clone();
+            let notes_tx = notes_tx.clone();
+            let compaction_abort_tx = compaction_abort_tx.clone();
+            let share_tx = share_tx.clone();
+            let reload_tx = reload_tx.clone();
+            let traces_upload_tx = traces_upload_tx.clone();
+            let catalog_tx = catalog_tx.clone();
+            let auth_panel_tx = auth_panel_tx.clone();
+            let heartbeats_tx = heartbeats_tx.clone();
+            let bash_tx = bash_tx.clone();
+            let commands_tx = commands_tx.clone();
+            async move {
+                let (client, events) = match first {
+                    Some(first) => first,
+                    None => DaemonClient::connect(&options.socket_path)
+                        .await
+                        .with_context(|| "the interactive UI could not attach to the daemon")?,
+                };
+                let session = SessionUi::open(
+                    client,
+                    &options,
+                    notes_tx,
+                    compaction_abort_tx,
+                    share_tx,
+                    reload_tx,
+                    traces_upload_tx,
+                    catalog_tx,
+                    auth_panel_tx,
+                    crate::session_ui::ActivityUpdates {
+                        heartbeats: heartbeats_tx,
+                        bash: bash_tx,
+                        commands: commands_tx,
+                    },
+                )
+                .await?;
+                Ok((events, session))
+            }
         },
     )
-    .await
-    {
-        Ok(session) => session,
+    .await;
+    let ((mut events, mut session), waited_for_update_restart) = match open_outcome {
+        Ok(opened) => opened,
         Err(error) => {
             // A daemon refusal for the startup create/attach/resume (the
             // daemon is alive and refused THIS request — a remembered id
@@ -990,6 +1066,20 @@ async fn run_interactive_surface(
                     ..Default::default()
                 });
             }
+            // The open wait's deadline failure is the same handoff (TS
+            // `runAgentsViewLoop` catches it as "Failed to open agent:"):
+            // the guidance to retry once the update finishes must land on
+            // the view the user came from — never tear the process down.
+            if crate::update_restart_wait::is_update_restart_deadline_error(&error) {
+                exit_guard.cancel();
+                let frames = renderer.finish(&mut view, true);
+                return Ok(InteractiveOutcome {
+                    return_to_agents_view: true,
+                    agents_view_notice: Some(format!("{error:#}")),
+                    frames,
+                    ..Default::default()
+                });
+            }
             // The surface is already up: hand the terminal back before the
             // CLI reports the failure on the plain screen (the same
             // teardown contract as the onboarding exit below).
@@ -1001,6 +1091,15 @@ async fn run_interactive_surface(
         }
     };
     session.exit_guard = exit_guard.clone();
+    // The supervisor reader's death watch: the event channel itself stays
+    // open across a supervisor socket loss (the retained sender keeps it
+    // alive for direct reader pumps), so this watch is the observable
+    // signal the loop's reconnect driver arms on. Taken from the LIVE
+    // session client after the open: an update-restart wait may have
+    // retried the open onto a fresh connection (the pre-mount one died
+    // with the old daemon), and the watch must name the connection the
+    // loop actually serves.
+    let mut reader_dead = session.client.reader_dead();
     if headless {
         session.osc_sink = crate::clipboard::OscSink::Buffer(Vec::new());
     }
@@ -1015,6 +1114,19 @@ async fn run_interactive_surface(
     session.spawn_bash_activity_refresh();
     session.rebuild_view(&mut view, crate::session_ui::RebuildKind::Rebind);
     if let Some(notice) = check_tmux_keyboard_setup().await {
+        view.push_entry(crate::chat::ChatEntry::Status {
+            text: format!("\u{26a0} {notice}"),
+            kind: crate::chat::StatusKind::Warning,
+        });
+        session.dirty = true;
+    }
+    // TS #2391 `startupNotice`/`updateRestartWaitNotice`: an open that
+    // waited through the update restart says so — the session's first
+    // status row (the TS `showWarning(startupNotice)` row) and, when the
+    // chat hands back to the view, the agents-view status line (the
+    // outcome's notice below).
+    if waited_for_update_restart {
+        let notice = crate::update_restart_wait::DAEMON_UPDATE_RESTART_WAIT_NOTICE;
         view.push_entry(crate::chat::ChatEntry::Status {
             text: format!("\u{26a0} {notice}"),
             kind: crate::chat::StatusKind::Warning,
@@ -2285,7 +2397,13 @@ async fn run_interactive_surface(
         agents_view_scope: session.scoped_agents_view.take(),
         selection_request: session.pending_selection,
         copies: std::mem::take(&mut session.copies),
-        agents_view_notice: None,
+        // TS #2391: the view's status line keeps the wait notice when the
+        // chat hands back (the `updateRestartWaitNotice` the open armed).
+        agents_view_notice: if waited_for_update_restart && preserve_alt_screen {
+            Some(crate::update_restart_wait::DAEMON_UPDATE_RESTART_WAIT_NOTICE.to_string())
+        } else {
+            None
+        },
     };
     // The agents-view handoff's background detach owns this connection now
     // (it closes once the daemon answers); every other exit closes it here.

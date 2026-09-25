@@ -431,8 +431,10 @@ fn take_locked(
     })
 }
 
-/// TS message for a mutating command refused by the admission gate.
-pub(crate) const UPDATE_PREPARING_MESSAGE: &str = "Daemon is preparing an update restart";
+/// TS message for a mutating command refused by the admission gate (now
+/// owned by `pa_types::daemon`, so the TUI's exact-message fallback for
+/// older daemons reads the same constant).
+pub(crate) use pa_types::daemon::UPDATE_RESTART_PREPARING_MESSAGE as UPDATE_PREPARING_MESSAGE;
 
 /// The admission gate verdict (spec §5): mutating commands are refused while
 /// the transaction is `Draining..Prepared` - except the abort-family drain

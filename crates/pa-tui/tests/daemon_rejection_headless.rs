@@ -37,6 +37,9 @@ struct MockSupervisor {
     listener: UnixListener,
     /// Every recorded `prompt` request payload.
     prompt_requests: Arc<Mutex<Vec<Value>>>,
+    /// Every recorded `create` request payload (the update-restart wait's
+    /// retry count reads its length).
+    create_requests: Arc<Mutex<Vec<Value>>>,
     /// Reject the prompt at this 0-based dispatch index with
     /// [`SUSPENDED_ADMISSION`] instead of streaming a turn.
     reject_prompt_index: Option<usize>,
@@ -49,6 +52,29 @@ struct MockSupervisor {
     /// open refusal: "session worker create failed: Session is already
     /// active in <id>: <file>").
     reject_create: Option<String>,
+    /// Per-create answers, one popped per create (the update-restart
+    /// window's scripted sequence): `None` accepts, `Some((message,
+    /// error_info))` refuses with the message and the typed info. An
+    /// empty queue falls through to `reject_create` (then accept).
+    create_answers: Vec<CreateAnswer>,
+}
+
+/// One scripted create answer: `None` accepts, `Some((message,
+/// error_info))` refuses with the message and the typed info.
+type CreateAnswer = Option<(String, Option<Value>)>;
+
+/// The answers every connection thread serves concurrently: the recorded
+/// request logs, the scripted create-answer queue, and the read-only
+/// refusal knobs. The update-restart wait retries its open over a SECOND
+/// connection while the first still holds — the mock serves both.
+struct SharedAnswers {
+    prompt_requests: Arc<Mutex<Vec<Value>>>,
+    create_requests: Arc<Mutex<Vec<Value>>>,
+    create_answers: Mutex<Vec<CreateAnswer>>,
+    reject_prompt_index: Option<usize>,
+    hold_turn_ms: u64,
+    close_on_prompt: bool,
+    reject_create: Option<String>,
 }
 
 impl MockSupervisor {
@@ -56,33 +82,62 @@ impl MockSupervisor {
         MockSupervisor {
             listener: UnixListener::bind(socket).expect("bind mock socket"),
             prompt_requests: Arc::new(Mutex::new(Vec::new())),
+            create_requests: Arc::new(Mutex::new(Vec::new())),
             reject_prompt_index: None,
             hold_turn_ms: 0,
             close_on_prompt: false,
             reject_create: None,
+            create_answers: Vec::new(),
         }
     }
 
-    /// Serve one client connection until it goes quiet (bounded, so the
-    /// plan teardown join always finishes).
-    fn serve(self) {
+    /// Serve client connections until the accept window goes quiet
+    /// (bounded, so the plan teardown join always finishes). The
+    /// update-restart wait RETRIES its open over a fresh connection —
+    /// every accepted connection serves on its own thread over the same
+    /// shared answers.
+    fn serve(mut self) {
         self.listener
             .set_nonblocking(true)
             .expect("nonblocking mock listener");
         let idle_window = std::time::Duration::from_millis(1500);
         let idle_until = std::time::Instant::now() + idle_window;
-        let (stream, _) = loop {
+        let shared = std::sync::Arc::new(SharedAnswers {
+            prompt_requests: self.prompt_requests,
+            create_requests: self.create_requests,
+            create_answers: std::sync::Mutex::new(std::mem::take(&mut self.create_answers)),
+            reject_prompt_index: self.reject_prompt_index,
+            hold_turn_ms: self.hold_turn_ms,
+            close_on_prompt: self.close_on_prompt,
+            reject_create: self.reject_create,
+        });
+        let mut connections = Vec::new();
+        loop {
             match self.listener.accept() {
-                Ok(accepted) => break accepted,
+                Ok((stream, _)) => {
+                    let shared = std::sync::Arc::clone(&shared);
+                    connections.push(std::thread::spawn(move || {
+                        shared.serve_connection(stream);
+                    }));
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if std::time::Instant::now() >= idle_until {
-                        return;
+                        break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                Err(_) => return,
+                Err(_) => break,
             }
-        };
+        }
+        for connection in connections {
+            let _ = connection.join();
+        }
+    }
+}
+
+/// One client connection's read loop, over the shared answers.
+impl SharedAnswers {
+    fn serve_connection(self: std::sync::Arc<Self>, stream: UnixStream) {
         let mut writer = stream.try_clone().expect("clone mock socket");
         let mut reader = BufReader::new(stream);
 
@@ -113,6 +168,61 @@ impl MockSupervisor {
                 .to_string();
             match command_type.as_str() {
                 "create" => {
+                    {
+                        let mut requests = self.create_requests.lock().unwrap();
+                        requests.push(command.clone());
+                    }
+                    // The scripted answer queue first (one entry per
+                    // create): the update-restart window's refusal
+                    // sequence. The head entry serves this create, then
+                    // pops for the next (a single trailing entry serves
+                    // every later create). An exhausted queue falls
+                    // through.
+                    let queued = {
+                        let mut answers = self.create_answers.lock().unwrap();
+                        if answers.is_empty() {
+                            None
+                        } else {
+                            let head = answers.first().cloned();
+                            if answers.len() > 1 {
+                                answers.remove(0);
+                            }
+                            head
+                        }
+                    };
+                    if let Some(answer) = queued {
+                        match answer {
+                            Some((message, error_info)) => {
+                                let mut refusal = json!({
+                                    "type": "response",
+                                    "id": id,
+                                    "command": "create",
+                                    "success": false,
+                                    "error": message,
+                                });
+                                if let Some(error_info) = error_info {
+                                    refusal["errorInfo"] = error_info;
+                                }
+                                write_json(&mut writer, &refusal);
+                            }
+                            None => write_json(
+                                &mut writer,
+                                &json!({
+                                    "type": "response",
+                                    "id": id,
+                                    "command": "create",
+                                    "success": true,
+                                    "data": {
+                                        "activeSessionId": "s1",
+                                        "id": "s1",
+                                        "sessionId": "sess-1",
+                                        "sessionFile": "/tmp/sess-1.jsonl",
+                                    },
+                                }),
+                            ),
+                        }
+                        continue;
+                    }
                     if let Some(message) = &self.reject_create {
                         write_json(
                             &mut writer,
@@ -377,6 +487,7 @@ fn enter() -> KeyEvent {
 struct RunOutcome {
     frames: Vec<String>,
     prompt_requests: Vec<Value>,
+    create_requests: Vec<Value>,
     return_to_agents_view: bool,
     agents_view_notice: Option<String>,
 }
@@ -394,6 +505,25 @@ fn run_plan_with_selection(
     selection: SessionSelection,
     configure: impl FnOnce(&mut MockSupervisor),
 ) -> anyhow::Result<RunOutcome> {
+    run_plan(steps, selection, false, configure)
+}
+
+/// The agents-view open route (TS `openAgentsViewSession`, TS #2391): the
+/// same harness through `run_interactive_agents_view_open`.
+fn run_agents_view_plan_with_selection(
+    steps: Vec<HeadlessStep>,
+    selection: SessionSelection,
+    configure: impl FnOnce(&mut MockSupervisor),
+) -> anyhow::Result<RunOutcome> {
+    run_plan(steps, selection, true, configure)
+}
+
+fn run_plan(
+    steps: Vec<HeadlessStep>,
+    selection: SessionSelection,
+    agents_view_open: bool,
+    configure: impl FnOnce(&mut MockSupervisor),
+) -> anyhow::Result<RunOutcome> {
     // The ambient TMUX variable adds a startup notice to the transcript;
     // scrub it so the run is the same inside tmux and out.
     std::env::remove_var("TMUX");
@@ -402,6 +532,7 @@ fn run_plan_with_selection(
     let mut supervisor = MockSupervisor::bind(&socket);
     configure(&mut supervisor);
     let prompt_requests = Arc::clone(&supervisor.prompt_requests);
+    let create_requests = Arc::clone(&supervisor.create_requests);
     let handle = std::thread::spawn(move || supervisor.serve());
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -414,11 +545,22 @@ fn run_plan_with_selection(
         height: 40,
     };
     let options = options_with_session(socket, selection);
-    let outcome = runtime.block_on(run_interactive(options, UiMode::Headless(plan)))?;
+    let outcome = runtime.block_on(async {
+        if agents_view_open {
+            pa_tui::interactive::run_interactive_agents_view_open(options, UiMode::Headless(plan))
+                .await
+        } else {
+            run_interactive(options, UiMode::Headless(plan)).await
+        }
+    })?;
     let _ = handle.join();
     Ok(RunOutcome {
         frames: outcome.frames,
         prompt_requests: Arc::try_unwrap(prompt_requests).map_or_else(
+            |locked| locked.lock().unwrap().clone(),
+            |locked| locked.into_inner().unwrap(),
+        ),
+        create_requests: Arc::try_unwrap(create_requests).map_or_else(
             |locked| locked.lock().unwrap().clone(),
             |locked| locked.into_inner().unwrap(),
         ),
@@ -672,5 +814,88 @@ fn refused_saved_session_create_names_the_holder_and_next_steps() {
     assert!(
         !notice.contains('\n'),
         "the notice rides ONE status line: {notice:?}"
+    );
+}
+
+/// TS #2391 "agents view open during a daemon update restart": a create
+/// rejected during the preparing-restart window is retried, the session
+/// opens, and the wait notice surfaces — the session's status row and the
+/// view's status line — never a bare failure.
+#[test]
+fn an_agents_view_open_waits_through_the_update_restart_window() {
+    let run = run_agents_view_plan_with_selection(
+        vec![
+            // The wait's retry cadence is 500ms: let the retry land before
+            // the agents-back key (the default `left` on an empty editor)
+            // exits the run.
+            HeadlessStep::WaitMs(1500),
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+        ],
+        SessionSelection::Resume(std::path::PathBuf::from("/tmp/sess-1.jsonl")),
+        |supervisor| {
+            supervisor.create_answers = vec![
+                Some((
+                    "Daemon is preparing an update restart".to_string(),
+                    Some(json!({"code": "update_restarting"})),
+                )),
+                None,
+            ];
+        },
+    )
+    .expect("the wait opens the session");
+    // The refused create was retried: exactly two creates.
+    assert_eq!(run.create_requests.len(), 2, "one refusal, one retry");
+    // The session OPENED and shows the wait row (the TS startup notice).
+    let frames = run.frames.join("\n");
+    assert!(
+        frames.contains(
+            "Waited for the Prime Agent daemon update restart to finish before opening this agent"
+        ),
+        "the session shows the wait row: {frames}"
+    );
+    // The agents-back handoff carries the notice for the view's status
+    // line (TS `persistentState.statusMessage`).
+    assert!(run.return_to_agents_view);
+    assert_eq!(
+        run.agents_view_notice.as_deref(),
+        Some(
+            "Waited for the Prime Agent daemon update restart to finish before opening this agent"
+        )
+    );
+}
+
+/// TS #2391's unmasked permanent failure: a create refused permanently
+/// after the preparing-restart refusal surfaces with the refusal itself —
+/// exactly two wire creates, no third attempt through the window, and no
+/// wait notice for an open that never completed.
+#[test]
+fn a_permanent_create_failure_after_the_window_surfaces_unmasked() {
+    let run = run_agents_view_plan_with_selection(
+        vec![HeadlessStep::WaitMs(1500)],
+        SessionSelection::Resume(std::path::PathBuf::from("/tmp/sess-1.jsonl")),
+        |supervisor| {
+            supervisor.create_answers = vec![
+                Some((
+                    "Daemon is preparing an update restart".to_string(),
+                    Some(json!({"code": "update_restarting"})),
+                )),
+                Some(("File not found: /tmp/scope.jsonl".to_string(), None)),
+            ];
+        },
+    )
+    .expect("the run hands off instead of exiting");
+    assert_eq!(run.create_requests.len(), 2, "no retry through the window");
+    assert!(
+        run.return_to_agents_view,
+        "the unmasked refusal falls back to the agents view, not exit"
+    );
+    let notice = run.agents_view_notice.as_deref().unwrap_or_default();
+    assert!(
+        notice.contains("File not found: /tmp/scope.jsonl"),
+        "the refusal surfaces unmasked: {notice}"
+    );
+    assert!(
+        !notice.contains("Waited for the Prime Agent daemon update restart"),
+        "no wait notice for an open that never completed: {notice}"
     );
 }
