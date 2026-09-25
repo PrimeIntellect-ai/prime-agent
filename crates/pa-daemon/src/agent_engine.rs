@@ -3445,7 +3445,14 @@ impl AgentSessionEngine {
         // has no configured credential fails the run before the provider
         // request, with the login-guidance message. The create-config key
         // covers the TS runtime-key candidate (`setRuntimeApiKey`), and the
-        // scripted faux seam has no credentials at all.
+        // scripted faux seam has no credentials at all. The preflight
+        // validates the model SERVING the run (TS `_runModel()`): a routed
+        // image-model episode is authenticated by its own image model, not
+        // by a text-only session model that never receives a request.
+        let preflight_model = self
+            .armed_image_route()
+            .map(|route| route.target.model)
+            .unwrap_or_else(|| model.clone());
         if self.config.faux_script.is_none() && self.current_selection().api_key.is_none() {
             let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
             let mut registry = pa_core::models::ModelRegistry::create(
@@ -3453,24 +3460,24 @@ impl AgentSessionEngine {
                 self.config.agent_dir.join("models.json"),
             );
             registry.load_private_authorization_from_cache();
-            if !registry.has_configured_auth(&model) {
+            if !registry.has_configured_auth(&preflight_model) {
                 let uses_oauth = registry
                     .auth
                     .get_all()
-                    .credential(&model.provider)
+                    .credential(&preflight_model.provider)
                     .is_some_and(|credential| {
                         matches!(credential, pa_core::auth::AuthCredential::Oauth { .. })
                     });
                 let message = if uses_oauth {
                     format!(
                         "Authentication failed for \"{}\". Credentials may have expired or network is unavailable.\n\nRun /login to update credentials.",
-                        model.provider
+                        preflight_model.provider
                     )
                 } else {
                     let docs = pa_core::packages::docs_path();
                     format!(
                         "No API key found for {}.\n\nUse /login to log into a provider via OAuth or API key. See:\n  {}\n  {}",
-                        model.provider,
+                        preflight_model.provider,
                         docs.join("providers.md").display(),
                         docs.join("models.md").display()
                     )

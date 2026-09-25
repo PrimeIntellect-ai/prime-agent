@@ -818,12 +818,20 @@ impl AgentSession {
                 .await
             {
                 // A concurrent admission won the agent's run slot: this
-                // prompt never started, so its route must not survive (the
-                // winner keeps its own fresh decision). TS decides per
-                // prepared action inside the same commit fence.
-                if let Some(router) = self.image_model_router.as_ref() {
-                    (router.swap_target)(None);
-                    self.agent.set_model_override(None);
+                // prompt never started, so its route must not survive. The
+                // unwind only happens while NO run streams - the winner's
+                // live run keeps its own serving target (an idle slot means
+                // our route never served a request; a streaming one belongs
+                // to the winner). TS decides per prepared action inside the
+                // same commit fence, so its single-threaded commit cannot
+                // observe this race at all; the headless surfaces serialize
+                // prompt admissions (one ACP prompt turn per session, the
+                // print loop's sequential awaits) besides.
+                if !self.agent.state().await.is_streaming {
+                    if let Some(router) = self.image_model_router.as_ref() {
+                        (router.swap_target)(None);
+                        self.agent.set_model_override(None);
+                    }
                 }
                 return Err(error);
             }
