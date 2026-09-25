@@ -131,8 +131,20 @@ fn user_text(content: &pa_types::ai::UserContent) -> String {
 
 /// Serialize conversation messages to text so the model summarizes rather
 /// than continues. Tool results are truncated.
+///
+/// Tool calls are serialized with a sequential `#N` prefix and results
+/// repeat the matching index, so repeated calls of the same tool pair
+/// unambiguously (TS #2424).
 pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
     let mut parts: Vec<String> = Vec::new();
+    // Tool calls are serialized with a 1-based sequential index and
+    // results repeat the index of their call (matched by tool call id),
+    // so repeated calls of the same tool pair unambiguously in the
+    // summarizer input. The short index stands in for the raw provider
+    // tool call id, which can exceed 450 characters on some providers.
+    let mut tool_call_indices: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut tool_call_index: usize = 0;
     for message in messages {
         match message {
             AgentMessage::User(user) => {
@@ -165,7 +177,9 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
                                 })
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            tool_calls.push(format!("{}({args})", call.name));
+                            tool_call_index += 1;
+                            tool_call_indices.insert(call.id.clone(), tool_call_index);
+                            tool_calls.push(format!("#{tool_call_index} {}({args})", call.name));
                         }
                     }
                 }
@@ -193,8 +207,25 @@ pub fn serialize_conversation(messages: &[AgentMessage]) -> String {
                     .collect::<Vec<_>>()
                     .join("");
                 if !content.is_empty() {
+                    // Label the tool name, error status, and the index of
+                    // the paired call so the summarizer can match each
+                    // result to its `#N`-prefixed entry in the [Assistant
+                    // tool calls] lines even when the same tool is called
+                    // repeatedly in one turn. Results whose call is not
+                    // part of the input (extension callers may pass
+                    // partial message lists) fall back to the name-only
+                    // label.
+                    let index_suffix = tool_call_indices
+                        .get(&result.tool_call_id)
+                        .map(|index| format!(" #{index}"))
+                        .unwrap_or_default();
+                    let label = if result.is_error {
+                        format!("[Tool result ({}, error){index_suffix}]", result.tool_name)
+                    } else {
+                        format!("[Tool result ({}){index_suffix}]", result.tool_name)
+                    };
                     parts.push(format!(
-                        "[Tool result]: {}",
+                        "{label}: {}",
                         truncate_for_summary(&content, TOOL_RESULT_MAX_CHARS)
                     ));
                 }
@@ -307,6 +338,123 @@ mod tests {
         let text = serialize_conversation(&messages);
         assert!(text.starts_with("[User]: do the thing"));
         assert!(text.contains("[Assistant]: doing it"));
+        assert!(text.contains("[Assistant tool calls]: #1 edit(path=\"/src/main.rs\")"));
+    }
+
+    fn tool_result(
+        text: &str,
+        tool_name: &str,
+        is_error: bool,
+        tool_call_id: &str,
+    ) -> AgentMessage {
+        AgentMessage::ToolResult(pa_types::ai::ToolResultMessage {
+            tool_call_id: tool_call_id.to_string(),
+            tool_name: tool_name.to_string(),
+            content: vec![pa_types::ai::UserContentBlock::Text(
+                pa_types::ai::TextContent {
+                    text: text.to_string(),
+                    text_signature: None,
+                    rest: Default::default(),
+                },
+            )],
+            details: None,
+            is_error,
+            timestamp: 0,
+            rest: Default::default(),
+        })
+    }
+
+    fn assistant_with_tool_calls(calls: &[(&str, &str, &str)]) -> AgentMessage {
+        AgentMessage::Assistant(pa_types::ai::AssistantMessage {
+            content: calls
+                .iter()
+                .map(|(id, name, code)| {
+                    let mut arguments = serde_json::Map::new();
+                    arguments.insert("code".to_string(), serde_json::json!(code));
+                    pa_types::ai::AssistantContentBlock::ToolCall(pa_types::ai::ToolCall {
+                        id: id.to_string(),
+                        name: name.to_string(),
+                        arguments,
+                        thought_signature: None,
+                        rest: Default::default(),
+                    })
+                })
+                .collect(),
+            api: "openai-completions".to_string(),
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: pa_types::ai::Usage::default(),
+            stop_reason: pa_types::ai::StopReason::ToolUse,
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp: 0,
+            rest: Default::default(),
+        })
+    }
+
+    /// Short success results label with the tool name (TS #2424:
+    /// `[Tool result (bash)]`), and error results mark the failure
+    /// (`[Tool result (edit, error)]`).
+    #[test]
+    fn tool_result_labels_carry_the_tool_name_and_error_marker() {
+        assert_eq!(
+            serialize_conversation(std::slice::from_ref(&tool_result(
+                "the output",
+                "bash",
+                false,
+                "tc1"
+            ))),
+            "[Tool result (bash)]: the output"
+        );
+        assert_eq!(
+            serialize_conversation(std::slice::from_ref(&tool_result(
+                "the failure",
+                "edit",
+                true,
+                "tc1"
+            ))),
+            "[Tool result (edit, error)]: the failure"
+        );
+    }
+
+    /// Repeated calls of the same tool pair with their results through the
+    /// sequential `#N` index on both the call and the result label, so the
+    /// summarizer can match each result to its call by position (TS
+    /// #2424's pairing fix).
+    #[test]
+    fn repeated_same_tool_calls_pair_by_index() {
+        let messages = vec![
+            assistant_with_tool_calls(&[("c1", "ipython", "a"), ("c2", "ipython", "b")]),
+            tool_result("first output", "ipython", false, "c1"),
+            tool_result("second output", "ipython", true, "c2"),
+        ];
+        let expected = [
+            "[Assistant tool calls]: #1 ipython(code=\"a\"); #2 ipython(code=\"b\")",
+            "[Tool result (ipython) #1]: first output",
+            "[Tool result (ipython, error) #2]: second output",
+        ]
+        .join("\n\n");
+        assert_eq!(serialize_conversation(&messages), expected);
+    }
+
+    /// A result whose call was not serialized (a partial message list from
+    /// an extension caller) falls back to the name-only label (TS #2424's
+    /// orphan arm).
+    #[test]
+    fn orphan_tool_result_falls_back_to_the_name_only_label() {
+        let messages = vec![
+            assistant_with_tool_calls(&[("c1", "bash", "ls")]),
+            tool_result("orphan output", "ipython", false, "tc-orphan"),
+        ];
+        let expected = [
+            "[Assistant tool calls]: #1 bash(code=\"ls\")",
+            "[Tool result (ipython)]: orphan output",
+        ]
+        .join("\n\n");
+        assert_eq!(serialize_conversation(&messages), expected);
     }
 
     #[test]
