@@ -3334,14 +3334,13 @@ mod tests {
     #[test]
     fn a_settled_row_re_arms_instead_of_executing_the_stale_word() {
         let mut mode = mode_with_parent_and_child();
-        mode.toggle_subagent_list(
-            &mode
-                .rows
-                .iter()
-                .find(|row| row.kind == RowKind::Agent)
-                .expect("the parent row")
-                .clone(),
-        );
+        let parent_row = mode
+            .rows
+            .iter()
+            .find(|row| row.kind == RowKind::Agent)
+            .expect("the parent row")
+            .clone();
+        mode.toggle_subagent_list(&parent_row);
         mode.selected = mode
             .rows
             .iter()
@@ -3352,7 +3351,12 @@ mod tests {
         let armed = mode.delete_arm_target().expect("an armed target");
         assert!(armed.stop);
         // The settled child: the section reads idle while the arm
-        // rides the same row.
+        // rides the same row. The running expansion keeps running rows
+        // only, so the settled child lives under the parent's inactive
+        // line now: open it before the rebuild so the armed row stays
+        // visible (the arm only rides a row the list still carries).
+        mode.expanded_inactive_parents
+            .insert(parent_row.identity.clone());
         mode.roster[1]["status"] = serde_json::json!("idle");
         mode.rebuild_rows();
         mode.selected = mode
@@ -3407,7 +3411,12 @@ mod tests {
             "the running row's confirm reads stop: {hint}"
         );
         // The settled child keeps the arm on its identity and session
-        // key; the hint reads the settled row's word.
+        // key; the hint reads the settled row's word. The settled child
+        // renders under the parent's inactive line now (the running
+        // expansion keeps running rows only), so open it before the
+        // rebuild so the armed row stays visible for the hint to ride.
+        mode.expanded_inactive_parents
+            .insert(parent_row.identity.clone());
         mode.roster[1]["status"] = serde_json::json!("idle");
         mode.rebuild_rows();
         let hint = mode

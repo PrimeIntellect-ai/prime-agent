@@ -2023,7 +2023,7 @@ mod tests {
     /// agent — the operator's no-duplicates safeguard).
     #[test]
     fn both_lines_expanded_render_each_agent_once() {
-        let mut grandchild = child_summary("gc", "c", "grandkid");
+        let mut grandchild = child_summary("gc", "c2", "grandkid");
         grandchild["rlmChildId"] = json!("child-gc");
         let roster = vec![
             roster_entry("p", "idle", parent_summary("p")),

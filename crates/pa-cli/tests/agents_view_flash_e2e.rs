@@ -505,12 +505,12 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     );
     let settled = frame_of(&view.frames, "flash parent");
     assert!(
-        settled.contains("300 subagents"),
+        settled.contains("300 inactive subagents"),
         "the settled frame carries the dead family behind the parent's collapsed tree:\n{settled}"
     );
     let expanded = frame_of(&view.frames, "flash worker 007");
     assert!(
-        !expanded.contains("▸ 300 subagents"),
+        !expanded.contains("▸ 300 inactive subagents"),
         "the expansion opens the parent's list:\n{expanded}"
     );
 }
