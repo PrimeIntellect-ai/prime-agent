@@ -321,9 +321,12 @@ fn receipt_ids_dedupe_within_a_run() {
     let chat = vec![
         receipt_card("c0", echo.clone()),
         receipt_card("c1", echo),
-        receipt_card("c2", serde_json::json!([
-            { "message": "idless", "deliveryStatus": "delivered", "receiverRole": "parent" }
-        ])),
+        receipt_card(
+            "c2",
+            serde_json::json!([
+                { "message": "idless", "deliveryStatus": "delivered", "receiverRole": "parent" }
+            ]),
+        ),
     ];
     let map = run_map(&chat);
     assert_eq!(
@@ -649,7 +652,11 @@ fn streamed_cards_count_before_their_results() {
     // The block appears at the THIRD named/id streamed card, before any
     // result lands: the count includes resultless cards, so the
     // streaming run reads three immediately.
-    let chat = vec![streamed_card("c0"), streamed_card("c1"), streamed_card("c2")];
+    let chat = vec![
+        streamed_card("c0"),
+        streamed_card("c1"),
+        streamed_card("c2"),
+    ];
     let map = run_map(&chat);
     assert_eq!(
         map.run_at(0),

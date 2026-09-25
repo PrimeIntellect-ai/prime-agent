@@ -162,9 +162,14 @@ fn card_receipts(card: &ToolCallCard) -> Vec<(Option<&str>, bool)> {
     let Some(result) = &card.result else {
         return Vec::new();
     };
-    let details = crate::tool_card::ipython_details::IpythonDetails::parse(&result.details);
-    details
-        .sent_agent_messages
+    let Some(receipts) = result
+        .details
+        .get("sentAgentMessages")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    receipts
         .iter()
         .filter_map(|receipt| {
             crate::tool_card::ipython_details::parse_sent_agent_message(receipt).map(|parsed| {
@@ -387,18 +392,21 @@ fn wall_label(wall_ms: Option<u64>) -> Option<String> {
 /// `5 tool calls`, `2 tool calls · 3 agent messages`, or
 /// `3 agent messages`.
 fn count_text(summary: &RunSummary) -> String {
-    [(summary.calls, "tool call"), (summary.messages, "agent message")]
-        .into_iter()
-        .filter(|(count, _)| *count > 0)
-        .map(|(count, noun)| {
-            if count == 1 {
-                format!("{count} {noun}")
-            } else {
-                format!("{count} {noun}s")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" \u{b7} ")
+    [
+        (summary.calls, "tool call"),
+        (summary.messages, "agent message"),
+    ]
+    .into_iter()
+    .filter(|(count, _)| *count > 0)
+    .map(|(count, noun)| {
+        if count == 1 {
+            format!("{count} {noun}")
+        } else {
+            format!("{count} {noun}s")
+        }
+    })
+    .collect::<Vec<_>>()
+    .join(" \u{b7} ")
 }
 
 /// The breakdown row's class text: `8 python \u{b7} 3 bash \u{b7} 2 agent

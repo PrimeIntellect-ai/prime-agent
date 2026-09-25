@@ -793,15 +793,12 @@ impl AgentView {
                     // (a short uncondensed sequence, or a standalone
                     // card) moves only its own rows - the fold lands
                     // there, never at the sequence's first card.
-                    Some(RunShapeInputs::Receipts(_)) | None => {
-                        match self.run_map.slot(index) {
-                            Some(
-                                crate::tool_runs::RunSlot::Start(_)
-                                    | crate::tool_runs::RunSlot::Member,
-                            ) => start,
-                            _ => index,
-                        }
-                    }
+                    Some(RunShapeInputs::Receipts(_)) | None => match self.run_map.slot(index) {
+                        Some(
+                            crate::tool_runs::RunSlot::Start(_) | crate::tool_runs::RunSlot::Member,
+                        ) => start,
+                        _ => index,
+                    },
                 };
                 self.sparse_tail_delta(after as isize - before as isize, fold);
             }

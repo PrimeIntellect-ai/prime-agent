@@ -531,7 +531,7 @@ fn an_assistant_crossing_the_glue_boundary_matches_the_full_rebuild() {
         }
     }
     let assert_two_blocks = |view: &AgentView| {
-        let runs = condensed_runs(view);
+        let runs = condensed_runs(&view);
         assert_eq!(runs.len(), 2, "two blocks around the visible assistant");
         assert_eq!(runs[0].calls, 5);
         assert_eq!(runs[1].calls, 5);
@@ -565,7 +565,7 @@ fn an_assistant_crossing_the_glue_boundary_matches_the_full_rebuild() {
     full.sparse_enabled = false;
     full.resolve_sparse_geometry();
     full.sparse_enabled = false;
-    let runs = condensed_runs(sparse);
+    let runs = condensed_runs(&sparse);
     assert_eq!(runs.len(), 1, "the runs merged into one block");
     assert_eq!(
         runs[0].calls, 10,
@@ -698,7 +698,7 @@ fn an_orphan_result_keeps_its_own_row_and_breaks_runs() {
         is_error: false,
         timestamp: 3,
     });
-    let runs = condensed_runs(view);
+    let runs = condensed_runs(&view);
     assert!(
         runs.is_empty(),
         "the orphan breaks the run: no condensed block ({runs:?})"
@@ -769,7 +769,7 @@ fn a_short_sequence_push_folds_at_the_pushed_slot() {
         .unwrap();
     assert!(view.begin_selection(row, 0));
     view.extend_active_selection(row, 80);
-    let expected = row_text(&frame, *row).trim_end().to_string();
+    let expected = row_text(&frame, row).trim_end().to_string();
     // The push: a second card lands at the tail (the sequence stays
     // under the condensing threshold).
     view.push_entry(card("a1"));
@@ -1120,7 +1120,7 @@ fn a_background_shell_run_keeps_its_block_uncached() {
         view.push_entry(card(&format!("c{index}"), false));
     }
     view.push_entry(card("c4", true));
-    let run = condensed_runs(view)
+    let run = condensed_runs(&view)
         .first()
         .copied()
         .expect("the five-call run condenses");
