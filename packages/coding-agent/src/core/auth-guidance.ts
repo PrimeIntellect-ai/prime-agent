@@ -71,6 +71,19 @@ export function formatImageModelUnusableMessage(reference: string): string {
 }
 
 /**
+ * settings.images.blockImages stops every image from reaching a provider, so a
+ * delegated read cannot run either: name the setting that blocks it instead of
+ * the model setting that is not the problem.
+ */
+export function formatBlockedImagesMessage(): string {
+	return [
+		"Image attachments are blocked (images.blockImages in settings.json), so this image cannot be read.",
+		"",
+		"Set images.blockImages to false, then retry.",
+	].join("\n");
+}
+
+/**
  * Why an explicit image-model reference could not serve image turns. The three
  * causes need different fixes, so `/image-model` reports the specific one
  * instead of the generic routing message above.

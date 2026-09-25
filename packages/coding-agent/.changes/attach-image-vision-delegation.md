@@ -1,0 +1,2 @@
+- `attach_image` now reads the image with the session's image model when the session model cannot see images, returning the reading as text instead of failing with "does not support vision".
+- With no usable image model, or a host that does not support delegation, the skill keeps its actionable error.

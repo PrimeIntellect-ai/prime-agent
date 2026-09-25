@@ -53,6 +53,9 @@ served those messages; later image-free turns return to the session model, where
 images already in the transcript appear as "(image omitted: model does not
 support images)" placeholders.
 
+The `attach_image` skill delegates the same way when the agent loads an image
+itself, so a text-only session never receives image blocks.
+
 ### Autonomous Runs
 
 | Setting | Type | Default | Description |

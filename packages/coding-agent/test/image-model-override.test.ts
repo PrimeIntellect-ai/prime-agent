@@ -90,8 +90,8 @@ function createImageTurnHarness(input: {
 	// in image-turn-child.test.ts); this file covers the routing fallback that
 	// serves image-bearing turns reaching dispatch without it, such as images an
 	// extension injects before the turn starts.
-	const imageTurn = session as unknown as { _readTurnImagesWithChild: () => Promise<undefined> };
-	imageTurn._readTurnImagesWithChild = async () => undefined;
+	const imageTurn = session as unknown as { _readImagesWithVisionChild: () => Promise<undefined> };
+	imageTurn._readImagesWithVisionChild = async () => undefined;
 	return {
 		session,
 		servedIds,

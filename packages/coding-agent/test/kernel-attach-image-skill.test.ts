@@ -1,10 +1,20 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Agent } from "@earendil-works/pi-agent-core";
+import type { AssistantMessage, AssistantMessageEvent } from "@earendil-works/pi-ai";
+import { EventStream } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getBundledSkillsDir } from "../src/config.js";
+import { AgentSession } from "../src/core/agent-session.js";
+import { AuthStorage } from "../src/core/auth-storage.js";
+import { ModelRegistry } from "../src/core/model-registry.js";
+import { SessionManager } from "../src/core/session-manager.js";
+import { SettingsManager } from "../src/core/settings-manager.js";
 import type { PythonSkillRuntimeInfo } from "../src/core/skills.js";
 import { IpythonKernelProvisioner, imageBlocksFromAttachments } from "../src/core/tools/ipython.js";
+import { getCodingAgentFixtureModel } from "./fixture-models.js";
+import { assistantMsg, createTestResourceLoader } from "./utilities.js";
 
 const PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
@@ -350,5 +360,194 @@ print(json.dumps({"agents": agents, "agent": agent, "recent": recent}, sort_keys
 			limit: 3,
 			max_chars: 120,
 		});
+	});
+});
+
+/**
+ * A session whose model cannot see images, pinned to an image model, with a
+ * spied child runtime so no real child process runs.
+ */
+function createTextOnlyImageSession(settings: Record<string, unknown> = { imageModel: "claude-haiku-4-5" }): {
+	agentSession: AgentSession;
+	spawns: Array<{ prompt: string; kwargs: Record<string, unknown> }>;
+} {
+	const dir = mkdtempSync(join(tmpdir(), "pi-attach-image-session-"));
+	writeFileSync(join(dir, "settings.json"), JSON.stringify(settings));
+	const base = getCodingAgentFixtureModel("anthropic", "claude-opus-4-7");
+	const sessionModel = { ...base, id: "claude-opus-4-7-text-only", input: ["text"] } as typeof base;
+	const agent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: { model: sessionModel, systemPrompt: "Test", tools: [] },
+		streamFn: () => {
+			const stream = new EventStream<AssistantMessageEvent, AssistantMessage>(
+				(event) => event.type === "done",
+				(event: any) => event.message,
+			);
+			stream.push({ type: "done", reason: "stop", message: assistantMsg("ok") });
+			return stream;
+		},
+	});
+	const auth = AuthStorage.create(join(dir, "auth.json"));
+	auth.setRuntimeApiKey("anthropic", "test-key");
+	const agentSession = new AgentSession({
+		agent,
+		sessionManager: SessionManager.create(dir, join(dir, "sessions")),
+		settingsManager: SettingsManager.create(dir, dir),
+		cwd: dir,
+		modelRegistry: ModelRegistry.create(auth, dir),
+		resourceLoader: createTestResourceLoader(),
+	});
+	const spawns: Array<{ prompt: string; kwargs: Record<string, unknown> }> = [];
+	const childRuntime = agentSession as unknown as {
+		runRlmChild: (prompt: string, kwargs: Record<string, unknown>) => Promise<{ rlm_child_id: string }>;
+		collectRlmChildren: () => Promise<{ results: unknown[] }>;
+		deleteRlmSubagent: () => Promise<unknown>;
+		_rlmChildSessions: Map<string, { session: { getLastAssistantText: () => string; dispose: () => void } }>;
+	};
+	childRuntime.runRlmChild = async (prompt, kwargs) => {
+		spawns.push({ prompt, kwargs });
+		const id = `child-${spawns.length}`;
+		childRuntime._rlmChildSessions.set(id, {
+			session: {
+				getLastAssistantText: () => "A bridge at sunset, with a harbour below.",
+				dispose: () => {},
+			},
+		});
+		childRuntime.collectRlmChildren = async () => ({
+			results: [{ rlm_child_id: id, status: "done", settled: true }],
+		});
+		childRuntime.deleteRlmSubagent = async () => ({});
+		return { rlm_child_id: id };
+	};
+	return { agentSession, spawns };
+}
+
+describe("attach-image delegation to the session image model", () => {
+	let tempDir: string;
+	let provisioner: IpythonKernelProvisioner | undefined;
+	let session: AgentSession | undefined;
+	let sessionDir: string | undefined;
+
+	beforeEach(() => {
+		tempDir = join(tmpdir(), `pi-attach-image-delegate-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(tempDir, { recursive: true });
+	});
+
+	afterEach(async () => {
+		await provisioner?.dispose();
+		provisioner = undefined;
+		session?.dispose();
+		session = undefined;
+		if (sessionDir) rmSync(sessionDir, { recursive: true, force: true });
+		sessionDir = undefined;
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("reads the image with the image model instead of raising when the session model is text-only", async () => {
+		const imagePath = join(tempDir, "sample.png");
+		writeFileSync(imagePath, Buffer.from(PNG_BASE64, "base64"));
+		const { agentSession, spawns } = createTextOnlyImageSession();
+		session = agentSession;
+		sessionDir = agentSession.sessionManager.getCwd();
+
+		const handlers = (
+			agentSession as unknown as {
+				_createKernelHostHandlers(): Record<
+					string,
+					(payload: Record<string, unknown>) => Promise<Record<string, unknown>>
+				>;
+			}
+		)._createKernelHostHandlers();
+		const requests: Array<Record<string, unknown>> = [];
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			pythonSkills: [bundledAttachImageSkill()],
+			hostHandlers: {
+				"model.info": handlers["model.info"]!,
+				"vision.read": async (payload) => {
+					requests.push(payload);
+					return handlers["vision.read"]!(payload);
+				},
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const result = await manager.execute(`print(await attach_image(${JSON.stringify(imagePath)}))`);
+
+		expect(result.status).toBe("ok");
+		expect(result.stdout).toContain("A bridge at sunset, with a harbour below.");
+		expect(result.stdout).toContain("Read by anthropic/claude-haiku-4-5");
+		expect(result.stdout).not.toContain("does not support vision");
+		// The image is never attached: only the reading reaches the session.
+		expect(result.attachments).toBeUndefined();
+		expect(spawns).toHaveLength(1);
+		expect(spawns[0]?.kwargs).toEqual({ model: "anthropic/claude-haiku-4-5" });
+		// The delegated read carries a focused question, not just bytes.
+		expect(requests).toHaveLength(1);
+		expect(String(requests[0]?.question ?? "")).toContain("Describe what this image shows");
+	});
+
+	it("surfaces the host's actionable refusal instead of the generic capability error", async () => {
+		const imagePath = join(tempDir, "sample.png");
+		writeFileSync(imagePath, Buffer.from(PNG_BASE64, "base64"));
+		provisioner = new IpythonKernelProvisioner(tempDir, {
+			pythonSkills: [bundledAttachImageSkill()],
+			hostHandlers: {
+				"model.info": async () => ({ id: "openai/gpt-oss-120b", input: ["text"] }),
+				"vision.read": async () => ({
+					error: "This turn attaches images, but the selected model (openai/gpt-oss-120b) does not accept image input.\n\nPick one:\n- Switch the session model with /model, or\n- Set an image model with /image-model <model>, or imageModel in settings.json",
+				}),
+			},
+		});
+
+		const manager = await provisioner.ensure();
+		const result = await manager.execute(`
+try:
+    await attach_image(${JSON.stringify(imagePath)})
+except RuntimeError as error:
+    print(f"RuntimeError: {error}")
+`);
+
+		expect(result.status).toBe("ok");
+		expect(result.stdout).toContain("/image-model <model>");
+		expect(result.stdout).not.toContain("does not support vision");
+		expect(result.attachments).toBeUndefined();
+	});
+
+	/**
+	 * The refusal the skill surfaces when the delegated read cannot run. The
+	 * skill turns any `error` into a RuntimeError, so the reason has to be the
+	 * real one: "pick an image model" is wrong when a model is already set.
+	 */
+	async function delegatedReadError(settings: Record<string, unknown>): Promise<string> {
+		const { agentSession } = createTextOnlyImageSession(settings);
+		session = agentSession;
+		sessionDir = agentSession.sessionManager.getCwd();
+		const handlers = (
+			agentSession as unknown as {
+				_createKernelHostHandlers(): Record<
+					string,
+					(payload: Record<string, unknown>) => Promise<Record<string, unknown>>
+				>;
+			}
+		)._createKernelHostHandlers();
+		const result = await handlers["vision.read"]!({
+			images: [{ mime_type: "image/png", data: PNG_BASE64 }],
+			question: "What does this image show?",
+		});
+		return String(result.error ?? "");
+	}
+
+	it("names the blocking setting when images.blockImages stops a delegated read", async () => {
+		const error = await delegatedReadError({ imageModel: "claude-haiku-4-5", images: { blockImages: true } });
+
+		expect(error).toContain("images.blockImages");
+		expect(error).not.toContain("Pick one:");
+	});
+
+	it("names the configured image model instead of asking for one when it cannot serve", async () => {
+		const error = await delegatedReadError({ imageModel: "openai/gpt-5.5" });
+
+		expect(error).toContain('imageModel "openai/gpt-5.5"');
+		expect(error).not.toContain("Pick one:");
 	});
 });

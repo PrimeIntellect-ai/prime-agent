@@ -204,6 +204,66 @@ def _emit_attachment(filepath: Path, mime_type: str, size: int, dimensions: tupl
     return resize_note
 
 
+# Focused question for a delegated read: the caller asked to see the image, not
+# for one specific answer, so the child reports what the image shows.
+_DELEGATION_QUESTION = (
+    "Describe what this image shows and transcribe any text it contains, "
+    "including the details that matter for the task it was attached to."
+)
+
+
+async def _delegate_to_image_model(
+    validated: list[tuple[Path, str, int, tuple[int, int]]],
+) -> str | None:
+    """Read validated images with the session's image model and return its text.
+
+    Returns None when the session has no usable image model, so the caller keeps
+    the actionable "switch to a vision-capable model" error. The images are sent
+    in the same bounded encoding an inline attachment would use, and no
+    attachment is emitted: only the reading reaches the session.
+    """
+    from rlm import host_request
+
+    images = []
+    unavailable = []
+    for filepath, mime, size, dimensions in validated:
+        try:
+            data_b64, emitted_mime, _note = _resize_image(filepath, mime, size, dimensions)
+        except ValueError as error:
+            # Encoded size is the only reason _resize_image gives up, so the image
+            # cannot be sent: say so instead of dropping it silently.
+            unavailable.append(f"{filepath} ({error})")
+            continue
+        images.append({"mime_type": emitted_mime, "data": data_b64})
+    if not images:
+        if unavailable:
+            raise ValueError("no image could be prepared for the image model: " + "; ".join(unavailable))
+        return None
+
+    try:
+        result = await host_request(
+            "vision.read",
+            {"images": images, "question": _DELEGATION_QUESTION},
+        )
+    except Exception:
+        # A host without the delegation request (or one that fails it) leaves the
+        # caller with the actionable "switch to a vision-capable model" error.
+        return None
+    if not isinstance(result, dict):
+        return None
+    error = result.get("error")
+    if isinstance(error, str) and error.strip():
+        # The host refused with the actionable message (no usable image model, or
+        # an unusable one): surface it instead of the generic capability error.
+        raise RuntimeError(error.strip())
+    text = result.get("text")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    reader = result.get("model") or "the image model"
+    skipped = "\n(skipped, could not be prepared: " + "; ".join(unavailable) + ")" if unavailable else ""
+    return f"{text.strip()}\n\n(Read by {reader}; the session model cannot see images.){skipped}"
+
+
 async def run(*paths: str) -> str:
     """Load one or more on-disk images into the model's context as attachments.
 
@@ -227,7 +287,8 @@ async def run(*paths: str) -> str:
         FileNotFoundError: If a path does not exist or is not a regular file.
         ValueError: If a file is not a supported image, is too large, or cannot
             be compressed enough for safe inline rendering and replay.
-        RuntimeError: If the current model cannot accept images.
+        RuntimeError: If neither the current model nor a configured image model
+            can read images.
     """
     if not paths:
         raise ValueError("attach_image requires at least one image path")
@@ -235,16 +296,23 @@ async def run(*paths: str) -> str:
     from rlm import host_request
 
     info = await host_request("model.info")
+    # Validate every path before emitting anything, so a later failure never
+    # leaves a partial subset injected.
+    validated = [_validate_image(path) for path in paths]
+
     if "image" not in info.get("input", []):
+        # A session whose model cannot see images still reads them when it has an
+        # image model: the host reads them in a vision child and returns text, so
+        # the image never enters a transcript only the session model serves.
+        delegated = await _delegate_to_image_model(validated)
+        if delegated is not None:
+            return delegated
         model_id = info.get("id") or "the current model"
         raise RuntimeError(
             f"{model_id} does not support vision. "
             "Tell the user to switch to a vision-capable model to load images into context."
         )
 
-    # Validate every path before emitting anything, so a later failure never
-    # leaves a partial subset injected.
-    validated = [_validate_image(path) for path in paths]
     resize_notes = []
     for filepath, mime, size, dimensions in validated:
         note = _emit_attachment(filepath, mime, size, dimensions)

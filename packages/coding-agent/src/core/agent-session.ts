@@ -78,7 +78,9 @@ import {
 import {
 	addLoginGuidanceToAuthError,
 	formatAuthenticationFailedMessage,
+	formatBlockedImagesMessage,
 	formatImageModelReferenceRejectedMessage,
+	formatImageModelRequiredMessage,
 	formatImageModelUnusableMessage,
 	formatImageTurnChildTimeoutMessage,
 	formatNoApiKeyFoundMessage,
@@ -861,6 +863,23 @@ function normalizeMessageContent(content: string | (TextContent | ImageContent)[
 }
 
 /**
+ * Image bytes from a host-request payload, in the shape the attach-image skill
+ * sends: base64 data with its mime type per image. Anything malformed is
+ * dropped, so a bad payload reads as "no image" instead of failing the read.
+ */
+function imageContentsFromPayload(value: unknown): ImageContent[] {
+	if (!Array.isArray(value)) return [];
+	const images: ImageContent[] = [];
+	for (const entry of value) {
+		if (!entry || typeof entry !== "object") continue;
+		const { mime_type: mimeType, data } = entry as { mime_type?: unknown; data?: unknown };
+		if (typeof mimeType !== "string" || typeof data !== "string" || !data) continue;
+		images.push({ type: "image", mimeType, data });
+	}
+	return images;
+}
+
+/**
  * Whether a delivered message attaches image content. Used to route
  * image-carrying turns off session models without image input.
  */
@@ -1152,6 +1171,8 @@ const IMAGE_TURN_CHILD_TIMEOUT_MS = 180_000;
 const VISION_READ_CHILD_ID_HISTORY = 64;
 /** Bound on waiting for the read child's session to publish. */
 const IMAGE_TURN_CHILD_PUBLICATION_TIMEOUT_MS = 30_000;
+/** Cap on the question the attach-image skill sends with a delegated read. */
+const VISION_READ_QUESTION_MAX_CHARS = 2000;
 const IMAGE_TURN_READING_MAX_CHARS = 4000;
 /** Types the image readers accept; anything else is skipped and reported in the reading. */
 const IMAGE_TURN_CHILD_MIME_TYPES: readonly string[] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
@@ -2839,7 +2860,10 @@ export class AgentSession {
 	 * images, or no resolvable image model); every failure throws with the fix
 	 * named, so images never reach a model that would drop them.
 	 */
-	private async _readTurnImagesWithChild(text: string, images: ImageContent[]): Promise<string | undefined> {
+	private async _readImagesWithVisionChild(
+		text: string,
+		images: ImageContent[],
+	): Promise<{ reading: string; reference: string } | undefined> {
 		if (images.length === 0) return undefined;
 		const sessionModel = this.model;
 		if (!sessionModel || sessionModel.input.includes("image")) return undefined;
@@ -2868,7 +2892,10 @@ export class AgentSession {
 			// Every image failed the caps: refuse here instead of returning the
 			// originals, which would reach a provider (or the in-place routed turn,
 			// re-sending the whole transcript) after the allowlist rejected them.
-			return `[no image read: all ${images.length} attached image(s) were rejected by the image-turn limits (unsupported type, over 8 MB each, or over 24 MB total)]`;
+			return {
+				reading: `[no image read: all ${images.length} attached image(s) were rejected by the image-turn limits (unsupported type, over 8 MB each, or over 24 MB total)]`,
+				reference,
+			};
 		}
 
 		const dir = mkdtempSync(join(tmpdir(), "prime-agent-image-turn-"));
@@ -2927,7 +2954,9 @@ export class AgentSession {
 					? `[${skipped} image(s) were skipped: unsupported type, over 8 MB each, over 24 MB total, or over the per-turn count of 8]`
 					: "",
 			].filter(Boolean);
-			return `[${scope}]\n${capped}${notes.length > 0 ? `\n${notes.join("\n")}` : ""}`;
+			// The reference travels with the reading: a pin or settings change
+			// during the read must not be reported as the model that served it.
+			return { reading: `[${scope}]\n${capped}${notes.length > 0 ? `\n${notes.join("\n")}` : ""}`, reference };
 		} finally {
 			// One child per turn, deleted once its reading is in hand: the image turn
 			// leaves no child behind to collect, and the materialized files go with it.
@@ -2942,6 +2971,27 @@ export class AgentSession {
 				);
 			}
 		}
+	}
+
+	/**
+	 * Why a delegated read left the images unread, as the message the skill
+	 * surfaces. The causes need different fixes: a setting that blocks images and
+	 * a configured image model that cannot serve them are the same two problems
+	 * the turn path names, so the skill must not report both of them as "pick an
+	 * image model".
+	 */
+	private _visionReadUnavailableMessage(): string {
+		const sessionModel = this.model;
+		if (this.settingsManager.getBlockImages()) {
+			return formatBlockedImagesMessage();
+		}
+		const reference = this._imageModelReference();
+		if (reference && sessionModel && !sessionModel.input.includes("image")) {
+			return formatImageModelUnusableMessage(reference);
+		}
+		return formatImageModelRequiredMessage(
+			sessionModel ? `${sessionModel.provider}/${sessionModel.id}` : "the session model",
+		);
 	}
 
 	/**
@@ -5832,9 +5882,9 @@ export class AgentSession {
 		// follow-up) only await normalization on the prompt path, and a session
 		// that needs no reading must not pay for one.
 		if (!this._needsVisionChildRead(normalized.images)) return normalized;
-		const reading = this._readTurnImagesWithChild(normalized.text, normalized.images).then((result) => {
+		const reading = this._readImagesWithVisionChild(normalized.text, normalized.images).then((result) => {
 			if (!result) return normalized;
-			const text = normalized.text.trim() ? `${normalized.text}\n\n${result}` : result;
+			const text = normalized.text.trim() ? `${normalized.text}\n\n${result.reading}` : result.reading;
 			return { ...normalized, text, images: undefined };
 		});
 		// A caller that abandons this promise must not crash the process: the
@@ -11352,6 +11402,37 @@ export class AgentSession {
 				provider: this.model?.provider ?? null,
 				input: this.model?.input ?? [],
 			}),
+			/**
+			 * Read image bytes with the image model and return its text. The
+			 * attach-image skill calls this instead of attaching images when the
+			 * session model cannot see them, so the image never enters a
+			 * transcript only the session model serves.
+			 */
+			"vision.read": async (payload) => {
+				const images = imageContentsFromPayload(payload.images);
+				if (images.length === 0) {
+					return { error: "vision.read needs at least one image" };
+				}
+				// A malformed entry is dropped by the parser; report it rather than
+				// reading fewer images than the caller asked for.
+				const sentImages = Array.isArray(payload.images) ? payload.images.length : images.length;
+				const droppedImages = Math.max(0, sentImages - images.length);
+				const question =
+					typeof payload.question === "string" ? payload.question.slice(0, VISION_READ_QUESTION_MAX_CHARS) : "";
+				try {
+					const reading = await this._readImagesWithVisionChild(question, images);
+					if (!reading) {
+						return { error: this._visionReadUnavailableMessage() };
+					}
+					const ignored =
+						droppedImages > 0
+							? `\n[${droppedImages} malformed image entr${droppedImages === 1 ? "y" : "ies"} in the request were ignored]`
+							: "";
+					return { text: `${reading.reading}${ignored}`, model: reading.reference };
+				} catch (error) {
+					return { error: error instanceof Error ? error.message : String(error) };
+				}
+			},
 		};
 		if (this._includeGoals) {
 			for (const type of ["goal.get", "goal.create", "goal.complete"]) {
