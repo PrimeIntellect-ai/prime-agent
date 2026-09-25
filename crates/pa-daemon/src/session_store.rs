@@ -246,7 +246,7 @@ impl SessionFile {
             }
             // Malformed lines are skipped, matching the TS loader.
             if let Ok(entry) = serde_json::from_str::<SessionEntry>(trimmed) {
-                file.push_index(entry)
+                file.push_index(entry);
             }
         }
         fold_child_usage_attributions(&mut file.entries);
