@@ -801,9 +801,6 @@ impl AgentView {
                 ));
                 rows
             }
-            ChatEntry::SlashCommandResult { content } => {
-                crate::chat_slash::render_slash_command_result(content, &self.theme, width)
-            }
             ChatEntry::CompactionSummary {
                 summary,
                 tokens_before,
