@@ -361,4 +361,3 @@ pub fn render_frame_text(view: &mut AgentView, width: u16, height: u16) -> Vec<S
         })
         .collect()
 }
-
