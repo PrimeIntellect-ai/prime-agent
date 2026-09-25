@@ -39,6 +39,11 @@ const SCOPE: &str = "openid profile email offline_access";
 pub const DEFAULT_ORIGINATOR: &str = "pi";
 /// One token request's bound (the port's request-timeout norm).
 pub const DEFAULT_TOKEN_TIMEOUT_MS: u64 = 30_000;
+/// The refresh grant's tighter bound: the auth storage runs it under its
+/// file lock, which a peer declares stale after 10 seconds — the request
+/// must fit inside that window so a slow endpoint fails the refresh
+/// (kept for a retry) instead of holding the lock past its staleness.
+pub const REFRESH_TIMEOUT_MS: u64 = 8_000;
 /// TS the `onAuth` instructions line.
 const AUTH_INSTRUCTIONS: &str = "A browser window should open. Complete login to finish.";
 /// TS the `onPrompt` fallback line.
@@ -106,6 +111,12 @@ pub async fn login_openai_codex(
     ui: &dyn CodexLoginUi,
     originator: &str,
 ) -> Result<OAuthCredentials, String> {
+    // The surface exited before the flow started: no server, no
+    // browser launch — the exit ends the flow (the first of the
+    // between-poll cancel checks, #2770).
+    if ui.is_cancelled() {
+        return Err(LOGIN_CANCELLED.to_string());
+    }
     let (verifier, challenge) = generate_pkce();
     let state = create_state();
     let url = authorization_url(&challenge, &state, originator);
@@ -340,16 +351,20 @@ fn account_id_of(access_token: &str) -> Result<String, String> {
 /// One token POST's outcome validation (TS `exchangeAuthorizationCode` /
 /// `refreshAccessToken` share the shape): a 2xx answer with the three
 /// fields the flow requires.
-async fn token_post(
+/// One token POST with an explicit request bound (the login keeps the
+/// port's default; the refresh runs under the storage lock and takes the
+/// tighter one).
+async fn token_post_bounded(
     http: &dyn CodexHttp,
     params: &[(&str, &str)],
     label: &str,
+    timeout_ms: u64,
 ) -> Result<TokenSuccess, String> {
     let body = url::form_urlencoded::Serializer::new(String::new())
         .extend_pairs(params.iter().map(|(key, value)| (*key, *value)))
         .finish();
     let response = http
-        .post_form(TOKEN_URL, &body, DEFAULT_TOKEN_TIMEOUT_MS)
+        .post_form(TOKEN_URL, &body, timeout_ms)
         .await
         .map_err(|message| format!("OpenAI Codex token {label} error: {message}"))?;
     if !response.ok() {
@@ -389,13 +404,25 @@ async fn token_post(
             "OpenAI Codex token {label} response missing fields: {json}"
         ));
     };
+    if !expires_in.is_finite() {
+        // A NaN/`inf` lifetime is not a lifetime (TS's arithmetic yields
+        // a never-expiring credential; the port refuses it as a broken
+        // response instead).
+        return Err(format!(
+            "OpenAI Codex token {label} response missing fields: {json}"
+        ));
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(i64::MAX, |elapsed| elapsed.as_millis() as i64);
+    // Saturating: an oversized `expires_in` cannot overflow the
+    // epoch-millisecond sum (the worst case saturates at the never
+    // until it refreshes).
+    let expires = now.saturating_add((expires_in * 1000.0) as i64);
     Ok(TokenSuccess {
         access: access.to_string(),
         refresh: refresh.to_string(),
-        expires: now + (expires_in * 1000.0) as i64,
+        expires,
     })
 }
 
@@ -406,7 +433,7 @@ async fn exchange_authorization_code(
     code: &str,
     verifier: &str,
 ) -> Result<TokenSuccess, String> {
-    token_post(
+    token_post_bounded(
         http,
         &[
             ("grant_type", "authorization_code"),
@@ -416,6 +443,7 @@ async fn exchange_authorization_code(
             ("redirect_uri", REDIRECT_URI),
         ],
         "exchange",
+        DEFAULT_TOKEN_TIMEOUT_MS,
     )
     .await
 }
@@ -425,7 +453,7 @@ async fn refresh_access_token(
     http: &dyn CodexHttp,
     refresh_token: &str,
 ) -> Result<TokenSuccess, String> {
-    token_post(
+    token_post_bounded(
         http,
         &[
             ("grant_type", "refresh_token"),
@@ -433,6 +461,7 @@ async fn refresh_access_token(
             ("client_id", OPENAI_CODEX_CLIENT_ID),
         ],
         "refresh",
+        REFRESH_TIMEOUT_MS,
     )
     .await
 }

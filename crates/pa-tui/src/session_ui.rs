@@ -3690,15 +3690,29 @@ impl SessionUi {
             provider.name
         )));
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        // A still-running previous flow ends before its replacement arms:
+        // its flag marks the blocking body out of the way, and its late
+        // settle is skipped below so it can never close the newer panel.
+        if let Some(previous) = self.auth_panel_cancel.take() {
+            previous.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.auth_panel_cancel = (provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID)
             .then(|| panel.cancel_flag());
         let provider = provider.clone();
         tokio::spawn(async move {
             let outcome = auth.0.login_on_panel(&provider, panel.clone()).await;
-            panel.send(crate::auth_panel::AuthPanelRequest::ProviderSettled {
-                provider: provider.id.clone(),
-                outcome,
-            });
+            // The driving surface already exited (Esc, or a newer login
+            // re-armed): the panel is unmounted, the outcome is cancelled
+            // or errored by the flow's own checks, and applying a stale
+            // settle would close the NEWER flow's panel — so it never
+            // lands (TS the cancelled dialog's outcome is dropped with
+            // the dialog).
+            if !panel.cancelled() {
+                panel.send(crate::auth_panel::AuthPanelRequest::ProviderSettled {
+                    provider: provider.id.clone(),
+                    outcome,
+                });
+            }
         });
     }
 
