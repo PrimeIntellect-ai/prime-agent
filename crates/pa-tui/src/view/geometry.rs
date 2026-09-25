@@ -201,7 +201,7 @@ mod tests {
         }
         view.push_entry(ChatEntry::AgentMessage(Box::new(AgentMessageRow {
             direction: AgentMessageDirection::Received,
-            participant: "from child".into(),
+            counterpart: "lane".into(),
             message: "hello 界\nnext".into(),
         })));
         view.push_entry(ChatEntry::ShellCompletion(Box::new(ShellCompletionRow {
