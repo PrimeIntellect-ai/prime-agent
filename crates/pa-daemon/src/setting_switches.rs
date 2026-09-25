@@ -80,6 +80,9 @@ impl Worker {
         if let Err(response) = self.require_created("cycle_model") {
             return response;
         }
+        // Same serialization as `set_model`: the cycle's model switch and
+        // tier re-clamp run under the replacement gate.
+        let _replacement_gate = self.replacement_gate.lock().await;
         let backward = payload.get("direction").and_then(Value::as_str) == Some("backward");
         let (scoped, current) = {
             let core = self.core.lock().unwrap();
@@ -267,15 +270,19 @@ impl Worker {
     /// moves. The stored preference keeps the requested tier, so switching
     /// back to (or resuming on) a capable model re-applies it.
     pub(crate) fn clamp_service_tier_for_model(&self) {
-        let (clamped, previous_active) = {
+        // The core preference/active pair and the engine's request slot move
+        // together under one lock: worker commands dispatch concurrently,
+        // so a model switch's clamp must never expose a window where the
+        // active tier and the provider target disagree.
+        let (changed, clamped) = {
             let mut core = self.core.lock().unwrap();
             let clamped = effective_service_tier(core.service_tier, self.engine.as_ref());
             let previous_active = core.active_service_tier;
             core.active_service_tier = clamped;
-            (clamped, previous_active)
+            self.engine.configure_service_tier(clamped);
+            (clamped != previous_active, clamped)
         };
-        self.engine.configure_service_tier(clamped);
-        if clamped != previous_active {
+        if changed {
             self.emit_worker_event(json!({
                 "type": "service_tier_changed",
                 "serviceTier": service_tier_wire_name(clamped.unwrap_or(ServiceTier::Auto)),
@@ -408,10 +415,15 @@ impl Worker {
     /// settings default persists only when the model supports the tier; and
     /// the `service_tier_changed` event follows an effective change. An
     /// unchanged request answers success without side effects.
-    pub(crate) fn handle_set_service_tier(&self, payload: &Value) -> DaemonResponse {
+    pub(crate) async fn handle_set_service_tier(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("set_service_tier") {
             return response;
         }
+        // Worker commands dispatch concurrently: the tier mutation runs
+        // under the replacement gate so a session swap's re-seed (TS
+        // `createAgentSession` reading the moved-to file) can never
+        // interleave with a user's in-flight tier change.
+        let _replacement_gate = self.replacement_gate.lock().await;
         let Some(tier) = payload
             .get("serviceTier")
             .cloned()

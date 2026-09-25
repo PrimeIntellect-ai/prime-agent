@@ -28,6 +28,12 @@ impl Worker {
         if let Err(response) = self.require_created("set_model") {
             return response;
         }
+        // Worker commands dispatch concurrently: a model switch (its
+        // durable row, the engine target, and the tier re-clamp) runs
+        // under the replacement gate so a session swap's model restore and
+        // tier re-seed can never interleave with it (one session, one
+        // mutation at a time).
+        let _replacement_gate = self.replacement_gate.lock().await;
         let Some(provider) = payload.get("provider").and_then(Value::as_str) else {
             return response_failure(None, "set_model", "set_model requires a provider", None);
         };
