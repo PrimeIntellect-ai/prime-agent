@@ -423,7 +423,7 @@ pub async fn execute_compaction(
             "turnPrefixMessages": turn_prefix_messages.len(),
         }),
     );
-    let tokens_before = context_tokens(&entries, session.get_leaf_id());
+    let tokens_before = context_tokens(entries, session.get_leaf_id());
     super::compaction_trace::trace(
         "compact.tokens_before_computed",
         serde_json::json!({ "tokensBefore": tokens_before }),
@@ -2790,21 +2790,20 @@ mod tests {
             // except a split turn with a retained prefix and no
             // history; the turn-prefix request only for a split turn
             // with a retained prefix).
-            let history_request = if !(is_split && !turn_prefix.is_empty() && history.is_empty())
-            {
+            let history_request = if is_split && !turn_prefix.is_empty() && history.is_empty() {
+                None
+            } else {
                 Some(build_summarization_request(
                     history,
                     Some("focus on the goal"),
                     Some("the previous summary text"),
                     reserve,
                 ))
-            } else {
-                None
             };
-            let turn_prefix_request = if !turn_prefix.is_empty() {
-                Some(build_turn_prefix_request(turn_prefix))
-            } else {
+            let turn_prefix_request = if turn_prefix.is_empty() {
                 None
+            } else {
+                Some(build_turn_prefix_request(turn_prefix))
             };
             let prebuilt = estimate_prebuilt_summary_request_tokens(
                 history_request.as_deref(),

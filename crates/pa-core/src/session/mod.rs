@@ -412,8 +412,10 @@ pub enum ContextMessageRef<'a> {
     Borrowed(&'a AgentMessage),
     /// A converted row (custom, branch-summary, compaction-summary) —
     /// the same conversion the owned context build materializes; never
-    /// a clone of a plain message.
-    Converted(AgentMessage),
+    /// a clone of a plain message. Boxed: converted rows are rare and
+    /// small, and a plain `AgentMessage` inline would size every
+    /// borrowed row of the walk.
+    Converted(Box<AgentMessage>),
 }
 
 impl<'a> ContextMessageRef<'a> {
@@ -481,17 +483,17 @@ pub fn session_context_message_refs<'a>(
     let append_ref = |entry: &'a FileEntry, target: &mut Vec<ContextMessageRef<'a>>| match entry {
         FileEntry::Message { message, .. } => target.push(ContextMessageRef::Borrowed(message)),
         FileEntry::CustomMessage { payload, .. } => {
-            target.push(ContextMessageRef::Converted(AgentMessage::Custom(
-                create_custom_message(payload, entry),
+            target.push(ContextMessageRef::Converted(Box::new(
+                AgentMessage::Custom(create_custom_message(payload, entry)),
             )));
         }
         FileEntry::BranchSummary { payload, .. } if !payload.summary.is_empty() => {
-            target.push(ContextMessageRef::Converted(AgentMessage::BranchSummary(
-                pa_types::session::BranchSummaryMessage {
+            target.push(ContextMessageRef::Converted(Box::new(
+                AgentMessage::BranchSummary(pa_types::session::BranchSummaryMessage {
                     summary: payload.summary.clone(),
                     from_id: payload.from_id.clone(),
                     timestamp: timestamp_to_millis(entry.timestamp()),
-                },
+                }),
             )));
         }
         _ => {}
@@ -512,15 +514,15 @@ pub fn session_context_message_refs<'a>(
                 append_ref(&entries[index], &mut retained);
             }
         }
-        messages.push(ContextMessageRef::Converted(AgentMessage::CompactionSummary(
-            CompactionSummaryMessage {
+        messages.push(ContextMessageRef::Converted(Box::new(
+            AgentMessage::CompactionSummary(CompactionSummaryMessage {
                 summary: payload.summary.clone(),
                 tokens_before: payload.tokens_before,
                 retained_message_count: Some(retained.len() as u64),
                 custom_instructions: payload.custom_instructions.clone(),
                 harness_digest: payload.harness_digest.clone(),
                 timestamp: timestamp_to_millis(entries[compaction_index].timestamp()),
-            },
+            }),
         )));
         messages.append(&mut retained);
         for &index in &path[path.partition_point(|&i| i <= compaction_index)..] {
