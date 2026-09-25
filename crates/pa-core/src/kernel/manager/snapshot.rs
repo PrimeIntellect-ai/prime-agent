@@ -93,7 +93,13 @@ impl Inner {
         // skip; repair retries (reprovision after a failed first restore) keep
         // the non-repair stat.
         if !protocol_repair {
-            lock(&self.guarded).restored_manifest_stat = Some(manifest_stat_of(&cfg.manifest_path));
+            // Off the executor: a stalled (network/FUSE) artifacts filesystem
+            // must not wedge the async worker during startup or recovery.
+            let manifest_path = cfg.manifest_path.clone();
+            let stat = tokio::task::spawn_blocking(move || manifest_stat_of(&manifest_path))
+                .await
+                .ok();
+            lock(&self.guarded).restored_manifest_stat = stat;
         }
         let request = Request::Restore {
             path: cfg.path.to_string_lossy().to_string(),
@@ -202,7 +208,7 @@ impl Inner {
     /// One-shot: consumed whether or not it fires. The skip holds only when no
     /// execution settled since the arm AND the manifest stat still matches the
     /// one recorded before the restore attempt.
-    fn consume_restored_snapshot_skip(self: &Arc<Self>) -> bool {
+    async fn consume_restored_snapshot_skip(self: &Arc<Self>) -> bool {
         let skip = lock(&self.guarded).restored_namespace_skip.take();
         let Some(skip) = skip else {
             return false;
@@ -210,10 +216,14 @@ impl Inner {
         if lock(&self.guarded).completed_executions != skip.completed_executions {
             return false;
         }
-        let Some(cfg) = self.options.snapshot.as_ref() else {
+        let Some(cfg) = self.options.snapshot.clone() else {
             return false;
         };
-        let stat = manifest_stat_of(&cfg.manifest_path);
+        // Off the executor, like the arming stat in perform_restore.
+        let stat = tokio::task::spawn_blocking(move || manifest_stat_of(&cfg.manifest_path))
+            .await
+            .ok()
+            .flatten();
         match (stat, skip.manifest_stat) {
             (Some(current), Some(armed)) => current == armed,
             (None, None) => true,
@@ -248,7 +258,7 @@ impl Inner {
                 // while the namespace is unchanged, rewriting the just-restored
                 // payload (or clobbering a still-valid one after a failed
                 // restore) is the one write that must not happen.
-                if inner.consume_restored_snapshot_skip() {
+                if inner.consume_restored_snapshot_skip().await {
                     return;
                 }
                 // The boot that followed a restore owns this window: the
