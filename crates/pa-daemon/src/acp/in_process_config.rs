@@ -136,6 +136,7 @@ pub(super) async fn handle_set_config_option(
 }
 
 /// One failed config operation: the TS handler's `RequestError` shape.
+#[derive(Debug)]
 enum ConfigOptionError {
     InvalidParams(String),
     Internal(String),
@@ -256,7 +257,7 @@ async fn apply_in_process_model_switch(
         move || acp_model_registry(&agent_dir)
     })
     .await
-    .map_err(|_| ConfigOptionError::Internal("model registry task failed".to_string()))?;
+    .map_err(|_| anyhow::anyhow!("model registry task failed"))?;
     let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
     // The previous live state, for the rollback a failed durable write
     // takes (a failure would otherwise leave the target switched and the
