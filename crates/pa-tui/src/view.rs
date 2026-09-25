@@ -611,8 +611,13 @@ impl AgentView {
             // just its own rows: capture the affected suffix so
             // `mark_entry_stale` folds the whole change through the
             // run's owning index (the per-entry capture never sees the
-            // block, which lives on the run's first entry).
-            if crate::tool_runs::is_run_glue(&self.chat[index]) {
+            // block, which lives on the run's first entry). An assistant
+            // mutates the same way: it can cross the glue boundary in
+            // either direction (a streamed message gains text and its
+            // run splits; a rebuilt one loses it and the runs merge), so
+            // its capture is the run-aware suffix too.
+            let assistant = matches!(self.chat[index], ChatEntry::Assistant(_));
+            if assistant || crate::tool_runs::is_run_glue(&self.chat[index]) {
                 let start = self.member_start(index);
                 let before = self.suffix_rows(start, self.layout_width);
                 self.sparse_mutation = None;
@@ -1591,6 +1596,7 @@ impl AgentView {
             || self.effort_picker.is_some()
             || self.heartbeats_picker.is_some()
             || self.bash_view.is_some()
+            || self.runs_view.is_some()
             || self.tree_selector.is_some()
             || self.fork_selector.is_some()
             || self.share_loader.is_some()
@@ -2888,6 +2894,26 @@ mod tests {
         view.detail = Detail::Overview;
         let text = transcript_text(&mut view, 80);
         assert!(text.contains("5 tool calls"), "overview condenses: {text}");
+    }
+
+    #[test]
+    fn the_runs_pane_suppresses_the_frame_cursor() {
+        let mut view = condensed_view(run_cards(5));
+        let runs = view.condensed_runs();
+        assert!(!runs.is_empty(), "the run condenses: {runs:?}");
+        // The dock paint draws the editor cursor; the pane mounts over it.
+        let _ = view.render_dock(80);
+        assert!(
+            view.frame_cursor().is_some(),
+            "the editor surface draws the cursor"
+        );
+        view.runs_view = Some(crate::runs_view::RunsView::new(24, &runs));
+        assert!(
+            view.frame_cursor().is_none(),
+            "the open runs pane suppresses the hardware cursor"
+        );
+        view.runs_view = None;
+        assert!(view.frame_cursor().is_some(), "the cursor returns");
     }
 
     #[test]

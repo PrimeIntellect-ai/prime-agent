@@ -136,8 +136,18 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
         r#"| `{exit}` | Exit (when editor is empty) |
 | `{select_model}` | Open model selector |
 | `{expand_tools}` | Cycle overview → thinking + diffs → all output |
-| `{condensed_runs}` | Browse condensed tool runs (Enter expand a run) |
-| `{focus_subagents}` | Focus activity (←/→ select group, Enter open) |
+"#
+    ));
+    // The condensed runs pane has no fixed affordance when the user
+    // disabled its binding (an empty key renders as a blank column, like
+    // the interrupted row above).
+    if !condensed_runs.is_empty() {
+        hotkeys.push_str(&format!(
+            "| `{condensed_runs}` | Browse condensed tool runs (Enter expand a run) |\n"
+        ));
+    }
+    hotkeys.push_str(&format!(
+        r#"| `{focus_subagents}` | Focus activity (←/→ select group, Enter open) |
 | `{manage_heartbeats}` | Manage heartbeats |
 | `{external_editor}` | Edit message in external editor |
 | `{prompt_stash}` | Stash or restore draft prompt |

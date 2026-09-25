@@ -543,3 +543,39 @@ fn live_runs_condense_and_short_runs_do_not() {
         "the short turn's cards render their own rows: {tail}"
     );
 }
+
+#[test]
+fn the_runs_pane_reconciles_across_a_live_turn() {
+    // The pane owns the frame while a SECOND turn streams behind it: the
+    // update-path reconcile runs on every event (the pane must survive
+    // the live traffic), the new run lands in the open pane's list, and
+    // the key path walks the reconciled state out clean.
+    let frames = run_plan(vec![
+        HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        HeadlessStep::Key(alt_t()),
+        HeadlessStep::Key(enter()),
+        HeadlessStep::Submit("live one".to_string()),
+        HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        HeadlessStep::Key(escape()),
+        HeadlessStep::Key(escape()),
+        HeadlessStep::Key(escape()),
+    ]);
+    let all = frames.join("\n");
+    // The pane opened and stayed open across the whole live turn (a
+    // reconcile that wrongly closed it would drop these rows).
+    assert!(all.contains("Tool runs"), "the pane renders: {all}");
+    // The new turn's six-call run condensed while the pane was open and
+    // reconciled into the open pane's list.
+    assert!(
+        all.contains("\u{2570}\u{2500} 6 python \u{b7} 1 agent messages queued"),
+        "the live run's block renders behind the pane: {all}"
+    );
+    // Esc walks back out of the detail and the list; the final frame is
+    // the plain transcript again.
+    let last = frames.last().expect("a final frame");
+    assert!(!last.contains("Tool runs"), "the pane closed: {last}");
+    assert!(
+        last.contains("6 tool calls"),
+        "the new run's block renders: {last}"
+    );
+}

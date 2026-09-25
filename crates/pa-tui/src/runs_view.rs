@@ -124,7 +124,10 @@ impl RunsView {
                 if self.detail_region_rows.get() == 0 {
                     return;
                 }
-                self.scroll_from_end = self.scroll_from_end.saturating_add_signed(delta);
+                // The scroll measures the lift off the newest rows (0 =
+                // bottom-anchored), so Up - a negative delta - must
+                // INCREASE it: older content sits above the newest row.
+                self.scroll_from_end = self.scroll_from_end.saturating_add_signed(-delta);
             }
         }
     }
@@ -436,3 +439,6 @@ fn pane_footer(theme: &Theme, width: usize, hint: &str) -> Vec<Line> {
         ),
     ]
 }
+
+#[cfg(test)]
+mod tests;

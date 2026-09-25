@@ -452,3 +452,138 @@ fn height_cache_tracks_mutations_and_spacing_in_all_details() {
         }
     }
 }
+
+#[test]
+fn an_assistant_crossing_the_glue_boundary_matches_the_full_rebuild() {
+    // [T x5, A(text), T x5]: two condensed blocks around a visible
+    // assistant. The assistant loses its text (the merge - one 10-call
+    // block replaces the two) and regains it (the split) while a
+    // tail-anchored window is paused on the rows: the mutation crosses
+    // the glue boundary in BOTH directions, so the sparse bookkeeping
+    // must fold the whole run-shape change, matching the full geometry
+    // exactly after each step.
+    let card = |id: &str| {
+        ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+            id: id.to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({"command": "echo done"}),
+            started: true,
+            started_at: Some(std::time::Instant::now()),
+            ended_at: Some(std::time::Instant::now()),
+            result: Some(crate::chat::ToolResultView {
+                content: vec![serde_json::json!({"type": "text", "text": "done"})],
+                details: serde_json::Value::Null,
+                is_error: false,
+            }),
+            result_partial: false,
+            ..Default::default()
+        }))
+    };
+    let visible_between = || {
+        ChatEntry::Assistant(Box::new(AssistantMessage {
+            blocks: vec![
+                MessageBlock::Thinking("between".into()),
+                MessageBlock::Text("the visible body".into()),
+            ],
+            has_tool_calls: false,
+            streaming: false,
+            error: None,
+            aborted: false,
+        }))
+    };
+    let mut sparse = view();
+    let mut full = view();
+    full.sparse_enabled = false;
+    for view in [&mut sparse, &mut full] {
+        view.detail = Detail::Overview;
+        for index in 0..5 {
+            view.push_entry(card(&format!("a{index}")));
+        }
+        view.push_entry(visible_between());
+        for index in 0..5 {
+            view.push_entry(card(&format!("b{index}")));
+        }
+        // A tail of text-bearing assistant rows lifts the transcript
+        // over the window height.
+        for index in 0..40 {
+            view.push_entry(ChatEntry::Assistant(Box::new(AssistantMessage {
+                blocks: vec![
+                    MessageBlock::Text(format!("tail {index} {}", "word ".repeat(index % 5))),
+                    MessageBlock::Thinking("t".into()),
+                ],
+                has_tool_calls: false,
+                streaming: false,
+                error: None,
+                aborted: false,
+            })));
+        }
+    }
+    let assert_two_blocks = |view: &AgentView| {
+        let runs = view.condensed_runs();
+        assert_eq!(runs.len(), 2, "two blocks around the visible assistant");
+        assert_eq!(runs[0].calls, 5);
+        assert_eq!(runs[1].calls, 5);
+    };
+    assert_two_blocks(&sparse);
+    sparse.render_frame(37, 24);
+    full.render_frame(37, 24);
+    sparse.scroll_by(-40);
+    full.resolve_sparse_geometry();
+    full.sparse_enabled = false;
+    full.scroll_by(-40);
+    full.resolve_sparse_geometry();
+    full.sparse_enabled = false;
+    assert_eq!(
+        sparse.render_frame(37, 24),
+        full.render_frame(37, 24),
+        "the paused window matches the full geometry before the mutation"
+    );
+    // The merge: the assistant loses its text and becomes hidden glue.
+    sparse.prepare_entry_mutation(5);
+    for view in [&mut sparse, &mut full] {
+        if let ChatEntry::Assistant(message) = &mut view.chat[5] {
+            message
+                .blocks
+                .retain(|block| !matches!(block, MessageBlock::Text(_)));
+        }
+    }
+    sparse.mark_entry_stale(5);
+    full.mark_entry_stale(5);
+    full.resolve_sparse_geometry();
+    full.sparse_enabled = false;
+    full.resolve_sparse_geometry();
+    full.sparse_enabled = false;
+    let runs = sparse.condensed_runs();
+    assert_eq!(runs.len(), 1, "the runs merged into one block");
+    assert_eq!(
+        runs[0].calls, 10,
+        "all ten cards belong to the merged block"
+    );
+    assert_eq!(
+        sparse.render_frame(37, 24),
+        full.render_frame(37, 24),
+        "the merge folds through the sparse window"
+    );
+    // The split: the assistant regains its text and the block parts
+    // again.
+    sparse.prepare_entry_mutation(5);
+    for view in [&mut sparse, &mut full] {
+        if let ChatEntry::Assistant(message) = &mut view.chat[5] {
+            message
+                .blocks
+                .push(MessageBlock::Text("the visible body".into()));
+        }
+    }
+    sparse.mark_entry_stale(5);
+    full.mark_entry_stale(5);
+    full.resolve_sparse_geometry();
+    full.sparse_enabled = false;
+    full.resolve_sparse_geometry();
+    full.sparse_enabled = false;
+    assert_two_blocks(&sparse);
+    assert_eq!(
+        sparse.render_frame(37, 24),
+        full.render_frame(37, 24),
+        "the split folds through the sparse window"
+    );
+}

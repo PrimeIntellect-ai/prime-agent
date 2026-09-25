@@ -1305,6 +1305,21 @@ impl SessionUi {
                 }
             }
         }
+        // A resync rebuild replaces the transcript wholesale while an
+        // open runs pane survives it: reconcile the pane against the
+        // rebuilt runs (the cursor and the open detail can point at a
+        // run that vanished in the rebuild; the pane closes when no run
+        // survives).
+        if view.runs_view.is_some() {
+            let runs = view.condensed_runs();
+            let closed = view
+                .runs_view
+                .as_mut()
+                .is_some_and(|runs_view| runs_view.reconcile(&runs).is_some());
+            if closed {
+                view.runs_view = None;
+            }
+        }
         // The rebuilt chat follows the session's live state: an attached
         // turn that survived the re-attach keeps its loader (TS
         // `renderResyncedSession`), and no stale loader survives a rebuild.
@@ -6107,6 +6122,19 @@ impl SessionUi {
             self.exit_guard.note_ctrl_c_handled();
         }
         let runs = view.condensed_runs();
+        // The runs change live under the open pane: reconcile BEFORE the
+        // key acts (the cursor and the open detail can point at a run
+        // that grew, split, or vanished since the last look), closing
+        // the pane when no run survives.
+        if view
+            .runs_view
+            .as_mut()
+            .is_some_and(|runs_view| runs_view.reconcile(&runs).is_some())
+        {
+            view.runs_view = None;
+            self.dirty = true;
+            return Ok(());
+        }
         let kb = view.editor.keybindings().clone();
         let action = view
             .runs_view
@@ -8333,6 +8361,20 @@ impl SessionUi {
                 self.sync_queue_selection(view);
             }
             TurnUpdate::StatusUpdate => {}
+        }
+        // A transcript mutation reshaped the condensed runs: reconcile an
+        // open runs pane now (the cursor and the open detail can point at
+        // a run that grew, split, or vanished; the pane closes when no
+        // run survives).
+        if view.runs_view.is_some() {
+            let runs = view.condensed_runs();
+            let closed = view
+                .runs_view
+                .as_mut()
+                .is_some_and(|runs_view| runs_view.reconcile(&runs).is_some());
+            if closed {
+                view.runs_view = None;
+            }
         }
         self.dirty = true;
     }

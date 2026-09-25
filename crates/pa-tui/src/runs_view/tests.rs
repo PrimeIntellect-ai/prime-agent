@@ -62,15 +62,12 @@ fn the_list_shows_one_row_per_run_cursor_on_the_newest() {
     let pane = RunsView::new(20, &runs);
     let rows = pane.render(&view, 80, &KeybindingsManager::new());
     let text = flat(&rows);
-    let listed = text
-        .iter()
-        .filter(|row| row.contains("tool calls"))
-        .count();
+    let listed = text.iter().filter(|row| row.contains("tool calls")).count();
     assert_eq!(listed, 2, "one row per run: {text:?}");
     assert!(
         text.iter()
-            .any(|row| row.contains("\u{203a} 6 tool calls")),
-        "the cursor starts on the newest run: {text:?}"
+            .any(|row| row.contains("\u{203a} \u{2713} 6 tool calls")),
+        "the cursor starts on the newest run (the status glyph rides the row): {text:?}"
     );
 }
 
@@ -94,7 +91,8 @@ fn enter_drills_into_the_exact_uncondensed_rows() {
         "the run header renders: {text:?}"
     );
     assert!(
-        text.iter().any(|row| row.contains("\u{2191}/\u{2193} scroll")),
+        text.iter()
+            .any(|row| row.contains("\u{2191}/\u{2193} scroll")),
         "the detail hint renders: {text:?}"
     );
 }
@@ -120,6 +118,19 @@ fn the_detail_scrolls_and_walks_back_out() {
     assert!(
         text.iter().any(|row| row.trim_start() == "\u{2193}"),
         "the lifted window carries the bottom marker: {text:?}"
+    );
+    // Down walks back to the newest rows: the bottom marker releases and
+    // the top marker rides again (the window is bottom-anchored once more).
+    pane.handle_key("down", &kb, &runs);
+    let rows = pane.render(&view, 60, &kb);
+    let text = flat(&rows);
+    assert!(
+        !text.iter().any(|row| row.trim_start() == "\u{2193}"),
+        "the bottom-anchored window has no bottom marker: {text:?}"
+    );
+    assert!(
+        text.iter().any(|row| row.trim_start() == "\u{2026}"),
+        "the window anchors on the newest rows again: {text:?}"
     );
     // Left (app.modal.back) returns to the list; Esc at the list closes.
     pane.handle_key("left", &kb, &runs);
@@ -152,10 +163,15 @@ fn a_vanished_run_reconciles_to_the_nearest() {
     let view = view_with_run(5);
     let runs = view.condensed_runs();
     let mut pane = RunsView::new(24, &runs);
-    let gone = vec![ToolRun { start: 7, end: 12, calls: 5 }];
+    let gone = vec![ToolRun {
+        start: 7,
+        end: 12,
+        calls: 5,
+    }];
     assert_eq!(pane.reconcile(&gone), None, "the pane stays open");
     assert_eq!(
-        pane.selected, Some(7),
+        pane.selected,
+        Some(7),
         "the cursor moved to the only surviving run"
     );
 }
