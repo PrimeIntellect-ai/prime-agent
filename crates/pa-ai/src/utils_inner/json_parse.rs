@@ -94,6 +94,12 @@ pub fn repair_json(json: &str) -> String {
 }
 
 /// Parse JSON; when parsing fails, retry once against the repaired text.
+///
+/// # Errors
+///
+/// Returns the original parse error when the text stays invalid after repair
+/// (including when the repair leaves it unchanged), otherwise the parse error
+/// of the repaired text.
 pub fn parse_json_with_repair(json: &str) -> Result<Value, serde_json::Error> {
     match serde_json::from_str::<Value>(json) {
         Ok(value) => Ok(value),
@@ -120,6 +126,12 @@ pub enum ParseError {
 /// Tolerant partial-JSON parser. `Ok` means a usable value was recovered
 /// (possibly a partial one); `Err(ParseError::Invalid)` means the input is not
 /// parseable JSON even with truncation tolerance.
+///
+/// # Errors
+///
+/// Returns `Err(ParseError::Invalid)` when the input is not usable even with
+/// truncation tolerance: a truncated top-level literal, malformed input, or
+/// trailing non-whitespace after the recovered value.
 pub fn parse_partial_json(input: &str) -> Result<Value, ParseError> {
     let mut parser = PartialParser {
         chars: input.chars().collect(),

@@ -50,6 +50,12 @@ impl SessionEngine {
     /// leading row (TS `_pendingNextTurnMessages.push(createGoalContextMessage(
     /// ..., "continuation"))`). Resumed or already-seeded branches keep their
     /// persisted goal untouched. Returns whether the seed landed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the objective or budget fails validation, or
+    /// when the continuation context row cannot be created. An unseedable
+    /// branch returns `Ok(false)` without erroring.
     pub async fn seed_initial_goal(
         &self,
         objective: &str,
@@ -77,6 +83,11 @@ impl SessionEngine {
     /// `_accountGoalUsageForAssistantMessage`): non-error, non-aborted turns
     /// spend the token budget; a crossing moves the goal to `budget_limited`
     /// and reports it so the caller arms its wrap-up steer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the driver's error for the accounting (invalid usage or a
+    /// failed state persist).
     pub async fn record_goal_usage(
         &self,
         message_id: &str,
@@ -137,6 +148,11 @@ impl SessionEngine {
     /// A failed terminal assistant message fails an active goal (TS
     /// `_finishGoalForTerminalAssistantMessage` at `agent_end`): the error
     /// text becomes the goal's terminal reason; an abort keeps the goal.
+    ///
+    /// # Errors
+    ///
+    /// Returns the driver's error when failing the goal cannot be
+    /// persisted.
     pub async fn fail_goal_for_terminal_error(
         &self,
         error_message: Option<&str>,

@@ -9,7 +9,7 @@
 //! updates. The turn settlement (response boundary, quiescence envelope,
 //! stop reason) mirrors the in-process mode: both serve the same captures.
 //! The daemon worker's `goal_update` session events surface through the
-//! wire mapping (wire_events.rs), and the autonomous accounting rides the
+//! wire mapping (`wire_events.rs`), and the autonomous accounting rides the
 //! `wait_for_headless_completion` response into the completion envelope
 //! and the stop reason (TS `waitForHeadlessCompletion` + `acpStopReason`).
 
@@ -230,6 +230,17 @@ struct DaemonAcpState {
 /// guarantees the socket answers (the composition spawns a supervisor
 /// when none is listening); a daemon that drops mid-session fails the
 /// hosted session's requests, exactly like the TS daemon connection.
+///
+/// # Errors
+///
+/// Returns an error when the daemon socket connect fails; a daemon that
+/// drops mid-session fails the hosted session's requests instead, exactly
+/// like the TS daemon connection.
+///
+/// # Panics
+///
+/// The frame-consumer task panics when the link's pending-response map
+/// lock is poisoned (a holder panicked while holding it).
 pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::Result<i32> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     let writer = tokio::spawn(async move {

@@ -1,4 +1,4 @@
-//! OpenAI Chat Completions streaming provider.
+//! `OpenAI` Chat Completions streaming provider.
 //!
 //! Full port of `packages/ai/src/providers/openai-completions.ts`, split
 //! across submodules: compat detection and options here, message/tool/usage
@@ -79,7 +79,7 @@ impl OpenAICompletionsOptions {
     }
 }
 
-/// Anthropic-style cache_control payload on OpenAI-compat proxies.
+/// Anthropic-style `cache_control` payload on OpenAI-compat proxies.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct OpenAICompatCacheControl {
     ttl: Option<&'static str>, // Some("1h") or None (default 5m)

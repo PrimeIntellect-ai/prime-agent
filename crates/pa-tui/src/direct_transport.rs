@@ -452,7 +452,7 @@ mod tests {
 
     /// Minimal scripted worker used by the link tests: hello, one
     /// `peer_auth` response, then the process dies (the socket tears down
-    /// the way a SIGKILLed worker does).
+    /// the way a `SIGKILLed` worker does).
     async fn spawn_mock_worker(listener: tokio::net::UnixListener) {
         let (stream, _) = listener.accept().await.expect("accept");
         let (reader, mut writer) = stream.into_split();

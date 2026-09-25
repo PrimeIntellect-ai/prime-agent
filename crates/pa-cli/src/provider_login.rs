@@ -3,7 +3,7 @@
 //! their auth status, the API-key store, the MCP device flow, the Prime
 //! Inference terminal login (`prime_inference_login`), and the credential
 //! removal. The provider OAuth flows (TS `the TS AI library/oauth`:
-//! Anthropic, GitHub Copilot, OpenAI Codex, xAI subscriptions) and the
+//! Anthropic, GitHub Copilot, `OpenAI` Codex, xAI subscriptions) and the
 //! Prime browser logins (the RSA `auth_challenge` flow) are not ported
 //! yet; their rows render (TS shape) and their flows report the
 //! unavailability.

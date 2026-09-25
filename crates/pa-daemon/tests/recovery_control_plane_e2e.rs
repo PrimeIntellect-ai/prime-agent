@@ -7,7 +7,7 @@
 //! list answers would land only after the whole pass, past the latency
 //! bound, with every relaunched worker already up.
 //!
-//! Linux-only e2e (AF_UNIX sockets, `kill -9` semantics): compiles to
+//! Linux-only e2e (`AF_UNIX` sockets, `kill -9` semantics): compiles to
 //! nothing elsewhere, like the other pa-daemon e2e verifiers.
 #![cfg(unix)]
 

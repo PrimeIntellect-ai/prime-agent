@@ -3,7 +3,7 @@
 //! grammar through cli-highlight's theme mapping). Cell-level scope coloring
 //! only: cli-highlight's parent-scope wrap is invisible once a child token
 //! colors the same cells, so the render needs one color per cell, matching
-//! the `theme.ts` mapping (keyword -> syntaxKeyword, built_in/type ->
+//! the `theme.ts` mapping (keyword -> syntaxKeyword, `built_in/type` ->
 //! syntaxType, literal/number -> syntaxNumber, string -> syntaxString,
 //! comment -> syntaxComment, title -> syntaxFunction, params ->
 //! syntaxVariable, everything else default). F-string substitutions and

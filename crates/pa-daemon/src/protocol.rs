@@ -179,6 +179,13 @@ impl EnvelopeParseError {
 /// Parse one JSONL command line into an envelope. Non-envelope lines are
 /// treated as bare commands (TS backward compat). Unknown command types are
 /// preserved as an error so callers can reply with the exact TS wire error.
+///
+/// # Errors
+///
+/// Returns an error when the line is not valid JSON, the envelope is
+/// malformed (missing id, a non-string clientId, a bad command payload),
+/// the protocol is too old, or the command type is unknown
+/// (`EnvelopeParseError`).
 pub fn parse_daemon_command_line(line: &str) -> Result<DaemonCommandEnvelope, EnvelopeParseError> {
     let value: Value = serde_json::from_str(line)
         .map_err(|e| EnvelopeParseError::Invalid(format!("invalid JSON: {e}")))?;
@@ -332,6 +339,13 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
 /// Parse a client command line the way the TS supervisor does: only
 /// `type: "command"` envelopes are accepted; bare commands fail with the
 /// protocol error, because the supervisor has no pre-envelope clients.
+///
+/// # Errors
+///
+/// Returns an error when the line is not valid JSON, is not a
+/// `type: "command"` envelope (bare commands fail as protocol-too-old),
+/// the envelope is malformed, the protocol is too old, or the command
+/// type is unknown (`EnvelopeParseError`).
 pub fn parse_supervisor_command_line(
     line: &str,
 ) -> Result<DaemonCommandEnvelope, EnvelopeParseError> {

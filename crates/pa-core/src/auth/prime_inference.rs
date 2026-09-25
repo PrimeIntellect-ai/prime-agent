@@ -337,6 +337,13 @@ pub(super) async fn check_prime_scope_access(
 
 /// TS `checkPrimeInferenceAccess` (scope `inference`): the stored or pasted
 /// key must carry the inference write permission.
+///
+/// # Errors
+///
+/// Returns [`PrimeAccessError::Failed`] when the `whoami` request fails or
+/// its response body is invalid, and [`PrimeAccessError::Denied`] when the
+/// request is rejected, the response is missing user or scope data, the
+/// token lacks the inference scope, or the scope lacks the write permission.
 pub async fn check_prime_inference_access(
     http: &dyn PrimeHttp,
     base_url: &str,
@@ -355,6 +362,12 @@ pub async fn check_prime_inference_access(
 }
 
 /// TS `fetchPrimeTeams`: the key's teams, paginated at 100 a page.
+///
+/// # Errors
+///
+/// Returns a human-readable error string when a team-list request fails,
+/// the API responds with a non-2xx status, or the response body cannot be
+/// parsed as a team list.
 pub async fn fetch_prime_teams(
     http: &dyn PrimeHttp,
     base_url: &str,

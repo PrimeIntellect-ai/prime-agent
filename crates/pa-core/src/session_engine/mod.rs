@@ -1,6 +1,6 @@
-//! AgentSession: the turn admission layer over the pa-agent loop.
+//! `AgentSession`: the turn admission layer over the pa-agent loop.
 //! First slice of core/agent-session.ts: prompt normalization (templates),
-//! busy-admission rules (steer/follow-up), and SessionManager persistence.
+//! busy-admission rules (steer/follow-up), and `SessionManager` persistence.
 //!
 //! Design note: the TS class runs an internal action-store with admission
 //! epochs/tickets. The Rust port keeps the observable contract instead: the
@@ -73,7 +73,7 @@ pub enum PromptOutcome {
     SessionCommand(SessionSlashCommand),
 }
 
-/// Options for `AgentSession::prompt`. Port of PromptOptions (used fields).
+/// Options for `AgentSession::prompt`. Port of `PromptOptions` (used fields).
 #[derive(Debug, Default)]
 pub struct PromptOptions {
     pub streaming_behavior: Option<StreamingBehavior>,
@@ -174,6 +174,11 @@ pub struct AgentSession {
 
 impl AgentSession {
     /// Build a session around a running agent loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying session-assembly error (see
+    /// [`AgentSession::from_session_arc`]).
     pub async fn new(
         agent: Arc<Agent>,
         session: SessionManager,
@@ -190,6 +195,11 @@ impl AgentSession {
 
     /// Build a session from an already-shared session manager handle, so the
     /// kernel host-request handlers can reach the same persistence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when subscribing the persistence listener fails or
+    /// the initial session context cannot be read.
     #[allow(clippy::too_many_arguments)]
     pub async fn from_session_arc(
         agent: Arc<Agent>,
@@ -403,6 +413,12 @@ impl AgentSession {
     /// untouched, matching the TS `CompactionSkippedError` flow. `abort`
     /// is the run's abort signal (TS `_performCompaction`'s `signal`):
     /// an aborted run returns the abort error and never commits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the abort error when the run was aborted, or the compaction
+    /// failure when the summarizer call or the compaction entry's persist
+    /// fails. A skip is a normal `Ok` outcome carrying the skip message.
     pub async fn compact(
         &self,
         custom_instructions: Option<&str>,
@@ -499,6 +515,11 @@ impl AgentSession {
     /// fails, so every in-process context rebuild (compaction, tree
     /// navigation) keeps the disclosure — the TS `_unpersistedOutcomes`
     /// guarantee, held structurally.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the disclosure row cannot be appended or
+    /// surfaced to the live loop; the row is retained in memory either way.
     pub async fn record_compaction_outcome(
         &self,
         reason: crate::session_engine::messages::CompactionOutcomeReason,
@@ -539,6 +560,10 @@ impl AgentSession {
     /// then `agent.state.messages = buildSessionContext().messages`). The
     /// session adopts the branch entries and the agent's message list is
     /// rebuilt from the post-navigation session state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the post-navigation history cannot be read.
     pub async fn rebuild_branch_context(
         &self,
         branch_entries: Vec<FileEntry>,
@@ -562,6 +587,11 @@ impl AgentSession {
     /// Execute `/refine`: plan, re-read, apply, and persist the continual
     /// harness state for this session. The conversation snapshot comes from
     /// the session entries (what the model would see on a rebuild).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conversation history cannot be read, or
+    /// when the refinement plan, apply, or persist fails.
     pub async fn refine(
         &self,
         options: &refine::RefineOptions,
@@ -630,6 +660,11 @@ impl AgentSession {
 
     /// Submit a prompt. Session commands (compact/refine/goal/autonomous)
     /// are recognized before admission and never reach the model.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying prompt admission error (see
+    /// [`AgentSession::prompt_with_images`]).
     pub async fn prompt(
         &self,
         text: &str,
@@ -647,6 +682,12 @@ impl AgentSession {
     /// `convert_to_llm` conversion, TS `convertToLlm`). The injected
     /// content is never template-expanded or command-parsed (TS injected
     /// turns skip `_normalizeSubmission`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session is already busy, when the pending
+    /// digest row cannot be captured, or when the agent rejects the
+    /// injected prompt.
     pub async fn prompt_injected_message(
         &self,
         message: &pa_types::session::CustomMessage,
@@ -686,6 +727,11 @@ impl AgentSession {
     /// Prompt with images attached (the ACP prompt-capability path). Busy
     /// sessions queue the text and images together as one follow-up batch,
     /// so an admitted prompt never loses its images to a queue race.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the prompt fails validation, the session is
+    /// busy under its admission rule, or the agent rejects the turn.
     pub async fn prompt_with_images(
         &self,
         text: &str,
@@ -878,6 +924,11 @@ impl AgentSession {
     /// Model change bookkeeping (mirrors appendModelChange). The resolved
     /// model is forwarded to the loop; pa-agent and pa-types serialize to the
     /// same camelCase wire shape, so the boundary converts through JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the model cannot be converted to the loop wire
+    /// shape, or when the model-change row cannot be persisted.
     pub async fn set_model(
         &self,
         model: &pa_types::ai::Model,
@@ -895,6 +946,11 @@ impl AgentSession {
     }
 
     /// Thinking level bookkeeping (mirrors appendThinkingLevelChange).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the thinking-level change row cannot be
+    /// persisted.
     pub async fn set_thinking_level(&self, level: ThinkingLevel) -> anyhow::Result<()> {
         self.agent.set_thinking_level(level).await;
         let mut session = self.session.lock().await;

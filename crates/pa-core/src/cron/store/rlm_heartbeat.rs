@@ -1,7 +1,7 @@
 //! RLM heartbeat operations: the agent-owned heartbeat jobs created and
 //! managed through the rlm-heartbeat kernel skill (list/create/update/delete
 //! plus session-teardown cancellation).
-//! Section of the port of the AgentCronJobStore half of core/cron-jobs.ts.
+//! Section of the port of the `AgentCronJobStore` half of core/cron-jobs.ts.
 
 use uuid::Uuid;
 
@@ -40,6 +40,13 @@ impl AgentCronJobStore {
         jobs
     }
 
+    /// Create an RLM heartbeat job for a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the schedule text cannot be parsed, when the
+    /// schedule is not recurring, or when the heartbeat instruction is
+    /// empty.
     pub fn create_rlm_heartbeat(
         &self,
         input: &CreateAgentCronJobInput,
@@ -85,6 +92,14 @@ impl AgentCronJobStore {
         Ok(job)
     }
 
+    /// Apply label, prompt, schedule, status, or delivery-mode updates to an
+    /// RLM heartbeat job. Returns `Ok(None)` when no matching job exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a matching job exists but the update was
+    /// rejected because the new instruction is empty or the new schedule is
+    /// invalid or not recurring.
     #[allow(clippy::too_many_arguments)]
     pub fn update_rlm_heartbeat(
         &self,

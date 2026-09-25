@@ -62,6 +62,12 @@ pub fn update_user_agent(version: &str) -> String {
 /// Fetch and validate the channel's latest release (TS `getLatestPiRelease`).
 /// `PI_SKIP_VERSION_CHECK`/`PI_OFFLINE` short-circuit to `None`; a missing or
 /// malformed manifest is `None`, never an error - `Planning` decides skip.
+///
+/// # Errors
+///
+/// Returns an error only when the manifest body cannot be read after a
+/// successful fetch; network, timeout, and manifest problems yield
+/// `Ok(None)`.
 pub async fn latest_release(
     current_version: &str,
     channel: Option<UpdateChannel>,
@@ -147,6 +153,11 @@ pub fn parse_channel_manifest(body: &[u8]) -> Option<LatestRelease> {
 }
 
 /// The artifact row for this platform, if the release carries one.
+///
+/// # Errors
+///
+/// Returns an error when the release carries no verified archive for the
+/// running platform.
 pub fn artifact_for_platform(release: &LatestRelease) -> Result<&ReleaseArtifact> {
     let platform = current_platform_alias();
     release

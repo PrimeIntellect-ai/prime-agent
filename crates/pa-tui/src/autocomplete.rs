@@ -41,7 +41,7 @@ pub struct CompletionResult {
     pub cursor_col: usize,
 }
 
-/// Provider contract mirroring TS AutocompleteProvider (synchronous).
+/// Provider contract mirroring TS `AutocompleteProvider` (synchronous).
 pub trait AutocompleteProvider: Send {
     fn get_suggestions(
         &self,
@@ -288,7 +288,7 @@ fn build_completion_value(path: &str, is_at_prefix: bool, is_quoted_prefix: bool
     format!("{prefix}\"{path}\"")
 }
 
-/// Selection state for the autocomplete dropdown (port of SelectList).
+/// Selection state for the autocomplete dropdown (port of `SelectList`).
 #[derive(Debug, Clone)]
 pub struct AutocompleteState {
     pub items: Vec<CompletionItem>,

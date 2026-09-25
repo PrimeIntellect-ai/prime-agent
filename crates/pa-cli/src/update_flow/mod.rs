@@ -22,6 +22,10 @@ use anyhow::{anyhow, Result};
 /// This process's install root (the coordinator runs the NEW binary from
 /// its release dir, the invoking CLI the old one - both derive the root
 /// from `current_exe`).
+///
+/// # Errors
+/// Returns an error when this process's executable path cannot be resolved
+/// or the binary does not run from a managed install root.
 pub fn activation_root() -> Result<PathBuf> {
     pa_core::update::install::install_root_of(&std::env::current_exe()?)
         .ok_or_else(|| anyhow!("the current binary does not run from a managed install root"))

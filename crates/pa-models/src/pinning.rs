@@ -51,6 +51,12 @@ impl PinnedTemplates {
 /// credentials are sent: parse the payload with skip-invalid semantics and
 /// keep only entries whose `(provider, api, baseUrl)` matches a compiled
 /// tuple. `Err` means the catalog carried nothing this client supports.
+///
+/// # Errors
+///
+/// Fails when the payload fails schema parsing (unsupported schema version,
+/// invalid model count, duplicates) or when no entry pins to a compiled
+/// transport.
 pub fn parse_provider_model_catalog(
     payload: &serde_json::Value,
     templates: &PinnedTemplates,
@@ -60,6 +66,11 @@ pub fn parse_provider_model_catalog(
 }
 
 /// Pin an already-parsed catalog's models to compiled transports.
+///
+/// # Errors
+///
+/// Fails when no entry pins to a compiled transport: the catalog carried
+/// nothing this client supports.
 pub fn pin_catalog_models(
     catalog_models: Vec<Model>,
     templates: &PinnedTemplates,

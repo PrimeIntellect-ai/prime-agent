@@ -1217,6 +1217,11 @@ pub fn find_trace_files(session_dir: &Path) -> Vec<PathBuf> {
 /// TS `uploadAllAgentTraces`: the concurrent sweep (default 4 workers)
 /// through the shared request gate, with the per-file progress and the
 /// cancel checks at the worker boundaries.
+///
+/// # Panics
+///
+/// Panics if a per-file result slot mutex is poisoned, i.e. if another
+/// worker panicked while holding that lock.
 pub async fn upload_all_traces(options: &TraceUploadAllOptions<'_>) -> TraceUploadAllResult {
     let session_dir = options.session_dir.map_or_else(
         || {

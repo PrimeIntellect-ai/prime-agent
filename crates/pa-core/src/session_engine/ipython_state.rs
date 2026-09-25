@@ -221,6 +221,12 @@ pub async fn capture_notice_content(probe: &dyn CompactionKernelProbe) -> Option
 /// turn so the notice precedes the failure it explains — and the row is
 /// returned for the surfaces to broadcast as a `message_start` /
 /// `message_end` pair. `None` when no notice landed (no running kernel).
+///
+/// # Errors
+///
+/// Returns the underlying I/O error when the durable notice row cannot be
+/// appended. A session with no running kernel returns `Ok(None)` without
+/// touching the disk.
 pub async fn sync_after_compaction(
     probe: &dyn CompactionKernelProbe,
     session: &Arc<tokio::sync::Mutex<SessionManager>>,

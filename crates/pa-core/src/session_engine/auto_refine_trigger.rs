@@ -74,6 +74,10 @@ impl AgentSession {
     /// arms the compact-trigger review. Sessions without the refine
     /// surface (TS `_autoRefineAllowedForSession`: depth 0 with a local
     /// harness state dir) never arm — the trigger would never run.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compact auto-refine state mutex is poisoned.
     pub fn mark_compact_auto_refine_pending(&self) {
         if !self.auto_refine_allowed() {
             return;
@@ -89,6 +93,10 @@ impl AgentSession {
     /// round and clears only when the outcome consumes it): the scheduling
     /// surfaces' cheap pre-check before resolving a model keeps servicing a
     /// retained review at the next quiescent boundary.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compact auto-refine state mutex is poisoned.
     pub fn compact_auto_refine_pending(&self) -> bool {
         let state = self
             .compact_auto_refine
@@ -101,6 +109,10 @@ impl AgentSession {
     /// round captured (TS `_autoRefineBranchVersion`'s post-await read):
     /// false means a discard fired mid-round and the round's result is
     /// stale — never applied, never surfaced.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compact auto-refine state mutex is poisoned.
     pub(crate) fn compact_auto_refine_branch_version_unchanged(&self, captured: u64) -> bool {
         self.compact_auto_refine
             .lock()
@@ -115,6 +127,10 @@ impl AgentSession {
     /// review started on the abandoned branch drops its result when it
     /// resolves (the version check inside the round), so its edits never
     /// apply to the moved-to session.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compact auto-refine state mutex is poisoned.
     pub fn discard_compact_auto_refine(&self) {
         let mut state = self
             .compact_auto_refine
@@ -125,8 +141,12 @@ impl AgentSession {
         state.branch_version += 1;
     }
 
-    /// TS `_assistantTurnsSinceAutoRefine`'s message_end increment: one
+    /// TS `_assistantTurnsSinceAutoRefine`'s `message_end` increment: one
     /// settled non-error assistant turn appended since the last review.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compact auto-refine state mutex is poisoned.
     pub fn note_settled_turn_since_auto_refine_review(&self) {
         self.compact_auto_refine
             .lock()
@@ -141,6 +161,14 @@ impl AgentSession {
     /// reviewer declining. `Ok(Some(result))` ran the refinement;
     /// `Err` is a failed review or refinement run (the cooldown is
     /// stamped either way).
+    ///
+    /// # Errors
+    ///
+    /// Returns the error of a failed auto-refine review or refinement run.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the compact auto-refine state mutex is poisoned.
     pub async fn consume_compact_auto_refine(
         &self,
         model: &Model,

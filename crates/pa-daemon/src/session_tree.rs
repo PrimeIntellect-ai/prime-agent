@@ -140,6 +140,11 @@ fn message_text(message: &Value) -> String {
 impl SessionFile {
     /// `branch` (TS `SessionManager.branch`): move the leaf onto an
     /// existing entry; the next append parents from there.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the target entry does not exist in the
+    /// session; a `None` id clears the leaf and never errors.
     pub fn branch_to(&mut self, id: Option<&str>) -> Result<()> {
         match id {
             Some(id) => {
@@ -156,6 +161,11 @@ impl SessionFile {
     /// `branchWithSummary`: move the leaf, then append the
     /// `branch_summary` entry describing the abandoned branch. Returns the
     /// summary entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the branch target does not exist or the
+    /// summary entry cannot be persisted.
     pub fn append_branch_summary(
         &mut self,
         from_id: Option<&str>,
@@ -181,6 +191,11 @@ impl SessionFile {
 
     /// `appendLabelChange`: persist the `label` entry for a target and
     /// keep the label state consistent (a null label clears it).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the target entry does not exist or the
+    /// label entry cannot be persisted.
     pub fn append_label_change(&mut self, target_id: &str, label: Option<&str>) -> Result<String> {
         if self.entry(target_id).is_none() {
             return Err(anyhow!("Entry {target_id} not found"));
@@ -207,6 +222,12 @@ impl SessionFile {
     /// their targets' labels re-recorded as fresh label entries), with a
     /// new header whose `parentSession` is this file. The caller re-points
     /// the worker at the returned store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the leaf entry does not exist, the fork's
+    /// lease cannot be acquired, or the forked session file cannot be
+    /// written.
     pub fn create_branched_file(&self, leaf_id: &str, session_dir: &Path) -> Result<SessionFile> {
         let path = self
             .branch_path_entries(leaf_id)
@@ -297,6 +318,11 @@ impl SessionFile {
     /// In-memory fork (TS non-persisted `createBranchedSession`): replace
     /// this store's entries with the root-to-`leaf_id` path, carrying the
     /// labels of the kept entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the leaf entry does not exist (a `None` id
+    /// clears the session and never errors).
     pub fn replace_with_branch(&mut self, leaf_id: Option<&str>) -> Result<()> {
         let path: Vec<SessionEntry> = match leaf_id {
             Some(leaf_id) => self

@@ -1,5 +1,5 @@
 //! End-to-end print-runtime verification: the real binary, an isolated HOME,
-//! and the scripted faux provider (PRIME_AGENT_FAUX_SCRIPT) drive the complete
+//! and the scripted faux provider (`PRIME_AGENT_FAUX_SCRIPT`) drive the complete
 //! pipeline — CLI parse, session assembly, agent loop, tool bridge seam, event
 //! emission, headless terminal selection — deterministically.
 

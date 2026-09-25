@@ -45,6 +45,14 @@ fn resolve_prime_agent_traces_challenge_config() -> (String, String) {
 
 /// TS `checkPrimeAgentTracesAccess`: the stored or pasted key must carry
 /// the `agent_traces` write permission.
+///
+/// # Errors
+///
+/// Returns [`PrimeAccessError::Failed`] when the `whoami` request fails or
+/// its response body is invalid, and [`PrimeAccessError::Denied`] when the
+/// request is rejected, the response is missing user or scope data, the
+/// token lacks the `agent_traces` scope, or the scope lacks the write
+/// permission.
 pub async fn check_prime_agent_traces_access(
     http: &dyn PrimeHttp,
     base_url: &str,
@@ -266,6 +274,12 @@ async fn run_prime_browser_login(
 /// TS `loginPrimeAgentTraces`: the prime-cli credential reuse (only when
 /// the traces base URL stays production), then the browser challenge, and
 /// the final `agent_traces` access check on the returned key.
+///
+/// # Errors
+///
+/// Returns a human-readable error string when the reused prime-cli key's
+/// access check fails, when the browser challenge or its polling fails, or
+/// when the resulting key fails the `agent_traces` access check.
 pub async fn login_prime_agent_traces(
     http: &dyn PrimeHttp,
     options: &PrimeAgentTracesLoginOptions<'_>,

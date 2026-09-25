@@ -220,7 +220,7 @@ mod tests {
     use serde_json::json;
 
     /// One test at a time over the global faux registry (the same contract
-    /// print_goal and print_boundary tests hold).
+    /// `print_goal` and `print_boundary` tests hold).
     static FAUX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     type Frames = std::sync::Arc<std::sync::Mutex<Vec<Value>>>;
@@ -321,7 +321,7 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
-    /// The faux engine bed (the print_goal test pattern): a persisted
+    /// The faux engine bed (the `print_goal` test pattern): a persisted
     /// session over its own tempdir, the wired goal surface with a capture
     /// sink, and the default autonomous state.
     async fn bed(script: Value) -> Bed {
@@ -418,7 +418,7 @@ mod tests {
         parse_session_command(&registry, text).expect("the test text is a session command")
     }
 
-    /// The driver's session-command branch (print_runtime's loop body).
+    /// The driver's session-command branch (`print_runtime`'s loop body).
     async fn run_command(bed: &Bed, text: &str) -> Option<String> {
         let execution = execute_prompt_session_command(
             &bed.engine,

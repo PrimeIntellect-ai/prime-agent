@@ -58,7 +58,7 @@ fn test_lock() -> MutexGuard<'static, ()> {
 }
 
 /// The kernel Python with prime-agent-runtime installed; set
-/// PA_E2E_KERNEL_PYTHON to point at an explicit interpreter instead.
+/// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);

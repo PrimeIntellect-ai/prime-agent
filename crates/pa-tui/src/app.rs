@@ -52,6 +52,13 @@ pub fn load_theme(name: &str) -> Theme {
 /// Every error return funnels through the one exit restore: an early `?`
 /// after the mount (a stream read, a draw failure) must not hand the shell
 /// a terminal still in TUI state.
+///
+/// # Errors
+///
+/// Returns `Err` when the surface fails to mount or the replay loop fails
+/// (raw-mode enable, the alternate-screen enter, a stream read, or a
+/// draw); the exit restore runs first, so the shell never keeps a
+/// TUI-state terminal.
 pub fn run_app(
     stream: Box<dyn SessionStream>,
     options: AppOptions,

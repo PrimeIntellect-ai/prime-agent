@@ -204,7 +204,7 @@ fn row_is_sibling(row: &Value, identity: &FamilyIdentity) -> bool {
 /// falls back to the supervisor-routed `send_message` (the TS worker's
 /// `sendRemoteAgentSessionMessage` path). Neither path is retried: daemon
 /// commands are not idempotent.
-/// Exposed for the agent-family e2e verifier (tests/agent_family_e2e.rs):
+/// Exposed for the agent-family e2e verifier (`tests/agent_family_e2e.rs)`:
 /// the same controller construction the worker engine wires.
 pub struct LinkAgentMessageController {
     link: Arc<SupervisorLink>,
@@ -1243,7 +1243,7 @@ mod controller_tests {
         assert_eq!(family[0].aliases, vec!["sub-kid2", "sess-e"]);
     }
 
-    /// A refused ticket falls back to the supervisor-routed send_message.
+    /// A refused ticket falls back to the supervisor-routed `send_message`.
     #[tokio::test]
     async fn refused_ticket_falls_back_to_the_supervisor_route() {
         let dir = tempfile::TempDir::new().unwrap();

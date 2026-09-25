@@ -36,6 +36,11 @@ impl ExtensionRunner {
     /// Spawn the sidecar, run the `hello` load cycle, and land the
     /// registrations. Load errors are carried in the runner (never fatal,
     /// TS parity: `loadExtensions` reports them per-path).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the sidecar fails to spawn or the `hello`
+    /// handshake fails (see [`ExtensionHost::start`]).
     pub async fn start(spec: ExtensionHostSpec) -> Result<ExtensionRunner> {
         let mut host = ExtensionHost::start(spec.clone()).await?;
         let registry = Arc::new(Mutex::new(ExtensionRegistry::default()));
@@ -123,6 +128,11 @@ impl ExtensionRunner {
 
     /// Dispatch one event; the reply carries the accumulated handler
     /// result (chaining semantics land with the event-surface stage).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the event params cannot be serialized or the
+    /// sidecar RPC request fails.
     pub async fn emit_event(
         &self,
         event_type: &str,
@@ -133,6 +143,11 @@ impl ExtensionRunner {
 
     /// Execute a registered extension tool by name (used directly by tests
     /// and the tool bridge's fallback paths).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tool params cannot be serialized, the RPC
+    /// request fails, or the reply cannot be parsed as a tool result.
     pub async fn execute_tool(
         &self,
         tool_call_id: &str,
@@ -143,6 +158,11 @@ impl ExtensionRunner {
     }
 
     /// Dispatch a slash command by invocation name.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the command params cannot be serialized or the
+    /// sidecar RPC request fails.
     pub async fn execute_command(&self, invocation_name: &str, args: &str) -> Result<()> {
         let params = serde_json::to_value(CommandExecuteParams {
             invocation_name: invocation_name.to_string(),
@@ -153,6 +173,11 @@ impl ExtensionRunner {
     }
 
     /// Dispatch a keybinding shortcut by normalized key id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the shortcut params cannot be serialized or the
+    /// sidecar RPC request fails.
     pub async fn execute_shortcut(&self, key: &str) -> Result<()> {
         let params = serde_json::to_value(ShortcutExecuteParams {
             key: key.to_string(),
@@ -190,12 +215,23 @@ impl ExtensionRunner {
     }
 
     /// Liveness probe (Rust-side `ping`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the sidecar is not running or the ping request
+    /// fails or times out.
     pub async fn ping(&self) -> Result<serde_json::Value> {
         self.host.ping().await
     }
 
     /// Orderly shutdown (§2.4): `shutdown` -> emit `session_shutdown` in the
     /// sidecar -> wait briefly -> kill the process group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when waiting for the sidecar process fails (see
+    /// [`ExtensionHost::shutdown`]); an unresponsive sidecar is killed and
+    /// reported as success.
     pub async fn shutdown(self, reason: &str) -> Result<()> {
         self.host.shutdown(reason).await
     }

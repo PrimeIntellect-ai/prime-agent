@@ -122,6 +122,19 @@ static IN_FLIGHT: Mutex<InFlightBootstrap> = Mutex::new(None);
 
 /// Resolve the Python interpreter for the kernel: the `PRIME_AGENT_KERNEL_PYTHON`
 /// override when valid, else the auto-bootstrapped venv python.
+///
+/// # Errors
+///
+/// Returns an error when the `PRIME_AGENT_KERNEL_PYTHON` override points to
+/// a Python missing the kernel runtime or default packages, when a writable
+/// venv directory cannot be resolved, or when the kernel venv bootstrap or
+/// its skill sync fails (the failure is formatted with remediation hints,
+/// including a missing packaged runtime directory).
+///
+/// # Panics
+///
+/// The in-flight promise stores its outcome under the same lock that takes
+/// it, so the internal `expect` on the stored outcome is unreachable.
 pub async fn ensure_kernel_python(options: EnsureKernelPythonOptions) -> anyhow::Result<PathBuf> {
     let python_skills = normalize_python_skills(&options.python_skills);
     let key = [

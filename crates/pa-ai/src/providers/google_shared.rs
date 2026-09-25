@@ -433,7 +433,7 @@ fn sanitize_for_openapi(schema: &Value) -> Value {
 /// Convert tools to Gemini function declarations.
 ///
 /// By default uses `parametersJsonSchema` (full JSON Schema). `use_parameters`
-/// switches to the legacy OpenAPI `parameters` field (needed for Cloud Code
+/// switches to the legacy `OpenAPI` `parameters` field (needed for Cloud Code
 /// Assist with Claude models).
 pub fn convert_tools(tools: &[Tool], use_parameters: bool) -> Option<Vec<Value>> {
     if tools.is_empty() {

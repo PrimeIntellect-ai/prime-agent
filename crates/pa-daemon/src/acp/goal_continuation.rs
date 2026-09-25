@@ -11,7 +11,7 @@
 //! ACP path drives every continuation INSIDE the one `session/prompt`
 //! request: continuation turns surface as events of the same prompt turn,
 //! and the response settles only after the goal run ends (complete /
-//! paused / budget_limited / error, or genuinely nothing more to do). The
+//! paused / `budget_limited` / error, or genuinely nothing more to do). The
 //! daemon-attached transport rides the worker's queue (the #244 lane);
 //! this module is the in-process counterpart: the prompt turn's settle
 //! loop consults the same arms at each settled boundary.
@@ -43,7 +43,7 @@ use super::AcpModeState;
 /// proceeds to the autonomous arm).
 pub(super) enum GoalFollowUp {
     None,
-    /// Boxed: the message's insertion-ordered JSON maps (preserve_order,
+    /// Boxed: the message's insertion-ordered JSON maps (`preserve_order`,
     /// wire parity) would dwarf the empty variant (`large_enum_variant`).
     Turn(Box<CustomMessage>),
 }
@@ -164,8 +164,8 @@ mod tests {
     use super::*;
     use crate::agent_engine::FAUX_TEST_LOCK;
 
-    /// The faux model's per-request output budget (maxTokens 16_384 under the
-    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// The faux model's per-request output budget (maxTokens `16_384` under the
+    /// `32_000` request cap): threshold fixtures subtract it from the window
     /// alongside the headroom (the combined input+output ceiling).
     const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
@@ -497,7 +497,7 @@ mod tests {
 
     /// The budget-limit wrap-up steer: the turn whose usage crossed the
     /// goal budget runs the budget-limit context as the prompt's last
-    /// model segment, the goal settles budget_limited, and no
+    /// model segment, the goal settles `budget_limited`, and no
     /// continuation is minted (the steer consumes no slot).
     #[tokio::test]
     async fn budget_crossing_runs_the_wrap_up_steer_and_settles() {

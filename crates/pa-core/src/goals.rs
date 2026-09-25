@@ -35,7 +35,7 @@ impl GoalContextKind {
     }
 }
 
-/// Goal payload returned to the kernel-side goal skill (snake_case).
+/// Goal payload returned to the kernel-side goal skill (`snake_case`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SerializedGoal {
@@ -86,6 +86,12 @@ pub fn normalize_goal_state(goal: GoalState) -> GoalState {
     }
 }
 
+/// Validate and normalize a goal objective.
+///
+/// # Errors
+///
+/// Returns an error when the objective is empty after trimming or longer
+/// than the objective character limit.
 pub fn validate_goal_objective(value: &str) -> anyhow::Result<String> {
     let objective = value.trim();
     if objective.is_empty() {
@@ -99,6 +105,11 @@ pub fn validate_goal_objective(value: &str) -> anyhow::Result<String> {
     Ok(objective.to_string())
 }
 
+/// Validate a goal token budget.
+///
+/// # Errors
+///
+/// Returns an error when the budget is present and zero.
 pub fn validate_goal_budget(value: Option<u64>) -> anyhow::Result<Option<u64>> {
     if value == Some(0) {
         return Err(anyhow::anyhow!(
@@ -175,6 +186,11 @@ pub fn goal_host_response(goal: &GoalState, include_completion_report: bool) -> 
 }
 
 /// The goal continuation/budget/objective message (custom type, display=true).
+///
+/// # Errors
+///
+/// Returns an error when the goal has no objective, or when the goal context
+/// details cannot be serialized.
 pub fn create_goal_context_message(
     goal: &GoalState,
     kind: GoalContextKind,

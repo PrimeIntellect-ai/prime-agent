@@ -1,7 +1,7 @@
 //! Generic cron job operations: create/list/cancel, session binding and
 //! rebinding, run and skip result recording, and due-claim dispatch with
 //! result recording and interrupted-dispatch recovery.
-//! Section of the port of the AgentCronJobStore half of core/cron-jobs.ts.
+//! Section of the port of the `AgentCronJobStore` half of core/cron-jobs.ts.
 
 use uuid::Uuid;
 
@@ -25,6 +25,12 @@ impl AgentCronJobStore {
         jobs
     }
 
+    /// Create a cron job from the input schedule and prompt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the prompt is empty or the schedule text cannot
+    /// be parsed.
     pub fn create(&self, input: &CreateAgentCronJobInput) -> anyhow::Result<AgentCronJob> {
         let prompt = input.prompt.trim();
         if prompt.is_empty() {
@@ -161,6 +167,11 @@ impl AgentCronJobStore {
     }
 
     /// Record one run: bump counters, roll `nextRunAt`, complete one-shots.
+    ///
+    /// # Errors
+    ///
+    /// The current implementation never returns `Err`; the updated job (or
+    /// `None` when the job is missing) is always wrapped in `Ok`.
     pub fn record_run_result(
         &self,
         id: &str,
@@ -309,6 +320,14 @@ impl AgentCronJobStore {
         None
     }
 
+    /// Record the outcome of a claimed dispatch: release the claim, roll the
+    /// job's next run, and complete one-shots. Returns the updated job, or
+    /// `None` when the dispatch is no longer pending.
+    ///
+    /// # Errors
+    ///
+    /// The current implementation never returns `Err`; the updated job (or
+    /// `None`) is always wrapped in `Ok`.
     pub fn record_dispatch_result(
         &self,
         dispatch_id: &str,
