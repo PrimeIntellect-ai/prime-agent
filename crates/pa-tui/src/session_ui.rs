@@ -3652,6 +3652,9 @@ impl SessionUi {
             }
             AuthSelectorAction::LoginError { message } => {
                 view.provider_auth = None;
+                // A failed key submission abandons the parked model
+                // selection too (an empty key never counts as a login).
+                self.pending_model_sign_in = None;
                 self.error_row(&message, view);
             }
             AuthSelectorAction::Login { provider, api_key } => {
@@ -3680,16 +3683,9 @@ impl SessionUi {
             }
             AuthSelectorAction::Logout { provider } => {
                 view.provider_auth = None;
-                // A logout voids a parked sign-in for the same provider
-                // (the credential the retry needs is being removed), so
-                // the logout's own status row never reads as a sign-in.
-                if self
-                    .pending_model_sign_in
-                    .as_ref()
-                    .is_some_and(|pending| pending.provider == provider.id)
-                {
-                    self.pending_model_sign_in = None;
-                }
+                // The settled outcome drops any parked model sign-in
+                // (`apply_auth_outcome` consumes it), so a logout never
+                // leaves a model waiting on the credential it removed.
                 let auth = self.provider_auth.clone().expect("the selector was open");
                 let outcome = auth.0.logout(&provider).await;
                 self.apply_auth_outcome(outcome, &provider.id, view).await;
@@ -3748,10 +3744,11 @@ impl SessionUi {
     }
 
     /// One flow outcome (TS `completeProviderAuthentication`'s status vs
-    /// the flow's error row). `provider` is the row's provider id: a
-    /// successful login of a parked model sign-in retries the switch;
-    /// a failed or cancelled one drops the park (the outcome's own rows
-    /// render as usual).
+    /// the flow's error row). The parked model sign-in is consumed by the
+    /// outcome: a successful login of its provider retries the switch;
+    /// a failed or cancelled flow — or a settled login for a different
+    /// provider, which abandons the route the user left — drops the park
+    /// (the outcome's own rows render as usual).
     async fn apply_auth_outcome(
         &mut self,
         outcome: crate::provider_auth::ProviderAuthOutcome,
@@ -3760,30 +3757,23 @@ impl SessionUi {
     ) {
         let parked = self
             .pending_model_sign_in
-            .as_ref()
-            .filter(|pending| pending.provider == provider)
-            .cloned();
+            .take()
+            .filter(|pending| pending.provider == provider);
         match outcome {
             crate::provider_auth::ProviderAuthOutcome::Status(message) => {
                 self.note(&message, view);
                 if let Some(pending) = parked {
-                    self.pending_model_sign_in = None;
                     self.finish_model_sign_in(pending, view).await;
                 }
             }
+            // The failed and cancelled flows drop the park above (the
+            // `take`); their own rows render as usual.
             crate::provider_auth::ProviderAuthOutcome::Error(message) => {
-                if parked.is_some() {
-                    self.pending_model_sign_in = None;
-                }
                 self.error_row(&message, view);
             }
             // A cancelled flow stays silent (the TS cancelled state shows
-            // no row either); the parked sign-in drops with it.
-            crate::provider_auth::ProviderAuthOutcome::Cancelled => {
-                if parked.is_some() {
-                    self.pending_model_sign_in = None;
-                }
-            }
+            // no row either).
+            crate::provider_auth::ProviderAuthOutcome::Cancelled => {}
         }
     }
 
@@ -5993,33 +5983,33 @@ impl SessionUi {
                 } else {
                     view.editor.set_text("");
                 }
-                // TS `ensureModelProviderConfigured` first: a provider
-                // the catalog does not count as signed in never reaches
-                // the daemon — the selection routes to the provider's
-                // sign-in flow and applies after the login lands.
-                if !self.model_configured_providers.contains(&applied.provider) {
-                    self.begin_model_sign_in(&applied, view).await;
-                } else {
-                    match self
-                        .try_set_model(&applied.provider, &applied.model_id, view)
-                        .await
-                    {
-                        SetModelOutcome::Switched => {
-                            // A user-edited effort applies after the model
-                            // switch (TS `completeModelSelection`:
-                            // `setModel`, then `applyThinkingLevel` — the
-                            // level row only on success).
-                            if let Some(level) = &applied.effort {
-                                self.apply_thinking_level(level, view).await;
-                            }
+                // The daemon is the source of truth (TS
+                // `ensureModelProviderConfigured`'s client gate rides the
+                // connection's own configured set; the local snapshot can
+                // lag an external credential change, so the switch is
+                // sent first and the typed refusal routes the sign-in
+                // flow).
+                match self
+                    .try_set_model(&applied.provider, &applied.model_id, view)
+                    .await
+                {
+                    SetModelOutcome::Switched => {
+                        // A user-edited effort applies after the model
+                        // switch (TS `completeModelSelection`: `setModel`,
+                        // then `applyThinkingLevel` — the level row only
+                        // on success).
+                        if let Some(level) = &applied.effort {
+                            self.apply_thinking_level(level, view).await;
                         }
-                        // A stale client snapshot: the daemon's typed
-                        // refusal routes the same sign-in flow.
-                        SetModelOutcome::NeedsSignIn { .. } => {
-                            self.begin_model_sign_in(&applied, view).await;
-                        }
-                        SetModelOutcome::Failed => {}
                     }
+                    // The typed refusal: the model resolved but its
+                    // provider is not signed in — the selection routes to
+                    // the provider's sign-in flow and applies after the
+                    // login lands.
+                    SetModelOutcome::NeedsSignIn { .. } => {
+                        self.begin_model_sign_in(&applied, view).await;
+                    }
+                    SetModelOutcome::Failed => {}
                 }
             }
         }

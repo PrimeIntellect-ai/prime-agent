@@ -222,8 +222,10 @@ impl ModelRegistry {
         // while its provider is not signed in — the picker's discovery
         // path. The stale fallback resolves from the full catalog (TS
         // `find`); a provider without any credential is the sign-in
-        // refusal; anything else (authorized private models aside) stays
-        // the TS "Model not found".
+        // refusal; a signed-in provider's exclusion is the unauthorized
+        // private Prime Inference model (the only `get_available` gate
+        // besides auth), which keeps the TS "Model not found" refusal —
+        // never a switch to a model the account is not entitled to.
         let Some(model) = self.get_all().iter().find(|model| matches(model)) else {
             return Err(SetModelSelectionError::NotFound {
                 provider: provider.to_string(),
@@ -240,7 +242,10 @@ impl ModelRegistry {
                 provider: provider.to_string(),
             });
         }
-        Ok(model)
+        Err(SetModelSelectionError::NotFound {
+            provider: provider.to_string(),
+            model_id: model_id.to_string(),
+        })
     }
 
     fn has_configured_provider_request_auth(&self, provider: &str) -> bool {

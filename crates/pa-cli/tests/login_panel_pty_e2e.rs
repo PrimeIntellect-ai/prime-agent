@@ -461,11 +461,12 @@ fn mcp_view_enter_login_renders_inline_without_a_terminal_takeover() {
 
 /// The model-picker sign-in e2e (the operator's bug report): a model from
 /// a provider the user is not signed in to stays visible in the picker
-/// (marked "require sign in"), selecting it routes to the provider's
-/// sign-in flow — the `/login` provider menu, preselected on the
-/// provider's row, then the API-key prompt — and a successful sign-in
-/// applies the model automatically (the `Model: <id>` status row after
-/// the login's own status row, never the old dead-end refusal).
+/// (marked "require sign in"), selecting it sends the switch, the
+/// daemon's typed not-signed-in refusal routes the provider's sign-in
+/// flow (the `/login` provider menu, preselected on the provider's row,
+/// then the API-key prompt), and a successful sign-in applies the model
+/// automatically (the `Model: <id>` status row after the login's own
+/// status row, never the old dead-end refusal).
 #[test]
 fn model_picker_routes_the_sign_in_flow_and_applies_after_login() {
     let mut harness = LoginPanelHarness::start_model_sign_in();
@@ -480,9 +481,9 @@ fn model_picker_routes_the_sign_in_flow_and_applies_after_login() {
     harness.wait_from_start("GLM 5.3 Fast", "the unauthenticated provider's model row");
     harness.wait_from_start("require sign in", "the row's sign-in marking");
 
-    // Enter selects the model: the sign-in route — the note explains why,
-    // the `/login` provider menu mounts, the provider's row is
-    // preselected.
+    // Enter selects the model: the daemon's typed not-signed-in refusal
+    // routes the sign-in flow — the note explains why, the `/login`
+    // provider menu mounts, the provider's row is preselected.
     let mark = harness.mark();
     harness.write(b"\r");
     harness.wait_from(
@@ -699,6 +700,11 @@ impl MockSupervisor {
                 "clientId": "mock",
             }),
         );
+        // The model-picker sign-in child's set_model sequence: the
+        // unsigned provider's first switch answers with the daemon's
+        // typed refusal (the wire shape `resolve_set_model_selection`
+        // produces), the post-login retry succeeds.
+        let mut set_model_count = 0usize;
         let mut line = String::new();
         loop {
             line.clear();
@@ -736,6 +742,39 @@ impl MockSupervisor {
                 }
                 "attach" => {
                     write_json(&mut writer, &attach_data(id));
+                }
+                "set_model" => {
+                    set_model_count += 1;
+                    if set_model_count == 1 {
+                        // The not-signed-in class: the typed refusal the
+                        // TUI routes to the sign-in flow (never the old
+                        // dead-end "Model not found" text).
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "set_model",
+                                "success": false,
+                                "error": "Provider \"zai\" is not signed in. Sign in to the provider (the TUI's /login command), then set the model again.",
+                                "errorInfo": {
+                                    "code": "model_provider_unauthenticated",
+                                    "provider": "zai",
+                                },
+                            }),
+                        );
+                    } else {
+                        write_json(
+                            &mut writer,
+                            &json!({
+                                "type": "response",
+                                "id": id,
+                                "command": "set_model",
+                                "success": true,
+                                "data": {},
+                            }),
+                        );
+                    }
                 }
                 "get_model_catalog" => {
                     // The model-picker sign-in child's catalog: the

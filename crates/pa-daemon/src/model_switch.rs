@@ -497,7 +497,30 @@ mod tests {
         );
         assert_eq!(
             error.to_string(),
-            "Model not found: {provider}/no-such-model"
+            format!("Model not found: {provider}/no-such-model")
+        );
+    }
+
+    /// A signed-in provider's unauthorized private Prime Inference model
+    /// (the only `get_available` exclusion besides auth) keeps the TS
+    /// refusal — the switch never reaches a model the account is not
+    /// entitled to.
+    #[test]
+    fn an_unauthorized_private_model_keeps_the_ts_refusal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        models_fixture(dir.path());
+        let agent_dir = dir.path().join("agent");
+        // The bundled private table ships `internal/glm-5.2-fast`; the
+        // fixture signs the provider in but grants no private-model
+        // authorization (no Prime credential, no explicit ids).
+        let error = resolve_available_model(&agent_dir, "prime-inference", "internal/glm-5.2-fast")
+            .expect_err("the unauthorized private model refuses");
+        assert_eq!(
+            error,
+            pa_core::models::SetModelSelectionError::NotFound {
+                provider: "prime-inference".to_string(),
+                model_id: "internal/glm-5.2-fast".to_string(),
+            }
         );
     }
 
