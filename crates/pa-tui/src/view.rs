@@ -603,12 +603,8 @@ impl AgentView {
     /// otherwise replay it after the cycle returns to that level.
     pub(crate) fn clear_entry_expanded(&mut self) {
         self.entry_expanded.clear();
-        for slot in &mut self.entry_layout {
-            *slot = [None, None, None];
-        }
-        for slot in &mut self.entry_heights {
-            *slot = [None, None, None];
-        }
+        self.entry_layout.fill([None, None, None]);
+        self.entry_heights.fill([None, None, None]);
     }
 
     /// Toggle the side-question pane's bash block expansion (TS
