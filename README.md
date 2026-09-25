@@ -47,10 +47,10 @@ Download the latest build for your platform from the [continuous release](https:
 
 ```bash
 # macOS Apple Silicon
-curl -fsSL https://github.com/PrimeIntellect-ai/prime-agent/releases/download/continuous/prime-agent-0.1.0-aarch64-apple-darwin.tar.gz | tar xz && ./prime-agent
+curl -fsSL https://github.com/PrimeIntellect-ai/prime-agent/releases/download/continuous/prime-agent-0.1.0-darwin-arm64.tar.gz | tar xz && ./prime-agent
 
 # Linux x64
-curl -fsSL https://github.com/PrimeIntellect-ai/prime-agent/releases/download/continuous/prime-agent-0.1.0-x86_64-unknown-linux-gnu.tar.gz | tar xz && ./prime-agent
+curl -fsSL https://github.com/PrimeIntellect-ai/prime-agent/releases/download/continuous/prime-agent-0.1.0-linux-x64.tar.gz | tar xz && ./prime-agent
 ```
 
 ## Why Prime Agent
