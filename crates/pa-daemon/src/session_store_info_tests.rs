@@ -440,7 +440,9 @@ fn a_failed_prefix_check_rescans_from_byte_zero() {
     // The file also grows: a valid appended line enters the resume path.
     append_rows(
         &path,
-        &[json!({"type":"message","id":"m1","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"grown","timestamp":1790110000000u64}})],
+        &[
+            json!({"type":"message","id":"m1","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"grown","timestamp":1790110000000u64}}),
+        ],
     );
     // Force the mtime tick so the generation is not byte-equal.
     let past = std::time::SystemTime::now() - std::time::Duration::from_secs(10);
