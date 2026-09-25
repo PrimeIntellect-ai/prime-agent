@@ -963,9 +963,7 @@ mod tests {
         match KnownFileEntry::deserialize(value) {
             Ok(entry) => Some(FileEntry::from(entry)),
             Err(_) => match value {
-                Value::Object(rest) => Some(FileEntry::Unknown {
-                    rest: rest.clone(),
-                }),
+                Value::Object(rest) => Some(FileEntry::Unknown { rest: rest.clone() }),
                 _ => None,
             },
         }

@@ -114,11 +114,13 @@ impl<'de> Deserialize<'de> for SessionEntry {
                     }
                 }
                 Ok(SessionEntry {
-                    type_: type_.ok_or_else(|| <A::Error as serde::de::Error>::missing_field("type"))?,
+                    type_: type_
+                        .ok_or_else(|| <A::Error as serde::de::Error>::missing_field("type"))?,
                     id: id.ok_or_else(|| <A::Error as serde::de::Error>::missing_field("id"))?,
                     parent_id: parent_id.unwrap_or_default(),
-                    timestamp: timestamp
-                        .ok_or_else(|| <A::Error as serde::de::Error>::missing_field("timestamp"))?,
+                    timestamp: timestamp.ok_or_else(|| {
+                        <A::Error as serde::de::Error>::missing_field("timestamp")
+                    })?,
                     fields: Value::Object(fields),
                 })
             }
