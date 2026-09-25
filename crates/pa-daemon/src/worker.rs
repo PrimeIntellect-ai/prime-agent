@@ -1580,20 +1580,7 @@ impl Worker {
                         self.write_response_frame(&sink, &request_id, &response)
                             .await;
                         if response.success {
-                            // Shutdown keeps the resume entry and exits the
-                            // process, like the TS close path
-                            // (`closeKeepsResumeEntry("shutdown")`).
-                            let _ = self.record_recovery(false, "shutdown");
-                            // A graceful exit owns its socket file: remove
-                            // it now so a respawn does not wait out the
-                            // stale-socket path (a killed worker cannot
-                            // clean up, but its killer relaunches through
-                            // `prepare_socket_path`).
-                            crate::socket::cleanup_socket_path(
-                                &self.config.socket_path,
-                                crate::socket::socket_identity(&self.config.socket_path),
-                            );
-                            std::process::exit(0);
+                            self.exit_after_close();
                         }
                         continue;
                     }
@@ -3294,6 +3281,45 @@ impl Worker {
             .and_then(|store| store.lease.take());
         drop(lease);
         response_success(None, "shutdown", None)
+    }
+
+    /// The durable tail of a successful close: the resume entry, the
+    /// worker's own socket cleanup, and the process exit. The routed
+    /// `shutdown` arm and the registration-retirement path share it
+    /// (`std::process::exit` runs no destructors, so the caller must
+    /// have settled the close first).
+    fn exit_after_close(&self) -> ! {
+        // Shutdown keeps the resume entry and exits the process, like the
+        // TS close path (`closeKeepsResumeEntry("shutdown")`).
+        let _ = self.record_recovery(false, "shutdown");
+        // A graceful exit owns its socket file: remove it now so a respawn
+        // does not wait out the stale-socket path (a killed worker cannot
+        // clean up, but its killer relaunches through
+        // `prepare_socket_path`).
+        crate::socket::cleanup_socket_path(
+            &self.config.socket_path,
+            crate::socket::socket_identity(&self.config.socket_path),
+        );
+        std::process::exit(0)
+    }
+
+    /// The refused-registration self-heal: the supervisor definitively
+    /// rejected this worker's identity (the unknown-worker verdict — no
+    /// descriptor exists for it), so no daemon will ever adopt or route to
+    /// this process again. The worker retires with the same graceful
+    /// close a routed `shutdown` runs — abort and settle the session,
+    /// dispose the kernel, keep the resume entry — releasing the runtime
+    /// session lease its session file needs back: a retired worker that
+    /// kept running would hold the lease against every future resume
+    /// while staying invisible to every roster, the leftover-holder
+    /// [`crate::boot_reap`] documents and clears on `/proc` platforms.
+    pub(crate) async fn exit_refused_registration(&self) {
+        eprintln!(
+            "pa-daemon worker {}: registration refused (the supervisor no longer owns this identity); retiring",
+            std::process::id()
+        );
+        let _ = self.handle_shutdown().await;
+        self.exit_after_close();
     }
 
     /// Wait until no turn or compaction run is in flight (the awaited
@@ -6246,6 +6272,19 @@ pub async fn run_worker() -> Result<()> {
     // because workers re-present their identity (liveness watch + backoff).
     let registration = crate::registration::start(&config);
     let worker = Arc::new(Worker::new(config, registration));
+    // The refused-registration self-heal: a supervisor that destroyed this
+    // worker's durable identity (its descriptor) can never adopt it again,
+    // so the registration loop's definitive rejection retires the worker —
+    // the graceful close releasing its session lease instead of the
+    // invisible lease-holder it would otherwise remain (the macOS case of
+    // the leftover-holder the boot reap cannot enumerate).
+    if let Some(handle) = worker.registration.clone() {
+        let worker = Arc::clone(&worker);
+        tokio::spawn(async move {
+            handle.retired().await;
+            worker.exit_refused_registration().await;
+        });
+    }
     worker.serve().await
 }
 
