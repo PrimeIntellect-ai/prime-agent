@@ -70,6 +70,15 @@ pub struct ProviderPickerOption {
     pub available: bool,
 }
 
+/// One picker row's presentation flags (the render and key paths share
+/// them; `available` carries the /login menu rule).
+#[derive(Debug, Clone, Copy)]
+struct RowMarks {
+    connected: bool,
+    selected: bool,
+    available: bool,
+}
+
 /// The picker's answer to one key (TS `onSelect`/`onContinue`/`onCancel`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderPick {
@@ -211,9 +220,11 @@ impl ProviderPicker {
             width,
             row_width,
             CONTINUE_LABEL,
-            false,
-            self.selected == 0,
-            true,
+            RowMarks {
+                connected: false,
+                selected: self.selected == 0,
+                available: true,
+            },
         ));
         let end = (scroll_top + VISIBLE_ROWS).min(filtered.len());
         for (index, item) in filtered.iter().enumerate().take(end).skip(scroll_top) {
@@ -229,9 +240,11 @@ impl ProviderPicker {
                 width,
                 row_width,
                 &label,
-                item.connected,
-                self.selected == index + 1,
-                item.available,
+                RowMarks {
+                    connected: item.connected,
+                    selected: self.selected == index + 1,
+                    available: item.available,
+                },
             ));
         }
         let remaining = filtered.len() - end;
@@ -262,10 +275,13 @@ impl ProviderPicker {
         width: usize,
         row_width: usize,
         label: &str,
-        connected: bool,
-        selected: bool,
-        available: bool,
+        marks: RowMarks,
     ) -> Line {
+        let RowMarks {
+            connected,
+            selected,
+            available,
+        } = marks;
         let name = format!("{}{}", if selected { "> " } else { "  " }, label);
         let mark = if connected { "  \u{2713}" } else { "" };
         let pad = " ".repeat(
