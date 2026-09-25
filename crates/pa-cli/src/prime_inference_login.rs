@@ -1104,7 +1104,7 @@ mod tests {
             (
                 teams_request(),
                 200,
-                r#"{"total_count":1,"data":[{"teamId":"t-1","name":"Team One"}]}}"#,
+                r#"{"total_count":1,"data":[{"teamId":"t-1","name":"Team One"}]}"#,
             ),
         ]);
         let dir = tempfile::tempdir().expect("temp dir");
@@ -1186,7 +1186,7 @@ mod tests {
             (
                 teams_request(),
                 200,
-                r#"{"total_count":1,"data":[{"teamId":"t-1","name":"Team One"}]}}"#,
+                r#"{"total_count":1,"data":[{"teamId":"t-1","name":"Team One"}]}"#,
             ),
         ]);
         let dir = tempfile::tempdir().expect("temp dir");
