@@ -94,7 +94,15 @@ struct AcpModeState {
     /// the session-command executors (`/compact`, `/refine`) follow the
     /// switched model, exactly like the TS session's own calls.
     model: Arc<Mutex<Option<pa_types::ai::Model>>>,
-    api_key: Option<String>,
+    /// The session's live request key: follows a picker model switch's
+    /// registry resolution, so the session-command executors authenticate
+    /// against the switched model's provider (TS re-resolves auth with
+    /// the model).
+    api_key: Arc<Mutex<Option<String>>>,
+    /// The serialized config queue (TS `configTask`): picker switches and
+    /// the trigger-consuming arms observe one another through it, so an
+    /// armed refinement never reads the pre-switch model mid-switch.
+    config_queue: Arc<tokio::sync::Mutex<()>>,
     agent_dir: Arc<PathBuf>,
     provider_target: ProviderTargetSlot,
     autonomous_config: Option<pa_core::autonomous::AgentAutonomousConfig>,
@@ -112,15 +120,24 @@ impl AcpModeState {
     async fn current_model(&self) -> Option<pa_types::ai::Model> {
         self.model.lock().await.clone()
     }
+
+    /// The session's current request key (the live slot the picker switch
+    /// updates).
+    pub(super) async fn current_api_key(&self) -> Option<String> {
+        self.api_key.lock().await.clone()
+    }
 }
 
 /// One hosted session and its in-flight prompt turn, if any.
 struct SessionEntry {
     session: Arc<AcpSession>,
     prompt_task: Option<tokio::task::JoinHandle<()>>,
-    /// The picker state (TS `AcpSessionEntry`'s configOptions/models) plus
-    /// the serialized config queue (`configTask`).
+    /// The picker state (TS `AcpSessionEntry`'s configOptions/models).
     config: Arc<InProcessConfig>,
+    /// The agent-end refresh subscription (unsubscribed at close so a
+    /// closed session stops refreshing — the listener would otherwise
+    /// outlive the session and pin its state).
+    config_refresh: Option<pa_agent::agent::Subscription>,
 }
 
 /// Run the ACP stdio mode until stdin closes. Returns the process exit code.
@@ -148,7 +165,8 @@ pub async fn run_acp_mode(options: AcpOptions) -> Result<i32> {
         actual_cwd: Arc::new(options.actual_cwd.clone()),
         product_version: Arc::new(options.product_version.clone()),
         model: Arc::new(Mutex::new(options.model.clone())),
-        api_key: options.api_key.clone(),
+        api_key: Arc::new(Mutex::new(options.api_key.clone())),
+        config_queue: Arc::new(tokio::sync::Mutex::new(())),
         agent_dir: Arc::new(options.agent_dir.clone()),
         provider_target: options.provider_target.clone(),
         autonomous_config: options.autonomous_config.clone(),
@@ -207,8 +225,12 @@ async fn teardown(state: &Arc<Mutex<ConnectionState>>, mode: &AcpModeState) {
     if let Some(task) = entry.prompt_task.take() {
         let _ = task.await;
     }
-    // The serialized config work settles before the producer fences.
-    let _ = entry.config.queue.lock().await;
+    // The refresh listener goes away with the session, then the
+    // serialized config work settles before the producer fences.
+    if let Some(subscription) = entry.config_refresh.take() {
+        subscription.unsubscribe().await;
+    }
+    let _ = mode.config_queue.lock().await;
     // The serialized dispose drain (TS `dispose`): a compaction can arm
     // the compact-trigger review with no further turn to service it —
     // close runs the round one last time, best-effort, before the
@@ -429,8 +451,11 @@ async fn session_new(
     );
     // The engine subscription refreshes the pickers at the end of every
     // agent run (the TS `agent_end` trigger), through the same serialized
-    // queue as the request handler.
-    in_process_config::wire_config_refresh(&session, Arc::clone(&config), mode.clone()).await;
+    // queue as the request handler. The subscription is retained on the
+    // entry so close removes it (a listener that outlives the session
+    // keeps refreshing it).
+    let config_refresh =
+        in_process_config::wire_config_refresh(&session, Arc::clone(&config), mode.clone()).await;
 
     let mut result = json!({
         "sessionId": session_id,
@@ -450,6 +475,7 @@ async fn session_new(
         session,
         prompt_task: None,
         config,
+        config_refresh: Some(config_refresh),
     })
 }
 
@@ -499,9 +525,14 @@ async fn handle_session_close(
     if let Some(task) = entry.prompt_task.take() {
         let _ = task.await;
     }
-    // The serialized config work settles before the producer fences (TS
-    // `await configTask` in `session/close`).
-    let _ = entry.config.queue.lock().await;
+    // The refresh listener goes away with the session (no later agent
+    // run refreshes a closed session), then the serialized config work
+    // settles before the producer fences (TS `await configTask` in
+    // `session/close`).
+    if let Some(subscription) = entry.config_refresh.take() {
+        subscription.unsubscribe().await;
+    }
+    let _ = mode.config_queue.lock().await;
     // The serialized dispose drain (TS `dispose`): a compaction can arm
     // the compact-trigger review with no further turn to service it —
     // close runs the round one last time, best-effort, before the

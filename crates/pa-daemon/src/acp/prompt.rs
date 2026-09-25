@@ -434,7 +434,7 @@ async fn run_session_command_segment(
         let mut autonomous = session.autonomous.lock().await;
         let mut params = SessionCommandParams {
             model: &model,
-            api_key: mode.api_key.clone(),
+            api_key: mode.current_api_key().await,
             global_harness_dir: mode.agent_dir.as_path().to_path_buf(),
             autonomous: &mut autonomous,
         };

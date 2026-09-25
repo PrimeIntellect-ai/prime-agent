@@ -328,8 +328,13 @@ pub(super) async fn refresh_wire_config(
     config: &Arc<HostedConfig>,
     producer: &Arc<UpdateProducer>,
 ) -> Vec<SessionConfigOption> {
-    let state = fetch_connection_state(link, daemon_session_id).await;
-    let options = picker_options_from_state(&state, &config.models.lock().await);
+    // A failed state fetch preserves the last published options (TS's
+    // refresh rejects on a failed `getState`, never clobbering the
+    // client's pickers with an empty list).
+    let Some(state) = fetch_connection_state(link, daemon_session_id).await else {
+        return config.published.lock().await.clone();
+    };
+    let options = picker_options_from_state(&Some(state), &config.models.lock().await);
     publish_config_options(producer, &config.published, options.clone()).await;
     options
 }

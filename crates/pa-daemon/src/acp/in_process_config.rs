@@ -28,7 +28,6 @@ use super::{internal_error, AcpModeState, ConnectionState};
 /// (TS `enqueueConfig`/`configTask` — close drains it before the
 /// producer fences).
 pub(crate) struct InProcessConfig {
-    pub(crate) queue: tokio::sync::Mutex<()>,
     pub(crate) published: tokio::sync::Mutex<Vec<SessionConfigOption>>,
     pub(crate) models: tokio::sync::Mutex<Vec<pa_types::ai::Model>>,
 }
@@ -63,7 +62,6 @@ pub(super) async fn admit_session_config(mode: &AcpModeState) -> Arc<InProcessCo
         )
     };
     Arc::new(InProcessConfig {
-        queue: tokio::sync::Mutex::new(()),
         published: tokio::sync::Mutex::new(published),
         models: tokio::sync::Mutex::new(models),
     })
@@ -100,8 +98,8 @@ pub(super) async fn handle_set_config_option(
         return;
     };
     // One config operation at a time (TS `enqueueConfig`): the queue also
-    // serializes the agent-run refreshes.
-    let _guard = config.queue.lock().await;
+    // serializes the agent-run refreshes and the trigger-consuming arms.
+    let _guard = mode.config_queue.lock().await;
     // The queue can outlive the session: a close admitted between the
     // resolution and the run refuses further config work (TS
     // `sessionCloseInFlight`).
@@ -202,7 +200,11 @@ async fn apply_in_process_config(
                 .ok_or_else(|| {
                     ConfigOptionError::invalid_params(&format!("Unavailable model: {value}"))
                 })?;
-            apply_in_process_model_switch(session, mode, model).await?;
+            apply_in_process_model_switch(session, mode, model)
+                .await
+                .map_err(|error| {
+                    ConfigOptionError::Internal(format!("model switch failed: {error:#}"))
+                })?;
             *config.models.lock().await = models;
             Ok(refresh_in_process_config(session, config, mode).await)
         }
@@ -245,7 +247,7 @@ async fn apply_in_process_model_switch(
     session: &Arc<AcpSession>,
     mode: &AcpModeState,
     model: pa_types::ai::Model,
-) -> Result<(), ConfigOptionError> {
+) -> anyhow::Result<()> {
     // The request key for the switched model: the same registry resolution
     // the create-time composition ran (TS re-registers the stream with the
     // model's own auth).
@@ -256,18 +258,28 @@ async fn apply_in_process_model_switch(
     .await
     .map_err(|_| ConfigOptionError::Internal("model registry task failed".to_string()))?;
     let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
+    // The previous live state, for the rollback a failed durable write
+    // takes (a failure would otherwise leave the target switched and the
+    // session's model identity split).
+    let previous_target = mode
+        .provider_target
+        .read()
+        .expect("provider target lock")
+        .clone();
+    let previous_model = mode.current_model().await;
+    let previous_api_key = mode.current_api_key().await;
     // The stream target swaps in place: the next turn streams on the
     // selected model (the service-tier preference survives the switch).
     {
         let mut target = mode.provider_target.write().expect("provider target lock");
         match target.as_mut() {
             Some(target) => {
-                target.api_key = resolved.api_key;
+                target.api_key = resolved.api_key.clone();
                 target.model = model.clone();
             }
             None => {
                 *target = Some(pa_core::session_engine::provider_adapter::ProviderTarget {
-                    api_key: resolved.api_key,
+                    api_key: resolved.api_key.clone(),
                     model: model.clone(),
                     service_tier: None,
                 });
@@ -275,12 +287,29 @@ async fn apply_in_process_model_switch(
         }
     }
     // The agent's model plus the durable `model_change` row (TS records
-    // every switch, even to the current model).
-    mode.engine
+    // every switch, even to the current model). A failed persist rolls
+    // the live state back: the client sees the refusal and the session
+    // keeps running on the model it still reports.
+    if let Err(error) = mode
+        .engine
         .session
         .set_model(&model, &model.provider, &model.id)
         .await
-        .map_err(|error| ConfigOptionError::Internal(format!("model switch failed: {error:#}")))?;
+    {
+        roll_back_model(
+            session,
+            mode,
+            previous_model.as_ref(),
+            previous_target,
+            previous_api_key,
+        )
+        .await;
+        anyhow::bail!(error);
+    }
+    // The session's live request key follows the switch (the
+    // session-command executors authenticate against the switched
+    // model's provider).
+    *mode.api_key.lock().await = resolved.api_key.clone();
     // TS `session.setModel` persists the default provider/model so the
     // next session starts on the switched model.
     {
@@ -316,6 +345,33 @@ async fn apply_in_process_model_switch(
     Ok(())
 }
 
+/// Roll the live session back to its previous model state after a failed
+/// durable `model_change` write: the provider target, the agent's model,
+/// and the mode's live slots all return to the pre-switch pair the client
+/// still sees.
+async fn roll_back_model(
+    session: &Arc<AcpSession>,
+    mode: &AcpModeState,
+    previous_model: Option<&pa_types::ai::Model>,
+    previous_target: Option<pa_core::session_engine::provider_adapter::ProviderTarget>,
+    previous_api_key: Option<String>,
+) {
+    {
+        let mut target = mode.provider_target.write().expect("provider target lock");
+        *target = previous_target;
+    }
+    *mode.api_key.lock().await = previous_api_key;
+    if let Some(model) = previous_model {
+        let wire: Option<pa_agent::types::Model> = serde_json::to_value(model)
+            .ok()
+            .and_then(|value| serde_json::from_value(value).ok());
+        if let Some(wire) = wire {
+            session.agent().set_model(wire).await;
+        }
+        *mode.model.lock().await = Some(model.clone());
+    }
+}
+
 /// Apply a thinking-level selection (TS `setThinkingLevel`): the level was
 /// validated against the model's supported levels, so the agent follows it
 /// and the durable row plus the settings default record the change.
@@ -345,13 +401,15 @@ async fn apply_level_change(
     if current == mapped {
         return Ok(());
     }
-    mode.engine
-        .session
-        .set_thinking_level(mapped)
-        .await
-        .map_err(|error| {
-            ConfigOptionError::Internal(format!("thinking level switch failed: {error:#}"))
-        })?;
+    // A failed durable `thinking_level_change` write rolls the live agent
+    // back to the previous level: the client sees the refusal, and the
+    // turns keep running on the level the session still reports.
+    if let Err(error) = mode.engine.session.set_thinking_level(mapped).await {
+        session.agent().set_thinking_level(current).await;
+        return Err(ConfigOptionError::Internal(format!(
+            "thinking level switch failed: {error:#}"
+        )));
+    }
     if reasoning || level != pa_types::ai::ModelThinkingLevel::Off {
         let mut settings = pa_core::settings::SettingsManager::create(
             mode.actual_cwd.as_path(),
@@ -365,25 +423,55 @@ async fn apply_level_change(
 }
 
 /// Recompute the options from the live session state and publish the
-/// change (TS `refreshConfig`): the current model and thinking level are
-/// the engine's own view, so an out-of-band switch still republishes.
+/// change (TS `refreshConfig`): the picker identity and the thinking
+/// level are the agent's own view, so an out-of-band model or level
+/// switch still republishes; the supported levels come from the full
+/// registry model (discovered or tracked) that matches the live agent
+/// model.
 async fn refresh_in_process_config(
     session: &Arc<AcpSession>,
     config: &Arc<InProcessConfig>,
     mode: &AcpModeState,
 ) -> Vec<SessionConfigOption> {
-    let current = mode.current_model().await;
+    let tracked = mode.current_model().await;
     let state = session.agent().state().await;
     let thinking_level =
         pa_core::session_engine::provider_adapter::model_thinking_level(state.thinking_level)
             .wire_name()
             .to_string();
-    let options = session_config_options(
-        current.as_ref().map(PickerModel::from_model),
-        &thinking_level,
-        &supported_levels(current.as_ref()),
-        &config.models.lock().await,
-    );
+    // The picker's identity is the agent's live model (an out-of-band
+    // failover switch moves it without the picker slot); the supported
+    // levels need the full registry model, so the discovered list (or the
+    // tracked slot) supplies the map when the agent's view matches.
+    let models = config.models.lock().await;
+    let live_model = PickerModel::from_agent_model(&state.model);
+    let full_model = models
+        .iter()
+        .find(|model| model.provider == live_model.provider && model.id == live_model.id)
+        .cloned()
+        .or_else(|| {
+            tracked
+                .as_ref()
+                .filter(|model| model.provider == live_model.provider && model.id == live_model.id)
+                .cloned()
+        });
+    let levels = match full_model.as_ref() {
+        Some(model) => supported_levels(Some(model)),
+        // No registry entry: the agent model's reasoning flag alone decides
+        // the no-map ladder (the map-less levels the registry would give).
+        None if live_model.reasoning => [
+            pa_types::ai::ModelThinkingLevel::Off,
+            pa_types::ai::ModelThinkingLevel::Minimal,
+            pa_types::ai::ModelThinkingLevel::Low,
+            pa_types::ai::ModelThinkingLevel::Medium,
+            pa_types::ai::ModelThinkingLevel::High,
+        ]
+        .iter()
+        .map(|level| level.wire_name().to_string())
+        .collect(),
+        None => Vec::new(),
+    };
+    let options = session_config_options(Some(live_model), &thinking_level, &levels, &models);
     publish_config_options(session.producer(), &config.published, options.clone()).await;
     options
 }
@@ -395,7 +483,7 @@ pub(super) async fn wire_config_refresh(
     session: &Arc<AcpSession>,
     config: Arc<InProcessConfig>,
     mode: AcpModeState,
-) {
+) -> pa_agent::agent::Subscription {
     let agent = Arc::clone(session.agent());
     // The owned clones the 'static listener captures (the borrow ends here).
     let session = Arc::clone(session);
@@ -407,12 +495,12 @@ pub(super) async fn wire_config_refresh(
             Box::pin(async move {
                 if matches!(event, pa_agent::types::AgentEvent::AgentEnd { .. }) {
                     tokio::spawn(async move {
-                        let _guard = config.queue.lock().await;
+                        let _guard = mode.config_queue.lock().await;
                         let _ = refresh_in_process_config(&session, &config, &mode).await;
                     });
                 }
                 Ok(())
             })
         })
-        .await;
+        .await
 }

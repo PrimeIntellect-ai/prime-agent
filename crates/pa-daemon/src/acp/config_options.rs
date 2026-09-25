@@ -67,6 +67,18 @@ impl PickerModel {
         }
     }
 
+    /// The agent-state model's view (the in-process refresh reads the live
+    /// agent model, which an out-of-band failover switch can move without
+    /// the picker's tracked slot).
+    pub fn from_agent_model(model: &pa_agent::types::Model) -> PickerModel {
+        PickerModel {
+            id: model.id.clone(),
+            name: model.name.clone(),
+            provider: model.provider.clone(),
+            reasoning: model.reasoning,
+        }
+    }
+
     /// Parse the `get_connection_state` `model` metadata (the daemon
     /// engine's `{ id, name, provider, reasoning }`).
     pub fn from_connection_state(value: &Value) -> Option<PickerModel> {
@@ -207,11 +219,14 @@ pub(crate) fn acp_model_registry(agent_dir: &Path) -> pa_core::models::ModelRegi
 /// `getAvailableModels`): `Err` carries the discovery failure the
 /// caller reports as "unavailable, try again later".
 pub(crate) fn discover_available_models(agent_dir: &Path) -> anyhow::Result<Vec<Model>> {
-    Ok(acp_model_registry(agent_dir)
-        .get_available()
-        .into_iter()
-        .cloned()
-        .collect())
+    let registry = acp_model_registry(agent_dir);
+    // A malformed models.json must surface as a discovery failure (the
+    // handler's "try again later"), never as an empty catalog the picker
+    // then answers with "Unavailable model".
+    if let Some(error) = registry.get_error() {
+        anyhow::bail!("{error}");
+    }
+    Ok(registry.get_available().into_iter().cloned().collect())
 }
 
 /// The switchable provider target the in-process session's stream reads

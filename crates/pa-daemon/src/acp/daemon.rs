@@ -1047,10 +1047,11 @@ async fn handle_session_close(
     if !hosted.mcp_server_names.is_empty() {
         let _ = replace_session_servers(link, &hosted, &[]).await;
     }
-    // The serialized config work settles before the producer fences (TS
-    // `await configTask` in `session/close`).
-    let _ = hosted.config.queue.lock().await;
-    hosted.producer.close().await;
+    // The worker dies before the config queue drains: a stalled
+    // `set_model`/`set_thinking_level` (holding the queue on a wire
+    // request) fails fast once the worker is gone instead of parking the
+    // close for the turn timeout. Then the serialized config work settles
+    // before the producer fences (TS `await configTask`).
     let _ = link
         .request(
             DaemonCommand::Kill {
@@ -1061,6 +1062,8 @@ async fn handle_session_close(
             REQUEST_TIMEOUT_MS,
         )
         .await;
+    let _ = hosted.config.queue.lock().await;
+    hosted.producer.close().await;
     let _ = tx.send(jsonrpc::response(id, json!({})));
     let mut guard = state.lock().await;
     guard.session_close_in_flight = false;
@@ -1072,8 +1075,9 @@ async fn teardown(link: &Arc<DaemonLink>, state: &Arc<Mutex<DaemonAcpState>>) {
     let Some(hosted) = hosted else {
         return;
     };
-    // The serialized config work settles before the producer fences.
-    let _ = hosted.config.queue.lock().await;
+    // The worker dies before the config queue drains (a stalled config
+    // operation holding the queue releases once the wire peer is gone),
+    // then the serialized config work settles before the producer fences.
     let _ = link
         .request(
             DaemonCommand::Abort {
@@ -1094,5 +1098,6 @@ async fn teardown(link: &Arc<DaemonLink>, state: &Arc<Mutex<DaemonAcpState>>) {
             REQUEST_TIMEOUT_MS,
         )
         .await;
+    let _ = hosted.config.queue.lock().await;
     hosted.producer.close().await;
 }
