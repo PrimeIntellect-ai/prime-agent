@@ -866,45 +866,67 @@ impl Supervisor {
         let journal_path = PathBuf::from(&descriptor.recovery_journal_path);
         let resident = ResidentWorker::new(worker_id.clone(), descriptor, path);
         // The stop tombstone outranks liveness (TS's stop ownership: the
-        // kill was durable intent BEFORE the worker was told): a
-        // supervisor that died between `persist_stop_tombstone` and the
-        // worker's shutdown finishes the stop on the next boot — never
-        // adopts the still-reachable worker as healthy (that would drop
-        // the kill and leave the stopped session resident).
+        // stop was durable intent BEFORE the worker was told): a
+        // supervisor that died between the tombstone and the worker's
+        // shutdown finishes the stop on the next boot — never adopts the
+        // still-reachable worker as healthy (that would drop the stop and
+        // leave the stopped session resident).
         if resident.descriptor.lock().await.stop_requested_at.is_some() {
+            // The tombstone's variant rides `archive_on_stop`: the kill
+            // stop (`Some(true)`) is irreversible — its killed close
+            // cancels jobs, archives the file, and cascades children; the
+            // per-session stop (`Some(false)`) keeps the session
+            // resumable — its graceful shutdown close and its
+            // schedule-cancel belt are all it owns.
+            let kill_stop = resident.descriptor.lock().await.archive_on_stop == Some(true);
             if alive {
                 // The worker outlived the crash and may never have received
-                // the kill (the crash window is between the tombstone and
+                // the stop (the crash window is between the tombstone and
                 // the forward): connect to it and forward the ORIGINAL
-                // kill — the killed close is the stop's intent (it cancels
-                // its jobs, archives its file, and cascades its children
-                // with the same killed reason; a shutdown would keep the
-                // resume entries of workers the stop was killing). A failed
-                // connect degrades to the dead-worker finalize below.
+                // stop intent — kill for the kill stop, shutdown for the
+                // resumable per-session stop. A failed connect degrades
+                // to the dead-worker finalize below.
                 resident.intentional_stop.store(true, Ordering::SeqCst);
                 if self
                     .connect_worker(&resident, worker_connect_deadline())
                     .await
                     .is_ok()
                 {
+                    let command = if kill_stop { "kill" } else { "shutdown" };
                     let _ = self
-                        .route_command(&resident, "kill", json!({}), ROUTE_TIMEOUT_MS)
+                        .route_command(&resident, command, json!({}), ROUTE_TIMEOUT_MS)
                         .await;
                 }
             }
             // TS `scheduleWorkerStopFinalization`: the interrupted stop's
-            // cleanup re-runs instead of a relaunch. The descriptor
-            // survives an unsettled finalize (a later boot retries the
-            // archived-state belt); a settled stop deletes it.
-            let settled = self.finalize_worker_stop(&resident, None).await;
-            if settled {
-                let _ = std::fs::remove_file(&resident.descriptor_path);
-                self.log_line(&format!(
-                    "finished the tombstoned stop of session worker {worker_id}"
-                ));
+            // cleanup re-runs instead of a relaunch, honoring the variant.
+            if kill_stop {
+                // The descriptor survives an unsettled finalize (a later
+                // boot retries the archived-state belt); a settled stop
+                // deletes it.
+                let settled = self.finalize_worker_stop(&resident, None).await;
+                if settled {
+                    let _ = std::fs::remove_file(&resident.descriptor_path);
+                    self.log_line(&format!(
+                        "finished the tombstoned stop of session worker {worker_id}"
+                    ));
+                } else {
+                    self.log_line(&format!(
+                        "tombstoned stop of session worker {worker_id} not settled; descriptor kept"
+                    ));
+                }
             } else {
+                // The per-session stop's durable half is the ephemeral
+                // schedule cancel (no archived-state belt — the session
+                // stays resumable), and the descriptor dies only with a
+                // provably-gone process: the retire pass removes it once
+                // the escalation confirms death and keeps a survivor's
+                // tombstone for the next boot (never orphaning a live
+                // lease holder behind a deleted descriptor).
+                self.finalize_owned_stop(&resident).await;
+                self.retire_worker_after_stop(&resident).await;
                 self.log_line(&format!(
-                    "tombstoned stop of session worker {worker_id} not settled; descriptor kept"
+                    "finished the tombstoned per-session stop of session worker {worker_id}"
                 ));
             }
             return AdoptionOutcome::Stopped;
@@ -3742,17 +3764,31 @@ impl Supervisor {
         let descriptor_path = self
             .descriptor_dir
             .join(format!("{}.json", registration.active_session_id));
-        let Ok(content) = std::fs::read_to_string(&descriptor_path) else {
-            // The TS unknown-worker error: this supervisor holds no
-            // descriptor for the identity, so it can never adopt the
-            // registrant. The worker treats the verdict as terminal (the
-            // refused-registration self-heal) and retires instead of
-            // retrying forever.
-            return Err(anyhow!(
-                "{}: {}",
-                crate::registration::UNKNOWN_SESSION_WORKER_PREFIX,
-                registration.active_session_id
-            ));
+        let content = match std::fs::read_to_string(&descriptor_path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // The TS unknown-worker error: this supervisor holds no
+                // descriptor for the identity, so it can never adopt the
+                // registrant. The worker treats the verdict as terminal
+                // (the refused-registration self-heal) and retires
+                // instead of retrying forever.
+                return Err(anyhow!(
+                    "{}: {}",
+                    crate::registration::UNKNOWN_SESSION_WORKER_PREFIX,
+                    registration.active_session_id
+                ));
+            }
+            // An unreadable descriptor is NOT an unknown worker: the
+            // identity exists on disk, and retiring it over a transient
+            // I/O failure (permissions, a torn read) would strand a live
+            // lease holder behind a healable condition. The worker keeps
+            // its backoff loop; the next attempt re-reads the file.
+            Err(error) => {
+                return Err(anyhow!(
+                    "descriptor read failed for {}: {error}",
+                    registration.active_session_id
+                ));
+            }
         };
         let descriptor: crate::descriptor::WorkerDescriptor = serde_json::from_str(&content)
             .with_context(|| format!("invalid descriptor {}", descriptor_path.display()))?;
@@ -4784,9 +4820,18 @@ impl Supervisor {
                 if let DaemonCommand::Kill { rest, .. } = command {
                     if response.success {
                         // The kill route's own tombstone already persisted
-                        // before the forward; this idempotent re-persist
-                        // never fails the already-succeeded kill.
-                        let _ = self.stop_worker(&resident).await;
+                        // before the forward, so the stop's durable intent
+                        // stands even when this pass fails; a failure is
+                        // observable (logged) instead of silently
+                        // skipping the retire/registry/passivation tail —
+                        // the boot's tombstoned-stop finalization owns
+                        // whatever this pass could not finish.
+                        if let Err(error) = self.stop_worker(&resident).await {
+                            self.log_line(&format!(
+                                "session worker {} stop after kill failed: {error:#}; the tombstoned descriptor holds the stop for the next boot",
+                                resident.worker_id
+                            ));
+                        }
                         // TS `stopWorkerUntracked`'s archived-stop finalize
                         // (the plain kill's durable half): the killed
                         // session tree's scheduled jobs cancel durably and

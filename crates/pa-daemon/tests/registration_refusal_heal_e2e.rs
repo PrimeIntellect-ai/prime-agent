@@ -10,7 +10,11 @@
 //! per-session stop retires the descriptor only after a confirmed
 //! process death (the same contract the shutdown pass enforces), so a
 //! stop that misses its worker escalates instead of stranding it.
-#![cfg(unix)]
+// The suite's liveness and child-discovery helpers read Linux procfs;
+// on other unixes they cannot observe processes, and the waits would
+// pass vacuously — skip the suite there instead of reporting a false
+// green.
+#![cfg(all(unix, target_os = "linux"))]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -529,11 +533,12 @@ fn an_owned_stop_kills_a_worker_that_missed_the_shutdown() {
         let descriptor: Value =
             serde_json::from_str(&std::fs::read_to_string(&descriptor_path).unwrap_or_default())
                 .unwrap_or(Value::Null);
-        if descriptor
+        let marker = descriptor
             .get("stopRequestedAt")
             .and_then(Value::as_str)
-            .is_some()
-        {
+            .is_some_and(|requested| !requested.is_empty())
+            && descriptor.get("archiveOnStop") == Some(&Value::Bool(false));
+        if marker {
             break;
         }
         assert!(
