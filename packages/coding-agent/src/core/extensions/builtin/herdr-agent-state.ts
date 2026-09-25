@@ -2,9 +2,11 @@
  * Built-in Herdr integration extension.
  *
  * Reports agent lifecycle state (working/idle/blocked) to the Herdr terminal
- * workspace manager via its Unix socket. This is the in-tree equivalent of
+ * workspace manager via its Unix socket. This is the in-tree counterpart of
  * the extension that `herdr integration install pi` writes, so Prime Agent
  * works inside Herdr panes out of the box without a manual install step.
+ * The wire contract (identity, states, session refs) is published in
+ * docs/herdr.md; keep them in sync.
  *
  * Unlike the file-based integration (re-evaluated per session load by jiti),
  * this module is statically imported and evaluated once per process. All env
@@ -25,9 +27,9 @@ type AgentState = "working" | "blocked" | "idle";
 /**
  * True when Herdr's own file-based Pi integration (`herdr integration
  * install pi`) is among the extension files the loader actually loaded this
- * cycle. That extension reports with the same `herdr:pi` source but its own
- * seq counter, so running the built-in alongside it would make the two
- * reporters race on one pane.
+ * cycle. That extension reports for the same pane under its own source and
+ * seq counter, so running the built-in alongside it would make two reporters
+ * race on one pane.
  *
  * Loaded paths — not raw disk existence — are the deferral source of truth:
  * a file that exists but never loads (settings `!` overrides, noExtensions,
@@ -142,7 +144,7 @@ function herdrAgentStateExtensionImpl(pi: ExtensionAPI, getLoadedExtensionPaths:
 		return;
 	}
 
-	const source = "herdr:pi";
+	const source = "custom:prime-agent";
 	const agentLabel = "prime-agent";
 	const idleDebounceMs = parseDurationEnv("HERDR_PI_IDLE_DEBOUNCE_MS", 250);
 	const retryGraceMs = parseDurationEnv("HERDR_PI_RETRY_GRACE_MS", 2500);
