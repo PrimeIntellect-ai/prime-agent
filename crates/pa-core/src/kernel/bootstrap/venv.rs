@@ -794,7 +794,10 @@ fn has_prime_agent_runtime_memoized(
     version_raw: &str,
 ) -> bool {
     let key = runtime_probe_key(python, runtime_identity, version_raw);
-    if lock_probe_memo().as_ref().is_some_and(|memo| memo.contains_key(&key)) {
+    if lock_probe_memo()
+        .as_ref()
+        .is_some_and(|memo| memo.contains_key(&key))
+    {
         return true;
     }
     if !has_prime_agent_runtime(python) {
