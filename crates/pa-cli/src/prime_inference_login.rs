@@ -38,8 +38,7 @@ pub(crate) enum TeamChoice {
 }
 
 /// TS `armManualInput`'s armed prompt after the browser URL shows.
-const BROWSER_PROMPT: &str =
-    "Complete the sign-in in your browser, or paste an API key below:";
+const BROWSER_PROMPT: &str = "Complete the sign-in in your browser, or paste an API key below:";
 /// TS the browser-unavailable fallback's prompt.
 const FALLBACK_PROMPT: &str = "Paste a Prime API key below:";
 
@@ -123,7 +122,12 @@ pub(crate) async fn run_prime_inference_login(
         on_auth: &on_auth,
         on_progress: Some(&on_progress),
     };
-    let mut login = pin!(login_prime_inference(inputs.http, inputs.config, &options, &callbacks));
+    let mut login = pin!(login_prime_inference(
+        inputs.http,
+        inputs.config,
+        &options,
+        &callbacks
+    ));
     // The local sender keeps the arm channel open for the fallback arm
     // (the login future's own sender dies with it).
     let _keep_arm_open = arm_tx;
@@ -535,13 +539,8 @@ mod tests {
             body: &'a str,
             _bearer: Option<&'a str>,
             _timeout_ms: u64,
-        ) -> Pin<
-            Box<
-                dyn std::future::Future<Output = Result<PrimeHttpResponse, String>>
-                    + Send
-                    + 'a,
-            >,
-        > {
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<PrimeHttpResponse, String>> + Send + 'a>>
+        {
             let url = url.to_string();
             let body = body.to_string();
             self.served.lock().unwrap().push(url.clone());
@@ -767,11 +766,14 @@ mod tests {
         );
         assert_eq!(prompts, vec![BROWSER_PROMPT.to_string()]);
         let requests = http.requests();
-        assert_eq!(requests[..2], [
-            "https://api.primeintellect.ai/api/v1/auth_challenge/generate".to_string(),
-            "https://api.primeintellect.ai/api/v1/auth_challenge/status?challenge=ch-1"
-                .to_string(),
-        ]);
+        assert_eq!(
+            requests[..2],
+            [
+                "https://api.primeintellect.ai/api/v1/auth_challenge/generate".to_string(),
+                "https://api.primeintellect.ai/api/v1/auth_challenge/status?challenge=ch-1"
+                    .to_string(),
+            ]
+        );
         // The stored credential carries the key and the selected team.
         let auth = AuthStorage::create(&agent_dir);
         assert_eq!(
