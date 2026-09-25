@@ -66,7 +66,7 @@ fn streamed_card(id: &str) -> ChatEntry {
 fn agent_message_row(message: &str) -> ChatEntry {
     ChatEntry::AgentMessage(Box::new(crate::custom_message::AgentMessageRow {
         direction: crate::custom_message::AgentMessageDirection::Received,
-        participant: "from parent".to_string(),
+        counterpart: "parent".to_string(),
         message: message.to_string(),
     }))
 }

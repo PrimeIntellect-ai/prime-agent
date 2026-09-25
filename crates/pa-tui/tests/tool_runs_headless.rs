@@ -460,7 +460,7 @@ fn replayed_runs_condense_with_the_received_message_merged() {
         "the wire timestamps carry the honest wall clock (63s - 1s): {last}"
     );
     assert!(
-        !last.contains("Agent message received"),
+        !last.contains("Agent message \u{b7} \u{2193}"),
         "the received notice renders nothing of its own inside the run: {last}"
     );
 }
@@ -477,12 +477,14 @@ fn details_renders_every_item_the_overview_condensed() {
         "no condensed block at the details level: {last}"
     );
     assert!(
-        last.contains("Agent message received"),
+        last.contains("Agent message \u{b7} \u{2193} fleet"),
         "the notice keeps its own row at details: {last}"
     );
+    // The collapsed row carries no body preview (the operator's
+    // 2026-09-25 directive): the content only opens on expand.
     assert!(
-        last.contains("steering note"),
-        "the notice's content stays visible: {last}"
+        !last.contains("steering note"),
+        "the notice's body never previews at details: {last}"
     );
     assert!(
         last.contains("before the message"),
