@@ -2384,12 +2384,31 @@ impl Worker {
     }
 
     pub(crate) fn summary_locked(&self, core: &SessionCore) -> SessionSummary {
+        // The transcript fold the composer derives from (see
+        // [`session_summary`]): the standalone summary owns its one fold.
+        let messages = core
+            .store
+            .as_ref()
+            .map(super::session_store::SessionFile::messages)
+            .unwrap_or_default();
+        self.summary_with_messages_locked(core, &messages)
+    }
+
+    /// [`summary_locked`] over a transcript slice the caller already
+    /// folded (the attach snapshot folds once and shares the fold with
+    /// the summary): the summary values are the composer's own, only the
+    /// fold is shared.
+    pub(crate) fn summary_with_messages_locked(
+        &self,
+        core: &SessionCore,
+        messages: &[Value],
+    ) -> SessionSummary {
         // The one summary composer (TS `summaryForActiveSession`): the
         // roster feed, `get_state`, and list rows all serve it, so the
         // live flags (`isRunningTools` from the core's in-flight tool
         // calls, `isBashRunning` from the user bash) never drift between
         // surfaces.
-        let mut summary = session_summary(
+        let mut summary = session_summary_with_messages(
             core,
             &self
                 .engine
@@ -2398,6 +2417,7 @@ impl Worker {
             self.engine.model_metadata(),
             self.engine.model_fallback_message(),
             self.user_bash.is_running(),
+            messages,
         );
         // The worker's roster-delta counter at snapshot time, and the
         // process instance that read it — the pair is one snapshot:
@@ -2474,12 +2494,17 @@ impl Worker {
         if !core.attached_client_ids.iter().any(|id| id == &client_id) {
             core.attached_client_ids.push(client_id.clone());
         }
-        let summary = self.summary_locked(&core);
+        // One transcript fold serves both the snapshot's `messages` and
+        // the summary the snapshot carries: the composer derives the
+        // summary from the same slice (the fields are the composer's
+        // own; only the fold is shared), so the attach never folds the
+        // whole branch twice.
         let messages: Vec<Value> = core
             .store
             .as_ref()
             .map(super::session_store::SessionFile::messages)
             .unwrap_or_default();
+        let summary = self.summary_with_messages_locked(&core, &messages);
         let state = self.connection_state_locked(&core);
         let last_event_sequence = core.last_event_sequence;
         let generation = core.generation.clone();
@@ -2490,16 +2515,6 @@ impl Worker {
         let cursor = json!({ "generation": generation, "sequence": last_event_sequence });
         let summary_value = serde_json::to_value(&summary).unwrap_or(Value::Null);
         let state_value = serde_json::to_value(&state).unwrap_or(Value::Null);
-        let snapshot = json!({
-            "activeSessionId": active_session_id,
-            "summary": summary_value,
-            "state": state_value,
-            "messages": messages,
-            "lastEventSequence": last_event_sequence,
-            "lastEventCursor": cursor,
-            // RLM child roster; empty for top-level daemon sessions.
-            "children": [],
-        });
         // Slim clients read summary/messages from the snapshot; duplicating
         // them at the top level would serialize the history twice per attach
         // (port of `createAttachResult`).
@@ -2514,10 +2529,26 @@ impl Worker {
             "activeSessionId": active_session_id,
         });
         if !slim {
-            result["state"] = summary_value;
-            result["messages"] = Value::Array(messages);
+            result["state"] = summary_value.clone();
+            result["messages"] = Value::Array(messages.clone());
         }
-        result["snapshot"] = snapshot;
+        // The snapshot map is built in the TS key order with the transcript
+        // MOVED into place: `json!` would re-serialize (a deep copy of the
+        // whole branch) a `Vec` it can only borrow, and the fold above is
+        // the one copy the slim snapshot ships.
+        let mut snapshot_map = serde_json::Map::with_capacity(7);
+        snapshot_map.insert("activeSessionId".to_string(), json!(active_session_id));
+        snapshot_map.insert("summary".to_string(), summary_value);
+        snapshot_map.insert("state".to_string(), state_value);
+        snapshot_map.insert("messages".to_string(), Value::Array(messages));
+        snapshot_map.insert(
+            "lastEventSequence".to_string(),
+            json!(last_event_sequence),
+        );
+        snapshot_map.insert("lastEventCursor".to_string(), cursor.clone());
+        // RLM child roster; empty for top-level daemon sessions.
+        snapshot_map.insert("children".to_string(), Value::Array(Vec::new()));
+        result["snapshot"] = Value::Object(snapshot_map);
         result["replay"] = json!(replay);
         result["lastEventSequence"] = json!(last_event_sequence);
         result["lastEventCursor"] = cursor;
@@ -6217,6 +6248,37 @@ pub(crate) fn session_summary(
     model_fallback_message: Option<String>,
     bash_running: bool,
 ) -> SessionSummary {
+    // The transcript fold (`SessionFile::messages`) is the summary's one
+    // owned copy of the whole branch; callers that already hold the fold
+    // (the attach snapshot) share it through
+    // [`session_summary_with_messages`] instead of folding twice.
+    let messages = core
+        .store
+        .as_ref()
+        .map(super::session_store::SessionFile::messages)
+        .unwrap_or_default();
+    session_summary_with_messages(
+        core,
+        thinking_level,
+        model,
+        model_fallback_message,
+        bash_running,
+        &messages,
+    )
+}
+
+/// [`session_summary`] over a transcript slice the caller already folded
+/// (the attach path folds once for the snapshot and computes the summary
+/// from the same slice): the summary fields are derived from the slice,
+/// so the values are the composer's own - only the fold is shared.
+pub(crate) fn session_summary_with_messages(
+    core: &SessionCore,
+    thinking_level: &str,
+    model: Option<Value>,
+    model_fallback_message: Option<String>,
+    bash_running: bool,
+    messages: &[Value],
+) -> SessionSummary {
     let store = core.store.as_ref();
     let streaming = core.busy;
     let compacting = core.compacting;
@@ -6233,9 +6295,6 @@ pub(crate) fn session_summary(
                     .unwrap_or_default(),
             )
         });
-    let messages = store
-        .map(super::session_store::SessionFile::messages)
-        .unwrap_or_default();
     let last_activity_at = messages
         .iter()
         .rev()
@@ -6248,7 +6307,7 @@ pub(crate) fn session_summary(
     let mut input_tokens = 0u64;
     let mut output_tokens = 0u64;
     let mut cost = 0.0f64;
-    for message in &messages {
+    for message in messages {
         if crate::types::message_role(message) != Some("assistant") {
             continue;
         }
