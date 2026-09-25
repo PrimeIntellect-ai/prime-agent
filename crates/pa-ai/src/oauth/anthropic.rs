@@ -376,7 +376,7 @@ async fn json_token_request(
         // TS `postJson` throws and the caller wraps the thrown error
         // (`formatErrorDetails` prints the Error head + message).
         return Err(format!(
-            "{label} request failed. url={url}; details=Error: HTTP request failed. status={}; url={url}; body={}",
+            "{label} request failed. url={url};{wire_context} details=Error: HTTP request failed. status={}; url={url}; body={}",
             response.status, response.body
         ));
     }
