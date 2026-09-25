@@ -117,25 +117,6 @@ fn default_adc_path() -> PathBuf {
         .join("application_default_credentials.json")
 }
 
-/// Prime team id from PRIME_TEAM_ID or ~/.prime/config.json.
-pub fn get_prime_team_id() -> Option<String> {
-    if let Ok(from_env) = std::env::var("PRIME_TEAM_ID") {
-        let trimmed = from_env.trim().to_string();
-        if !trimmed.is_empty() {
-            return Some(trimmed);
-        }
-    }
-    let home = pa_types::platform::home_dir()?;
-    let config_path = home.join(".prime").join("config.json");
-    let text = std::fs::read_to_string(config_path).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&text).ok()?;
-    parsed
-        .get("team_id")
-        .and_then(|value| value.as_str())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -56,6 +56,12 @@ pub struct ProviderTarget {
     pub api_key: Option<String>,
     pub model: Model,
     pub service_tier: Option<pa_types::ai::ServiceTier>,
+    /// The auth-resolved request headers (the registry's merged headers —
+    /// the auth storage's provider headers such as `X-Prime-Team-ID`,
+    /// plus models.json provider headers): the single-owner path the TS
+    /// routes through `getApiKeyAndHeaders` (TS #2497 removed the
+    /// provider-side team-header fallback; the merged headers ship here).
+    pub headers: std::collections::HashMap<String, String>,
 }
 
 /// A real pa-ai provider stream adapter for the agent loop, reading its
@@ -69,21 +75,26 @@ pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>
                 api_key,
                 model,
                 service_tier,
+                headers,
             } = target
                 .read()
                 .expect("provider target lock")
                 .clone()
                 .expect("provider target set before the first stream");
-            Box::pin(async move { stream_once(model, api_key, service_tier, context, options) })
+            Box::pin(
+                async move { stream_once(model, api_key, service_tier, headers, context, options) },
+            )
         },
     )
 }
 
-/// Stream one completion against `model` with `api_key`.
+/// Stream one completion against `model` with `api_key` and the
+/// auth-resolved request `headers`.
 fn stream_once(
     model: Model,
     api_key: Option<String>,
     service_tier: Option<pa_types::ai::ServiceTier>,
+    headers: std::collections::HashMap<String, String>,
     context: LlmContext,
     options: StreamRequestOptions,
 ) -> anyhow::Result<Box<dyn ModelStream>> {
@@ -117,7 +128,7 @@ fn stream_once(
             session_id: options.session_id.clone(),
             on_payload: None,
             on_response: None,
-            headers: None,
+            headers: (!headers.is_empty()).then_some(headers),
             metadata: None,
             timeout_ms: None,
         },
@@ -155,6 +166,7 @@ pub fn real_stream_fn(api_key: Option<String>, model: Model) -> StreamFn {
         api_key,
         model,
         service_tier: None,
+        headers: Default::default(),
     }))))
 }
 
@@ -349,6 +361,7 @@ mod tests {
             api_key: None,
             model: model.clone(),
             service_tier: Some(pa_types::ai::ServiceTier::Priority),
+            headers: Default::default(),
         })));
         let stream_fn = switchable_stream_fn(target.clone());
         for tier in [Some(pa_types::ai::ServiceTier::Priority), None] {
@@ -473,6 +486,7 @@ mod tests {
             api_key: None,
             model: model.clone(),
             service_tier: None,
+            headers: Default::default(),
         })));
         let stream_fn = switchable_stream_fn(target);
         let mut stream = stream_fn(

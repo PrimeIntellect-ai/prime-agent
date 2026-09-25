@@ -1,10 +1,11 @@
 //! Static model catalog ported from `packages/ai/src/models.generated.ts`.
 //!
-//! The TS catalog is an object literal (32 providers, 1281 models); the Rust
-//! port keeps the same data as JSON in [`models.generated.json`] (regenerate
-//! with `scripts/generate-models.py`) and deserializes it into
-//! [`pa_types::ai::Model`] values on first use. The wire shapes match the TS
-//! exactly (camelCase fields), so no per-field conversion is needed.
+//! The TS catalog is an object literal (32 providers, 1281 models at the
+//! port; 1285 after the TS #2505 grok-4.7 rows); the Rust port keeps the
+//! same data as JSON in [`models.generated.json`] (regenerate with
+//! `scripts/generate-models.py`) and deserializes it into
+//! [`pa_types::ai::Model`] values on first use. The wire shapes match the
+//! TS exactly (camelCase fields), so no per-field conversion is needed.
 //!
 //! This file is generated data plumbing; it is exempt from the module-size
 //! split rule because its size is a direct function of the TS catalog size,
@@ -80,6 +81,35 @@ mod tests {
         assert!(model.reasoning);
         assert!(model.context_window > 0);
         assert!(model.cost.input.as_f64() >= 0.0);
+    }
+
+    /// Port of #2505: grok-4.7 is selectable on every provider that
+    /// serves it — the xAI API key, OpenRouter, the Vercel AI Gateway,
+    /// and OpenCode Go — with the regenerated catalog's context and
+    /// pricing metadata. (The TS grok-subscription surface builds its
+    /// rows from these at runtime; the Rust branch has no ported xAI
+    /// OAuth login yet.)
+    #[test]
+    fn grok_4_7_is_served_on_every_serving_provider() {
+        let direct = get_model("xai", "grok-4.7").expect("the xAI API key serves grok-4.7");
+        assert_eq!(direct.name, "Grok 4.7");
+        assert!(direct.reasoning);
+        assert_eq!(direct.context_window, 500_000);
+        assert_eq!(direct.max_tokens, 500_000);
+
+        let openrouter =
+            get_model("openrouter", "x-ai/grok-4.7").expect("OpenRouter serves grok-4.7");
+        assert!(openrouter.reasoning);
+        assert_eq!(openrouter.context_window, 500_000);
+
+        let gateway =
+            get_model("vercel-ai-gateway", "spacexai/grok-4.7").expect("the gateway serves it");
+        assert!(gateway.reasoning);
+        assert_eq!(gateway.context_window, 500_000);
+
+        let opencode = get_model("opencode-go", "grok-4.7").expect("OpenCode Go serves it");
+        assert!(opencode.reasoning);
+        assert_eq!(opencode.context_window, 500_000);
     }
 
     #[test]

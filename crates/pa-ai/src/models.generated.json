@@ -13199,6 +13199,26 @@
    "contextWindow": 500000,
    "maxTokens": 500000
   },
+  "grok-4.7": {
+   "id": "grok-4.7",
+   "name": "Grok 4.7",
+   "api": "openai-responses",
+   "provider": "opencode-go",
+   "baseUrl": "https://opencode.ai/zen/go/v1",
+   "reasoning": true,
+   "input": [
+    "text",
+    "image"
+   ],
+   "cost": {
+    "input": 2,
+    "output": 6,
+    "cacheRead": 0.5,
+    "cacheWrite": 0
+   },
+   "contextWindow": 500000,
+   "maxTokens": 500000
+  },
   "hy3": {
    "id": "hy3",
    "name": "Hy3",
@@ -20653,6 +20673,35 @@
     "input": 2,
     "output": 6,
     "cacheRead": 0.5,
+    "cacheWrite": 0
+   },
+   "contextWindow": 500000,
+   "maxTokens": 450000
+  },
+  "x-ai/grok-4.7": {
+   "id": "x-ai/grok-4.7",
+   "name": "SpaceXAI: Grok 4.7",
+   "api": "openai-completions",
+   "provider": "openrouter",
+   "baseUrl": "https://openrouter.ai/api/v1",
+   "reasoning": true,
+   "thinkingLevelMap": {
+    "off": null,
+    "minimal": null,
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "xhigh",
+    "max": null
+   },
+   "input": [
+    "text",
+    "image"
+   ],
+   "cost": {
+    "input": 1.5999999999999999,
+    "output": 4.8,
+    "cacheRead": 0.39999999999999997,
     "cacheWrite": 0
    },
    "contextWindow": 500000,
@@ -29591,6 +29640,26 @@
    "contextWindow": 500000,
    "maxTokens": 500000
   },
+  "spacexai/grok-4.7": {
+   "id": "spacexai/grok-4.7",
+   "name": "Grok 4.7",
+   "api": "anthropic-messages",
+   "provider": "vercel-ai-gateway",
+   "baseUrl": "https://ai-gateway.vercel.sh",
+   "reasoning": true,
+   "input": [
+    "text",
+    "image"
+   ],
+   "cost": {
+    "input": 1.2,
+    "output": 3.5999999999999996,
+    "cacheRead": 0.3,
+    "cacheWrite": 0
+   },
+   "contextWindow": 500000,
+   "maxTokens": 500000
+  },
   "spacexai/grok-build-0.1": {
    "id": "spacexai/grok-build-0.1",
    "name": "Grok Build 0.1",
@@ -30198,6 +30267,26 @@
   "grok-4.6": {
    "id": "grok-4.6",
    "name": "Grok 4.6",
+   "api": "openai-completions",
+   "provider": "xai",
+   "baseUrl": "https://api.x.ai/v1",
+   "reasoning": true,
+   "input": [
+    "text",
+    "image"
+   ],
+   "cost": {
+    "input": 2,
+    "output": 6,
+    "cacheRead": 0.5,
+    "cacheWrite": 0
+   },
+   "contextWindow": 500000,
+   "maxTokens": 500000
+  },
+  "grok-4.7": {
+   "id": "grok-4.7",
+   "name": "Grok 4.7",
    "api": "openai-completions",
    "provider": "xai",
    "baseUrl": "https://api.x.ai/v1",

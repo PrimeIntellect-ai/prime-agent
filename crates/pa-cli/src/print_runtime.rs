@@ -13,7 +13,7 @@ use pa_types::ai::Model;
 use crate::headless_autonomous::{autonomous_runtime_config, HeadlessAutonomous};
 use crate::mode::{AppMode, MissingSubsystem, RunOptions};
 use pa_core::session_engine::provider_adapter::{
-    json_round_trip, map_thinking_level, real_stream_fn,
+    json_round_trip, map_thinking_level, real_stream_fn, switchable_stream_fn, ProviderTarget,
 };
 
 /// The runtime: implements the print (text) mode against the merged session
@@ -219,10 +219,23 @@ async fn build_headless_engine_parts(options: &RunOptions) -> Result<HeadlessEng
         config.model.as_deref(),
     )?;
 
-    // Resolve request auth once (single-shot mode).
+    // Resolve request auth once (single-shot mode): the merged headers
+    // ship on the request (the TS `getApiKeyAndHeaders` single-owner path;
+    // TS #2497 removed the provider-side team-header fallback, so the
+    // stored team / `PRIME_TEAM_ID` reach the wire through these headers).
     let resolved = registry.get_api_key_and_headers(&model, model.headers.as_ref());
 
-    let stream_fn = real_stream_fn(resolved.api_key.clone(), model.clone());
+    let stream_fn = switchable_stream_fn(std::sync::Arc::new(std::sync::RwLock::new(Some(
+        ProviderTarget {
+            api_key: resolved.api_key.clone(),
+            headers: resolved
+                .headers
+                .map(|headers| headers.into_iter().collect())
+                .unwrap_or_default(),
+            model: model.clone(),
+            service_tier: None,
+        },
+    ))));
     let agent_model: AgentModel = json_round_trip(&model).ok_or("model conversion failed")?;
 
     let session_manager = if options.session.no_session {

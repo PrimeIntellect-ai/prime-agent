@@ -1296,15 +1296,33 @@ impl AgentSessionEngine {
     /// (auth storage, then the models.json provider `apiKey` — the same
     /// sources `getApiKeyAndHeaders` merges in the TS product).
     pub(crate) fn resolve_request_api_key(&self, model: &Model) -> Option<String> {
+        self.resolve_request_auth(model).api_key
+    }
+
+    /// The full request auth for `model` (the TS `getApiKeyAndHeaders`
+    /// single-owner merge): the API key plus the merged request headers —
+    /// the auth storage's provider headers (the stored Prime team or the
+    /// `PRIME_TEAM_ID` pin arrive as `X-Prime-Team-ID`) and the models.json
+    /// provider headers. TS #2497 made the auth storage the only
+    /// team-header owner; the request target ships the merged headers so
+    /// the deletion of the provider-side fallback keeps the team on the
+    /// wire.
+    pub(crate) fn resolve_request_auth(
+        &self,
+        model: &Model,
+    ) -> pa_core::models::ResolvedRequestAuth {
         if let Some(api_key) = &self.current_selection().api_key {
-            return Some(api_key.clone());
+            return pa_core::models::ResolvedRequestAuth {
+                ok: true,
+                api_key: Some(api_key.clone()),
+                headers: None,
+                error: None,
+            };
         }
         let auth = pa_core::auth::AuthStorage::create(&self.config.agent_dir);
         let mut registry =
             pa_core::models::ModelRegistry::create(auth, self.config.agent_dir.join("models.json"));
-        registry
-            .get_api_key_and_headers(model, model.headers.as_ref())
-            .api_key
+        registry.get_api_key_and_headers(model, model.headers.as_ref())
     }
 
     /// Kernel host-request handlers for agent messaging and observation,
@@ -1385,10 +1403,15 @@ impl AgentSessionEngine {
         // rebuild.
         let stream_fn = switchable_stream_fn(std::sync::Arc::clone(&self.provider_target));
         {
+            let request_auth = self.resolve_request_auth(model);
             let mut target = self.provider_target.write().expect("provider target lock");
             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
-                api_key: self.resolve_request_api_key(model),
+                api_key: request_auth.api_key,
+                headers: request_auth
+                    .headers
+                    .map(|headers| headers.into_iter().collect())
+                    .unwrap_or_default(),
                 model: model.clone(),
             });
         }
@@ -2118,10 +2141,15 @@ impl SessionEngine for AgentSessionEngine {
         // agent's model (loop context) and the provider stream's target
         // swap in place (TS `agent.state.model = model`).
         {
+            let request_auth = self.resolve_request_auth(&model);
             let mut target = self.provider_target.write().expect("provider target lock");
             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
-                api_key: self.resolve_request_api_key(&model),
+                api_key: request_auth.api_key,
+                headers: request_auth
+                    .headers
+                    .map(|headers| headers.into_iter().collect())
+                    .unwrap_or_default(),
                 model: model.clone(),
             });
         }
@@ -3316,13 +3344,18 @@ impl AgentSessionEngine {
             let guard = self.session.blocking_lock();
             guard.as_deref().and_then(|engine| engine.telemetry.clone())
         };
-        let primary_state: std::cell::RefCell<
-            Option<(
-                pa_types::ai::Model,
-                pa_agent::types::ThinkingLevel,
-                Option<String>,
-            )>,
-        > = std::cell::RefCell::new(None);
+        // The failover-captured primary target state (TS `_backupModel`):
+        // the model, its thinking level, and its resolved request auth,
+        // restored when the turn settles back onto the primary.
+        #[derive(Clone)]
+        struct FailoverPrimary {
+            model: pa_types::ai::Model,
+            thinking_level: pa_agent::types::ThinkingLevel,
+            api_key: Option<String>,
+            headers: std::collections::HashMap<String, String>,
+        }
+        let primary_state: std::cell::RefCell<Option<FailoverPrimary>> =
+            std::cell::RefCell::new(None);
         let result = self.runtime.block_on(
             pa_core::session_engine::provider_failover::run_turn_with_provider_failover(
                 &policy,
@@ -3414,11 +3447,16 @@ impl AgentSessionEngine {
                         // session was built with, restored when the turn
                         // settles.
                         if primary.is_none() {
-                            *primary = Some((
-                                model.clone(),
-                                map_thinking_level(self.effective_thinking()),
-                                self.resolve_request_api_key(&model),
-                            ));
+                            let request_auth = self.resolve_request_auth(&model);
+                            *primary = Some(FailoverPrimary {
+                                model: model.clone(),
+                                thinking_level: map_thinking_level(self.effective_thinking()),
+                                api_key: request_auth.api_key,
+                                headers: request_auth
+                                    .headers
+                                    .map(|headers| headers.into_iter().collect())
+                                    .unwrap_or_default(),
+                            });
                         }
                     }
                     let next = next.clone();
@@ -3436,11 +3474,16 @@ impl AgentSessionEngine {
                         // request hits the switched-to provider with its
                         // resolved key.
                         {
+                            let request_auth = self.resolve_request_auth(&next);
                             let mut target =
                                 self.provider_target.write().expect("provider target lock");
                             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
-                                api_key: self.resolve_request_api_key(&next),
+                                api_key: request_auth.api_key,
+                                headers: request_auth
+                                    .headers
+                                    .map(|headers| headers.into_iter().collect())
+                                    .unwrap_or_default(),
                                 model: next.clone(),
                             });
                         }
@@ -3460,7 +3503,12 @@ impl AgentSessionEngine {
                     let persistence = persistence.clone();
                     let primary = primary_state.borrow().clone();
                     async move {
-                        let Some((primary_model, thinking_level, primary_api_key)) = primary
+                        let Some(FailoverPrimary {
+                            model: primary_model,
+                            thinking_level,
+                            api_key: primary_api_key,
+                            headers: primary_headers,
+                        }) = primary
                         else {
                             return Ok(None);
                         };
@@ -3474,6 +3522,7 @@ impl AgentSessionEngine {
                             *target = Some(ProviderTarget {
                 service_tier: *self.service_tier.read().expect("service tier lock"),
                                 api_key: primary_api_key,
+                                headers: primary_headers,
                                 model: primary_model.clone(),
                             });
                         }
@@ -7348,6 +7397,29 @@ pub(crate) mod tests {
         assert!(
             engine.model_fallback_message().is_none(),
             "a successful restore leaves no fallback message"
+        );
+    }
+
+    /// TS #2497: the auth storage is the single team-header owner. The
+    /// request auth a session's provider target carries resolves the
+    /// stored Prime team as `X-Prime-Team-ID` — with the provider-side
+    /// fallback deleted, these merged headers are what keeps the team on
+    /// the wire.
+    #[test]
+    fn request_auth_carries_the_stored_team_header() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let agent_dir = dir.path().join("agent");
+        write_prime_auth(&agent_dir);
+        let engine = restore_test_engine(dir.path(), Some("prime-inference"), None);
+        let model = engine.resolve_registry_model().expect("resolved model");
+        assert_eq!(model.provider, "prime-inference");
+        let auth = engine.resolve_request_auth(&model);
+        assert_eq!(auth.api_key.as_deref(), Some("test-key"));
+        let headers = auth.headers.expect("merged request headers");
+        assert_eq!(
+            headers.get("X-Prime-Team-ID").map(String::as_str),
+            Some("team-1"),
+            "the stored team ships as the team header"
         );
     }
 
