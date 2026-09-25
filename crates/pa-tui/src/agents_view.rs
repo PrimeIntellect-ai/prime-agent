@@ -298,6 +298,24 @@ impl DeleteAction {
             }
         }
     }
+
+    /// Whether the wire's own outcome fields say the effect actually
+    /// happened (the honest-success check: a `cancelled: false` or a
+    /// `deleted: false` in a `success` response means the command ran
+    /// but changed nothing — reported as such, never as success).
+    fn effect_happened(&self, response: &crate::daemon_client::DaemonResponse) -> bool {
+        let Some(data) = response.data.as_ref() else {
+            return true;
+        };
+        match self {
+            DeleteAction::StopSubagent { .. } => data.get("cancelled") != Some(&serde_json::json!(false)),
+            DeleteAction::DeleteSubagent { .. } => data.get("deleted") != Some(&serde_json::json!(false)),
+            DeleteAction::StopAgent { .. } => true,
+            DeleteAction::DeleteSavedSession { .. } => {
+                data.get("deleted").map(serde_json::Value::as_bool) != Some(Some(false))
+            }
+        }
+    }
 }
 
 /// One stop-or-delete wire dispatch (TS `handleDeleteSelected`'s arms):
@@ -350,7 +368,26 @@ fn spawn_delete_dispatch(
             }
         };
         let outcome = match client.request(request).await {
-            Ok(response) if response.success => action.success_message(),
+            Ok(response) if response.success && action.effect_happened(&response) => {
+                action.success_message()
+            }
+            Ok(response) if response.success => format!(
+                "{} did not change anything: {}",
+                action.fail_word(),
+                response
+                    .data
+                    .as_ref()
+                    .map(|data| crate::width::truncate_line(
+                        &vec![crate::Span::raw(
+                            serde_json::to_string(data).unwrap_or_default()
+                        )],
+                        120,
+                        "\u{2026}",
+                    )
+                    .first()
+                    .map(|line| line.iter().map(|span| span.content.clone()).collect::<String>())
+                    .unwrap_or_else(|| "nothing changed".into())
+            ),
             Ok(response) => {
                 let error = response
                     .error
@@ -361,6 +398,13 @@ fn spawn_delete_dispatch(
         };
         let _ = ui_tx.send(UiInput::DeleteResult { message: outcome });
     });
+}
+
+/// The row's stop-or-delete word: true while the row has live work (the
+/// running section - TS `hasLiveWork`), false otherwise. The confirm's
+/// hint and the execution gate both derive from the CURRENT row state.
+fn delete_arm_word(row: &AgentsViewRow) -> bool {
+    row.section == crate::agents_view_state::Section::Running
 }
 
 /// The agents view state: roster + catalog data, search, selection, and
@@ -1202,6 +1246,12 @@ impl AgentsViewMode {
                 self.rows
                     .get(self.selected)
                     .is_some_and(|row| row.identity == pending.identity)
+                    // The armed word must still match the row's live work:
+                    // a row that settled between the presses (running ->
+                    // idle) re-arms rather than executing the stale word
+                    // (the hint said stop; the row now deletes - the
+                    // confirm rides the CURRENT state).
+                    && delete_arm_word(&row) == pending.stop
             }) {
                 if let Some(action) = self.delete_action_for_selected() {
                     self.pending_delete_action = Some(action);
@@ -2867,7 +2917,7 @@ mod tests {
         mode.selected = child_index;
         mode.handle_key("ctrl+x");
         let hint = mode
-            .render_hints(120)
+            .render_hints(120, None)
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
@@ -2885,6 +2935,97 @@ mod tests {
         mode.handle_key("down");
         assert!(mode.pending_delete.is_none(), "the arm dies with the move");
         assert!(mode.pending_delete_action.is_none());
+    }
+
+    /// The honest-success check: a `success` response whose own outcome
+    /// field says nothing happened (`cancelled: false`, `deleted: false`)
+    /// never reports Stopped/Deleted — the status says what the wire
+    /// said, not what the button hoped.
+    #[test]
+    fn a_no_effect_success_response_reports_nothing_changed() {
+        let action = DeleteAction::StopSubagent {
+            active_session_id: "p-live".to_string(),
+            child_id: "child-c".to_string(),
+            name: "worker one".to_string(),
+        };
+        let response = crate::daemon_client::DaemonResponse {
+            success: true,
+            data: Some(serde_json::json!({"cancelled": false})),
+            error: None,
+            id: None,
+            command: "cancel_rlm_child".to_string(),
+            error_info: None,
+        };
+        assert!(!action.effect_happened(&response));
+        let response = crate::daemon_client::DaemonResponse {
+            success: true,
+            data: Some(serde_json::json!({"cancelled": true})),
+            error: None,
+            id: None,
+            command: "cancel_rlm_child".to_string(),
+            error_info: None,
+        };
+        assert!(action.effect_happened(&response));
+        let delete = DeleteAction::DeleteSubagent {
+            active_session_id: "p-live".to_string(),
+            child_id: "child-c".to_string(),
+            name: "worker one".to_string(),
+        };
+        let response = crate::daemon_client::DaemonResponse {
+            success: true,
+            data: Some(serde_json::json!({"deleted": false})),
+            error: None,
+            id: None,
+            command: "delete_rlm_subagent".to_string(),
+            error_info: None,
+        };
+        assert!(!delete.effect_happened(&response));
+    }
+
+    /// A row that settles between the presses re-arms instead of
+    /// executing the stale word: the armed confirm rides the row's
+    /// CURRENT live-work state.
+    #[test]
+    fn a_settled_row_re_arms_instead_of_executing_the_stale_word() {
+        let mut mode = mode_with_parent_and_child();
+        mode.toggle_subagent_list(
+            &mode
+                .rows
+                .iter()
+                .find(|row| row.kind == RowKind::Agent)
+                .expect("the parent row")
+                .clone(),
+        );
+        mode.selected = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        // Arm over the running child (the word is stop).
+        mode.handle_key("ctrl+x");
+        let armed = mode.delete_arm_target().expect("an armed target");
+        assert!(armed.stop);
+        // The row settles: the section flips to idle while the arm is up.
+        mode.roster[1]["status"] = serde_json::json!("idle");
+        mode.rebuild_rows();
+        mode.selected = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        // The second press on the same row: the stale stop word no longer
+        // matches the idle row - the confirm re-arms over the current
+        // state instead of executing the stop.
+        mode.handle_key("ctrl+x");
+        assert!(
+            mode.pending_delete_action.is_none(),
+            "the stale word never executes"
+        );
+        assert!(
+            mode.pending_delete.as_ref().is_some_and(|pending| !pending.stop),
+            "the re-arm carries the current word: {:?}",
+            mode.pending_delete
+        );
     }
 
     /// The delete hint renders the word for a row without live work.
