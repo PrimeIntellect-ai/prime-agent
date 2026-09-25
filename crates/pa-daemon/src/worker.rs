@@ -6917,7 +6917,10 @@ mod update_snapshot_tests {
     /// process, and the parked row carries the typed provenance. The
     /// exact spoofs are answered loudly instead — the same command
     /// without a mint, and a replay of the consumed mint — while the
-    /// same-text user row still parks as a plain row.
+    /// same-text user row still parks as a plain row. That user row is
+    /// human class while the minted notice is background, so admission
+    /// priority parks the user row ahead of the notice; the rider names
+    /// only the notice's lane slot, whichever position it holds.
     #[tokio::test]
     async fn a_follow_up_notice_parks_with_typed_provenance() {
         let (worker, _) = snapshot_after_create().await;
@@ -6977,8 +6980,8 @@ mod update_snapshot_tests {
         );
         assert_eq!(
             snapshot.rlm_child_status.follow_up,
-            vec![0],
-            "only the minted notice row flags; the same-text user row does not"
+            vec![1],
+            "only the minted notice row flags: the same-text human row parks ahead of it"
         );
     }
 
