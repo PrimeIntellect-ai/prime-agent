@@ -134,9 +134,9 @@ impl EffortPicker {
         }
     }
 
-    /// The picker's rendered frame (the inline-picker's bordered list).
-    pub fn render(&self, theme: &Theme, width: usize) -> Vec<Line> {
-        self.selector.render(theme, width)
+    /// The picker's rendered frame (the shared menu-panel grammar).
+    pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
+        self.selector.render(theme, width, kb)
     }
 }
 
@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn the_frame_lists_levels_and_their_descriptions() {
         let picker = EffortPicker::new(&levels(), None);
-        let frame = picker.render(&theme(), 60);
+        let frame = picker.render(&theme(), 60, &kb());
         let text: Vec<String> = frame
             .iter()
             .map(|line| line.iter().map(|span| span.content.as_str()).collect())
