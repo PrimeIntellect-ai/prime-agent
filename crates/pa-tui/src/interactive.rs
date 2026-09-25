@@ -869,6 +869,15 @@ async fn run_interactive_surface(
     let theme = crate::app::load_theme(&options.theme);
     let mut view = AgentView::new(theme);
     view.code_block_indent = options.code_block_indent.clone();
+    // The file-completion provider browses the SESSION cwd (TS
+    // `createBaseAutocompleteProvider` anchors on `this.getCurrentCwd()`),
+    // not the process cwd: the editor constructor's `env::current_dir()`
+    // default only matches when the launch directory is the session cwd —
+    // the attach flows pass the session's own cwd, and the completion
+    // menu must browse the directory the user sees.
+    view.editor.set_autocomplete_provider(Box::new(
+        crate::autocomplete::CombinedAutocompleteProvider::from_registry(options.cwd.clone()),
+    ));
     // The effective bindings (user `keybindings.json` merged over the TS
     // defaults) drive the editor, the pickers, and every hint the view
     // renders (TS `KeybindingsManager.create()` + `setKeybindings`).

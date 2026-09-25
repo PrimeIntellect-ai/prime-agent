@@ -21,9 +21,11 @@ impl Worker {
     /// (settings `allowedModels`: a model outside the allowlist fails
     /// loudly, never a fallback), switch the engine, record the durable
     /// `model_change` row, and persist the settings default (TS
-    /// `session.setModel`). Unknown models fail with the TS message. The
-    /// engine switch parks the engine's runtime, so it runs on the blocking
-    /// pool like the turn path.
+    /// `session.setModel`). Unknown models fail with the TS message; a
+    /// model whose provider is not signed in fails with the typed
+    /// sign-in refusal (the client offers the provider's login and
+    /// retries). The engine switch parks the engine's runtime, so it
+    /// runs on the blocking pool like the turn path.
     pub(crate) async fn handle_set_model(&self, payload: &Value) -> DaemonResponse {
         if let Err(response) = self.require_created("set_model") {
             return response;
@@ -36,6 +38,29 @@ impl Worker {
         };
         let model = match resolve_available_model(&self.config.agent_dir, provider, model_id) {
             Ok(model) => model,
+            // A model whose provider is not signed in is a typed refusal
+            // (`errorInfo.modelProviderUnauthenticated` carries the
+            // provider): the client offers the provider's sign-in flow
+            // and retries the switch, instead of a dead-end error.
+            Err(
+                refusal @ pa_core::models::SetModelSelectionError::ProviderUnauthenticated {
+                    ..
+                },
+            ) => {
+                return response_failure(
+                    None,
+                    "set_model",
+                    &refusal.to_string(),
+                    Some(
+                        pa_types::daemon::DaemonErrorInfo::ModelProviderUnauthenticated {
+                            provider: refusal
+                                .unauthenticated_provider()
+                                .expect("the sign-in refusal names its provider")
+                                .to_string(),
+                        },
+                    ),
+                );
+            }
             Err(error) => return response_failure(None, "set_model", &error.to_string(), None),
         };
         // The daemon model allowlist (settings `allowedModels`): a switch
@@ -220,22 +245,20 @@ impl Worker {
 
 /// Resolve one `(provider, modelId)` pair against the registry's available
 /// catalog (auth-configured models). The TS `set_model` handler looks the
-/// model up in the refreshed available list, so an unavailable or unknown
-/// model fails with the same message.
+/// model up in the refreshed available list; a model that exists without a
+/// signed-in provider is the typed sign-in refusal, and an unavailable or
+/// unknown model fails with the TS message.
 fn resolve_available_model(
     agent_dir: &std::path::Path,
     provider: &str,
     model_id: &str,
-) -> anyhow::Result<pa_types::ai::Model> {
+) -> Result<pa_types::ai::Model, pa_core::models::SetModelSelectionError> {
     let auth = pa_core::auth::AuthStorage::create(agent_dir);
     let mut registry = pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
     registry.load_private_authorization_from_cache();
     registry
-        .get_available()
-        .into_iter()
-        .find(|model| model.provider == provider && model.id == model_id)
+        .resolve_set_model_selection(provider, model_id)
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("Model not found: {provider}/{model_id}"))
 }
 
 #[cfg(test)]
@@ -353,6 +376,71 @@ mod tests {
         );
     }
 
+    /// The `set_model` refusal for a model whose provider is not signed
+    /// in carries the typed `errorInfo` (the provider id), so a client
+    /// offers the provider's sign-in flow instead of a dead-end error;
+    /// a genuinely absent model keeps the TS refusal without `errorInfo`.
+    #[tokio::test]
+    async fn set_model_refuses_an_unsigned_in_provider_with_the_typed_sign_in_error() {
+        let dir = std::env::temp_dir().join(format!("pa-worker-si-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        models_fixture(&dir);
+        let worker = std::sync::Arc::new(crate::worker::Worker::new(worker_config(&dir), None));
+        let created = worker
+            .dispatch("create", &json!({ "noSession": true, "cwd": dir }))
+            .await;
+        assert!(created.success, "create failed: {created:?}");
+
+        // A catalog model of a provider without a credential: the typed
+        // sign-in refusal with the provider id on the wire.
+        let (provider, model_id) = first_built_in_anthropic_model();
+        let response = worker
+            .dispatch(
+                "set_model",
+                &json!({
+                    "activeSessionId": "allowlist-session",
+                    "provider": provider,
+                    "modelId": model_id,
+                }),
+            )
+            .await;
+        assert!(!response.success, "the unsigned provider refuses");
+        assert_eq!(response.command, "set_model");
+        assert_eq!(
+            response.error.as_deref(),
+            Some(
+                "Provider \"anthropic\" is not signed in. Sign in to the provider (the TUI's /login command), then set the model again."
+            )
+        );
+        assert_eq!(
+            response.error_info,
+            Some(
+                pa_types::daemon::DaemonErrorInfo::ModelProviderUnauthenticated {
+                    provider: "anthropic".to_string(),
+                }
+            )
+        );
+
+        // A genuinely absent model keeps the TS refusal: no typed info,
+        // no sign-in class.
+        let response = worker
+            .dispatch(
+                "set_model",
+                &json!({
+                    "activeSessionId": "allowlist-session",
+                    "provider": "anthropic",
+                    "modelId": "no-such-model",
+                }),
+            )
+            .await;
+        assert!(!response.success);
+        assert_eq!(
+            response.error.as_deref(),
+            Some("Model not found: anthropic/no-such-model")
+        );
+        assert_eq!(response.error_info, None);
+    }
+
     #[test]
     fn thinking_levels_wire_names_match_the_enum() {
         // Every wire name must parse; the list is the exact TS `ThinkingLevel`
@@ -364,6 +452,119 @@ mod tests {
             );
         }
         assert!(pa_ai::models::thinking_level_from_str("sideways").is_none());
+    }
+
+    /// A catalog model from a provider without a credential resolves to the
+    /// typed sign-in refusal (the client offers the provider's login and
+    /// retries the switch), while a genuinely absent model keeps the TS
+    /// "Model not found" message — the two classes the old path conflated
+    /// into the dead-end error.
+    #[test]
+    fn resolution_classifies_the_sign_in_refusal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        models_fixture(dir.path());
+        let agent_dir = dir.path().join("agent");
+        // The signed-in provider keeps resolving (the regression guard).
+        let model = resolve_available_model(&agent_dir, "prime-inference", "mock-1")
+            .expect("the signed-in provider resolves");
+        assert_eq!(model.id, "mock-1");
+
+        // A built-in provider without a credential: the typed refusal.
+        let (provider, model_id) = first_built_in_anthropic_model();
+        let error = resolve_available_model(&agent_dir, &provider, &model_id)
+            .expect_err("an unsigned provider refuses with the sign-in class");
+        assert_eq!(
+            error,
+            pa_core::models::SetModelSelectionError::ProviderUnauthenticated {
+                provider: provider.clone()
+            }
+        );
+        assert_eq!(error.unauthenticated_provider(), Some(provider.as_str()));
+        assert_eq!(
+            error.to_string(),
+            "Provider \"anthropic\" is not signed in. Sign in to the provider (the TUI's /login command), then set the model again."
+        );
+
+        // A model absent from the catalog keeps the TS refusal, never the
+        // sign-in class.
+        let error = resolve_available_model(&agent_dir, &provider, "no-such-model")
+            .expect_err("an unknown model fails with the TS message");
+        assert_eq!(
+            error,
+            pa_core::models::SetModelSelectionError::NotFound {
+                provider: provider.clone(),
+                model_id: "no-such-model".to_string(),
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("Model not found: {provider}/no-such-model")
+        );
+    }
+
+    /// A signed-in provider's unauthorized private Prime Inference model
+    /// (the only `get_available` exclusion besides auth) keeps the TS
+    /// refusal — the switch never reaches a model the account is not
+    /// entitled to.
+    #[test]
+    fn an_unauthorized_private_model_keeps_the_ts_refusal() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        models_fixture(dir.path());
+        let agent_dir = dir.path().join("agent");
+        // The bundled private table ships `internal/glm-5.2-fast`; the
+        // fixture signs the provider in but grants no private-model
+        // authorization (no Prime credential, no explicit ids).
+        let error = resolve_available_model(&agent_dir, "prime-inference", "internal/glm-5.2-fast")
+            .expect_err("the unauthorized private model refuses");
+        assert_eq!(
+            error,
+            pa_core::models::SetModelSelectionError::NotFound {
+                provider: "prime-inference".to_string(),
+                model_id: "internal/glm-5.2-fast".to_string(),
+            }
+        );
+    }
+
+    /// A stale-auth provider keeps the switch (the TS daemon's
+    /// full-catalog fallback: the lookup never mutates stale state,
+    /// `session.setModel` owns the clear) even though the stale
+    /// credential gates the model out of the available list.
+    #[test]
+    fn stale_auth_keeps_the_set_model_switch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let agent_dir = dir.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        let mut auth = pa_core::auth::AuthStorage::create(&agent_dir);
+        auth.set(
+            "anthropic",
+            pa_core::auth::AuthCredential::ApiKey {
+                key: "sk-stale".to_string(),
+                prime_team: None,
+            },
+        );
+        assert!(
+            auth.mark_auth_stale("anthropic"),
+            "the stored credential marks stale"
+        );
+        let mut registry =
+            pa_core::models::ModelRegistry::create(auth, agent_dir.join("models.json"));
+        registry.load_private_authorization_from_cache();
+        let (provider, model_id) = first_built_in_anthropic_model();
+        let model = registry
+            .resolve_set_model_selection(&provider, &model_id)
+            .expect("a stale-auth provider keeps the switch");
+        assert_eq!(model.id, model_id);
+    }
+
+    /// The first built-in Anthropic catalog model (the fixture-free
+    /// unauthenticated provider: the generated catalog ships its models
+    /// without any credential).
+    fn first_built_in_anthropic_model() -> (String, String) {
+        let model = pa_ai::models_generated::get_models("anthropic")
+            .first()
+            .copied()
+            .expect("the generated catalog has anthropic models");
+        (model.provider.to_string(), model.id.to_string())
     }
 
     #[test]
