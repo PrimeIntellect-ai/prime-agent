@@ -241,11 +241,17 @@ pub struct AgentsViewRun {
 /// The armed stop-or-delete row (TS `pendingDeleteAgent` /
 /// `pendingKillSubagent`): which row waits on the second press, and the
 /// word its hint renders (`stop` while the row has live work, `delete`
-/// otherwise — TS `hasLiveWork`).
+/// otherwise — TS `hasLiveWork`). The session key rides along so a
+/// roster replacement (the same identity, a NEW live session) retires
+/// the arm: the second press must confirm the session it will act on,
+/// never silently act on its replacement.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PendingDelete {
     identity: String,
     stop: bool,
+    /// The row's live-session key (or the session-file key for saved
+    /// rows) at arm time.
+    session_key: Option<String>,
 }
 
 /// One stop-or-delete dispatch the run loop executes (the wire variant
@@ -413,6 +419,17 @@ fn spawn_delete_dispatch(
             deleted_saved_path,
         });
     })
+}
+
+/// The row's arming key: the live session id when it has one, else the
+/// session file — the identity a roster replacement would change under
+/// the same row identity.
+fn armed_session_key(row: &AgentsViewRow) -> Option<String> {
+    row.summary
+        .get("activeSessionId")
+        .or_else(|| row.summary.get("sessionFile"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 /// The agents view state: roster + catalog data, search, selection, and
@@ -725,7 +742,14 @@ impl AgentsViewMode {
         // row the list no longer carries (the execution gate would
         // reject it anyway - the arm and the visible row stay one).
         if let Some(pending) = &self.pending_delete {
-            if !self.rows.iter().any(|row| row.identity == pending.identity) {
+            let still_there = self.rows.iter().any(|row| row.identity == pending.identity);
+            let unchanged_key = self
+                .rows
+                .iter()
+                .find(|row| row.identity == pending.identity)
+                .map(armed_session_key)
+                .is_some_and(|key| key == pending.session_key);
+            if !still_there || !unchanged_key {
                 self.pending_delete = None;
             }
         }
@@ -945,6 +969,7 @@ impl AgentsViewMode {
         Some(PendingDelete {
             identity: row.identity.clone(),
             stop,
+            session_key: armed_session_key(row),
         })
     }
 
@@ -3156,6 +3181,36 @@ mod tests {
                 .is_some_and(|pending| !pending.stop),
             "the re-arm carries the current word: {:?}",
             mode.pending_delete
+        );
+    }
+
+    /// A roster replacement retires the arm: the same row identity with
+    /// a NEW live session (the worker was replaced) never inherits the
+    /// armed confirm — the second press confirms the session it acts
+    /// on (a stale arm must not stop the replacement's new session).
+    #[test]
+    fn a_roster_replacement_retires_the_armed_confirm() {
+        let mut mode = mode_with_parent_and_child();
+        mode.selected = 0;
+        mode.handle_key("ctrl+x");
+        let armed = mode.delete_arm_target().expect("an armed target");
+        let key = armed.session_key.clone();
+        assert!(key.is_some());
+        // The roster replaces the agent: the same identity, a new live
+        // session id.
+        mode.roster[0]["summary"]["activeSessionId"] = serde_json::json!("p-live-2");
+        mode.rebuild_rows();
+        assert!(
+            mode.pending_delete.is_none(),
+            "the replacement retires the arm"
+        );
+        // The same session (no replacement) keeps it.
+        mode.selected = 0;
+        mode.handle_key("ctrl+x");
+        mode.rebuild_rows();
+        assert!(
+            mode.pending_delete.is_some(),
+            "an unchanged roster keeps the arm"
         );
     }
 
