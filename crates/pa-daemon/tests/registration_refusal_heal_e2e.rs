@@ -22,6 +22,8 @@ use serde_json::{json, Value};
 
 struct Daemon {
     child: Child,
+    // The socket path rides the struct for harness symmetry (the spawned
+    // daemon's address is part of the fixture); no case reads it here.
     #[allow(dead_code)]
     socket: PathBuf,
 }

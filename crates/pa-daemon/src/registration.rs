@@ -499,6 +499,66 @@ mod tests {
         drop(writer2);
     }
 
+    /// A definitive rejection on the HELD connection retires too: the
+    /// in-place `SessionCreated` re-registration can carry the unknown-
+    /// worker verdict (the supervisor lost this identity between the
+    /// initial registration and the session's creation), and the terminal
+    /// handling does not depend on which attempt the refusal rides —
+    /// retiring there as well keeps the refused worker from retrying
+    /// forever against a supervisor that will never adopt it.
+    #[tokio::test]
+    async fn a_definitive_rejection_on_the_held_connection_retires() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let supervisor_socket = dir.path().join("supervisor.sock");
+        let config = test_config(dir.path(), &supervisor_socket);
+        let handle = start(&config).expect("registration starts");
+
+        let listener = bind_transport(&supervisor_socket).await.expect("bind");
+        let stream = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("registration within bounded window")
+            .expect("accept");
+        let (command, mut reader, mut fake_writer) =
+            fake_supervisor_handshake(stream).await.expect("handshake");
+        assert_eq!(command["type"], "worker_register");
+
+        // The session is created while connected: the in-place
+        // re-registration is refused for good.
+        handle.notify_session_created("session-uuid-1".to_string());
+        let mut line = String::new();
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line))
+            .await
+            .expect("re-registration within bounded window")
+            .expect("read re-register");
+        let envelope: Value = serde_json::from_str(line.trim()).expect("parse re-register");
+        let request_id = envelope["id"].as_str().unwrap_or_default().to_string();
+        let response = json!({
+            "id": request_id,
+            "type": "response",
+            "command": "worker_register",
+            "success": false,
+            "error": "Unknown session worker: abc123def456",
+        });
+        fake_writer
+            .write_all(
+                format!(
+                    "{response}
+"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("refuse");
+        fake_writer.flush().await.expect("flush");
+        tokio::time::timeout(Duration::from_secs(5), handle.retired())
+            .await
+            .expect("the definitive rejection on the held connection retires the worker");
+        // No further registration attempt: the loop ended.
+        tokio::time::sleep(Duration::from_millis(750)).await;
+        let late = tokio::time::timeout(Duration::from_millis(750), listener.accept()).await;
+        assert!(late.is_err(), "a retired registration never retries");
+    }
+
     /// The definitive rejection retires the worker: a supervisor that
     /// answers `worker_register` with the unknown-worker error ends the
     /// retry loop (the `retired` signal resolves) and no further
