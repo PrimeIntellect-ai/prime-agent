@@ -155,7 +155,6 @@ Models, Providers, and MCP Connections open as separate pickers. Use `escape` to
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
 | `app.tools.expand` | `ctrl+o` | Cycle overview → thinking and file diffs → all output |
-| `app.transcript.runs` | `alt+t` | Open the condensed tool runs view (Enter expand a run) |
 | `app.message.followUp` | `alt+enter` | Queue follow-up message |
 | `app.message.navigateOlder` | `alt+up` | Select the next older pending message |
 | `app.message.navigateNewer` | `alt+down` | Select the next newer pending message or restore the draft |

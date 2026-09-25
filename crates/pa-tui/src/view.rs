@@ -156,10 +156,6 @@ pub struct AgentView {
     /// The dedicated bash view (the dock's Bash group's destination):
     /// while set, it owns the editor dock like the inline pickers.
     pub bash_view: Option<crate::bash_view::BashView>,
-    /// The condensed tool runs view (the drill-in pane for the collapsed
-    /// transcript's condensed blocks): while set, it owns the editor dock
-    /// like the bash view.
-    pub runs_view: Option<crate::runs_view::RunsView>,
     /// A `/share` gist upload in flight (TS `BorderedLoader`): while set,
     /// it replaces the editor with the cancellable loader rows.
     pub share_loader: Option<ShareLoader>,
@@ -354,7 +350,6 @@ impl AgentView {
             heartbeats_picker: None,
             goal_panel: None,
             bash_view: None,
-            runs_view: None,
             share_loader: None,
             reload_box: None,
             side_pane: None,
@@ -1032,30 +1027,7 @@ impl AgentView {
         if let Some(rows) = self.render_condensed(index, width) {
             return rows;
         }
-        self.render_entry_uncondensed(
-            index,
-            entry,
-            width,
-            first,
-            preceded_by_tool_activity,
-            self.detail,
-        )
-    }
-
-    /// The uncondensed rendering of one entry (the runs view's drill-in
-    /// paints the exact rows a condensed block replaced). `detail` is
-    /// the mode the rows render in: the transcript passes the ambient
-    /// mode, the drill-in pins the overview so its rows are exactly
-    /// the ones the block replaced.
-    pub(crate) fn render_entry_uncondensed(
-        &self,
-        index: usize,
-        entry: &ChatEntry,
-        width: usize,
-        first: bool,
-        preceded_by_tool_activity: bool,
-        detail: Detail,
-    ) -> Vec<Line> {
+        let detail = self.detail;
         match entry {
             ChatEntry::Status { text, kind } => {
                 let style = match kind {
@@ -1565,10 +1537,6 @@ impl AgentView {
             let mut dock = prompt_context;
             dock.extend(view.render(&self.theme, width, self.editor.keybindings()));
             Some(dock)
-        } else if let Some(runs_view) = self.runs_view.as_ref() {
-            let mut dock = prompt_context;
-            dock.extend(runs_view.render(self, width, self.editor.keybindings()));
-            Some(dock)
         } else {
             None
         };
@@ -1778,7 +1746,6 @@ impl AgentView {
             || self.heartbeats_picker.is_some()
             || self.goal_panel.is_some()
             || self.bash_view.is_some()
-            || self.runs_view.is_some()
             || self.tree_selector.is_some()
             || self.fork_selector.is_some()
             || self.share_loader.is_some()
@@ -3255,26 +3222,6 @@ mod tests {
         view.detail = Detail::Overview;
         let text = transcript_text(&mut view, 80);
         assert!(text.contains("3 tool calls"), "overview condenses: {text}");
-    }
-
-    #[test]
-    fn the_runs_pane_suppresses_the_frame_cursor() {
-        let mut view = condensed_view(run_cards(5));
-        let runs = view.condensed_runs();
-        assert!(!runs.is_empty(), "the run condenses: {runs:?}");
-        // The dock paint draws the editor cursor; the pane mounts over it.
-        let _ = view.render_dock(80);
-        assert!(
-            view.frame_cursor().is_some(),
-            "the editor surface draws the cursor"
-        );
-        view.runs_view = Some(crate::runs_view::RunsView::new(24, &view.chat, &runs));
-        assert!(
-            view.frame_cursor().is_none(),
-            "the open runs pane suppresses the hardware cursor"
-        );
-        view.runs_view = None;
-        assert!(view.frame_cursor().is_some(), "the cursor returns");
     }
 
     #[test]

@@ -11,7 +11,7 @@
 
 use super::AgentView;
 use crate::chat::{ChatEntry, Detail};
-use crate::tool_runs::{self, is_run_glue, RunSlot, ToolRun};
+use crate::tool_runs::{self, is_run_glue, RunSlot};
 
 impl AgentView {
     /// Paint one entry's collapsed-mode rows when a qualifying run covers
@@ -127,16 +127,5 @@ impl AgentView {
                 *slot = [None, None, None];
             }
         }
-    }
-
-    /// The condensed runs in transcript order (the runs view's list).
-    pub(crate) fn condensed_runs(&self) -> Vec<ToolRun> {
-        let mut runs = Vec::new();
-        for index in 0..self.chat.len() {
-            if let Some(run) = self.run_map.run_at(index) {
-                runs.push(run);
-            }
-        }
-        runs
     }
 }

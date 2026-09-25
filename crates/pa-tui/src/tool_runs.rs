@@ -103,19 +103,6 @@ pub fn is_run_glue(entry: &ChatEntry) -> bool {
     }
 }
 
-/// A run's stable identity: the wire id of its first tool card. A
-/// resync rebuild replaces the chat wholesale and shifts indices, so
-/// a run's position is not stable across it - the first card's wire id
-/// is (the runs view's reconcile re-finds a survived run by this key).
-pub fn run_key(chat: &[ChatEntry], run: ToolRun) -> Option<&str> {
-    chat.get(run.start..run.end)?
-        .iter()
-        .find_map(|entry| match entry {
-            ChatEntry::Tool(card) => Some(card.id.as_str()),
-            _ => None,
-        })
-}
-
 /// The condensed block's inputs, derived from the run's entries at
 /// render time (never stored - the transcript model stays exactly as
 /// the event stream built it).

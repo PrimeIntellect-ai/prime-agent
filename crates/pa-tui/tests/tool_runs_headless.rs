@@ -1,11 +1,12 @@
-//! Headless e2e for the collapsed view's condensed tool runs (the
+//! Headless e2e for the collapsed view's condensed activity runs (the
 //! operator feature): a mock supervisor serves one attached session whose
-//! replayed transcript carries a >4 tool-call run with a queued
-//! agent-message receipt and a received agent message mid-run (the
-//! received row breaks the run; the five cards after it condense), a
-//! live-streamed >4 run, and a live four-call turn that must NOT
-//! condense. The drill-in pane opens through the bound key, Enter expands
-//! a run, and Esc walks back out.
+//! replayed transcript carries eight ipython calls split across a
+//! received agent message with hidden thinking around it - one >=3
+//! activity-item run with the received row and a queued receipt merged
+//! into its aggregate - a live-streamed six-call run, and a live
+//! two-call turn that must NOT condense. Ctrl+O owns the detail levels:
+//! overview condenses, details renders every card, notice, and thinking
+//! block individually.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
@@ -136,7 +137,7 @@ impl MockSupervisor {
 /// turn end, and the agent drain.
 fn serve_turn(writer: &mut UnixStream, prompt: &str, turn: usize) {
     let event = |payload: Value| json!({ "type": "session_event", "activeSessionId": "s1", "event": payload });
-    let calls = if prompt.contains("short") { 4 } else { 6 };
+    let calls = if prompt.contains("short") { 2 } else { 6 };
     // Tool-call ids are unique per invocation (the real daemon's ids are
     // fresh per call): the TUI upserts streamed cards BY ID, so a reused
     // id updates the earlier invocation's card instead of opening a new
@@ -228,11 +229,12 @@ fn write_json(writer: &mut UnixStream, value: &Value) {
     writer.flush().expect("flush mock frame");
 }
 
-/// The replayed transcript: eight ipython calls in two groups split by a
-/// received agent message (three before it, five after it) - only the
-/// five-card group crosses the condensing threshold, so exactly ONE
-/// condensed block renders and the received row keeps its place. The
-/// wire timestamps carry an honest 61-second wall clock.
+/// The replayed transcript: eight ipython calls whose only separator
+/// is a received agent message between two hidden-thinking stretches -
+/// one activity run of eight calls plus the received row (a member, not
+/// a boundary) with a queued receipt riding c5's result, so ONE
+/// aggregate renders with both kinds counted. The wire timestamps carry
+/// an honest 62-second wall clock.
 fn attach_data(id: &str) -> Value {
     let tool_call = |index: usize| {
         json!({
@@ -405,20 +407,8 @@ fn options(socket: PathBuf) -> InteractiveOptions {
     }
 }
 
-fn alt_t() -> KeyEvent {
-    KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT)
-}
-
 fn ctrl_o() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)
-}
-
-fn enter() -> KeyEvent {
-    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
-}
-
-fn escape() -> KeyEvent {
-    KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)
 }
 
 fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
@@ -445,8 +435,8 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
 }
 
 #[test]
-fn replayed_runs_condense_with_the_received_message_in_place() {
-    // The condensed blocks render at the collapsed overview level; a
+fn replayed_runs_condense_with_the_received_message_merged() {
+    // The condensed block renders at the collapsed overview level; a
     // chat starts at the middle details level, so the plan cycles down
     // (details -> all -> overview) before asserting the transcript.
     let frames = run_plan(vec![
@@ -454,73 +444,54 @@ fn replayed_runs_condense_with_the_received_message_in_place() {
         HeadlessStep::Key(ctrl_o()),
         HeadlessStep::Key(ctrl_o()),
     ]);
-    let all = frames.join("\n");
-    // The five-card group after the received message condenses; the
-    // three-card group before it stays card-for-card.
+    let last = frames.last().expect("a final frame");
     assert!(
-        all.contains("5 tool calls"),
-        "the condensed block renders: {all}"
+        last.contains("8 tool calls \u{b7} 2 agent messages"),
+        "the ONE aggregate spans the whole interleaved run: {last}"
     );
     assert!(
-        all.contains("\u{2570}\u{2500} 5 python \u{b7} 1 agent messages queued"),
-        "the breakdown carries the classes and the queued receipt: {all}"
+        last.contains(
+            "\u{2570}\u{2500} 8 python \u{b7} 1 agent messages received \u{b7} 1 agent messages queued",
+        ),
+        "the breakdown carries the classes, the received row, and the queued receipt: {last}"
     );
     assert!(
-        all.contains("45s"),
-        "the wire timestamps carry the honest wall clock (63s - 18s): {all}"
+        last.contains("62s"),
+        "the wire timestamps carry the honest wall clock (63s - 1s): {last}"
     );
     assert!(
-        all.contains("Agent message received \u{b7} \u{2190} parent fleet"),
-        "the received row keeps its place (the #2752 directional glyph): {all}"
-    );
-    assert!(
-        all.contains("steering note"),
-        "the received message's content stays visible: {all}"
-    );
-    // The three cards before the message render their own rows.
-    assert!(
-        all.contains("\u{2713} python \u{b7} print(0)"),
-        "the below-threshold group keeps its card rows: {all}"
-    );
-    // The three-card group never condenses: no second block renders.
-    assert!(
-        !all.contains("3 tool calls"),
-        "the below-threshold group renders its own rows, not a block: {all}"
+        !last.contains("Agent message received"),
+        "the received notice renders nothing of its own inside the run: {last}"
     );
 }
 
 #[test]
-fn the_drill_in_opens_expands_and_walks_back_out() {
-    let frames = run_plan(vec![
-        HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-        HeadlessStep::Key(alt_t()),
-        HeadlessStep::Key(enter()),
-        HeadlessStep::Key(escape()),
-        HeadlessStep::Key(escape()),
-        HeadlessStep::Key(escape()),
-    ]);
-    let all = frames.join("\n");
-    assert!(all.contains("Tool runs"), "the pane opens: {all}");
-    assert!(
-        all.contains("0 running"),
-        "the list header carries the live counts: {all}"
-    );
-    assert!(
-        all.contains("\u{2191}/\u{2193} move"),
-        "the list hint renders: {all}"
-    );
-    assert!(
-        all.contains("\u{2191}/\u{2193} scroll"),
-        "the detail hint renders after Enter: {all}"
-    );
-    // The detail shows the exact rows the block replaced.
-    assert!(
-        all.contains("print(3)"),
-        "the drill-in shows the run's own cell rows: {all}"
-    );
-    // Esc returns to the transcript: the final frame has no pane rows.
+fn details_renders_every_item_the_overview_condensed() {
+    // The Ctrl+O path: the same replayed transcript at the startup
+    // details level renders every card, the received notice's own row,
+    // and the hidden thinking individually - no condensed block at all.
+    let frames = run_plan(vec![HeadlessStep::WaitIdle { timeout_ms: 30_000 }]);
     let last = frames.last().expect("a final frame");
-    assert!(!last.contains("Tool runs"), "the pane closed: {last}");
+    assert!(
+        !last.contains("tool calls"),
+        "no condensed block at the details level: {last}"
+    );
+    assert!(
+        last.contains("Agent message received"),
+        "the notice keeps its own row at details: {last}"
+    );
+    assert!(
+        last.contains("steering note"),
+        "the notice's content stays visible: {last}"
+    );
+    assert!(
+        last.contains("before the message"),
+        "the thinking is visible at details: {last}"
+    );
+    assert!(
+        last.contains("print(3)"),
+        "every card renders its own rows: {last}"
+    );
 }
 
 #[test]
@@ -550,51 +521,11 @@ fn live_runs_condense_and_short_runs_do_not() {
         "the live run's receipts fold into the breakdown: {tail}"
     );
     assert!(
-        !tail.contains("4 tool calls"),
-        "the four-call turn never condenses: {tail}"
+        !tail.contains("2 tool calls"),
+        "the two-call turn never condenses: {tail}"
     );
     assert!(
-        tail.contains("print(3)"),
+        tail.contains("print(1)"),
         "the short turn's cards render their own rows: {tail}"
-    );
-}
-
-#[test]
-fn the_runs_pane_reconciles_across_a_live_turn() {
-    // The pane owns the frame while a SECOND turn streams behind it: the
-    // update-path reconcile runs on every event (the pane must survive
-    // the live traffic), the new run lands in the open pane's list, and
-    // the key path walks the reconciled state out clean.
-    let frames = run_plan(vec![
-        HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-        // The condensed block behind the pane renders at the collapsed
-        // overview level; cycle down from the startup details level.
-        HeadlessStep::Key(ctrl_o()),
-        HeadlessStep::Key(ctrl_o()),
-        HeadlessStep::Key(alt_t()),
-        HeadlessStep::Key(enter()),
-        HeadlessStep::Submit("live one".to_string()),
-        HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-        HeadlessStep::Key(escape()),
-        HeadlessStep::Key(escape()),
-        HeadlessStep::Key(escape()),
-    ]);
-    let all = frames.join("\n");
-    // The pane opened and stayed open across the whole live turn (a
-    // reconcile that wrongly closed it would drop these rows).
-    assert!(all.contains("Tool runs"), "the pane renders: {all}");
-    // The new turn's six-call run condensed while the pane was open and
-    // reconciled into the open pane's list.
-    assert!(
-        all.contains("\u{2570}\u{2500} 6 python \u{b7} 1 agent messages queued"),
-        "the live run's block renders behind the pane: {all}"
-    );
-    // Esc walks back out of the detail and the list; the final frame is
-    // the plain transcript again.
-    let last = frames.last().expect("a final frame");
-    assert!(!last.contains("Tool runs"), "the pane closed: {last}");
-    assert!(
-        last.contains("6 tool calls"),
-        "the new run's block renders: {last}"
     );
 }
