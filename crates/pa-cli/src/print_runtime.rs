@@ -216,20 +216,7 @@ async fn rpc_mode_main(options: &RunOptions) -> Result<i32, String> {
 /// The engine-replacement seam the RPC mode's `new_session` /
 /// `switch_session` / `fork` commands drive (TS `runtimeHost`
 /// replacement flows): pa-cli owns the assembly, the mode owns the swap.
-fn rpc_engine_factory(
-    options: &RunOptions,
-) -> std::sync::Arc<
-    dyn Fn(
-            pa_daemon::rpc::session::RpcEngineRequest,
-        ) -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<
-                        Output = Result<pa_daemon::rpc::session::RpcEngineHandle, String>,
-                    > + Send,
-            >,
-        > + Send
-        + Sync,
-> {
+fn rpc_engine_factory(options: &RunOptions) -> pa_daemon::rpc::session::RpcEngineFactory {
     let options = options.clone();
     std::sync::Arc::new(move |request| {
         let mut options = options.clone();

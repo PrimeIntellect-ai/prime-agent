@@ -225,11 +225,8 @@ async fn fork_at(
                 .path
         } else {
             // Fork at the root: a fresh session under the source.
-            let mut forked = crate::session_store::SessionFile::create(
-                &source_cwd,
-                session_file.to_str(),
-                0,
-            );
+            let mut forked =
+                crate::session_store::SessionFile::create(&source_cwd, session_file.to_str(), 0);
             let file =
                 session_dir.join(crate::session_store::session_file_name(forked.session_id()));
             forked.set_path(file);
