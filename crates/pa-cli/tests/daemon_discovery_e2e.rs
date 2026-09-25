@@ -118,7 +118,7 @@ fn reported_socket_paths(report: &Value) -> Vec<String> {
             report
                 .get(key)
                 .and_then(Value::as_array)
-                .map(|rows| rows.clone())
+                .cloned()
                 .unwrap_or_default()
         })
         .filter_map(|row| {
