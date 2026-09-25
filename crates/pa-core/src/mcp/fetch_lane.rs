@@ -22,8 +22,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use pa_models::cache::{CatalogCache, CatalogFetcher, CatalogParse, RefreshOptions, PUBLIC_SCOPE};
-use pa_models::fetch::MCP_SERVICE_CATALOG_URL;
+use pa_models::cache::{CatalogCache, CatalogParse, RefreshOptions, PUBLIC_SCOPE};
+use pa_models::fetch::{CatalogFetcher, MCP_SERVICE_CATALOG_URL};
 use pa_models::offline::is_catalog_offline;
 use pa_models::CATALOG_REFRESH_INTERVAL_MS;
 
