@@ -117,10 +117,10 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
-                Ok(_) => {
+                Ok(_) if !line.trim().is_empty() => {
                     return serde_json::from_str(line.trim()).expect("parse response line");
                 }
+                Ok(_) => {}
                 Err(error) => {
                     assert!(
                         Instant::now() < deadline,
