@@ -123,9 +123,9 @@ pub struct AgentView {
     /// The `/effort` inline picker (TS `ThinkingSelectorComponent` seam):
     /// while set, it owns the whole frame like the model picker.
     pub effort_picker: Option<crate::effort_picker::EffortPicker>,
-    /// The `/mcp` inline connections view (TS the configuration menu's
-    /// MCP Connections tab): while set, it owns the editor dock like the
-    /// model picker.
+    /// The `/mcp` inline connections view (the MCP surface's own
+    /// picker): while set, it owns the editor dock like the model
+    /// picker.
     pub mcp_view: Option<crate::mcp_view::McpView>,
     /// The `/heartbeats` inline management view (TS
     /// `HeartbeatManagerComponent`, inline-picker style): while set, it
