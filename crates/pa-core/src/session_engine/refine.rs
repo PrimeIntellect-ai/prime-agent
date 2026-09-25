@@ -374,24 +374,21 @@ pub(crate) enum AutoRefineRound {
 }
 
 impl AgentSession {
-    /// The compact-trigger auto-refine round (TS `_maybeAutoRefine`'s
-    /// compact arm): the review gate first — an LLM call over the
-    /// conversation, the merged harness state, and the refinement history —
-    /// and, only when the reviewer approves, the refinement run carrying the
-    /// auto-refine instructions. A decline resolves `Declined`; an approval
-    /// landing while an agent turn is streaming resolves `Deferred` (the
-    /// review is retained and never applied mid-stream); a ran refinement
-    /// resolves `Ran`. The caller stamps the review cooldown for every fresh
-    /// consumed outcome (decline, success, and failure alike, the TS
-    /// contract) and never for a deferred one.
-    pub(crate) async fn auto_refine_after_compaction(
+    /// The compact-trigger review (TS `_reviewAutoRefine`'s compact
+    /// round): the review gate first — an LLM call over the
+    /// conversation, the merged harness state, and the refinement
+    /// history — then the decline and the branch-version fence. `Ok(None)`
+    /// is the decline (or a round resolved against a bumped branch
+    /// version); `Ok(Some(review))` is a fresh approval the caller's arm
+    /// applies.
+    pub async fn review_compact_auto_refine(
         &self,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
         global_harness_dir: std::path::PathBuf,
         turns_since_last_review: u32,
         branch_version: u64,
-    ) -> anyhow::Result<AutoRefineRound> {
+    ) -> anyhow::Result<Option<AutoRefineReview>> {
         // The review reads the same planning inputs the refinement run
         // plans against (TS `_reviewAutoRefine`: the live conversation,
         // `_loadMergedHarnessState`, `_loadRefinementHistory`).
@@ -411,7 +408,7 @@ impl AgentSession {
         let entries = snapshot.await?;
         let history = crate::refinement::merge_refinement_history(
             &history,
-            &session_refinement_history(&entries),
+            session_refinement_history(&entries),
         );
         let messages: Vec<AgentMessage> = entries
             .into_iter()
@@ -429,11 +426,11 @@ impl AgentSession {
                 reason: AUTO_REFINE_COMPACT_REASON.to_string(),
                 turns_since_last_review,
             },
-            default_refiner_call(api_key.clone()),
+            default_refiner_call(api_key),
         )
         .await?;
         if !review.should_refine {
-            return Ok(AutoRefineRound::Declined);
+            return Ok(None);
         }
         // TS `_reviewAutoRefine`'s post-await branch check
         // (`branchVersion !== this._autoRefineBranchVersion`): a branch
@@ -443,24 +440,43 @@ impl AgentSession {
         // (its harness edits, audit rows, and message rebuilds) never
         // starts.
         if !self.compact_auto_refine_branch_version_unchanged(branch_version) {
-            return Ok(AutoRefineRound::Declined);
+            return Ok(None);
         }
-        // TS `_maybeAutoRefine`'s post-review active-agent gate
-        // (`_shouldSkipAutoRefineForActiveAgent`: `isStreaming ||
-        // isCompacting`): a turn admitted while the review's model call
-        // was in flight is streaming now, and the refinement run holds
-        // the session mutex across its planner model call and then
-        // rebuilds the live loop context — running it mid-stream stalls
-        // the turn at its session seams and swaps its context
-        // underneath it. The approval is retained instead, and the next
-        // serviced boundary runs the refinement on a quiescent session
-        // (TS `_pendingAutoRefineReview` + the idle re-run; the port's
-        // compaction surfaces all run inside an active turn, so the
-        // agent's streaming state is the live seam).
-        if self.agent().state().await.is_streaming {
-            return Ok(AutoRefineRound::Deferred(review));
-        }
-        Ok(AutoRefineRound::Ran(
+        Ok(Some(review))
+    }
+
+    /// The serialized arm's compact-trigger round (TS
+    /// `_runSerializedAutoRefineReview` with `reason: "compact"`): the
+    /// review, and only when the reviewer approves, the refinement run
+    /// carrying the auto-refine instructions. `Ok(None)` is the
+    /// reviewer's decline: no refinement ran and nothing surfaces. The
+    /// serialized boundary is quiescent by construction (the serialized
+    /// path drains at turn boundaries and never runs inside a tool
+    /// loop), so this arm carries no active-agent gate; the interactive
+    /// arm's gate lives in the session-side consumption instead. The
+    /// caller stamps its review cooldown for every outcome (decline,
+    /// success, and failure alike, the TS contract).
+    pub async fn auto_refine_after_compaction(
+        &self,
+        model: &pa_types::ai::Model,
+        api_key: Option<String>,
+        global_harness_dir: std::path::PathBuf,
+        turns_since_last_review: u32,
+        branch_version: u64,
+    ) -> anyhow::Result<Option<RefinementResult>> {
+        let Some(review) = self
+            .review_compact_auto_refine(
+                model,
+                api_key,
+                global_harness_dir,
+                turns_since_last_review,
+                branch_version,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(
             self.run_approved_refine(&review, model, api_key, global_harness_dir)
                 .await?,
         ))

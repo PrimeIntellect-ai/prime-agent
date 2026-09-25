@@ -208,14 +208,42 @@ impl AgentSession {
                 .await
                 .map(AutoRefineRound::Ran)
         } else {
-            self.auto_refine_after_compaction(
-                model,
-                api_key,
-                global_harness_dir,
-                settled_turns,
-                branch_version,
-            )
-            .await
+            // TS `_maybeAutoRefine`'s interactive compact arm: the review,
+            // then the post-review active-agent gate
+            // (`_shouldSkipAutoRefineForActiveAgent`: `isStreaming ||
+            // isCompacting`) between the review and the apply — a turn
+            // admitted while the review's model call was in flight is
+            // streaming now, and the refinement run holds the session
+            // mutex across its planner model call and then rebuilds the
+            // live loop context; running it mid-stream stalls the turn at
+            // its session seams and swaps its context underneath it. The
+            // approval is retained instead, and the next serviced
+            // boundary runs the refinement on a quiescent session (TS
+            // `_pendingAutoRefineReview` + the idle re-run; the port's
+            // compaction surfaces all run inside an active turn, so the
+            // agent's streaming state is the live seam).
+            match self
+                .review_compact_auto_refine(
+                    model,
+                    api_key,
+                    global_harness_dir,
+                    settled_turns,
+                    branch_version,
+                )
+                .await
+            {
+                Ok(None) => Ok(AutoRefineRound::Declined),
+                Ok(Some(review)) => {
+                    if self.agent().state().await.is_streaming {
+                        Ok(AutoRefineRound::Deferred(review))
+                    } else {
+                        self.run_approved_refine(&review, model, api_key, global_harness_dir)
+                            .await
+                            .map(AutoRefineRound::Ran)
+                    }
+                }
+                Err(error) => Err(error),
+            }
         };
         let outcome = {
             let mut state = self
