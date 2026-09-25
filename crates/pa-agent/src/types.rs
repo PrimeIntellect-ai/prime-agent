@@ -53,7 +53,7 @@ pub enum StopReason {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextContent {
     pub text: String,
-    /// e.g. OpenAI responses message metadata (legacy id or `TextSignatureV1` JSON).
+    /// e.g. `OpenAI` responses message metadata (legacy id or `TextSignatureV1` JSON).
     #[serde(
         rename = "textSignature",
         default,
@@ -468,7 +468,7 @@ pub type AgentToolUpdateCallback = Arc<dyn Fn(AgentToolResult) + Send + Sync>;
 
 /// Tool definition used by the agent runtime.
 ///
-/// The TS reference validates arguments against a TypeBox schema. Here the
+/// The TS reference validates arguments against a `TypeBox` schema. Here the
 /// schema is a plain JSON Schema `Value` and validation runs through
 /// [`crate::validation`], which implements the subset of JSON Schema the
 /// product's tool schemas use (type checks, required properties, nested

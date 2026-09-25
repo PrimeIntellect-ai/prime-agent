@@ -135,6 +135,11 @@ impl AbortController {
 ///
 /// Mirrors the TS `raceWithAbort`: when the signal is already aborted, the
 /// operation future is dropped and the abort error is returned immediately.
+///
+/// # Errors
+///
+/// Returns the abort error (`AbortedError`) if `signal` is already aborted when
+/// called, or if it aborts before `operation` completes.
 pub async fn race_with_abort<T, F>(operation: F, signal: &AbortSignal) -> anyhow::Result<T>
 where
     F: Future<Output = T>,
@@ -150,6 +155,10 @@ where
 }
 
 /// Return an error if the signal is already aborted (`throwIfAborted` in TS).
+///
+/// # Errors
+///
+/// Returns the abort error (`AbortedError`) if `signal` is already aborted.
 pub fn throw_if_aborted(signal: &AbortSignal) -> anyhow::Result<()> {
     if signal.is_aborted() {
         Err(aborted_error())
@@ -160,6 +169,11 @@ pub fn throw_if_aborted(signal: &AbortSignal) -> anyhow::Result<()> {
 
 /// `throwIfAborted` with an optional signal (the TS loop calls it with
 /// `signal | undefined`).
+///
+/// # Errors
+///
+/// Returns the abort error (`AbortedError`) if the provided signal is already
+/// aborted; returns `Ok(())` when the signal is `None` or not aborted.
 pub fn throw_if_aborted_signal(signal: Option<&AbortSignal>) -> anyhow::Result<()> {
     match signal {
         Some(signal) => throw_if_aborted(signal),
