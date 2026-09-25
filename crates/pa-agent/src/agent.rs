@@ -215,7 +215,6 @@ fn batch_preview(batch: &[AgentMessage]) -> String {
                             .collect();
                         (!text.is_empty()).then(|| text.join(" "))
                     }
-                    _ => None,
                 };
                 text
             }
