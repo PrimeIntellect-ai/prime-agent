@@ -1,0 +1,4 @@
+The package's test suite fails one test: the day count for February in a
+non-leap century year is wrong. Fix the bug in the library code, not in the
+tests, so the full suite passes. The fix must preserve correct leap-year
+behavior for every other year.
