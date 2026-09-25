@@ -8,6 +8,7 @@ import {
 	Key,
 	type KeyId,
 	matchesKey,
+	matchesOptionComposedKey,
 	parseKey,
 	setKittyProtocolActive,
 } from "../src/keys.js";
@@ -402,6 +403,8 @@ describe("matchesKey", () => {
 			assert.strictEqual(parseKey("\x1by"), "alt+y");
 			assert.strictEqual(matchesKey("\x1bz", "alt+z"), true);
 			assert.strictEqual(parseKey("\x1bz"), "alt+z");
+			assert.strictEqual(matchesOptionComposedKey("ß", "alt+s"), true);
+			assert.strictEqual(matchesKey("ß", "alt+s"), false);
 
 			setKittyProtocolActive(true);
 			assert.strictEqual(matchesKey("\x1b ", "alt+space"), false);
