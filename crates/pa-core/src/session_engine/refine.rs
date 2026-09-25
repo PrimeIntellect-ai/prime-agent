@@ -385,7 +385,7 @@ impl AgentSession {
         &self,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
-        global_harness_dir: std::path::PathBuf,
+        global_harness_dir: &Path,
         turns_since_last_review: u32,
         branch_version: u64,
     ) -> anyhow::Result<Option<AutoRefineReview>> {
@@ -396,11 +396,11 @@ impl AgentSession {
             let session = self.session_handle().lock().await;
             let local_state =
                 load_harness_state(&local_harness_state_dir(&session), HarnessScope::Local);
-            let global_state = load_harness_state(&global_harness_dir, HarnessScope::Global);
+            let global_state = load_harness_state(global_harness_dir, HarnessScope::Global);
             (
                 session.history_snapshot(),
                 merge_harness_states(&global_state, Some(&local_state)),
-                load_global_refinement_history(&global_harness_dir),
+                load_global_refinement_history(global_harness_dir),
             )
         };
         // Refinement deliberately reviews historical messages, unlike ordinary
@@ -426,7 +426,7 @@ impl AgentSession {
                 reason: AUTO_REFINE_COMPACT_REASON.to_string(),
                 turns_since_last_review,
             },
-            default_refiner_call(api_key),
+            default_refiner_call(api_key.clone()),
         )
         .await?;
         if !review.should_refine {
@@ -467,8 +467,8 @@ impl AgentSession {
         let Some(review) = self
             .review_compact_auto_refine(
                 model,
-                api_key,
-                global_harness_dir,
+                api_key.clone(),
+                &global_harness_dir,
                 turns_since_last_review,
                 branch_version,
             )

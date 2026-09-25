@@ -225,8 +225,8 @@ impl AgentSession {
             match self
                 .review_compact_auto_refine(
                     model,
-                    api_key,
-                    global_harness_dir,
+                    api_key.clone(),
+                    &global_harness_dir,
                     settled_turns,
                     branch_version,
                 )
