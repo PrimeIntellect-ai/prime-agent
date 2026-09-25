@@ -933,13 +933,18 @@ fn wrap_spans_into(spans: &[Span], width: usize, out: &mut geometry::WrapOutput<
         // Rows are borrowed slices of the token and the remaining-tail gate
         // comes from a forward atom cursor, so an unbroken multi-megabyte
         // word costs one linear pass instead of a rescan, a suffix clone,
-        // and a width-cache key per row.
+        // and a width-cache key per row - except one unbounded grapheme
+        // cluster, whose mid-cluster cuts re-measure its remainder per cut
+        // (the pre-fix loop paid the same there).
         let style = *style;
         let mut rest = text.as_str();
         let mut consumed = 0usize;
         let mut rest_w = w;
-        let mut tail = crate::width::SuffixWidth::new(text, w);
+        // Fitting tokens never enter the breaker, so the cursor and its
+        // per-token scan are built only once the first row overflows.
+        let mut tail: Option<crate::width::SuffixWidth<'_>> = None;
         while rest_w + col > width {
+            let tail = tail.get_or_insert_with(|| crate::width::SuffixWidth::new(text, w));
             let mut tw = 0usize;
             let mut taken = 0usize;
             while taken < rest.len() {
@@ -1692,10 +1697,16 @@ mod tests {
             ],
             vec![Span::styled("xxx", bold), Span::styled("yyy", dim)],
             vec![Span::raw("short")],
+            // One mega-cluster cut many times mid-cluster (the breaker
+            // emits a row every `width` columns inside it): consecutive
+            // cuts inside the same grapheme cluster, where the cursor
+            // re-measures the cluster remainder per cut.
+            vec![Span::raw("カ".to_string() + &"\u{ff9e}".repeat(256))],
+            vec![Span::raw("\u{1f469}\u{200d}".repeat(128))],
         ];
         for spans in corpus {
             let label: String = spans.iter().map(|s| s.content.as_str()).collect();
-            for width in [0, 1, 2, 3, 5, 7, 13, 40, 80] {
+            for width in 0..=80 {
                 let mut painted = Vec::new();
                 wrap_spans(&spans, width, Style::default(), &mut painted);
                 let mut expected = Vec::new();
@@ -1714,6 +1725,42 @@ mod tests {
         }
     }
 
+    /// Count+render wall time for one span list: the scaling tests' work
+    /// proxy. Count and render share `wrap_spans_into`, so their row
+    /// counts must agree for the timing to mean anything.
+    fn time_count_and_render(spans: &[Span], width: usize) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        let rows = wrapped_span_count(spans, width);
+        let mut painted = Vec::new();
+        wrap_spans(spans, width, Style::default(), &mut painted);
+        let elapsed = started.elapsed();
+        assert_eq!(painted.len(), rows, "count and render rows disagree");
+        elapsed
+    }
+
+    /// Linearity guard for one corpus token: the full token must wrap in
+    /// at most 48x the time of the 1/16-size token. Linear work needs 16x,
+    /// the pre-fix rescan loop 256x, so a slow or loaded runner cannot
+    /// flip the verdict the way an absolute wall-clock bound can; one
+    /// retry absorbs a transient load spike, and the absolute bound stays
+    /// only as a hang canary.
+    fn assert_wraps_linearly(spans_full: &[Span], spans_small: &[Span], width: usize) {
+        let mut full = time_count_and_render(spans_full, width);
+        let mut small = time_count_and_render(spans_small, width);
+        if full > small * 48 {
+            full = time_count_and_render(spans_full, width);
+            small = time_count_and_render(spans_small, width);
+        }
+        assert!(
+            full <= small * 48,
+            "overlong-word wrap scaled superlinearly: 1/16 token {small:?}, full {full:?}"
+        );
+        assert!(
+            full < std::time::Duration::from_secs(30),
+            "overlong-word wrap hung: full {full:?}"
+        );
+    }
+
     #[test]
     fn overlong_word_wrap_stays_linear() {
         // 1 MiB unbroken ASCII at width 32: 32_768 rows. The pre-fix loop
@@ -1724,19 +1771,39 @@ mod tests {
         const TOKEN: usize = 1024 * 1024;
         const WIDTH: usize = 32;
         let spans = vec![Span::raw("x".repeat(TOKEN))];
-        let started = std::time::Instant::now();
-        let rows = wrapped_span_count(&spans, WIDTH);
-        let count_elapsed = started.elapsed();
-        assert_eq!(rows, TOKEN / WIDTH);
-        let started = std::time::Instant::now();
+        assert_eq!(wrapped_span_count(&spans, WIDTH), TOKEN / WIDTH);
         let mut painted = Vec::new();
         wrap_spans(&spans, WIDTH, Style::default(), &mut painted);
-        let render_elapsed = started.elapsed();
         assert_eq!(painted.len(), TOKEN / WIDTH);
-        assert!(
-            count_elapsed + render_elapsed < std::time::Duration::from_secs(3),
-            "overlong-word wrap scaled superlinearly: count {count_elapsed:?}, render {render_elapsed:?}"
-        );
+        let small = vec![Span::raw("x".repeat(TOKEN / 16))];
+        assert_wraps_linearly(&spans, &small, WIDTH);
+    }
+
+    #[test]
+    fn overlong_word_wrap_stays_linear_non_ascii() {
+        // The atom-walk path (no printable-ASCII byte shortcut) under the
+        // same ratio-based linearity guard. Width 32 divides every
+        // pattern's row budget exactly, so the row counts pin the wrap
+        // semantics too: CJK and emoji rows hold sixteen 2-column atoms,
+        // the "ab\u{754c}" tiling rows eight (1+1+2)-column triples.
+        const WIDTH: usize = 32;
+        let cases: [(&str, usize); 3] = [
+            // 2-column CJK atom per cluster.
+            ("\u{754c}", 16),
+            // 2-column single-emoji cluster.
+            ("\u{1f600}", 16),
+            // Mixed-width tiling row: a(1) b(1) \u{754c}(2) = 4 columns.
+            ("ab\u{754c}", 8),
+        ];
+        for (pattern, per_row) in cases {
+            let full = pattern.repeat(per_row * 8192);
+            let small = pattern.repeat(per_row * 512);
+            let spans_full = vec![Span::raw(full)];
+            let spans_small = vec![Span::raw(small)];
+            assert_eq!(wrapped_span_count(&spans_full, WIDTH), 8192);
+            assert_eq!(wrapped_span_count(&spans_small, WIDTH), 512);
+            assert_wraps_linearly(&spans_full, &spans_small, WIDTH);
+        }
     }
 
     #[test]
