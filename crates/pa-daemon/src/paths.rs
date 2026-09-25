@@ -41,8 +41,9 @@ pub fn expand_tilde(path: &str) -> Result<PathBuf> {
     }
 }
 
-/// The agent state root: the `AGENT_DIR_ENV` override (`PRIME_AGENT_CODING_AGENT_DIR`)
-/// when set, else `.prime/agent` under the home directory.
+/// The agent state root: the `PRIME_AGENT_CODING_AGENT_DIR` override
+/// when set (tilde expanded), else `.prime/agent` under the home
+/// directory.
 ///
 /// # Errors
 ///
@@ -55,8 +56,8 @@ pub fn agent_dir() -> Result<PathBuf> {
     }
 }
 
-/// The sessions root: the `SESSION_DIR_ENV` override (`PRIME_AGENT_SESSION_DIR`)
-/// when set, else `<agent-dir>/sessions`.
+/// The sessions root: the `PRIME_AGENT_SESSION_DIR` override when set
+/// (tilde expanded), else `<agent-dir>/sessions`.
 ///
 /// # Errors
 ///

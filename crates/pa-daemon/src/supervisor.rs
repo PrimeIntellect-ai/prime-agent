@@ -267,6 +267,16 @@ enum AdoptionOutcome {
 }
 
 impl Supervisor {
+    /// Build the supervisor: the descriptor dir, the persisted config,
+    /// the event channel, the log, and the compaction-supervision
+    /// journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the descriptor directory cannot be created,
+    /// the sessions dir cannot be resolved, the supervisor config
+    /// cannot be persisted, or the compaction-supervision journal cannot
+    /// be opened.
     pub fn new(options: SupervisorOptions) -> Result<Self> {
         let descriptor_dir =
             crate::descriptor::descriptor_dir(&options.agent_dir, &options.socket_path);
@@ -538,6 +548,17 @@ impl Supervisor {
     }
 
     /// Bind the client socket, adopt or relaunch persisted workers, serve.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the socket path cannot be prepared (already
+    /// in use), the supervisor socket cannot be bound, or the accept
+    /// loop fails while not shutting down.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the telemetry mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub async fn run(self: Arc<Self>) -> Result<()> {
         // Daemon telemetry: same env/settings posture as the sessions
         // (the supervisor is the `daemon` execution mode).
@@ -5134,6 +5155,12 @@ fn offline_summary(worker_id: &str) -> Value {
 }
 
 /// Entry point for the supervisor process.
+///
+/// # Errors
+///
+/// Returns an error when the supervisor cannot start (see
+/// [`Supervisor::new`]) or its serve loop fails (see
+/// [`Supervisor::run`]).
 pub async fn run_supervisor(options: SupervisorOptions) -> Result<()> {
     let supervisor = Arc::new(Supervisor::new(options)?);
     supervisor.run().await

@@ -132,6 +132,17 @@ pub struct WorkerConfig {
 }
 
 impl WorkerConfig {
+    /// Read the worker spawn env pair into a config: the socket path,
+    /// the authentication token, the root active session id, and the
+    /// agent dir; the script, the telemetry-disabled flag, the supervisor
+    /// socket path, and the recovery journal path all default when unset
+    /// or unreadable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a required env pair is missing (the socket
+    /// path, the authentication token, or the root active session id),
+    /// or the agent dir cannot be resolved.
     pub fn from_env() -> Result<Self> {
         let socket_path: PathBuf = std::env::var_os(WORKER_SOCKET_ENV)
             .map(PathBuf::from)
@@ -951,6 +962,14 @@ fn sender_parent_edge_is(
 }
 
 impl Worker {
+    /// Build the worker: the session core, the engine, and the sink and
+    /// hook wiring between them.
+    ///
+    /// # Panics
+    ///
+    /// The closures wired here (the queue purge and the session-input
+    /// probe) panic on a poisoned session-core mutex (a holder panicked
+    /// while holding it).
     pub fn new(config: WorkerConfig, registration: Option<RegistrationHandle>) -> Self {
         let events = Arc::new(EventPump::new());
         let supervisor_claims = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1388,6 +1407,17 @@ impl Worker {
     }
 
     /// Serve worker connections until the process is asked to shut down.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the recovery journal cannot be opened, the
+    /// socket path cannot be prepared, the worker socket cannot be
+    /// bound, or an accept fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the recovery mutex is poisoned (a holder panicked
+    /// while holding it).
     pub async fn serve(self: Arc<Self>) -> Result<()> {
         *self.recovery.lock().unwrap() = Some(WorkerRecoveryJournal::open(
             &self.config.recovery_journal_path,
@@ -6038,6 +6068,12 @@ impl TurnRunner {
 }
 
 /// Entry point for the worker process.
+///
+/// # Errors
+///
+/// Returns an error when the worker role env is missing (it must be
+/// `WORKER_ROLE_ENV=1`), the worker env pair cannot be read, or the
+/// serve loop fails.
 pub async fn run_worker() -> Result<()> {
     if std::env::var(WORKER_ROLE_ENV).unwrap_or_default() != "1" {
         return Err(anyhow!("worker mode requires {WORKER_ROLE_ENV}=1"));
