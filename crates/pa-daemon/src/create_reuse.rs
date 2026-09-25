@@ -101,9 +101,10 @@ struct ReuseCandidates {
 /// comparison rule: canonicalize when the path exists, keep the raw path
 /// otherwise — the file exists by construction here).
 fn canonical_opening_key(path: &Path) -> String {
-    path.canonicalize()
-        .map(|canonical| canonical.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string_lossy().to_string())
+    path.canonicalize().map_or_else(
+        |_| path.to_string_lossy().to_string(),
+        |canonical| canonical.to_string_lossy().to_string(),
+    )
 }
 
 /// Whether one resident's process is provably gone, identity-aware (the

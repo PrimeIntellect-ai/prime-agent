@@ -13,8 +13,7 @@ pub fn new_display_id() -> String {
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 /// RFC 3339 / ISO 8601 UTC timestamp, matching `new Date().toISOString()`.

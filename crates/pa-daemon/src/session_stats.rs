@@ -231,9 +231,8 @@ fn context_usage(
             .take(branch.len() - compaction_index - 1)
             .filter_map(|entry| entry.fields.get("message"))
             .find_map(valid_assistant_usage);
-        let usable = post_compaction_usage
-            .map(|usage| calculate_context_tokens(&usage) > 0)
-            .unwrap_or(false);
+        let usable =
+            post_compaction_usage.is_some_and(|usage| calculate_context_tokens(&usage) > 0);
         if !usable {
             return Some(json!({
                 "tokens": Value::Null,

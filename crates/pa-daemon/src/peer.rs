@@ -78,10 +78,9 @@ impl ConnectionRole {
     /// Whether event fan-out may stream to this connection.
     pub(crate) fn streams_events(&self) -> bool {
         match self {
-            ConnectionRole::Unauthenticated => false,
             ConnectionRole::Supervisor { .. } => true,
             ConnectionRole::SessionClient { session } => session.is_attached(),
-            ConnectionRole::PeerWorker { .. } => false,
+            ConnectionRole::Unauthenticated | ConnectionRole::PeerWorker { .. } => false,
         }
     }
 }

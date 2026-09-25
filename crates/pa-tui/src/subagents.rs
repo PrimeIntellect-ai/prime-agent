@@ -155,7 +155,7 @@ pub fn entry_status(entry: &Value) -> AgentRosterStatus {
         Some("inactive") => AgentRosterStatus::Inactive,
         _ => entry
             .get("summary")
-            .map(|summary| {
+            .map_or(AgentRosterStatus::Idle, |summary| {
                 classify_summary_value(
                     summary,
                     entry
@@ -163,8 +163,7 @@ pub fn entry_status(entry: &Value) -> AgentRosterStatus {
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
                 )
-            })
-            .unwrap_or(AgentRosterStatus::Idle),
+            }),
     }
 }
 

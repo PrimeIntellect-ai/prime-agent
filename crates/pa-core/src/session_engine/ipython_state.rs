@@ -84,8 +84,7 @@ impl CompactionKernelProbe for EngineOwnedProbe {
     fn has_running_kernel(&self) -> bool {
         self.owned()
             .as_deref()
-            .map(crate::kernel::provisioner::IpythonKernelProvisioner::has_running_kernel)
-            .unwrap_or(false)
+            .is_some_and(crate::kernel::provisioner::IpythonKernelProvisioner::has_running_kernel)
     }
 
     fn prune_oversized_variables(

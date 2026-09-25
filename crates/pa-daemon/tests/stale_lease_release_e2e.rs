@@ -132,9 +132,7 @@ fn daemon_log(socket: &Path, agent_dir: &Path) -> PathBuf {
 }
 
 fn log_contains(socket: &Path, agent_dir: &Path, needle: &str) -> bool {
-    std::fs::read_to_string(daemon_log(socket, agent_dir))
-        .map(|log| log.contains(needle))
-        .unwrap_or(false)
+    std::fs::read_to_string(daemon_log(socket, agent_dir)).is_ok_and(|log| log.contains(needle))
 }
 
 /// Wait until the daemon log names `needle`, or panic past `budget`.
@@ -211,7 +209,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(

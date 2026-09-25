@@ -192,7 +192,7 @@ pub fn reconcile_unified_sessions(roster: &[Value], saved: &[Value]) -> Vec<Unif
         let Some(identity) = aliases.first().cloned() else {
             continue;
         };
-        let section = status.map(section_from_status).unwrap_or(Section::Idle);
+        let section = status.map_or(Section::Idle, section_from_status);
         let search = daemon_search_text(&summary);
         let index = records.len();
         for alias in &aliases {
@@ -406,8 +406,7 @@ pub fn filter_empty_sessions(records: &[UnifiedRecord], preserved: &[&str]) -> V
                 > 0
             || get_str(&summary, "sessionName").is_some()
             || get_str(&summary, "firstMessage")
-                .map(|text| !text.trim().is_empty() && text.trim() != "(no messages)")
-                .unwrap_or(false)
+                .is_some_and(|text| !text.trim().is_empty() && text.trim() != "(no messages)")
             || summary
                 .get("usage")
                 .and_then(|usage| usage.get("cost"))
@@ -607,8 +606,7 @@ pub(crate) fn truncate_text(value: &str, width: usize) -> String {
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn pad_start(value: &str, width: usize) -> String {

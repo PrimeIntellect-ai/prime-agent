@@ -180,9 +180,7 @@ impl ExtensionRunner {
         registrations
             .into_iter()
             .filter(|tool| {
-                allow_list
-                    .map(|allowed| allowed.iter().any(|name| name == &tool.name))
-                    .unwrap_or(true)
+                allow_list.is_none_or(|allowed| allowed.iter().any(|name| name == &tool.name))
             })
             .map(|tool| {
                 Arc::new(ExtensionTool::new(tool, client.clone(), self.timeouts.rpc))

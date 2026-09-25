@@ -1008,26 +1008,25 @@ impl SupervisorChildSessionsInner {
             // Still running (a timed-out slice or a re-queued continuation):
             // re-check liveness so a dead worker cannot spin the watch.
             let busy = self.child_busy(&active_session_id).await;
-            match busy {
-                Ok(_) => unreachable_polls = 0,
-                Err(_) => {
-                    unreachable_polls += 1;
-                    if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
-                        {
-                            let mut state = record.lock().await;
-                            if state.closed_by_parent || state.notice_delivered {
-                                return;
-                            }
-                            state.settled_status = Some("error");
-                            state.error = Some("Child worker unreachable".to_string());
+            if busy.is_ok() {
+                unreachable_polls = 0;
+            } else {
+                unreachable_polls += 1;
+                if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
+                    {
+                        let mut state = record.lock().await;
+                        if state.closed_by_parent || state.notice_delivered {
+                            return;
                         }
-                        // A dead child keeps whatever rows its file already
-                        // holds; capture them before the terminal notice.
-                        self.emit_child_usage(record).await;
-                        self.deliver_settle_notice(record).await;
-                        self.fire_settle_hook();
-                        return;
+                        state.settled_status = Some("error");
+                        state.error = Some("Child worker unreachable".to_string());
                     }
+                    // A dead child keeps whatever rows its file already
+                    // holds; capture them before the terminal notice.
+                    self.emit_child_usage(record).await;
+                    self.deliver_settle_notice(record).await;
+                    self.fire_settle_hook();
+                    return;
                 }
             }
             tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
@@ -1263,22 +1262,12 @@ impl SupervisorChildSessionsInner {
                         turn_started = true;
                         break;
                     }
-                    Ok(false) if Instant::now() >= start_deadline => break,
-                    Ok(false) => {}
-                    Err(_) if Instant::now() >= start_deadline => break,
-                    Err(_) => {}
+                    Ok(false) | Err(_) if Instant::now() >= start_deadline => break,
+                    Ok(false) | Err(_) => {}
                 }
                 tokio::time::sleep(Duration::from_millis(FOLLOWUP_START_POLL_MS)).await;
             }
-            if !turn_started {
-                // The turn never showed busy: it either completed
-                // between two polls (its rows are on disk — bill them) or
-                // the delivery never started a turn (the cursor walk is a
-                // no-op). Observe once before the tail decides whether
-                // another delivery is owed — the TS subscription never
-                // stops observing a live child.
-                self.emit_child_usage(&record).await;
-            } else {
+            if turn_started {
                 // Phase 2: slice-wait until the turn settles (the
                 // task-run watcher's cadence, minus its settle
                 // bookkeeping).
@@ -1323,6 +1312,14 @@ impl SupervisorChildSessionsInner {
                     }
                     tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
                 }
+            } else {
+                // The turn never showed busy: it either completed
+                // between two polls (its rows are on disk — bill them) or
+                // the delivery never started a turn (the cursor walk is a
+                // no-op). Observe once before the tail decides whether
+                // another delivery is owed — the TS subscription never
+                // stops observing a live child.
+                self.emit_child_usage(&record).await;
             }
             // The tail: a delivery that arrived while this watcher was
             // live re-arms it for another turn (the flag was set instead

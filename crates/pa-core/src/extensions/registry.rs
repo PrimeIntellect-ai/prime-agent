@@ -94,9 +94,7 @@ impl BuiltinKeybindings {
             for key in keys {
                 let normalized = key.to_lowercase();
                 match by_key.get(&normalized) {
-                    Some((_, existing_restrict)) if *existing_restrict && !restrict => {
-                        continue;
-                    }
+                    Some((_, existing_restrict)) if *existing_restrict && !restrict => {}
                     _ => {
                         by_key.insert(normalized, (keybinding.clone(), restrict));
                     }
