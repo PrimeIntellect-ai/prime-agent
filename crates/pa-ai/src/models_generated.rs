@@ -1,10 +1,11 @@
 //! Static model catalog ported from `packages/ai/src/models.generated.ts`.
 //!
-//! The TS catalog is an object literal (32 providers, 1281 models); the Rust
-//! port keeps the same data as JSON in [`models.generated.json`] (regenerate
-//! with `scripts/generate-models.py`) and deserializes it into
-//! [`pa_types::ai::Model`] values on first use. The wire shapes match the TS
-//! exactly (camelCase fields), so no per-field conversion is needed.
+//! The TS catalog is an object literal (32 providers, 1281 models at the
+//! port; 1285 after the TS #2505 grok-4.7 rows); the Rust port keeps the
+//! same data as JSON in [`models.generated.json`] (regenerate with
+//! `scripts/generate-models.py`) and deserializes it into
+//! [`pa_types::ai::Model`] values on first use. The wire shapes match the
+//! TS exactly (camelCase fields), so no per-field conversion is needed.
 //!
 //! This file is generated data plumbing; it is exempt from the module-size
 //! split rule because its size is a direct function of the TS catalog size,
