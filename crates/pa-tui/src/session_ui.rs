@@ -73,6 +73,12 @@ const ESCAPE_REPEAT_WINDOW_MS: std::time::Duration = std::time::Duration::from_m
 /// best-effort like the detach, never able to hold the exit open.
 const EXIT_STATS_TIMEOUT_MS: u64 = 500;
 
+/// TS `ANTHROPIC_SUBSCRIPTION_AUTH_WARNING` (auth-flows.ts, #2645): the
+/// ban-risk warning a completed Anthropic subscription login shows once
+/// per session (the settings toggle `warnings.anthropicExtraUsage`
+/// gates it).
+const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING: &str = "Anthropic subscription auth is active. Usage draws from your plan limits, but Prime Agent identifies as Claude Code and this may violate Anthropic's terms — your account can be restricted or banned. An Anthropic API key avoids the risk. Manage usage at https://claude.ai/settings/usage.";
+
 /// How a submitted prompt travels to the session (TS `streamingBehavior`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SubmitBehavior {
@@ -335,6 +341,9 @@ pub(crate) struct SessionUi {
     /// The client-process settings seam (`/settings`, `/fullscreen`);
     /// the composition root supplies it.
     client_settings: Option<std::sync::Arc<dyn crate::client_settings::ClientSettings>>,
+    /// The ban-risk warning's once-per-session gate (TS
+    /// `anthropicSubscriptionWarningShown`).
+    anthropic_subscription_warning_shown: bool,
     /// The side-question run currently streaming (TS `activeSideQuestionId`):
     /// at most one run per client, exactly like the daemon enforces.
     active_side_question_id: Option<String>,
@@ -724,6 +733,7 @@ impl SessionUi {
             speed_display_enabled: false,
             speed_stats: None,
             client_settings: options.client_settings.clone(),
+            anthropic_subscription_warning_shown: false,
             active_side_question_id: None,
             side_question_counter: 0,
             share: None,
@@ -1615,6 +1625,33 @@ impl SessionUi {
             self.last_status_index = Some(view.chat_len() - 1);
         }
         self.dirty = true;
+    }
+
+    /// TS `maybeWarnAboutAnthropicSubscriptionAuth`'s login-completed
+    /// slice (`onLoginCompleted`): a completed Anthropic subscription
+    /// login draws the ban-risk warning once per session, gated by the
+    /// settings toggle (`warnings.anthropicExtraUsage`, TS default
+    /// true — an absent settings seam keeps the default).
+    fn maybe_warn_anthropic_subscription_auth(
+        &mut self,
+        provider: &str,
+        view: &mut AgentView,
+    ) {
+        if provider != crate::provider_auth::ANTHROPIC_PROVIDER_ID
+            || self.anthropic_subscription_warning_shown
+            || self
+                .client_settings
+                .as_ref()
+                .is_none_or(|settings| !settings.warnings_anthropic_extra_usage())
+        {
+            return;
+        }
+        self.anthropic_subscription_warning_shown = true;
+        self.note_as(
+            ANTHROPIC_SUBSCRIPTION_AUTH_WARNING,
+            StatusKind::Warning,
+            view,
+        );
     }
 
     /// The OSC 52 sequences the headless run captured (TS writes them to
@@ -3893,6 +3930,7 @@ impl SessionUi {
                 self.auth_panel_cancel = None;
                 view.auth_panel = None;
                 self.apply_auth_outcome(outcome, &provider, view).await;
+                self.maybe_warn_anthropic_subscription_auth(&provider, view);
             }
             AuthPanelRequest::McpSettled { note } => {
                 view.auth_panel = None;
