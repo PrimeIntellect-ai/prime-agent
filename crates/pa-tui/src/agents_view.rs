@@ -460,6 +460,11 @@ struct AgentsViewMode {
     /// The executed delete the run loop takes (the dispatch runs off the
     /// key loop with the client, the saved-catalog fetch's pattern).
     pending_delete_action: Option<DeleteAction>,
+    /// Session paths deleted this run: an in-flight saved-catalog
+    /// response can still carry a file the daemon already deleted, so
+    /// the catalog apply filters these paths out (a deleted row never
+    /// reappears behind a slow fetch).
+    deleted_saved_paths: std::collections::HashSet<String>,
     /// The scope root's `depth` metadata (`rlmDepth + 1`); `None` when the
     /// scope root is not on the roster (the view falls back to the global
     /// list with a status message, TS scope-resolution fallback).
@@ -575,6 +580,7 @@ impl AgentsViewMode {
             notice,
             pending_delete: None,
             pending_delete_action: None,
+            deleted_saved_paths: Default::default(),
             scope_depth: None,
             scope_active: false,
             scope_dropped: false,
@@ -1089,6 +1095,7 @@ impl AgentsViewMode {
         // A deleted saved row leaves the catalog by its own path (the
         // key the daemon deleted), never by the display name.
         if let Some(path) = deleted_saved_path {
+            self.deleted_saved_paths.insert(path.clone());
             self.saved.retain(|saved| {
                 saved
                     .get("path")
@@ -1098,6 +1105,23 @@ impl AgentsViewMode {
             });
             self.rebuild_rows();
         }
+    }
+
+    /// A landed saved-catalog snapshot: the authoritative array replaces
+    /// the stream's rows, with this run's deleted paths filtered out (a
+    /// slow fetch never restores a row the daemon already deleted).
+    fn apply_saved_loaded(&mut self, sessions: Vec<Value>) {
+        self.saved = sessions
+            .into_iter()
+            .filter(|saved| {
+                saved
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(|path| !self.deleted_saved_paths.contains(path))
+                    .unwrap_or(true)
+            })
+            .collect();
+        self.saved_fetch_failed = false;
     }
 
     /// Whether the loop must re-arm the saved-catalog fetch (one retry
@@ -2510,8 +2534,7 @@ async fn run_agents_view_surface(
                     // never re-orders after streaming them.
                     mode.drop_saved_stream();
                     saved_flush = None;
-                    mode.saved = sessions;
-                    mode.saved_fetch_failed = false;
+                    mode.apply_saved_loaded(sessions);
                     // The failure status is the fetch's own honest error;
                     // the catalog's success retires it (the status line
                     // must not keep reporting an unavailable catalog after
@@ -3184,6 +3207,36 @@ mod tests {
                 .is_some_and(|pending| !pending.stop),
             "the re-arm carries the current word: {:?}",
             mode.pending_delete
+        );
+    }
+
+    /// A deleted path never reappears behind a slow catalog fetch: the
+    /// SavedLoaded apply filters the recorded deleted paths, so a stale
+    /// response cannot restore a row the daemon already deleted.
+    #[test]
+    fn a_deleted_path_survives_a_late_catalog_apply() {
+        let mut mode = mode_with_anchor(None, Vec::new());
+        mode.saved = vec![saved_catalog_row(
+            "/x/gone.jsonl",
+            "gone-1",
+            "a deleted session",
+        )];
+        mode.rebuild_rows();
+        mode.delete_result(
+            "Deleted session a deleted session".to_string(),
+            Some("/x/gone.jsonl".to_string()),
+        );
+        assert!(mode.saved.is_empty());
+        // The in-flight fetch lands late with the deleted file still in
+        // its snapshot: the apply filters it.
+        mode.apply_saved_loaded(vec![saved_catalog_row(
+            "/x/gone.jsonl",
+            "gone-1",
+            "a deleted session",
+        )]);
+        assert!(
+            mode.saved.is_empty(),
+            "the deleted path stays gone behind the late fetch"
         );
     }
 
