@@ -25,21 +25,43 @@ jobs:
           root = Path(os.environ['GITHUB_WORKSPACE'])
           base = os.environ['BASE_SHA']
           git = ['git', '-C', str(root)]
-          changed = subprocess.check_output(git + ['diff', '--name-only', '-z',
-              '--diff-filter=ACMR', base, 'HEAD', '--', '*.rs']).split(b'\0')
-          count = 0
-          for raw in filter(None, changed):
-              path = os.fsdecode(raw)
+          # --name-status -z -M keeps rename/copy sources, so a rename counts
+          # from the source path, not from zero.
+          out = subprocess.check_output(git + ['diff', '--name-status', '-z', '-M',
+              '--diff-filter=ACMR', base, 'HEAD', '--', '*.rs'])
+          tokens = [os.fsdecode(t) for t in out.split(b'\0')]
+          changed = []
+          i = 0
+          while i < len(tokens):
+              status = tokens[i]
+              if not status:
+                  i += 1
+                  continue
+              if status[0] in ('R', 'C'):
+                  changed.append((tokens[i + 2], tokens[i + 1]))
+                  i += 3
+              else:
+                  changed.append((tokens[i + 1], None))
+                  i += 2
+          findings = []
+          for path, source in changed:
               if path == 'crates/pa-ai/src/models_generated.rs':
                   continue
-              old = subprocess.run(git + ['show', f'{base}:{path}'],
+              before_path = source or path
+              old = subprocess.run(git + ['show', f'{base}:{before_path}'],
                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout
               before = len(old.splitlines())
               after = len((root / path).read_bytes().splitlines())
               if after > 500 and after > before:
-                  count += 1
-                  if count <= 10:
-                      print(f'::warning file={path},line=1,title=File size guidance::'
-                            f'{before} -> {after} lines; consider splitting this module')
-          print(f'{count} changed Rust file(s) grew beyond 500 lines (guidance only).')
+                  findings.append((path, before, after))
+          # Annotations are capped at 10 per job by GitHub; the log carries the
+          # full list either way.
+          for path, before, after in findings[:10]:
+              print(f'::warning file={path},line=1,title=File size guidance::'
+                    f'{before} -> {after} lines; consider splitting this module')
+          if len(findings) > 10:
+              print('remaining findings beyond the annotation cap:')
+              for path, before, after in findings[10:]:
+                  print(f'  {before} -> {after} lines: {path}')
+          print(f'{len(findings)} changed Rust file(s) grew beyond 500 lines (guidance only).')
           PY
