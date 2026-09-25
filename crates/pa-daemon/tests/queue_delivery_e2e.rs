@@ -257,7 +257,7 @@ fn serve(
     bodies
         .lock()
         .expect("mock lock")
-        .push(format!("#{index}: {last_user}"));
+        .push(format!("#{index}: {marker_text}"));
     if !held {
         std::thread::sleep(Duration::from_millis(ANSWER_DELAY_MS));
     }
