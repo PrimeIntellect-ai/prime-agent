@@ -96,6 +96,11 @@ pub struct OpenedRow {
     pub rlm_depth: Option<u32>,
     pub has_children: bool,
     pub status_message: Option<String>,
+    /// The opened session's own directory (the roster summary's `cwd`):
+    /// the session run rides it as its cwd (the completion base and the
+    /// session chrome browse the attached session's directory, not the
+    /// view's launch directory — TS `getCurrentCwd`).
+    pub cwd: Option<String>,
 }
 
 /// How the view is driven.
@@ -155,6 +160,11 @@ pub struct AgentsViewOutcome {
     /// Whether the opened session has direct children (TS
     /// `sessionHasChildren`).
     pub opened_has_children: bool,
+    /// The opened session's own directory (the roster summary's `cwd`):
+    /// the session run rides it as its cwd so the completion base and the
+    /// chrome browse the attached session's directory, not the launch
+    /// directory (TS `getCurrentCwd`).
+    pub opened_cwd: Option<std::path::PathBuf>,
     /// A status message the session opener left (TS
     /// `statusMessage` on the open result): the unattachable-child
     /// fallback surfaces it in the next view run.
@@ -1354,6 +1364,12 @@ impl AgentsViewMode {
                 .map(|depth| depth as u32),
             has_children,
             status_message,
+            cwd: row
+                .summary
+                .get("cwd")
+                .and_then(Value::as_str)
+                .filter(|cwd| !cwd.is_empty())
+                .map(str::to_string),
         });
         self.running = false;
     }
@@ -1396,6 +1412,11 @@ impl AgentsViewMode {
                 .map(|depth| depth as u32),
             has_children,
             status_message: None,
+            cwd: summary
+                .get("cwd")
+                .and_then(Value::as_str)
+                .filter(|cwd| !cwd.is_empty())
+                .map(str::to_string),
         });
         self.running = false;
     }
@@ -2931,6 +2952,10 @@ async fn run_agents_view_surface(
             selected_key: opened.as_ref().map(|row| row.selected_key.clone()),
             opened_rlm_depth: opened.as_ref().and_then(|row| row.rlm_depth),
             opened_has_children: opened.as_ref().is_some_and(|row| row.has_children),
+            opened_cwd: opened
+                .as_ref()
+                .and_then(|row| row.cwd.clone())
+                .map(std::path::PathBuf::from),
             status_message: opened.as_ref().and_then(|row| row.status_message.clone()),
         },
     })
