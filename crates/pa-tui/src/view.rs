@@ -3092,12 +3092,14 @@ mod tests {
             started_at: Some(std::time::Instant::now()),
             ended_at: Some(std::time::Instant::now()),
             result: Some(ToolResultView {
-                // Seven output lines with the marker FIRST: the collapsed
-                // bash card previews only the LAST five lines.
+                // Ten output lines with the marker FIRST: the collapsed
+                // bash card previews only the LAST five lines, and the
+                // five-row growth dwarfs the leading spacer the
+                // expansion drops (`shouldAddLeadingSpace(expanded)`).
                 content: vec![serde_json::json!({
                     "type": "text",
                     "text": format!(
-                        "{marker}\npreview line two\npreview line three\npreview line four\npreview line five\npreview line six\npreview line seven"
+                        "{marker}\npreview line two\npreview line three\npreview line four\npreview line five\npreview line six\npreview line seven\npreview line eight\npreview line nine\npreview line ten"
                     )
                 })],
                 details: serde_json::Value::Null,
@@ -3132,10 +3134,6 @@ mod tests {
             "the first card expanded: {after}"
         );
         let expanded_rows = v.count_entry_rows(0, 80);
-        eprintln!(
-            "[toggledbg] overrides={:?} global={:?} expanded={expanded_rows} collapsed={collapsed_rows} entry0_detail={:?}",
-            v.entry_expanded, v.detail, v.entry_detail(0)
-        );
         assert!(
             expanded_rows > collapsed_rows,
             "the expanded card measures taller: {collapsed_rows} vs {expanded_rows}"
