@@ -617,14 +617,13 @@ impl AgentView {
         self.frame_clicks.link_at(row, col).map(str::to_string)
     }
 
-    /// Debug-only view of the frame's click links (the click e2e's
-    /// tracing gate; behind `PA_TUI_CLICK_DEBUG`).
-    #[cfg(test)]
+    /// Debug view of the frame's click links (the click e2e's tracing,
+    /// behind `PA_TUI_CLICK_DEBUG`).
     pub(crate) fn frame_clicks_debug_links(&self) -> Vec<(usize, usize, usize, String)> {
         self.frame_clicks.debug_links()
     }
 
-    #[cfg(test)]
+    /// Debug view of the frame's click targets (the click e2e's tracing).
     pub(crate) fn frame_clicks_debug_targets(&self) -> Vec<crate::click_regions::FrameClickTarget> {
         self.frame_clicks.debug_targets()
     }

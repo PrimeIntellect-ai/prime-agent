@@ -162,7 +162,6 @@ impl FrameClicks {
     }
 
     /// Debug view of the links (the click e2e's tracing).
-    #[cfg(test)]
     pub(crate) fn debug_links(&self) -> Vec<(usize, usize, usize, String)> {
         self.links
             .iter()
@@ -170,7 +169,7 @@ impl FrameClicks {
             .collect()
     }
 
-    #[cfg(test)]
+    /// Debug view of the targets (the click e2e's tracing).
     pub(crate) fn debug_targets(&self) -> Vec<FrameClickTarget> {
         self.targets.clone()
     }
