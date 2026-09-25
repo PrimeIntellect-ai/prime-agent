@@ -53,8 +53,7 @@ pub(crate) fn agent_message_row_count(
     width: usize,
     leading: bool,
 ) -> usize {
-    let header =
-        super::render::agent_message_summary_line(row.direction, &row.counterpart, theme);
+    let header = super::render::agent_message_summary_line(row.direction, &row.counterpart, theme);
     usize::from(leading)
         + wrapped_line_count(&header, width.saturating_sub(2).max(1))
         + if detail.tool_output_expanded() {
