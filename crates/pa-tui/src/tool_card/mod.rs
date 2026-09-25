@@ -27,6 +27,10 @@ pub struct ToolCallCard {
     pub id: String,
     pub name: String,
     pub args: Value,
+    /// A result that matched no pending call (an orphan replayed from
+    /// the wire): renders as its own standalone card and never joins a
+    /// condensed run.
+    pub unmatched_result: bool,
     /// `tool_execution_start` seen (live only; replayed cards infer it from
     /// the result).
     pub started: bool,
@@ -38,6 +42,15 @@ pub struct ToolCallCard {
     pub result: Option<ToolResultView>,
     /// `result` is a partial streaming frame.
     pub result_partial: bool,
+    /// The wire `timestamp` (Unix milliseconds) of the assistant message
+    /// the call hangs off, when the transcript carries it (the replay
+    /// path; live events carry no timestamps). Read from the unchanged
+    /// stored messages - the condensed runs derive their wall-clock from
+    /// the same fields the entries already hold.
+    pub started_ms: Option<u64>,
+    /// The wire `timestamp` (Unix milliseconds) of the call's stored
+    /// toolResult message, when the transcript carries it.
+    pub ended_ms: Option<u64>,
     /// The run's failed final frame (an abort or a provider error) settled
     /// this still-pending card with the run's error text; the tool's late
     /// result frames are dropped (TS `resetPendingToolState` removed the
