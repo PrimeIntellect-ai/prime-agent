@@ -195,6 +195,11 @@ enum UiInput {
     SavedFailed {
         error: String,
     },
+    /// One stop-or-delete dispatch landed (the ctrl+x flow): the status
+    /// line reports the outcome.
+    DeleteResult {
+        message: String,
+    },
 }
 
 /// The flow's roster connection (TS `AgentsViewPersistentState.rosterClient`):
@@ -230,6 +235,134 @@ pub struct AgentsViewRun {
     pub link: Option<AgentsViewLink>,
 }
 
+/// The armed stop-or-delete row (TS `pendingDeleteAgent` /
+/// `pendingKillSubagent`): which row waits on the second press, and the
+/// word its hint renders (`stop` while the row has live work, `delete`
+/// otherwise — TS `hasLiveWork`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingDelete {
+    identity: String,
+    stop: bool,
+}
+
+/// One stop-or-delete dispatch the run loop executes (the wire variant
+/// follows the row kind — TS `handleDeleteSelected`'s branches).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeleteAction {
+    /// A running subagent: stop it via its parent's session
+    /// (`cancel_rlm_child`).
+    StopSubagent {
+        active_session_id: String,
+        child_id: String,
+        name: String,
+    },
+    /// An idle subagent: delete the row via its parent's session
+    /// (`delete_rlm_subagent`).
+    DeleteSubagent {
+        active_session_id: String,
+        child_id: String,
+        name: String,
+    },
+    /// A live agent: stop the session (`kill`).
+    StopAgent {
+        active_session_id: String,
+        name: String,
+    },
+    /// A saved, non-live agent: delete the session file
+    /// (`delete_saved_session`).
+    DeleteSavedSession { session_path: String, name: String },
+}
+
+impl DeleteAction {
+    /// The status line's success text (the wire word plus the row).
+    fn success_message(&self) -> String {
+        match self {
+            DeleteAction::StopSubagent { name, .. } | DeleteAction::StopAgent { name, .. } => {
+                format!("Stopped {name}")
+            }
+            DeleteAction::DeleteSubagent { name, .. } => {
+                format!("Deleted {name}")
+            }
+            DeleteAction::DeleteSavedSession { name, .. } => {
+                format!("Deleted session {name}")
+            }
+        }
+    }
+
+    /// The failure prefix (the arm's wire word).
+    fn fail_word(&self) -> &'static str {
+        match self {
+            DeleteAction::StopSubagent { .. } | DeleteAction::StopAgent { .. } => "Stop",
+            DeleteAction::DeleteSubagent { .. } | DeleteAction::DeleteSavedSession { .. } => {
+                "Delete"
+            }
+        }
+    }
+}
+
+/// One stop-or-delete wire dispatch (TS `handleDeleteSelected`'s arms):
+/// the call runs off the key loop with a client clone and its outcome
+/// re-enters the loop as a `DeleteResult` status line — the live roster
+/// push refreshes the rows behind it, so the stopped or deleted row
+/// leaves the list on the next roster event, not on the status itself.
+fn spawn_delete_dispatch(
+    client: &DaemonClient,
+    ui_tx: mpsc::UnboundedSender<UiInput>,
+    action: DeleteAction,
+) {
+    let client = client.clone();
+    tokio::spawn(async move {
+        let request = match &action {
+            DeleteAction::StopSubagent {
+                active_session_id,
+                child_id,
+                ..
+            } => DaemonCommand::CancelRlmChild {
+                id: None,
+                active_session_id: active_session_id.clone(),
+                child_id: child_id.clone(),
+                rest: Default::default(),
+            },
+            DeleteAction::DeleteSubagent {
+                active_session_id,
+                child_id,
+                ..
+            } => DaemonCommand::DeleteRlmSubagent {
+                id: None,
+                active_session_id: active_session_id.clone(),
+                child_id: child_id.clone(),
+                rest: Default::default(),
+            },
+            DeleteAction::StopAgent {
+                active_session_id, ..
+            } => DaemonCommand::Kill {
+                id: None,
+                active_session_id: active_session_id.clone(),
+                rest: Default::default(),
+            },
+            DeleteAction::DeleteSavedSession { session_path, .. } => {
+                DaemonCommand::DeleteSavedSession {
+                    id: None,
+                    active_session_id: None,
+                    session_path: session_path.clone(),
+                    rest: Default::default(),
+                }
+            }
+        };
+        let outcome = match client.request(request).await {
+            Ok(response) if response.success => action.success_message(),
+            Ok(response) => {
+                let error = response
+                    .error
+                    .unwrap_or_else(|| "the command failed".into());
+                format!("{} failed: {error}", action.fail_word())
+            }
+            Err(error) => format!("{} failed: {error}", action.fail_word()),
+        };
+        let _ = ui_tx.send(UiInput::DeleteResult { message: outcome });
+    });
+}
+
 /// The agents view state: roster + catalog data, search, selection, and
 /// the pending exit/open requests.
 struct AgentsViewMode {
@@ -247,6 +380,14 @@ struct AgentsViewMode {
     /// status truncation, so the full text — both ways out included —
     /// stays readable.
     notice: Option<String>,
+    /// The armed stop-or-delete confirm (TS `pendingDeleteAgent` /
+    /// `pendingKillSubagent`, keyed by row identity): the first ctrl+x
+    /// arms it over the selected row, the second press on the same row
+    /// executes, any other key clears it.
+    pending_delete: Option<PendingDelete>,
+    /// The executed delete the run loop takes (the dispatch runs off the
+    /// key loop with the client, the saved-catalog fetch's pattern).
+    pending_delete_action: Option<DeleteAction>,
     /// The scope root's `depth` metadata (`rlmDepth + 1`); `None` when the
     /// scope root is not on the roster (the view falls back to the global
     /// list with a status message, TS scope-resolution fallback).
@@ -360,6 +501,8 @@ impl AgentsViewMode {
             query,
             status,
             notice,
+            pending_delete: None,
+            pending_delete_action: None,
             scope_depth: None,
             scope_active: false,
             scope_dropped: false,
@@ -682,6 +825,95 @@ impl AgentsViewMode {
         self.saved_query_rearm = self.saved_fetch_failed;
     }
 
+    /// The selected row's stop-or-delete arming target: `(identity,
+    /// stop)`, `None` for rows with no stop-or-delete action (summary
+    /// rows, and rows carrying neither a live session nor a saved file).
+    /// `stop` is true while the row has live work (TS `hasLiveWork`: the
+    /// running section, or a subagent under a live parent).
+    fn delete_arm_target(&self) -> Option<(String, bool)> {
+        let row = self.rows.get(self.selected)?;
+        match row.kind {
+            RowKind::SubagentSummary => None,
+            RowKind::Agent => {
+                let live = row.section == crate::agents_view_state::Section::Running;
+                if live {
+                    row.summary.get("activeSessionId").map(Value::as_str)?;
+                } else {
+                    row.summary.get("sessionFile").map(Value::as_str)?;
+                }
+                Some((row.identity.clone(), live))
+            }
+            RowKind::Subagent => {
+                row.summary.get("rlmChildId").map(Value::as_str)?;
+                Some((
+                    row.identity.clone(),
+                    row.section == crate::agents_view_state::Section::Running,
+                ))
+            }
+        }
+    }
+
+    /// The executed dispatch for the armed row (the second press): the
+    /// wire variant follows the row kind, exactly TS
+    /// `handleDeleteSelected`'s branches.
+    fn delete_action_for_selected(&self) -> Option<DeleteAction> {
+        let row = self.rows.get(self.selected)?;
+        let name = row.title.clone();
+        match row.kind {
+            RowKind::SubagentSummary => None,
+            RowKind::Agent => {
+                if row.section == crate::agents_view_state::Section::Running {
+                    let active_session_id =
+                        row.summary.get("activeSessionId")?.as_str()?.to_string();
+                    Some(DeleteAction::StopAgent {
+                        active_session_id,
+                        name,
+                    })
+                } else {
+                    let session_path = row.summary.get("sessionFile")?.as_str()?.to_string();
+                    Some(DeleteAction::DeleteSavedSession { session_path, name })
+                }
+            }
+            RowKind::Subagent => {
+                let child_id = row.summary.get("rlmChildId")?.as_str()?.to_string();
+                let parent = row
+                    .parent_identity
+                    .as_deref()
+                    .and_then(|identity| self.rows.iter().find(|row| row.identity == identity))?;
+                let active_session_id = parent
+                    .summary
+                    .get("activeSessionId")
+                    .and_then(Value::as_str)
+                    .or_else(|| row.summary.get("activeSessionId").and_then(Value::as_str))?
+                    .to_string();
+                if row.section == crate::agents_view_state::Section::Running {
+                    Some(DeleteAction::StopSubagent {
+                        active_session_id,
+                        child_id,
+                        name,
+                    })
+                } else {
+                    Some(DeleteAction::DeleteSubagent {
+                        active_session_id,
+                        child_id,
+                        name,
+                    })
+                }
+            }
+        }
+    }
+
+    /// The executed delete the run loop takes (the dispatch runs with
+    /// the client, off the key loop).
+    fn take_delete_action(&mut self) -> Option<DeleteAction> {
+        self.pending_delete_action.take()
+    }
+
+    /// One landed stop-or-delete outcome: the status line reports it.
+    fn delete_result(&mut self, message: String) {
+        self.status = Some(message);
+    }
+
     /// Whether the loop must re-arm the saved-catalog fetch (one retry
     /// per terminal failure; the consumption clears the failure intent
     /// with it, so the retry in flight is the only one until IT fails).
@@ -935,7 +1167,11 @@ impl AgentsViewMode {
         }
         self.notice = None;
         // Any other key clears the exit hint (TS `clearCtrlCExitHint`).
+        // Any other key clears the exit hint (TS `clearCtrlCExitHint`)
+        // and the stop-or-delete confirm (TS `clearDeleteConfirmation`
+        // at the top of `handleInput`).
         self.exit_armed = false;
+        let was_delete_armed = self.pending_delete.take();
         let has_query = !self.query.is_empty();
         // TS `app.clear` (default ctrl+c): the first press arms the exit
         // hint, a second press while armed exits the view (TS
@@ -951,6 +1187,28 @@ impl AgentsViewMode {
                 self.running = false;
             } else {
                 self.exit_armed = true;
+            }
+            return;
+        }
+        // TS `app.agents.delete` (default ctrl+x, empty editor only — TS
+        // `handleInput`'s gate): stop or delete the selected row. The
+        // first press arms the confirm over the row (the hint reads
+        // "stop" while the row has live work, "delete" otherwise — TS
+        // `hasLiveWork`), the second press on the same row executes, and
+        // any other key clears the arm.
+        if !has_query && self.keybindings.matches(key, "app.agents.delete") {
+            if was_delete_armed
+                && was_delete_armed.as_ref().is_some_and(|pending| {
+                    self.rows
+                        .get(self.selected)
+                        .is_some_and(|row| row.identity == pending.identity)
+                })
+            {
+                if let Some(action) = self.delete_action_for_selected() {
+                    self.pending_delete_action = Some(action);
+                }
+            } else if let Some((identity, stop)) = self.delete_arm_target() {
+                self.pending_delete = Some(PendingDelete { identity, stop });
             }
             return;
         }
@@ -1520,6 +1778,20 @@ impl AgentsViewMode {
             };
             return truncate_line(vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
+        // The armed stop-or-delete confirm: "Press ctrl+x again to
+        // stop|delete" (TS `renderHints`'s delete hint, keyed by the
+        // armed row's live work).
+        if let Some(pending) = &self.pending_delete {
+            let word = if pending.stop { "stop" } else { "delete" };
+            let hint = match self.keybindings.first_key("app.agents.delete") {
+                Some(key) => format!(
+                    "Press {} again to {word}",
+                    crate::keybindings::format_key_text(&key)
+                ),
+                None => format!("Press again to {word}"),
+            };
+            return truncate_line(vec![theme.fg(ThemeColor::Muted, hint)], width);
+        }
         if let Some(status) = status_override.or(self.status.as_deref()) {
             return truncate_line(vec![theme.fg(ThemeColor::Error, status.to_string())], width);
         }
@@ -2017,8 +2289,21 @@ async fn run_agents_view_surface(
                         mode.drop_saved_stream();
                         saved_flush = None;
                     }
+                    // The executed stop-or-delete dispatch (the second
+                    // ctrl+x): the wire call runs off the key loop with
+                    // the client — the saved-catalog fetch's pattern —
+                    // and its outcome lands as a `DeleteResult` status
+                    // line (the roster push refreshes the rows behind
+                    // it).
+                    if let Some(action) = mode.take_delete_action() {
+                        spawn_delete_dispatch(&client, ui_tx.clone(), action);
+                    }
                 }
                 UiInput::Resize | UiInput::Settled => {}
+                UiInput::DeleteResult { message } => {
+                    mode.delete_result(message);
+                    redraw = true;
+                }
                 // The saved-catalog scan landed (TS `armSavedSearchFetch`
                 // applying its result): the Inactive section builds now.
                 UiInput::SavedLoaded { sessions } => {
@@ -2466,6 +2751,124 @@ mod tests {
         ];
         mode.rebuild_rows();
         mode
+    }
+
+    /// The ctrl+x stop-or-delete flow (TS `handleDeleteSelected`, the
+    /// operator's missing-functionality report): the first press arms the
+    /// confirm over the selected row with the stop|delete hint, the second
+    /// press on the same row takes the dispatch, any other key clears the
+    /// arm, and a moved selection never executes.
+    #[test]
+    fn ctrl_x_arms_then_executes_the_stop_or_delete() {
+        let mut mode = mode_with_parent_and_child();
+        // The child row (a running subagent) is selected by default? The
+        // parent leads; select the child.
+        mode.handle_key("down");
+        let child_identity = mode.rows[mode.selected].identity.clone();
+        assert!(child_identity.contains("c"));
+        // First press: armed, no dispatch.
+        mode.handle_key("ctrl+x");
+        assert!(
+            mode.pending_delete.is_some(),
+            "the first press arms the confirm"
+        );
+        assert!(mode.pending_delete_action.is_none(), "no dispatch yet");
+        let (identity, stop) = mode.delete_arm_target().expect("an armed target");
+        assert_eq!(identity, child_identity);
+        assert!(stop, "the running subagent arms as stop");
+        // Any other key clears the arm.
+        mode.handle_key("down");
+        assert!(mode.pending_delete.is_none(), "another key clears the arm");
+        // Re-arm and execute on the same row.
+        mode.handle_key("up");
+        mode.handle_key("ctrl+x");
+        mode.handle_key("ctrl+x");
+        let action = mode.take_delete_action().expect("the executed dispatch");
+        match action {
+            DeleteAction::StopSubagent {
+                active_session_id,
+                child_id,
+                ..
+            } => {
+                assert_eq!(active_session_id, "p-live", "the parent's session");
+                assert_eq!(child_id, "child-c", "the child's rlm id");
+            }
+            other => panic!("a running subagent stops, got {other:?}"),
+        }
+    }
+
+    /// The idle arm: an idle subagent arms as delete and dispatches the
+    /// `delete_rlm_subagent` wire; the hint word follows the live work.
+    #[test]
+    fn ctrl_x_on_an_idle_subagent_deletes() {
+        let mut mode = mode_with_parent_and_child();
+        mode.roster[1]["status"] = serde_json::json!("idle");
+        mode.rebuild_rows();
+        mode.handle_key("down");
+        let (_, stop) = mode.delete_arm_target().expect("an armed target");
+        assert!(!stop, "the idle subagent arms as delete");
+        mode.handle_key("ctrl+x");
+        mode.handle_key("ctrl+x");
+        let action = mode.take_delete_action().expect("the executed dispatch");
+        match action {
+            DeleteAction::DeleteSubagent { child_id, .. } => {
+                assert_eq!(child_id, "child-c");
+            }
+            other => panic!("an idle subagent deletes, got {other:?}"),
+        }
+    }
+
+    /// The armed hint renders the stop|delete word with the effective
+    /// binding; any other row selection clears the arm before the press.
+    #[test]
+    fn the_delete_confirm_hint_and_the_cleared_arm() {
+        let mut mode = mode_with_parent_and_child();
+        mode.handle_key("ctrl+x");
+        let frame = mode.render_list(120, 8);
+        let hint = frame
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .find(|row| row.contains("Press ctrl+x again to"))
+            .expect("the confirm hint row");
+        assert!(hint.contains("stop"), "the live row reads stop: {hint}");
+        // A moved selection never executes the armed row.
+        mode.handle_key("down");
+        mode.handle_key("ctrl+x");
+        assert!(mode.pending_delete.is_none(), "the arm belongs to its row");
+        assert!(mode.pending_delete_action.is_none());
+    }
+
+    /// The delete hint renders the word for a row without live work.
+    #[test]
+    fn the_delete_confirm_hint_reads_delete_for_saved_rows() {
+        let mut mode = mode_with_anchor(None, Vec::new());
+        mode.saved = vec![saved_catalog_row(
+            "/x/saved.jsonl",
+            "saved-1",
+            "an old session",
+        )];
+        mode.rebuild_rows();
+        // The saved row sits in the Inactive section.
+        let saved_index = mode
+            .rows
+            .iter()
+            .position(|row| row.identity.contains("saved"))
+            .expect("the saved row");
+        mode.selected = saved_index;
+        mode.handle_key("ctrl+x");
+        let (_, stop) = mode.delete_arm_target().expect("an armed target");
+        assert!(!stop, "the saved row arms as delete");
+        mode.handle_key("ctrl+x");
+        match mode.take_delete_action().expect("the dispatch") {
+            DeleteAction::DeleteSavedSession { session_path, .. } => {
+                assert_eq!(session_path, "/x/saved.jsonl");
+            }
+            other => panic!("the saved row deletes its file, got {other:?}"),
+        }
     }
 
     /// A fresh-open view anchored on the given session (the agents-back
