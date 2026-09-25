@@ -50,9 +50,14 @@ pub struct ResolvedResponsesCompat {
 }
 
 pub fn get_responses_compat(model: &Model) -> ResolvedResponsesCompat {
-    let compat = model.compat_kind().and_then(|kind| match kind {
-        crate::types::CompatKind::OpenAiResponses(compat) => Some(compat),
-        _ => None,
+    // TS reads the responses compat directly: the wire object cannot tag
+    // its shape, and a shared-key-only object (the xAI subscription's
+    // `supportsLongCacheRetention: false`) still decodes — every field is
+    // optional and unknown keys are ignored, so the responses view of any
+    // compat object is lossless for this API.
+    let compat = model.compat.as_ref().and_then(|compat| {
+        serde_json::from_value::<pa_types::ai::OpenAiResponsesCompat>(compat.raw.clone().into())
+            .ok()
     });
     ResolvedResponsesCompat {
         send_session_id_header: compat
@@ -476,5 +481,59 @@ impl Provider for OpenAIResponsesProvider {
         options: Option<&SimpleStreamOptions>,
     ) -> AssistantMessageEventStream {
         stream_simple_openai_responses(model, context, options)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A responses-served model with a wire `compat` object (the whole
+    /// model need not be responses-shaped for the compat resolution).
+    fn compat_model(raw: serde_json::Value) -> Model {
+        serde_json::from_value(serde_json::json!({
+            "id": "m", "name": "m", "api": "openai-responses", "provider": "xai",
+            "baseUrl": "https://api.x.ai/v1", "reasoning": true, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1000, "maxTokens": 100,
+            "compat": raw,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_shared_key_only_compat_decodes_for_responses_models() {
+        // TS `getXaiSubscriptionModel`'s compat carries only
+        // `supportsLongCacheRetention: false`; the responses provider
+        // reads the responses view directly (the wire object cannot tag
+        // its shape).
+        let model = compat_model(serde_json::json!({ "supportsLongCacheRetention": false }));
+        let compat = get_responses_compat(&model);
+        assert!(!compat.supports_long_cache_retention);
+        assert!(
+            compat.send_session_id_header,
+            "the absent header flag defaults on"
+        );
+    }
+
+    #[test]
+    fn the_responses_shaped_compat_keeps_its_values() {
+        let model = compat_model(
+            serde_json::json!({ "sendSessionIdHeader": false, "supportsLongCacheRetention": true }),
+        );
+        let compat = get_responses_compat(&model);
+        assert!(!compat.send_session_id_header);
+        assert!(compat.supports_long_cache_retention);
+        // Absent compat: both defaults on (TS's defaults).
+        let plain = serde_json::from_value::<Model>(serde_json::json!({
+            "id": "m", "name": "m", "api": "openai-responses", "provider": "openai",
+            "baseUrl": "https://api.openai.com/v1", "reasoning": false, "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 1000, "maxTokens": 100
+        }))
+        .unwrap();
+        let compat = get_responses_compat(&plain);
+        assert!(compat.send_session_id_header);
+        assert!(compat.supports_long_cache_retention);
     }
 }

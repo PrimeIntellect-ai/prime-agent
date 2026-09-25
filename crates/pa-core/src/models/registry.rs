@@ -4,10 +4,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use pa_types::ai::Model;
+use pa_types::ai::{
+    CompatKind, Model, ModelCompat, ModelThinkingLevel, OpenAiResponsesCompat, ThinkingLevelMap,
+};
 
 use crate::auth::manager::AuthStorage;
-use crate::auth::types::PRIME_INFERENCE_PROVIDER_ID;
+use crate::auth::types::{AuthCredential, PRIME_INFERENCE_PROVIDER_ID};
 
 use super::catalog_chain;
 use super::custom::{apply_model_override, load_custom_models, merge_compat, CustomModelsResult};
@@ -56,6 +58,67 @@ pub struct ModelRegistry {
     /// The process-shared live catalog chain (`catalog_chain::catalog_for`):
     /// `resolve()` sources built-ins from it.
     catalog: std::sync::Arc<pa_models::ModelCatalog>,
+}
+
+/// TS `getXaiSubscriptionModel`: the xAI provider's models switch onto
+/// the openai-responses API under a stored subscription — the TS
+/// thinking map per model id (the explicit maps for the models the TS
+/// flow knows, an all-null map otherwise) and the
+/// `supportsLongCacheRetention: false` compat.
+fn xai_subscription_model(model: &Model) -> Model {
+    let mut adapted = model.clone();
+    adapted.api = "openai-responses".to_string();
+    adapted.base_url = "https://api.x.ai/v1".to_string();
+    adapted.thinking_level_map = Some(xai_subscription_thinking_map(&model.id));
+    adapted.compat = Some(ModelCompat::from_kind(CompatKind::OpenAiResponses(
+        OpenAiResponsesCompat {
+            send_session_id_header: None,
+            supports_long_cache_retention: Some(false),
+        },
+    )));
+    adapted
+}
+
+/// The TS flow's thinking maps (`getXaiSubscriptionModel`'s switch): an
+/// explicit map for the grok models the TS flow names, and the
+/// all-levels-null default for every other xAI model (the reasoning
+/// output stays; unverified effort controls never send).
+fn xai_subscription_thinking_map(model_id: &str) -> ThinkingLevelMap {
+    // The map's value is the TS table's entry: `None` for the null
+    // mapping (unsupported), the wire string for a named level; an
+    // absent level keeps its default support.
+    let null = || None;
+    let value = |text: &str| Some(text.to_string());
+    let mut map = ThinkingLevelMap::new();
+    match model_id {
+        "grok-4.3" => {
+            map.insert(ModelThinkingLevel::Off, value("none"));
+            map.insert(ModelThinkingLevel::Minimal, null());
+        }
+        "grok-4.5" => {
+            map.insert(ModelThinkingLevel::Off, null());
+            map.insert(ModelThinkingLevel::Minimal, null());
+        }
+        "grok-4.6" | "grok-4.7" => {
+            map.insert(ModelThinkingLevel::Off, null());
+            map.insert(ModelThinkingLevel::Minimal, null());
+            map.insert(ModelThinkingLevel::Xhigh, value("xhigh"));
+        }
+        _ => {
+            for level in [
+                ModelThinkingLevel::Off,
+                ModelThinkingLevel::Minimal,
+                ModelThinkingLevel::Low,
+                ModelThinkingLevel::Medium,
+                ModelThinkingLevel::High,
+                ModelThinkingLevel::Xhigh,
+                ModelThinkingLevel::Max,
+            ] {
+                map.insert(level, null());
+            }
+        }
+    }
+    map
 }
 
 impl ModelRegistry {
@@ -245,6 +308,57 @@ impl ModelRegistry {
         let mut built_in = self.load_built_in_models(&result, credentials.as_ref());
         built_in.extend(private_models.into_values());
         self.models = self.merge_custom_models(built_in, result.models);
+        self.apply_subscription_model_adaptations();
+    }
+
+    /// TS `loadModels`'s `modifyModels` loop plus
+    /// `getModelForCurrentAuth`'s xAI subscription switch, applied at
+    /// load: a stored Copilot credential rewrites its models' base URL
+    /// through the credential (the token's proxy endpoint, else the
+    /// enterprise domain, else the catalog default), and a stored xAI
+    /// subscription switches the provider's models onto the
+    /// openai-responses API with the TS thinking maps. The registry
+    /// reloads after every credential change, so the adaptations track
+    /// the store exactly like TS's per-read switch.
+    fn apply_subscription_model_adaptations(&mut self) {
+        // TS `githubCopilotOAuthProvider.modifyModels`.
+        let copilot_credential = self
+            .auth
+            .get_all()
+            .credential(crate::auth::GITHUB_COPILOT_PROVIDER_ID)
+            .cloned();
+        if let Some(AuthCredential::Oauth {
+            access,
+            enterprise_url,
+            ..
+        }) = copilot_credential
+        {
+            let base_url =
+                pa_ai::oauth::get_github_copilot_base_url(Some(&access), enterprise_url.as_deref());
+            for model in &mut self.models {
+                if model.provider == crate::auth::GITHUB_COPILOT_PROVIDER_ID {
+                    model.base_url = base_url.clone();
+                }
+            }
+        }
+        // TS `isUsingXaiSubscription`: the stored credential is OAuth
+        // and the store is the winning source (a stale credential does
+        // not serve the subscription API).
+        let xai_stored = matches!(
+            self.auth.get_all().credential(crate::auth::XAI_PROVIDER_ID),
+            Some(AuthCredential::Oauth { .. })
+        ) && self
+            .auth
+            .get_auth_status(crate::auth::XAI_PROVIDER_ID)
+            .source
+            == Some(crate::auth::types::AuthSource::Stored);
+        if xai_stored {
+            for model in &mut self.models {
+                if model.provider == crate::auth::XAI_PROVIDER_ID {
+                    *model = xai_subscription_model(model);
+                }
+            }
+        }
     }
 
     fn load_custom_models_file(&mut self, path: &Path) -> CustomModelsResult {
@@ -922,5 +1036,110 @@ mod tests {
         let registry = ModelRegistry::in_memory(auth_with(serde_json::json!({})));
         let private_model = model("internal/custom-private", "prime-inference");
         assert!(!registry.is_authorized_private_model(&private_model));
+    }
+
+    #[test]
+    fn a_stored_copilot_credential_rewrites_its_models_base_url() {
+        // TS `githubCopilotOAuthProvider.modifyModels`: the token's
+        // proxy endpoint wins.
+        let auth = auth_without_env(serde_json::json!({
+            "github-copilot": {
+                "type": "oauth",
+                "access": "tid=1;exp=2;proxy-ep=proxy.enterprise.githubcopilot.com",
+                "refresh": "gh", "expires": 4102444800000
+            }
+        }));
+        let registry = ModelRegistry::in_memory(auth);
+        let grok = registry
+            .get_all()
+            .iter()
+            .find(|model| model.provider == "github-copilot")
+            .expect("the copilot models render");
+        assert_eq!(grok.base_url, "https://api.enterprise.githubcopilot.com");
+        // An enterprise credential without a proxy endpoint routes onto
+        // the enterprise API.
+        let auth = auth_without_env(serde_json::json!({
+            "github-copilot": {
+                "type": "oauth",
+                "access": "plain-token", "refresh": "gh", "expires": 4102444800000,
+                "enterpriseUrl": "company.ghe.com"
+            }
+        }));
+        let registry = ModelRegistry::in_memory(auth);
+        let grok = registry
+            .get_all()
+            .iter()
+            .find(|model| model.provider == "github-copilot")
+            .expect("the copilot models render");
+        assert_eq!(grok.base_url, "https://copilot-api.company.ghe.com");
+    }
+
+    #[test]
+    fn a_stored_xai_subscription_switches_its_models_onto_responses() {
+        let auth = auth_without_env(serde_json::json!({
+            "xai": { "type": "oauth", "access": "grok", "refresh": "r", "expires": 4102444800000 }
+        }));
+        let registry = ModelRegistry::in_memory(auth);
+        let grok_46 = registry
+            .get_all()
+            .iter()
+            .find(|model| model.id == "grok-4.6")
+            .expect("the grok model renders");
+        assert_eq!(grok_46.api, "openai-responses");
+        assert_eq!(grok_46.base_url, "https://api.x.ai/v1");
+        // TS grok-4.6's map: low/medium/high/xhigh supported.
+        let supported = pa_types::ai::thinking_levels::get_supported_thinking_levels(grok_46);
+        assert_eq!(
+            supported,
+            vec![
+                ModelThinkingLevel::Low,
+                ModelThinkingLevel::Medium,
+                ModelThinkingLevel::High,
+                ModelThinkingLevel::Xhigh,
+            ]
+        );
+        // The compat is the shared-key-only object (TS
+        // `supportsLongCacheRetention: false`); the responses provider
+        // decodes it directly (its own test covers the decode).
+        let compat = grok_46.compat.as_ref().expect("the compat rides the model");
+        assert_eq!(
+            compat.raw.get("supportsLongCacheRetention"),
+            Some(&serde_json::json!(false))
+        );
+        // The default map: an unnamed model serves no thinking levels.
+        let grok_build = registry
+            .get_all()
+            .iter()
+            .find(|model| model.id == "grok-build-0.1")
+            .expect("the grok build model renders");
+        assert_eq!(
+            pa_types::ai::thinking_levels::get_supported_thinking_levels(grok_build),
+            Vec::<ModelThinkingLevel>::new()
+        );
+        // grok-4.3's map: the "none" off value + low/medium/high.
+        let grok_43 = registry
+            .get_all()
+            .iter()
+            .find(|model| model.id == "grok-4.3")
+            .expect("the grok 4.3 model renders");
+        assert!(grok_43
+            .thinking_level_map
+            .as_ref()
+            .and_then(|map| map.get(&ModelThinkingLevel::Off))
+            .map(|value| value.as_deref() == Some("none"))
+            .unwrap_or(false));
+    }
+
+    #[test]
+    fn without_a_stored_xai_subscription_the_models_stay_on_completions() {
+        let registry = ModelRegistry::in_memory(auth_without_env(serde_json::json!({})));
+        let grok = registry
+            .get_all()
+            .iter()
+            .find(|model| model.id == "grok-4.6")
+            .expect("the grok model renders");
+        assert_eq!(grok.api, "openai-completions");
+        assert!(grok.thinking_level_map.is_none());
+        assert!(grok.compat.is_none());
     }
 }

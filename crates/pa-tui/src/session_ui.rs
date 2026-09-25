@@ -3640,7 +3640,8 @@ impl SessionUi {
                     let auth = self.provider_auth.clone().expect("the selector was open");
                     if provider.id.starts_with("mcp:")
                         || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
-                        || provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID
+                        || crate::provider_auth::SUBSCRIPTION_PROVIDER_IDS
+                            .contains(&provider.id.as_str())
                     {
                         self.start_provider_panel_login(&provider, auth, view);
                     } else {
@@ -3684,7 +3685,8 @@ impl SessionUi {
             provider.name
         )));
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
-        self.auth_panel_cancel = (provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID)
+        self.auth_panel_cancel = crate::provider_auth::SUBSCRIPTION_PROVIDER_IDS
+            .contains(&provider.id.as_str())
             .then(|| panel.cancel_flag());
         let provider = provider.clone();
         tokio::spawn(async move {
@@ -3786,10 +3788,11 @@ impl SessionUi {
             AuthPanelRequest::PastePrompt {
                 prompt,
                 style,
+                allow_empty,
                 reply,
             } => {
                 if let Some(panel) = view.auth_panel.as_mut() {
-                    panel.mount_paste(prompt, style, reply);
+                    panel.mount_paste(prompt, style, allow_empty, reply);
                 }
             }
             AuthPanelRequest::SelectTeam {

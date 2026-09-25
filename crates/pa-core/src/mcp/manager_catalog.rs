@@ -844,6 +844,7 @@ mod tests {
                     client_id: None,
                     resource: None,
                     issuer: None,
+                    enterprise_url: None,
                 },
             );
         }

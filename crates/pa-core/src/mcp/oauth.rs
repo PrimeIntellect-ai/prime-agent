@@ -93,6 +93,7 @@ fn to_credentials(
         client_id: (!client_id.is_empty()).then(|| client_id.to_string()),
         resource: resource.map(str::to_string),
         issuer: issuer.map(str::to_string),
+        enterprise_url: None,
     }
 }
 
@@ -966,6 +967,7 @@ mod tests {
             client_id: Some("c".to_string()),
             resource: None,
             issuer: None,
+            enterprise_url: None,
         };
         let origin_prm = "https://srv.test/.well-known/oauth-protected-resource/mcp";
         let http = ScriptedHttp::new(vec![
@@ -995,6 +997,7 @@ mod tests {
             client_id: Some("client-xyz".to_string()),
             resource: Some(RESOURCE.to_string()),
             issuer: Some(PLANE_ISSUER.to_string()),
+            enterprise_url: None,
         };
         let http = ScriptedHttp::new(vec![
             (RESOURCE, 401, None, ""),
@@ -1067,6 +1070,7 @@ mod tests {
             client_id: None,
             resource: None,
             issuer: None,
+            enterprise_url: None,
         };
         let error = mcp_refresh_token(&http, &config("plane", RESOURCE), &retargeted)
             .await
@@ -1086,6 +1090,7 @@ mod tests {
             client_id: Some("client-xyz".to_string()),
             resource: Some(RESOURCE.to_string()),
             issuer: Some(PLANE_ISSUER.to_string()),
+            enterprise_url: None,
         };
         let error = mcp_refresh_token(&http, &config("plane", RESOURCE), &drifted)
             .await
@@ -1116,6 +1121,7 @@ mod tests {
             client_id: Some("origin-client".to_string()),
             resource: None,
             issuer: None,
+            enterprise_url: None,
         };
         let http = ScriptedHttp::new(vec![
             (RESOURCE, 401, None, ""),

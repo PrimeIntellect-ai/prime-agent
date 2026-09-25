@@ -924,7 +924,7 @@ Method: every TS method in scope read in full; the Rust implementing code locate
 | auth-flows.ts:675 | runPrimeAgentTracesLogin (browser + manual fallback + access check) | MISSING | MISSING | clip-auth-cmds |
 | auth-flows.ts:782 | showApiKeyLoginDialog | MISSING | MISSING | clip-auth-cmds |
 | auth-flows.ts:819 | showOAuthLoginSelect (in-flow oauth account selector) | MISSING | MISSING | clip-auth-cmds |
-| auth-flows.ts:840 | showLoginDialog (oauth browser + manual code + prompt/select hooks) | MISSING | MISSING | clip-auth-cmds |
+| auth-flows.ts:840 | showLoginDialog (oauth browser + manual code + prompt/select hooks) | crates/pa-cli/src/{codex_subscription_login,subscription_login}.rs + crates/pa-ai/src/oauth (the four subscription providers' flows render through the inline auth panel; the `onSelect` hook stays unported — no built-in provider uses it) | MATCHES (minus the unused select hook) | noncodex-subscription-oauth + codex-subscription-login |
 | auth-flows.ts:48 | getAnthropicSubscriptionAuthWarning | MISSING | MISSING | clip-auth-cmds |
 | auth-flows.ts:81 | isApiKeyLoginProvider | MISSING | MISSING | clip-auth-cmds |
 | interactive-mode.ts:9118 | showInlineAuthPanel (panel stack, reset abort) | MISSING | MISSING | clip-auth-cmds |

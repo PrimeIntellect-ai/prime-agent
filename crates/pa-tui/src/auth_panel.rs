@@ -93,11 +93,13 @@ pub enum AuthPanelRequest {
     },
     /// TS `dialog.showManualInput` / `armManualInput`: the prompt above
     /// the panel's paste field. Enter submits the trimmed value (an
-    /// empty submit stays mounted with the notice); Esc cancels the
-    /// flow (`None`).
+    /// empty submit stays mounted with the notice, unless the prompt
+    /// allows it — TS `OAuthPrompt.allowEmpty`: a blank answer is a
+    /// valid submit); Esc cancels the flow (`None`).
     PastePrompt {
         prompt: String,
         style: PasteStyle,
+        allow_empty: bool,
         reply: oneshot::Sender<Option<String>>,
     },
     /// TS `PrimeTeamSelectorComponent` mounts over the panel: Esc
@@ -185,10 +187,33 @@ impl AuthPanelHandle {
     /// paste field; the submitted value resolves the future, a cancel
     /// answers `None`.
     pub async fn paste_prompt(&self, prompt: &str, style: PasteStyle) -> Option<String> {
+        self.paste_prompt_with(prompt, style, false).await
+    }
+
+    /// The `allow_empty` variant (TS `OAuthPrompt.allowEmpty`): a blank
+    /// submit resolves as an empty answer instead of the notice (the
+    /// Copilot domain prompt's "blank for github.com").
+    pub async fn paste_prompt_allow_empty(
+        &self,
+        prompt: &str,
+        style: PasteStyle,
+    ) -> Option<String> {
+        self.paste_prompt_with(prompt, style, true).await
+    }
+
+    /// One paste prompt over the request channel (the two surfaces
+    /// above funnel here).
+    async fn paste_prompt_with(
+        &self,
+        prompt: &str,
+        style: PasteStyle,
+        allow_empty: bool,
+    ) -> Option<String> {
         let (reply, answer) = oneshot::channel();
         self.send(AuthPanelRequest::PastePrompt {
             prompt: prompt.to_string(),
             style,
+            allow_empty,
             reply,
         });
         answer.await.unwrap_or(None)
@@ -277,6 +302,9 @@ enum PanelInput {
     Paste {
         prompt: String,
         style: PasteStyle,
+        /// Whether a blank submit is a valid answer (TS
+        /// `OAuthPrompt.allowEmpty`).
+        allow_empty: bool,
         field: SearchInput,
         reply: Option<oneshot::Sender<Option<String>>>,
     },
@@ -351,11 +379,13 @@ impl AuthPanel {
         &mut self,
         prompt: String,
         style: PasteStyle,
+        allow_empty: bool,
         reply: oneshot::Sender<Option<String>>,
     ) {
         self.input = PanelInput::Paste {
             prompt: scrub_controls(&prompt),
             style,
+            allow_empty,
             field: SearchInput::new(),
             reply: Some(reply),
         };
@@ -408,7 +438,12 @@ impl AuthPanel {
         let mut answered = false;
         match &mut self.input {
             PanelInput::Working => {}
-            PanelInput::Paste { field, reply, .. } => {
+            PanelInput::Paste {
+                field,
+                allow_empty,
+                reply,
+                ..
+            } => {
                 if kb.matches(key, "tui.select.cancel") {
                     if let Some(reply) = reply.take() {
                         let _ = reply.send(None);
@@ -417,9 +452,19 @@ impl AuthPanel {
                 } else if kb.matches(key, "tui.select.confirm") {
                     let value = field.value().trim().to_string();
                     if value.is_empty() {
-                        // TS the paste panel's empty-submit notice; the
-                        // field stays mounted.
-                        self.notice = Some(EMPTY_VALUE_NOTICE.to_string());
+                        if *allow_empty {
+                            // TS `OAuthPrompt.allowEmpty`: a blank submit
+                            // is a valid answer (the Copilot domain
+                            // prompt's "blank for github.com").
+                            if let Some(reply) = reply.take() {
+                                let _ = reply.send(Some(value));
+                                answered = true;
+                            }
+                        } else {
+                            // TS the paste panel's empty-submit notice; the
+                            // field stays mounted.
+                            self.notice = Some(EMPTY_VALUE_NOTICE.to_string());
+                        }
                     } else if let Some(reply) = reply.take() {
                         let _ = reply.send(Some(value));
                         answered = true;
@@ -767,6 +812,7 @@ mod tests {
         panel.mount_paste(
             "Paste a Prime API key below:".to_string(),
             PasteStyle::Visible,
+            false,
             reply,
         );
         (panel, answer)
@@ -811,6 +857,7 @@ mod tests {
         panel.mount_paste(
             "Paste the code below:".to_string(),
             PasteStyle::Visible,
+            false,
             oneshot::channel().0,
         );
         panel.show_auth_url(
@@ -885,6 +932,30 @@ mod tests {
         assert_eq!(answer.try_recv(), Ok(Some("k".to_string())));
     }
 
+    /// TS `OAuthPrompt.allowEmpty`: a prompt that allows the blank entry
+    /// submits it as a valid answer (the Copilot domain prompt's
+    /// "blank for github.com"), without the notice.
+    #[test]
+    fn an_allow_empty_paste_prompt_submits_the_blank_answer() {
+        let mut panel = AuthPanel::new("Login to GitHub Copilot");
+        let (reply, mut answer) = oneshot::channel();
+        panel.mount_paste(
+            "GitHub Enterprise URL/domain (blank for github.com)".to_string(),
+            PasteStyle::Visible,
+            true,
+            reply,
+        );
+        panel.handle_key("enter", &kb());
+        assert_eq!(answer.try_recv(), Ok(Some(String::new())));
+        let rows = frame_text(&mut panel);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.contains("The value cannot be empty.")),
+            "the blank entry is a valid answer, not a notice"
+        );
+    }
+
     /// TS `McpTokenPastePanelComponent`: a masked field renders bullets,
     /// never the secret.
     #[test]
@@ -893,6 +964,7 @@ mod tests {
         panel.mount_paste(
             "Paste the token for github:".to_string(),
             PasteStyle::Masked,
+            false,
             oneshot::channel().0,
         );
         for character in "ghp_secretvalue".chars() {
