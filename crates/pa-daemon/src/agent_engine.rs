@@ -392,6 +392,19 @@ pub struct AgentSessionEngine {
 }
 
 impl AgentSessionEngine {
+    /// Build the engine: the shared async runtime, the model selection
+    /// (create config, else the process env pair), the supervisor link, the
+    /// children registry, and the MCP store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the multi-thread runtime cannot be built.
+    ///
+    /// # Panics
+    ///
+    /// The MCP user-server and catalog-source closures built here panic
+    /// on a poisoned engine cwd lock (a holder panicked while holding
+    /// it).
     pub fn new(config: AgentEngineConfig) -> anyhow::Result<Self> {
         let runtime = crate::async_safe_runtime::AsyncSafeRuntime::new_multi_thread()?;
         let session_file = std::sync::Mutex::new(config.session_file.clone());
@@ -575,6 +588,11 @@ impl AgentSessionEngine {
     /// harnesses inject a scripted driver here; the product keeps the
     /// default shell-gate driver in the session cwd. Call before the
     /// first admitted turn.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the autonomous-driver lock is poisoned (a holder
+    /// panicked while holding it).
     pub fn set_autonomous_driver(
         &self,
         driver: std::sync::Arc<dyn pa_core::autonomous::AutonomousDriver>,
@@ -844,6 +862,12 @@ impl AgentSessionEngine {
     /// reused for a fresh create), and a stale settle callback must find
     /// no goal runtime to mint through — the owed slot itself survives
     /// the close in the durable state for a later resumed session.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an internal mutex is poisoned (the goal runtime or the
+    /// autonomous boundary lock, after a holder panicked while holding
+    /// it).
     pub fn mark_session_closed(&self) {
         self.session_closed
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -869,6 +893,11 @@ impl AgentSessionEngine {
     }
 
     /// Session-scoped kernel shell activity; never builds a new session/kernel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no session kernel is running ("Kernel is
+    /// not running"), or when the kernel's own shell-activity call fails.
     pub async fn bash_activity(
         &self,
         action: &str,

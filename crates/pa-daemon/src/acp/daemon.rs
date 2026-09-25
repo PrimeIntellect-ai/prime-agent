@@ -230,6 +230,17 @@ struct DaemonAcpState {
 /// guarantees the socket answers (the composition spawns a supervisor
 /// when none is listening); a daemon that drops mid-session fails the
 /// hosted session's requests, exactly like the TS daemon connection.
+///
+/// # Errors
+///
+/// Returns an error when the daemon socket connect fails; a daemon that
+/// drops mid-session fails the hosted session's requests instead, exactly
+/// like the TS daemon connection.
+///
+/// # Panics
+///
+/// The frame-consumer task panics when the link's pending-response map
+/// lock is poisoned (a holder panicked while holding it).
 pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::Result<i32> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
     let writer = tokio::spawn(async move {

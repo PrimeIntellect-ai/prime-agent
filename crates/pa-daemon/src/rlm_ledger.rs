@@ -432,6 +432,14 @@ impl RlmSpawnLedger {
 
     /// Record a spawn admission. The child session path must be unique among
     /// live edges (a per-process advisory check, exactly like the TS writer).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the spawn input is invalid (an empty child
+    /// id, parent, or child session path, or a zero depth), when another
+    /// live edge already claims the child session path, when the ledger
+    /// replay fails (an oversized or malformed ledger), or when the
+    /// record cannot be appended.
     pub fn append_spawn(&self, input: RlmSpawnInput) -> Result<()> {
         if input.child_id.is_empty()
             || input.parent.is_empty()
@@ -474,6 +482,11 @@ impl RlmSpawnLedger {
     }
 
     /// Record a rename for a known child edge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the rename record cannot be appended (the
+    /// ledger directory, open, serialization, write, or sync fails).
     pub fn append_rename(&self, child_id: &str, child: &str, name: &str) -> Result<()> {
         let child_path = canonical_session_path(Path::new(child));
         self.append_record(json!({
@@ -488,6 +501,11 @@ impl RlmSpawnLedger {
 
     /// Rename by child session path alone (an offline rename knows no
     /// childId): one rename record for every live edge at that path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the replay fails (an oversized or malformed
+    /// ledger) or one of the rename records cannot be appended.
     pub fn append_rename_by_child_path(&self, child: &str, name: &str) -> Result<()> {
         let target = canonical_session_path(Path::new(child));
         let state = self.replay_cached()?;
@@ -507,6 +525,12 @@ impl RlmSpawnLedger {
     }
 
     /// Tombstone a child's edge.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tombstone record cannot be appended
+    /// (the ledger directory, open, serialization, write, or sync
+    /// fails).
     pub fn append_delete(
         &self,
         child_id: &str,
@@ -531,6 +555,13 @@ impl RlmSpawnLedger {
     /// snapshot; replay's last-writer-wins merges it into the tombstoned
     /// edge, so the spend survives the transcript's removal, a saved-
     /// session delete, and daemon restarts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the usage snapshot cannot be serialized or
+    /// the tombstone record cannot be appended; a snapshot replay would
+    /// reject (a non-finite or negative cost) rides as absent — the
+    /// bare tombstone still lands.
     pub fn append_delete_with_usage(
         &self,
         child_id: &str,
@@ -567,6 +598,11 @@ impl RlmSpawnLedger {
     /// Tombstone every edge for one child session path (a path may hold
     /// duplicate edges from raced or corrupt appends; a live one would
     /// resurrect a later recreation at that path as a subagent).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the replay fails or one of the tombstone
+    /// records cannot be appended.
     pub fn tombstone_child_path(
         &self,
         child: &str,
@@ -578,6 +614,11 @@ impl RlmSpawnLedger {
     /// The saved-session delete's tombstone with the captured usage
     /// snapshot (the file dies right after this, so the snapshot must ride
     /// the tombstone: the bucket's lazy file fallback has nothing to read).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the replay fails or one of the per-edge
+    /// tombstones cannot be appended.
     pub fn tombstone_child_path_with_usage(
         &self,
         child: &str,
@@ -617,6 +658,11 @@ impl RlmSpawnLedger {
     /// tombstones that predate the capture - a path with neither a snapshot
     /// nor a readable transcript is the documented historical gap (no
     /// fabricated backfill: zero).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger replay fails (an oversized or
+    /// malformed ledger).
     pub fn deleted_descendant_usage_by_parent(
         &self,
     ) -> Result<HashMap<String, crate::session_usage::SessionUsageSummary>> {
@@ -747,6 +793,11 @@ impl RlmSpawnLedger {
 
     /// Replay edges without liveness reconciliation. Deleted edges are
     /// filtered by default; tombstones carry their delete reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger replay fails (an oversized or
+    /// malformed ledger); a missing ledger replays empty.
     pub fn edges(&self, include_deleted: bool) -> Result<Vec<RlmLedgerEdge>> {
         self.seed_once()?;
         let state = self.replay_cached()?;
@@ -766,6 +817,12 @@ impl RlmSpawnLedger {
     /// same session under a different root — and the returned edge
     /// carries the resolved path, so a restart-era child never anchors to
     /// a stale path. Only a session with no live file anywhere is dead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the ledger replay fails (an oversized or
+    /// malformed ledger); a missing ledger replays empty, and only the
+    /// liveness resolution drops edges.
     pub fn live_edges(&self) -> Result<Vec<RlmLedgerEdge>> {
         self.seed_once()?;
         let state = self.replay_cached()?;
@@ -1211,6 +1268,13 @@ pub fn read_rlm_subagent_display(child_session_dir: &Path) -> Option<RlmSubagent
 /// Atomically write one child's display entry. A non-delete write over a
 /// deletion tombstone is refused (the deleted child stays deleted), exactly
 /// like the TS display writer.
+///
+/// # Errors
+///
+/// Returns an error when the display directory cannot be created, the
+/// entry cannot be serialized, or the atomic temp write or rename onto
+/// the display file fails; a refused write over a tombstone answers
+/// `Ok(false)`.
 pub fn write_rlm_subagent_display(entry: &RlmSubagentDisplayEntry) -> Result<bool> {
     if entry.status != "deleted"
         && read_rlm_subagent_display(Path::new(&entry.session_dir))

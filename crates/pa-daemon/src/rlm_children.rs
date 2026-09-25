@@ -309,6 +309,11 @@ impl SupervisorChildSessions {
     /// Wire the delete notification hook (the worker's context-tree cache
     /// invalidation): called once per completed `delete_subagent` with
     /// the deleted child's id.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the delete-notifier mutex is poisoned (a holder
+    /// panicked while holding the lock).
     pub fn set_delete_notifier(&self, notifier: DeleteNotifier) {
         *self
             .inner
@@ -328,6 +333,11 @@ impl SupervisorChildSessions {
     /// once per settled child run — the natural settle watcher, the
     /// cancel walk, and the delete path — so a goal continuation owed
     /// behind descendant work re-evaluates when descendants settle.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the settle-hook mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_settle_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
         *self.inner.settle_hook.lock().expect("settle hook lock") = Some(hook);
     }
@@ -337,6 +347,11 @@ impl SupervisorChildSessions {
     /// capture-before-unlink teardown paths) deliver per-origin batches
     /// into this sink (TS `flushPendingChildUsageAttribution`'s Rust
     /// seam — the producer owns the target row and the durable append).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the usage-sink mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_usage_sink(&self, sink: Arc<dyn RlmChildUsageSink>) {
         *self.inner.usage_sink.lock().expect("usage sink lock") = Some(sink);
     }
@@ -365,18 +380,34 @@ impl SupervisorChildSessions {
     /// notice (the parent session is going away), and each child's own
     /// close cascades to its children through the child worker's kill
     /// handler with the same close reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first close failure after walking every child (a
+    /// failed close keeps the child tracked so the caller can retry); a
+    /// child whose session is already gone is a completed no-op.
     pub async fn close_children(&self, reason: ChildCloseReason) -> Result<()> {
         self.inner.close_children_inner(reason).await
     }
 
     /// Replace the parent identity (the worker session sets it once its own
     /// session exists).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_identity(&self, identity: ParentIdentity) {
         *self.inner.identity.lock().expect("identity lock") = identity;
     }
 
     /// The inherited RLM depth bound (TS `getRlmMaxDepthStatus().maxDepth`
     /// before any chat override).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn rlm_max_depth(&self) -> u32 {
         self.inner
             .identity
@@ -407,6 +438,11 @@ impl SupervisorChildSessions {
     /// run status, elapsed duration, answer preview, and session dir.
     /// `parent_id` (the parent's own RLM node id) is overlaid by the
     /// worker, which owns that identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub async fn child_snapshots(&self) -> Vec<Value> {
         let model = self
             .inner
@@ -520,6 +556,11 @@ impl SupervisorChildSessions {
 
     /// Set only the inherited model selector (the engine resolves its model
     /// when it builds the session, after the create command arrived).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_model(&self, model: String) {
         self.inner.identity.lock().expect("identity lock").model = Some(model);
     }
@@ -527,6 +568,11 @@ impl SupervisorChildSessions {
     /// Set the session's RLM depth bound (TS `setRlmMaxDepth`): the
     /// registry is the bound every spawn checks, so the override is the
     /// live limit children respect immediately.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_rlm_max_depth(&self, max_depth: u32) {
         self.inner
             .identity
@@ -550,6 +596,12 @@ impl SupervisorChildSessions {
     /// child is torn down with its ledger tombstone, `"not_found"` for an
     /// unknown id. A teardown failure surfaces as `Err` (the TS delete
     /// throws through the wire arm).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the child teardown fails (the kill of the
+    /// child worker times out or errors), which the TS delete throws
+    /// through the wire arm.
     pub async fn delete_inactive_subagent(&self, child_id: &str) -> Result<&'static str> {
         self.inner.delete_inactive_subagent(child_id).await
     }
