@@ -2432,6 +2432,7 @@ impl SessionUi {
                             queue_key: None,
                             prefix_messages: None,
                             admission_id: None,
+                            rlm_notice_nonce: None,
                         },
                         rest: Default::default(),
                     },
@@ -8870,11 +8871,13 @@ impl SessionUi {
                 steering,
                 follow_ups,
                 starting,
+                rlm_child_status,
             } => {
                 view.queued = crate::queued::QueuedMessages {
                     steering,
                     follow_ups,
                     starting,
+                    rlm_child_status,
                 };
                 // A queue change under an active browse reconciles the
                 // selection (TS `refreshQueueSelectionAt`): the cursor
