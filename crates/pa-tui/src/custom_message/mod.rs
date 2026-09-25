@@ -288,11 +288,11 @@ fn compaction_outcome_entry(message: &Value, details: &Value) -> ChatEntry {
         .unwrap_or(false)
         && matches!(
             details.get("reason").and_then(Value::as_str),
-            Some("threshold") | Some("overflow") | Some("requested")
+            Some("threshold" | "overflow" | "requested")
         )
         && matches!(
             details.get("outcome").and_then(Value::as_str),
-            Some("skipped") | Some("cancelled") | Some("failed")
+            Some("skipped" | "cancelled" | "failed")
         );
     if !valid {
         return ChatEntry::Status {

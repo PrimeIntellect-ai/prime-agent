@@ -1061,7 +1061,7 @@ mod tests {
                     "usesOAuth": true, "source": "catalog",
                     "connectionIds": ["notion"], "pasteToken": false,
                     "description": "Notion workflows.", "toolCount": 12,
-                    "verifiedAt": 1790000000
+                    "verifiedAt": 1_790_000_000
                 },
                 {
                     "serviceId": "linear", "label": "Linear",

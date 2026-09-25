@@ -122,7 +122,7 @@ pub(crate) async fn reap_predecessors(supervisor: &Arc<Supervisor>) {
     // one is not).
     let protected: HashSet<u32> =
         protected_worker_pids(&supervisor.options.agent_dir, &socket_path);
-    let mut targets = same_socket_worker_targets(&socket_path, &protected);
+    let mut targets = same_socket_worker_targets(&socket_path, &protected, None);
     targets.extend(same_socket_supervisor_targets(&socket_path));
     if targets.is_empty() {
         return;
@@ -184,6 +184,73 @@ pub(crate) async fn stop_process(pid: u32, start_id: Option<String>) -> ReapOutc
         kind: ReapKind::Worker,
     })
     .await
+}
+
+/// The give-up belt: when the supervisor abandons a worker id (the
+/// exhausted-failure verdict), no live process of THIS daemon may outlive
+/// it under that id. The zombie-holder incident proved the hole: a failure
+/// loop that spawned duplicates of one id gave up on the id while one of
+/// its processes - the first, healthy one - still lived and held the
+/// session's runtime lease; the registry row left with the give-up, so
+/// every later create found no resident, launched a fresh worker, and
+/// bounced off the orphan's lease with the "already active in <id>"
+/// refusal, forever. The belt sweeps the abandoned id's same-socket
+/// worker processes (the supervisor stamped every spawn's environment
+/// with its active-session id) with the boot reap's own identity-gated
+/// escalation, so the hold the daemon gave up on actually releases: the
+/// last crashed child is already provably gone (the failure loop watched
+/// it die), and a dead holder's lease self-heals on the next acquire -
+/// the sweep exists for the ones nobody is watching anymore.
+///
+/// Never touched: other daemons' workers (different supervisor socket),
+/// other sessions' workers (different active-session id), and any pid a
+/// live resident still owns. Non-Linux platforms have no /proc census
+/// here - the same limitation the boot reap documents.
+pub(crate) async fn reap_abandoned_workers(supervisor: &Arc<Supervisor>, worker_id: &str) {
+    let socket_path = supervisor.options.socket_path.clone();
+    // Belt over the env filter: a pid a LIVE resident still owns is never
+    // signaled, whatever its environment says (a wrong signal is
+    // unrecoverable; a missed sweep is).
+    let mut protected = HashSet::new();
+    for resident in supervisor.registry.list().await {
+        let pid = resident.descriptor.lock().await.pid as u32;
+        if pid != 0 {
+            protected.insert(pid);
+        }
+    }
+    let targets = same_socket_worker_targets(&socket_path, &protected, Some(worker_id));
+    if targets.is_empty() {
+        return;
+    }
+    supervisor.log_line(&format!(
+        "give-up sweep: {} leftover process(es) of session worker {worker_id}",
+        targets.len()
+    ));
+    let outcomes = futures::future::join_all(
+        targets
+            .iter()
+            .map(|target| async move {
+                let outcome = stop_target(target).await;
+                supervisor.log_line(&format!(
+                    "give-up sweep: leftover worker pid {} (start id {:?}) of {worker_id} - {:?}",
+                    target.pid, target.start_id, outcome
+                ));
+                (target.clone(), outcome)
+            })
+            .collect::<Vec<_>>(),
+    )
+    .await;
+    // The reaped leftovers' endpoint files leave with them (the same
+    // deterministic-name gate the boot reap applies).
+    for (target, outcome) in outcomes {
+        if let (Some(socket), ReapOutcome::Term | ReapOutcome::Kill) =
+            (&target.worker_socket, outcome)
+        {
+            if is_unix_socket_file(socket) {
+                let _ = std::fs::remove_file(socket);
+            }
+        }
+    }
 }
 
 /// Whether the pid still names the discovered process (the identity gate: a
@@ -273,20 +340,33 @@ async fn await_gone(target: &ReapTarget, budget: Duration) -> bool {
 /// this daemon's own descriptors name (the adoption pass's business).
 /// Linux-only (the /proc census); other platforms answer nothing.
 #[cfg(target_os = "linux")]
-fn same_socket_worker_targets(socket_path: &Path, protected: &HashSet<u32>) -> Vec<ReapTarget> {
+fn same_socket_worker_targets(
+    socket_path: &Path,
+    protected: &HashSet<u32>,
+    active_session: Option<&str>,
+) -> Vec<ReapTarget> {
     let socket = normalize_socket_spelling(socket_path);
     let mut targets = Vec::new();
     for pid in numeric_proc_entries() {
         if pid == std::process::id() || protected.contains(&pid) {
             continue;
         }
-        // The identity captures BEFORE the /proc reads and re-verifies
-        // AFTER the qualification: a worker that exits mid-census and
-        // whose pid the kernel immediately recycles must never leave a
-        // target behind under the REUSHER'S identity (the late capture
-        // would have validated the replacement and signaled an
-        // unrelated process).
+        // The identity captures BEFORE every /proc read (the abandoned-id
+        // filter included) and re-verifies AFTER the qualification: a
+        // worker that exits mid-census and whose pid the kernel
+        // immediately recycles must never leave a target behind under
+        // the REPLACEMENT'S identity - a recycled worker of ANOTHER
+        // session would otherwise pass the late identity check with its
+        // own argv/exe/socket and take the abandoned id's signal.
         let start_id = crate::lease::get_process_start_id(pid);
+        // The abandoned-id filter (the give-up belt's target class): only
+        // workers whose active-session env names the given-up id. `None`
+        // keeps the boot reap's whole-census shape.
+        if let Some(active_session) = active_session {
+            if !proc_environ_names_active_session(pid, active_session) {
+                continue;
+            }
+        }
         let Some(argv) = read_proc_argv(pid) else {
             continue;
         };
@@ -366,7 +446,7 @@ fn socket_spelling_of(pid: u32, value: &str) -> String {
 pub(crate) fn is_product_binary(exe: &str) -> bool {
     matches!(
         Path::new(exe).file_name().and_then(|name| name.to_str()),
-        Some("prime-agent") | Some("pa-daemon")
+        Some("prime-agent" | "pa-daemon")
     )
 }
 
@@ -399,8 +479,32 @@ pub(crate) fn is_our_worker_socket(path: &str, supervisor_socket: &Path) -> bool
 }
 
 #[cfg(not(target_os = "linux"))]
-fn same_socket_worker_targets(_socket_path: &Path, _protected: &HashSet<u32>) -> Vec<ReapTarget> {
+fn same_socket_worker_targets(
+    _socket_path: &Path,
+    _protected: &HashSet<u32>,
+    _active_session: Option<&str>,
+) -> Vec<ReapTarget> {
     Vec::new()
+}
+
+/// Whether one process's environment names `active_session` as its worker
+/// active-session id (the supervisor stamps
+/// `WORKER_ACTIVE_SESSION_ID_ENV` on every spawn; an unreadable
+/// environment never matches - the conservative no-signal default).
+#[cfg(target_os = "linux")]
+fn proc_environ_names_active_session(pid: u32, active_session: &str) -> bool {
+    read_proc_environ(pid).is_some_and(|environ| {
+        environ.iter().any(|entry| {
+            entry
+                .strip_prefix(&format!("{}=", crate::worker::WORKER_ACTIVE_SESSION_ID_ENV))
+                .is_some_and(|value| value == active_session)
+        })
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn proc_environ_names_active_session(_pid: u32, _active_session: &str) -> bool {
+    false
 }
 
 /// The wedged supervisors of this socket path: a supervisor-shaped process
@@ -514,8 +618,10 @@ pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> boo
 
 /// Whether the path is a unix socket file (the reap's endpoint unlink
 /// removes endpoints only - a regular file at a matching name is never
-/// touched).
-#[cfg(target_os = "linux")]
+/// touched). UNIX-wide on purpose (the caller is unconditional): the
+/// std `os::unix` socket-file probe compiles on every unix - darwin
+/// included.
+#[cfg(unix)]
 fn is_unix_socket_file(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
     std::fs::symlink_metadata(path)
@@ -606,7 +712,10 @@ fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
 /// leftover carries), so a leftover whose inherited spelling differs
 /// (`/a/b/../c/daemon.sock` vs `/a/c/daemon.sock`, a symlinked tmpdir)
 /// is still a same-socket predecessor - its lease is held either way.
-#[cfg(target_os = "linux")]
+/// Pure `std` (canonicalize + components): it compiles on every unix -
+/// darwin included, which the unconditional `supervisor_argv_names_socket`
+/// (the argv-only view the supervisor census normalizes with) requires.
+#[cfg(unix)]
 pub(crate) fn normalize_socket_spelling(path: &Path) -> String {
     if let Ok(canonical) = path.canonicalize() {
         return canonical.to_string_lossy().to_string();
@@ -694,10 +803,99 @@ mod tests {
         }
     }
 
+    /// Kills and reaps the child on any exit path (a failed assertion in
+    /// between would otherwise leak the `sleep` into the test machine: the
+    /// std child kills nothing on drop).
+    struct ReapOnDrop(Option<std::process::Child>);
+
+    impl Drop for ReapOnDrop {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.0.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    /// The abandoned-id filter (the give-up belt's target class): only a
+    /// process whose environment names the given-up id as its worker
+    /// active-session matches. A `sleep` child inherits the test's env
+    /// (never the worker var), and one stamped with the env answers true
+    /// only for its own id.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_abandoned_id_filter_matches_the_stamped_env_only() {
+        let _unstamped_guard = ReapOnDrop(
+            std::process::Command::new("sleep")
+                .arg("300")
+                .env_remove(crate::worker::WORKER_ACTIVE_SESSION_ID_ENV)
+                .spawn()
+                .expect("spawn unstamped sleep")
+                .into(),
+        );
+        assert!(
+            !proc_environ_names_active_session(
+                _unstamped_guard
+                    .0
+                    .as_ref()
+                    .expect("guard holds the child")
+                    .id(),
+                "6b558be357e3"
+            ),
+            "an unstamped environment never matches the abandoned id"
+        );
+        let stamped_guard = ReapOnDrop(
+            std::process::Command::new("sleep")
+                .arg("300")
+                .env(crate::worker::WORKER_ACTIVE_SESSION_ID_ENV, "6b558be357e3")
+                .spawn()
+                .expect("spawn stamped sleep")
+                .into(),
+        );
+        let stamped = stamped_guard
+            .0
+            .as_ref()
+            .expect("guard holds the child")
+            .id();
+        // The stamp is readable only once execve completes: between fork
+        // and exec the child's environment area still holds the parent's
+        // (parallel-test load widens that window), so the read retries a
+        // bounded budget instead of racing the kernel.
+        let stamped_matches = {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if proc_environ_names_active_session(stamped, "6b558be357e3") {
+                    break true;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the stamped environment never matched its abandoned id"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        assert!(
+            stamped_matches,
+            "the stamped environment matches its abandoned id"
+        );
+        assert!(
+            !proc_environ_names_active_session(stamped, "other-id"),
+            "a different abandoned id never matches"
+        );
+        assert!(
+            !proc_environ_names_active_session(0, "6b558be357e3"),
+            "an unreadable pid is the conservative no-match"
+        );
+    }
+
     /// A reaped process is provably gone after the escalation: the reap's
     /// own child (the same contract the CLI stop test uses) dies inside the
     /// TERM grace and reports Term. The signal rides the kernel-held pidfd
     /// (the open itself proves the handle is available on this kernel).
+    /// LINUX ONLY: the stop is real only where the pidfd opens - elsewhere
+    /// `stop_target` is the never-signal no-op, and the live `sleep` child
+    /// would never exit for the wait.
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_real_process_stops_inside_the_term_grace() {
         let mut child = std::process::Command::new("sleep")
@@ -705,7 +903,6 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         let pid = child.id();
-        #[cfg(target_os = "linux")]
         assert!(
             pa_core::platform::process::open_pidfd(pid).is_some(),
             "the kernel-held handle opens"
@@ -773,11 +970,11 @@ mod tests {
     fn worker_argv_shapes() {
         let worker = ["/bin/prime-agent", "worker"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         let pa_daemon_worker = ["/usr/bin/pa-daemon", "worker", "--flag"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         let kernel = [
             "/opt/kernel-venv/bin/python",
@@ -785,19 +982,19 @@ mod tests {
             "prime_agent_runtime.kernel",
         ]
         .iter()
-        .map(|arg| arg.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
         let bash_child = ["/usr/bin/sleep", "300"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         let bare = ["/usr/local/bin/prime-agent"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         let worker_flag_second = ["/usr/local/bin/prime-agent", "--mode", "worker"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         assert!(is_worker_argv(&worker), "the product worker role");
         assert!(
@@ -819,7 +1016,7 @@ mod tests {
         );
         let foreign_worker_arg = ["/usr/bin/python", "worker"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         assert!(
             !is_worker_argv(&foreign_worker_arg),
@@ -878,7 +1075,7 @@ mod tests {
             "/tmp/x/daemon.sock",
         ]
         .iter()
-        .map(|arg| arg.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
         assert!(supervisor_argv_names_socket(
             &direct,
@@ -892,7 +1089,7 @@ mod tests {
             "/tmp/x/y/../daemon.sock",
         ]
         .iter()
-        .map(|arg| arg.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
         assert!(
             supervisor_argv_names_socket(
@@ -947,7 +1144,7 @@ mod tests {
             "/tmp/sock/daemon.sock",
         ]
         .iter()
-        .map(|arg| arg.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
         let direct = [
             "/usr/bin/pa-daemon",
@@ -958,7 +1155,7 @@ mod tests {
             "/agent",
         ]
         .iter()
-        .map(|arg| arg.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
         let other_socket = [
             "/usr/local/bin/prime-agent",
@@ -968,11 +1165,11 @@ mod tests {
             "/tmp/OTHER/daemon.sock",
         ]
         .iter()
-        .map(|arg| arg.to_string())
+        .map(ToString::to_string)
         .collect::<Vec<_>>();
         let interactive = ["/usr/local/bin/prime-agent"]
             .iter()
-            .map(|arg| arg.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>();
         assert!(supervisor_argv_names_socket(
             &product,

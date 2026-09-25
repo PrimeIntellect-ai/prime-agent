@@ -80,7 +80,7 @@ fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
-        "created": 1750000000,
+        "created": 1_750_000_000,
         "model": "mock-1",
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
     })
@@ -231,7 +231,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -268,7 +268,7 @@ impl Client {
 
     /// The response for `id`, with every session event observed on the way.
     fn request(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -355,7 +355,7 @@ fn setup_with_rejection(
                             "id": "mock-1",
                             "name": "Mock 1",
                             "api": "openai-completions",
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096
                         }
                     ]
@@ -541,7 +541,7 @@ fn provider_failure_is_retried_then_surfaced_to_attached_clients() {
         .filter(|event| {
             matches!(
                 event.get("type").and_then(Value::as_str),
-                Some("message_start") | Some("message_end")
+                Some("message_start" | "message_end")
             ) && event["message"]["role"] == "custom"
                 && event["message"]["customType"] == "provider_retry_outcome"
         })
@@ -741,7 +741,7 @@ impl DirectClient {
     }
 
     fn read_frame(&mut self) -> (Value, Value) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         let (header, payload) = self
             .read_frame_soft(deadline)
             .expect("worker frame read timed out");
@@ -771,7 +771,7 @@ impl DirectClient {
             NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         );
         self.send_frame(command_type, &request_id, payload);
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         loop {
             assert!(Instant::now() < deadline, "no response for {request_id}");
             let (header, body) = self.read_frame();
@@ -832,7 +832,7 @@ fn provider_failure_surfaces_on_the_direct_transport_path() {
     );
     let mut events: Vec<Value> = Vec::new();
     let mut response = None;
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     while response.is_none() {
         assert!(Instant::now() < deadline, "direct prompt never settled");
         let (header, body) = direct.read_frame();

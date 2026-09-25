@@ -145,7 +145,7 @@ fn coerce_children(schema: &Value, value: &mut Value) {
 }
 
 fn number_value(n: f64) -> Value {
-    if n.fract() == 0.0 && n.abs() < 9.007199254740992e15 {
+    if n.fract() == 0.0 && n.abs() < 9.007_199_254_740_992e15 {
         Value::from(n as i64)
     } else {
         serde_json::Number::from_f64(n)

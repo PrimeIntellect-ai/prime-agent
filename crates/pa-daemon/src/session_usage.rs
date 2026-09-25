@@ -534,7 +534,7 @@ mod tests {
         let summary = scan_summary(&[line("a", 0.1), line("b", 0.2), line("c", 0.3)]);
         let cost = summary.as_ref().map(|summary| summary.cost);
         assert_eq!(cost, Some(0.1 + 0.2 + 0.3));
-        assert_eq!(cost, Some(0.6000000000000001));
+        assert_eq!(cost, Some(0.600_000_000_000_000_1));
     }
 
     /// A persisted partial usage object (`{input, output, totalTokens}`

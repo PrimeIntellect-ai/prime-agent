@@ -158,7 +158,7 @@ pub fn parse_event(line: &str) -> Result<Event, String> {
         Some(map)
             if matches!(
                 map.get("event").and_then(Value::as_str),
-                Some("display") | Some("host_request")
+                Some("display" | "host_request")
             ) =>
         {
             map.remove("data").unwrap_or(Value::Null)

@@ -3,11 +3,14 @@
 //! Parity with the TS product's `getOrCreateTelemetryInstallationId`: a
 //! `<agentDir>/telemetry.json` state file `{ "version": 1, "installationId":
 //! <uuid> }`, created exclusively and mode 0600 on first use, validated on
-//! load, atomically replaced when the stored state is invalid.
+//! load, atomically replaced when the stored state is invalid. The exclusive
+//! create publishes a fully-written candidate (unique temp file + hard
+//! link), so concurrent creators converge on one id and never observe a
+//! half-written winner.
 
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -24,7 +27,8 @@ struct State {
 
 /// Load the installation id from `<agentDir>/telemetry.json`, creating it on
 /// first use. Concurrent callers on the same directory converge on one id:
-/// the create is exclusive and losers re-read the winner's state.
+/// the create is exclusive, the winner's state is published fully written,
+/// and losers re-read the winner's state.
 pub fn install_id(agent_dir: &Path) -> Result<String> {
     let path = agent_dir.join(STATE_FILE);
     if let Some(existing) = read_install_id(&path)? {
@@ -41,20 +45,30 @@ pub fn install_id(agent_dir: &Path) -> Result<String> {
     };
     let payload = serde_json::to_vec_pretty(&state)?;
 
-    match create_exclusive(&path, &payload) {
-        Ok(()) => Ok(installation_id),
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+    match publish_exclusive(&path, &payload)? {
+        // Return the id the state file stores now: on the hard-link path the
+        // durable file is this caller's own payload, and on the no-hard-link
+        // fallback a concurrent repairer may have replaced a partial state
+        // while the fallback writer was writing, so every caller converges
+        // on the durable id.
+        Publish::Won => Ok(read_install_id(&path)?.unwrap_or(installation_id)),
+        Publish::Lost => {
             // Lost a create race: prefer the winner's id if it is valid,
-            // otherwise replace the invalid state atomically.
+            // otherwise replace the invalid state atomically. The winner's
+            // publish is atomic, so this re-read can only miss on state that
+            // was already invalid before the race, never on a winner whose
+            // write is still in flight.
             match read_install_id(&path)? {
                 Some(existing) => Ok(existing),
                 None => {
                     replace_invalid_state(&path, &payload)?;
-                    Ok(installation_id)
+                    // Return the id the state file stores now: a concurrent
+                    // repair may have landed its rename after ours, and every
+                    // caller must converge on the durable id.
+                    Ok(read_install_id(&path)?.unwrap_or(installation_id))
                 }
             }
         }
-        Err(err) => Err(err).with_context(|| format!("create {}", path.display())),
     }
 }
 
@@ -72,16 +86,76 @@ fn read_install_id(path: &Path) -> Result<Option<String>> {
     Ok(valid)
 }
 
-/// Atomically replace invalid state (temp file + rename, both sides of the
-/// rename land on the same filesystem inside the agent dir). The rename goes
-/// through `rename_onto` so the win32 destination-busy retry applies, like
-/// the TS `writeTelemetryStateAtomically` (`writeFileAtomicSync`).
+/// Outcome of trying to publish a candidate state file exclusively.
+enum Publish {
+    /// The candidate is live at the target path.
+    Won,
+    /// Another file already owns the path.
+    Lost,
+}
+
+/// Publish the candidate state exclusively so exactly one concurrent caller
+/// wins and its state appears at `path` fully written. The candidate is
+/// written to a unique sibling temp file and hard-linked into place: `link`
+/// is an atomic exclusive create, so a loser can never observe the winner's
+/// file mid-write. Filesystems without hard links fall back to the
+/// open+write+sync exclusive create, where losers re-read after
+/// `AlreadyExists`.
+fn publish_exclusive(path: &Path, payload: &[u8]) -> Result<Publish> {
+    let tmp = unique_sibling(path);
+    let linked = create_exclusive(&tmp, payload).and_then(|()| std::fs::hard_link(&tmp, path));
+    match linked {
+        Ok(()) => {
+            remove_quietly(&tmp);
+            Ok(Publish::Won)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            remove_quietly(&tmp);
+            Ok(Publish::Lost)
+        }
+        Err(_) => {
+            remove_quietly(&tmp);
+            match create_exclusive(path, payload) {
+                Ok(()) => Ok(Publish::Won),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(Publish::Lost),
+                Err(err) => Err(err).with_context(|| format!("create {}", path.display())),
+            }
+        }
+    }
+}
+
+/// Atomically replace invalid state (unique temp file + rename, both sides of
+/// the rename land on the same filesystem inside the agent dir, and a unique
+/// temp name keeps concurrent replacers from sharing one temp file). The
+/// rename goes through `rename_onto` so the win32 destination-busy retry
+/// applies, like the TS `writeTelemetryStateAtomically`
+/// (`writeFileAtomicSync`).
 fn replace_invalid_state(path: &Path, payload: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, payload).with_context(|| format!("write {}", tmp.display()))?;
-    set_file_private(&tmp)?;
-    crate::rename_onto(&tmp, path)
-        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()))
+    let tmp = unique_sibling(path);
+    if let Err(err) = create_exclusive(&tmp, payload) {
+        remove_quietly(&tmp);
+        return Err(err).with_context(|| format!("create {}", tmp.display()));
+    }
+    let renamed = crate::rename_onto(&tmp, path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), path.display()));
+    if renamed.is_err() {
+        remove_quietly(&tmp);
+    }
+    renamed
+}
+
+/// Unique sibling of `path` for atomic publishes: inside the same directory
+/// (so the hard link and the rename stay on one filesystem) and unique per
+/// call, so concurrent creators and replacers never share a temp file.
+fn unique_sibling(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.tmp", uuid::Uuid::new_v4()));
+    path.with_file_name(name)
+}
+
+/// Best-effort temp cleanup: a stale candidate must never fail the caller.
+fn remove_quietly(path: &Path) {
+    let _ = std::fs::remove_file(path);
 }
 
 /// Exclusive create with 0600 permissions on unix (Windows has no portable
@@ -97,21 +171,6 @@ fn create_exclusive(path: &Path, payload: &[u8]) -> std::io::Result<()> {
     let mut file = options.open(path)?;
     file.write_all(payload)?;
     file.sync_all()
-}
-
-fn set_file_private(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, perms)
-            .with_context(|| format!("chmod 600 {}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
-    }
-    Ok(())
 }
 
 /// TS parity validation: hex uuid whose version nibble is 1-8 and variant
@@ -163,10 +222,22 @@ mod tests {
         let first = install_id(dir.path()).unwrap();
         let second = install_id(dir.path()).unwrap();
         assert_eq!(first, second);
-        let state: State =
-            serde_json::from_slice(&std::fs::read(dir.path().join(STATE_FILE)).unwrap()).unwrap();
+        let path = dir.path().join(STATE_FILE);
+        let state: State = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(state.version, 1);
         assert_eq!(state.installation_id, first);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "created state must stay private");
+        }
+        // No candidate temps may survive a clean create.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(leftovers, [STATE_FILE]);
     }
 
     #[test]
@@ -214,5 +285,43 @@ mod tests {
         });
         let ids = ids.into_inner().unwrap();
         assert!(ids.iter().all(|id| id == &ids[0]));
+    }
+
+    /// Concurrent creators must converge on one durable id: this loop aligns
+    /// more callers than there are cores on a fresh directory over and over,
+    /// and asserts every caller returns the same id the state file stores.
+    #[test]
+    fn concurrent_create_stress_converges() {
+        const ROUNDS: usize = 64;
+        const THREADS: usize = 16;
+        for round in 0..ROUNDS {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().to_path_buf();
+            let start = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+            let ids: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+            std::thread::scope(|scope| {
+                for _ in 0..THREADS {
+                    let ids = &ids;
+                    let path = path.clone();
+                    let start = start.clone();
+                    scope.spawn(move || {
+                        start.wait();
+                        let id = install_id(&path).unwrap();
+                        ids.lock().unwrap().push(id);
+                    });
+                }
+            });
+            let ids = ids.into_inner().unwrap();
+            assert_eq!(ids.len(), THREADS, "every caller must return an id");
+            let distinct: std::collections::HashSet<&String> = ids.iter().collect();
+            assert_eq!(
+                distinct.len(),
+                1,
+                "round {round} diverged across {THREADS} callers: {ids:?}"
+            );
+            let state: State =
+                serde_json::from_slice(&std::fs::read(path.join(STATE_FILE)).unwrap()).unwrap();
+            assert_eq!(state.installation_id, ids[0], "durable state must match");
+        }
     }
 }

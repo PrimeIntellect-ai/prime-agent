@@ -45,9 +45,7 @@ pub struct RefineCommandOptions {
 pub fn parse_refine_command_options(args: &str) -> Result<RefineCommandOptions, String> {
     let mut rest = args.trim();
     let mut global = false;
-    if rest.starts_with("--global")
-        && matches!(rest.as_bytes().get(8), None | Some(b' ') | Some(b'\t'))
-    {
+    if rest.starts_with("--global") && matches!(rest.as_bytes().get(8), None | Some(b' ' | b'\t')) {
         global = true;
         rest = rest["--global".len()..].trim();
     }

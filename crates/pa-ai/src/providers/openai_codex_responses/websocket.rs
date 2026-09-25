@@ -172,14 +172,14 @@ fn bun_read_failure(error: WsError) -> WebSocketTransportError {
         WsError::Protocol(ProtocolError::NonZeroReservedBits) => {
             WebSocketTransportError::close(1011, "Compression not implemented yet")
         }
-        WsError::Protocol(ProtocolError::InvalidOpcode(_))
-        | WsError::Protocol(ProtocolError::UnknownDataFrameType(_))
-        | WsError::Protocol(ProtocolError::UnknownControlFrameType(_)) => {
-            WebSocketTransportError::close(
-                WEBSOCKET_CLOSE_CODE_PROTOCOL,
-                "Protocol error - unsupported control frame",
-            )
-        }
+        WsError::Protocol(
+            ProtocolError::InvalidOpcode(_)
+            | ProtocolError::UnknownDataFrameType(_)
+            | ProtocolError::UnknownControlFrameType(_),
+        ) => WebSocketTransportError::close(
+            WEBSOCKET_CLOSE_CODE_PROTOCOL,
+            "Protocol error - unsupported control frame",
+        ),
         WsError::Protocol(other) => WebSocketTransportError::close(
             WEBSOCKET_CLOSE_CODE_PROTOCOL,
             &format!("Protocol error - {other}"),
@@ -335,9 +335,7 @@ async fn read_request_events(
                         let event_type = event.get("type").and_then(Value::as_str);
                         if matches!(
                             event_type,
-                            Some("response.completed")
-                                | Some("response.done")
-                                | Some("response.incomplete")
+                            Some("response.completed" | "response.done" | "response.incomplete")
                         ) {
                             saw_completion = true;
                         }
@@ -395,9 +393,7 @@ async fn read_request_events(
                 };
                 return Err(CodexStreamError::Transport(error));
             }
-            Some(Ok(Message::Ping(_)))
-            | Some(Ok(Message::Pong(_)))
-            | Some(Ok(Message::Frame(_))) => {
+            Some(Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_))) => {
                 continue;
             }
             Some(Err(error)) => {

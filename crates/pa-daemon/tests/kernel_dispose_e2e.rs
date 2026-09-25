@@ -219,7 +219,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -241,7 +241,7 @@ impl Client {
     }
 
     fn read_response(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(240);
+        let deadline = Instant::now() + Duration::from_mins(4);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -364,7 +364,7 @@ fn kill_disposes_the_session_kernel() {
     let session_id = create_session_with_kernel(&mut client, dir.path(), &script, "c1");
 
     // The session's kernel booted and executed the cell.
-    let kernels = await_new_kernel(&baseline, Duration::from_secs(120));
+    let kernels = await_new_kernel(&baseline, Duration::from_mins(2));
     await_receipt(dir.path());
 
     // User delete: the routed `kill` closes the session (the supervisor
@@ -402,7 +402,7 @@ fn shutdown_disposes_session_kernels_before_the_worker_exits() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
     let _session_id = create_session_with_kernel(&mut client, dir.path(), &script, "c1");
-    await_new_kernel(&baseline, Duration::from_secs(120));
+    await_new_kernel(&baseline, Duration::from_mins(2));
     await_receipt(dir.path());
 
     // Daemon stop: the supervisor routes `shutdown` to the workers and
@@ -437,7 +437,7 @@ fn orphan_exit_disposes_the_kernel_before_the_worker_exits() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
     let _session_id = create_session_with_kernel(&mut client, dir.path(), &script, "c1");
-    await_new_kernel(&baseline, Duration::from_secs(120));
+    await_new_kernel(&baseline, Duration::from_mins(2));
     await_receipt(dir.path());
 
     // Hard-kill the supervisor: no graceful stop runs, so the worker's

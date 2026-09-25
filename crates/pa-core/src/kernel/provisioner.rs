@@ -910,7 +910,7 @@ mod tests {
         let started = std::time::Instant::now();
         let _ = provisioner.ensure(None, None).await;
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(5_000),
+            started.elapsed() < std::time::Duration::from_secs(5),
             "dispose during retry must cancel the backoff promptly"
         );
     }

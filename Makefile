@@ -24,13 +24,15 @@ windows-cross:
 	cargo clippy --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
 # Lints the live workflow files (.github/workflows/; promoted from
-# ci/workflows/ via make activate-workflows). The staged ci.yml/benchmark.yml
-# still carry pre-existing findings (custom self-hosted label needs an
-# actionlint.yaml labels config; SC2012 info in benchmark.yml) and stay out
-# of this gate until their lane owners clean them up.
+# ci/workflows/ via make activate-workflows) plus the still-staged
+# ci/workflows/ci.yml, which is clean under actionlint. The staged
+# benchmark.yml still carries pre-existing findings (the custom
+# self-hosted `prime-sandbox` label needs an actionlint.yaml labels
+# config; SC2012 info) and stays out of this gate until its lane owner
+# cleans it up.
 actionlint:
 	@command -v actionlint >/dev/null 2>&1 || { echo "actionlint not installed (see rhysd/actionlint releases)"; exit 1; }
-	actionlint .github/workflows/continuous.yml .github/workflows/release.yml
+	actionlint .github/workflows/ci.yml .github/workflows/continuous.yml .github/workflows/release.yml ci/workflows/ci.yml
 
 # GLIBC baseline gate (the continuous.yml/release.yml build-gnu jobs): a
 # GNU/Linux artifact must not require symbols above GLIBC_2.35, the Ubuntu

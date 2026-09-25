@@ -63,7 +63,7 @@ fn faux_script(dir: &Path) -> PathBuf {
             "modelId": "faux-1",
             "modelName": "Faux Model",
             "reasoning": false,
-            "contextWindow": 128000,
+            "contextWindow": 128_000,
             "tokensPerSecond": 30,
             "responses": [
                 {"content": [
@@ -154,7 +154,7 @@ impl Client {
     }
 
     fn read_line(&mut self) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -190,7 +190,7 @@ impl Client {
     }
 
     fn request(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -214,7 +214,7 @@ impl Client {
 
     /// Drain until the socket stays quiet for `quiet_ms`.
     fn drain_events(&mut self, quiet_ms: Duration) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         let mut last_line = Instant::now();
         loop {
             assert!(Instant::now() < deadline, "event drain timed out");
@@ -292,7 +292,7 @@ fn abort_during_a_kernel_cell_settles_the_daemon_turn_immediately() {
     );
     assert_eq!(started["success"], true, "prompt failed: {started}");
     let marker = cwd.join("wedge-started");
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_mins(3);
     while Instant::now() < deadline {
         if marker.exists() {
             break;

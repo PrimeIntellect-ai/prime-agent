@@ -135,7 +135,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -157,7 +157,7 @@ impl Client {
     }
 
     fn read_response(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(240);
+        let deadline = Instant::now() + Duration::from_mins(4);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
