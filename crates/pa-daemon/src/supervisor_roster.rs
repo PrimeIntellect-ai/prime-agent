@@ -226,14 +226,18 @@ impl Supervisor {
     /// TS `flipWorkerRosterEntriesInactive` (the Rust form: one pass in
     /// place, no ledger reseed, no transcript read): a stopped worker's
     /// rows settle where they are. An ephemeral (client-owned) worker's
-    /// rows and queued children die with the registration; a subagent row
-    /// whose ledger edge is tombstoned (or whose transcript is gone) dies
-    /// with the deletion; a subagent row still descending from a
-    /// surviving resident root passivates - its summary keeps every
-    /// durable display field (model, thinking level, cwd) and drops only
-    /// the live-only fields (TS `passivatedWorkerRosterEntry`); a
-    /// top-level row is removed (a roster that passivated every stopped
-    /// top-level row would grow forever).
+    /// rows and queued children die with the registration; the TOP-LEVEL
+    /// row passivates, exactly like TS (TS
+    /// `passivatedWorkerRosterEntry` keeps every durable display field -
+    /// model, thinking level, cwd - and `lifecycle` stays `"live"`), so a
+    /// stopped session's row stays visible in the agents view instead of
+    /// vanishing until the next catalog scan re-lists it from disk; a
+    /// subagent row keeps the family walk (the live edge and a surviving
+    /// resident root anchor it; the tombstoned edge of a deleted child
+    /// dies with the deletion). The roster's growth with passivated
+    /// top-level rows is daemon-lifetime bounded (TS accepts the same),
+    /// and the unowned sweep below still settles the dead seeded
+    /// families (the #2716 flash).
     pub(crate) async fn passivate_roster_worker(
         self: &Arc<Self>,
         worker_id: &str,
@@ -332,17 +336,27 @@ impl Supervisor {
                 {
                     continue;
                 }
+                // TS `flipWorkerRosterEntriesInactive` (the non-ephemeral,
+                // non-queued arms): a stopped worker's TOP-LEVEL row
+                // rewrites passivated (TS `passivatedWorkerRosterEntry`
+                // keeps `lifecycle: "live"` and every durable display
+                // field), so a stopped session's row stays visible in the
+                // view instead of vanishing until a catalog scan re-lists
+                // it from disk - the agents view merges the passivated
+                // row with its saved catalog row by identity, so it never
+                // renders twice, and a re-registration replaces the
+                // passive row in place. A SUBAGENT row keeps the family
+                // walk: the live edge and a surviving resident root anchor
+                // it (the tombstoned edge of a deleted child dies with the
+                // deletion; a dead family's child returns to the saved
+                // catalog alone - the #2716 flash design).
                 let subagent = entry
                     .summary
                     .get("rlmChildId")
                     .and_then(Value::as_str)
                     .is_some();
-                // A subagent row survives only while a live edge still
-                // carries it and a surviving resident root anchors its
-                // family walk; everything else (top-level rows included)
-                // is removed.
-                let anchored = subagent
-                    && entry
+                let anchored = !subagent
+                    || entry
                         .summary
                         .get("sessionFile")
                         .and_then(Value::as_str)
@@ -396,18 +410,24 @@ impl Supervisor {
                         .get("rlmChildId")
                         .and_then(Value::as_str)
                         .is_some();
-                    let anchored = subagent
-                        && entry
-                            .summary
-                            .get("sessionFile")
-                            .and_then(Value::as_str)
-                            .is_some_and(|file| {
-                                parent_by_child
-                                    .get(&canonical_session_path(Path::new(file)))
-                                    .is_some_and(|parent| {
-                                        family_descends_from(parent_by_child, parent, &roots)
-                                    })
-                            });
+                    // Only seeded subagent rows are the sweep's business:
+                    // a passivated TOP-LEVEL row is unowned too (the stop
+                    // pass cleared its worker), but it is a stopped
+                    // session's visible row, not a dead family's flash.
+                    if !subagent {
+                        continue;
+                    }
+                    let anchored = entry
+                        .summary
+                        .get("sessionFile")
+                        .and_then(Value::as_str)
+                        .is_some_and(|file| {
+                            parent_by_child
+                                .get(&canonical_session_path(Path::new(file)))
+                                .is_some_and(|parent| {
+                                    family_descends_from(parent_by_child, parent, &roots)
+                                })
+                        });
                     if !anchored {
                         roster.delete(&entry.agent_id);
                         removed.push(entry.agent_id.clone());
@@ -655,12 +675,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Rows without an anchor are removed, never passivated: a
-    /// tombstoned ledger edge (the user deleted the subagent), a live
-    /// edge with no resident root, a top-level row, a queued child, and
-    /// an ephemeral worker's rows all die with the stop.
+    /// Unanchored subagent rows are removed, never passivated (a
+    /// tombstoned ledger edge - the user deleted the subagent - or a live
+    /// edge with no resident root), a queued child and an ephemeral
+    /// worker's rows die with the stop, and the TOP-LEVEL row passivates
+    /// (TS keeps every stopped non-ephemeral row visible: the operator's
+    /// rows-disappear report), surviving later stops' unowned sweeps.
     #[tokio::test]
-    async fn stop_removes_unanchored_rows() {
+    async fn stop_removes_unanchored_children_and_passivates_the_top_level_row() {
         let (dir, supervisor, root_file, child_file) = roster_fixture().await;
         let agent_dir = dir.join("agent");
         let sessions_dir = agent_dir.join("sessions");
@@ -722,13 +744,22 @@ mod tests {
             "an unanchored row dies: {pushes:?}"
         );
 
-        // A top-level row is removed, exactly like the remove+reseed it
-        // replaces (the reseed never resurrected roots).
+        // A top-level row PASSIVATES with the stop (TS
+        // `flipWorkerRosterEntriesInactive` keeps every stopped
+        // non-ephemeral row visible; the operator's rows-disappear
+        // report): the push carries the passivated entry - `lifecycle`
+        // stays "live", the live-only fields drop - and the roster keeps
+        // the row, so the agents view's Inactive section keeps the
+        // stopped session instead of losing it until the next catalog
+        // scan.
         let mut top_summary = live_child_summary(&root_file, &child_file);
         top_summary["runtimeKind"] = json!("top-level");
         top_summary["sessionId"] = json!("root-persisted");
         top_summary["id"] = json!("root-persisted");
         top_summary["sessionFile"] = json!(root_file.to_string_lossy());
+        // The real worker's summary carries its lifecycle (the view's
+        // visibility gate); the passivation preserves it.
+        top_summary["lifecycle"] = json!("live");
         top_summary.as_object_mut().unwrap().remove("rlmChildId");
         top_summary
             .as_object_mut()
@@ -739,12 +770,32 @@ mod tests {
         supervisor.passivate_roster_worker("w-top", false).await;
         let pushes = drain_roster_pushes(&mut events);
         assert!(
-            pushes[0]["removed"]
+            pushes[0]["changed"]
                 .as_array()
-                .is_some_and(|ids| ids.len() == 1),
-            "the top-level row dies: {pushes:?}"
+                .is_some_and(|entries| entries.iter().any(|entry| {
+                    entry["summary"]["sessionId"] == json!("root-persisted")
+                        && entry["status"] == json!("inactive")
+                        && entry["summary"]["lifecycle"] == json!("live")
+                })),
+            "the top-level row passivates (lifecycle stays live): {pushes:?}"
         );
-
+        assert!(
+            pushes[0]["removed"].is_null() || pushes[0]["removed"] == json!([]),
+            "the passivated top-level row is not a removal: {pushes:?}"
+        );
+        let entries = supervisor.roster.lock().unwrap().entries();
+        let passivated = entries
+            .iter()
+            .find(|entry| {
+                entry.summary.get("sessionId").and_then(Value::as_str) == Some("root-persisted")
+            })
+            .expect("the passivated top-level row stays in the roster");
+        assert_eq!(passivated.status, AgentRosterStatus::Inactive);
+        assert!(
+            passivated.summary.get("workerState").is_none()
+                && passivated.summary.get("activeSessionId").is_none(),
+            "the live-only fields dropped with the passivation: {passivated:?}"
+        );
         // A queued child and an ephemeral worker's rows die with the stop.
         let mut queued_summary = live_child_summary(&root_file, &child_file);
         queued_summary["rlmChildId"] = json!("sub-queued");
@@ -779,6 +830,22 @@ mod tests {
                 |entry| entry.summary.get("rlmChildId").and_then(Value::as_str)
                     != Some("sub-queued")
             ));
+
+        // A LATER stop's unowned sweep never revisits the passivated
+        // top-level row (the sweep's business is the dead seeded
+        // families, not the stopped sessions' visible rows): the queued
+        // arm above was one stop pass since the row passivated, and this
+        // one is a second - the row survives both sweeps. The lock drops
+        // before the test's end; no await runs under it.
+        supervisor.passivate_roster_worker("w-none", false).await;
+        let roster = supervisor.roster.lock().unwrap();
+        assert!(
+            roster.entries().iter().any(|entry| {
+                entry.summary.get("sessionId").and_then(Value::as_str) == Some("root-persisted")
+            }),
+            "the passivated top-level row survives later stops' sweeps"
+        );
+        drop(roster);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
