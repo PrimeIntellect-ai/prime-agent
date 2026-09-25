@@ -3132,6 +3132,10 @@ mod tests {
             "the first card expanded: {after}"
         );
         let expanded_rows = v.count_entry_rows(0, 80);
+        eprintln!(
+            "[toggledbg] overrides={:?} global={:?} expanded={expanded_rows} collapsed={collapsed_rows} entry0_detail={:?}",
+            v.entry_expanded, v.detail, v.entry_detail(0)
+        );
         assert!(
             expanded_rows > collapsed_rows,
             "the expanded card measures taller: {collapsed_rows} vs {expanded_rows}"
