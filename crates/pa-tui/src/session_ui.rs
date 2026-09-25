@@ -749,6 +749,7 @@ impl SessionUi {
             pending_confirm: None,
             traces: options.traces.clone(),
             provider_auth: options.provider_auth.clone(),
+            pending_model_sign_in: None,
             auth_panel_notes,
             pending_update: None,
             update_commands: options.update_commands.clone(),
