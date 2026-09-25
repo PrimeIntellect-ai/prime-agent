@@ -357,9 +357,9 @@ pub fn stream_simple_openai_completions(
             stop_reason_raw: None,
             error_message: Some(format!("No API key for provider: {}", model.provider)),
             timestamp: crate::utils_inner::diagnostics::now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
-        message.usage.cost = Default::default();
+        message.usage.cost = UsageCost::default();
         writer.push(AssistantMessageEvent::Error {
             reason: crate::types::ErrorStopReason::Error,
             error: message.clone(),

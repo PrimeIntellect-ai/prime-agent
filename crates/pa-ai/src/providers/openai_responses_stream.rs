@@ -125,7 +125,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 thinking: String::new(),
                                 thinking_signature: None,
                                 redacted: None,
-                                rest: Default::default(),
+                                rest: Map::default(),
                             }));
                         self.writer.push(AssistantMessageEvent::ThinkingStart {
                             content_index: content_index as u64,
@@ -148,7 +148,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                             .push(AssistantContent::Text(TextContent {
                                 text: String::new(),
                                 text_signature: None,
-                                rest: Default::default(),
+                                rest: Map::default(),
                             }));
                         self.writer.push(AssistantMessageEvent::TextStart {
                             content_index: content_index as u64,
@@ -188,9 +188,9 @@ impl<'a> ResponsesStreamProcessor<'a> {
                             .push(AssistantContent::ToolCall(ToolCall {
                                 id: format!("{call_id}|{item_id}"),
                                 name: name.to_string(),
-                                arguments: Default::default(),
+                                arguments: Map::default(),
                                 thought_signature: None,
-                                rest: Default::default(),
+                                rest: Map::default(),
                             }));
                         self.writer.push(AssistantMessageEvent::ToolcallStart {
                             content_index: content_index as u64,
@@ -677,7 +677,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                         .to_string(),
                                     arguments: arguments.as_object().cloned().unwrap_or_default(),
                                     thought_signature: None,
-                                    rest: Default::default(),
+                                    rest: Map::default(),
                                 };
                                 if let Some(AssistantContent::ToolCall(block)) =
                                     self.output.content.get_mut(content_index)
@@ -718,7 +718,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                             .to_string(),
                                         arguments,
                                         thought_signature: None,
-                                        rest: Default::default(),
+                                        rest: Map::default(),
                                     }));
                                 let content_index = self.output.content.len() - 1;
                                 let tool_call = match self.output.content.last() {
@@ -759,7 +759,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                                 .get("id")
                                 .and_then(|value| value.as_str())
                                 .unwrap_or("");
-                            for block in self.output.content.iter_mut() {
+                            for block in &mut self.output.content {
                                 let AssistantContent::Thinking(thinking) = block else {
                                     continue;
                                 };
@@ -812,7 +812,7 @@ impl<'a> ResponsesStreamProcessor<'a> {
                             .get("total_tokens")
                             .and_then(serde_json::Value::as_u64)
                             .unwrap_or(0),
-                        cost: Default::default(),
+                        cost: UsageCost::default(),
                     };
                 }
                 calculate_cost(self.model, &mut self.output.usage, None);

@@ -69,7 +69,7 @@ impl StreamingState {
             .push(AssistantContent::Text(TextContent {
                 text: String::new(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: Map::default(),
             }));
         let index = self.output.content.len() - 1;
         self.text_block = Some(index);
@@ -94,7 +94,7 @@ impl StreamingState {
                 thinking: String::new(),
                 thinking_signature: Some(thinking_signature.to_string()),
                 redacted: None,
-                rest: Default::default(),
+                rest: Map::default(),
             }));
         let index = self.output.content.len() - 1;
         self.thinking_block = Some(index);
@@ -132,9 +132,9 @@ impl StreamingState {
             .push(AssistantContent::ToolCall(ToolCall {
                 id: id.unwrap_or("").to_string(),
                 name: String::new(),
-                arguments: Default::default(),
+                arguments: Map::default(),
                 thought_signature: None,
-                rest: Default::default(),
+                rest: Map::default(),
             }));
         let index = self.output.content.len() - 1;
         if let Some(stream_index) = stream_index {
@@ -388,7 +388,7 @@ fn handle_chunk(
                     detail.get("data").filter(|value| !value.is_null()),
                 ) {
                     let _ = data;
-                    for block in state.output.content.iter_mut() {
+                    for block in &mut state.output.content {
                         if let AssistantContent::ToolCall(tool_call) = block {
                             if tool_call.id == id {
                                 tool_call.thought_signature = Some(detail.to_string());
@@ -407,7 +407,7 @@ fn handle_chunk(
                         thinking: String::new(),
                         thinking_signature: None,
                         redacted: Some(true),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     }));
                 let index = state.output.content.len() - 1;
                 state.reasoning_details_block = Some(index);
@@ -468,7 +468,7 @@ pub fn stream_openai_completions(
             stop_reason_raw: None,
             error_message: None,
             timestamp: crate::utils_inner::diagnostics::now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;

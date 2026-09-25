@@ -81,7 +81,7 @@ impl HttpResponse {
             Some(signal) => {
                 let next = self.body.chunk();
                 tokio::select! {
-                    _ = signal.cancelled() => return Err(ProviderError::Aborted),
+                    () = signal.cancelled() => return Err(ProviderError::Aborted),
                     result = next => result,
                 }
             }
@@ -108,7 +108,7 @@ impl HttpResponse {
             Some(signal) => {
                 let next = self.body.chunk();
                 tokio::select! {
-                    _ = signal.cancelled() => return Err(ProviderError::Aborted),
+                    () = signal.cancelled() => return Err(ProviderError::Aborted),
                     result = next => result,
                 }
             }
@@ -216,7 +216,7 @@ pub async fn send(request: RequestOptions) -> Result<HttpResponse, ProviderError
     let response = match (&signal, request.timeout_ms) {
         (Some(signal), _) => {
             tokio::select! {
-                _ = signal.cancelled() => return Err(ProviderError::Aborted),
+                () = signal.cancelled() => return Err(ProviderError::Aborted),
                 result = send_future => result,
             }
         }

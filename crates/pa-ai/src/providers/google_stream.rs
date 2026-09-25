@@ -109,7 +109,7 @@ impl GoogleStreamState {
                                         thinking: String::new(),
                                         thinking_signature: None,
                                         redacted: None,
-                                        rest: Default::default(),
+                                        rest: Map::default(),
                                     }));
                                 self.current_kind = Some("thinking");
                                 writer.push(AssistantMessageEvent::ThinkingStart {
@@ -120,7 +120,7 @@ impl GoogleStreamState {
                                 output.content.push(AssistantContent::Text(TextContent {
                                     text: String::new(),
                                     text_signature: None,
-                                    rest: Default::default(),
+                                    rest: Map::default(),
                                 }));
                                 self.current_kind = Some("text");
                                 writer.push(AssistantMessageEvent::TextStart {
@@ -208,7 +208,7 @@ impl GoogleStreamState {
                                 .get("thoughtSignature")
                                 .and_then(|value| value.as_str())
                                 .map(std::string::ToString::to_string),
-                            rest: Default::default(),
+                            rest: Map::default(),
                         };
 
                         let arguments_json = Value::Object(tool_call.arguments.clone()).to_string();
@@ -267,7 +267,7 @@ impl GoogleStreamState {
                 cache_read: cached_tokens,
                 cache_write: 0,
                 total_tokens: get("totalTokenCount"),
-                cost: Default::default(),
+                cost: UsageCost::default(),
             };
             calculate_cost(model, &mut output.usage, None);
         }

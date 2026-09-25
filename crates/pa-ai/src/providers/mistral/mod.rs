@@ -162,9 +162,7 @@ pub fn stream_simple_mistral(
         .and_then(|options| options.base.api_key.clone())
         .filter(|key| !key.is_empty())
         .or_else(|| get_env_api_key(&model.provider));
-    let api_key = if let Some(api_key) = api_key {
-        api_key
-    } else {
+    let Some(api_key) = api_key else {
         let (writer, reader) = create_assistant_message_event_stream();
         let mut error = AssistantMessage {
             content: Vec::new(),
@@ -179,7 +177,7 @@ pub fn stream_simple_mistral(
             stop_reason_raw: None,
             error_message: Some(format!("No API key for provider: {}", model.provider)),
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let message = error.error_message.clone().unwrap_or_default();
         writer.push(AssistantMessageEvent::Error {

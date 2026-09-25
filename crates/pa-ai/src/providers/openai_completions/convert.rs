@@ -109,8 +109,7 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                 let assistant_text = text_blocks
                     .iter()
                     .map(|block| sanitize_surrogates(&block.text))
-                    .collect::<Vec<_>>()
-                    .join("");
+                    .collect::<String>();
 
                 let replay_reasoning_details: Vec<Value> = assistant
                     .content
@@ -442,7 +441,7 @@ pub(crate) fn parse_chunk_usage(
         cache_read: cache_read_tokens,
         cache_write: cache_write_tokens,
         total_tokens: input + output_tokens + cache_read_tokens + cache_write_tokens,
-        cost: Default::default(),
+        cost: UsageCost::default(),
     };
     calculate_cost(
         model,

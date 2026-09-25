@@ -560,7 +560,7 @@ pub fn append_transport_failure_diagnostic(
             code: error.close_code().map(|code| {
                 crate::types::DiagnosticCode::Num(crate::types::JsNumber::from(u64::from(code)))
             }),
-            rest: Default::default(),
+            rest: Map::default(),
         }),
         Some(transport_failure_details(
             configured_transport,
@@ -845,7 +845,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         append_transport_failure_diagnostic(&mut output, &close, "auto", false, 23_377);
         append_transport_failure_diagnostic(&mut output, &runtime, "auto", true, 23_361);
@@ -914,7 +914,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: Some(error.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         crate::utils_inner::stream_failure::record_stream_failure(
             ("openai-codex", "gpt-5-codex", API_OPENAI_CODEX_RESPONSES),

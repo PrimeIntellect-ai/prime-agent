@@ -66,7 +66,7 @@ async fn normalized_result(model: &Model) -> Value {
                     .into(),
             ),
             timestamp: 1_789_529_142_000,
-            rest: Default::default(),
+            rest: Map::default(),
         })],
         tools: None,
     };

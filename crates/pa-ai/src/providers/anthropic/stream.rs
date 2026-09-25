@@ -129,7 +129,7 @@ pub fn stream_anthropic(
             stop_reason_raw: None,
             error_message: None,
             timestamp: now_ms(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
 
         let result = run_stream(&model, &context, options.as_ref(), &mut output, &writer).await;
@@ -624,9 +624,8 @@ async fn run_stream(
     }
 
     loop {
-        let chunk = match response.next_text().await? {
-            Some(chunk) => chunk,
-            None => break,
+        let Some(chunk) = response.next_text().await? else {
+            break;
         };
         for sse in decoder.push_text(&chunk) {
             handle_sse(&sse, request_id.as_deref(), |event| {

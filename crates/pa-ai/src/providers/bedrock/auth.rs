@@ -4,6 +4,8 @@
 //! for `POST /model/{modelId}/converse-stream`, plus the region / endpoint /
 //! credential resolution rules from `packages/ai/src/providers/amazon-bedrock.ts`.
 
+use std::fmt::Write as _;
+
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 
@@ -168,7 +170,7 @@ pub fn sigv4_headers(
         ("x-amz-date".to_string(), amz_date.clone()),
     ];
     for (name, value) in params.extra_signed_headers {
-        canonical_headers.push((name.to_lowercase(), value.to_string()));
+        canonical_headers.push((name.to_lowercase(), value.clone()));
     }
     if let Some(token) = &credentials.session_token {
         canonical_headers.push(("x-amz-security-token".to_string(), token.clone()));
@@ -180,10 +182,13 @@ pub fn sigv4_headers(
         .map(|(name, _)| name.as_str())
         .collect::<Vec<_>>()
         .join(";");
-    let canonical_headers_text = canonical_headers
-        .iter()
-        .map(|(name, value)| format!("{name}:{value}\n"))
-        .collect::<String>();
+    let canonical_headers_text =
+        canonical_headers
+            .iter()
+            .fold(String::new(), |mut text, (name, value)| {
+                let _ = write!(text, "{name}:{value}\n");
+                text
+            });
 
     let canonical_request = format!(
         "{}\n{}\n{canonical_headers_text}\n{signed_headers}\n{payload_hash}",

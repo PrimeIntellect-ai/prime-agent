@@ -159,7 +159,7 @@ pub(crate) fn build_params(
                     }
                 }
             }
-            _ => {
+            crate::types::ThinkingFormat::Openai => {
                 if let Some(effort) = options.reasoning_effort {
                     if compat.supports_reasoning_effort {
                         let mapped = model
@@ -241,12 +241,11 @@ fn apply_anthropic_cache_control(
                 .insert("cache_control".into(), cache_control.to_json());
         }
     }
-    let messages = match params
+    let Some(messages) = params
         .get_mut("messages")
         .and_then(|value| value.as_array_mut())
-    {
-        Some(messages) => messages,
-        None => return,
+    else {
+        return;
     };
     // System prompt.
     for message in messages.iter_mut() {
@@ -372,7 +371,7 @@ mod tests {
             messages: vec![Message::User(UserMessage {
                 content: UserMessageContent::Text("Hi".into()),
                 timestamp: 1,
-                rest: Default::default(),
+                rest: Map::default(),
             })],
             tools: None,
         };

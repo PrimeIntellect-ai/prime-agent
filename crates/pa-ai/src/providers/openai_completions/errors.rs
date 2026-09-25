@@ -206,20 +206,20 @@ mod tests {
     #[test]
     fn openrouter_metadata_appends_only_when_truthy() {
         let body = r#"{"error": {"message": "boom", "metadata": {"raw": "extra context"}}}"#;
-        let error = openai_http_error(400, body, Default::default());
+        let error = openai_http_error(400, body, HashMap::default());
         assert_eq!(
             openrouter_raw_metadata(&error).as_deref(),
             Some("extra context")
         );
 
         let no_metadata =
-            openai_http_error(400, r#"{"error": {"message": "boom"}}"#, Default::default());
+            openai_http_error(400, r#"{"error": {"message": "boom"}}"#, HashMap::default());
         assert_eq!(openrouter_raw_metadata(&no_metadata), None);
 
         let falsy = openai_http_error(
             400,
             r#"{"error": {"message": "boom", "metadata": {"raw": ""}}}"#,
-            Default::default(),
+            HashMap::default(),
         );
         assert_eq!(openrouter_raw_metadata(&falsy), None);
 

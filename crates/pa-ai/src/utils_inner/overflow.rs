@@ -145,7 +145,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: error_message.map(std::string::ToString::to_string),
             timestamp: 0,
-            rest: Default::default(),
+            rest: Map::default(),
         }
     }
 
