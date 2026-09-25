@@ -1409,8 +1409,8 @@ mod tests {
             })
         };
         // The retained branch starts at the compaction boundary: the
-        // summarizer's usage row carries no model of its own (a legacy
-        // row) and no `model_change` row precedes it on the walk.
+        // summarizer's usage row carries no model of its own (an
+        // unattributed row) and no `model_change` row precedes it on the walk.
         let entries = vec![
             entry(
                 &json!({"type": "branch_summary", "summary": "cut", "usage": usage(30, 3)}),
