@@ -10,11 +10,16 @@ so a unit lands in exactly one shard on every run — binaries never move
 between shards when the suite grows or shrinks, keeping flake attribution
 stable.
 
-Unit kinds (the exact set `cargo test --workspace` builds and runs):
+Unit kinds (the exact set `cargo test --workspace` builds and runs; every
+target honors its manifest `test` flag exactly as cargo does, so a target
+with `test = false` is never run here either):
   lib   — package lib unittests            (`cargo test -p PKG --lib`)
   bin   — package bin unittests            (`cargo test -p PKG --bin NAME`)
   test  — tests/ integration target        (`cargo test -p PKG --test NAME`)
   doc   — package doctests                 (`cargo test -p PKG --doc`)
+  example — example target with `test = true`: `cargo test --workspace`
+          also runs its example tests, so each one is its own unit
+          (`cargo test -p PKG --example NAME`)
   examples/benches — compile parity targets: `cargo test --workspace` builds
           example and bench targets without running them; the owning shard
           reproduces exactly that with `--examples --no-run` / `--benches
@@ -60,6 +65,8 @@ def _target_flag(kind: str, name: str | None) -> list[str]:
         return ["--test", name or ""]
     if kind == "doc":
         return ["--doc"]
+    if kind == "example":
+        return ["--example", name or ""]
     if kind in COMPILE_ONLY_KINDS:
         return [f"--{kind}", "--no-run"]
     raise ValueError(f"unknown unit kind {kind!r}")
@@ -98,10 +105,15 @@ def enumerate_units() -> list[dict]:
                 units.append({"package": name, "kind": "lib", "name": tname})
             if "bin" in kinds and target.get("test", True):
                 units.append({"package": name, "kind": "bin", "name": tname})
-            if "test" in kinds:
+            if "test" in kinds and target.get("test", True):
                 units.append({"package": name, "kind": "test", "name": tname})
             if "example" in kinds:
                 has_examples = True
+                if target.get("test", False):
+                    # `cargo test --workspace` runs the tests of examples
+                    # with `test = true`; they are real test units here too.
+                    units.append({"package": name, "kind": "example",
+                                  "name": tname})
             if "bench" in kinds:
                 has_benches = True
         # Doc tests: one cargo `--doc` run covers every doctest=true target of
