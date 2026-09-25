@@ -74,13 +74,14 @@ These are the persisted defaults for the same limits as the `--autonomous-*` CLI
 
 ### UI & Display
 
-Conversation output starts in overview. Ctrl+O cycles through details and all output; the old `hideThinkingBlock` setting no longer controls visibility.
+Conversation output starts at the `chatDetail` level (default `details`). Ctrl+O cycles overview -> details -> all output and saves the choice, so new, resumed, and attached chats open at the level you last picked. The old `hideThinkingBlock` setting no longer controls visibility.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `theme` | string | detected | Theme name (built-ins: `"prime"`, `"dark"`, `"light"`; or custom). Unset uses `"prime"` on dark terminals and `"light"` on light terminals |
 | `quietStartup` | boolean | `false` | Hide startup header |
 | `treeFilterMode` | string | `"user-only"` | Default filter for `/tree`: `"default"`, `"no-tools"`, `"user-only"`, `"labeled-only"`, `"all"` |
+| `chatDetail` | string | `"details"` | Conversation detail level: `"overview"`, `"details"`, or `"all"`. Ctrl+O updates it |
 | `editorPaddingX` | number | `0` | Horizontal padding for input editor (0-3) |
 | `autocompleteMaxVisible` | number | `5` | Max visible items in autocomplete dropdown (3-20) |
 | `showHardwareCursor` | boolean | `false` | Show terminal cursor |
