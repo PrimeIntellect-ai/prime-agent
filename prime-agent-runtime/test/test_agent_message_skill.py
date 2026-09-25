@@ -11,7 +11,7 @@ SKILL = Path(__file__).parents[2] / "packages/coding-agent/skills/agent-message/
 
 
 class AgentMessageSkillTest(unittest.TestCase):
-    def test_roled_parent_and_broadcast_forms(self) -> None:
+    def test_roled_parent_form(self) -> None:
         spec = importlib.util.spec_from_file_location("agent_message_test", SKILL)
         assert spec and spec.loader
         module = importlib.util.module_from_spec(spec)
@@ -19,9 +19,8 @@ class AgentMessageSkillTest(unittest.TestCase):
         host = AsyncMock(return_value={"deliveryStatus": "queued"})
         with patch.object(module, "host_request", host), patch.object(module, "_emit_sent_message"):
             asyncio.run(module.send("done", receiver_role="parent"))
-            asyncio.run(module.send("all", "follow up"))
         self.assertEqual(host.await_args_list[0].args[1]["receiver_role"], "parent")
-        self.assertEqual(host.await_args_list[1].args[1]["target"], "all")
+        self.assertNotIn("target", host.await_args_list[0].args[1])
 
     def test_roled_selector_validation(self) -> None:
         spec = importlib.util.spec_from_file_location("agent_message_validation", SKILL)

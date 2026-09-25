@@ -1,0 +1,1 @@
+- Removed the legacy `agent_message.send` broadcast form; every send now addresses one parent, sibling, or child.

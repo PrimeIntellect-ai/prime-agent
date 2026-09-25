@@ -734,10 +734,7 @@ describe("AgentSession rlm recursion", () => {
 		);
 	});
 
-	it.each([
-		{ label: "an in-cell roled send", payload: { message: "done", receiver_role: "parent" } },
-		{ label: "a broadcast delivery", payload: { target: "all", message: "done" } },
-	])("marks $label to the parent as replied", async ({ payload }) => {
+	it("marks an in-cell roled send to the parent as replied", async () => {
 		const sendAgentMessage = vi.fn(async () => ({
 			id: "agentmsg-reply",
 			source: "agent_message" as const,
@@ -758,7 +755,7 @@ describe("AgentSession rlm recursion", () => {
 		const send = hostHandler(child, "agent_message.send");
 
 		expect(child.repliedToParentSinceTask).toBe(false);
-		await expect(send(payload)).resolves.toBeDefined();
+		await expect(send({ message: "done", receiver_role: "parent" })).resolves.toBeDefined();
 		expect(sendAgentMessage).toHaveBeenCalledWith(
 			expect.objectContaining({ target: "parent-session", message: "done" }),
 		);
