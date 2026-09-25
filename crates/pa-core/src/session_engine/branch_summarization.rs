@@ -249,6 +249,7 @@ pub fn finalize_branch_summary(
         aborted: false,
         error: None,
         usage: None,
+        model: None,
     }
 }
 
