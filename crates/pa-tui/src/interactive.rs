@@ -597,6 +597,14 @@ async fn drive_onboarding_pane(
                 // is done, the terminal reader is gone): without this arm
                 // the always-ready `recv()` spins the redraw loop hot.
                 let Some(input) = maybe_input else {
+                    // A closed input channel ends the pane: end a
+                    // still-running login flow with it — the
+                    // cooperative cancel reaches the blocking login
+                    // body, so the exit never leaves a detached flow
+                    // writing credentials in the background.
+                    if let Some(task) = flow.take() {
+                        task.end().await;
+                    }
                     return Ok((pane, PaneOutcome::InputClosed));
                 };
                 match input {
