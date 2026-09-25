@@ -4676,20 +4676,13 @@ impl SessionUi {
     /// TS `getServiceTierCompletions`: the `/tier` argument items — the
     /// available tiers with their descriptions, the current one marked.
     fn tier_completion_items(&self, view: &AgentView) -> Vec<crate::autocomplete::CompletionItem> {
-        const DESCRIPTIONS: [(&str, &str); 4] = [
-            ("default", "Standard processing"),
-            ("flex", "Cheaper, slower, may hit capacity limits"),
-            ("priority", "Faster, more expensive (fast mode)"),
-            ("auto", "Provider picks the tier"),
-        ];
         let current = self.service_tier.as_deref().unwrap_or("default");
         self.available_service_tiers(view)
             .into_iter()
             .map(|tier| {
-                let description = DESCRIPTIONS
-                    .iter()
-                    .find_map(|(choice, description)| (*choice == tier).then_some(*description))
-                    .unwrap_or("");
+                // The one descriptions owner: the settings row's submenu
+                // exports the TS `SERVICE_TIER_OPTIONS` table.
+                let description = crate::settings_menu::service_tier_description(tier);
                 let description = if tier == current {
                     format!("{description} (current)")
                 } else {
