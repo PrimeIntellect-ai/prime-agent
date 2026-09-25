@@ -23,9 +23,8 @@
 //! again on a later start or resume: the support check holds the
 //! process-global event-reader lock for up to 250ms on silent terminals,
 //! so re-querying at every start would delay input after every SIGCONT
-//! resume (and the
-//! check's implicit raw-mode bracket can race the app's own suspend
-//! bracket). The terminal's kitty capability cannot change across a
+//! resume (and the check's implicit raw-mode bracket can race the app's
+//! own suspend bracket). The terminal's kitty capability cannot change across a
 //! stop/continue of the same process, so the probe resolves once and
 //! every later start re-applies the resolved state — the observable
 //! TS contract (kitty terminals keep CSI-u parsing after a resume;
@@ -357,10 +356,9 @@ fn spawn_kitty_probe() {
         .spawn(|| {
             let (answer_tx, answer_rx) = mpsc::channel();
             // crossterm's support check sends the query and blocks on the
-            // answer for at most 250ms (the vendored crossterm patch). It reads
-            // the tty through the
-            // shared internal reader, so the bytes it skips (user keys
-            // typed during the window) stay queued for the app reader.
+            // answer for at most 250ms (the vendored crossterm patch). It
+            // reads the tty through the shared internal reader, so the
+            // skipped user keys stay queued for the app reader.
             let reader = std::thread::Builder::new()
                 .name("tui-kitty-probe-read".to_string())
                 .spawn(move || {
