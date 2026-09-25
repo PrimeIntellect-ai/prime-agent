@@ -161,9 +161,18 @@ fn the_pill_lands_right_aligned_and_leaves_other_rows_alone() {
         })
         .collect();
     let col = width - crate::width::str_width(&pill);
+    // The composite closes any open link region before the pill's cells
+    // unconditionally, so the composited row's text carries the close
+    // ahead of the pill (a zero-width sequence: the visible columns stay
+    // the pill at the row's right edge).
     assert_eq!(
         rendered[2],
-        format!("{}{}", "x".repeat(col), pill),
+        format!(
+            "{}{}{}",
+            "x".repeat(col),
+            crate::hyperlinks::OSC8_CLOSE,
+            pill
+        ),
         "the pill lands at the row's right edge"
     );
     assert_eq!(rendered[1], "x".repeat(width));
