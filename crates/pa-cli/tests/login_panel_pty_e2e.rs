@@ -109,6 +109,7 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
             }),
             flow: AuthFlow::TerminalFlow,
             configured: true,
+            available: true,
         };
         Box::pin(async move { vec![row] })
     }
@@ -283,6 +284,10 @@ impl ProviderAuthCommands for ScriptedModelPickerAuth {
             status: None,
             flow: AuthFlow::ApiKeyPrompt,
             configured: false,
+            // The menu rule: a working API-key login row is available
+            // (Enter routes the picked model's sign-in through it; an
+            // unavailable row renders dimmed and inert).
+            available: true,
         };
         Box::pin(async move { vec![row] })
     }

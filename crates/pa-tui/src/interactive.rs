@@ -972,6 +972,7 @@ async fn run_onboarding_phase(
                 id: row.id.clone(),
                 name: row.name.clone(),
                 connected: row.configured,
+                available: row.available,
             })
             .collect();
         // An empty provider list ends the step (TS `options.length === 0`).

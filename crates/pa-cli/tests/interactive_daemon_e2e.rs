@@ -759,6 +759,7 @@ impl pa_tui::provider_auth::ProviderAuthCommands for FullFlowProviderAuth {
                 }),
                 flow: pa_tui::provider_auth::AuthFlow::TerminalFlow,
                 configured: self.stored(pa_tui::provider_auth::PRIME_INFERENCE_PROVIDER_ID),
+                available: true,
             },
             pa_tui::provider_auth::ProviderRow {
                 id: "faux-key".to_string(),
@@ -767,6 +768,7 @@ impl pa_tui::provider_auth::ProviderAuthCommands for FullFlowProviderAuth {
                 status: None,
                 flow: pa_tui::provider_auth::AuthFlow::ApiKeyPrompt,
                 configured: self.stored("faux-key"),
+                available: true,
             },
             pa_tui::provider_auth::ProviderRow {
                 id: "mcp:faux".to_string(),
@@ -775,6 +777,7 @@ impl pa_tui::provider_auth::ProviderAuthCommands for FullFlowProviderAuth {
                 status: None,
                 flow: pa_tui::provider_auth::AuthFlow::TerminalFlow,
                 configured: false,
+                available: true,
             },
         ];
         Box::pin(async move { rows })

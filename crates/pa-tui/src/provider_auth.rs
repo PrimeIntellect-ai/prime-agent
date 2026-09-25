@@ -6,6 +6,11 @@
 //! flows / `runLogout`). The TUI owns the panel, the search, and the
 //! API-key prompt; credential storage and the OAuth flows live above this
 //! crate.
+//!
+//! The menu rule: a row whose login flow this build does not carry is
+//! marked inline BEFORE selection (dimmed, the "not available"
+//! annotation) and Enter is inert — no row dead-ends in an
+//! after-selection error wall.
 
 use std::pin::Pin;
 
@@ -62,7 +67,8 @@ pub enum AuthStatusStyle {
     Muted,
 }
 
-/// One provider row (TS `AuthSelectorProvider` plus its rendered status).
+/// One provider row (TS `AuthSelectorProvider` plus its rendered
+/// status).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderRow {
     pub id: String,
@@ -77,6 +83,12 @@ pub struct ProviderRow {
     /// `getProviderAuthStatus(id).configured`): the onboarding picker's
     /// connected check, distinct from the display indicator.
     pub configured: bool,
+    /// Whether this build carries the row's login flow (the codex
+    /// subscription row does; the not-yet-ported subscription providers
+    /// do not). An unavailable row renders dimmed with the "not
+    /// available" annotation and Enter is inert — the menu states the
+    /// dead-end BEFORE selection instead of error-walling after it.
+    pub available: bool,
 }
 
 /// The outcome of one login/logout flow: the status row to show, the
@@ -106,8 +118,10 @@ pub trait ProviderAuthCommands: Send + Sync {
     /// TS `getLogoutProviderOptions`: one row per stored credential,
     /// sorted by name.
     fn logout_options(&self) -> ProviderRowsFuture;
-    /// TS `loginProvider`: store the key for `ApiKeyPrompt` rows; the
-    /// unported OAuth stubs report their error.
+    /// TS `loginProvider`: store the key for `ApiKeyPrompt` rows. The
+    /// unavailable rows never reach this (the menu marks them before
+    /// selection); an OAuth row arriving here answers the silent
+    /// cancel, never an error wall.
     fn login(&self, provider: &ProviderRow, api_key: Option<&str>) -> ProviderAuthFuture;
     /// TS `loginProvider` for the panel-driven flows (the MCP OAuth
     /// login, the Prime Inference login): the TUI mounts the inline auth
@@ -143,12 +157,21 @@ pub const PRIME_INFERENCE_PROVIDER_ID: &str = "prime-inference";
 /// has no current model.
 pub const PRIME_INFERENCE_DEFAULT_MODEL_ID: &str = "z-ai/glm-5.3";
 
+/// The Codex Subscription provider's id (the wire identifier pa-core's
+/// auth exports; carried here too because the TUI does not link the
+/// session engine).
+pub const OPENAI_CODEX_PROVIDER_ID: &str = "openai-codex";
+
 /// The TS list geometry (`PREFERRED_VISIBLE_PROVIDERS`).
 const PREFERRED_VISIBLE_PROVIDERS: usize = 8;
 
 /// The panel's search placeholder (TS `MenuSearchInput("Search
 /// providers")`).
 const SEARCH_PLACEHOLDER: &str = "Search providers";
+
+/// The unavailable row's trailing annotation (the menu rule: a row
+/// without a login flow in this build states it BEFORE selection).
+const NOT_AVAILABLE_LABEL: &str = "not available";
 
 /// One key press while the selector owns the frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,6 +380,13 @@ impl ProviderAuthSelector {
                                         };
                                         AuthSelectorAction::None
                                     }
+                                    // The menu rule: an unavailable row
+                                    // shows its dead-end state inline and
+                                    // Enter never starts a flow that
+                                    // would error-wall after selection.
+                                    AuthFlow::TerminalFlow if !provider.available => {
+                                        AuthSelectorAction::None
+                                    }
                                     AuthFlow::TerminalFlow => AuthSelectorAction::Login {
                                         provider,
                                         api_key: None,
@@ -445,16 +475,23 @@ impl ProviderAuthSelector {
                 continue;
             };
             let selected = index == self.selected;
-            let primary = vec![crate::Span::raw(format!(
-                "{} · {}",
-                provider.name,
-                provider.auth_type.label()
-            ))];
-            let trailing: Vec<String> = provider
+            // An unavailable row renders dimmed (the menu rule: the
+            // missing flow is stated inline, not answered after
+            // selection).
+            let label = format!("{} · {}", provider.name, provider.auth_type.label());
+            let primary = if provider.available {
+                vec![crate::Span::raw(label)]
+            } else {
+                vec![theme.fg_span(ThemeColor::Muted, label)]
+            };
+            let mut trailing: Vec<String> = provider
                 .status
                 .as_ref()
                 .map(|status| vec![status.label.clone()])
                 .unwrap_or_default();
+            if !provider.available {
+                trailing.push(NOT_AVAILABLE_LABEL.to_string());
+            }
             let trailing_refs: Vec<crate::menu_panel::MenuSegment> = trailing
                 .iter()
                 .map(|segment| crate::menu_panel::MenuSegment::muted(segment))
@@ -529,6 +566,21 @@ mod tests {
             status: None,
             flow: AuthFlow::TerminalFlow,
             configured: false,
+            available: false,
+        }
+    }
+
+    /// The ported codex subscription row: available, driven through the
+    /// panel.
+    fn codex() -> ProviderRow {
+        ProviderRow {
+            id: "openai-codex".to_string(),
+            name: "ChatGPT Plus/Pro (Codex Subscription)".to_string(),
+            auth_type: AuthType::Oauth,
+            status: None,
+            flow: AuthFlow::TerminalFlow,
+            configured: false,
+            available: true,
         }
     }
 
@@ -543,6 +595,7 @@ mod tests {
             }),
             flow: AuthFlow::ApiKeyPrompt,
             configured: true,
+            available: true,
         }
     }
 
@@ -554,6 +607,7 @@ mod tests {
             status: None,
             flow: AuthFlow::TerminalFlow,
             configured: false,
+            available: true,
         }
     }
 
@@ -616,13 +670,92 @@ mod tests {
 
     #[test]
     fn enter_on_a_terminal_flow_row_hands_the_flow_over() {
-        let mut selector = ProviderAuthSelector::new(AuthSelectorKind::Login, vec![anthropic()]);
+        let mut selector = ProviderAuthSelector::new(AuthSelectorKind::Login, vec![linear()]);
         assert_eq!(
             selector.handle_key("enter", &kb()),
             AuthSelectorAction::Login {
-                provider: anthropic(),
+                provider: linear(),
                 api_key: None,
             }
+        );
+    }
+
+    /// The menu rule: an unavailable row never starts a flow (no
+    /// after-selection error wall).
+    #[test]
+    fn enter_on_an_unavailable_row_is_inert() {
+        let mut selector = ProviderAuthSelector::new(AuthSelectorKind::Login, vec![anthropic()]);
+        assert_eq!(
+            selector.handle_key("enter", &kb()),
+            AuthSelectorAction::None
+        );
+        assert_eq!(
+            selector.handle_key("ctrl+c", &kb()),
+            AuthSelectorAction::Cancel,
+            "the cancel keys still close the selector"
+        );
+    }
+
+    /// The menu rule's render: an unavailable row is dimmed and carries
+    /// the "not available" annotation; a signed-in row keeps the TS row
+    /// shape with its configured status.
+    #[test]
+    fn the_panel_marks_unavailable_rows_before_selection() {
+        let codex_signed_in = ProviderRow {
+            status: Some(AuthStatusIndicator {
+                style: AuthStatusStyle::Success,
+                label: "configured".to_string(),
+            }),
+            ..codex()
+        };
+        let mut selector =
+            ProviderAuthSelector::new(AuthSelectorKind::Login, vec![codex_signed_in, anthropic()]);
+        let rows = selector.render(&theme(), 80);
+        let plain = |line: &crate::Line| {
+            line.iter()
+                .map(|span| span.content.clone())
+                .collect::<String>()
+        };
+        let text: Vec<String> = rows.iter().map(plain).collect();
+        // The signed-in row: the TS row shape with its configured status.
+        assert!(text.iter().any(|row| {
+            row.contains("ChatGPT Plus/Pro (Codex Subscription) · subscription")
+                && row.contains("configured")
+                && !row.contains("not available")
+        }));
+        // The unavailable row: the dimmed primary (a themed span, not a
+        // raw one) plus the annotation.
+        let unavailable_row = rows
+            .iter()
+            .find(|line| plain(line).contains("Anthropic · subscription"))
+            .expect("the unavailable row renders");
+        assert!(
+            plain(unavailable_row).contains("not available"),
+            "the annotation rides the trailing cluster: {:?}",
+            plain(unavailable_row)
+        );
+        let name_span = unavailable_row
+            .iter()
+            .find(|span| span.content.contains("Anthropic"))
+            .expect("the unavailable primary carries the name");
+        assert!(
+            name_span.style.fg.is_some(),
+            "the unavailable primary is dimmed (themed), not raw"
+        );
+        // The available row's primary stays raw (no dimming).
+        let available_row = rows
+            .iter()
+            .find(|line| {
+                plain(line).contains("ChatGPT Plus/Pro (Codex Subscription) · subscription")
+            })
+            .expect("the signed-in row renders");
+        let name_span = available_row
+            .iter()
+            .find(|span| span.content.contains("Codex Subscription"))
+            .expect("the available primary carries the name");
+        assert!(
+            name_span.style.fg.is_none(),
+            "the available primary is not dimmed"
         );
     }
 

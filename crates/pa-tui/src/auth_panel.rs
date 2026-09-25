@@ -16,10 +16,14 @@
 //! the loop unmounts the panel and applies the outcome row.
 //!
 //! TS carries an abort signal on its login dialog (Esc cancels a running
-//! check); the flow seams here have no cancel-push, so a settled flow
-//! always unmounts the panel — the paste prompt and the team picker are
-//! cancellable, and the network steps settle within their request
-//! timeouts.
+//! check). The cooperative mirror (#2770): every handle shares one
+//! cancel flag — the driving surface marks it when the panel exits and
+//! a running flow checks it between its poll steps and before its
+//! credential writes (a `JoinHandle::abort` cannot reach a started
+//! blocking login body, so the flag is the seam). The paste prompt and
+//! the team picker answer their own cancels; the network steps settle
+//! within their request timeouts; a settled flow always unmounts the
+//! panel.
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -145,6 +149,12 @@ impl FlowCancel {
         self.flag.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// The bare flag's storage (the `\#2790` panel consumers load it
+    /// directly; every `mark` is visible through it).
+    pub(crate) fn flag_arc(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.flag)
+    }
+
     /// The pane exits: mark the flow cancelled and wake every prompt
     /// that is waiting for an answer the exited pane can no longer give.
     pub(crate) fn mark(&self) {
@@ -173,10 +183,10 @@ impl FlowCancel {
 #[derive(Clone)]
 pub struct AuthPanelHandle {
     tx: mpsc::UnboundedSender<AuthPanelRequest>,
-    /// The flow's cooperative cancel signal: the driving pane marks it
-    /// when it exits, and a blocking login body checks it before its
-    /// auth-store writes — a `JoinHandle::abort` cannot reach a started
-    /// `spawn_blocking` closure.
+    /// The flow's cooperative cancel signal: the driving surface marks
+    /// it when the panel or pane exits, and a blocking login body
+    /// checks it before its auth-store writes — a `JoinHandle::abort`
+    /// cannot reach a started `spawn_blocking` closure (#2770).
     cancel: FlowCancel,
 }
 
@@ -190,7 +200,7 @@ impl AuthPanelHandle {
         }
     }
 
-    /// The flow's cancel state: `true` once the driving pane exited.
+    /// The flow's cancel state: `true` once the driving surface exited.
     pub fn cancelled(&self) -> bool {
         self.cancel.cancelled()
     }
@@ -199,6 +209,12 @@ impl AuthPanelHandle {
     /// on exit; every handle clone shares it).
     pub fn cancel_signal(&self) -> FlowCancel {
         self.cancel.clone()
+    }
+
+    /// The bare cancel flag (the `\#2790` codex login's shape): the
+    /// same storage the [`FlowCancel`] arms — loads observe every mark.
+    pub fn cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.cancel.flag_arc()
     }
 
     /// Submit one request directly (the helpers below and the session's

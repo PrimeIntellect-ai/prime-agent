@@ -63,6 +63,11 @@ pub struct ProviderPickerOption {
     pub name: String,
     /// Already signed in: the row is marked with a check rather than a note.
     pub connected: bool,
+    /// Whether this build carries the row's login flow (the /login menu
+    /// rule): an unavailable row renders dimmed with the "not available"
+    /// annotation and Enter is inert — the picker states the dead-end
+    /// before selection instead of error-walling after it.
+    pub available: bool,
 }
 
 /// The picker's answer to one key (TS `onSelect`/`onContinue`/`onCancel`).
@@ -118,6 +123,12 @@ impl ProviderPicker {
             }
             let filtered = self.filtered();
             let item = filtered.get(self.selected - 1)?;
+            // The /login menu rule: an unavailable row's Enter is inert —
+            // the missing flow is stated inline before selection, never
+            // answered with an after-selection error wall.
+            if !item.available {
+                return None;
+            }
             return Some(ProviderPick::Provider(item.id.clone()));
         }
         if kb.matches(key, "tui.select.cancel") {
@@ -202,16 +213,25 @@ impl ProviderPicker {
             CONTINUE_LABEL,
             false,
             self.selected == 0,
+            true,
         ));
         let end = (scroll_top + VISIBLE_ROWS).min(filtered.len());
         for (index, item) in filtered.iter().enumerate().take(end).skip(scroll_top) {
+            // The menu rule: an unavailable row states its dead-end
+            // inline — the dimmed label carries the annotation.
+            let label = if item.available {
+                item.name.clone()
+            } else {
+                format!("{} · not available", item.name)
+            };
             lines.push(self.row(
                 theme,
                 width,
                 row_width,
-                &item.name,
+                &label,
                 item.connected,
                 self.selected == index + 1,
+                item.available,
             ));
         }
         let remaining = filtered.len() - end;
@@ -244,6 +264,7 @@ impl ProviderPicker {
         label: &str,
         connected: bool,
         selected: bool,
+        available: bool,
     ) -> Line {
         let name = format!("{}{}", if selected { "> " } else { "  " }, label);
         let mark = if connected { "  \u{2713}" } else { "" };
@@ -253,6 +274,13 @@ impl ProviderPicker {
         );
         let wash = highlight_wash(theme);
         let mut line: Line = vec![Span::raw(" ")];
+        // The menu rule: an unavailable row's label stays dim even when
+        // selected (the missing flow is stated inline, not lifted).
+        let label_color = if available {
+            ThemeColor::Text
+        } else {
+            ThemeColor::Muted
+        };
         if selected {
             // The selected row lifts off the canvas (TS
             // `onboardingHighlightBackground`): a bold name, the success
@@ -260,7 +288,7 @@ impl ProviderPicker {
             let mut washed_name = Span::styled(
                 name,
                 theme
-                    .fg_style(ThemeColor::Text)
+                    .fg_style(label_color)
                     .add_modifier(Modifier::BOLD),
             );
             washed_name.style = washed_name.style.bg(wash);
@@ -464,6 +492,7 @@ mod tests {
                 id: format!("provider-{index}"),
                 name: format!("Provider {index}"),
                 connected: index == 0,
+                available: true,
             })
             .collect()
     }
@@ -513,11 +542,13 @@ mod tests {
                 id: "one".to_string(),
                 name: "One".to_string(),
                 connected: true,
+                available: true,
             },
             ProviderPickerOption {
                 id: "two".to_string(),
                 name: "Two".to_string(),
                 connected: false,
+                available: true,
             },
         ]);
         let rows = picker.render(&theme(), 60);
@@ -530,6 +561,31 @@ mod tests {
             text.iter()
                 .any(|row| row.contains("One") && row.contains('\u{2713}'.to_string().as_str())),
             "the connected check rides its row: {text:?}"
+        );
+    }
+
+    /// The /login menu rule in the picker: an unavailable row states its
+    /// dead-end inline (the dimmed "not available" annotation) and Enter
+    /// is inert — no after-selection error wall.
+    #[test]
+    fn the_picker_marks_unavailable_rows_inert() {
+        let mut picker = ProviderPicker::new(vec![ProviderPickerOption {
+            id: "anthropic".to_string(),
+            name: "Anthropic".to_string(),
+            connected: false,
+            available: false,
+        }]);
+        let rows = picker.render(&theme(), 60);
+        let text: Vec<String> = rows.iter().map(row_text).collect();
+        assert!(
+            text.iter().any(|row| row.contains("Anthropic · not available")),
+            "the unavailable row carries the inline annotation: {text:?}"
+        );
+        // Enter on the unavailable row keeps the picker mounted.
+        picker.handle_key("down", &kb());
+        assert!(
+            picker.handle_key("enter", &kb()).is_none(),
+            "Enter on an unavailable row is inert"
         );
     }
 
