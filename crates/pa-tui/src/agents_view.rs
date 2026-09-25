@@ -247,6 +247,12 @@ struct AgentsViewMode {
     selected: usize,
     query: String,
     status: Option<String>,
+    /// A multi-line notice from the previous run (a daemon refusal whose
+    /// ways out span lines, like the cross-product lease hold): rendered
+    /// as a dismissible panel above the hint line instead of the one-line
+    /// status truncation, so the full text — both ways out included —
+    /// stays readable.
+    notice: Option<String>,
     /// The scope root's `depth` metadata (`rlmDepth + 1`); `None` when the
     /// scope root is not on the roster (the view falls back to the global
     /// list with a status message, TS scope-resolution fallback).
@@ -319,7 +325,13 @@ impl AgentsViewMode {
     fn new(options: AgentsViewOptions) -> Self {
         let theme = crate::app::load_theme(&options.theme);
         let query = options.query.clone().unwrap_or_default();
-        let status = options.status_message.clone();
+        // A notice with lines to show (the refusal families) renders as
+        // the dismissible panel; a single-line notice keeps the hint-line
+        // status.
+        let (status, notice) = match options.status_message.clone() {
+            Some(message) if message.contains('\n') => (None, Some(message)),
+            status => (status, None),
+        };
         let pending_ancestors =
             (!options.expanded_ancestors.is_empty()).then(|| options.expanded_ancestors.clone());
         let selected_identity = options.selected_row_identity.clone();
@@ -353,6 +365,7 @@ impl AgentsViewMode {
             selected: 0,
             query,
             status,
+            notice,
             scope_depth: None,
             scope_active: false,
             scope_dropped: false,
@@ -918,6 +931,15 @@ impl AgentsViewMode {
     /// the same contract as the session view (#184).
     fn handle_key(&mut self, key: &str) {
         let was_armed = self.exit_armed;
+        // The notice panel: any key closes it (the refusal's ways out
+        // stay copy-pasteable while it is up), except the exit key,
+        // which falls through so the double-press exit convention keeps
+        // working with the panel open.
+        if self.notice.is_some() && !self.keybindings.matches(key, "app.clear") {
+            self.notice = None;
+            return;
+        }
+        self.notice = None;
         // Any other key clears the exit hint (TS `clearCtrlCExitHint`).
         self.exit_armed = false;
         let has_query = !self.query.is_empty();
@@ -1133,16 +1155,114 @@ impl AgentsViewMode {
         lines.push(prompt);
         lines.push(vec![]);
 
-        let list_rows = height.saturating_sub(lines.len() + 1);
+        // The notice panel (a multi-line refusal from the previous run)
+        // takes its rows between the list and the hint line, so the list
+        // window shrinks while the full text stays visible. A budget that
+        // cannot hold the borders and one content row (a degenerate pane)
+        // falls back to the hint-line status with the notice's first line.
+        let budget = height.saturating_sub(lines.len() + 1);
+        // The panel is built and the notice's borrow ends here (render_list
+        // below takes the mode mutably).
+        let notice_panel = self
+            .notice
+            .as_deref()
+            .filter(|_| budget >= 4)
+            .map(|notice| self.render_notice(notice, width, budget));
+        // Owned: the fallback's borrow of the notice must end before the
+        // mutable list render below.
+        let status_fallback: Option<String> = notice_panel
+            .is_none()
+            .then(|| {
+                self.notice
+                    .as_deref()
+                    .and_then(|notice| notice.lines().next())
+            })
+            .flatten()
+            .map(str::to_string);
+        let notice_height = notice_panel.as_ref().map_or(0, Vec::len);
+        let list_rows = height.saturating_sub(lines.len() + 1 + notice_height);
         lines.extend(self.render_list(width, list_rows));
+        if let Some(panel) = notice_panel {
+            lines.extend(panel);
+        }
         while lines.len() < height.saturating_sub(1) {
             lines.push(vec![]);
         }
-        lines.push(self.render_hints(width));
+        lines.push(self.render_hints(width, status_fallback.as_deref()));
         while lines.len() > height {
             lines.pop();
         }
         (lines, cursor)
+    }
+
+    /// The notice panel: the notice's own lines wrapped to the pane's
+    /// inner width inside a bordered box, with the dismissal row last. The
+    /// content fits the budget (the borders and the dismissal row are the
+    /// fixed three); an overflow names the cap instead of silently
+    /// cutting the refusal.
+    fn render_notice(&self, notice: &str, width: usize, budget: usize) -> Vec<Line> {
+        let theme = &self.theme;
+        let inner = width.saturating_sub(4).max(1);
+        let mut content: Vec<Line> = Vec::new();
+        for line in notice.split('\n') {
+            if line.trim().is_empty() {
+                content.push(vec![]);
+                continue;
+            }
+            content.extend(crate::width::wrap_text(line, inner));
+        }
+        // The fixed rows: the borders and the dismissal row. The notice's
+        // content fits what is left; an overflow names the cap (the marker
+        // wraps with the same width, so a narrow pane never overflows the
+        // border).
+        let cap = budget.saturating_sub(3).max(1);
+        if content.len() > cap {
+            // One row of room carries the marker alone: a truncated
+            // refusal never renders without the indication.
+            if cap == 1 {
+                content.clear();
+            } else {
+                content.truncate(cap - 1);
+            }
+            content.extend(crate::width::wrap_text(
+                "… the notice continues — a taller pane shows it whole",
+                inner,
+            ));
+            content.truncate(cap);
+        }
+        content.push(vec![crate::Span::styled(
+            "any key dismisses".to_string(),
+            theme.fg_style(ThemeColor::Dim),
+        )]);
+        let border = |left: &str, right: &str| {
+            let row = vec![
+                crate::Span::styled(left.to_string(), theme.fg_style(ThemeColor::Dim)),
+                crate::Span::styled(
+                    "─".repeat(width.saturating_sub(2)),
+                    theme.fg_style(ThemeColor::Dim),
+                ),
+                crate::Span::styled(right.to_string(), theme.fg_style(ThemeColor::Dim)),
+            ];
+            crate::width::pad_line(row, width)
+        };
+        let mut panel = Vec::with_capacity(content.len() + 2);
+        panel.push(border("┌", "┐"));
+        for line in content {
+            let mut row = vec![crate::Span::styled(
+                "│ ".to_string(),
+                theme.fg_style(ThemeColor::Dim),
+            )];
+            row.extend(line);
+            let used: usize = row.iter().map(|s| str_width(&s.content)).sum();
+            row.push(crate::Span::raw(" ".repeat(width.saturating_sub(used + 2))));
+            row.push(crate::Span::styled(
+                " │".to_string(),
+                theme.fg_style(ThemeColor::Dim),
+            ));
+            panel.push(crate::width::pad_line(row, width));
+        }
+        panel.push(border("└", "┘"));
+        panel
     }
 
     /// The sectioned session list (TS `renderSessionRows`): the rows group
@@ -1389,8 +1509,9 @@ impl AgentsViewMode {
         line
     }
 
-    /// The bottom hint/status line.
-    fn render_hints(&self, width: usize) -> Line {
+    /// The bottom hint/status line. `status_override` carries the
+    /// notice's first line when the degenerate pane skipped the panel.
+    fn render_hints(&self, width: usize, status_override: Option<&str>) -> Line {
         let theme = &self.theme;
         if self.exit_armed {
             // TS `renderHints`: the exit hint renders the effective
@@ -1405,8 +1526,8 @@ impl AgentsViewMode {
             };
             return truncate_line(vec![theme.fg(ThemeColor::Muted, hint)], width);
         }
-        if let Some(status) = &self.status {
-            return truncate_line(vec![theme.fg(ThemeColor::Error, status.clone())], width);
+        if let Some(status) = status_override.or(self.status.as_deref()) {
+            return truncate_line(vec![theme.fg(ThemeColor::Error, status.to_string())], width);
         }
         // TS `renderHints`: every hint slot renders the effective binding
         // (`keyText`, arrows for up/down/left/right), so a user override
@@ -2432,6 +2553,86 @@ mod tests {
         mode
     }
 
+    /// One mode over the given notice (the previous run's failure).
+    fn mode_with_notice(notice: &str) -> AgentsViewMode {
+        let mut mode = AgentsViewMode::new(AgentsViewOptions {
+            socket_path: PathBuf::from("/tmp/agents-view-test.sock"),
+            cwd: PathBuf::from("/tmp"),
+            session_dir: None,
+            theme: "prime".to_string(),
+            version: "0.0.0".to_string(),
+            anchor_session_id: None,
+            scope: None,
+            query: None,
+            expanded_ancestors: Vec::new(),
+            selected_row_identity: None,
+            selected_key: None,
+            status_message: Some(notice.to_string()),
+            keybindings: crate::keybindings::KeybindingsManager::new(),
+        });
+        mode.rebuild_rows();
+        mode
+    }
+
+    /// A multi-line notice — the cross-product lease refusal with its two
+    /// ways out — renders as the panel: the full text stays visible and
+    /// wrapped, never truncated to the single hint line, and any key
+    /// dismisses it.
+    #[test]
+    fn a_multiline_refusal_notice_renders_as_a_dismissible_panel() {
+        let refusal = "This session is currently open in another Rust build of Prime Agent \
+(active in 6b558be357e3) — another daemon or window of this product holds the file's \
+runtime lease.\n\n• Continue where you left off:\n  prime-agent-rust --daemon-socket \
+<socket> --resume 'sess-1'\n  (<socket> is that instance's daemon socket, from the \
+shell where you started it — that daemon owns this session)\n\n• Take over on this \
+daemon:\n  kill 4242 # the holder is prime-agent\n  Then retry — the file unlocks when \
+the holder exits.";
+        let render = |mode: &mut AgentsViewMode| {
+            let (lines, _) = mode.render_frame(120, 40);
+            lines
+                .iter()
+                .map(|line| {
+                    line.iter()
+                        .map(|span| span.content.as_str())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let mut mode = mode_with_notice(refusal);
+        let shown = render(&mut mode);
+        for way_out in [
+            "Continue where you left off",
+            "--daemon-socket <socket> --resume 'sess-1'",
+            "Take over on this daemon",
+            "kill 4242 # the holder is prime-agent",
+        ] {
+            assert!(
+                shown.contains(way_out),
+                "the panel shows {way_out:?} in full:\n{shown}"
+            );
+        }
+        // Any key dismisses the panel; the hint line returns.
+        mode.handle_key("down");
+        let dismissed = render(&mut mode);
+        assert!(
+            !dismissed.contains("Take over on this daemon"),
+            "the panel leaves the frame on any key:\n{dismissed}"
+        );
+    }
+
+    /// A single-line notice keeps the hint-line status: the panel arms only
+    /// for notices with lines to show.
+    #[test]
+    fn a_single_line_notice_keeps_the_status_line() {
+        let mode = mode_with_notice("Saved sessions unavailable: no such directory");
+        assert!(mode.notice.is_none());
+        assert_eq!(
+            mode.status.as_deref(),
+            Some("Saved sessions unavailable: no such directory")
+        );
+    }
+
     /// A fresh open (the agents-back handoff) anchors the entry selection
     /// on the session the view was opened from, not the first row.
     #[test]
@@ -2945,7 +3146,10 @@ mod tests {
         // `renderHints`: `Press ${keyText("app.clear")} again to exit`).
         mode.handle_key("ctrl+q");
         assert!(mode.exit_armed);
-        assert_eq!(flat(&mode.render_hints(120)), "Press Ctrl+Q again to exit");
+        assert_eq!(
+            flat(&mode.render_hints(120, None)),
+            "Press Ctrl+Q again to exit"
+        );
         // The default ctrl+c no longer arms the exit flow.
         mode.exit_armed = false;
         mode.handle_key("ctrl+c");
@@ -2963,12 +3167,12 @@ mod tests {
         // Defaults: TS `renderHints` with the stock keys.
         let mode = mode_with_parent_and_child();
         assert_eq!(
-            flat(&mode.render_hints(120)),
+            flat(&mode.render_hints(120, None)),
             "\u{2191}/\u{2193} navigate   Enter/\u{2192} open   Ctrl+N new"
         );
         // A user override moves the hint with the handler.
         let mode = mode_with_user_bindings(&[("app.agents.new", "ctrl+t")]);
-        let hints = flat(&mode.render_hints(120));
+        let hints = flat(&mode.render_hints(120, None));
         assert_eq!(
             hints,
             "\u{2191}/\u{2193} navigate   Enter/\u{2192} open   Ctrl+T new"
