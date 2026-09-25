@@ -493,6 +493,23 @@ mod tests {
         assert_eq!(key_event_to_id(&ctrl_alt_j).as_deref(), Some("ctrl+alt+j"));
     }
 
+    /// The shift-modified Enter maps to the `shift+enter` id (the
+    /// operator's 2026-09-24 directive: Shift+Enter inserts a newline,
+    /// never submits): a kitty terminal's `CSI 13;2u` parses to
+    /// Enter+SHIFT, and the editor's `tui.input.newLine` binding
+    /// consumes the id.
+    #[test]
+    fn shift_modified_enter_maps_to_the_newline_id() {
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(
+            key_event_to_id(&shift_enter).as_deref(),
+            Some("shift+enter")
+        );
+        let kb = crate::keybindings::KeybindingsManager::new();
+        assert!(kb.matches("shift+enter", "tui.input.newLine"));
+        assert!(!kb.matches("shift+enter", "tui.input.submit"));
+    }
+
     /// Super-modified SPECIAL keys keep their super identity (Bugbot
     /// round-1 fix): an unbound Cmd combo must match nothing instead of
     /// falling through to the bare action — Cmd+Enter submitting the
