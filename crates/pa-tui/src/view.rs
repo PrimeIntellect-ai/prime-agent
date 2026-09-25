@@ -3220,14 +3220,24 @@ mod tests {
             text.contains("Agent message \u{b7} \u{2193} root"),
             "the received row keeps its place: {text}"
         );
+        // The collapsed row carries no body preview (the operator's
+        // 2026-09-25 directive): the content only opens on expand.
         assert!(
-            text.contains("course correct"),
-            "the received message's content stays visible: {text}"
+            !text.contains("course correct"),
+            "the collapsed row never previews the body: {text}"
         );
         // The three cards before the message render their own rows.
         assert!(
             text.contains("bash \u{b7}"),
             "the below-threshold side stays uncondensed: {text}"
+        );
+        // Expanded, the received row opens its \u{2570}\u{2500}-guttered
+        // body: the content stays stored and reachable.
+        view.detail = Detail::All;
+        let text = transcript_text(&mut view, 80);
+        assert!(
+            text.contains("\u{2570}\u{2500} course correct"),
+            "the received body opens on expand: {text}"
         );
     }
 
