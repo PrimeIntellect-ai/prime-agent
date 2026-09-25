@@ -10,9 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ai::{
-    AssistantContentBlock, AssistantMessage, AssistantMessageDiagnostic, ImageContent,
-    ServiceTier, StopReason, TextContent, ThinkingContent, ToolCall, ToolResultMessage, Usage,
-    UserContent, UserContentBlock, UserMessage,
+    AssistantContentBlock, AssistantMessage, AssistantMessageDiagnostic, ImageContent, ServiceTier,
+    StopReason, TextContent, ThinkingContent, ToolCall, ToolResultMessage, Usage, UserContent,
+    UserContentBlock, UserMessage,
 };
 use crate::JsonMap;
 
@@ -631,7 +631,9 @@ fn message_entry_message(value: &Value) -> Option<AgentMessage> {
 
 /// An optional field of a derived shape, parsed through the mirror's own
 /// derive: absent or null is `None`, a mismatch defers to the mirror.
-fn optional_deserialize<T: serde::de::DeserializeOwned>(value: Option<&Value>) -> Option<Option<T>> {
+fn optional_deserialize<T: serde::de::DeserializeOwned>(
+    value: Option<&Value>,
+) -> Option<Option<T>> {
     match value {
         None | Some(Value::Null) => Some(None),
         Some(value) => serde_json::from_value(value.clone()).ok().map(Some),
@@ -703,10 +705,7 @@ fn thinking_content_fast(map: &JsonMap) -> Option<ThinkingContent> {
         thinking,
         thinking_signature,
         redacted,
-        rest: rest_of(
-            map,
-            &["type", "thinking", "thinkingSignature", "redacted"],
-        ),
+        rest: rest_of(map, &["type", "thinking", "thinkingSignature", "redacted"]),
     })
 }
 
@@ -720,7 +719,10 @@ fn tool_call_fast(map: &JsonMap) -> Option<ToolCall> {
         name,
         arguments,
         thought_signature,
-        rest: rest_of(map, &["type", "id", "name", "arguments", "thoughtSignature"]),
+        rest: rest_of(
+            map,
+            &["type", "id", "name", "arguments", "thoughtSignature"],
+        ),
     })
 }
 
@@ -1009,8 +1011,12 @@ mod tests {
 
     #[test]
     fn message_fast_path_round_trips() {
-        assert_roundtrips(r#"{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"run"},{"type":"text","text":"Running.","textSignature":"sig"}],"toolCalls":[{"id":"call_000001","name":"ipython","arguments":{"code":"print(1)"}}],"api":"openai-completions","provider":"prime-inference","model":"mock-1","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0.1,"output":0.1,"cacheRead":0,"cacheWrite":0,"total":0.2}},"stopReason":"tool_calls","timestamp":1789584016604,"vendorExtra":{"z":1}}}"#);
-        assert_roundtrips(r#"{"type":"message","id":"a1","parentId":null,"timestamp":"2026-09-16T18:40:16.600Z","entryExtra":true,"message":{"role":"user","content":[{"type":"text","text":"blocks","extra":1}],"timestamp":1789584016603,"userExtra":true}}"#);
+        assert_roundtrips(
+            r#"{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-09-16T18:40:16.600Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"run"},{"type":"text","text":"Running.","textSignature":"sig"}],"toolCalls":[{"id":"call_000001","name":"ipython","arguments":{"code":"print(1)"}}],"api":"openai-completions","provider":"prime-inference","model":"mock-1","usage":{"input":1,"output":2,"cacheRead":0,"cacheWrite":0,"totalTokens":3,"cost":{"input":0.1,"output":0.1,"cacheRead":0,"cacheWrite":0,"total":0.2}},"stopReason":"tool_calls","timestamp":1789584016604,"vendorExtra":{"z":1}}}"#,
+        );
+        assert_roundtrips(
+            r#"{"type":"message","id":"a1","parentId":null,"timestamp":"2026-09-16T18:40:16.600Z","entryExtra":true,"message":{"role":"user","content":[{"type":"text","text":"blocks","extra":1}],"timestamp":1789584016603,"userExtra":true}}"#,
+        );
     }
 
     #[test]

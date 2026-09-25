@@ -113,9 +113,7 @@ impl<'de> Deserialize<'de> for SessionEntry {
                         }
                     }
                 }
-                let missing = |field: &str| {
-                    <A::Error as serde::de::Error>::missing_field(field)
-                };
+                let missing = |field: &str| <A::Error as serde::de::Error>::missing_field(field);
                 Ok(SessionEntry {
                     type_: type_.ok_or_else(|| missing("type"))?,
                     id: id.ok_or_else(|| missing("id"))?,
@@ -1929,12 +1927,20 @@ mod tests {
         assert_eq!(entry.id, "a2");
         assert_eq!(entry.parent_id.as_deref(), Some("a1"));
         assert_eq!(entry.timestamp, "2026-09-16T18:40:16.600Z");
-        let expected = json!({"message": {"role": "user", "content": "hi", "timestamp": 1}, "extra": null});
+        let expected =
+            json!({"message": {"role": "user", "content": "hi", "timestamp": 1}, "extra": null});
         assert_eq!(entry.fields, expected);
-        let keys: Vec<&str> = entry.fields.as_object().unwrap().keys().map(|k| k.as_str()).collect();
+        let keys: Vec<&str> = entry
+            .fields
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|k| k.as_str())
+            .collect();
         assert_eq!(keys, vec!["message", "extra"]);
         // Absent `parentId` stays None; missing required fields fail.
-        let line = r#"{"type":"session_state","id":"s1","timestamp":"t","state":{"status":"archived"}}"#;
+        let line =
+            r#"{"type":"session_state","id":"s1","timestamp":"t","state":{"status":"archived"}}"#;
         let entry: SessionEntry = serde_json::from_str(line).unwrap();
         assert_eq!(entry.parent_id, None);
         assert!(serde_json::from_str::<SessionEntry>(r#"{"id":"x"}"#).is_err());
@@ -1948,7 +1954,10 @@ mod tests {
         assert_eq!(entry.parent_id, None);
         // A round trip keeps the durable row byte-shape.
         let out = serde_json::to_string(&entry).unwrap();
-        assert_eq!(out, r#"{"type":"x","id":"y","parentId":null,"timestamp":"t"}"#);
+        assert_eq!(
+            out,
+            r#"{"type":"x","id":"y","parentId":null,"timestamp":"t"}"#
+        );
     }
 
     /// The captured-attribution fixture: real devbox session rows
