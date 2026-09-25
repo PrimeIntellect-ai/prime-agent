@@ -194,7 +194,7 @@ pub fn card_receipt_count(card: &ToolCallCard) -> usize {
 /// receipt ids against `seen` (the same receipt echoed by two cells of
 /// one run counts once; an id-less parseable receipt is its own notice
 /// - no identity to share).
-fn count_notices(entry: &ChatEntry, seen: &mut HashSet<&str>, notices: &mut RunNotices) {
+fn count_notices<'a>(entry: &'a ChatEntry, seen: &mut HashSet<&'a str>, notices: &mut RunNotices) {
     match entry {
         ChatEntry::AgentMessage(_) => notices.received += 1,
         ChatEntry::Tool(card) => {
