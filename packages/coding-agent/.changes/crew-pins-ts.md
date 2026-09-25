@@ -1,0 +1,2 @@
+- The harness digest now labels a malformed entry with a non-string id by type instead of leaking its raw value.
+- Fixed a child terminal notice staying parked when the queued turn that had captured it was cancelled; it is re-queued immediately.

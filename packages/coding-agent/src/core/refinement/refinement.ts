@@ -490,6 +490,11 @@ export function harnessRefinementMalformation(event: HarnessRefinementEvent): st
 	return undefined;
 }
 
+/** Bounded label for a stored id: a non-string id is named by type, never by value. */
+function harnessIdLabel(id: unknown): string {
+	return typeof id === "string" ? id : `a ${typeof id} id`;
+}
+
 /** Bounded label for a skipped malformed refinement event. Non-object elements
  * and invalid ids are labeled by type, never by value: a corrupt store element
  * must not inject arbitrary unbounded text into every session's prompt digest. */
@@ -498,7 +503,7 @@ function malformedRefinementEventLabel(event: HarnessRefinementEvent): string {
 	if (typeof event === "undefined") return "undefined";
 	if (typeof event !== "object") return `a ${typeof event}`;
 	if (Array.isArray(event)) return "an array";
-	return typeof event.id === "string" ? event.id : `a ${typeof event.id} id`;
+	return harnessIdLabel(event.id);
 }
 
 function compactText(text: string, maxLength: number): string {
@@ -724,7 +729,7 @@ export function formatHarnessStateForPrompt(
 		for (const entry of entries.slice(0, maxEntriesPerKind)) {
 			const malformation = harnessEntryMalformation(entry);
 			if (malformation) {
-				lines.push(`harness: skipped malformed entry ${entry.id} (${malformation})`);
+				lines.push(`harness: skipped malformed entry ${harnessIdLabel(entry.id)} (${malformation})`);
 				continue;
 			}
 			const argumentsText =
@@ -851,7 +856,7 @@ function overviewForPrompt(state: HarnessState): string {
 		for (const entry of entries.slice(0, 40)) {
 			const malformation = harnessEntryMalformation(entry);
 			if (malformation) {
-				lines.push(`- harness: skipped malformed entry ${entry.id} (${malformation})`);
+				lines.push(`- harness: skipped malformed entry ${harnessIdLabel(entry.id)} (${malformation})`);
 				continue;
 			}
 			const content = entry.content.replace(/\s+/g, " ").slice(0, 240);

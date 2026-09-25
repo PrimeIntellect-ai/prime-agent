@@ -19,8 +19,6 @@ export interface ImageModelRoutingInputs {
 	imageModelReference: string | undefined;
 	/** Registry models the reference may resolve to. */
 	availableModels: Model<Api>[];
-	/** Whether the registry has working credentials for a model. */
-	hasConfiguredAuth: (model: Model<any>) => boolean;
 	/** settings.images.blockImages: no image reaches any provider, so no turn routes. */
 	blockImages: boolean;
 }
@@ -39,7 +37,7 @@ export function resolveImageModelOverride(inputs: ImageModelRoutingInputs): Agen
 		throw new Error(formatImageModelRequiredMessage(`${sessionModel.provider}/${sessionModel.id}`));
 	}
 	const imageModel = findExactModelReferenceMatch(inputs.imageModelReference, inputs.availableModels);
-	if (!imageModel || !imageModel.input.includes("image") || !inputs.hasConfiguredAuth(imageModel)) {
+	if (!imageModel || !imageModel.input.includes("image")) {
 		throw new Error(formatImageModelUnusableMessage(inputs.imageModelReference));
 	}
 	return {
