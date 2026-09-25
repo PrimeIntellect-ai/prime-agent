@@ -2029,10 +2029,35 @@ mod tests {
                 },
             },
         });
+        // The outcome row decodes as a system status row, never a user
+        // block (the operator's 2026-09-25 ruling: command output is not
+        // user text).
         assert_eq!(
             event_to_update(&result),
-            Some(TurnUpdate::CustomRow(ChatEntry::SlashCommandResult {
-                content: "Goal active: ship it".to_string()
+            Some(TurnUpdate::CustomRow(ChatEntry::Status {
+                text: "Goal active: ship it".to_string(),
+                kind: StatusKind::Info
+            }))
+        );
+        // A failed command's outcome row carries the error tone.
+        let failed = json!({
+            "type": "message_start",
+            "message": {
+                "role": "custom",
+                "customType": "session_slash_command_result",
+                "content": "Command failed: boom",
+                "display": true,
+                "details": {
+                    "command": { "name": "goal", "args": "clear", "text": "/goal clear" },
+                    "success": false, "severity": "error",
+                },
+            },
+        });
+        assert_eq!(
+            event_to_update(&failed),
+            Some(TurnUpdate::CustomRow(ChatEntry::Status {
+                text: "Command failed: boom".to_string(),
+                kind: StatusKind::Error
             }))
         );
     }
@@ -2047,6 +2072,26 @@ mod tests {
             "display": false,
         });
         assert!(custom_message_entries(&hidden).is_empty());
+        // A displayed outcome row renders in the status-row class with
+        // the severity's tone (the operator's 2026-09-25 ruling: command
+        // output is system output, never user text).
+        let outcome = json!({
+            "role": "custom",
+            "customType": "session_slash_command_result",
+            "content": "Goal cleared.",
+            "display": true,
+            "details": {
+                "command": { "name": "goal", "args": "clear", "text": "/goal clear" },
+                "success": true, "severity": "info",
+            },
+        });
+        assert_eq!(
+            custom_message_entries(&outcome),
+            vec![ChatEntry::Status {
+                text: "Goal cleared.".to_string(),
+                kind: StatusKind::Info,
+            }]
+        );
         // Unknown displayed custom types render the generic box (the TS
         // live dispatch fallthrough; harness digests persist with
         // display=false and render nothing).
