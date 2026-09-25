@@ -56,6 +56,42 @@ const COMPLETION_BOUND_MS: u64 = 2_000;
 /// A declining review reply (the TS `AutoRefineReview` JSON shape).
 const REVIEW_DECLINE: &str = r#"{"shouldRefine": false, "rationale": "one-off tool output"}"#;
 
+/// The deferral test's failure diagnostics: the mock's request
+/// classifications and the daemon trace's auto-refine phases, so a
+/// timeout names the phase the round actually reached.
+fn deferral_diagnostics(mock: &StallMock, trace_path: &Path) -> String {
+    let requests = mock.requests.lock().expect("mock lock").clone();
+    let mut parts: Vec<String> = vec![format!(
+        "review_requests={}",
+        requests
+            .iter()
+            .filter(|body| is_review_request(body))
+            .count()
+    )];
+    parts.push(format!(
+        "plan_requests={}",
+        requests
+            .iter()
+            .filter(|body| is_refine_plan_request(body))
+            .count()
+    ));
+    parts.push(format!(
+        "summarizer_requests={}",
+        requests
+            .iter()
+            .filter(|body| is_summarizer_request(body))
+            .count()
+    ));
+    parts.push(format!("turn_requests={}", mock.turn_request_count()));
+    let phases: Vec<String> = read_trace(trace_path)
+        .into_iter()
+        .filter(|(phase, _)| phase.starts_with("autorefine.") || phase.starts_with("compact."))
+        .map(|(phase, at)| format!("{phase}@{at}us"))
+        .collect();
+    parts.push(format!("trace=[{}]", phases.join(", ")));
+    parts.join(" ")
+}
+
 /// An approving review reply (the TS `AutoRefineReview` JSON shape).
 const REVIEW_APPROVE: &str =
     r#"{"shouldRefine": true, "rationale": "the fattening markers recur"}"#;
@@ -1050,7 +1086,12 @@ fn approving_review_while_a_turn_streams_defers_its_refinement() {
             break;
         }
     }
-    let outcome_at = outcome_at.expect("the retained review never ran its refinement");
+    let outcome_at = outcome_at.unwrap_or_else(|| {
+        panic!(
+            "the retained review never ran its refinement: {}",
+            deferral_diagnostics(&mock, &trace_path)
+        )
+    });
     assert!(
         outcome_at >= turn_settled_at,
         "the refinement ran before the streaming turn settled ({outcome_at:?} < {turn_settled_at:?})"
