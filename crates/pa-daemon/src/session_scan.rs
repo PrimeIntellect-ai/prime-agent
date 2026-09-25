@@ -1,9 +1,12 @@
 //! The saved-session roster scan (`list_sessions`): the listing loop gated
 //! by a bounded first-line header read (the `isValidSessionFile`
-//! precedent). A file whose complete first line is not a session header is
-//! skipped without its fold; the rows stay the fold's own values: a
-//! perf-only reshape, the row contract is the fold's (now the #2713
-//! resumable scan: the gate runs first, then `read_session_info`).
+//! precedent). A file whose complete first line is a parseable record that
+//! is not the `session` header is skipped without its fold (the TS
+//! `acc.invalid` arm); an unparseable or blank first line leaves the fold
+//! to decide (TS never invalidates on a parse failure). The rows stay the
+//! fold's own values: a perf-only reshape, the row contract is the fold's
+//! (now the #2713 resumable scan: the gate runs first, then
+//! `read_session_info`).
 
 use std::fs;
 use std::path::Path;
@@ -19,9 +22,11 @@ enum HeaderGate {
     /// The complete first line is a valid `session` header: the fold fills
     /// the row.
     Header,
-    /// The complete first line is not a session header. Harness-written
-    /// session files lead with their header (`session_header_line` writes it
-    /// first), so the file is not a session: skip it without the fold.
+    /// The complete first line is a parseable record that is not the
+    /// `session` header. Harness-written session files lead with their
+    /// header (`session_header_line` writes it first), and TS marks the
+    /// same file invalid (`acc.invalid`), so the file is not a session:
+    /// skip it without the fold.
     NotAHeader,
     /// The first line does not end within the bound (an over-long header, an
     /// unreadable file): the bounded read cannot judge the file, the fold
@@ -44,6 +49,17 @@ fn bounded_header_gate(path: &Path) -> HeaderGate {
         // way), so the fold decides.
         return HeaderGate::Unjudged;
     }
+    // TS `foldSessionScanLine` never invalidates a file on a parse failure
+    // (the catch returns before the header check, session-manager.ts:1563-1569):
+    // an unparseable first record leaves a later `session` header free to
+    // produce the row, so the fold decides.
+    if serde_json::from_str::<serde_json::Value>(text).is_err() {
+        return HeaderGate::Unjudged;
+    }
+    // A parseable first record that is not the `session` header marks the
+    // file invalid (the TS `acc.invalid` arm, session-manager.ts:1602-1608):
+    // TS breaks the scan and lists no row for such a file, so the gate skips
+    // it without the fold.
     if parse_session_header_line(text).is_some() {
         HeaderGate::Header
     } else {
@@ -161,20 +177,43 @@ mod tests {
     }
 
     #[test]
-    fn skips_a_file_whose_first_line_is_not_a_session_header() {
+    fn skips_a_file_whose_first_parseable_line_is_not_the_session_header() {
         let dir = temp_dir();
-        write_session(&dir, "/repo/a", None, 1);
-        let foreign = dir.join("foreign.jsonl");
-        fs::write(&foreign, "not a session file at all\n").unwrap();
+        // A session header preceded by a parseable non-session record: TS
+        // marks the file invalid (`acc.invalid`, session-manager.ts:1602-1608)
+        // and lists no row, so the gate skips it without the fold - even
+        // though a header follows.
         let mistyped = dir.join("mistyped.jsonl");
+        let mut session = SessionFile::create("/repo/mistyped", None, 0);
+        session.set_path(mistyped.clone());
+        session.rewrite().unwrap();
+        let header_line = fs::read_to_string(&mistyped).unwrap();
         fs::write(
             &mistyped,
-            r#"{"type":"message","id":"x1","timestamp":"t"}\n"#,
+            format!("{{\"type\":\"message\",\"id\":\"x1\"}}\n{header_line}"),
         )
         .unwrap();
+        // An unparseable first line with no header anywhere is no skip
+        // either: the fold decides and finds no row.
+        let foreign = dir.join("foreign.jsonl");
+        fs::write(&foreign, "not a session file at all\n").unwrap();
+        assert!(list_sessions(&dir).is_empty());
+    }
+
+    #[test]
+    fn still_lists_a_file_with_an_unparseable_first_line_and_a_later_header() {
+        let dir = temp_dir();
+        // TS `foldSessionScanLine` never invalidates on a parse failure (the
+        // catch returns before the header check, session-manager.ts:1563-1569):
+        // a truncated or foreign first line must not hide a recoverable
+        // session, so the fold decides the file.
+        let path = write_session(&dir, "/repo/junk-first", None, 1);
+        let content = fs::read_to_string(&path).unwrap();
+        fs::write(&path, format!("not a session file at all\n{content}")).unwrap();
         let scanned = list_sessions(&dir);
+        assert_eq!(scanned, sequential_list_sessions(&dir));
         assert_eq!(scanned.len(), 1);
-        assert_eq!(scanned[0].cwd, "/repo/a");
+        assert_eq!(scanned[0].cwd, "/repo/junk-first");
     }
 
     #[test]
