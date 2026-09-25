@@ -1496,7 +1496,8 @@ mod tests {
                         (
                             continuation.connection_id,
                             continuation.last_response_id.clone(),
-                            continuation.last_response_items.len(),
+                            continuation.last_response_items.clone(),
+                            continuation.last_request_body.clone(),
                         )
                     }),
                 )
