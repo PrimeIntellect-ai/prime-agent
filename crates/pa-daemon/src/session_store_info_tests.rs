@@ -334,17 +334,22 @@ fn a_torn_trailing_line_folds_once_completed() {
         &path,
         &[json!({"type":"session","id":"t","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"})],
     );
-    // A torn trailing message: no newline, so the scan leaves it unconsumed.
-    let torn = r#"{"type":"message","id":"torn","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"torn text","timestamp":1790110000000}}"#;
+    // A torn trailing message - invalid JSON (the write is mid-line), no
+    // newline: the scan leaves it unconsumed and the row cannot fold it
+    // (TS snapshotSessionInfo's tornTail is lenient: a parse failure is
+    // skipped).
+    let torn_head = r#"{"type":"message","id":"torn","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"torn"#;
     {
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-        file.write_all(torn.as_bytes()).unwrap();
+        file.write_all(torn_head.as_bytes()).unwrap();
     }
     let partial = read_session_info(&path).unwrap();
     assert_eq!(partial.message_count, 0, "a torn line must not fold");
     // The completed line folds exactly once, and the row matches the oracle.
     {
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(br#" text","timestamp":1790110000000}}"#.as_slice())
+            .unwrap();
         file.write_all(b"\n").unwrap();
     }
     assert_fold_matches(&path);

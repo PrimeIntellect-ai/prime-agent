@@ -1158,10 +1158,65 @@ impl SessionInfoGeneration {
     }
 }
 
-fn session_info_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, SessionScanState>> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, SessionScanState>>> =
+/// TS `SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES`: the cross-file memory
+/// budget on retained per-assistant-message usage records. Whole-state
+/// LRU eviction can force a full catalog rescan every refresh, so keep
+/// large families (~2k sessions, 150k usage entries) and growth headroom
+/// resident (session-manager.ts).
+const SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES: usize = 400_000;
+
+/// TS `sessionScanStates` + `storeSessionScanState`'s accounting: the
+/// states map with its insertion order (JS Map iteration order — the LRU
+/// eviction walks from the front) and the retained-usage-entry counter.
+#[derive(Default)]
+struct SessionInfoScanCache {
+    states: HashMap<PathBuf, SessionScanState>,
+    /// Insertion order; a re-store moves a path to the back (LRU recency).
+    order: Vec<PathBuf>,
+    retained_usage_entries: usize,
+}
+
+impl SessionInfoScanCache {
+    /// TS `dropSessionScanState`.
+    fn drop_state(&mut self, path: &Path) {
+        if let Some(state) = self.states.remove(path) {
+            self.retained_usage_entries -= state.accounted_usage_entries;
+        }
+        self.order.retain(|p| p != path);
+    }
+
+    /// The unchanged-file hit re-stores in TS (`storeSessionScanState
+    /// (filePath, previous)`) — LRU recency without re-accounting.
+    fn touch(&mut self, path: &Path) {
+        if !self.states.contains_key(path) {
+            return;
+        }
+        self.order.retain(|p| p.as_path() != path);
+        self.order.push(path.to_path_buf());
+    }
+
+    /// TS `storeSessionScanState`: (re-)store with fresh accounting, then
+    /// evict insertion-order-first states until the budget holds.
+    fn store_state(&mut self, path: &Path, state: SessionScanState) {
+        self.drop_state(path);
+        let mut state = state;
+        state.accounted_usage_entries = state.acc.usage_scan.retained_entries();
+        self.retained_usage_entries += state.accounted_usage_entries;
+        self.order.push(path.to_path_buf());
+        self.states.insert(path.to_path_buf(), state);
+        while self.retained_usage_entries > SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES {
+            let Some(front) = self.order.first().cloned() else {
+                break;
+            };
+            self.drop_state(&front);
+        }
+    }
+}
+
+fn session_info_cache() -> &'static std::sync::Mutex<SessionInfoScanCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<SessionInfoScanCache>> =
         std::sync::OnceLock::new();
-    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+    CACHE.get_or_init(|| std::sync::Mutex::new(SessionInfoScanCache::default()))
 }
 
 /// TS `SESSION_SCAN_RESUME_TAIL_BYTES`: the trailing window of the consumed
@@ -1200,6 +1255,9 @@ struct SessionScanState {
     /// The trailing window of the consumed prefix (TS `advanceScanTail`).
     tail: [u8; SESSION_SCAN_RESUME_TAIL_BYTES],
     info: Option<SessionInfo>,
+    /// Usage entries counted against the retained bound at the last store
+    /// (TS `accountedUsageEntries`).
+    accounted_usage_entries: usize,
 }
 
 impl SessionScanState {
@@ -1210,6 +1268,7 @@ impl SessionScanState {
             offset: 0,
             tail: [b'\n'; SESSION_SCAN_RESUME_TAIL_BYTES],
             info: None,
+            accounted_usage_entries: 0,
         }
     }
 
@@ -1234,6 +1293,7 @@ impl SessionScanState {
             offset: self.offset,
             tail: self.tail,
             info: None,
+            accounted_usage_entries: 0,
         }
     }
 
@@ -1367,10 +1427,12 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
 
     // The unchanged case answers from the cache; the grown case resumes.
     let mut state = {
-        let cache = session_info_cache().lock().ok()?;
-        match cache.get(path) {
+        let mut cache = session_info_cache().lock().ok()?;
+        match cache.states.get(path) {
             Some(cached) if cached.generation == generation => {
-                return cached.info.clone();
+                let info = cached.info.clone();
+                cache.touch(path);
+                return info;
             }
             Some(cached)
                 if cached.same_file_identity(&generation)
@@ -1411,10 +1473,7 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
         state.generation = generation;
         state.info = Some(info.clone());
         if let Ok(mut cache) = session_info_cache().lock() {
-            if cache.len() > 512 {
-                cache.clear();
-            }
-            cache.insert(path.to_path_buf(), state);
+            cache.store_state(path, state);
         }
     }
     Some(info)

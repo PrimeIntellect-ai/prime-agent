@@ -79,6 +79,11 @@ impl AssistantUsageById {
         self.index.contains_key(id)
     }
 
+    /// The retained-entry count: TS `state.acc.assistantUsageById.size`.
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     fn set(&mut self, id: &str, usage: Usage) {
         match self.index.get(id) {
             Some(at) => self.entries[*at].1 = usage,
@@ -170,6 +175,12 @@ pub struct UsageScan {
 }
 
 impl UsageScan {
+    /// TS `storeSessionScanState`'s retained-usage accounting: the number of
+    /// per-assistant-message records the scan state keeps resident.
+    pub(crate) fn retained_entries(&self) -> usize {
+        self.assistant_usage_by_id.len()
+    }
+
     /// TS `foldSessionScanLine`: the raw assistant usage keyed by entry id.
     /// Only an assistant row with a usage block lands in the map.
     pub(crate) fn fold_message(&mut self, id: &str, role: Option<&str>, usage: Option<Usage>) {
