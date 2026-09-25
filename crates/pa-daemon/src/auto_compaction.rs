@@ -128,6 +128,13 @@ impl AgentSessionEngine {
                 Ok(Ok(CompactOutcome::Skipped(_))) => {
                     serde_json::json!({ "outcome": "skipped" })
                 }
+                // The abort arm mirrors the emit match's order: the
+                // abort marker (from either layer) is checked before the
+                // generic failure, so a cancelled run traces "cancelled",
+                // never "failed".
+                Ok(Err(error)) | Err(error) if pa_agent::abort::is_abort_error(error) => {
+                    serde_json::json!({ "outcome": "cancelled" })
+                }
                 Ok(Err(_)) | Err(_) => {
                     serde_json::json!({ "outcome": "failed" })
                 }

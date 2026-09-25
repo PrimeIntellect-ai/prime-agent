@@ -5,8 +5,11 @@
 //!
 //! `PA_COMPACTION_TRACE=1` (or `stderr`) writes stderr;
 //! `PA_COMPACTION_TRACE=<path>` appends one JSON line per boundary. The
-//! first trace line of the process starts the elapsed clock, so
-//! `elapsedMicros` on every line reads as time since the run began.
+//! path must be a regular file (or creatable as one): the sink opens it
+//! once, synchronously, at the first trace line — a FIFO would block that
+//! first line until a reader appears. The first trace line of the
+//! process also starts the elapsed clock, so `elapsedMicros` on every
+//! line reads as time since the run began.
 
 use std::io::Write;
 use std::sync::OnceLock;
@@ -35,11 +38,6 @@ fn sink() -> &'static Sink {
     })
 }
 
-/// Whether the trace is on (callers skip building detail values).
-pub fn enabled() -> bool {
-    !matches!(sink(), Sink::Off)
-}
-
 /// One phase boundary. `phase` names the boundary (dotted
 /// `surface.stage[.what]`); `detail` carries phase-specific numbers
 /// (counts, byte sizes, entry ids).
@@ -65,21 +63,5 @@ pub fn trace(phase: &str, detail: serde_json::Value) {
             let _ = writeln!(file, "compaction-trace: {line}");
         }
         Sink::Off => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The sink resolves once per process from the env; the test cannot
-    /// flip it after another test resolved it, so it only proves the
-    /// resolved default (off) for a fresh process.
-    #[test]
-    fn unset_env_means_off() {
-        if std::env::var("PA_COMPACTION_TRACE").is_ok() {
-            return;
-        }
-        assert!(!enabled());
     }
 }

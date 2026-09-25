@@ -39,7 +39,8 @@ pub enum CompactAutoRefineSurface {
 }
 
 /// The trigger state one session carries (TS `_compactAutoRefinePending`,
-/// `_lastAutoRefineReviewAt`, `_assistantTurnsSinceAutoRefine`).
+/// `_lastAutoRefineReviewAt`, `_assistantTurnsSinceAutoRefine`,
+/// `_autoRefineBranchVersion`, `_autoRefineInProgress`).
 #[derive(Debug, Default)]
 pub(crate) struct CompactAutoRefineState {
     /// A successful compaction armed the trigger; the next serviced
@@ -51,6 +52,15 @@ pub(crate) struct CompactAutoRefineState {
     /// The settled non-error assistant turns since the last review, the
     /// count the review prompt's trigger line carries.
     settled_turns_since_review: u32,
+    /// A review round is in flight (its model call awaiting): a second
+    /// consumption re-arms the trigger instead of overlapping (TS
+    /// `_autoRefineInProgress`).
+    in_flight: bool,
+    /// The branch invalidation version (TS `_autoRefineBranchVersion`):
+    /// a branch move bumps it, and a round that started on an older
+    /// version drops its result — a review resolved against the abandoned
+    /// branch never applies its edits.
+    branch_version: u64,
 }
 
 impl AgentSession {
@@ -77,13 +87,19 @@ impl AgentSession {
             .pending
     }
 
-    /// TS `_discardPendingAutoRefine`: drop the armed trigger outright
-    /// (a branch move invalidates the conversation the review would read).
+    /// TS `_discardPendingAutoRefine` +
+    /// `_invalidatePendingAutoRefineForBranchChange`: drop the armed
+    /// trigger outright AND bump the branch version — an in-flight
+    /// review started on the abandoned branch drops its result when it
+    /// resolves (the version check inside the round), so its edits never
+    /// apply to the moved-to session.
     pub fn discard_compact_auto_refine(&self) {
-        self.compact_auto_refine
+        let mut state = self
+            .compact_auto_refine
             .lock()
-            .expect("compact auto-refine state lock")
-            .pending = false;
+            .expect("compact auto-refine state lock");
+        state.pending = false;
+        state.branch_version += 1;
     }
 
     /// TS `_assistantTurnsSinceAutoRefine`'s message_end increment: one
@@ -110,7 +126,7 @@ impl AgentSession {
         surface: CompactAutoRefineSurface,
     ) -> anyhow::Result<Option<RefinementResult>> {
         let gates = self.auto_refine_gates();
-        let settled_turns = {
+        let (settled_turns, branch_version) = {
             let mut state = self
                 .compact_auto_refine
                 .lock()
@@ -137,23 +153,43 @@ impl AgentSession {
                 }
                 return Ok(None);
             }
+            // A round already in flight owns the review (TS
+            // `_autoRefineInProgress`): the background servicing makes a
+            // second compaction's settle overlap the first round's model
+            // call, so this consumption re-arms the trigger for the next
+            // serviced boundary instead of stacking a second review.
+            if state.in_flight {
+                return Ok(None);
+            }
             state.pending = false;
-            state.settled_turns_since_review
+            state.in_flight = true;
+            (state.settled_turns_since_review, state.branch_version)
         };
         let outcome = self
             .auto_refine_after_compaction(model, api_key, global_harness_dir, settled_turns)
             .await;
-        // TS stamps the cooldown and resets the turn counter for every
-        // attempt — decline, success, and failure alike — so a persistent
-        // failure cannot retry a full review on every boundary.
-        {
+        let outcome = {
             let mut state = self
                 .compact_auto_refine
                 .lock()
                 .expect("compact auto-refine state lock");
+            state.in_flight = false;
+            // TS stamps the cooldown and resets the turn counter for every
+            // attempt — decline, success, and failure alike — so a persistent
+            // failure cannot retry a full review on every boundary.
             state.last_review_at = Some(now_millis());
             state.settled_turns_since_review = 0;
-        }
+            // A branch move (or a session rebuild's discard) bumped the
+            // version while this round's model call was in flight (TS
+            // `_reviewAutoRefine`'s `branchVersion !==
+            // this._autoRefineBranchVersion` check after the await): the
+            // resolved review belongs to the abandoned conversation, so
+            // its edits and rows never surface.
+            if state.branch_version != branch_version {
+                return Ok(None);
+            }
+            outcome
+        };
         outcome
     }
 }

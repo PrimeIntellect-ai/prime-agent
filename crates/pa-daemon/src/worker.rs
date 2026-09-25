@@ -4887,20 +4887,41 @@ fn restore_queue_snapshot(
 /// review and broadcast its `message_start`/`message_end` pair (the TS
 /// `_emit` for rows the session appends outside a turn): the same shape
 /// `Worker::emit_custom_row` persists for the `/refine` command's rows.
-fn emit_refinement_row(core: &Arc<Mutex<SessionCore>>, events: &Arc<EventPump>, message: Value) {
+///
+/// `review_session_id` fences the row against the session moves a branch
+/// navigation or replacement makes while the review's model call was in
+/// flight (the round's branch-version check already drops its harness
+/// edits; this drops the ROWS): the worker's live store answers with a
+/// different session id — the review resolved against the abandoned
+/// conversation, so its rows never persist or broadcast into the
+/// moved-to session. Returns whether the row landed.
+fn emit_refinement_row(
+    core: &Arc<Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+    review_session_id: &str,
+    message: Value,
+) -> bool {
     {
         let mut core = core.lock().unwrap();
-        if let Some(store) = core.store.as_mut() {
-            let _ = store.persist_entry(
-                "custom_message",
-                json!({
-                    "customType": message.get("customType").cloned().unwrap_or(Value::Null),
-                    "content": message.get("content").cloned().unwrap_or(Value::Null),
-                    "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
-                    "details": message.get("details").cloned().unwrap_or(Value::Null),
-                }),
+        let Some(store) = core.store.as_mut() else {
+            return false;
+        };
+        if store.session_id() != review_session_id {
+            pa_core::session_engine::compaction_trace::trace(
+                "autorefine.rows_dropped_session_moved",
+                serde_json::Value::Null,
             );
+            return false;
         }
+        let _ = store.persist_entry(
+            "custom_message",
+            json!({
+                "customType": message.get("customType").cloned().unwrap_or(Value::Null),
+                "content": message.get("content").cloned().unwrap_or(Value::Null),
+                "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
+                "details": message.get("details").cloned().unwrap_or(Value::Null),
+            }),
+        );
     }
     emit_worker_event_with(
         core,
@@ -4912,6 +4933,7 @@ fn emit_refinement_row(core: &Arc<Mutex<SessionCore>>, events: &Arc<EventPump>, 
         events,
         json!({ "type": "message_end", "message": message }),
     );
+    true
 }
 
 pub(crate) fn emit_worker_event_with(
@@ -5438,8 +5460,16 @@ impl TurnRunner {
         let agent_dir = crate::paths::agent_dir().unwrap_or_default();
         // The settle tail's background compact-trigger servicing owns its
         // own engine clone (the turn closure below moves the shadowing
-        // clone).
+        // clone), and fences its rows on the session identity it serviced
+        // (a branch move or replacement swaps the store mid-review).
         let review_engine = std::sync::Arc::clone(&engine);
+        let review_session_id = {
+            let core = self.core.lock().unwrap();
+            core.store
+                .as_ref()
+                .map(|store| store.session_id().to_string())
+                .unwrap_or_default()
+        };
         // The turn's settled outcome reaches the waiting prompt only
         // after the runner flipped the session back to idle (TS
         // `promptAndWait` resolves after the full settle): the blocking
@@ -6077,6 +6107,7 @@ impl TurnRunner {
             let engine = review_engine;
             let core = Arc::clone(&self.core);
             let events = self.events.clone();
+            let review_session_id = review_session_id.clone();
             tokio::spawn(async move {
                 // The pending pre-check and the round both take the
                 // engine's session mutex (`blocking_lock`): they run on
@@ -6105,7 +6136,10 @@ impl TurnRunner {
                         // the model-facing notice (when edits applied) as
                         // durable rows: persist both to the session file
                         // and broadcast their message pairs like the
-                        // `/refine` command.
+                        // `/refine` command — each row fenced on the
+                        // session identity the review serviced (a branch
+                        // move or replacement swaps the store mid-review;
+                        // the row never lands on the moved-to session).
                         let outcome_row =
                             pa_core::session_engine::refine::create_refinement_outcome_message(
                                 &result,
@@ -6113,7 +6147,7 @@ impl TurnRunner {
                         if let Ok(value) = serde_json::to_value(
                             pa_types::session::AgentMessage::Custom(outcome_row),
                         ) {
-                            emit_refinement_row(&core, &events, value);
+                            emit_refinement_row(&core, &events, &review_session_id, value);
                         }
                         if result.applied_edits.iter().any(|edit| edit.applied) {
                             let notice =
@@ -6124,7 +6158,7 @@ impl TurnRunner {
                             if let Ok(value) = serde_json::to_value(
                                 pa_types::session::AgentMessage::Custom(notice),
                             ) {
-                                emit_refinement_row(&core, &events, value);
+                                emit_refinement_row(&core, &events, &review_session_id, value);
                             }
                         }
                     }
