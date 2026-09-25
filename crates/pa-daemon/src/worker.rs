@@ -325,7 +325,7 @@ pub(crate) struct QueuedItem {
     /// The original agent-message text when this item came from an
     /// `agent_message` delivery (the marker `agent_messages_clear` /
     /// `agent_messages_pause` remove queued items by); `None` for items a
-    /// client queued directly (steer/follow_up).
+    /// client queued directly (`steer/follow_up`).
     pub(crate) agent_message: Option<String>,
     /// The scheduler's queue key (TS `followUpQueueKey`): a heartbeat's
     /// queued fire carries `heartbeat:<id>`, and a later fire replaces the
@@ -3553,8 +3553,8 @@ impl Worker {
     /// Bind the live session's schedule catalog (TS `rebindCronJobsToState`):
     /// register the session's artifact partition, rebind the stored jobs onto
     /// the live ids, and start (or wake) the scheduler. Runs at create and
-    /// after every replacement swap (new_session / switch_session /
-    /// import_jsonl / fork) - the jobs follow the live session onto the
+    /// after every replacement swap (`new_session` / `switch_session` /
+    /// `import_jsonl` / fork) - the jobs follow the live session onto the
     /// moved-to file, exactly like the TS rebind on the runtime swap.
     pub(crate) async fn bind_scheduled_jobs(&self) {
         let binding = {
@@ -4462,7 +4462,7 @@ impl Worker {
         self.emit_worker_event(json!({ "type": "message_end", "message": message }));
     }
 
-    /// Sequence and broadcast one session_event for the queue projection.
+    /// Sequence and broadcast one `session_event` for the queue projection.
     pub(crate) fn emit_action_update(&self, snapshot: &SessionActionSnapshot) -> Result<()> {
         let mut core = self.core.lock().unwrap();
         // TS `_emitQueueUpdate`: an unchanged projection stays silent (an
@@ -7591,7 +7591,7 @@ mod tests {
     /// completion surface) settles the goal, and the completion's
     /// boundary mints nothing more. The completing cell needs a
     /// bootable kernel: a sandbox gate run must provide uv and
-    /// PI_PACKAGE_DIR at the checkout (the guard inside names the
+    /// `PI_PACKAGE_DIR` at the checkout (the guard inside names the
     /// recipe when the cell fails instead of letting the loop drain
     /// the faux script into a misleading count mismatch).
     #[allow(clippy::await_holding_lock)] // the faux registry is process-global: the guard must span the async flow
@@ -7740,7 +7740,7 @@ mod tests {
     /// gap: TS broadcasts AND persists it, the gate used to drop it): a
     /// turn aborted mid-provider-wait settles on its aborted assistant
     /// row, and the gate forwards the row — the attached client sees the
-    /// row's message_start/message_end pair (stopReason "aborted", the
+    /// row's `message_start/message_end` pair (stopReason "aborted", the
     /// abort error, EMPTY usage) and the session file holds the same
     /// row — while the active goal's accounting skips it (the state the
     /// goal-start turn left is unchanged after the abort).
@@ -10438,7 +10438,7 @@ mod turn_stream_tests {
 
     /// An instant burst (the provider outruns the tick entirely) parks one
     /// snapshot at a time; the settle frame flushes the final snapshot
-    /// before message_end, so the client sees the full message without a
+    /// before `message_end`, so the client sees the full message without a
     /// tick waiting period and nothing lands out of order.
     #[tokio::test]
     async fn an_instant_burst_flushes_the_final_snapshot_with_its_settle_frame() {

@@ -9,7 +9,7 @@
 //! updates. The turn settlement (response boundary, quiescence envelope,
 //! stop reason) mirrors the in-process mode: both serve the same captures.
 //! The daemon worker's `goal_update` session events surface through the
-//! wire mapping (wire_events.rs), and the autonomous accounting rides the
+//! wire mapping (`wire_events.rs`), and the autonomous accounting rides the
 //! `wait_for_headless_completion` response into the completion envelope
 //! and the stop reason (TS `waitForHeadlessCompletion` + `acpStopReason`).
 

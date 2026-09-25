@@ -825,7 +825,7 @@ pub struct CompactionRun {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompactionOutcome {
     /// Compacted; the run carries the result and entry usage. Boxed: the
-    /// run's insertion-ordered JSON maps (preserve_order, wire parity)
+    /// run's insertion-ordered JSON maps (`preserve_order`, wire parity)
     /// would make this variant dwarf the skip/abort/fail variants
     /// (`large_enum_variant`).
     Compacted { run: Box<CompactionRun> },

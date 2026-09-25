@@ -9,7 +9,7 @@
 //! Writers: the supervisor appends at admission moments (spawn at child
 //! create, rename at subagent rename, delete at subagent delete). Readers:
 //! every roster surface that must show non-resident children (`list --all`,
-//! the saved-session catalog). Appends are single small O_APPEND writes
+//! the saved-session catalog). Appends are single small `O_APPEND` writes
 //! whose atomicity we rely on for cross-process interleaving; reads re-read
 //! the whole file behind a stat guard, so staleness is bounded to in-flight
 //! appends.

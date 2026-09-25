@@ -298,7 +298,7 @@ pub struct WorkerQueueItemRecord {
     #[serde(default = "queue_visible_default")]
     pub queue_visible: bool,
     /// The item's turn-execution class ("queued"/"injected"/"direct", see
-    /// worker::TurnPolicy): the batch gathering's compatibility gate. A
+    /// `worker::TurnPolicy)`: the batch gathering's compatibility gate. A
     /// record written before the field existed restores as "queued" — the
     /// dominant lane class, and the only one a fresh snapshot can batch.
     #[serde(default = "queue_policy_default")]

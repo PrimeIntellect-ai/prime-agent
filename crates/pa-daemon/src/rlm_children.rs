@@ -259,7 +259,7 @@ struct SupervisorChildSessionsInner {
     /// `None` until the engine wires it.
     settle_hook: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// The worker's model-allowlist refusal telemetry (`model refused`):
-    /// spawn/create_session refusals emit through the engine's shared
+    /// `spawn/create_session` refusals emit through the engine's shared
     /// lazily-built client.
     model_refusal_telemetry: std::sync::Arc<crate::model_allowlist::ModelRefusalTelemetry>,
     /// The engine's child-usage attribution producer (wired once the

@@ -62,7 +62,7 @@ impl AgentTaskState {
         }
     }
 
-    /// The wire/persisted form (TS `session-manager` snake_case).
+    /// The wire/persisted form (TS `session-manager` `snake_case`).
     pub(crate) fn persisted(self) -> pa_types::session::AgentTaskState {
         match self {
             AgentTaskState::NeedsInput => pa_types::session::AgentTaskState::NeedsInput,
@@ -584,7 +584,7 @@ fn counting_artifact() -> Regex {
 }
 
 /// Take the content of the last `<recap>` and `<status>` tags; idle verdicts
-/// default to needs_input.
+/// default to `needs_input`.
 pub fn parse_agent_status(text: &str, is_working: bool) -> Option<GeneratedStatus> {
     // Normalize unicode angle-bracket lookalikes so a tag written with them
     // still parses.

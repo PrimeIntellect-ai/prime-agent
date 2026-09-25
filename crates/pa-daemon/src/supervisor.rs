@@ -5587,7 +5587,7 @@ mod tests {
 
     /// The shutdown gate and the accept loop's exit flag are separate: the
     /// gate refuses creates the moment a terminal stop begins, but the
-    /// loop must stay up until begin_shutdown finishes stopping the workers.
+    /// loop must stay up until `begin_shutdown` finishes stopping the workers.
     #[tokio::test]
     async fn begin_shutdown_sets_the_accept_exit_after_the_stop_pass() {
         let dir = tempfile::TempDir::new().unwrap();

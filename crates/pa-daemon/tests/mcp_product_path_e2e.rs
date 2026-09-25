@@ -363,10 +363,10 @@ fn settings_declared_stdio_server_round_trips_through_the_kernel_mcp_client() {
     );
 }
 
-/// The begin_login host request is live in the daemon worker product path:
+/// The `begin_login` host request is live in the daemon worker product path:
 /// the kernel reaches the session's real MCP manager, which answers with
 /// the TS wording for unknown servers (the full login flow is verified
-/// against the fixture OAuth transport in the mcp_login unit tests — a
+/// against the fixture OAuth transport in the `mcp_login` unit tests — a
 /// real login needs a live HTTPS provider, so this e2e pins the wiring).
 #[test]
 fn begin_login_host_request_is_live_in_the_worker() {

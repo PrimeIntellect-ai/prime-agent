@@ -624,7 +624,7 @@ mod tests {
     /// reasoning-controls metadata); the passivated row keeps the
     /// DURABLE display field - the `{provider, modelId}` pair the
     /// ledger-seed hydrate writes and the agents view reads (the
-    /// thinking_level e2e's post-stop assertion).
+    /// `thinking_level` e2e's post-stop assertion).
     #[tokio::test]
     async fn passivation_normalizes_the_live_model_descriptor_to_the_durable_pair() {
         let (dir, supervisor, root_file, child_file) = roster_fixture().await;
