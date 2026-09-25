@@ -2607,6 +2607,13 @@ async fn run_agents_view_surface(
         exit_guard.cancel();
     }
     let opened = mode.opened.take();
+    // An in-flight stop-or-delete dispatch settles before the connection
+    // closes (bounded): an exit right after the second ctrl+x must not
+    // drop the request on the floor (the loop's client close would take
+    // the connection down before the detached task ever sent).
+    if let Some(dispatch) = delete_dispatch.take() {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), dispatch).await;
+    }
     // A handoff returns the roster connection for the flow's next view run
     // (TS `persistentState.rosterClient`); a selection-less exit closes it.
     let link = if opened.is_some() || mode.new_session {
