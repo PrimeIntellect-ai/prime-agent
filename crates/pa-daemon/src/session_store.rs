@@ -1173,7 +1173,8 @@ const SESSION_SCAN_RESUME_TAIL_BYTES: usize = 16;
 /// TS `SessionScanAccumulator`: the per-file fold state a resume continues
 /// from. The finished [`SessionInfo`] is derived from this; the cached state
 /// carries the accumulator so a grown file folds ONLY its appended entries.
-#[derive(Default)]
+/// Clone is the snapshot fold's copy (TS `snapshotSessionInfo`).
+#[derive(Clone, Default)]
 struct SessionScanAccumulator {
     header: Option<SessionHeader>,
     name: Option<String>,
@@ -1392,8 +1393,8 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
         return None;
     }
     let mut reader = std::io::BufReader::new(&mut file);
-    state.scan_from_cursor(&mut reader, generation.len)?;
-    let info = state.build_info(path)?;
+    let torn_tail = state.scan_from_cursor(&mut reader, generation.len)?;
+    let info = state.build_info(path, Some(&torn_tail))?;
     // A concurrent append/replacement must never certify stale metadata.
     // The legacy no-timestamp fallback is now(), not a durable file value.
     let modified_ms = state.acc.last_activity_ms.unwrap_or(0);
@@ -1421,13 +1422,14 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
 
 impl SessionScanState {
     /// Fold lines from the cursor (TS `scanSessionLines`): a complete line
-    /// advances the cursor and the tail; a torn trailing line stays
-    /// unconsumed for the next resume. `None` = the abort arm.
+    /// advances the cursor and the tail; an unterminated final line is
+    /// never consumed (it may still be an in-progress append) and is
+    /// returned as the snapshot-only torn tail. `None` = the abort arm.
     fn scan_from_cursor(
         &mut self,
         reader: &mut std::io::BufReader<&mut fs::File>,
         size: u64,
-    ) -> Option<()> {
+    ) -> Option<String> {
         let mut line = String::new();
         loop {
             line.clear();
@@ -1437,26 +1439,40 @@ impl SessionScanState {
             }
             let complete = line.ends_with('\n');
             if !complete && (self.offset + consumed as u64) >= size {
-                // A torn trailing line: not folded, the cursor stays put
-                // so the completed line folds on the next scan.
-                break;
+                // A torn trailing line: not folded here, the cursor stays
+                // put so the completed line folds on the next scan; the
+                // caller folds it into the current snapshot only.
+                return Some(line);
             }
             if complete {
                 line.pop();
             }
-            fold_scan_entry(self, &line)?;
+            fold_scan_entry(&mut self.acc, &line)?;
             self.offset += consumed as u64;
             self.advance_tail(line.as_bytes());
             if !complete {
                 break;
             }
         }
-        Some(())
+        Some(String::new())
     }
 
-    /// Derive the listing row (the tail of the old full scan).
-    fn build_info(&self, path: &Path) -> Option<SessionInfo> {
-        let acc = &self.acc;
+    /// Derive the listing row (the tail of the old full scan). A non-empty
+    /// torn tail folds into a SNAPSHOT copy of the accumulator (TS
+    /// `snapshotSessionInfo`): the valid unterminated final line reaches
+    /// the row, while the consumed prefix - the resumable state - stays
+    /// untouched for the scan that sees the terminating newline.
+    fn build_info(&self, path: &Path, torn: Option<&str>) -> Option<SessionInfo> {
+        let snapshot;
+        let acc = match torn.filter(|tail| !tail.trim().is_empty()) {
+            Some(tail) => {
+                let mut snap = self.acc.clone();
+                fold_scan_entry(&mut snap, tail)?;
+                snapshot = snap;
+                &snapshot
+            }
+            None => &self.acc,
+        };
         let usage = acc.usage_scan.summary();
         let header = acc.header.as_ref()?;
         let modified_ms = acc.last_activity_ms.unwrap_or(0);
@@ -1501,12 +1517,11 @@ impl SessionScanState {
 
 /// Fold one complete line into the scan state (the old scan-loop body).
 /// `None` = the abort arm (a `model_change` without its model identity).
-fn fold_scan_entry(state: &mut SessionScanState, raw: &str) -> Option<()> {
+fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Some(());
     }
-    let acc = &mut state.acc;
     let Ok(entry) = serde_json::from_str::<SessionInfoEntry>(trimmed) else {
         return Some(());
     };

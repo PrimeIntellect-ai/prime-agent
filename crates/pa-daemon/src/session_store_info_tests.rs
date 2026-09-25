@@ -430,7 +430,7 @@ fn a_failed_prefix_check_rescans_from_byte_zero() {
     // must rescan from byte zero. A fresh scan that kept the shared cursor
     // where `prefix_intact` left it would start mid-file, miss the session
     // header, and return None (the bots' prefix-rewrite-then-append case).
-    let line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"after!!"}).to_string();
+    let line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"after!"}).to_string();
     let before_line = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"before"}).to_string();
     assert_eq!(line.len(), before_line.len());
     let content = fs::read_to_string(&path).unwrap();
@@ -452,8 +452,37 @@ fn a_failed_prefix_check_rescans_from_byte_zero() {
     let second = read_session_info(&path).unwrap();
     assert_eq!(
         second.name.as_deref(),
-        Some("after!!"),
+        Some("after!"),
         "a prefix rewrite then append must rescan from the top"
     );
     assert_fold_matches(&path);
+}
+
+#[test]
+fn a_valid_unterminated_final_line_folds_into_the_snapshot() {
+    let dir = test_dir();
+    let path = dir.join("unterminated.jsonl");
+    append_rows(
+        &path,
+        &[json!({"type":"session","id":"u","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"})],
+    );
+    // The final line is complete JSON with NO terminal newline: the row
+    // must fold it (TS snapshotSessionInfo's tornTail - the legacy
+    // str::lines oracle yields it too), without consuming it.
+    let tail = json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":"tail-name"}).to_string();
+    {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(tail.as_bytes()).unwrap();
+    }
+    let info = read_session_info(&path).unwrap();
+    assert_eq!(info.name.as_deref(), Some("tail-name"));
+    assert_fold_matches(&path);
+    // Completing the line folds it into the consumed prefix exactly once.
+    {
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"\n").unwrap();
+    }
+    assert_fold_matches(&path);
+    let completed = read_session_info(&path).unwrap();
+    assert_eq!(completed.name.as_deref(), Some("tail-name"));
 }
