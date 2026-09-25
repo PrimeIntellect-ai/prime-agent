@@ -353,7 +353,7 @@ impl SessionFile {
     /// no session header; a malformed retained row falls back to the
     /// full [`SessionFile::open`] load, so its errors surface here too.
     pub fn open_windowed(path: &Path) -> Result<Self> {
-        let Some(window) = pa_core::session::window::WindowedSessionStore::open(path)? else {
+        let Some(mut window) = pa_core::session::window::WindowedSessionStore::open(path)? else {
             return Self::open(path);
         };
         let header = window
