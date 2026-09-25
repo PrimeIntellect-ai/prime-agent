@@ -87,6 +87,18 @@ impl AgentSession {
             .pending
     }
 
+    /// Whether the branch invalidation version is still the one the
+    /// round captured (TS `_autoRefineBranchVersion`'s post-await read):
+    /// false means a discard fired mid-round and the round's result is
+    /// stale — never applied, never surfaced.
+    pub(crate) fn compact_auto_refine_branch_version_unchanged(&self, captured: u64) -> bool {
+        self.compact_auto_refine
+            .lock()
+            .expect("compact auto-refine state lock")
+            .branch_version
+            == captured
+    }
+
     /// TS `_discardPendingAutoRefine` +
     /// `_invalidatePendingAutoRefineForBranchChange`: drop the armed
     /// trigger outright AND bump the branch version — an in-flight
@@ -166,7 +178,13 @@ impl AgentSession {
             (state.settled_turns_since_review, state.branch_version)
         };
         let outcome = self
-            .auto_refine_after_compaction(model, api_key, global_harness_dir, settled_turns)
+            .auto_refine_after_compaction(
+                model,
+                api_key,
+                global_harness_dir,
+                settled_turns,
+                branch_version,
+            )
             .await;
         let outcome = {
             let mut state = self

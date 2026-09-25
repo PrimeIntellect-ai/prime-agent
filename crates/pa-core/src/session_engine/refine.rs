@@ -371,6 +371,7 @@ impl AgentSession {
         api_key: Option<String>,
         global_harness_dir: std::path::PathBuf,
         turns_since_last_review: u32,
+        branch_version: u64,
     ) -> anyhow::Result<Option<RefinementResult>> {
         // The review reads the same planning inputs the refinement run
         // plans against (TS `_reviewAutoRefine`: the live conversation,
@@ -413,6 +414,16 @@ impl AgentSession {
         )
         .await?;
         if !review.should_refine {
+            return Ok(None);
+        }
+        // TS `_reviewAutoRefine`'s post-await branch check
+        // (`branchVersion !== this._autoRefineBranchVersion`): a branch
+        // move (or a replacement teardown's discard) bumped the version
+        // while the review's model call was in flight — the approval
+        // belongs to the abandoned conversation, so the refinement run
+        // (its harness edits, audit rows, and message rebuilds) never
+        // starts.
+        if !self.compact_auto_refine_branch_version_unchanged(branch_version) {
             return Ok(None);
         }
         let options = RefineOptions {

@@ -807,6 +807,13 @@ impl AgentSessionEngine {
         // target while a cwd/settings change waits for the prewarm.
         *self.provider_target.write().expect("provider target lock") = None;
         if let Some(engine) = built {
+            // The replacement teardown also drops the compact-trigger
+            // state with a version bump (TS teardown -> `requestAbort` ->
+            // `_autoRefineReviewAbort.abort()`): a background review round
+            // still in flight on this session resolves against the
+            // bumped version and never applies its edits or surfaces its
+            // rows.
+            engine.session.discard_compact_auto_refine();
             // The session's telemetry ends with it (the TS dispose
             // callback the replacement teardown runs); best-effort like
             // every end path, a failed flush never fails the teardown.

@@ -479,7 +479,10 @@ impl TurnBoundary {
         let turns = self.assistant_turns_since_review;
         let outcome = engine
             .session
-            .auto_refine_after_compaction(model, api_key, global_harness_dir, turns)
+            // The headless print boundary never moves branches (the
+            // session is single-branch for the run), so the branch
+            // invalidation version stays at its initial 0.
+            .auto_refine_after_compaction(model, api_key, global_harness_dir, turns, 0)
             .await;
         // Every review attempt stamps the cooldown and resets the turn
         // counter (TS stamps decline, success, and failure alike).
