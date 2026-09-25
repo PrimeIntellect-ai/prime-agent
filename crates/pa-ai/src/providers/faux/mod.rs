@@ -169,26 +169,52 @@ impl FauxProviderRegistration {
     }
 
     /// Call count across all requests against this registration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the counter `Mutex` is poisoned (a thread panicked while
+    /// holding the lock).
     pub fn call_count(&self) -> u64 {
         *self.state.call_count.lock().unwrap()
     }
 
     /// The API key each recorded request carried (per call, in order):
     /// summarizer arms that must follow the session's live key pin on it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the recorded-keys `Mutex` is poisoned (a thread panicked
+    /// while holding the lock).
     pub fn received_api_keys(&self) -> Vec<Option<String>> {
         self.state.received_api_keys.lock().unwrap().clone()
     }
 
     /// Replace the queued responses.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pending `Mutex` is poisoned (a thread panicked while
+    /// holding the lock).
     pub fn set_responses(&self, responses: Vec<FauxResponseStep>) {
         *self.state.pending.lock().unwrap() = responses;
     }
 
     /// Append to the queued responses.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pending `Mutex` is poisoned (a thread panicked while
+    /// holding the lock).
     pub fn append_responses(&self, responses: Vec<FauxResponseStep>) {
         self.state.pending.lock().unwrap().extend(responses);
     }
 
+    /// Number of queued responses.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pending `Mutex` is poisoned (a thread panicked while
+    /// holding the lock).
     pub fn get_pending_response_count(&self) -> usize {
         self.state.pending.lock().unwrap().len()
     }
