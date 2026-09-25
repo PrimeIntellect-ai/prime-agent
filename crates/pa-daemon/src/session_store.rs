@@ -19,6 +19,10 @@ use std::path::{Path, PathBuf};
 #[path = "session_store_info_tests.rs"]
 mod info_tests;
 #[cfg(test)]
+#[path = "session_store_stream_tests.rs"]
+mod stream_tests;
+
+#[cfg(test)]
 #[path = "session_store_window_tests.rs"]
 mod window_tests;
 
