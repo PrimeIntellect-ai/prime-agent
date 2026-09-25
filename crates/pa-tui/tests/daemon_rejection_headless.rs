@@ -59,6 +59,20 @@ struct MockSupervisor {
     create_answers: Vec<Option<(String, Option<Value>)>>,
 }
 
+/// The answers every connection thread serves concurrently: the recorded
+/// request logs, the scripted create-answer queue, and the read-only
+/// refusal knobs. The update-restart wait retries its open over a SECOND
+/// connection while the first still holds — the mock serves both.
+struct SharedAnswers {
+    prompt_requests: Arc<Mutex<Vec<Value>>>,
+    create_requests: Arc<Mutex<Vec<Value>>>,
+    create_answers: Mutex<Vec<Option<(String, Option<Value>)>>>,
+    reject_prompt_index: Option<usize>,
+    hold_turn_ms: u64,
+    close_on_prompt: bool,
+    reject_create: Option<String>,
+}
+
 impl MockSupervisor {
     fn bind(socket: &std::path::Path) -> Self {
         MockSupervisor {
@@ -73,26 +87,53 @@ impl MockSupervisor {
         }
     }
 
-    /// Serve one client connection until it goes quiet (bounded, so the
-    /// plan teardown join always finishes).
+    /// Serve client connections until the accept window goes quiet
+    /// (bounded, so the plan teardown join always finishes). The
+    /// update-restart wait RETRIES its open over a fresh connection —
+    /// every accepted connection serves on its own thread over the same
+    /// shared answers.
     fn serve(mut self) {
         self.listener
             .set_nonblocking(true)
             .expect("nonblocking mock listener");
         let idle_window = std::time::Duration::from_millis(1500);
         let idle_until = std::time::Instant::now() + idle_window;
-        let (stream, _) = loop {
+        let shared = std::sync::Arc::new(SharedAnswers {
+            prompt_requests: self.prompt_requests,
+            create_requests: self.create_requests,
+            create_answers: std::sync::Mutex::new(std::mem::take(&mut self.create_answers)),
+            reject_prompt_index: self.reject_prompt_index,
+            hold_turn_ms: self.hold_turn_ms,
+            close_on_prompt: self.close_on_prompt,
+            reject_create: self.reject_create,
+        });
+        let mut connections = Vec::new();
+        loop {
             match self.listener.accept() {
-                Ok(accepted) => break accepted,
+                Ok((stream, _)) => {
+                    let shared = std::sync::Arc::clone(&shared);
+                    connections.push(std::thread::spawn(move || {
+                        shared.serve_connection(stream);
+                    }));
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     if std::time::Instant::now() >= idle_until {
-                        return;
+                        break;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                Err(_) => return,
+                Err(_) => break,
             }
-        };
+        }
+        for connection in connections {
+            let _ = connection.join();
+        }
+    }
+}
+
+/// One client connection's read loop, over the shared answers.
+impl SharedAnswers {
+    fn serve_connection(self: std::sync::Arc<Self>, stream: UnixStream) {
         let mut writer = stream.try_clone().expect("clone mock socket");
         let mut reader = BufReader::new(stream);
 
@@ -133,14 +174,17 @@ impl MockSupervisor {
                     // pops for the next (a single trailing entry serves
                     // every later create). An exhausted queue falls
                     // through.
-                    let queued = if self.create_answers.is_empty() {
-                        None
-                    } else {
-                        let head = self.create_answers.first().cloned();
-                        if self.create_answers.len() > 1 {
-                            self.create_answers.remove(0);
+                    let queued = {
+                        let mut answers = self.create_answers.lock().unwrap();
+                        if answers.is_empty() {
+                            None
+                        } else {
+                            let head = answers.first().cloned();
+                            if answers.len() > 1 {
+                                answers.remove(0);
+                            }
+                            head
                         }
-                        head
                     };
                     if let Some(answer) = queued {
                         match answer {
