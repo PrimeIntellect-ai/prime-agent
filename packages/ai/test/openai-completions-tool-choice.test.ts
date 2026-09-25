@@ -10,6 +10,7 @@ import type {
 	Context,
 	Model,
 	OpenAICompletionsCompat,
+	ThinkingContent,
 	Tool,
 	ToolResultMessage,
 	Usage,
@@ -21,21 +22,25 @@ const mockState = vi.hoisted(() => ({
 	lastParams: undefined as unknown,
 	lastClientOptions: undefined as unknown,
 	chunks: undefined as
-		| Array<null | {
-				id?: string;
-				model?: string;
-				service_tier?: string;
-				choices?: Array<{ delta: Record<string, unknown>; finish_reason: string | null; usage?: unknown }>;
-				usage?: {
-					prompt_tokens: number;
-					completion_tokens: number;
-					prompt_tokens_details: { cached_tokens: number; cache_write_tokens?: number };
-					completion_tokens_details: { reasoning_tokens: number };
-					cost?: number;
-					is_byok?: boolean;
-					cost_details?: { upstream_inference_cost?: number };
-				};
-		  }>
+		| Array<
+				| null
+				| Error
+				| {
+						id?: string;
+						model?: string;
+						service_tier?: string;
+						choices?: Array<{ delta: Record<string, unknown>; finish_reason: string | null; usage?: unknown }>;
+						usage?: {
+							prompt_tokens: number;
+							completion_tokens: number;
+							prompt_tokens_details: { cached_tokens: number; cache_write_tokens?: number };
+							completion_tokens_details: { reasoning_tokens: number };
+							cost?: number;
+							is_byok?: boolean;
+							cost_details?: { upstream_inference_cost?: number };
+						};
+				  }
+		  >
 		| undefined,
 }));
 
@@ -63,6 +68,7 @@ vi.mock("openai", () => {
 								},
 							];
 							for (const chunk of chunks) {
+								if (chunk instanceof Error) throw chunk;
 								yield chunk;
 							}
 						},
@@ -954,6 +960,27 @@ describe("openai-completions tool_choice", () => {
 			{ type: "reasoning.text", index: 0, format: "unknown", text: "first second" },
 			{ type: "reasoning.summary", index: 1, format: "unknown", summary: "brief plan" },
 		]);
+	});
+
+	it("encodes the reasoning_details signature when the stream errors mid-flight", async () => {
+		const details = [{ type: "reasoning.summary", index: 0, format: "unknown", summary: "brief plan" }];
+		mockState.chunks = [
+			{ id: "chatcmpl-reasoning-error", choices: [{ delta: { reasoning_details: details }, finish_reason: null }] },
+			new Error("socket closed"),
+		];
+
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-completions">("openai", "gpt-4o-mini")!;
+		const model = { ...baseModel, api: "openai-completions" } as const;
+		const result = await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "Think privately.", timestamp: 1 }] },
+			{ apiKey: "test" },
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		const redacted = result.content.find((block) => block.type === "thinking") as ThinkingContent | undefined;
+		expect(redacted?.redacted).toBe(true);
+		expect(JSON.parse(redacted?.thinkingSignature ?? "").details).toEqual(details);
 	});
 
 	it("does not double-count reasoning tokens in completion usage", async () => {

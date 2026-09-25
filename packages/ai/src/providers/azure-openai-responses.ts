@@ -13,6 +13,7 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
+import type { StreamingJsonAccumulator } from "../utils/json-parse.js";
 import {
 	formatStreamFailureMessage,
 	recordStreamFailure,
@@ -113,9 +114,11 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
+				const { partialJson } = block as { partialJson?: StreamingJsonAccumulator };
+				if (block.type === "toolCall" && partialJson) block.arguments = partialJson.flush() ?? block.arguments;
 				delete (block as { index?: number }).index;
 				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
+				delete (block as { partialJson?: StreamingJsonAccumulator }).partialJson;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatStreamFailureMessage(error);

@@ -39,6 +39,7 @@ import {
 } from "../utils/diagnostics.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
+import type { StreamingJsonAccumulator } from "../utils/json-parse.js";
 import { parseRetryAfterMs, recordStreamFailure } from "../utils/stream-failure.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
 import { applyServiceTierPricing } from "./service-tier-pricing.js";
@@ -248,8 +249,10 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			stream.end();
 		} catch (error) {
 			for (const block of output.content) {
+				const { partialJson } = block as { partialJson?: StreamingJsonAccumulator };
+				if (block.type === "toolCall" && partialJson) block.arguments = partialJson.flush() ?? block.arguments;
 				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
+				delete (block as { partialJson?: StreamingJsonAccumulator }).partialJson;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = error instanceof Error ? error.message : String(error);

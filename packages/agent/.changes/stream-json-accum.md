@@ -1,0 +1,2 @@
+- Fixed high CPU use in proxy streams with large tool-call arguments.
+- Stopped proxy error results from carrying the raw partial JSON buffer.

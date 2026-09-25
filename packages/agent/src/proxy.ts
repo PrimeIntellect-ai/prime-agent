@@ -4,9 +4,9 @@ import {
 	type Context,
 	EventStream,
 	type Model,
-	parseStreamingJson,
 	type SimpleStreamOptions,
 	type StopReason,
+	StreamingJsonAccumulator,
 	type ToolCall,
 } from "@earendil-works/pi-ai";
 
@@ -221,6 +221,7 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 
 			stream.end();
 		} catch (error) {
+			settlePartialToolCalls(partial);
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			const reason = options.signal?.aborted ? "aborted" : "error";
 			partial.stopReason = reason;
@@ -239,6 +240,15 @@ export function streamProxy(model: Model<any>, context: Context, options: ProxyS
 	})();
 
 	return stream;
+}
+
+function settlePartialToolCalls(partial: AssistantMessage): void {
+	for (const block of partial.content) {
+		const { partialJson } = block as { partialJson?: StreamingJsonAccumulator };
+		if (block.type !== "toolCall" || !partialJson) continue;
+		block.arguments = partialJson.flush() ?? block.arguments;
+		delete (block as { partialJson?: StreamingJsonAccumulator }).partialJson;
+	}
 }
 
 function processProxyEvent(
@@ -319,15 +329,15 @@ function processProxyEvent(
 				id: proxyEvent.id,
 				name: proxyEvent.toolName,
 				arguments: {},
-				partialJson: "",
-			} satisfies ToolCall & { partialJson: string } as ToolCall;
+				partialJson: new StreamingJsonAccumulator(),
+			} satisfies ToolCall & { partialJson: StreamingJsonAccumulator } as ToolCall;
 			return { type: "toolcall_start", contentIndex: proxyEvent.contentIndex, partial };
 
 		case "toolcall_delta": {
 			const content = partial.content[proxyEvent.contentIndex];
 			if (content?.type === "toolCall") {
-				(content as any).partialJson += proxyEvent.delta;
-				content.arguments = parseStreamingJson((content as any).partialJson) || {};
+				const { partialJson } = content as ToolCall & { partialJson: StreamingJsonAccumulator };
+				content.arguments = partialJson.append(proxyEvent.delta) ?? content.arguments;
 				partial.content[proxyEvent.contentIndex] = { ...content }; // Trigger reactivity
 				return {
 					type: "toolcall_delta",
@@ -342,7 +352,9 @@ function processProxyEvent(
 		case "toolcall_end": {
 			const content = partial.content[proxyEvent.contentIndex];
 			if (content?.type === "toolCall") {
-				delete (content as any).partialJson;
+				content.arguments =
+					(content as { partialJson?: StreamingJsonAccumulator }).partialJson?.flush() ?? content.arguments;
+				delete (content as { partialJson?: StreamingJsonAccumulator }).partialJson;
 				return {
 					type: "toolcall_end",
 					contentIndex: proxyEvent.contentIndex,
@@ -359,6 +371,7 @@ function processProxyEvent(
 			return { type: "done", reason: proxyEvent.reason, message: partial };
 
 		case "error":
+			settlePartialToolCalls(partial);
 			partial.stopReason = proxyEvent.reason;
 			partial.errorMessage = proxyEvent.errorMessage;
 			partial.usage = proxyEvent.usage;

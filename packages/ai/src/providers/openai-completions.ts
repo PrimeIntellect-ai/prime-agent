@@ -33,7 +33,7 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { headersToRecord } from "../utils/headers.js";
-import { parseStreamingJson } from "../utils/json-parse.js";
+import { parseStreamingJson, StreamingJsonAccumulator } from "../utils/json-parse.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import { recordStreamFailure } from "../utils/stream-failure.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
@@ -165,6 +165,15 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			timestamp: Date.now(),
 		};
 
+		const reasoningDetailsByIndex = new Map<number, Record<string, unknown>>();
+		let reasoningDetailsBlock: ThinkingContent | null = null;
+		const encodeReasoningDetailsSignature = () => {
+			if (!reasoningDetailsBlock) return;
+			reasoningDetailsBlock.thinkingSignature = encodeReasoningDetails(
+				[...reasoningDetailsByIndex.entries()].sort(([left], [right]) => left - right).map(([, detail]) => detail),
+			);
+		};
+
 		try {
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const compat = getCompat(model);
@@ -200,7 +209,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			stream.push({ type: "start", partial: output });
 
 			interface StreamingToolCallBlock extends ToolCall {
-				partialArgs?: string;
+				partialArgs?: StreamingJsonAccumulator;
 				streamIndex?: number;
 			}
 			type StreamingBlock = TextContent | ThinkingContent | StreamingToolCallBlock;
@@ -210,9 +219,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			let thinkingBlock: ThinkingContent | null = null;
 			const toolCallBlocksByIndex = new Map<number, StreamingToolCallBlock>();
 			const toolCallBlocksById = new Map<string, StreamingToolCallBlock>();
-			const reasoningDetailsByIndex = new Map<number, Record<string, unknown>>();
 			let nextReasoningDetailsIndex = 0;
-			let reasoningDetailsBlock: ThinkingContent | null = null;
 			const blocks = output.content as StreamingBlock[];
 			const getContentIndex = (block: StreamingBlock) => blocks.indexOf(block);
 			const finishBlock = (block: StreamingBlock) => {
@@ -235,7 +242,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						partial: output,
 					});
 				} else if (block.type === "toolCall") {
-					block.arguments = parseStreamingJson(block.partialArgs);
+					block.arguments = parseStreamingJson(block.partialArgs?.text);
 					// Finalize in-place and strip the scratch buffers so replay only
 					// carries parsed arguments.
 					delete block.partialArgs;
@@ -280,7 +287,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						id: toolCall.id || "",
 						name: toolCall.function?.name || "",
 						arguments: {},
-						partialArgs: "",
+						partialArgs: new StreamingJsonAccumulator(),
 						streamIndex,
 					};
 					if (streamIndex !== undefined) {
@@ -399,8 +406,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 							let delta = "";
 							if (toolCall.function?.arguments) {
 								delta = toolCall.function.arguments;
-								block.partialArgs = (block.partialArgs ?? "") + toolCall.function.arguments;
-								block.arguments = parseStreamingJson(block.partialArgs);
+								block.arguments = block.partialArgs?.append(delta) ?? block.arguments;
 							}
 							stream.push({
 								type: "toolcall_delta",
@@ -452,11 +458,6 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 									partial: output,
 								});
 							}
-							reasoningDetailsBlock.thinkingSignature = encodeReasoningDetails(
-								[...reasoningDetailsByIndex.entries()]
-									.sort(([left], [right]) => left - right)
-									.map(([, detail]) => detail),
-							);
 						}
 					}
 				}
@@ -468,6 +469,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				applyServiceTierPricing(output.usage, responseServiceTier, model.id);
 			}
 
+			encodeReasoningDetailsSignature();
 			for (const block of blocks) {
 				finishBlock(block);
 			}
@@ -485,10 +487,13 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
+			encodeReasoningDetailsSignature();
 			for (const block of output.content) {
+				const { partialArgs } = block as { partialArgs?: StreamingJsonAccumulator };
+				if (block.type === "toolCall" && partialArgs) block.arguments = partialArgs.flush() ?? block.arguments;
 				delete (block as { index?: number }).index;
 				// Streaming scratch buffers are only used during parsing; never persist them.
-				delete (block as { partialArgs?: string }).partialArgs;
+				delete (block as { partialArgs?: StreamingJsonAccumulator }).partialArgs;
 				delete (block as { streamIndex?: number }).streamIndex;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
