@@ -4444,11 +4444,21 @@ impl SessionUi {
                 let _ = self.handle_reload_command(view).await;
             }
             "show-hardware-cursor" => {
-                self.persist_bool_setting(
-                    |settings, enabled| settings.set_show_hardware_cursor(enabled),
-                    value,
-                    view,
-                );
+                // The show-images shape: a failed persist surfaces the
+                // error and changes nothing — the live flag flips only
+                // when the setting actually persisted, so the view and
+                // the on-disk state can never disagree.
+                if let Some(settings) = &self.client_settings {
+                    if let Err(error) = settings.set_show_hardware_cursor(value == "true") {
+                        self.error_row(&format!("{error:#}"), view);
+                        return;
+                    }
+                }
+                // The live TUI effect (TS persists through the settings
+                // manager, then calls `ui.setShowHardwareCursor(enabled)`
+                // in place): the very next frame shows or hides the
+                // hardware cursor at the focused caret.
+                view.show_hardware_cursor = value == "true";
             }
             "editor-padding" => {
                 if let Some(settings) = &self.client_settings {
