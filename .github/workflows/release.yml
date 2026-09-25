@@ -115,7 +115,13 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          key: ${{ matrix.target }}
+          # The glibc235 marker scopes the cache to the Ubuntu 22.04 build
+          # baseline: cargo fingerprints do not encode the host libc, so a
+          # key without it could restore a target/ tree linked on the old
+          # ubuntu-24.04 host and reuse a GLIBC_2.39 binary. First run on
+          # the new key builds cold; the marker moves only with reviewed
+          # baseline changes (same protocol as the image digest below).
+          key: ${{ matrix.target }}-glibc235
       - name: Build (release, locked)
         run: cargo build --release --locked --target ${{ matrix.target }} -j 4
       - name: "Livecheck gate: --version prints the tag version"
@@ -128,14 +134,17 @@ jobs:
         run: |
           set -euo pipefail
           bin="target/${{ matrix.target }}/release/prime-agent"
-          max_glibc="$(objdump -T "${bin}" | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1 || true)"
-          echo "highest GLIBC symbol required: ${max_glibc:-none}"
-          if [ -n "${max_glibc}" ]; then
-            top="$(printf '%s\nGLIBC_2.35\n' "${max_glibc}" | sort -Vu | tail -1)"
-            if [ "${top}" != "GLIBC_2.35" ]; then
-              echo "::error::binary requires ${max_glibc}, above the GLIBC_2.35 (Ubuntu 22.04) release baseline"
-              exit 1
-            fi
+          syms="$(objdump -T "${bin}" | grep -o 'GLIBC_[0-9.]*' || true)"
+          if [ -z "${syms}" ]; then
+            echo "::error::could not inspect ${bin} with objdump (no GLIBC symbols found) - refusing to pass the gate without evidence"
+            exit 1
+          fi
+          max_glibc="$(printf '%s\n' "${syms}" | sort -Vu | tail -1)"
+          echo "highest GLIBC symbol required: ${max_glibc}"
+          top="$(printf '%s\nGLIBC_2.35\n' "${max_glibc}" | sort -Vu | tail -1)"
+          if [ "${top}" != "GLIBC_2.35" ]; then
+            echo "::error::binary requires ${max_glibc}, above the GLIBC_2.35 (Ubuntu 22.04) release baseline"
+            exit 1
           fi
       - name: Generate bundled catalog assets (fixture, offline-safe)
         run: |
