@@ -2758,9 +2758,22 @@ mod tests {
     #[test]
     fn ctrl_x_arms_then_executes_the_stop_or_delete() {
         let mut mode = mode_with_parent_and_child();
-        // The child row (a running subagent) is selected by default? The
-        // parent leads; select the child.
-        mode.handle_key("down");
+        // Subagent rows materialize only inside the parent's expanded
+        // list: expand the parent (found by its Agent kind, never by
+        // section order), then select the child by its own rlmChildId.
+        let parent_row = mode
+            .rows
+            .iter()
+            .find(|row| row.kind == RowKind::Agent)
+            .expect("the parent row")
+            .clone();
+        mode.toggle_subagent_list(&parent_row);
+        let child_index = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        mode.selected = child_index;
         let child_identity = mode.rows[mode.selected].identity.clone();
         assert!(child_identity.contains("c"));
         // First press: armed, no dispatch.
@@ -2801,7 +2814,19 @@ mod tests {
         let mut mode = mode_with_parent_and_child();
         mode.roster[1]["status"] = serde_json::json!("idle");
         mode.rebuild_rows();
-        mode.handle_key("down");
+        let parent_row = mode
+            .rows
+            .iter()
+            .find(|row| row.kind == RowKind::Agent)
+            .expect("the parent row")
+            .clone();
+        mode.toggle_subagent_list(&parent_row);
+        let child_index = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        mode.selected = child_index;
         let (_, stop) = mode.delete_arm_target().expect("an armed target");
         assert!(!stop, "the idle subagent arms as delete");
         mode.handle_key("ctrl+x");
@@ -2820,7 +2845,15 @@ mod tests {
     #[test]
     fn the_delete_confirm_hint_and_the_cleared_arm() {
         let mut mode = mode_with_parent_and_child();
-        // Select the child row explicitly, then arm over it.
+        // Expand the parent's list so the child row materializes, then
+        // select it by its own rlmChildId.
+        let parent_row = mode
+            .rows
+            .iter()
+            .find(|row| row.kind == RowKind::Agent)
+            .expect("the parent row")
+            .clone();
+        mode.toggle_subagent_list(&parent_row);
         let child_index = mode
             .rows
             .iter()
