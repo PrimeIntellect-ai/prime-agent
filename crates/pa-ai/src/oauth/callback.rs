@@ -520,7 +520,10 @@ mod tests {
         let page = error_page("<script>&\"'</script>");
         // The angle brackets escape too: the payload renders fully
         // entity-encoded, never as raw markup.
-        assert!(page.contains("<script>&amp;&quot;&#39;</script>"), "{page}");
+        assert!(
+            page.contains("&lt;script&gt;&amp;&quot;&#39;&lt;/script&gt;"),
+            "{page}"
+        );
         assert!(!page.contains("<script>"), "{page}");
     }
 }
