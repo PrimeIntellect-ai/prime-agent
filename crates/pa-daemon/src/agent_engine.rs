@@ -3351,7 +3351,7 @@ impl SessionEngine for AgentSessionEngine {
             TurnPrompt::User { images, batch, .. } => {
                 !images.is_empty() || batch.iter().any(|row| !row.images.is_empty())
             }
-            TurnPrompt::Injected(message) => custom_message_carries_images(message),
+            TurnPrompt::Injected(message) => Self::custom_message_carries_images(message),
         };
         if let Err(refusal) = self.arm_image_turn_route(carries_images) {
             emit(EngineEvent::Done(Err(refusal)));
@@ -3708,7 +3708,7 @@ impl AgentSessionEngine {
                         agent
                             .set_thinking_level(map_thinking_level(clamped))
                             .await;
-                        if let Some(route) = &armed {
+                        if armed.is_some() {
                             let agent_model = json_round_trip(&next)
                                 .ok_or_else(|| anyhow::anyhow!("model conversion failed"))?;
                             agent.set_model_override(Some(
