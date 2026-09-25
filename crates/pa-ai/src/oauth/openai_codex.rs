@@ -860,16 +860,18 @@ mod tests {
             return; // the registered port is busy: this run cannot stage it.
         };
         drop(probe);
-        let http = token_http(&account_jwt(Some("acct-live")));
+        let http = Arc::new(token_http(&account_jwt(Some("acct-live"))));
         let ui = Arc::new(ScriptedUi::new(
             Some(ScriptedAnswer::Pending),
             ScriptedAnswer::Pending,
         ));
         let flow_ui = Arc::clone(&ui);
-        let flow =
-            tokio::spawn(
-                async move { login_openai_codex(&http, &flow_ui, DEFAULT_ORIGINATOR).await },
-            );
+        let flow = {
+            let flow_http = Arc::clone(&http);
+            tokio::spawn(async move {
+                login_openai_codex(flow_http.as_ref(), flow_ui.as_ref(), DEFAULT_ORIGINATOR).await
+            })
+        };
         let url = ui.captured_url().await;
         let state = url::Url::parse(&url)
             .unwrap()

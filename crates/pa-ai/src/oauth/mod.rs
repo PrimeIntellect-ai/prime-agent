@@ -66,10 +66,8 @@ impl Default for ReqwestCodexHttp {
 }
 
 impl ReqwestCodexHttp {
-    /// # Panics
-    ///
-    /// Panics when the underlying reqwest client cannot be built; with no
-    /// TLS configuration this construction cannot fail.
+    /// Construction is trivial: the client is built per request, so
+    /// there is nothing to fail here.
     pub fn new() -> Self {
         ReqwestCodexHttp
     }

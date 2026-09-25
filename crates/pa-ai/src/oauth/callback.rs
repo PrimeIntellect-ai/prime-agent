@@ -57,16 +57,6 @@ pub struct CodexCallbackServer {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl Default for CodexCallbackServer {
-    fn default() -> Self {
-        CodexCallbackServer {
-            shared: None,
-            port: None,
-            task: None,
-        }
-    }
-}
-
 impl Drop for CodexCallbackServer {
     fn drop(&mut self) {
         if let Some(task) = self.task.take() {
