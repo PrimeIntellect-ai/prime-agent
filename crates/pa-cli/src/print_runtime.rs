@@ -835,7 +835,7 @@ fn open_session_file(
 
 /// Render a selector failure with the main.ts formatting: the error message
 /// plus the browse hint.
-fn render_selector_error(error: SessionSelectorError) -> String {
+pub(crate) fn render_selector_error(error: SessionSelectorError) -> String {
     format!(
         "{}.{}\nOpen prime-agent and press left-arrow to browse sessions.",
         error.message(),

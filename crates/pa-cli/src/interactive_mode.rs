@@ -14,6 +14,7 @@ use anyhow::{anyhow, Context, Result};
 
 use crate::config;
 use crate::mode::RunOptions;
+use pa_core::session::discovery::{resolve_session_path, ResolvedSession};
 use pa_tui::interactive::{InteractiveOptions, ModelSelection, SessionSelection, UiMode};
 
 const DAEMON_STARTUP_TIMEOUT_MS: u64 = 30_000;
@@ -125,7 +126,13 @@ fn startup_model_ready(
         .as_deref()
         .map(|patterns| pa_core::models::resolve_model_scope_from_models(patterns, &available))
         .unwrap_or_default();
-    let is_continuing = options.session.resume.is_some() || options.session.continue_recent;
+    // TS `isContinuing` is `hasExistingSession` (the session context
+    // carries messages): a fork always does — the copy holds the source's
+    // rows — so the fork launch resolves the startup model as a
+    // continuation.
+    let is_continuing = options.session.resume.is_some()
+        || options.session.continue_recent
+        || options.session.fork.is_some();
     let startup_model =
         pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
             cli_provider: config.provider.as_deref(),
@@ -483,9 +490,11 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
         // session for the cwd (the notice names it) so the user confirms
         // what continues instead of a blind newest-resume.
         let continue_view = continue_recent_view(options, tui_options.onboarding.is_some());
-        let agents_view = options.session.resume_bare
-            || (options.agents_view_requested && tui_options.onboarding.is_none())
-            || continue_view.is_some();
+        let agents_view = should_open_agents_view(
+            options,
+            tui_options.onboarding.is_some(),
+            continue_view.is_some(),
+        );
         if agents_view {
             let (anchor, notice) = continue_view.map_or((None, None), |view| {
                 (Some(view.session_id), Some(view.notice))
@@ -690,14 +699,6 @@ fn build_tui_options(
     prompt_stash: std::sync::Arc<std::sync::Mutex<pa_tui::prompt_stash::PromptStashStore>>,
 ) -> Result<InteractiveOptions> {
     let config = &options.config;
-    if options.session.fork.is_some() {
-        // A fork must copy the target session into a new file before the
-        // daemon can open it; wiring the copy is tracked with session-queue
-        // work. Refuse instead of silently resuming the original file.
-        return Err(anyhow!(
-            "session forking is not wired into the daemon yet; use --resume to reopen the session"
-        ));
-    }
     let session_dir = options
         .session
         .session_dir
@@ -717,7 +718,14 @@ fn build_tui_options(
     // Test seam: a scripted faux daemon session (same contract as the print
     // runtime). Verification harness only; never set by the product.
     let script_path = std::env::var_os("PRIME_AGENT_FAUX_SCRIPT").map(PathBuf::from);
-    let session = session_selection(&options.session, &session_dir)?;
+    // TS `createSessionManager`'s flag order (fork -> resume -> create):
+    // a fork copies its source into a fresh file client-side, and the
+    // daemon opens the fork — never the source — through the create
+    // `sessionPath` (TS `getInteractiveDaemonSessionPath`).
+    let session = match &options.session.fork {
+        Some(selector) => fork_startup_selection(selector, &config.cwd, session_dir.as_deref())?,
+        None => session_selection(&options.session, &session_dir)?,
+    };
     // The chat markdown code-block indent reads the effective settings on
     // startup (TS `getCodeBlockIndent` -> `getMarkdownThemeWithSettings`).
     let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
@@ -849,6 +857,65 @@ fn session_selection(
         return Ok(resolve_resume_selector(selector, dir));
     }
     Ok(SessionSelection::New)
+}
+
+/// TS `createSessionManager`'s fork arm for the interactive launch: resolve
+/// the selector, copy the source into a fresh session file client-side
+/// ([`pa_core::session::manager::SessionManager::fork_from`], the same
+/// copy print mode uses), and hand the daemon the fork — never the source —
+/// as the create `sessionPath` (TS `getInteractiveDaemonSessionPath`). Every
+/// resolution shape forks: a GLOBAL session is exactly what `--fork` is for
+/// (a different project's session copied into this cwd). No daemon-active
+/// guard applies: the copy reads the source and writes a brand-new file, so
+/// a session a live worker already hosts forks fine (TS parity).
+///
+/// # Errors
+///
+/// Returns the TS startup failures: a selector that matches nothing (with
+/// the browse hint), and the `forkFrom` contract failures (an empty or
+/// headerless source file).
+fn fork_startup_selection(
+    selector: &str,
+    cwd: &Path,
+    session_dir: Option<&Path>,
+) -> Result<SessionSelection> {
+    let default_dir = config::get_agent_dir().join("sessions");
+    let dir = session_dir.unwrap_or(&default_dir);
+    let resolved = resolve_session_path(selector, cwd, dir)
+        .map_err(|error| anyhow!(crate::print_runtime::render_selector_error(error)))?;
+    let source = match resolved {
+        ResolvedSession::Path(path) | ResolvedSession::Local(path) => path,
+        ResolvedSession::Global { path, .. } => path,
+    };
+    let forked = pa_core::session::manager::SessionManager::fork_from(&source, cwd, dir)
+        .map_err(anyhow::Error::msg)?;
+    let fork_file = forked
+        .get_session_file()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            anyhow!(
+                "Cannot fork: the forked session file is missing: {}",
+                source.display()
+            )
+        })?;
+    Ok(SessionSelection::Resume(fork_file))
+}
+
+/// TS `shouldOpenAgentsViewForDaemonInteractive`: a selector, continuation,
+/// or fork opens its target session directly instead of the agents view.
+/// The selector (`--resume <id>`) and `--continue` launches never reach the
+/// view with `--fork` anyway (the shared flag validation refuses the
+/// combination at startup), so only the explicit `agents` request needs the
+/// guard; bare `--resume` still opens the view, as does a `--continue` with
+/// a saved candidate.
+fn should_open_agents_view(
+    options: &RunOptions,
+    onboarding_pending: bool,
+    continue_view: bool,
+) -> bool {
+    options.session.resume_bare
+        || (options.agents_view_requested && !onboarding_pending && options.session.fork.is_none())
+        || continue_view
 }
 
 /// The `--continue` launch's agents-view target: the newest saved session
@@ -1549,5 +1616,272 @@ mod tests {
         )
         .expect("options");
         assert_eq!(options.code_block_indent, "  ");
+    }
+
+    /// A session with one user/assistant exchange, written the same shape
+    /// `SessionManager::persisted` + appends produce. Returns the file and
+    /// its session id.
+    fn seed_session(
+        session_dir: &std::path::Path,
+        cwd: &std::path::Path,
+        user_text: &str,
+    ) -> (std::path::PathBuf, String) {
+        use pa_types::ai::{AssistantMessage, StopReason, Usage, UserContent, UserMessage};
+        use pa_types::session::AgentMessage;
+        let mut session = pa_core::session::manager::SessionManager::persisted(cwd, session_dir);
+        session
+            .append_message(AgentMessage::User(UserMessage {
+                // The block shape a real run writes (the print runtime's
+                // `content[0].text` rows), so the copy assertions read the
+                // same shape the shipped sessions carry.
+                content: UserContent::Blocks(vec![pa_types::ai::UserContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: user_text.to_string(),
+                        text_signature: None,
+                        rest: Default::default(),
+                    },
+                )]),
+                timestamp: 0,
+                rest: Default::default(),
+            }))
+            .expect("write user message");
+        session
+            .append_message(AgentMessage::Assistant(AssistantMessage {
+                content: vec![pa_types::ai::AssistantContentBlock::Text(
+                    pa_types::ai::TextContent {
+                        text: "the answer".to_string(),
+                        text_signature: None,
+                        rest: Default::default(),
+                    },
+                )],
+                api: "openai-completions".to_string(),
+                provider: "openai".to_string(),
+                model: "gpt-x".to_string(),
+                response_model: None,
+                response_id: None,
+                diagnostics: None,
+                usage: Usage::default(),
+                stop_reason: StopReason::Stop,
+                stop_reason_raw: None,
+                error_message: None,
+                timestamp: 0,
+                rest: Default::default(),
+            }))
+            .expect("write assistant message");
+        let id = session.get_session_id().to_string();
+        (
+            session
+                .get_session_file()
+                .expect("session file")
+                .to_path_buf(),
+            id,
+        )
+    }
+
+    fn read_jsonl(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .expect("read session file")
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<Result<_, _>>()
+            .expect("valid session entries")
+    }
+
+    #[test]
+    fn fork_startup_selection_copies_the_source_under_a_fresh_header() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cwd = dir.path().join("project");
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+        std::fs::create_dir_all(&session_dir).expect("sessions dir");
+        let (source, id) = seed_session(&session_dir, &cwd, "original question");
+        let before = std::fs::read(&source).expect("read source");
+
+        let selection =
+            fork_startup_selection(&id, &cwd, Some(&session_dir)).expect("fork startup");
+        let SessionSelection::Resume(fork) = &selection else {
+            panic!("the fork opens as a resume of the forked file, got {selection:?}");
+        };
+
+        // A new file in the session dir, never the source.
+        assert!(fork.is_file(), "the fork file landed on disk");
+        assert_ne!(fork, &source, "the fork is a new session file");
+        assert!(
+            fork.starts_with(&session_dir),
+            "the fork lives in the session dir"
+        );
+        // Fresh header: new id, the source as parentSession, the target
+        // cwd (TS `forkFrom`'s new header).
+        let fork_entries = read_jsonl(fork);
+        let header = &fork_entries[0];
+        assert_eq!(header["type"], "session");
+        assert_ne!(header["id"].as_str(), Some(id.as_str()));
+        assert_eq!(
+            header["parentSession"].as_str(),
+            Some(source.display().to_string().as_str()),
+            "the fork header parents at the source"
+        );
+        assert_eq!(
+            header["cwd"].as_str(),
+            Some(cwd.display().to_string().as_str())
+        );
+        // The branch copied: the source's exchange rides the fork.
+        let texts: Vec<&str> = fork_entries
+            .iter()
+            .filter(|entry| entry["type"] == "message")
+            .filter_map(|entry| entry["message"]["content"][0]["text"].as_str())
+            .collect();
+        assert!(texts.contains(&"original question"), "texts: {texts:?}");
+        assert!(texts.contains(&"the answer"), "texts: {texts:?}");
+        // The source keeps its rows untouched (the copy never rewrites it).
+        let after = std::fs::read(&source).expect("read source");
+        assert_eq!(before, after, "the source file is unchanged");
+    }
+
+    #[test]
+    fn fork_startup_selection_imports_a_global_session_into_this_cwd() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let other_project = dir.path().join("other-project");
+        let this_project = dir.path().join("this-project");
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&other_project).expect("other project");
+        std::fs::create_dir_all(&this_project).expect("this project");
+        std::fs::create_dir_all(&session_dir).expect("sessions dir");
+        let (source, id) = seed_session(&session_dir, &other_project, "global question");
+        let before = std::fs::read(&source).expect("read source");
+
+        let selection = fork_startup_selection(&id, &this_project, Some(&session_dir))
+            .expect("a GLOBAL session is exactly what --fork is for");
+        let SessionSelection::Resume(fork) = &selection else {
+            panic!("the fork opens as a resume of the forked file, got {selection:?}");
+        };
+
+        let fork_entries = read_jsonl(fork);
+        assert_eq!(
+            fork_entries[0]["cwd"].as_str(),
+            Some(this_project.display().to_string().as_str()),
+            "the fork adopts the TARGET cwd"
+        );
+        assert_eq!(
+            fork_entries[0]["parentSession"].as_str(),
+            Some(source.display().to_string().as_str())
+        );
+        let after = std::fs::read(&source).expect("read source");
+        assert_eq!(before, after, "the source file is unchanged");
+    }
+
+    #[test]
+    fn fork_startup_selection_reports_the_ts_contracts() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cwd = dir.path().join("project");
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+        std::fs::create_dir_all(&session_dir).expect("sessions dir");
+
+        // An empty source file: the `forkFrom` failure contract.
+        let empty = session_dir.join("empty.jsonl");
+        std::fs::write(&empty, "").expect("write empty file");
+        let error =
+            fork_startup_selection(empty.to_str().expect("utf8 path"), &cwd, Some(&session_dir))
+                .expect_err("an empty source cannot fork");
+        assert!(
+            error.to_string().contains(&format!(
+                "Cannot fork: source session file is empty or invalid: {}",
+                empty.display()
+            )),
+            "unexpected error: {error:#}"
+        );
+
+        // A headerless source file.
+        let headerless = session_dir.join("headerless.jsonl");
+        std::fs::write(&headerless, "{\"type\":\"message\"}\n").expect("write headerless file");
+        let error = fork_startup_selection(
+            headerless.to_str().expect("utf8 path"),
+            &cwd,
+            Some(&session_dir),
+        )
+        .expect_err("a headerless source cannot fork");
+        assert!(
+            error
+                .to_string()
+                .contains("Cannot fork: source session has no header: "),
+            "unexpected error: {error:#}"
+        );
+
+        // An unknown selector: the TS startup failure with the browse hint.
+        let error = fork_startup_selection("does-not-exist", &cwd, Some(&session_dir))
+            .expect_err("an unknown selector cannot fork");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("No session found matching 'does-not-exist'"),
+            "unexpected error: {rendered}"
+        );
+        assert!(
+            rendered.contains("Open prime-agent and press left-arrow to browse sessions."),
+            "unexpected error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn build_tui_options_opens_a_fork_as_the_startup_session() {
+        use crate::mode::{AppMode, RuntimeConfig};
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let cwd = dir.path().join("project");
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&cwd).expect("cwd");
+        std::fs::create_dir_all(&session_dir).expect("sessions dir");
+        let (source, id) = seed_session(&session_dir, &cwd, "interactive question");
+
+        let mut options = run_options_for_continue(dir.path());
+        options.config.cwd = cwd.clone();
+        options.config.agent_dir = dir.path().join("agent");
+        options.session.fork = Some(id.clone());
+        options.session.session_dir = Some(session_dir.clone());
+        let tui = build_tui_options(&options, dir.path().join("d.sock"), Default::default())
+            .expect("the interactive launch forks instead of refusing");
+
+        let SessionSelection::Resume(fork) = &tui.session else {
+            panic!(
+                "the fork opens as a resume of the forked file, got {:?}",
+                tui.session
+            );
+        };
+        assert!(
+            fork.starts_with(&session_dir),
+            "the fork honors --session-dir"
+        );
+        assert_ne!(fork, &source, "the fork is a new session file");
+        let fork_entries = read_jsonl(fork);
+        assert_eq!(
+            fork_entries[0]["parentSession"].as_str(),
+            Some(source.display().to_string().as_str())
+        );
+    }
+
+    #[test]
+    fn a_fork_launch_never_opens_the_agents_view() {
+        // TS `shouldOpenAgentsViewForDaemonInteractive`: `--fork` opens its
+        // target directly — even alongside an explicit `agents` request.
+        let mut options = run_options_for_continue(std::path::Path::new("/does/not/matter"));
+        options.agents_view_requested = true;
+        assert!(
+            should_open_agents_view(&options, false, false),
+            "an explicit agents request still opens the view"
+        );
+        options.session.resume_bare = true;
+        assert!(
+            should_open_agents_view(&options, false, false),
+            "a bare --resume still opens the view"
+        );
+        options.session.resume_bare = false;
+        options.session.fork = Some("source".to_string());
+        assert!(
+            !should_open_agents_view(&options, false, false),
+            "a fork opens its target, never the agents view"
+        );
+        assert!(
+            should_open_agents_view(&options, false, true),
+            "a --continue with a saved candidate still opens the view"
+        );
     }
 }
