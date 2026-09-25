@@ -296,6 +296,12 @@ impl WindowedSessionStore {
                         | "agent_status"
                         | "git_state"
                         | "child_usage_attributed"
+                ) || matches!(
+                    (meta.kind.as_str(), meta.custom_type.as_deref()),
+                    (
+                        "custom",
+                        Some("provider_quota_park" | "provider_quota_resume")
+                    )
                 ))
             {
                 metadata_entries.push(

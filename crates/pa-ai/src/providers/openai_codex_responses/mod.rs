@@ -389,7 +389,11 @@ fn is_codex_visible_response_event(event: &Value) -> bool {
     let Some(event_type) = event.get("type").and_then(Value::as_str) else {
         return false;
     };
+    // `response.done` normalizes to `response.completed` before the TS
+    // classifier sees a mapped event, so the raw-type check here must
+    // accept it too (a terminal-only stream still starts visibly).
     event_type == "response.completed"
+        || event_type == "response.done"
         || event_type == "response.incomplete"
         || event_type.starts_with("response.output_")
         || event_type.starts_with("response.reasoning_")
@@ -1114,6 +1118,7 @@ mod tests {
     fn codex_visible_event_classifier() {
         let visible = [
             "response.completed",
+            "response.done",
             "response.incomplete",
             "response.output_item.added",
             "response.output_text.delta",

@@ -773,6 +773,10 @@ impl AgentSessionEngine {
         }
         if let Some(entries) = pending_branch {
             built.session.rebuild_branch_context(entries).await?;
+            // A moved branch restores its own park (the early return
+            // would otherwise skip the build-tail restore and leave the
+            // previous branch's park — or none — armed).
+            self.restore_quota_park(built).await;
             return Ok(());
         }
         // Restore the retained context and certified metadata without loading
@@ -828,7 +832,15 @@ impl AgentSessionEngine {
 
     /// Scan the built session's branch entries for the park this branch
     /// ended on and re-arm the live park state (TS `_restoreQuotaPark`).
+    /// A rebuild starts from the branch's own records: any park carried
+    /// by the previous build (a replaced session or a moved branch) is
+    /// cleared first, so the state never survives onto a branch that did
+    /// not park.
     async fn restore_quota_park(&self, built: &CoreSessionEngine) {
+        *self
+            .quota_park
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         let persistence = built.session.shared_persistence();
         let manager = persistence.lock().await;
         let Some(persisted) = manager.latest_quota_park() else {
@@ -842,8 +854,10 @@ impl AgentSessionEngine {
             return;
         }
         // A wake job that still exists keeps its id; a missing one is
-        // rebuilt; a user-cancelled one is honored (the user owns the
-        // wake) by leaving the session unparked.
+        // rebuilt and the replacement is recorded so the next restart
+        // reuses it instead of arming another beside it; a user-cancelled
+        // one is honored (the user owns the wake) by leaving the session
+        // unparked.
         let job_id = match persisted.job_id {
             Some(job_id) if self.quota_wake_job_active(&job_id) => Some(job_id),
             Some(job_id)
@@ -851,10 +865,19 @@ impl AgentSessionEngine {
                     wiring.store.list().iter().any(|job| job.id == job_id)
                 }) =>
             {
-                None
+                return;
             }
             Some(_) | None => self.create_quota_resume_job(persisted.resume_at_ms).await,
         };
+        if job_id != persisted.job_id {
+            self.append_quota_park_entry(
+                persisted.resume_at_ms,
+                persisted.park_count,
+                job_id.as_deref(),
+                None,
+            )
+            .await;
+        }
         *self
             .quota_park
             .lock()
@@ -882,6 +905,13 @@ impl AgentSessionEngine {
     pub(crate) async fn retire_session_runtime(&self) {
         let _build = self.session_build.lock().await;
         let built = self.session.lock().await.take();
+        // The retired session's quota park ends with it (the wake's owner
+        // is gone); the replacement build restores whatever the new
+        // branch's own entries say.
+        *self
+            .quota_park
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         *self.goal_runtime.lock().expect("goal runtime lock") = None;
         *self.turn_agent.lock().expect("turn agent lock") = None;
         *self
@@ -3977,13 +4007,42 @@ impl AgentSessionEngine {
                     // goal survives until the wake (or a spent park
                     // budget, which declines the park first) ends it (TS
                     // `_stopGoalContinuationForTerminalMessage`'s
-                    // `_quotaPark` guard).
-                    if self
+                    // `_quotaPark` guard — a restored park guards too,
+                    // not only this run's park decision).
+                    let parked_this_run = self
                         .quota_parked_this_run
-                        .swap(false, std::sync::atomic::Ordering::SeqCst)
-                    {
+                        .swap(false, std::sync::atomic::Ordering::SeqCst);
+                    let live_park = self
+                        .quota_park
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    if parked_this_run {
                         emit(EngineEvent::Done(Err(error)));
                         return;
+                    }
+                    if let Some(park) = live_park {
+                        if park.resume_at_ms > crate::util::now_ms() {
+                            // A future wake still owns the resume: the
+                            // goal survives this failed turn (TS's
+                            // `_quotaPark` guard).
+                            emit(EngineEvent::Done(Err(error)));
+                            return;
+                        }
+                        // The wake was consumed and this give-up did not
+                        // re-park (a non-quota failure): the episode ends
+                        // here (the give-up it replaced stands), so the
+                        // stale park must not linger without a wake (TS
+                        // abort arm's stale-park clear).
+                        if let Some(job_id) = &park.job_id {
+                            self.cancel_quota_resume_job(job_id);
+                        }
+                        self.runtime
+                            .block_on(self.append_quota_resume_entry("wake-error"));
+                        *self
+                            .quota_park
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
                     }
                     // TS `_stopGoalContinuationForTerminalMessage`: an
                     // error assistant message fails an active goal (the
@@ -5576,6 +5635,27 @@ pub(crate) mod tests {
             "the spent re-arm budget drops the park"
         );
         assert!(!engine.is_quota_parked());
+    }
+
+    /// The replacement teardown ends the retired session's park with it:
+    /// the state clears so an unparked replacement is never reported
+    /// quota-parked (the replacement build restores whatever its own
+    /// branch says).
+    #[tokio::test]
+    async fn retire_session_runtime_clears_the_live_park() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = park_engine(dir.path());
+        let message = quota_failure_message(Some("rate_limit"), Some(3_600_000));
+        engine
+            .park_for_quota_reset(&message, "abort")
+            .await
+            .expect("the park fires");
+        assert!(engine.is_quota_parked());
+        engine.retire_session_runtime().await;
+        assert!(
+            !engine.is_quota_parked(),
+            "the retired session's park ends with it"
+        );
     }
 
     /// A parked session that completes a model call resumes: the park
