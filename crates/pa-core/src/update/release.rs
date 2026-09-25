@@ -259,4 +259,87 @@ mod tests {
         assert!(agent.starts_with("prime-agent/1.2.3 ("));
         assert!(agent.contains("; rust/"));
     }
+
+    /// Serve one HTTP request from a fake local release endpoint and return
+    /// the endpoint's base URL plus a channel carrying what the client sent
+    /// (the request head). No fixed ports: the listener binds `127.0.0.1:0`.
+    async fn fake_release_endpoint(
+        status: &str,
+        body: String,
+    ) -> (String, tokio::sync::oneshot::Receiver<String>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let (head_tx, head_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buffer = [0u8; 4096];
+            let mut read = 0usize;
+            let head = loop {
+                let Ok(n) = socket.read(&mut buffer[read..]).await else {
+                    return;
+                };
+                read += n;
+                let head = String::from_utf8_lossy(&buffer[..read]).to_string();
+                if head.contains("\r\n\r\n") {
+                    break head;
+                }
+            };
+            let response = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = head_tx.send(head);
+        });
+        (format!("http://127.0.0.1:{port}"), head_rx)
+    }
+
+    #[tokio::test]
+    async fn latest_release_fetches_the_channel_manifest_over_http() {
+        let manifest = serde_json::json!({
+            "version": "1.2.3",
+            "binaries_v2": [{
+                "platform": "linux-x64",
+                "file": "prime-agent-1.2.3-linux-x64.tar.gz",
+                "sha256": "a".repeat(64),
+            }],
+        })
+        .to_string();
+        let (base_url, head_rx) = fake_release_endpoint("200 OK", manifest).await;
+        let release = latest_release(
+            "1.2.2",
+            Some(UpdateChannel::Stable),
+            &base_url,
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .expect("the endpoint answered")
+        .expect("the manifest parses");
+        assert_eq!(release.version, "1.2.3");
+        assert_eq!(release.artifacts.len(), 1);
+        assert_eq!(release.artifacts[0].platform, "linux-x64");
+        let head = head_rx.await.expect("the head was captured").to_lowercase();
+        assert!(
+            head.starts_with("get /latest.json http/1.1"),
+            "the fetch hits the stable manifest path: {head}"
+        );
+        assert!(
+            head.contains(&format!("user-agent: {}", update_user_agent("1.2.2"))),
+            "the request identifies the release updater: {head}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_error_is_no_release_never_a_planning_failure() {
+        let (base_url, _) = fake_release_endpoint("500 Internal Server Error", String::new()).await;
+        let release = latest_release("1.2.2", None, &base_url, std::time::Duration::from_secs(5))
+            .await
+            .expect("the fetch resolves");
+        assert!(release.is_none(), "a failed endpoint is nothing to install");
+    }
 }

@@ -497,6 +497,49 @@ string — which is not build recency.
   `update_flow` (plan anchor + guards, the Direct plan arm) and
   `public_command` (flag parse; the TUI `/update` surface stays TS parity).
 
+## Package update self target = the real update flow (2026-09-25)
+
+Reference: TS `package-manager-cli.ts` (`handlePackageCommand`'s update case)
+over the update flow above. The gap: `prime-agent package update
+--rollback|--nightly|--stable` — the dispatcher lets exactly these through,
+matching TS — reached a leftover stub (`self-update is not available in this
+build yet`), misleading once the staged-activation flow was linked in, and
+the parse dropped `--force`/`--nightly`/`--stable` values after validating
+them.
+
+- The update case now ports TS's order: the persisted channel is read once,
+  an explicit nightly switch warns and confirms BEFORE any update work (an
+  unconfirmed non-tty switch aborts with the TS exit codes — 75 for the
+  interactive update child, else 1 — so declining changes nothing, not even
+  extensions), the extensions half runs first, and the self target runs the
+  same native flow `prime-agent update` runs.
+- One shared command core (`pa-cli`'s `self_update` module): the parsed
+  invocation options (the old `public_command::UpdateInvocation` moved there
+  as `SelfUpdateOptions`), the nightly confirmation, and the run +
+  `commitChannel` persist. `prime-agent update` and the package self target
+  call the same body, so the two entries cannot diverge.
+- Installations the Prime Agent installer does not own (a cargo build, a
+  copied binary, a future package-manager channel) keep the flow's verbatim,
+  install-method-specific message ("This compiled application is not owned
+  by the Prime Agent installer. Update it using its original installer.")
+  through the update case's `Error:` line — the TS bun-binary behavior; no
+  stub, no renamed error, no hidden surface.
+- Divergence (recorded): TS treats an unresolvable manifest on the self-only
+  npm path as an aborted run (exit 1/75) after extensions succeeded; the
+  Rust flow resolves the same event as a completed `Skipped` run (exit 0/75,
+  the merged flow's semantics) — unchanged by this slice.
+- Tests: the parse stores force/channel (previously dropped), and the update
+  case's confirm-before-work ordering, target routing, flag propagation, and
+  exit-code composition run against a recording self-update runner (no real
+  update effects in tests). The release fetch chain gained fake local
+  endpoint coverage (127.0.0.1:0, no fixed ports): `latest_release` over
+  HTTP (the manifest path, the updater User-Agent, a 500 is `None`) and
+  `download_archive` (the streamed digest verify, a mismatch installs
+  nothing).
+- Ownership: pa-cli `self_update` (new), `package_command` (the update case
+  + its tests), `public_command` (the shared-core call); pa-core `update`
+  (`release.rs`/`download.rs` endpoint tests only).
+
 ## Update graceful stop + roster (slice 3, 2026-09-19)
 
 The TS-era worker prepare/commit/cancel frames (`worker_prepare_update`/
