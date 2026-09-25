@@ -73,6 +73,11 @@ struct Envelope {
     parent_id: Option<String>,
     message: Option<MessageMetadata>,
     custom_type: Option<String>,
+    /// The entry's own usage block (`compaction` / `branch_summary`
+    /// rows carry the summarizer's spend at the top level, outside any
+    /// message; message rows never carry one here).
+    #[serde(default)]
+    usage: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -135,6 +140,13 @@ pub struct WindowStats {
     pub cache_write: u64,
     #[serde(with = "super::window_cache::float_bits")]
     pub cost: f64,
+    /// The discarded prefix's `compaction` / `branch_summary` spend (the
+    /// summarizer's own bill): the full-session total reads it; the
+    /// active TS stats never do. Snapshot version 5 is the first format
+    /// that carries it: a v4 sidecar deserializes it as zero and would
+    /// undercount, so the version bump retires those caches.
+    #[serde(default)]
+    pub summarization_cost: f64,
 }
 
 /// One older-path assistant row's spend-relevant usage: the walk records
@@ -184,6 +196,7 @@ pub struct WindowedSessionStore {
     first_user_message: Option<serde_json::Value>,
     leaf_id: String,
     settings: SessionContext,
+    boundary_model: Option<(String, String)>,
     full: bool,
     snapshot: Snapshot,
     reads: WindowReadStats,
@@ -264,6 +277,11 @@ impl WindowedSessionStore {
         let mut thinking = None;
         let mut tier = None;
         let mut model = None;
+        // The model in effect at the retained-window boundary (the newest
+        // `model_change` in the discarded prefix): the per-model usage fold
+        // seeds its timeline with this — not `model`, which ends up as the
+        // leaf's model.
+        let mut boundary_model = None;
         let mut header = None;
         while let Some(line) = reader.next()? {
             let Ok(text) = std::str::from_utf8(&line) else {
@@ -350,6 +368,21 @@ impl WindowedSessionStore {
             }
             let on_path = expected.as_deref() == Some(id);
             if on_path {
+                if window_done && matches!(meta.kind.as_str(), "compaction" | "branch_summary") {
+                    // The discarded prefix's summarizer spend rides the
+                    // entry's own usage block (never a message): the
+                    // full-session total (`get_session_stats` `totalCost`)
+                    // bills it exactly like the retained region's
+                    // compaction rows, while the active TS stats stay
+                    // messages-only.
+                    if let Some(usage) = &meta.usage {
+                        older_path_stats.summarization_cost += usage
+                            .get("cost")
+                            .and_then(|cost| cost.get("total"))
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or_default();
+                    }
+                }
                 if window_done && meta.kind == "message" {
                     if let Some(message) = &meta.message {
                         older_path_stats.total_messages += 1;
@@ -429,8 +462,19 @@ impl WindowedSessionStore {
                     Some(FileEntry::ServiceTierChange { payload, .. }) if tier.is_none() => {
                         tier = Some(payload.service_tier);
                     }
-                    Some(FileEntry::ModelChange { payload, .. }) if model.is_none() => {
-                        model = Some((payload.provider.clone(), payload.model_id.clone()));
+                    Some(FileEntry::ModelChange { payload, .. }) => {
+                        if model.is_none() {
+                            model = Some((payload.provider.clone(), payload.model_id.clone()));
+                        }
+                        // The retained-window boundary's timeline: the newest
+                        // `model_change` in the discarded prefix (the first the
+                        // backward walk meets past the boundary) is the model the
+                        // window's early summarizer rows billed on — `model`
+                        // tracks the leaf's model, not the boundary's.
+                        if window_done && boundary_model.is_none() {
+                            boundary_model =
+                                Some((payload.provider.clone(), payload.model_id.clone()));
+                        }
                     }
                     Some(FileEntry::Compaction { payload, .. }) if first_kept.is_none() => {
                         first_kept = Some(payload.first_kept_entry_id.clone());
@@ -525,6 +569,7 @@ impl WindowedSessionStore {
             tier: tier.flatten(),
             tier_present,
             model: model.clone(),
+            boundary_model: boundary_model.clone(),
             metadata: metadata_entries.clone(),
             message_count,
             compaction_count,
@@ -555,6 +600,7 @@ impl WindowedSessionStore {
                 service_tier: tier.flatten(),
                 model,
             },
+            boundary_model,
             full: false,
             snapshot,
             reads: reader.reads,
@@ -629,6 +675,7 @@ impl WindowedSessionStore {
                 service_tier: snapshot.tier,
                 model: snapshot.model.clone(),
             },
+            boundary_model: snapshot.boundary_model.clone(),
             full: false,
             snapshot,
             reads,
@@ -723,6 +770,15 @@ impl WindowedSessionStore {
     #[cfg(test)]
     pub fn is_full_history(&self) -> bool {
         self.full
+    }
+
+    /// The model in effect at the retained-window boundary (the newest
+    /// `model_change` in the discarded prefix): the per-model usage fold
+    /// seeds its timeline with this — retained summarizer rows before the
+    /// branch's first in-window `model_change` billed on it. `None` on a
+    /// full-history load or a prefix without `model_change` rows.
+    pub fn boundary_model(&self) -> Option<&(String, String)> {
+        self.boundary_model.as_ref()
     }
 
     /// Model context with settings resolved across the entire active ancestry.

@@ -17,6 +17,17 @@ use crate::session_tree;
 use crate::worker::{SessionCore, Worker};
 use pa_agent::abort::AbortController;
 
+/// One completed abandoned-branch summary to persist: the text, its usage
+/// block, its file-operation details, and the model the summary call
+/// served on (TS #2411's auxiliary routing — `None` keeps the timeline
+/// attribution).
+type PendingBranchSummary = (
+    String,
+    Option<Value>,
+    Option<Value>,
+    Option<(String, String)>,
+);
+
 pub(crate) struct TreeNavigation {
     engine: Arc<dyn SessionEngine>,
     core: Arc<Mutex<SessionCore>>,
@@ -184,7 +195,7 @@ impl TreeNavigation {
 
         // The abandoned-branch summary (TS `generateBranchSummary` over
         // `collectEntriesForBranchSummary`).
-        let mut summary: Option<(String, Option<Value>, Option<Value>)> = None;
+        let mut summary: Option<PendingBranchSummary> = None;
         let replace_instructions =
             payload.get("replaceInstructions").and_then(Value::as_bool) == Some(true);
         if summarize {
@@ -239,7 +250,7 @@ impl TreeNavigation {
                 }
                 match outcome {
                     crate::engine::BranchSummaryOutcome::Complete { run } => {
-                        summary = Some((run.summary, run.usage, run.details));
+                        summary = Some((run.summary, run.usage, run.details, run.model));
                     }
                     crate::engine::BranchSummaryOutcome::Aborted => {
                         return response_success(
@@ -271,13 +282,16 @@ impl TreeNavigation {
                 );
             };
             let mut summary_entry = None;
-            if let Some((summary, usage, details)) = summary {
+            if let Some((summary, usage, details, model)) = summary {
                 match store.append_branch_summary(
                     new_leaf.as_deref(),
                     &summary,
                     details,
                     None,
                     usage,
+                    model
+                        .as_ref()
+                        .map(|(provider, model_id)| (provider.as_str(), model_id.as_str())),
                 ) {
                     Ok(summary_id) => {
                         if let Some(label) = &label {

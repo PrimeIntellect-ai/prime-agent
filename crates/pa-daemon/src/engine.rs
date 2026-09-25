@@ -887,6 +887,10 @@ pub struct BranchSummaryRun {
     pub summary: String,
     pub usage: Option<Value>,
     pub details: Option<Value>,
+    /// The model that served the call (`provider`, `modelId`) when the
+    /// scripted response or the live engine names one: persisted on the
+    /// `branch_summary` entry for the per-model cost fold.
+    pub model: Option<(String, String)>,
 }
 
 /// How one branch-summary run ended (TS `BranchSummaryResult` outcomes).
@@ -1626,6 +1630,7 @@ impl SessionEngine for ScriptedEngine {
                     summary: "scripted branch summary".to_string(),
                     usage: None,
                     details: Some(json!({ "readFiles": [], "modifiedFiles": [] })),
+                    model: None,
                 },
             };
         };
@@ -1650,6 +1655,11 @@ impl SessionEngine for ScriptedEngine {
                     .to_string(),
                 usage: entry.get("usage").cloned().filter(|usage| !usage.is_null()),
                 details: entry.get("details").cloned().filter(|d| !d.is_null()),
+                model: (|| {
+                    let provider = entry.get("provider")?.as_str()?.to_string();
+                    let model_id = entry.get("modelId")?.as_str()?.to_string();
+                    Some((provider, model_id))
+                })(),
             },
         }
     }
