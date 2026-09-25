@@ -1,6 +1,5 @@
 //! The worker<->supervisor process contract: the environment variables the
 //! supervisor passes at spawn, and the close reasons a kill carries.
-use super::*;
 
 use serde_json::Value;
 
@@ -15,7 +14,7 @@ use crate::protocol::DaemonSessionClosedReason;
 /// later wake), `replaced` keeps the plain cron jobs but cancels the RLM
 /// heartbeats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum KillCloseReason {
+pub(crate) enum KillCloseReason {
     Killed,
     Shutdown,
     Replaced,
