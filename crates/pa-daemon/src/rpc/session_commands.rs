@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use pa_types::usage::{calculate_context_tokens, estimate_tokens, valid_assistant_usage};
 use pa_types::session::FileEntry;
+use pa_types::usage::{calculate_context_tokens, estimate_tokens, valid_assistant_usage};
 
 use super::commands::RpcState;
 use super::protocol::ResponseData;
@@ -54,10 +54,11 @@ pub async fn handle(
         "set_heartbeat" | "update_heartbeat" | "manage_heartbeat" => {
             Err(HEARTBEATS_REQUIRE_DAEMON.to_string())
         }
-        "send_message" | "agent_messages_status" | "agent_messages_pause"
-        | "agent_messages_resume" | "agent_messages_clear" => {
-            Err(AGENT_MESSAGING_REQUIRES_DAEMON.to_string())
-        }
+        "send_message"
+        | "agent_messages_status"
+        | "agent_messages_pause"
+        | "agent_messages_resume"
+        | "agent_messages_clear" => Err(AGENT_MESSAGING_REQUIRES_DAEMON.to_string()),
         // The in-process session hosts no family, so no active session
         // is observable: the TS `watchSession` miss for an unknown child
         // id is the exact answer here.
@@ -121,7 +122,7 @@ async fn fork(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, St
         };
         (entry.parent_id().map(str::to_string), user.content.text())
     };
-    fork_at(state, target_leaf, selected_text).await
+    fork_at(state, target_leaf, Some(selected_text)).await
 }
 
 /// `clone` (TS `connection.clone` -> `fork(leafId, { position: "at" })`):
@@ -179,10 +180,11 @@ async fn fork_at(
             let handle = state.session.handle().await;
             let persistence = handle.engine.session.shared_persistence();
             let manager = persistence.lock().await;
-            let branch_entries = branch_entries_to_leaf(manager, target_leaf.as_deref());
+            let branch_entries = branch_entries_to_leaf(&manager, target_leaf.as_deref());
             (branch_entries, handle.engine.clone())
         };
         engine
+            .session
             .rebuild_branch_context(branch_entries)
             .await
             .map_err(|error| format!("{error:#}"))?;
@@ -224,8 +226,8 @@ async fn fork_at(
                     session_file.to_str(),
                     0,
                 );
-                let file = session_dir
-                    .join(crate::session_store::session_file_name(forked.session_id()));
+                let file =
+                    session_dir.join(crate::session_store::session_file_name(forked.session_id()));
                 forked.set_path(file);
                 if forked.rewrite().is_err() {
                     return Err("Failed to create forked session".to_string());
@@ -274,7 +276,9 @@ fn branch_entries_to_leaf(
             break;
         }
         path.push(entry.clone());
-        current = entry.parent_id().and_then(|parent| by_id.get(parent).copied());
+        current = entry
+            .parent_id()
+            .and_then(|parent| by_id.get(parent).copied());
     }
     path.reverse();
     path
@@ -452,8 +456,14 @@ async fn get_session_stats(state: &Arc<RpcState>) -> Result<ResponseData, String
                         .count() as u64;
                 }
                 if let Some(usage) = message.get("usage") {
-                    input += usage.get("input").and_then(Value::as_u64).unwrap_or_default();
-                    output += usage.get("output").and_then(Value::as_u64).unwrap_or_default();
+                    input += usage
+                        .get("input")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
+                    output += usage
+                        .get("output")
+                        .and_then(Value::as_u64)
+                        .unwrap_or_default();
                     cache_read += usage
                         .get("cacheRead")
                         .and_then(Value::as_u64)
@@ -504,15 +514,18 @@ async fn get_session_stats(state: &Arc<RpcState>) -> Result<ResponseData, String
             .rposition(|message| valid_assistant_usage(message).is_some())
         {
             Some(anchor_index) => {
-                let usage = valid_assistant_usage(&messages[anchor_index])
-                    .expect("checked by rposition");
+                let usage =
+                    valid_assistant_usage(&messages[anchor_index]).expect("checked by rposition");
                 calculate_context_tokens(&usage)
                     + messages[anchor_index + 1..]
                         .iter()
                         .map(|message| estimate_tokens(message))
                         .sum::<u64>()
             }
-            None => messages.iter().map(|message| estimate_tokens(message)).sum(),
+            None => messages
+                .iter()
+                .map(|message| estimate_tokens(message))
+                .sum(),
         };
         stats["contextUsage"] = json!({
             "tokens": tokens,
@@ -570,7 +583,6 @@ async fn get_commands(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     }
     Ok(ResponseData::Present(json!({ "commands": commands })))
 }
-
 
 /// The concatenated text blocks of one assistant message (TS
 /// `getLastAssistantText`).

@@ -28,7 +28,10 @@ fn registry(state: &RpcState) -> pa_core::models::ModelRegistry {
 /// catalog, swap the live provider target and the agent model, clamp the
 /// thinking level, record the durable `model_change` row, and persist the
 /// settings default.
-pub(crate) async fn set_model(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, String> {
+pub(crate) async fn set_model(
+    state: &Arc<RpcState>,
+    payload: &Value,
+) -> Result<ResponseData, String> {
     let provider = payload
         .get("provider")
         .and_then(Value::as_str)
