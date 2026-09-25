@@ -15,6 +15,10 @@ use std::time::{Duration, Instant};
 use crate::{Line, Span};
 use ratatui::style::Style;
 
+/// The OSC 8 open prefix (the `hyperlinks` writer's grammar): an OSC 8
+/// escape that is not the exact close opens a link region.
+const OSC8_OPEN_PREFIX: &str = "\x1b]8;;";
+
 /// How long a toast stays on screen before it auto-dismisses.
 pub const TOAST_TTL: Duration = Duration::from_secs(3);
 
@@ -162,21 +166,87 @@ pub fn overlay_toasts(
         let col = width.saturating_sub(pill_width);
         let (markers, rest) = crate::osc133::split_leading_markers(row);
         let mut out: Line = markers;
-        out.extend(crate::width::slice_line_by_column_strict(
-            &rest, 0, col, true,
-        ));
+        let (prefix, link_open) = slice_columns_keeping_escapes(&rest, 0, col);
+        out.extend(prefix);
+        // The pill sits at its right-edge column even when the covered
+        // content runs short or a wide cluster clips at the boundary: the
+        // composited prefix pads up to the column first.
+        let prefix_width = crate::width::line_width(&out);
+        if prefix_width < col {
+            out.push(Span::raw(" ".repeat(col - prefix_width)));
+        }
+        // A link region still open at the pill column closes first: the
+        // pill's cells must not inherit the hyperlink.
+        if link_open {
+            out.push(Span::raw(crate::hyperlinks::OSC8_CLOSE.to_string()));
+        }
         out.push(Span::styled(pill, style));
-        out.extend(crate::width::slice_line_by_column_strict(
-            &rest,
-            col.saturating_add(pill_width),
-            width,
-            true,
-        ));
+        let (suffix, _) =
+            slice_columns_keeping_escapes(&rest, col.saturating_add(pill_width), width);
+        out.extend(suffix);
         if crate::width::line_width(&out) > width {
             out = crate::width::truncate_line(&out, width, "");
         }
         *row = out;
     }
+}
+
+/// Slice `line`'s visible columns `[start, start + length)`, keeping the
+/// zero-width escapes whose column falls inside the range — the TS
+/// `sliceByColumn` form drops them, which strips an OSC 8 hyperlink from
+/// covered content for the toast's lifetime. Returns the slice and
+/// whether it ends inside an open hyperlink region (the caller closes it
+/// before the pill's cells). Wide clusters clip at the boundary like the
+/// strict TS form.
+fn slice_columns_keeping_escapes(line: &Line, start: usize, length: usize) -> (Line, bool) {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut out: Line = Vec::new();
+    let mut link_open = false;
+    let mut col = 0usize;
+    let end = start.saturating_add(length);
+    'outer: for span in line {
+        let mut rest = span.content.as_str();
+        while !rest.is_empty() {
+            if let Some(len) = crate::width::escape_len(rest) {
+                let escape = &rest[..len];
+                if col >= start && col < end {
+                    push_slice_text(&mut out, span.style, escape);
+                    if escape == crate::hyperlinks::OSC8_CLOSE {
+                        link_open = false;
+                    } else if escape.starts_with(OSC8_OPEN_PREFIX) {
+                        link_open = true;
+                    }
+                }
+                rest = &rest[len..];
+                continue;
+            }
+            let cluster = rest.graphemes(true).next().expect("non-empty rest");
+            let cluster_width = crate::width::grapheme_width(cluster);
+            let in_range = col >= start && col < end;
+            let fits = col.saturating_add(cluster_width) <= end;
+            if in_range && fits {
+                push_slice_text(&mut out, span.style, cluster);
+            }
+            col += cluster_width;
+            rest = &rest[cluster.len()..];
+            if col >= end {
+                break 'outer;
+            }
+        }
+    }
+    (out, link_open)
+}
+
+/// Append `text` to the slice, merging into the trailing span when the
+/// style already matches (the width module's span-merge shape).
+fn push_slice_text(out: &mut Line, style: ratatui::style::Style, text: &str) {
+    if let Some(last) = out.last_mut() {
+        if last.style == style {
+            last.content.push_str(text);
+            return;
+        }
+    }
+    out.push(Span::styled(text.to_string(), style));
 }
 
 #[cfg(test)]
@@ -447,6 +517,158 @@ mod tests {
             .find(|span| span.content.contains("Copied"))
             .expect("the pill renders");
         assert_eq!(pill.style, style);
+    }
+
+    /// A short covered row keeps the pill at the right edge: the composited
+    /// prefix pads up to the pill column (the Macroscope short-row
+    /// finding), so the row spans the full width with the pill at its end.
+    #[test]
+    fn a_short_covered_row_keeps_the_pill_at_the_right_edge() {
+        let width = 60;
+        let pill = " Copied to clipboard ".to_string();
+        let mut frame = vec![line_of("short row")];
+        overlay_toasts(
+            &mut frame,
+            0,
+            1,
+            &["Copied to clipboard".to_string()],
+            width,
+            Style::default(),
+        );
+        let rendered: String = frame[0]
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert!(
+            rendered.starts_with("short row"),
+            "the covered content stays: {rendered:?}"
+        );
+        assert!(
+            rendered.ends_with(&pill),
+            "the pill lands at the right edge: {rendered:?}"
+        );
+        assert_eq!(
+            crate::width::str_width(&rendered),
+            width,
+            "the composited row spans the frame width"
+        );
+    }
+
+    /// A wide cluster clipping at the pill's column pads to the column
+    /// (the Bugbot straddle finding): the pill never shifts off the right
+    /// edge.
+    #[test]
+    fn a_wide_cluster_at_the_pill_column_still_places_the_pill_at_the_edge() {
+        let width = 20;
+        // Four double-width clusters cover columns 0..8; the pill column
+        // is 18 minus the pill width, so the prefix clips mid-cluster and
+        // pads the rest of the way.
+        let pill = " ok ".to_string();
+        let col = width - crate::width::str_width(&pill);
+        let clusters = "\u{65e5}".repeat(col / 2 + 1);
+        let mut frame = vec![line_of(&clusters)];
+        overlay_toasts(
+            &mut frame,
+            0,
+            1,
+            &["ok".to_string()],
+            width,
+            Style::default(),
+        );
+        let rendered: String = frame[0]
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert_eq!(
+            crate::width::str_width(&rendered),
+            width,
+            "the pill lands at its column over a clipped cluster: {rendered:?}"
+        );
+        assert!(
+            rendered.ends_with(&pill),
+            "the pill rides the right edge: {rendered:?}"
+        );
+    }
+
+    /// A covered hyperlink keeps its OSC 8 pair while the toast is up
+    /// (the Macroscope escape-stripping finding): the prefix slice keeps
+    /// the zero-width escapes in its column range.
+    #[test]
+    fn a_covered_hyperlink_keeps_its_osc8_pair() {
+        let url = "https://example.invalid/docs";
+        let row_text = format!(
+            "see {}the docs{} for the details{}",
+            crate::hyperlinks::osc8_open(url),
+            crate::hyperlinks::OSC8_CLOSE,
+            " ".repeat(40)
+        );
+        let mut frame = vec![line_of(&row_text)];
+        overlay_toasts(
+            &mut frame,
+            0,
+            1,
+            &["Copied to clipboard".to_string()],
+            80,
+            Style::default(),
+        );
+        let rendered: String = frame[0]
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert!(
+            rendered.contains(&crate::hyperlinks::osc8_open(url)),
+            "the link's open sequence survives: {rendered:?}"
+        );
+        assert!(
+            rendered.contains(crate::hyperlinks::OSC8_CLOSE),
+            "the link's close sequence survives: {rendered:?}"
+        );
+        assert!(rendered.contains("the docs"));
+    }
+
+    /// A link region the pill cuts OPEN closes before the pill: the
+    /// pill's cells must not inherit the hyperlink.
+    #[test]
+    fn a_link_cut_open_by_the_pill_closes_before_the_pill() {
+        let url = "https://example.invalid/long";
+        let row_text = format!(
+            "{}the linked words{}",
+            crate::hyperlinks::osc8_open(url),
+            " ".repeat(60)
+        );
+        let width = 80;
+        let pill = " Copied to clipboard ".to_string();
+        let col = width - crate::width::str_width(&pill);
+        let mut frame = vec![line_of(&row_text)];
+        overlay_toasts(
+            &mut frame,
+            0,
+            1,
+            &["Copied to clipboard".to_string()],
+            width,
+            Style::default(),
+        );
+        let rendered: String = frame[0]
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        let close = crate::hyperlinks::OSC8_CLOSE;
+        let close_at = rendered
+            .find(close)
+            .expect("the dangling link region closes");
+        let pill_at = rendered.find(&pill).expect("the pill renders");
+        assert!(
+            close_at < pill_at,
+            "the link closes before the pill: {rendered:?}"
+        );
+        // The closing sequence rides at the pill's column: the covered
+        // content ends at the column and the region closes exactly there.
+        let before_pill = &rendered[..pill_at];
+        assert_eq!(
+            crate::width::str_width(before_pill),
+            col,
+            "the close rides at the pill column: {rendered:?}"
+        );
     }
 
     fn line_of(text: &str) -> Line {

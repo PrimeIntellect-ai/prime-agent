@@ -242,7 +242,7 @@ fn is_emoji_presentation(c: char) -> bool {
     )
 }
 
-fn grapheme_width(g: &str) -> usize {
+pub(crate) fn grapheme_width(g: &str) -> usize {
     // TS `visibleWidth` replaces tabs with three spaces before segmenting,
     // so a tab cluster measures 3 columns (GB5 keeps it its own cluster).
     if g == "\t" {
