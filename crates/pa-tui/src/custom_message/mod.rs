@@ -295,10 +295,7 @@ fn slash_row_entries(
 /// TS `isCompactionOutcomeMessage` envelope: content string + a known
 /// reason/outcome pair; anything else is the malformed notice.
 fn compaction_outcome_entry(message: &Value, details: &Value) -> ChatEntry {
-    let valid = message
-        .get("content")
-        .map(Value::is_string)
-        .unwrap_or(false)
+    let valid = message.get("content").is_some_and(Value::is_string)
         && matches!(
             details.get("reason").and_then(Value::as_str),
             Some("threshold" | "overflow" | "requested")

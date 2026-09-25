@@ -175,7 +175,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(Instant::now() < deadline, "timed out reading: {error}");
@@ -194,7 +194,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).ok(),
                 Err(_) => return None,
             }
@@ -312,6 +312,7 @@ fn view_options(socket: &Path, session_dir: &Path) -> AgentsViewOptions {
         selected_key: None,
         status_message: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        show_hardware_cursor: false,
     }
 }
 

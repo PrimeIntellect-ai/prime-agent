@@ -232,6 +232,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn gist_spawn_against_stub_gh() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::TempDir::new().expect("temp dir");
         let stub = r#"#!/bin/bash
 case "$1" in
@@ -247,7 +248,6 @@ case "$1" in
 esac
 "#;
         std::fs::write(dir.path().join("gh"), stub).expect("write stub");
-        use std::os::unix::fs::PermissionsExt;
         let mut permissions = std::fs::metadata(dir.path().join("gh"))
             .expect("stat")
             .permissions();

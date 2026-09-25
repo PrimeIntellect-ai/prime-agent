@@ -539,8 +539,7 @@ impl AgentInner {
         if let Err(error) = &result {
             let aborted = self
                 .current_signal()
-                .map(|signal| signal.is_aborted())
-                .unwrap_or(false);
+                .is_some_and(|signal| signal.is_aborted());
             self.handle_run_failure(error, aborted).await;
         }
 

@@ -188,8 +188,7 @@ fn doctor_lists_and_then_reaps_an_idle_root_owned_daemon() {
         report
             .get("skipped")
             .and_then(Value::as_array)
-            .map(Vec::is_empty)
-            .unwrap_or(true),
+            .is_none_or(Vec::is_empty),
         "skipped rows: {}",
         stdout(&fix)
     );
@@ -240,8 +239,7 @@ fn shutdown_without_force_requires_confirmation_and_harms_nothing() {
         report
             .get("stopped")
             .and_then(Value::as_array)
-            .map(Vec::is_empty)
-            .unwrap_or(true),
+            .is_none_or(Vec::is_empty),
         "stopped rows: {}",
         stdout(&json_error)
     );
@@ -319,8 +317,7 @@ fn discovery_and_shutdown_from_another_root_leave_a_foreign_daemon_alive() {
         report
             .get("failed")
             .and_then(Value::as_array)
-            .map(Vec::is_empty)
-            .unwrap_or(true),
+            .is_none_or(Vec::is_empty),
         "stopping the root-owned daemon must not fail: {}",
         stdout(&shutdown)
     );

@@ -270,13 +270,13 @@ fn validate_name(name: &str) -> Result<&str> {
 }
 
 fn parse_mcp_add_args(args: &[String]) -> Result<(&str, McpServerConfig, bool)> {
-    let name = validate_name(args.first().map(String::as_str).unwrap_or(""))?;
+    let name = validate_name(args.first().map_or("", String::as_str))?;
     if BUILTIN_MCP_CATALOG.contains(&name) {
         bail!("MCP server name \"{name}\" is reserved for a built-in integration.");
     }
     let separator = args.iter().position(|arg| arg == "--");
     let option_args = &args[1..separator.unwrap_or(args.len())];
-    let command_args = separator.map(|sep| &args[sep + 1..]).unwrap_or(&[]);
+    let command_args: &[String] = separator.map_or(&[], |sep| &args[sep + 1..]);
     let mut url: Option<String> = None;
     let mut bearer_token_env_var: Option<String> = None;
     let mut oauth = false;

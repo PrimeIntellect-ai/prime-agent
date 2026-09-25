@@ -705,10 +705,9 @@ impl AgentSession {
                 let source = if busy {
                     match options.streaming_behavior {
                         Some(StreamingBehavior::Steer) => "steer",
-                        Some(StreamingBehavior::FollowUp) => "follow_up",
                         // The busy-without-behavior case errors below; the
                         // queued label is the honest fallback.
-                        None => "follow_up",
+                        Some(StreamingBehavior::FollowUp) | None => "follow_up",
                     }
                 } else {
                     "prompt"
@@ -974,8 +973,7 @@ pub(crate) fn session_message_to_loop(message: &SessionAgentMessage) -> Option<A
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 #[cfg(test)]
@@ -1206,8 +1204,9 @@ mod tests {
                 .iter()
                 .filter_map(|event| match event {
                     AgentEvent::TurnStart => Some("turn_start".to_string()),
-                    AgentEvent::MessageStart { message } => Some(message.role().to_string()),
-                    AgentEvent::MessageEnd { message } => Some(message.role().to_string()),
+                    AgentEvent::MessageStart { message } | AgentEvent::MessageEnd { message } => {
+                        Some(message.role().to_string())
+                    }
                     _ => None,
                 })
                 .collect();

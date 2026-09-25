@@ -360,7 +360,6 @@ async fn assert_roster_answers_fast(socket: &Path, dir: &Path) {
             Err(error) => {
                 last_error = format!("{error:#}");
                 tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
             }
             Ok(data) => break data,
         }

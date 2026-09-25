@@ -155,7 +155,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -213,11 +213,10 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -927,30 +926,31 @@ async fn family_edges_never_cross_families_end_to_end() {
     // host error, and the recorded traceback carries the TS error text
     // (the send resolves no sibling — the other family's session is not
     // addressable by name from this family).
-    let crossed = match std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.error")) {
-        Ok(content) => content,
-        Err(_) => {
-            let transcript = client.messages("gm-kid-debug", kid_a_active);
-            eprintln!("KEEP-DIR {}", dir.path().display());
-            if std::env::var_os("PA_E2E_KEEP_DIR").is_some() {
-                std::mem::forget(dir);
-            }
-            let daemon_log = std::fs::read_to_string(socket.with_extension("daemon.log"))
-                .unwrap_or_else(|_| "<no daemon log>".to_string());
-            panic!(
-                "no sibling-probe record: success receipt: {:?}; kid-a transcript: {}; daemon log tail: {}",
-                std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.json")).ok(),
-                transcript,
-                daemon_log
-                    .chars()
-                    .rev()
-                    .take(4000)
-                    .collect::<String>()
-                    .chars()
-                    .rev()
-                    .collect::<String>()
-            );
+    let crossed = if let Ok(content) =
+        std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.error"))
+    {
+        content
+    } else {
+        let transcript = client.messages("gm-kid-debug", kid_a_active);
+        eprintln!("KEEP-DIR {}", dir.path().display());
+        if std::env::var_os("PA_E2E_KEEP_DIR").is_some() {
+            std::mem::forget(dir);
         }
+        let daemon_log = std::fs::read_to_string(socket.with_extension("daemon.log"))
+            .unwrap_or_else(|_| "<no daemon log>".to_string());
+        panic!(
+            "no sibling-probe record: success receipt: {:?}; kid-a transcript: {}; daemon log tail: {}",
+            std::fs::read_to_string(receipts_dir.join("kid-sibling-cross.json")).ok(),
+            transcript,
+            daemon_log
+                .chars()
+                .rev()
+                .take(4000)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
+        );
     };
     assert!(
         crossed.contains("No sibling matches"),

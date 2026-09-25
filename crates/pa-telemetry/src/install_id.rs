@@ -58,15 +58,14 @@ pub fn install_id(agent_dir: &Path) -> Result<String> {
             // publish is atomic, so this re-read can only miss on state that
             // was already invalid before the race, never on a winner whose
             // write is still in flight.
-            match read_install_id(&path)? {
-                Some(existing) => Ok(existing),
-                None => {
-                    replace_invalid_state(&path, &payload)?;
-                    // Return the id the state file stores now: a concurrent
-                    // repair may have landed its rename after ours, and every
-                    // caller must converge on the durable id.
-                    Ok(read_install_id(&path)?.unwrap_or(installation_id))
-                }
+            if let Some(existing) = read_install_id(&path)? {
+                Ok(existing)
+            } else {
+                replace_invalid_state(&path, &payload)?;
+                // Return the id the state file stores now: a concurrent
+                // repair may have landed its rename after ours, and every
+                // caller must converge on the durable id.
+                Ok(read_install_id(&path)?.unwrap_or(installation_id))
             }
         }
     }

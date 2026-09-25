@@ -66,16 +66,13 @@ impl FlagsClient {
             let value = value.unwrap_or(Value::Null);
             return truthy(&value).unwrap_or(default);
         }
-        match self.fetch().await {
-            Some(flags) => {
-                let value = flags.get(name).cloned().unwrap_or(Value::Null);
-                self.store(flags);
-                truthy(&value).unwrap_or(default)
-            }
-            None => {
-                self.store(HashMap::new());
-                default
-            }
+        if let Some(flags) = self.fetch().await {
+            let value = flags.get(name).cloned().unwrap_or(Value::Null);
+            self.store(flags);
+            truthy(&value).unwrap_or(default)
+        } else {
+            self.store(HashMap::new());
+            default
         }
     }
 

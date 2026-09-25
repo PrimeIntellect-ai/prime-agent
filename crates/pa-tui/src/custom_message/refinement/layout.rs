@@ -283,7 +283,7 @@ fn edit_section_rows(edit: &RefinementEditRow, theme: &Theme, width: usize, out:
                 // The diff block keeps its own row width at the branch
                 // depth: the four-column continuation prefix plus the
                 // block's internal width make the full width.
-                rich_change_rows(removed, added, theme, width, out)
+                rich_change_rows(removed, added, theme, width, out);
             }
         }
     }

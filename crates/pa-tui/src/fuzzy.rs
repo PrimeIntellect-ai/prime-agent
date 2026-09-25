@@ -96,12 +96,11 @@ pub fn fuzzy_filter<T: Clone>(items: &[T], query: &str, get_text: impl Fn(&T) ->
         let mut total = 0.0f64;
         let mut all_match = true;
         for token in &tokens {
-            match fuzzy_match(token, &text) {
-                Some(score) => total += score,
-                None => {
-                    all_match = false;
-                    break;
-                }
+            if let Some(score) = fuzzy_match(token, &text) {
+                total += score;
+            } else {
+                all_match = false;
+                break;
             }
         }
         if all_match {
