@@ -752,10 +752,10 @@ impl AgentsViewMode {
             }
         }
         self.rows = rows;
-        // A roster update that removed or re-created the armed row
-        // retires the stop-or-delete confirm: the hint never rides a
-        // row the list no longer carries (the execution gate would
-        // reject it anyway - the arm and the visible row stay one).
+        // The armed confirm only rides a row the list still carries
+        // under the session key it armed with: a removed, re-created,
+        // or re-keyed row retires it, so the hint always matches a row
+        // the execution gate accepts.
         if let Some(pending) = &self.pending_delete {
             let still_there = self.rows.iter().any(|row| row.identity == pending.identity);
             let unchanged_key = self
@@ -3300,9 +3300,9 @@ mod tests {
             .iter()
             .position(|row| row.summary.get("rlmChildId").is_some())
             .expect("the child row");
-        // The second press on the same row: the stale stop word no longer
-        // matches the idle row - the confirm re-arms over the current
-        // state instead of executing the stop.
+        // The armed stop word no longer matches the settled row: the
+        // confirm re-arms over the current state instead of executing
+        // the stale stop.
         mode.handle_key("ctrl+x");
         assert!(
             mode.pending_delete_action.is_none(),
