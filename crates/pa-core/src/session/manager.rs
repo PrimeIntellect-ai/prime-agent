@@ -745,30 +745,6 @@ impl SessionManager {
             })
     }
 
-    /// Newest agent status reachable without hydration (same order as
-    /// [`Self::latest_git_context`]).
-    pub(crate) fn latest_agent_status_entry(&self) -> Option<pa_types::session::AgentStatus> {
-        let on_branch = self.active_branch_entries().iter().rev().find_map(|entry| {
-            if let FileEntry::AgentStatus { payload, .. } = entry {
-                Some(payload.status.clone())
-            } else {
-                None
-            }
-        });
-        if on_branch.is_some() {
-            return on_branch;
-        }
-        self.window
-            .as_ref()?
-            .metadata_entries()
-            .iter()
-            .rev()
-            .find_map(|line| match serde_json::from_str::<FileEntry>(line) {
-                Ok(FileEntry::AgentStatus { payload, .. }) => Some(payload.status),
-                _ => None,
-            })
-    }
-
     pub fn has_non_bootstrap_entries(&self) -> bool {
         self.window
             .as_ref()

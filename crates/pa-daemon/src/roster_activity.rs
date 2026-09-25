@@ -45,8 +45,8 @@ pub(crate) const ROSTER_SESSION_EVENT_TRIGGERS: &[&str] = &[
 
 /// Whether one broadcast frame triggers a roster flush (TS
 /// `observeRosterEvent`: session events by event type, plus the
-/// `session_status` frame kind and the `session_closed`/`session_replaced`
-/// payload tags, which the worker frames as session events).
+/// `session_closed`/`session_replaced` payload tags, which the worker
+/// frames as session events).
 pub(crate) fn frame_triggers_roster_flush(frame: &OutboundFrame) -> bool {
     #[derive(serde::Deserialize)]
     struct Envelope<'a> {
@@ -59,9 +59,6 @@ pub(crate) fn frame_triggers_roster_flush(frame: &OutboundFrame) -> bool {
     struct EventType<'a> {
         #[serde(rename = "type", borrow)]
         kind: &'a str,
-    }
-    if frame.outbound_type == "session_status" {
-        return true;
     }
     if frame.outbound_type != "session_event" {
         return false;
@@ -238,14 +235,8 @@ mod tests {
                 "{event_type} must not trigger a roster flush"
             );
         }
-        // The non-`session_event` frame kinds the pump carries: the status
-        // line flushes (TS `session_status`), a side question does not.
-        let status_payload =
-            serde_json::to_vec(&json!({ "type": "session_status", "activeSessionId": "s" }))
-                .unwrap();
-        assert!(frame_triggers_roster_flush(&OutboundFrame::session_status(
-            status_payload
-        )));
+        // The non-`session_event` frame kinds the pump carries: a side
+        // question does not.
         let side_question_payload = serde_json::to_vec(&json!({
             "type": "side_question_event",
             "activeSessionId": "s",

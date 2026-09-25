@@ -2,8 +2,8 @@
 //! Port of the tail of core/session-manager.ts (getBranch/getTree/branch*).
 
 use pa_types::session::{
-    AgentMessage, AgentStatus, AgentStatusEntry, CustomMessageEntry, FileEntry, GitContext,
-    GitStateEntry, LabelEntry, SessionStateStatus,
+    AgentMessage, CustomMessageEntry, FileEntry, GitContext, GitStateEntry, LabelEntry,
+    SessionStateStatus,
 };
 
 use super::manager::SessionManager;
@@ -53,32 +53,6 @@ impl SessionManager {
         content_entries.len() > start
     }
 
-    /// Append an agent-status row; returns the new entry id.
-    ///
-    /// # Errors
-    ///
-    /// Returns the underlying I/O error when the durable append fails.
-    pub fn append_agent_status(
-        &mut self,
-        summary: &str,
-        task_state: Option<pa_types::session::AgentTaskState>,
-        based_on_message_count: usize,
-    ) -> std::io::Result<String> {
-        let base = self.next_base();
-        let id = base.id.clone().unwrap_or_default();
-        self.append_entry(FileEntry::AgentStatus {
-            payload: AgentStatusEntry {
-                status: AgentStatus {
-                    summary: summary.to_string(),
-                    task_state,
-                    based_on_message_count: based_on_message_count as u64,
-                },
-            },
-            base,
-        })?;
-        Ok(id)
-    }
-
     /// Append a `git_state` row; returns the new entry id.
     ///
     /// # Errors
@@ -116,11 +90,6 @@ impl SessionManager {
             Some(header) => header.git.clone(),
             None => None,
         }
-    }
-
-    /// Latest agent status on the active branch.
-    pub fn get_latest_agent_status(&self) -> Option<AgentStatus> {
-        self.latest_agent_status_entry()
     }
 
     /// Append a custom message entry; returns the new entry id.
@@ -323,7 +292,6 @@ fn entry_type(entry: &FileEntry) -> &'static str {
         FileEntry::Label { .. } => "label",
         FileEntry::SessionInfo { .. } => "session_info",
         FileEntry::SessionState { .. } => "session_state",
-        FileEntry::AgentStatus { .. } => "agent_status",
         FileEntry::GitState { .. } => "git_state",
         FileEntry::Unknown { .. } => "unknown",
     }
@@ -397,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn labels_and_status_on_active_branch() {
+    fn labels_on_active_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let mut manager = SessionManager::in_memory(tmp.path());
         let a = manager.append_message(user("first")).unwrap();
@@ -407,20 +375,5 @@ mod tests {
         // Clear the label.
         manager.append_label_change(&a, None).unwrap();
         assert_eq!(manager.get_label(&a), None);
-        // Agent status visible on the active branch.
-        let status_id = manager
-            .append_agent_status(
-                "working",
-                Some(pa_types::session::AgentTaskState::NeedsInput),
-                3,
-            )
-            .unwrap();
-        assert!(manager.get_entry_by_id(&status_id).is_some());
-        let status = manager.get_latest_agent_status().unwrap();
-        assert_eq!(status.summary, "working");
-        assert_eq!(status.based_on_message_count, 3);
-        // Branch away: the status is no longer on the active path.
-        manager.branch(&a);
-        assert_eq!(manager.get_latest_agent_status(), None);
     }
 }

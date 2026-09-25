@@ -78,8 +78,6 @@ pub struct DaemonSavedSessionInfo {
     pub first_message: String,
     pub all_messages_text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_status: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<Value>,
@@ -280,15 +278,6 @@ pub enum DaemonOutbound {
     SideQuestionEvent {
         active_session_id: String,
         event: Value,
-        #[serde(flatten)]
-        rest: JsonMap,
-    },
-    SessionStatus {
-        active_session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        recap: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        meta: Option<DaemonEventMeta>,
         #[serde(flatten)]
         rest: JsonMap,
     },

@@ -92,16 +92,7 @@ pub(crate) fn session_status_label(summary: &Value) -> String {
     {
         return "replied".to_string();
     }
-    if get_str(summary, "activity") == Some("working") {
-        return "classifying".to_string();
-    }
-    if get_str(summary, "taskState") == Some("error") {
-        return "error".to_string();
-    }
-    match get_str(summary, "taskState") {
-        Some("completed") => "completed".to_string(),
-        _ => "needs input".to_string(),
-    }
+    String::new()
 }
 
 /// The model column text: the bare model id plus `:level` when a thinking
@@ -175,7 +166,7 @@ pub struct AgentsViewRow {
     pub title: String,
     pub status_label: String,
     pub model: String,
-    /// The row's own activity text (`status · recap`).
+    /// The row's own activity text (the status label).
     pub activity: String,
     /// Own usage cost plus every descendant's (TS `recursiveCost`).
     pub cost: f64,
@@ -708,15 +699,6 @@ pub fn build_rows(
         } else {
             String::new()
         };
-        let recap = summary
-            .get("summary")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let activity = if recap.is_empty() {
-            status.clone()
-        } else {
-            format!("{status} · {recap}")
-        };
         let age = relative_age(
             if summary
                 .get("activeSessionId")
@@ -742,9 +724,9 @@ pub fn build_rows(
             search_score: record.search_score,
             identity: record.identity.clone(),
             title: session_title(&summary),
-            status_label: status,
+            status_label: status.clone(),
             model: session_model(&summary),
-            activity,
+            activity: status,
             age,
             own_cost: summary
                 .get("usage")
