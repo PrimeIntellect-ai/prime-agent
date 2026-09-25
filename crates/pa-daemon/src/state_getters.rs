@@ -17,10 +17,8 @@ use crate::worker::Worker;
 impl Worker {
     /// `get_connection_state`: the connection state block (the same shape
     /// the attach snapshot carries) with the TS `createConnectionState`
-    /// overlays — `heartbeat` (this worker owns no cron store, so the
-    /// overlay is the TS null) and `recap` (only when a live summary
-    /// exists; this port's worker summaries surface through the roster,
-    /// so the persisted recap stays).
+    /// `heartbeat` overlay (this worker owns no cron store, so the
+    /// overlay is the TS null).
     pub(crate) fn handle_get_connection_state(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_connection_state") {
             return response;

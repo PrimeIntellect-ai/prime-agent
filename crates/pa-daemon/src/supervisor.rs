@@ -1624,17 +1624,6 @@ impl Supervisor {
                             })
                             .unwrap_or(ClientRouting::Broadcast);
                         let _ = events.send((routing, payload));
-                    } else if outbound_type == "session_status" {
-                        let active_session_id = payload
-                            .get("activeSessionId")
-                            .and_then(Value::as_str)
-                            .map(str::to_string);
-                        let routing = active_session_id
-                            .map(|active_session_id| ClientRouting::AttachedSession {
-                                active_session_id,
-                            })
-                            .unwrap_or(ClientRouting::Broadcast);
-                        let _ = events.send((routing, payload));
                     } else if outbound_type == "side_question_event" {
                         let active_session_id = payload
                             .get("activeSessionId")
@@ -5131,11 +5120,6 @@ fn saved_session_row(info: &crate::session_store::SessionInfo) -> Value {
         "allMessagesText": info.all_messages_text,
         "state": info.state.as_ref().map(|state| json!({ "status": state })),
     });
-    if let Some(status) = &info.agent_status {
-        row.as_object_mut()
-            .expect("row object")
-            .insert("agentStatus".to_string(), status.clone());
-    }
     let object = row.as_object_mut().expect("row object");
     if let Some(name) = &info.name {
         object.insert("name".to_string(), json!(name));

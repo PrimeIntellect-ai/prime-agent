@@ -1081,8 +1081,6 @@ pub struct SessionInfo {
     /// `SESSION_LIST_SEARCH_TEXT_MAX_CHARS` (TS `allMessagesText`: the
     /// agents-view full-transcript search corpus).
     pub all_messages_text: String,
-    /// The latest `agent_status` recap (`summary` is searchable).
-    pub agent_status: Option<Value>,
     /// TS `SessionInfo.usage`: the own-usage summary — assistant
     /// aggregates plus summarization calls, minus every attributed child
     /// block (`session_usage::UsageScan`; the child's own row carries the
@@ -1207,8 +1205,6 @@ struct SessionInfoEntry {
     #[serde(default)]
     thinking_level: Option<Value>,
     #[serde(default)]
-    status: Option<Value>,
-    #[serde(default)]
     message: Option<SessionInfoMessage>,
     /// `child_usage_attributed`: the parent entry the aggregate folds into.
     #[serde(default)]
@@ -1246,7 +1242,6 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
     let mut message_count = 0usize;
     let mut first_message = String::new();
     let mut all_messages_text = String::new();
-    let mut agent_status: Option<Value> = None;
     let mut usage_scan = crate::session_usage::UsageScan::default();
     let mut last_activity_ms: Option<u64> = None;
     let mut reader = std::io::BufReader::new(file);
@@ -1304,7 +1299,6 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
                     thinking_level = Some(level.to_string());
                 }
             }
-            "agent_status" => agent_status = entry.status,
             "child_usage_attributed" => {
                 usage_scan.fold_child_attribution(
                     entry.target_id.as_deref(),
@@ -1393,7 +1387,6 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
             first_message
         },
         all_messages_text,
-        agent_status,
         usage,
         deleted_descendant_usage: None,
     };
@@ -1923,7 +1916,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_builds_transcript_search_text_and_latest_agent_status() {
+    fn scan_builds_transcript_search_text() {
         let dir = temp_dir();
         let mut session = SessionFile::create("/tmp", None, 0);
         let path = dir.join(session_file_name(session.session_id()));
@@ -1940,28 +1933,10 @@ mod tests {
         session.append_message(
             json!({"role": "toolResult", "content": "tool noise", "timestamp": 3u64}),
         );
-        session.append_entry(
-            "agent_status",
-            json!({
-                "status": { "summary": "first recap", "basedOnMessageCount": 1 }
-            }),
-        );
-        session.append_entry(
-            "agent_status",
-            json!({
-                "status": { "summary": "login fix landed", "basedOnMessageCount": 2 }
-            }),
-        );
         session.rewrite().unwrap();
 
         let info = read_session_info(&path).unwrap();
         assert_eq!(info.all_messages_text, "fix the login bug fixed in auth.rs");
-        assert_eq!(
-            info.agent_status,
-            Some(json!({
-                "summary": "login fix landed", "basedOnMessageCount": 2
-            }))
-        );
         let _ = fs::remove_dir_all(&dir);
     }
 

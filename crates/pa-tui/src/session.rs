@@ -50,10 +50,6 @@ pub enum TranscriptItem {
         full_output_path: Option<String>,
         excluded: bool,
     },
-    AgentStatus {
-        summary: String,
-        task_state: String,
-    },
     ModelChange {
         provider: String,
         model_id: String,
@@ -131,14 +127,6 @@ pub fn parse_jsonl(raw: &str) -> Result<Vec<FileEntry>> {
 pub fn entry_to_items(entry: &FileEntry) -> Vec<TranscriptItem> {
     match entry {
         FileEntry::Message { message, .. } => message_to_items(message),
-        FileEntry::AgentStatus { payload, .. } => vec![TranscriptItem::AgentStatus {
-            summary: payload.status.summary.clone(),
-            task_state: payload
-                .status
-                .task_state
-                .map(|t| format!("{t:?}").to_lowercase())
-                .unwrap_or_default(),
-        }],
         FileEntry::ModelChange { payload, .. } => vec![TranscriptItem::ModelChange {
             provider: payload.provider.clone(),
             model_id: payload.model_id.clone(),

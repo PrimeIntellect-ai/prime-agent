@@ -533,71 +533,6 @@ impl SessionCore {
     }
 }
 
-impl crate::status_line::StatusSession for SessionCore {
-    fn status_messages(&self) -> Vec<Value> {
-        self.store
-            .as_ref()
-            .map(super::session_store::SessionFile::messages)
-            .unwrap_or_default()
-    }
-
-    fn status_busy(&self) -> bool {
-        self.busy
-    }
-
-    fn status_active_session_id(&self) -> String {
-        self.active_session_id.clone()
-    }
-
-    fn status_generation(&self) -> String {
-        self.generation.clone()
-    }
-
-    fn status_next_sequence(&mut self) -> u64 {
-        self.last_event_sequence += 1;
-        self.last_event_sequence
-    }
-
-    fn status_append_agent_status(
-        &mut self,
-        status: &crate::status_line::PersistedAgentStatus,
-    ) -> Result<()> {
-        let Some(store) = self.store.as_mut() else {
-            return Ok(());
-        };
-        let persisted = pa_types::session::AgentStatus {
-            summary: status.summary.clone(),
-            task_state: status
-                .task_state
-                .map(crate::status_line::AgentTaskState::persisted),
-            based_on_message_count: status.based_on_message_count as u64,
-        };
-        store.persist_entry(
-            "agent_status",
-            json!({ "status": serde_json::to_value(&persisted)? }),
-        )?;
-        Ok(())
-    }
-
-    fn status_latest_agent_status(&self) -> Option<crate::status_line::PersistedAgentStatus> {
-        let store = self.store.as_ref()?;
-        let entry = store
-            .entries()
-            .iter()
-            .rev()
-            .find(|entry| entry.type_ == "agent_status")?;
-        let status: pa_types::session::AgentStatus =
-            serde_json::from_value(entry.fields.get("status")?.clone()).ok()?;
-        Some(crate::status_line::PersistedAgentStatus {
-            summary: status.summary,
-            task_state: status
-                .task_state
-                .map(crate::status_line::AgentTaskState::from_persisted),
-            based_on_message_count: status.based_on_message_count as usize,
-        })
-    }
-}
-
 /// One outbound frame: the serialized JSON payload plus its private-frame
 /// `outboundType` (`session_event` or `side_question_event`), mirroring the
 /// TS worker frame header. The supervisor fans frames out per its own
@@ -615,14 +550,6 @@ impl OutboundFrame {
         OutboundFrame {
             payload,
             outbound_type: "session_event",
-            seq: 0,
-        }
-    }
-
-    pub(crate) fn session_status(payload: Vec<u8>) -> Self {
-        OutboundFrame {
-            payload,
-            outbound_type: "session_status",
             seq: 0,
         }
     }
@@ -805,9 +732,6 @@ pub struct Worker {
     idle_notify: Arc<Notify>,
     pub(crate) events: Arc<EventPump>,
     recovery: Arc<Mutex<Option<WorkerRecoveryJournal>>>,
-    /// Post-turn status-line runner (seeded from persisted verdicts at
-    /// session create).
-    status_runner: std::sync::Arc<crate::status_line::StatusLineRunner<SessionCore>>,
     /// Live side-question runs (registry, guards, event frames).
     side_questions: crate::side_question::SideQuestionManager,
     /// Single-use peer-transport grants (worker memory only).
@@ -1015,18 +939,6 @@ impl Worker {
         let recovery = Arc::new(Mutex::new(None));
         let work_notify = Arc::new(Notify::new());
         let idle_notify = Arc::new(Notify::new());
-        // The post-turn status line: turn-end notifications (debounced) and
-        // periodic sweeps ask the small dashboard model for a recap.
-        let status_runner = std::sync::Arc::new(crate::status_line::StatusLineRunner::new(
-            std::sync::Arc::clone(&core),
-            config.agent_dir.clone(),
-            events.clone(),
-        ));
-        let (status_notify, status_rx) = tokio::sync::mpsc::unbounded_channel();
-        let status_runner_handle = std::sync::Arc::clone(&status_runner);
-        tokio::spawn(async move {
-            status_runner.run(status_rx).await;
-        });
         // The supervisor link and worker token for roster pushes: one
         // construction shared by the turn runner's busy-flip pushes and
         // the command arms' switch pushes (the same env the runner reads,
@@ -1307,7 +1219,6 @@ impl Worker {
                 events: events.clone(),
                 engine: std::sync::Arc::clone(&engine),
                 active_session_id,
-                status_notify,
                 roster_pushes: roster_pushes.clone(),
             };
             tokio::spawn(async move {
@@ -1367,7 +1278,6 @@ impl Worker {
             idle_notify,
             events,
             recovery,
-            status_runner: status_runner_handle,
             side_questions,
             peer_grants: PeerGrantStore::new(),
             compaction,
@@ -2627,9 +2537,6 @@ impl Worker {
                 let _ = engine.ensure_core_session_async(&model).await;
             });
         }
-        // Seed the status line from the latest persisted verdict (a respawned
-        // worker resumes with the pre-crash verdict).
-        self.status_runner.seed_from_session();
         // Bind the schedule catalog onto the session (artifact partition,
         // job rebind, scheduler start) — TS `rebindCronJobsToState`.
         self.bind_scheduled_jobs().await;
@@ -3505,15 +3412,11 @@ impl Worker {
     /// Refresh the replacement session's derived state (TS
     /// `refreshReplacedSessionState` on the `sessionReplaced` event): the
     /// moved-to session's depth re-seeds the worker core and the engine's
-    /// RLM identity (a resumed subagent keeps its persisted depth), and
-    /// the wire summary re-seeds from the new session. The schedule
+    /// RLM identity (a resumed subagent keeps its persisted depth). The schedule
     /// catalog rebind runs separately (`bind_scheduled_jobs`), like the
     /// TS dispatch handlers that call `rebindCronJobsToState` after the
     /// runtime call.
     pub(crate) fn refresh_replaced_session_state(&self) {
-        // The status line re-seeds from the moved-to session's persisted
-        // verdict (TS `summarizer.forget` + `seed` on the replacement).
-        self.status_runner.seed_from_session();
         let (rlm_depth, summary, child_script) = {
             let mut core = self
                 .core
@@ -4405,7 +4308,6 @@ impl Worker {
             scoped_models: core.scoped_models.clone(),
             active_tool_names: Vec::new(),
             context_usage: None,
-            recap: None,
         }
     }
 
@@ -5195,7 +5097,6 @@ struct TurnRunner {
     /// Shared worker recovery journal (queue snapshot persistence).
     recovery: Arc<Mutex<Option<WorkerRecoveryJournal>>>,
     active_session_id: String,
-    status_notify: tokio::sync::mpsc::UnboundedSender<()>,
     /// The coalescing roster push queue: the busy flips enqueue here and
     /// the queue's consumer composes and ships the summary (the
     /// event-driven arm lives in [`crate::roster_activity`]).
@@ -5984,9 +5885,6 @@ impl TurnRunner {
             },
         );
         let _ = self.emit_action_update(&snapshot);
-        // A finished turn is the cue to refresh the session's status line
-        // (the runner debounces a burst into one request).
-        let _ = self.status_notify.send(());
         self.idle_notify.notify_waiters();
         // The settled prompts' admissions clear (TS `clearAdmission` in
         // the prompt arm's finally).
@@ -6290,9 +6188,6 @@ pub(crate) fn session_summary(
         usage,
         worker_state: Some("ready".to_string()),
         worker_pid: Some(std::process::id()),
-        status_label: None,
-        summary: None,
-        task_state: None,
         // Set by the caller when the snapshot backs a roster push (the
         // push-order lock reads the pre-stamp counter); authoritative
         // pulls embed the live counter in `summary_locked` instead.
@@ -8938,7 +8833,6 @@ mod turn_stream_tests {
             active_action: None,
             running_tool_calls: std::collections::HashSet::new(),
         }));
-        let (status_notify, _status_rx) = tokio::sync::mpsc::unbounded_channel();
         TurnRunner {
             core,
             input_pauses: crate::session_input_pause::InputPauseTable::new(),
@@ -8949,7 +8843,6 @@ mod turn_stream_tests {
             engine,
             recovery: Arc::new(Mutex::new(None)),
             active_session_id: "burst-session".to_string(),
-            status_notify,
             roster_pushes: crate::roster_activity::RosterPushQueue::disabled(),
         }
     }
@@ -9795,7 +9688,6 @@ mod turn_stream_tests {
             Arc::clone(&events),
             roster_pushes.clone(),
         );
-        let (status_notify, _status_rx) = tokio::sync::mpsc::unbounded_channel();
         TurnRunner {
             recovery: Arc::new(Mutex::new(None)),
             core,
@@ -9806,7 +9698,6 @@ mod turn_stream_tests {
             events,
             engine,
             active_session_id: "feed-session".to_string(),
-            status_notify,
             roster_pushes,
         }
     }

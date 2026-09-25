@@ -291,11 +291,7 @@ impl WindowedSessionStore {
             } else if window_done
                 && (matches!(
                     meta.kind.as_str(),
-                    "session_info"
-                        | "session_state"
-                        | "agent_status"
-                        | "git_state"
-                        | "child_usage_attributed"
+                    "session_info" | "session_state" | "git_state" | "child_usage_attributed"
                 ))
             {
                 metadata_entries.push(
@@ -463,7 +459,7 @@ impl WindowedSessionStore {
             let value: serde_json::Value = serde_json::from_str(row)?;
             let kind = value["type"].as_str().unwrap_or("");
             match kind {
-                "session_info" | "session_state" | "agent_status" | "git_state" => {
+                "session_info" | "session_state" | "git_state" => {
                     latest.insert(kind.to_owned(), index);
                 }
                 "child_usage_attributed"
