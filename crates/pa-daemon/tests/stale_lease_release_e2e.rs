@@ -476,7 +476,7 @@ fn a_worker_that_fails_to_death_releases_the_session_hold() {
     let give_up = format!("session worker {session_id} failed after 6 consecutive failures");
     let replay_grace = Duration::from_secs(4);
     let mut serving_since: Option<Instant> = None;
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_mins(3);
     while !log_contains(&socket, &agent_dir, &give_up) {
         let alive = child_pids_of(supervisor_pid)
             .into_iter()
@@ -608,7 +608,7 @@ fn the_give_up_sweep_reaps_a_live_leftover_of_the_abandoned_id() {
     let give_up = format!("session worker {session_id} failed after 6 consecutive failures");
     let replay_grace = Duration::from_secs(4);
     let mut serving_since: Option<Instant> = None;
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_mins(3);
     while !log_contains(&socket, &agent_dir, &give_up) {
         let alive = child_pids_of(supervisor_pid)
             .into_iter()
