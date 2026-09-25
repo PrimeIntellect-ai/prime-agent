@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type { RlmChildAgentSnapshot } from "../src/core/agent-session.js";
 import type { AgentSessionRuntimeDiagnostic } from "../src/core/agent-session-services.js";
 import type { AgentCronJob } from "../src/core/cron-jobs.js";
+import type { ContextUsage } from "../src/core/extensions/types.js";
 import type { SessionActionSnapshot } from "../src/core/session-action-store.js";
 import type { AgentStatus, SessionInfo } from "../src/core/session-manager.js";
 import type { SessionUsageSummary } from "../src/core/usage.js";
@@ -568,6 +569,20 @@ describe("summary compose memoization", () => {
 		}
 	});
 
+	it("recomposes when the agent's progress note changes and carries context percent", () => {
+		const state = makeState({
+			activeSessionId: "note",
+			contextUsage: { tokens: 42_000, contextWindow: 100_000, percent: 42 },
+		});
+		const first = summaryForActiveSession(state);
+		expect(first.contextPercent).toBe(42);
+		expect(first.progressNote).toBeUndefined();
+		(state.runtime.session as { rlmProgressNote?: string }).rlmProgressNote = "running tests";
+		const second = summaryForActiveSession(state);
+		expect(second).not.toBe(first);
+		expect(second.progressNote).toBe("running tests");
+	});
+
 	it("recomposes when heartbeat registration flags differ per call site", () => {
 		const state = makeState({ activeSessionId: "flags" });
 		const unflagged = summaryForActiveSession(state);
@@ -791,6 +806,7 @@ interface StateOptions {
 	hasUserContent?: boolean;
 	summaryState?: ActiveSessionState["summaryState"];
 	usage?: SessionUsageSummary;
+	contextUsage?: ContextUsage;
 	hasRunningRlmChildren?: boolean;
 	hasAcceptedPromptInFlight?: boolean;
 	unfinishedActionCount?: number;
@@ -843,6 +859,7 @@ function makeState(options: StateOptions): ActiveSessionState {
 				messages: options.messages ?? ([] as AgentMessage[]),
 				getRlmChildSnapshots: () => options.childSnapshots ?? [],
 				getOwnUsageSummary: () => options.usage,
+				getContextUsage: () => options.contextUsage,
 				hasRunningRlmChildren: () => options.hasRunningRlmChildren ?? false,
 				hasAcceptedPromptInFlight: options.hasAcceptedPromptInFlight ?? false,
 				unfinishedActionCount: options.unfinishedActionCount ?? (options.hasAcceptedPromptInFlight ? 1 : 0),

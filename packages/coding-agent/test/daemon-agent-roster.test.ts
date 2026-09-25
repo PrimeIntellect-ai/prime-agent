@@ -128,6 +128,7 @@ function makeState(options: {
 				getCurrentRecap: () => undefined,
 				_contextTokensForCurrentMessages: () => undefined,
 				getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
+				getContextUsage: () => undefined,
 				state: { streamingMessage: undefined, pendingToolCalls: new Set() },
 			},
 		},
@@ -528,7 +529,7 @@ describe("worker roster reporter", () => {
 		expect(daemon.rosterReporter.lastComposed.get("steady-session")).toBe(secondEntry);
 	});
 
-	it("republishes busy-state flips that arrive without any append", () => {
+	it("republishes busy-state flips that arrive without any append", async () => {
 		const { daemon, sentDeltas } = makeWorkerReporter();
 		const state = makeState({ activeSessionId: "busy-active", sessionId: "busy-session", messages: [] });
 		daemon.sessions.set(state.activeSessionId, state);
@@ -551,6 +552,17 @@ describe("worker roster reporter", () => {
 		session.isSessionActive = false;
 		daemon.flushRoster();
 		expect(sentDeltas.at(-1)?.entries[0]?.summary).toMatchObject({ isStreaming: false, activity: "idle" });
+		// agent_end clears the progress note without an append: republish then, not when the summarizer settles.
+		const noteSession = state.runtime.session as unknown as { rlmProgressNote?: string };
+		noteSession.rlmProgressNote = "still working";
+		daemon.flushRoster();
+		noteSession.rlmProgressNote = undefined;
+		daemon.observeRosterEvent(state, {
+			type: "session_event",
+			event: { type: "agent_end", messages: [] },
+		});
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(sentDeltas.at(-1)?.entries[0]?.summary.progressNote).toBeUndefined();
 	});
 
 	it("coalesces flush triggers into a 250ms window and scopes them to the dirty session", () => {

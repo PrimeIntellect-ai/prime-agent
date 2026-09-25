@@ -8034,6 +8034,7 @@ interface WorkerRosterReporterState {
 const ROSTER_SESSION_EVENT_TRIGGERS = new Set([
 	"turn_start",
 	"turn_end",
+	"agent_end",
 	"bash_start",
 	"bash_end",
 	"compaction_start",
@@ -8046,6 +8047,7 @@ const ROSTER_SESSION_EVENT_TRIGGERS = new Set([
 	"session_action_update",
 	"session_info_changed",
 	"thinking_level_changed",
+	"rlm_progress_note",
 ]);
 
 // Flushes coalesce into one window: streaming bursts fire several triggers per turn.

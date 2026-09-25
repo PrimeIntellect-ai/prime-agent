@@ -843,6 +843,7 @@ describe("daemon mode helpers", () => {
 					},
 					hasRunningRlmChildren: () => false,
 					getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
+					getContextUsage: () => undefined,
 				},
 			} as never;
 		}
@@ -3427,6 +3428,7 @@ function makeAgentFamilyState(
 			},
 			hasRunningRlmChildren: () => false,
 			getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
+			getContextUsage: () => undefined,
 			acceptAgentMessagePrompt,
 		},
 	} as never;

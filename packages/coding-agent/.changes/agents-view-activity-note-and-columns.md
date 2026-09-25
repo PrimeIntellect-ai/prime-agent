@@ -1,0 +1,1 @@
+- Agents view: the Activity column shows the agent's latest progress note (`rlm.progress_note`); the selected row expands to show the full text. New Cwd, Input, Output and Context columns; they are hidden first on narrow terminals.

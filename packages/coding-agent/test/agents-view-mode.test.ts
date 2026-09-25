@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { setKeybindings } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -602,6 +604,57 @@ describe("AgentsViewMode", () => {
 			stopThemeWatcher();
 		}
 	});
+
+	it("shows cwd, token and context columns, drops them on narrow widths, and expands the selected row's note", () => {
+		initTheme("dark");
+		const note = Array.from({ length: 40 }, (_, index) => `word${index}`).join(" ");
+		const rows = buildAgentsViewRows([
+			summary({
+				cwd: join(homedir(), "work", "proj"),
+				progressNote: note,
+				contextPercent: 42.4,
+				usage: { inputTokens: 12_437, outputTokens: 1_234, cost: 1 },
+			}),
+			summary({
+				id: "b",
+				activeSessionId: "b",
+				sessionId: "b",
+				sessionFile: "/tmp/b.jsonl",
+				summary: "short recap",
+			}),
+		]);
+		const self = {
+			rows,
+			selectedIndex: 0,
+			editor: { getText: () => "" },
+			isPendingDeleteRow: () => false,
+			isPendingKillSubagentRow: () => false,
+			getRowIcon: () => "•",
+			formatRowIcon: (_section: unknown, icon: string) => icon,
+			expandedActivityLines: (...args: unknown[]) => invoke("expandedActivityLines", self, ...args) as string[],
+			renderRow: (...args: unknown[]) => invoke("renderRow", self, ...args) as string,
+		};
+		const lines = (width: number, maxRows = 30): string[] =>
+			(invoke("renderSessionRows", self, width, maxRows) as string[]).map(stripAnsi);
+		const wide = lines(160);
+		expect(wide[0]).toMatch(/Session\s+Model\s+Cwd\s+Activity\s+Input\s+Output\s+Context\s+Cost\s+Age/);
+		const projRow = wide.find((line) => line.includes("~/work/proj"))!;
+		expect(projRow).toMatch(/12k\s+1\.2k\s+42%/);
+		expect(wide.join("\n")).toMatch(/-\s+\$0\.00/);
+		expect(wide.join("\n")).toContain("word39");
+		// A short window keeps the selected row and as many detail lines as fit: row a, first note line, trailing ellipsis.
+		expect(lines(160, 5).slice(2)).toEqual([wide[3], wide[4], "  ..."]);
+
+		self.selectedIndex = 1;
+		const collapsed = lines(160);
+		expect(collapsed.length).toBeLessThan(wide.length);
+		expect(collapsed.join("\n")).not.toContain("word39");
+		expect(collapsed.join("\n")).toContain("short recap");
+
+		const narrow = lines(80);
+		expect(narrow[0]).toMatch(/Cost\s+Age/);
+		expect(narrow[0]).not.toMatch(/Input|Context|Cwd/);
+	});
 });
 
 function createUiServices(): InteractiveModeUiServices {
@@ -1105,7 +1158,7 @@ describe("AgentsViewMode catalog performance", () => {
 			sessionName: "child",
 			runtimeKind: "subagent",
 			parentActiveSessionId: parent.activeSessionId,
-			usage: { inputTokens: 0, outputTokens: 0, cost: 2 },
+			usage: { inputTokens: 1000, outputTokens: 100, cost: 2 },
 		});
 		const grandchild = summary({
 			id: "grandchild",
@@ -1128,7 +1181,12 @@ describe("AgentsViewMode catalog performance", () => {
 		const rollups = Reflect.get(self, "recursiveRollups");
 		expect(rollups).toBeInstanceOf(Map);
 		const parentRow = () => self.rows.find((row) => row.summary.sessionId === parent.sessionId);
-		expect(parentRow()).toMatchObject({ recursiveCost: 7, descendantCount: 2 });
+		expect(parentRow()).toMatchObject({
+			recursiveCost: 7,
+			recursiveInputTokens: 1000,
+			recursiveOutputTokens: 100,
+			descendantCount: 2,
+		});
 
 		for (const query of ["parent", "grandchild", "no match", ""]) {
 			self.editor.getText.mockReturnValue(query);

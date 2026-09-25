@@ -74,7 +74,7 @@ export function buildChildAgentDoctrine(options: ChildAgentDoctrineOptions): str
 	}
 	if (hasIpython) {
 		lines.push(
-			"For long-running work, report brief progress with `await rlm.progress_note('...')` (at most 512 characters, throttled to about one note per 10 seconds); the parent sees notes without needing a reply.",
+			"For long-running work, report brief progress with `await rlm.progress_note('...')` (at most 512 characters, throttled to about one note per 10 seconds); the parent's `rlm.list_subagents` and the agents view Activity column show the latest note without a reply.",
 		);
 	}
 	return lines.join("\n");

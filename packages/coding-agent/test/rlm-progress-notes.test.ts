@@ -183,7 +183,7 @@ describe("rlm.progress.note child progress channel", () => {
 		await expect(throttled({ message: "note" })).resolves.toEqual({ accepted: false, retry_after_ms: 1234 });
 	});
 
-	it("throttles repeated notes per session and emits one event each", () => {
+	it("throttles repeated notes per session and emits one event each", async () => {
 		session = makeSession();
 		const events: { message: string; timestamp: number }[] = [];
 		session.subscribe((event) => {
@@ -193,11 +193,13 @@ describe("rlm.progress.note child progress channel", () => {
 		const first = session.noteRlmProgress("first note");
 		expect(first.accepted).toBe(true);
 		expect(first.retry_after_ms).toBeUndefined();
+		expect(session.rlmProgressNote).toBe("first note");
 
 		const second = session.noteRlmProgress("second note");
 		expect(second.accepted).toBe(false);
 		expect(second.retry_after_ms).toBeGreaterThan(0);
 		expect(second.retry_after_ms).toBeLessThanOrEqual(10_000);
+		expect(session.rlmProgressNote).toBe("first note");
 
 		expect(events).toHaveLength(1);
 		expect(events[0].message).toBe("first note");
@@ -209,6 +211,10 @@ describe("rlm.progress.note child progress channel", () => {
 		expect(third.accepted).toBe(true);
 		expect(events).toHaveLength(2);
 		expect(events[1].message).toBe("third note");
+		expect(session.rlmProgressNote).toBe("third note");
+
+		await session.prompt("hello");
+		expect(session.rlmProgressNote).toBeUndefined();
 	});
 
 	it("captures child notes into the run snapshot and roster entries", async () => {

@@ -54,9 +54,15 @@ import {
 	listDaemonSavedSessions,
 	renameDaemonSavedSession,
 } from "../daemon/saved-session-catalog.js";
+import { formatTokenCount } from "../interactive/agent-activity.js";
 import { CustomEditor } from "../interactive/components/custom-editor.js";
 import { keyText } from "../interactive/components/keybinding-hints.js";
-import { BrandSplashHeader, InteractiveMode } from "../interactive/interactive-mode.js";
+import {
+	BrandSplashHeader,
+	formatSplashCwd,
+	InteractiveMode,
+	truncatePathMiddle,
+} from "../interactive/interactive-mode.js";
 import type { InteractiveModeUiServices } from "../interactive/interactive-mode-services.js";
 import { ClientPromptStashStore } from "../interactive/prompt-stash-state.js";
 import {
@@ -133,6 +139,10 @@ const RESUME_PROMPT_PLACEHOLDER = "Write a prompt to resume this session";
 const STATUS_ROW_ICON = "•";
 const SELECTED_ROW_MARKER = "\0agents-view-selected-row\0";
 const CODE_ROW_MARKER = "\0agents-view-code-row\0";
+// Optional columns drop in this order when the Activity cell would fall below its minimum.
+const OPTIONAL_COLUMN_DROP_ORDER = ["tokens", "context", "cwd"] as const;
+const ACTIVITY_MIN_WIDTH = 20;
+const CWD_MAX_WIDTH = 20;
 
 export interface AgentsViewModeOptions {
 	socketPath?: string;
@@ -2775,12 +2785,18 @@ export class AgentsViewMode implements Component, Focusable {
 		const layout = buildCompactAgentsViewLayout(this.rows, width);
 		const displayItems: DisplayItem[] = [];
 		const counts = countRowsBySection(this.rows);
+		const selectedIdentity = this.rows[this.selectedIndex]?.identity;
 		for (const section of ["running", "idle", "inactive"] as const) {
 			if (counts[section] === 0) continue;
 			if (displayItems.length > 0) displayItems.push({ type: "spacer" });
 			displayItems.push({ type: "heading", section });
 			for (const row of getDisplayRowsForSection(this.rows, section)) {
 				displayItems.push({ type: "row", row });
+				if (row.identity === selectedIdentity) {
+					for (const text of this.expandedActivityLines(row, width, layout)) {
+						displayItems.push({ type: "detail", text });
+					}
+				}
 			}
 		}
 		if (displayItems.length === 0) {
@@ -2791,7 +2807,6 @@ export class AgentsViewMode implements Component, Focusable {
 		// Reserve the column header and its spacer, leaving at least one session row visible.
 		const headerRows = Math.min(2, maxRows - 1);
 		const visibleRows = maxRows - headerRows;
-		const selectedIdentity = this.rows[this.selectedIndex]?.identity;
 		const selectedDisplayIndex = displayItems.findIndex(
 			(item) => item.type === "row" && item.row.identity === selectedIdentity,
 		);
@@ -2802,12 +2817,16 @@ export class AgentsViewMode implements Component, Focusable {
 		const showLeadingEllipsis = start > 0 && visibleRows > 1;
 		const showTrailingEllipsis = start + visibleRows < displayItems.length && visibleRows > 2;
 		const contentRows = visibleRows - Number(showLeadingEllipsis) - Number(showTrailingEllipsis);
-		const sliceStart = selectedDisplayIndex >= start + contentRows ? selectedDisplayIndex - contentRows + 1 : start;
+		// Only the selected row carries detail items, so their count is the block height below it.
+		const blockEnd = selectedDisplayIndex + displayItems.filter((item) => item.type === "detail").length;
+		const sliceStart =
+			blockEnd >= start + contentRows ? Math.min(selectedDisplayIndex, blockEnd - contentRows + 1) : start;
 		const lines = displayItems.slice(sliceStart, sliceStart + contentRows).map((item) => {
 			if (item.type === "spacer") return "";
 			if (item.type === "heading") {
 				return theme.fg("muted", truncateToWidth(`${sectionTitle(item.section)} (${counts[item.section]})`, width));
 			}
+			if (item.type === "detail") return `${SELECTED_ROW_MARKER}${item.text}`;
 			return this.renderRow(item.row, width, layout);
 		});
 		if (showLeadingEllipsis) lines.unshift(theme.fg("dim", "  ..."));
@@ -2845,21 +2864,35 @@ export class AgentsViewMode implements Component, Focusable {
 		const badge = formatHeartbeatBadge(row.heartbeat);
 		const heartbeat = badge ? `${theme.fg((row.heartbeat?.activeCount ?? 0) > 0 ? "error" : "dim", badge)} ` : "";
 		const title = `${"  ".repeat(row.depth)}${icon} ${heartbeat}${styleRowTitle(row)}`;
-		const status =
-			row.summary.lastHeardFromAt !== undefined
-				? getSessionStatusLabel(row.summary, row.heartbeat)
-				: row.summary.statusLabel !== undefined
-					? row.statusLabel
-					: undefined;
-		const activity = [status, row.summary.summary].filter(Boolean).join(" · ");
+		const activity = formatActivityCell(row);
 		const cells = [
 			formatTableCell(title, layout.nameWidth),
 			formatTableCell(theme.fg("muted", formatSessionModel(row)), layout.modelWidth),
 		];
+		if (layout.cwdWidth > 0) {
+			cells.push(
+				formatTableCell(
+					theme.fg("muted", truncatePathMiddle(formatSplashCwd(row.summary.cwd), layout.cwdWidth)),
+					layout.cwdWidth,
+				),
+			);
+		}
 		if (layout.activityWidth > 0) cells.push(formatTableCell(theme.fg("dim", activity), layout.activityWidth));
 		cells.push(theme.fg("dim", details));
 		return markRow(formatTableCell(cells.join("  "), width));
 	}
+
+	// The selected agent row shows its full note/recap under the row when the one-line cell cannot hold it.
+	private expandedActivityLines(row: AgentsViewRow, width: number, layout: AgentsViewUsageLayout): string[] {
+		if (row.kind !== "agent" && row.kind !== "subagent") return [];
+		const detail = activityDetail(row)?.trim();
+		if (!detail || visibleWidth(formatActivityCell(row)) <= layout.activityWidth) return [];
+		const indent = `${"  ".repeat(row.depth)}    `;
+		return wrapTextWithAnsi(detail, Math.max(1, width - indent.length)).map(
+			(line) => `${indent}${theme.fg("dim", line)}`,
+		);
+	}
+
 	// Spawn-code rows are read-only context. They render deemphasized — muted
 	// text on a panel background (applied in finalizeRenderedLine) so the program
 	// reads as one quiet segmented block rather than competing with agent rows.
@@ -3025,6 +3058,7 @@ export class AgentsViewMode implements Component, Focusable {
 type DisplayItem =
 	| { type: "spacer" }
 	| { type: "heading"; section: AgentsViewSection }
+	| { type: "detail"; text: string }
 	| { type: "row"; row: AgentsViewRow };
 
 // Nested rows (subagent summaries and expanded subagents) always render in
@@ -3071,6 +3105,8 @@ export interface AgentsViewUsageLayout {
 	details: ReadonlyMap<string, string>;
 	nameWidth: number;
 	modelWidth: number;
+	/** Cwd column width; 0 when the column is hidden. */
+	cwdWidth: number;
 	activityWidth: number;
 }
 
@@ -3078,27 +3114,61 @@ export function buildCompactAgentsViewLayout(rows: readonly AgentsViewRow[], wid
 	const sessions = rows.filter((row) => row.kind === "agent" || row.kind === "subagent");
 	const entries = sessions.map((row) => ({
 		identity: row.identity,
+		cwd: truncatePathMiddle(formatSplashCwd(row.summary.cwd), CWD_MAX_WIDTH),
+		input: formatTokenCount(row.recursiveInputTokens),
+		output: formatTokenCount(row.recursiveOutputTokens),
+		context: row.summary.contextPercent === undefined ? "-" : `${Math.round(row.summary.contextPercent)}%`,
 		cost: `$${row.recursiveCost.toFixed(2)}`,
 		age: formatSessionDuration(row.summary),
 	}));
-	const costWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.cost)), 4);
-	const ageWidth = entries.reduce((size, entry) => Math.max(size, visibleWidth(entry.age)), 3);
-	const detailsWidth = costWidth + 2 + ageWidth;
-	const available = Math.max(0, width - detailsWidth - 4);
+	const columnWidth = (key: "cwd" | "input" | "output" | "context" | "cost" | "age", heading: string) =>
+		entries.reduce((size, entry) => Math.max(size, visibleWidth(entry[key])), visibleWidth(heading));
+	const cwdWidth = columnWidth("cwd", "Cwd");
+	const inputWidth = columnWidth("input", "Input");
+	const outputWidth = columnWidth("output", "Output");
+	const contextWidth = columnWidth("context", "Context");
+	const costWidth = columnWidth("cost", "Cost");
+	const ageWidth = columnWidth("age", "Age");
 	const desiredModelWidth = sessions.reduce((size, row) => Math.max(size, visibleWidth(formatSessionModel(row))), 12);
-	const modelWidth = Math.min(desiredModelWidth, 32, Math.max(0, available - 12));
-	const nameWidth = Math.min(28, Math.max(0, available - modelWidth));
-	const activityWidth = Math.max(0, available - modelWidth - nameWidth - 2);
-	const detailLine = (cost: string, age: string) => `${padCellStart(cost, costWidth)}  ${padCellStart(age, ageWidth)}`;
-	const headings = [formatTableCell("Session", nameWidth), formatTableCell("Model", modelWidth)];
-	if (activityWidth > 0) headings.push(formatTableCell("Activity", activityWidth));
-	headings.push(detailLine("Cost", "Age"));
+	const shown = new Set<(typeof OPTIONAL_COLUMN_DROP_ORDER)[number]>(OPTIONAL_COLUMN_DROP_ORDER);
+	const measure = () => {
+		const detailsWidth =
+			(shown.has("tokens") ? inputWidth + 2 + outputWidth + 2 : 0) +
+			(shown.has("context") ? contextWidth + 2 : 0) +
+			costWidth +
+			2 +
+			ageWidth;
+		const available = Math.max(0, width - detailsWidth - (shown.has("cwd") ? cwdWidth + 2 : 0) - 4);
+		const modelWidth = Math.min(desiredModelWidth, 32, Math.max(0, available - 12));
+		const nameWidth = Math.min(28, Math.max(0, available - modelWidth));
+		return { modelWidth, nameWidth, activityWidth: Math.max(0, available - modelWidth - nameWidth - 2) };
+	};
+	let dims = measure();
+	for (const column of OPTIONAL_COLUMN_DROP_ORDER) {
+		if (dims.activityWidth >= ACTIVITY_MIN_WIDTH) break;
+		shown.delete(column);
+		dims = measure();
+	}
+	const detailLine = (entry: { input: string; output: string; context: string; cost: string; age: string }) =>
+		[
+			...(shown.has("tokens")
+				? [padCellStart(entry.input, inputWidth), padCellStart(entry.output, outputWidth)]
+				: []),
+			...(shown.has("context") ? [padCellStart(entry.context, contextWidth)] : []),
+			padCellStart(entry.cost, costWidth),
+			padCellStart(entry.age, ageWidth),
+		].join("  ");
+	const headings = [formatTableCell("Session", dims.nameWidth), formatTableCell("Model", dims.modelWidth)];
+	if (shown.has("cwd")) headings.push(formatTableCell("Cwd", cwdWidth));
+	if (dims.activityWidth > 0) headings.push(formatTableCell("Activity", dims.activityWidth));
+	headings.push(detailLine({ input: "Input", output: "Output", context: "Context", cost: "Cost", age: "Age" }));
 	return {
 		legend: formatTableCell(headings.join("  "), width),
-		details: new Map(entries.map((entry) => [entry.identity, detailLine(entry.cost, entry.age)])),
-		nameWidth,
-		modelWidth,
-		activityWidth,
+		details: new Map(entries.map((e) => [e.identity, detailLine(e)])),
+		nameWidth: dims.nameWidth,
+		modelWidth: dims.modelWidth,
+		cwdWidth: shown.has("cwd") ? cwdWidth : 0,
+		activityWidth: dims.activityWidth,
 	};
 }
 
@@ -3139,6 +3209,23 @@ function formatSessionDuration(summary: SessionSummary): string {
 	return formatAgentsViewRelativeTime(
 		summary.activeSessionId ? (summary.created ?? summary.modified) : (summary.modified ?? summary.created),
 	);
+}
+
+// The agent's own note wins over the daemon recap.
+function activityDetail(row: AgentsViewRow): string | undefined {
+	return row.summary.progressNote ?? row.summary.summary;
+}
+
+// One-line Activity text: system status label, then the agent's own note or the daemon recap.
+function formatActivityCell(row: AgentsViewRow): string {
+	const status =
+		row.summary.lastHeardFromAt !== undefined
+			? getSessionStatusLabel(row.summary, row.heartbeat)
+			: row.summary.statusLabel !== undefined
+				? row.statusLabel
+				: undefined;
+	const detail = activityDetail(row)?.replace(/\s+/g, " ").trim();
+	return [status, detail].filter(Boolean).join(" · ");
 }
 
 export function formatAgentsViewRelativeTime(value: string | undefined, now: number = Date.now()): string {

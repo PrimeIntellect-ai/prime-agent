@@ -1712,6 +1712,7 @@ export class AgentSession {
 	private _activeRlmChildRuns = new Map<string, RlmChildRun>();
 	/** Wall-clock ms of the last accepted progress note; throttles rlm.progress.note. */
 	private _lastRlmProgressNoteAt: number | undefined;
+	private _rlmProgressNote: string | undefined;
 	private _unsettledRlmChildRuns = new Set<RlmChildRun>();
 	private _abandonedRlmQuiescenceChildIds = new Set<string>();
 	private _rlmQuiescenceWaitAborts = new Set<AbortController>();
@@ -4463,6 +4464,7 @@ export class AgentSession {
 	}
 
 	private _handleAgentEvent = (event: AgentEvent): void => {
+		if (event.type === "agent_start" || event.type === "agent_end") this._rlmProgressNote = undefined;
 		this._createRetryPromiseForAgentEnd(event);
 		if (event.type === "message_start" || event.type === "message_end") {
 			for (const action of this._actionStore.ownedActions()) {
@@ -11213,6 +11215,11 @@ export class AgentSession {
 		return this._repliedToParentSinceTask;
 	}
 
+	/** Latest accepted progress note of the active run; cleared at agent_start and agent_end so idle rows fall back to the recap. */
+	get rlmProgressNote(): string | undefined {
+		return this._rlmProgressNote;
+	}
+
 	getCurrentRecap(): string | undefined {
 		return this._currentRecap;
 	}
@@ -11410,6 +11417,7 @@ export class AgentSession {
 			return { accepted: false, retry_after_ms: RLM_PROGRESS_NOTE_MIN_INTERVAL_MS - (now - lastAt) };
 		}
 		this._lastRlmProgressNoteAt = now;
+		this._rlmProgressNote = message;
 		this._emit({ type: "rlm_progress_note", message, timestamp: now });
 		return { accepted: true, retry_after_ms: undefined };
 	}

@@ -85,6 +85,7 @@ export function passivatedWorkerRosterEntry(
 ): WorkerRosterEntry {
 	const {
 		activeSessionId,
+		contextPercent,
 		directAttachedClients,
 		hasActiveHeartbeat,
 		hasRegisteredHeartbeat,
@@ -92,6 +93,7 @@ export function passivatedWorkerRosterEntry(
 		hasRunningRlmChildren,
 		isBashRunning,
 		isRunningTools,
+		progressNote,
 		workerState,
 		workerPid,
 		...summary
