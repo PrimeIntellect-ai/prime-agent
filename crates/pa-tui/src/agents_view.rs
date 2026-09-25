@@ -2569,6 +2569,7 @@ mod tests {
             selected_key: None,
             status_message: Some(notice.to_string()),
             keybindings: crate::keybindings::KeybindingsManager::new(),
+            show_hardware_cursor: false,
         });
         mode.rebuild_rows();
         mode
