@@ -6,14 +6,14 @@
 //!
 //! The chain reuses the models-catalog machinery (pa-models'
 //! [`CatalogCache`]: scope-keyed last-good snapshots, hourly gating,
-//! in-flight coalescing, ETag, atomic 0600 writes, failure keeps the
+//! in-flight coalescing, `ETag`, atomic 0600 writes, failure keeps the
 //! last-good snapshot, `PI_OFFLINE` skips the network) over the plugins
 //! catalog URL, with the plugins parser injected as the parse closure
 //! (pa-core depends on pa-models — never the other way).
 //!
 //! TS parity note (the sanctioned divergence): the TS picker's
 //! `SERVICE_CATALOG` is compile-time baked — TS never fetches the catalog
-//! at runtime. The Rust port carries the remote chain (URL + ETag fetch +
+//! at runtime. The Rust port carries the remote chain (URL + `ETag` fetch +
 //! validated disk cache) so the catalog stays fresh between releases;
 //! the daemon supervisor keeps the cache warm — a forced startup refresh
 //! plus the hourly loop, both fire-and-forget; the settle log is one
