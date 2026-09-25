@@ -146,7 +146,7 @@ fn sent_agent_messages_render_below_the_code() {
     assert!(
         flat[1]
             .trim_end()
-            .starts_with(" \u{2709} Agent message sent \u{b7} \u{2192} parent Worker"),
+            .starts_with(" \u{2709} Agent message \u{b7} \u{2191} Worker"),
         "got: {flat:?}"
     );
     assert!(!flat[1].contains("Ping."), "no body when collapsed");
@@ -155,12 +155,12 @@ fn sent_agent_messages_render_below_the_code() {
     let flat: Vec<String> = expanded.iter().map(text_of).collect();
     let summary = flat
         .iter()
-        .position(|row| row.contains("Agent message sent"))
+        .position(|row| row.contains("Agent message \u{b7} \u{2191} Worker"))
         .expect("summary row");
     assert_eq!(flat[summary - 1], "", "blank between code and receipt");
     assert_eq!(
         flat[summary].trim_end(),
-        " \u{2709} Agent message sent \u{b7} \u{2192} parent Worker"
+        " \u{2709} Agent message \u{b7} \u{2191} Worker"
     );
     assert_eq!(flat[summary + 1], " \u{2570}\u{2500} Ping.");
     assert_eq!(flat[summary + 2], "    Then report back.");
@@ -170,14 +170,12 @@ fn sent_agent_messages_render_below_the_code() {
 }
 
 #[test]
-fn sent_agent_message_labels_and_participant_fallbacks() {
-    // TS: queued receipts label `Agent message queued`; the participant
-    // falls back name -> active session id -> session id -> unknown and
-    // renders bare without a receiver role.
-    for (delivery, label) in [
-        ("delivered", "Agent message sent"),
-        ("queued", "Agent message queued"),
-    ] {
+fn sent_agent_message_receipts_share_the_viewer_relative_arrow() {
+    // Both receipt kinds (delivered and queued) render the same shared
+    // `Agent message` label with the outgoing `↑` arrow (the operator's
+    // 2026-09-25 directive); the counterpart falls back name -> active
+    // session id -> session id -> unknown.
+    for delivery in ["delivered", "queued"] {
         let details = json!({
             "status": "ok",
             "sentAgentMessages": [{
@@ -192,9 +190,7 @@ fn sent_agent_message_labels_and_participant_fallbacks() {
         let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
         let text = text_of(&lines[1]);
         assert!(
-            text.contains(&format!(
-                "\u{2709} {label} \u{b7} \u{2192} child worker-active"
-            )),
+            text.contains("\u{2709} Agent message \u{b7} \u{2191} worker-active"),
             "got: {text}"
         );
     }
@@ -210,7 +206,7 @@ fn sent_agent_message_labels_and_participant_fallbacks() {
     let card = cell_card("send()", details, false, false);
     let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
     assert!(
-        text_of(&lines[1]).contains("Agent message queued \u{b7} \u{2192} peer-session"),
+        text_of(&lines[1]).contains("Agent message \u{b7} \u{2191} peer-session"),
         "got: {}",
         text_of(&lines[1])
     );
