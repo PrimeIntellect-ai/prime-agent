@@ -359,25 +359,22 @@ async fn finish_failure(
         )))?;
         return Ok(());
     }
-    match wait_for_hello(&options.socket_path, options.budget.boot_ms).await {
-        Some(identity) => {
-            writer.lock().await.set_successor(identity)?;
-            writer.lock().await.set_state(UpdateState::Restoring)?;
-            let (counts, _failures) = restore_report(&options.socket_path, &options.budget).await;
-            writer.lock().await.set_counts(counts)?;
-            writer.lock().await.set_state(UpdateState::Complete)?;
-            writer.lock().await.set_message(Some(format!(
-                "Rolled back to the previous Prime Agent version ({reason})"
-            )))?;
-            Ok(())
-        }
-        None => {
-            writer.lock().await.set_state(UpdateState::Failed)?;
-            writer.lock().await.set_message(Some(format!(
-                "The rollback supervisor did not greet within its boot budget; the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
-            )))?;
-            Ok(())
-        }
+    if let Some(identity) = wait_for_hello(&options.socket_path, options.budget.boot_ms).await {
+        writer.lock().await.set_successor(identity)?;
+        writer.lock().await.set_state(UpdateState::Restoring)?;
+        let (counts, _failures) = restore_report(&options.socket_path, &options.budget).await;
+        writer.lock().await.set_counts(counts)?;
+        writer.lock().await.set_state(UpdateState::Complete)?;
+        writer.lock().await.set_message(Some(format!(
+            "Rolled back to the previous Prime Agent version ({reason})"
+        )))?;
+        Ok(())
+    } else {
+        writer.lock().await.set_state(UpdateState::Failed)?;
+        writer.lock().await.set_message(Some(format!(
+            "The rollback supervisor did not greet within its boot budget; the update failed ({reason}). Sessions persist on disk - prime-agent attach recovers them."
+        )))?;
+        Ok(())
     }
 }
 

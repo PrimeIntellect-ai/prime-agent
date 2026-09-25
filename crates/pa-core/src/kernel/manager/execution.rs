@@ -182,8 +182,7 @@ impl Inner {
                 .opts
                 .signal
                 .as_ref()
-                .map(AbortSignal::is_aborted)
-                .unwrap_or(false)
+                .is_some_and(AbortSignal::is_aborted)
             {
                 status = ExecuteStatus::Aborted;
             }

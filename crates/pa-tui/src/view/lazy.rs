@@ -340,7 +340,7 @@ impl AgentView {
         if movement < 0 {
             match &mut window.anchor {
                 Anchor::Tail(distance) => {
-                    *distance = distance.saturating_sub(movement.unsigned_abs())
+                    *distance = distance.saturating_sub(movement.unsigned_abs());
                 }
                 Anchor::Top(offset) => *offset = offset.saturating_sub(movement.unsigned_abs()),
             }

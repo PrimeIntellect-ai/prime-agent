@@ -480,9 +480,7 @@ impl McpManager {
             // The configured env var is the ONLY credential source for this
             // server: when it is unset, a stale OAuth credential stored
             // under the same id must never authorize dispatch.
-            return std::env::var(env_var)
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false);
+            return std::env::var(env_var).is_ok_and(|value| !value.trim().is_empty());
         }
         // ONE shared grant-usability rule (with the view states): typed
         // oauth, non-empty access, endpoint binding, and no

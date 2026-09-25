@@ -81,13 +81,14 @@ fn session_tree(
 ) -> Vec<TreeMember> {
     let mut members = Vec::new();
     let root = canonical_session_path(root_session_file);
-    let root_id = read_session_info(&root)
-        .map(|info| info.id)
-        .unwrap_or_else(|| {
+    let root_id = read_session_info(&root).map_or_else(
+        || {
             root.file_stem()
                 .map(|stem| stem.to_string_lossy().to_string())
                 .unwrap_or_default()
-        });
+        },
+        |info| info.id,
+    );
     if root_id.is_empty() {
         return members;
     }

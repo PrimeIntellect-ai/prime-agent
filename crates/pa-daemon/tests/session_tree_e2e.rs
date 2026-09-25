@@ -153,6 +153,9 @@ fn scripted_turn(client: &mut Client, session_id: &str, message: &str, id: &str)
 
 #[test]
 fn session_tree_commands_over_the_supervisor_wire() {
+    fn entry_id(node: &serde_json::Value) -> &str {
+        node["entry"]["id"].as_str().expect("entry id")
+    }
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
@@ -211,9 +214,6 @@ fn session_tree_commands_over_the_supervisor_wire() {
     assert!(!leaf_id.is_empty());
     // The flat nodes are wire entries with id/parentId.
     assert!(flat.iter().all(|node| node["entry"]["id"].is_string()));
-    fn entry_id(node: &serde_json::Value) -> &str {
-        node["entry"]["id"].as_str().expect("entry id")
-    }
     let first_user = flat
         .iter()
         .find(|node| {
@@ -597,8 +597,10 @@ fn session_tree_commands_over_the_direct_worker_link() {
                     && node["entry"]["message"]["role"] == role
                     && node["entry"]["message"]["content"].as_str() == Some(content)
             })
-            .map(|node| node["entry"]["id"].as_str().expect("id").to_string())
-            .unwrap_or_else(|| panic!("the {role} entry for {content}"))
+            .map_or_else(
+                || panic!("the {role} entry for {content}"),
+                |node| node["entry"]["id"].as_str().expect("id").to_string(),
+            )
     };
     let first_assistant_id = entry_of("first answer", "assistant");
     let second_user_id = entry_of("second question", "user");

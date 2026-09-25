@@ -44,6 +44,11 @@ pub fn char_width(c: char) -> usize {
         // unicode-width vs get-east-asian-width scan found exactly this
         // set plus the FF9E/FF9F halves below; verified against the TS
         // dist).
+        // TS `graphemeWidth` counts the halfwidth katakana sound marks
+        // (EastAsianWidth H) as one column each, both standalone and as
+        // the trailing half of a cluster; `unicode-width` counts them zero
+        // as Grapheme_Extend. The prompt-token mask pads its placeholders
+        // with `FF9E` per extra column, so the layout wrap must count it.
         '\u{1161}'..='\u{11ff}'
         | '\u{d7b0}'..='\u{d7c6}'
         | '\u{d7cb}'..='\u{d7fb}'
@@ -55,13 +60,9 @@ pub fn char_width(c: char) -> usize {
         | '\u{11941}'
         | '\u{11a3a}'
         | '\u{11d46}'
-        | '\u{11f02}' => 1,
-        // TS `graphemeWidth` counts the halfwidth katakana sound marks
-        // (EastAsianWidth H) as one column each, both standalone and as
-        // the trailing half of a cluster; `unicode-width` counts them zero
-        // as Grapheme_Extend. The prompt-token mask pads its placeholders
-        // with `FF9E` per extra column, so the layout wrap must count it.
-        '\u{FF9E}' | '\u{FF9F}' => 1,
+        | '\u{11f02}'
+        | '\u{FF9E}'
+        | '\u{FF9F}' => 1,
         c if c.is_control() => 0,
         c => c.width().unwrap_or(0),
     }
@@ -120,6 +121,7 @@ pub(crate) fn escape_len(s: &str) -> Option<usize> {
 }
 
 pub fn str_width(s: &str) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
     if s.is_empty() {
         return 0;
     }
@@ -131,7 +133,6 @@ pub fn str_width(s: &str) -> usize {
     if let Some(width) = width_cache().lock().unwrap().get(s) {
         return *width;
     }
-    use unicode_segmentation::UnicodeSegmentation;
     // TS `visibleWidth` expands tabs to three spaces BEFORE measuring (a
     // tab is 3 columns everywhere the editor renders one).
     let expanded;
@@ -144,13 +145,12 @@ pub fn str_width(s: &str) -> usize {
     let mut width = 0;
     let mut rest = measured;
     while !rest.is_empty() {
-        match escape_len(rest) {
-            Some(len) => rest = &rest[len..],
-            None => {
-                let g = rest.graphemes(true).next().expect("non-empty rest");
-                width += grapheme_width(g);
-                rest = &rest[g.len()..];
-            }
+        if let Some(len) = escape_len(rest) {
+            rest = &rest[len..];
+        } else {
+            let g = rest.graphemes(true).next().expect("non-empty rest");
+            width += grapheme_width(g);
+            rest = &rest[g.len()..];
         }
     }
     let mut cache = width_cache().lock().unwrap();

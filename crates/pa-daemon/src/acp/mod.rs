@@ -182,9 +182,8 @@ pub async fn run_acp_mode(options: AcpOptions) -> Result<i32> {
     loop {
         line.clear();
         match stdin.read_line(&mut line).await {
-            Ok(0) => break,
+            Ok(0) | Err(_) => break,
             Ok(_) => {}
-            Err(_) => break,
         }
         if line.trim().is_empty() {
             continue;

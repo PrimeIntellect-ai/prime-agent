@@ -162,34 +162,33 @@ pub fn stream_simple_mistral(
         .and_then(|options| options.base.api_key.clone())
         .filter(|key| !key.is_empty())
         .or_else(|| get_env_api_key(&model.provider));
-    let api_key = match api_key {
-        Some(api_key) => api_key,
-        None => {
-            let (writer, reader) = create_assistant_message_event_stream();
-            let mut error = AssistantMessage {
-                content: Vec::new(),
-                api: API_MISTRAL_CONVERSATIONS.to_string(),
-                provider: model.provider.clone(),
-                model: model.id.clone(),
-                response_model: None,
-                response_id: None,
-                diagnostics: None,
-                usage: Usage::default(),
-                stop_reason: StopReason::Error,
-                stop_reason_raw: None,
-                error_message: Some(format!("No API key for provider: {}", model.provider)),
-                timestamp: now_ms(),
-                rest: Default::default(),
-            };
-            let message = error.error_message.clone().unwrap_or_default();
-            writer.push(AssistantMessageEvent::Error {
-                reason: error_reason(StopReason::Error),
-                error: error.clone(),
-            });
-            error.error_message = Some(message);
-            writer.end(Some(error));
-            return reader;
-        }
+    let api_key = if let Some(api_key) = api_key {
+        api_key
+    } else {
+        let (writer, reader) = create_assistant_message_event_stream();
+        let mut error = AssistantMessage {
+            content: Vec::new(),
+            api: API_MISTRAL_CONVERSATIONS.to_string(),
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: Usage::default(),
+            stop_reason: StopReason::Error,
+            stop_reason_raw: None,
+            error_message: Some(format!("No API key for provider: {}", model.provider)),
+            timestamp: now_ms(),
+            rest: Default::default(),
+        };
+        let message = error.error_message.clone().unwrap_or_default();
+        writer.push(AssistantMessageEvent::Error {
+            reason: error_reason(StopReason::Error),
+            error: error.clone(),
+        });
+        error.error_message = Some(message);
+        writer.end(Some(error));
+        return reader;
     };
 
     let base = build_base_options(model, options, Some(&api_key));

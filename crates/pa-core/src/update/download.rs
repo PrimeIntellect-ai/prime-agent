@@ -54,6 +54,7 @@ async fn download_once(
     timeout: Duration,
     user_agent: &str,
 ) -> Result<()> {
+    use futures::StreamExt;
     let response = reqwest::Client::new()
         .get(url)
         .header("User-Agent", user_agent)
@@ -69,7 +70,6 @@ async fn download_once(
     let mut file = std::fs::File::create(&temporary)
         .with_context(|| format!("create {}", temporary.display()))?;
     let mut stream = response.bytes_stream();
-    use futures::StreamExt;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.context("read the archive stream")?;
         digest.update(&chunk);
@@ -162,13 +162,12 @@ pub async fn binary_reported_version(exe: &Path) -> Result<String> {
     read.with_context(|| format!("read the {} --version output", exe.display()))?;
     // A well-behaved binary has exited by now; a hung or over-writing one
     // is killed only when the overall probe budget expires.
-    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
-        Ok(status) => status,
-        Err(_) => {
-            let _ = child.kill().await;
-            anyhow::bail!("{} --version timed out", exe.display())
-        }
-    }
+    let status = (if let Ok(status) = tokio::time::timeout_at(deadline, child.wait()).await {
+        status
+    } else {
+        let _ = child.kill().await;
+        anyhow::bail!("{} --version timed out", exe.display())
+    })
     .with_context(|| format!("wait for {} --version", exe.display()))?;
     if !status.success() {
         anyhow::bail!("{} --version exited with {status}", exe.display());
@@ -723,6 +722,7 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_permission_change_stages_a_new_release() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let payload = fixture_payload(dir.path(), "payload", "9.9.9");
         let root = dir.path().join("install-root");
@@ -734,7 +734,6 @@ mod tests {
         // payload: the digest must not reuse the earlier release.
         let helper = payload.join("README.md");
         let mut permissions = std::fs::metadata(&helper).unwrap().permissions();
-        use std::os::unix::fs::PermissionsExt;
         permissions.set_mode(permissions.mode() | 0o111);
         std::fs::set_permissions(&helper, permissions).unwrap();
         let (second, _) = stage_local_payload(&payload, &root, "https://example.com")
