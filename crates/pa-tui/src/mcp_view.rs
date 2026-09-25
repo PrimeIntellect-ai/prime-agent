@@ -1220,9 +1220,9 @@ mod tests {
         assert_eq!(view.selected_server(), Some("github"));
     }
 
-    /// Escape and Ctrl+C close without selecting; the left arrow edits
-    /// the search field (TS: the catalog surface has no parent to go
-    /// back to), never cancels.
+    /// Escape and Ctrl+C close without selecting; the modal back key
+    /// (the #2730 auth-panel navigation) closes from an EMPTY search,
+    /// and edits the field once the caret sits inside it.
     #[test]
     fn escape_cancels() {
         let mut view = McpView::from_response(&catalog_response(), 19);
@@ -1230,10 +1230,20 @@ mod tests {
         assert_eq!(view.handle_key("ctrl+c", &kb()), McpViewAction::Cancel);
         assert_eq!(
             view.handle_key("left", &kb()),
-            McpViewAction::None,
-            "left arrow is inert"
+            McpViewAction::Cancel,
+            "back closes from the empty search"
         );
         assert_eq!(view.search.value(), "");
+        let mut view = McpView::from_response(&catalog_response(), 19);
+        for character in "lin".chars() {
+            view.handle_key(&character.to_string(), &kb());
+        }
+        assert_eq!(
+            view.handle_key("left", &kb()),
+            McpViewAction::None,
+            "left edits the search field with a caret inside"
+        );
+        assert_eq!(view.search.value(), "lin");
     }
 
     /// The banded search: identity fields (label, id, aliases) rank before
@@ -1427,11 +1437,13 @@ mod tests {
             Some(SCORE_PREFIX + 2.0 * 0.01),
             "the prefix remainder counts UTF-16 units"
         );
-        // The substring tiebreak: the position after the two-unit emoji
-        // is 2, not the byte offset 4.
+        // The substring tiebreak: inside "xy" (a word the emoji split
+        // keeps whole) the token "y" is NOT a word start, so the
+        // substring position after the two-unit emoji is 3 — a UTF-16
+        // unit index, not the byte offset 6.
         assert_eq!(
-            identity_match_score("x\u{1f600}y", "y"),
-            Some(SCORE_SUBSTRING + 2.0 * 0.01),
+            identity_match_score("\u{1f600}xy", "y"),
+            Some(SCORE_SUBSTRING + 3.0 * 0.01),
             "the substring position is a UTF-16 unit index"
         );
         // The subsequence walk matches surrogate halves like TS: the
