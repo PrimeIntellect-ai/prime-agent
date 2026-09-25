@@ -874,10 +874,18 @@ impl Supervisor {
         // cleanup re-runs instead of a relaunch, honoring the variant.
         if kill_stop {
             // The descriptor survives an unsettled finalize (a later boot
-            // retries the archived-state belt); a settled stop deletes it.
+            // retries the archived-state belt); a settled stop still dies
+            // only with a provably-gone process. The forwarded kill
+            // releases the lease without exiting the worker, and the
+            // registration path's refused worker is not yet in the
+            // registry, so the finalize's registry-coverage checks cannot
+            // observe it — the settle is not a death certificate. The
+            // retire pass's escalation is: a survivor keeps its
+            // tombstoned descriptor for the next boot exactly like the
+            // per-session arm, and only a provable death removes it.
             let settled = self.finalize_worker_stop(resident, None).await;
             if settled {
-                let _ = std::fs::remove_file(&resident.descriptor_path);
+                self.retire_worker_after_stop(resident).await;
                 self.log_line(&format!(
                     "finished the tombstoned stop of session worker {}",
                     resident.worker_id
