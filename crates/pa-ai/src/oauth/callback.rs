@@ -267,10 +267,16 @@ fn percent_decode(value: &str) -> String {
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(&value[index + 1..index + 3], 16) {
-                out.push(byte);
-                index += 3;
-                continue;
+            // The two bytes after `%` are decoded as bytes — a slice of
+            // the UTF-8 string there could split a multi-byte character
+            // and panic, so malformed escapes fall through to the
+            // literal byte instead.
+            if let Ok(hex) = std::str::from_utf8(&bytes[index + 1..index + 3]) {
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    index += 3;
+                    continue;
+                }
             }
         }
         out.push(bytes[index]);
@@ -507,6 +513,10 @@ mod tests {
     fn query_and_percent_decoding() {
         assert_eq!(percent_decode("a%20b"), "a b");
         assert_eq!(percent_decode("bad%2"), "bad%2");
+        // A `%` escape that would split a multi-byte character decodes
+        // as the literal bytes (the regression for the panicking
+        // string slice).
+        assert_eq!(percent_decode("%9\u{e9}"), "%9\u{e9}");
         assert_eq!(
             query_param("code=1&state=2", "state"),
             Some("2".to_string())
