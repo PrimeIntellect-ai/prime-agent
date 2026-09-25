@@ -880,7 +880,9 @@ fn session_selection(
 ///
 /// Returns the TS startup failures: a selector that matches nothing (with
 /// the browse hint), and the `forkFrom` contract failures (an empty or
-/// headerless source file).
+/// headerless source file). A leading `~` in the selector expands against
+/// the home dir ([`crate::config::expand_tilde_path`]), the resume
+/// selector's convention.
 fn fork_startup_selection(
     selector: &str,
     cwd: &Path,
@@ -888,7 +890,9 @@ fn fork_startup_selection(
 ) -> Result<SessionSelection> {
     let default_dir = config::get_agent_dir().join("sessions");
     let dir = session_dir.unwrap_or(&default_dir);
-    let resolved = resolve_session_path(selector, cwd, dir)
+    let expanded = config::expand_tilde_path(selector);
+    let selector = expanded.to_string_lossy();
+    let resolved = resolve_session_path(&selector, cwd, dir)
         .map_err(|error| anyhow!(crate::print_runtime::render_selector_error(error)))?;
     let source = match resolved {
         ResolvedSession::Path(path)
@@ -1846,6 +1850,48 @@ mod tests {
         assert!(
             rendered.contains("Open prime-agent and press left-arrow to browse sessions."),
             "unexpected error: {rendered}"
+        );
+    }
+
+    #[test]
+    fn fork_startup_selection_expands_a_tilde_selector() {
+        // The resume selector's convention: a leading `~` resolves against
+        // the home dir, so forking a home-located session by that path
+        // opens it instead of erroring on a nonexistent relative path.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let home = dir.path().join("home");
+        let project = dir.path().join("project");
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&home).expect("home");
+        std::fs::create_dir_all(&project).expect("project");
+        std::fs::create_dir_all(&session_dir).expect("sessions dir");
+        let (source, id) = seed_session(&session_dir, &project, "tilde question");
+        let home_sessions = home.join("sessions");
+        std::fs::create_dir_all(&home_sessions).expect("home sessions dir");
+        let home_file = home_sessions.join(format!("{id}.jsonl"));
+        std::fs::rename(&source, &home_file).expect("move the source under home");
+        let previous_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home);
+        let selector = format!("~/sessions/{id}.jsonl");
+        let selection = fork_startup_selection(&selector, &project, Some(&session_dir));
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        let selection = selection.expect("the tilde selector forks");
+        let SessionSelection::Resume(fork) = &selection else {
+            panic!("the fork opens as a resume of the forked file, got {selection:?}");
+        };
+        assert_ne!(fork, &home_file, "the fork is a new session file");
+        assert!(
+            fork.starts_with(&session_dir),
+            "the fork lands in the requested session dir"
+        );
+        let fork_entries = read_jsonl(fork);
+        assert_eq!(
+            fork_entries[0]["parentSession"].as_str(),
+            Some(home_file.display().to_string().as_str()),
+            "the fork header parents at the tilde-resolved source"
         );
     }
 

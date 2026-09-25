@@ -649,8 +649,12 @@ fn build_session_manager(
     // project's session copied into this cwd) — with no daemon-active
     // guard: the copy writes a fresh file, never the hosted source.
     if let Some(selector) = &options.session.fork {
+        // A leading `~` expands against the home dir (the resume
+        // selector's convention; the interactive fork arm matches).
+        let expanded = crate::config::expand_tilde_path(selector);
+        let selector = expanded.to_string_lossy();
         let resolved =
-            resolve_session_path(selector, &cwd, &session_dir).map_err(render_selector_error)?;
+            resolve_session_path(&selector, &cwd, &session_dir).map_err(render_selector_error)?;
         let source = match resolved {
             ResolvedSession::Path(path)
             | ResolvedSession::Local(path)
