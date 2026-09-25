@@ -479,6 +479,17 @@ impl WindowedSessionStore {
                 {
                     latest.insert(format!("attribution:{}", value["targetId"]), index);
                 }
+                // The quota-park chain is scanned newest-first with resume
+                // entries ending episodes, so every park/resume row must
+                // survive the keep filter (not just the newest of a kind).
+                "custom"
+                    if matches!(
+                        value["customType"].as_str(),
+                        Some("provider_quota_park" | "provider_quota_resume")
+                    ) =>
+                {
+                    keep.insert(index);
+                }
                 _ => {}
             }
         }

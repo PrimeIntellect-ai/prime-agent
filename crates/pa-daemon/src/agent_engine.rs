@@ -870,7 +870,10 @@ impl AgentSessionEngine {
             Some(_) | None => self.create_quota_resume_job(persisted.resume_at_ms).await,
         };
         if job_id != persisted.job_id {
+            // Write through the BUILT session: the installed slot is
+            // still empty while the build runs.
             self.append_quota_park_entry(
+                Some(built.session.shared_persistence()),
                 persisted.resume_at_ms,
                 persisted.park_count,
                 job_id.as_deref(),
@@ -4332,6 +4335,7 @@ impl AgentSessionEngine {
                             wake_retries: park.wake_retries,
                         });
                     self.append_quota_park_entry(
+                        self.installed_persistence().await,
                         resume_at_ms,
                         park.park_count,
                         job_id.as_deref(),
@@ -4401,6 +4405,7 @@ impl AgentSessionEngine {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
         self.append_quota_park_entry(
+            self.installed_persistence().await,
             resume_at_ms,
             park_count,
             Some(job_id.as_str()),
@@ -4450,8 +4455,14 @@ impl AgentSessionEngine {
         // `_recoverQuotaParkWake` appends one so a restart reads the
         // replacement wake instead of the spent one; it carries no
         // provider field, like the TS).
-        self.append_quota_park_entry(resume_at_ms, park.park_count, Some(job_id.as_str()), None)
-            .await;
+        self.append_quota_park_entry(
+            self.installed_persistence().await,
+            resume_at_ms,
+            park.park_count,
+            Some(job_id.as_str()),
+            None,
+        )
+        .await;
         let resume_at_iso = pa_core::session::manager::format_iso(resume_at_ms as i64);
         Some(pa_core::session_engine::provider_park::ProviderParkOutcome {
             status_message: format!(
@@ -4496,8 +4507,14 @@ impl AgentSessionEngine {
     /// `QUOTA_PARK_CUSTOM_ENTRY_TYPE`), so a restart restores the park
     /// count and the wake. Async (the park callback runs inside the
     /// retry chain's `block_on`, where a nested `block_on` would panic).
+    /// The persistence handle is a parameter: the park callback writes
+    /// through the installed session, the build-time restore through the
+    /// built one (the installed slot is still empty while it runs).
     async fn append_quota_park_entry(
         &self,
+        persistence: Option<
+            std::sync::Arc<tokio::sync::Mutex<pa_core::session::manager::SessionManager>>,
+        >,
         resume_at_ms: u64,
         park_count: u32,
         job_id: Option<&str>,
@@ -4509,12 +4526,6 @@ impl AgentSessionEngine {
             "jobId": job_id,
             "provider": provider,
         });
-        let persistence = self
-            .session
-            .lock()
-            .await
-            .as_ref()
-            .map(|engine| engine.session.shared_persistence());
         let Some(persistence) = persistence else {
             return;
         };
@@ -4523,6 +4534,18 @@ impl AgentSessionEngine {
             pa_core::session_engine::provider_park::PROVIDER_QUOTA_PARK_ENTRY,
             Some(data),
         );
+    }
+
+    /// The installed session's persistence handle (the park callback's
+    /// write path).
+    async fn installed_persistence(
+        &self,
+    ) -> Option<std::sync::Arc<tokio::sync::Mutex<pa_core::session::manager::SessionManager>>> {
+        self.session
+            .lock()
+            .await
+            .as_ref()
+            .map(|engine| engine.session.shared_persistence())
     }
 
     /// A parked session completed a model call: the quota is back. Clear
