@@ -161,6 +161,20 @@ impl FrameClicks {
         })
     }
 
+    /// Debug view of the links (the click e2e's tracing).
+    #[cfg(test)]
+    pub(crate) fn debug_links(&self) -> Vec<(usize, usize, usize, String)> {
+        self.links
+            .iter()
+            .map(|l| (l.row, l.start_col, l.end_col, l.url.clone()))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn debug_targets(&self) -> Vec<FrameClickTarget> {
+        self.targets.clone()
+    }
+
     /// The OSC 8 hyperlink URL at a screen position, if any (TS
     /// `hyperlinkAt`).
     pub fn link_at(&self, row: usize, col: usize) -> Option<&str> {
