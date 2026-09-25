@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
 use super::config_options::{
@@ -20,7 +20,7 @@ use super::config_options::{
 use super::jsonrpc;
 use super::producer;
 use super::session::AcpSession;
-use super::types::SetConfigOptionParams;
+use super::types;
 use super::{internal_error, AcpModeState, ConnectionState};
 
 /// The in-process picker state: the published options, the discovered

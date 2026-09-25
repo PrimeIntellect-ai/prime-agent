@@ -46,6 +46,7 @@ use types::{
     initialize_result, session_id_params, AcpStopReason, AcpStopReasonResponse, NewSessionParams,
 };
 
+use config_options::ProviderTargetSlot;
 use in_process_config::{admit_session_config, InProcessConfig};
 
 /// Everything the mode needs from the composition root.

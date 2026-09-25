@@ -21,8 +21,9 @@ use super::daemon::{
     DaemonAcpState, DaemonLink, HostedSession, REQUEST_TIMEOUT_MS, TURN_TIMEOUT_MS,
 };
 use super::jsonrpc;
-use super::producer;
-use super::types::SetConfigOptionParams;
+use super::producer::{self, UpdateProducer};
+use super::types;
+use pa_types::daemon::DaemonCommand;
 
 /// The hosted session's picker state: the published options, the
 /// discovered models, and the serialized queue every config operation

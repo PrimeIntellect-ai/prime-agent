@@ -153,7 +153,7 @@ impl DaemonLink {
     }
 
     /// Send one command envelope and wait for the matching response.
-    async fn request(
+    pub(crate) async fn request(
         &self,
         command: DaemonCommand,
         timeout_ms: u64,
