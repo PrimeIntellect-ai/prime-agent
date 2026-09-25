@@ -1,9 +1,11 @@
 //! The extension-confirm selector (TS `showExtensionConfirm` →
-//! `showExtensionSelector` with the Yes/No options): a bordered pane with
-//! the title, the message as its description lines, and a small option
-//! list that answers the pending question.
+//! `showExtensionSelector` with the Yes/No options): the shared menu
+//! grammar (the `›` marker rows and the key-hint status row every picker
+//! renders with) over the title, the message as its description lines,
+//! and a small option list that answers the pending question.
 
-use crate::keybindings::KeybindingsManager;
+use crate::keybindings::{format_key_text, KeybindingsManager};
+use crate::menu_panel::{hint_row, menu_row};
 use crate::theme::{Theme, ThemeColor};
 use crate::width::truncate_line;
 use crate::Line;
@@ -71,11 +73,9 @@ impl ConfirmPanel {
     }
 
     /// The pane's rendered rows.
-    pub fn render(&self, theme: &Theme, width: usize) -> Vec<Line> {
-        let border = || vec![theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))];
+    pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
         let mut lines: Vec<Line> = Vec::new();
         lines.push(Vec::new());
-        lines.push(border());
         lines.push(vec![crate::Span::raw(format!("  {}", self.title))]);
         for line in &self.message {
             lines.push(truncate_line(
@@ -86,28 +86,37 @@ impl ConfirmPanel {
         }
         lines.push(Vec::new());
         for (index, option) in self.options.iter().enumerate() {
-            let row = if index == self.selected {
-                vec![
-                    theme.fg_span(ThemeColor::Accent, "› ".to_string()),
-                    crate::Span::raw(option.clone()),
-                ]
-            } else {
-                vec![crate::Span::raw(format!("  {option}"))]
-            };
-            lines.push(truncate_line(&row, width, ""));
+            lines.push(menu_row(
+                theme,
+                width,
+                vec![crate::Span::raw(option.clone())],
+                &[],
+                index == self.selected,
+            ));
         }
         lines.push(Vec::new());
-        lines.push(truncate_line(
-            &vec![theme.fg_span(
-                ThemeColor::Muted,
-                "  ↑↓ navigate  enter select  escape cancel".to_string(),
-            )],
-            width,
-            "",
-        ));
-        lines.push(border());
+        lines.push(hint_row(theme, width, &hint(kb)));
         lines
     }
+}
+
+/// The pane's key hint: the shared hint-row grammar, this surface's
+/// vocabulary.
+fn hint(kb: &KeybindingsManager) -> String {
+    let navigate = format!(
+        "{}/{}",
+        kb.first_key("tui.select.up")
+            .map_or_else(|| "↑".to_string(), |key| format_key_text(&key)),
+        kb.first_key("tui.select.down")
+            .map_or_else(|| "↓".to_string(), |key| format_key_text(&key))
+    );
+    let select_key = kb
+        .first_key("tui.select.confirm")
+        .map_or_else(|| "Enter".to_string(), |key| format_key_text(&key));
+    let close_key = kb
+        .first_key("tui.select.cancel")
+        .map_or_else(|| "Esc".to_string(), |key| format_key_text(&key));
+    format!("{navigate} navigate · {select_key} select · {close_key} close")
 }
 
 #[cfg(test)]
@@ -147,7 +156,7 @@ mod tests {
             "Session cwd not found",
             "cwd from session file does not exist\n/old/path\n\ncontinue in current cwd\n/new/path",
         );
-        let rows = panel.render(&theme, 80);
+        let rows = panel.render(&theme, 80, &kb());
         let text = rows
             .iter()
             .map(|line| {
@@ -162,5 +171,9 @@ mod tests {
             .any(|row| row.contains("continue in current cwd")));
         assert!(text.iter().any(|row| row.contains("› Yes")));
         assert!(text.iter().any(|row| row.contains("  No")));
+        // The shared hint-row grammar (the pickers' vocabulary shape).
+        assert!(text
+            .iter()
+            .any(|row| row.contains("↑/↓ navigate · Enter select · Esc close")));
     }
 }

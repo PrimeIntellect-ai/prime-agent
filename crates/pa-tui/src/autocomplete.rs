@@ -487,6 +487,16 @@ impl PathCompletionProvider {
                 };
                 (dir, file)
             };
+        // The filename anchor the entries must complete: the typed
+        // component after the last `/` of the prefix. Dot entries list
+        // only when that anchor is an explicit dot prefix of a filename
+        // (`.z`, `./.claude`, `src/.h`) — never for the directory
+        // references `.`/`..` or an empty browse anchor: a directory
+        // browse must not surface the cwd's dotfiles as completion
+        // candidates (the operator's 2026-09-25 directive: the menu's
+        // "useless stuff" starting with a `.claude` directory).
+        let anchor = raw_prefix.rsplit('/').next().unwrap_or(raw_prefix);
+        let dot_anchor = anchor.starts_with('.') && anchor != "." && anchor != "..";
         let Ok(entries) = std::fs::read_dir(&search_dir) else {
             return Vec::new();
         };
@@ -495,6 +505,9 @@ impl PathCompletionProvider {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if !name.to_lowercase().starts_with(&lower_search) {
+                continue;
+            }
+            if name.starts_with('.') && !dot_anchor {
                 continue;
             }
             let full_path = entry.path();
@@ -1059,6 +1072,55 @@ mod tests {
             .get_suggestions(&["hello ma".to_string()], 0, 8, true)
             .is_some());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Dot entries list only for an explicit dot-prefix anchor (the
+    /// operator's 2026-09-25 directive): a directory browse (`./`, `src/`,
+    /// `..`, the empty root prefix) must not surface the cwd's dotfiles —
+    /// the old forced pass listed the whole cwd and a `.claude` directory
+    /// rode first — while a typed dot prefix (`.h`, `./.cl`) still
+    /// completes hidden paths.
+    #[test]
+    fn dotfiles_list_only_for_a_dot_prefix_anchor() {
+        let outer = tempfile::TempDir::new().expect("temp dir");
+        let base = outer.path().join("base");
+        std::fs::create_dir_all(base.join(".claude")).expect("mkdir");
+        std::fs::create_dir_all(base.join("src")).expect("mkdir");
+        std::fs::write(base.join(".hidden"), "x").expect("write");
+        std::fs::write(base.join("main.rs"), "fn main() {}").expect("write");
+        std::fs::write(outer.path().join(".outer-hidden"), "x").expect("write");
+        let provider = provider(base.to_str().unwrap());
+        let values = |text: &str| -> Vec<String> {
+            provider
+                .get_suggestions(&[text.to_string()], 0, text.chars().count(), true)
+                .expect("suggestions")
+                .items
+                .into_iter()
+                .map(|item| item.value)
+                .collect()
+        };
+        // The root browse: non-hidden entries only.
+        assert_eq!(
+            values("./"),
+            ["./src/", "./main.rs"],
+            "the cwd browse hides the dot entries"
+        );
+        // The explicit `src/` browse and the empty-prefix forced pass are
+        // the same class of listing.
+        assert_eq!(values("src/"), ["src/main.rs"]);
+        assert_eq!(values(""), ["src/", "main.rs"]);
+        // The directory references `.`/`..` browse like any other empty
+        // anchor: the dot entries stay hidden (the parent's too).
+        assert_eq!(values("."), ["src/", "main.rs"]);
+        assert_eq!(
+            values(".."),
+            ["base"],
+            "the parent browse hides the dot entries"
+        );
+        // A typed dot prefix is the explicit hidden-path browse: dot
+        // entries list again.
+        assert_eq!(values("./.cl"), ["./.claude/"]);
+        assert_eq!(values(".h"), [".hidden"]);
     }
 
     #[test]

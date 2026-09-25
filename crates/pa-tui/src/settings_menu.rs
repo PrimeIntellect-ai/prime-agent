@@ -5,10 +5,10 @@
 //! owns the row data (daemon state + settings seam reads) and executes the
 //! change actions; this module owns navigation, filtering, and rendering.
 
-use crate::keybindings::KeybindingsManager;
+use crate::keybindings::{format_key_text, KeybindingsManager};
 use crate::search_input::SearchInput;
 use crate::theme::{Theme, ThemeColor};
-use crate::width::{str_width, wrap_text};
+use crate::width::wrap_text;
 
 /// The reasoning-level descriptions the TS thinking submenu lists (TS
 /// `THINKING_DESCRIPTIONS`).
@@ -533,41 +533,43 @@ impl SettingsMenu {
         self.selected = 0;
     }
 
-    /// Render (TS `render`): the search field, the windowed label/value
-    /// rows, the scroll info, the selected row's description, and the
-    /// hint line; a submenu replaces the whole list.
-    pub fn render(&self, theme: &Theme, width: usize) -> Vec<crate::Line> {
+    /// Render (TS `render`): the shared menu panel over the settings rows
+    /// — the bordered search field, the windowed label/value rows, the
+    /// scroll indicator, the selected row's description, and the hint
+    /// line; a submenu replaces the whole list.
+    pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<crate::Line> {
         if let Some(sub) = &self.sub {
-            return self.render_submenu(sub, theme, width);
+            return self.render_submenu(sub, theme, width, kb);
         }
-        let dim = theme.fg_style(ThemeColor::Dim);
-        let muted = theme.fg_style(ThemeColor::Muted);
-        let accent = theme.fg_style(ThemeColor::Accent);
         let mut lines: Vec<crate::Line> = Vec::new();
-        // The search field (TS `Input.render`): the typed value with its
-        // cursor, on one line.
-        lines.push(self.search_line(theme, width));
-        lines.push(Vec::new());
+        // The search field: the shared bordered field with its
+        // placeholder.
+        lines.extend(crate::menu_panel::search_field_lines(
+            theme,
+            width,
+            self.search.value(),
+            self.search.cursor(),
+            true,
+            "Search settings",
+        ));
         if self.rows.is_empty() {
-            lines.push(vec![theme.fg(ThemeColor::Dim, "  No settings available")]);
-            self.push_hint(&mut lines, dim, width, true);
+            lines.push(crate::menu_panel::no_match_row(
+                theme,
+                width,
+                "No settings available",
+            ));
+            lines.push(crate::menu_panel::hint_row(theme, width, &hint(kb)));
             return lines;
         }
         if self.filtered.is_empty() {
-            lines.push(truncate_line(
-                vec![theme.fg(ThemeColor::Dim, "  No matching settings")],
+            lines.push(crate::menu_panel::no_match_row(
+                theme,
                 width,
+                "No matching settings",
             ));
-            self.push_hint(&mut lines, dim, width, true);
+            lines.push(crate::menu_panel::hint_row(theme, width, &hint(kb)));
             return lines;
         }
-        let max_label_width = self
-            .rows
-            .iter()
-            .map(|row| str_width(row.label))
-            .max()
-            .unwrap_or(0)
-            .min(30);
         let start = self
             .selected
             .saturating_sub(self.max_visible / 2)
@@ -577,38 +579,20 @@ impl SettingsMenu {
             let position = start + position;
             let row = &self.rows[*row_index];
             let selected = position == self.selected;
-            let prefix = if selected {
-                theme.fg_span(ThemeColor::Accent, "› ".to_string())
-            } else {
-                crate::Span::raw("  ".to_string())
-            };
-            let label = format!(
-                "{}{}",
-                row.label,
-                " ".repeat(max_label_width.saturating_sub(str_width(row.label)))
-            );
-            let label_span = if selected {
-                crate::Span::styled(label, accent)
-            } else {
-                crate::Span::raw(label)
-            };
-            let used =
-                str_width(if selected { "› " } else { "  " }) + max_label_width + str_width("  ");
-            let value_max = width.saturating_sub(used + 2);
-            let value = truncate_plain(&row.current, value_max);
-            let value_span = if selected {
-                crate::Span::styled(value, accent)
-            } else {
-                crate::Span::styled(value, muted)
-            };
-            let line: crate::Line = vec![prefix, label_span, crate::Span::raw("  "), value_span];
-            lines.push(truncate_line(line, width));
+            lines.push(crate::menu_panel::menu_row(
+                theme,
+                width,
+                vec![crate::Span::raw(row.label.clone())],
+                &[crate::menu_panel::MenuSegment::muted(&row.current)],
+                selected,
+            ));
         }
         if start > 0 || end < self.filtered.len() {
-            let scroll = format!("  ({}/{})", self.selected + 1, self.filtered.len());
-            lines.push(truncate_line(
-                vec![theme.fg(ThemeColor::Dim, scroll)],
-                width.saturating_sub(2),
+            lines.push(crate::menu_panel::scroll_row(
+                theme,
+                width,
+                self.selected + 1,
+                self.filtered.len(),
             ));
         }
         if let Some(&row_index) = self.filtered.get(self.selected) {
@@ -617,27 +601,31 @@ impl SettingsMenu {
                 lines.push(Vec::new());
                 for line in wrap_text(row.description, width.saturating_sub(4)) {
                     let plain: String = line.iter().map(|span| span.content.as_str()).collect();
-                    lines.push(truncate_line(
-                        vec![
+                    lines.push(crate::width::truncate_line(
+                        &vec![
                             crate::Span::raw("  ".to_string()),
-                            crate::Span::styled(plain, dim),
+                            crate::Span::styled(plain, theme.fg_style(ThemeColor::Dim)),
                         ],
                         width,
+                        "",
                     ));
                 }
             }
         }
-        self.push_hint(&mut lines, dim, width, true);
+        lines.push(crate::menu_panel::hint_row(theme, width, &hint(kb)));
         lines
     }
 
     /// The submenu render (TS `SelectSubmenu`): accent title, muted
-    /// description, the option list (value, label, description), and the
+    /// description, the shared menu rows over the option list, and the
     /// back hint.
-    fn render_submenu(&self, sub: &SubmenuState, theme: &Theme, width: usize) -> Vec<crate::Line> {
-        let dim = theme.fg_style(ThemeColor::Dim);
-        let muted = theme.fg_style(ThemeColor::Muted);
-        let accent = theme.fg_style(ThemeColor::Accent);
+    fn render_submenu(
+        &self,
+        sub: &SubmenuState,
+        theme: &Theme,
+        width: usize,
+        kb: &KeybindingsManager,
+    ) -> Vec<crate::Line> {
         let (title, description, options): (&str, &str, Vec<(String, Option<&'static str>)>) =
             match &sub.kind {
                 SettingsSubmenu::Thinking { levels } => (
@@ -675,136 +663,45 @@ impl SettingsMenu {
         for (position, (value, description)) in options[start..end].iter().enumerate() {
             let position = start + position;
             let selected = position == sub.selected;
-            let prefix = if selected {
-                theme.fg_span(ThemeColor::Accent, "› ".to_string())
-            } else {
-                crate::Span::raw("  ".to_string())
-            };
-            let label = if selected {
-                crate::Span::styled(value.clone(), accent)
-            } else {
-                crate::Span::raw(value.clone())
-            };
-            let mut line: crate::Line = vec![prefix, label];
-            if let Some(description) = description {
-                line.push(crate::Span::raw(" ".to_string()));
-                line.push(crate::Span::styled(description.to_string(), muted));
-            }
-            lines.push(truncate_line(line, width));
+            let trailing: Vec<crate::menu_panel::MenuSegment> = description
+                .map(|description| vec![crate::menu_panel::MenuSegment::muted(description)])
+                .unwrap_or_default();
+            lines.push(crate::menu_panel::menu_row(
+                theme,
+                width,
+                vec![crate::Span::raw(value.clone())],
+                &trailing,
+                selected,
+            ));
         }
         lines.push(Vec::new());
-        lines.push(truncate_line(
-            vec![
-                crate::Span::raw("  ".to_string()),
-                crate::Span::styled("Enter to select · esc to go back".to_string(), dim),
-            ],
-            width,
-        ));
+        lines.push(crate::menu_panel::hint_row(theme, width, &submenu_hint(kb)));
         lines
     }
-
-    /// The search field row (the `SearchInput`'s value + cursor).
-    fn search_line(&self, theme: &Theme, width: usize) -> crate::Line {
-        let value = self.search.value();
-        let cursor = self.search.cursor();
-        let chars: Vec<char> = value.chars().collect();
-        let before: String = chars[..cursor.min(chars.len())].iter().collect();
-        let at: String = chars
-            .get(cursor)
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        let after: String = chars[(cursor + 1).min(chars.len())..].iter().collect();
-        let text = format!("{before}{at}{after}");
-        let _ = width;
-        let mut line: crate::Line = vec![
-            crate::Span::raw(" ".to_string()),
-            theme.fg_span(ThemeColor::Muted, "Search settings: ".to_string()),
-            crate::Span::raw(before),
-        ];
-        // The cursor is a styled cell over the character at it (reverse
-        // video, the TS Input's block cursor).
-        let cursor_style = theme
-            .bg_style(crate::theme::ThemeBg::SelectedBg)
-            .add_modifier(ratatui::style::Modifier::REVERSED);
-        line.push(crate::Span::styled(at, cursor_style));
-        line.push(crate::Span::raw(after));
-        if text.is_empty() {
-            line.push(crate::Span::raw(" ".to_string()));
-        }
-        line
-    }
-
-    /// The trailing hint line (TS `addHintLine`): a blank row, then the
-    /// key hint.
-    fn push_hint(
-        &self,
-        lines: &mut Vec<crate::Line>,
-        dim: ratatui::style::Style,
-        width: usize,
-        search: bool,
-    ) {
-        let _ = search;
-        lines.push(Vec::new());
-        let hint = if search {
-            "  Type to search · Enter/Space to change · Esc to cancel"
-        } else {
-            "  Enter/Space to change · Esc to cancel"
-        };
-        let line = vec![crate::Span::styled(hint.to_string(), dim)];
-        lines.push(truncate_line(line, width));
-    }
 }
 
-/// Truncate a rendered row to the width without an ellipsis (TS
-/// `truncateToWidth(..., "")`).
-fn truncate_line(line: crate::Line, width: usize) -> crate::Line {
-    let used: usize = line.iter().map(|span| str_width(&span.content)).sum();
-    if used <= width || width == 0 {
-        return line;
-    }
-    let mut out: crate::Line = Vec::new();
-    let mut remaining = width;
-    for span in line {
-        if remaining == 0 {
-            break;
-        }
-        let span_width = str_width(&span.content);
-        if span_width <= remaining {
-            remaining -= span_width;
-            out.push(span);
-        } else {
-            let mut cut = String::new();
-            for character in span.content.chars() {
-                let character_width =
-                    unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
-                if character_width > remaining {
-                    break;
-                }
-                cut.push(character);
-                remaining -= character_width;
-            }
-            out.push(crate::Span {
-                content: cut,
-                style: span.style,
-            });
-        }
-    }
-    out
+/// The menu's key hint: the shared hint-row grammar, this surface's
+/// vocabulary (the search field types, Enter/Space cycles a row).
+fn hint(kb: &KeybindingsManager) -> String {
+    let select_key = kb
+        .first_key("tui.select.confirm")
+        .map_or_else(|| "Enter".to_string(), |key| format_key_text(&key));
+    let close_key = kb
+        .first_key("tui.select.cancel")
+        .map_or_else(|| "Esc".to_string(), |key| format_key_text(&key));
+    format!("Type to search · {select_key}/Space change · {close_key} close")
 }
 
-/// Truncate a plain string to the width without an ellipsis.
-fn truncate_plain(text: &str, width: usize) -> String {
-    let mut out = String::new();
-    let mut used = 0;
-    for character in text.chars() {
-        let character_width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
-        if used + character_width > width {
-            break;
-        }
-        out.push(character);
-        used += character_width;
-    }
-    out
+/// The submenu's key hint (TS `SelectSubmenu`'s back row): the selected
+/// value applies, the cancel binding goes back.
+fn submenu_hint(kb: &KeybindingsManager) -> String {
+    let select_key = kb
+        .first_key("tui.select.confirm")
+        .map_or_else(|| "Enter".to_string(), |key| format_key_text(&key));
+    let back_key = kb
+        .first_key("tui.select.cancel")
+        .map_or_else(|| "Esc".to_string(), |key| format_key_text(&key));
+    format!("{select_key} select · {back_key} back")
 }
 
 #[cfg(test)]
@@ -832,7 +729,7 @@ mod menu_tests {
 
     fn render_text(menu: &SettingsMenu) -> Vec<String> {
         let theme = crate::theme::Theme::builtin("prime", crate::theme::ColorMode::Color256);
-        menu.render(&theme, 100)
+        menu.render(&theme, 100, &KeybindingsManager::new())
             .iter()
             .map(|line| line.iter().map(|span| span.content.as_str()).collect())
             .collect()
@@ -918,7 +815,7 @@ mod menu_tests {
         let text = render_text(&menu);
         assert!(text
             .iter()
-            .any(|row| row.contains("Type to search · Enter/Space to change · Esc to cancel")));
+            .any(|row| row.contains("Type to search · Enter/Space change · Esc close")));
     }
 
     #[test]
@@ -970,6 +867,10 @@ mod menu_tests {
             .any(|row| row.contains("Automatically compact context when it gets too large")));
         assert!(text
             .iter()
-            .any(|row| row.contains("Type to search · Enter/Space to change · Esc to cancel")));
+            .any(|row| row.contains("Type to search · Enter/Space change · Esc close")));
+        // The selected first row carries the menu marker and its value
+        // rides the row's trailing cluster (the shared menu-row grammar).
+        assert!(text.iter().any(|row| row.contains("\u{203a} Auto-compact")));
+        assert!(text.iter().any(|row| row.contains("on ")));
     }
 }
