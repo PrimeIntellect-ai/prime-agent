@@ -323,21 +323,28 @@ replay folds tool-result messages onto their pending tool cards
 
 Splash + "Share agent traces with Prime Intellect?" notice, answerable,
 persisted completion flag (`pa-tui/src/onboarding.rs`;
-`pa-tui/src/interactive.rs` L186-207). Battery-verified
+`pa-tui/src/interactive.rs`). Battery-verified
 (`runs/20260917T062810Z` f1: "first-run splash + trace-sharing notice
-rendered and answerable on both sides"). Sanctioned divergence (Kevin,
-2026-09-24): a fresh install ships sharing pre-configured ON, so the flow
-completes silently and the session owns the first frame — the splash +
-question mounts only for an explicit opt-out that never completed
-onboarding, and the persisted flag gates the task mount forever after
-(it never returns); `/traces` stays the change path.
+rendered and answerable on both sides"). Divergences (operator rulings,
+Kevin, 2026-09-24): sharing is OPT-IN (the later ruling
+reversing the #2699 pre-configured-ON divergence; TS parity restored on
+the default), and the question is first-run-only: a fresh home (no trace
+choice written) is asked exactly once — the opt-in moment — while a home
+that already carries a standing choice (a provisioned/copied config, or
+a `/traces` change) never sees the question: the standing choice stands
+and the flow completes silently (TS #2368 asks such homes; deliberately
+not ported).
+The completion flag gates both the startup task mount and the phase
+itself (the agents-view flow re-runs the phase per session with the same
+task, so the phase re-reads the persisted marker and never re-shows);
+`/traces` stays the change path.
 
 ## 19. Trace sharing - partial
 
-Sharing ships pre-configured ON (Kevin's 2026-09-24 product decision;
-sanctioned divergence — TS defaults off and asks on first run): the
-default IS the configuration (nothing is written until the user opts
-out), the opt-out persists (`set_agent_traces_enabled`,
+Sharing is OPT-IN (operator policy, Kevin 2026-09-24, reversing the
+earlier #2699 pre-configured-ON divergence; TS defaults off and asks on
+first run): unset means OFF, the first-run onboarding question is the
+opt-in moment, the answer persists (`set_agent_traces_enabled`,
 `crates/pa-core/src/settings/manager.rs`), and `/traces` (the command the
 onboarding note advertises) is ported (`pa-tui/src/traces.rs` + the
 composition-root hook `pa-cli/src/client_traces.rs`): the TS status
