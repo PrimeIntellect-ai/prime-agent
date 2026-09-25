@@ -431,47 +431,18 @@ export function summaryForActiveSession(
 }
 
 function summaryComposeFingerprintsEqual(left: SummaryComposeFingerprint, right: SummaryComposeFingerprint): boolean {
-	return (
-		left.hasActiveHeartbeat === right.hasActiveHeartbeat &&
-		left.hasRegisteredHeartbeat === right.hasRegisteredHeartbeat &&
-		left.hasRegisteredCronJob === right.hasRegisteredCronJob &&
-		left.savedSession === right.savedSession &&
-		left.isStreaming === right.isStreaming &&
-		left.isCompacting === right.isCompacting &&
-		left.isBashRunning === right.isBashRunning &&
-		left.pendingToolCallsSize === right.pendingToolCallsSize &&
-		left.isSessionActive === right.isSessionActive &&
-		left.hasRunningRlmChildren === right.hasRunningRlmChildren &&
-		left.unfinishedActionCount === right.unfinishedActionCount &&
-		left.attachedClients === right.attachedClients &&
-		left.directAttachedClients === right.directAttachedClients &&
-		left.messageCount === right.messageCount &&
-		left.usage === right.usage &&
-		left.model === right.model &&
-		left.thinkingLevel === right.thinkingLevel &&
-		left.streamingMessage === right.streamingMessage &&
-		left.summaryState === right.summaryState &&
-		left.repliedSinceTask === right.repliedSinceTask &&
-		left.metadataKind === right.metadataKind &&
-		left.metadataParentActiveSessionId === right.metadataParentActiveSessionId &&
-		left.metadataParentSessionId === right.metadataParentSessionId &&
-		left.metadataParentSessionFile === right.metadataParentSessionFile &&
-		left.metadataRlmChildId === right.metadataRlmChildId &&
-		left.metadataRlmParentNodeId === right.metadataRlmParentNodeId &&
-		left.metadataSpawnCode === right.metadataSpawnCode &&
-		left.sessionName === right.sessionName &&
-		left.sessionId === right.sessionId &&
-		left.sessionFile === right.sessionFile &&
-		left.cwd === right.cwd &&
-		left.rlmDepth === right.rlmDepth &&
-		left.modelFallbackMessage === right.modelFallbackMessage &&
-		left.headerTimestamp === right.headerTimestamp &&
-		left.modified === right.modified &&
-		left.lastActivityAt === right.lastActivityAt &&
-		left.firstMessage === right.firstMessage &&
-		diagnosticsEqual(left.diagnostics, right.diagnostics) &&
-		sessionActionSnapshotsEqual(left.sessionActions, right.sessionActions)
-	);
+	// Both sides come from the one typed literal in summaryForActiveSession, so its own keys are the full field set.
+	for (const key of Object.keys(left) as (keyof SummaryComposeFingerprint)[]) {
+		// A new field that is a fresh object on every read needs its own branch here, or the memo never hits.
+		const equal =
+			key === "diagnostics"
+				? diagnosticsEqual(left.diagnostics, right.diagnostics)
+				: key === "sessionActions"
+					? sessionActionSnapshotsEqual(left.sessionActions, right.sessionActions)
+					: left[key] === right[key];
+		if (!equal) return false;
+	}
+	return true;
 }
 
 // Runtime diagnostics change by wholesale replacement or by append; a stable
