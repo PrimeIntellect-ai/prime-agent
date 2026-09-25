@@ -363,7 +363,21 @@ pub async fn execute_compaction(
         .iter()
         .filter_map(message_from_entry)
         .collect();
+    super::compaction_trace::trace(
+        "compact.cut_prepared",
+        serde_json::json!({
+            "entries": entries.len(),
+            "firstKeptEntryIndex": cut.first_kept_entry_index,
+            "isSplitTurn": cut.is_split_turn,
+            "historyMessages": history.len(),
+            "turnPrefixMessages": turn_prefix_messages.len(),
+        }),
+    );
     let tokens_before = context_tokens(&entries, session.get_leaf_id());
+    super::compaction_trace::trace(
+        "compact.tokens_before_computed",
+        serde_json::json!({ "tokensBefore": tokens_before }),
+    );
     let prev_compaction_index = entries[..cut.first_kept_entry_index]
         .iter()
         .rposition(|entry| matches!(entry, FileEntry::Compaction { .. }));
@@ -440,12 +454,23 @@ pub async fn execute_compaction(
     let history_max_tokens = history_summary_completion_budget(options.settings.reserve_tokens);
     let turn_prefix_max_tokens =
         turn_prefix_summary_completion_budget(options.settings.reserve_tokens);
+    super::compaction_trace::trace(
+        "compact.summarizer_request",
+        serde_json::json!({
+            "historyMaxTokens": history_max_tokens,
+            "turnPrefixMaxTokens": turn_prefix_max_tokens,
+        }),
+    );
     let history_call = async {
         // The stand-in applies only inside the split arm (TS
         // `messagesToSummarize.length > 0 ? generateSummary(...) : "No
         // prior history."` — the arm runs when a turn prefix exists); a
         // cut without a turn prefix makes the history call below.
         if cut.is_split_turn && !turn_prefix_messages.is_empty() && history.is_empty() {
+            super::compaction_trace::trace(
+                "compact.summarizer_no_history",
+                serde_json::Value::Null,
+            );
             return Ok(SummarySlice {
                 summary: NO_PRIOR_HISTORY.to_string(),
                 usage: None,
@@ -486,6 +511,15 @@ pub async fn execute_compaction(
     let (history_slice, turn_prefix_slice) = tokio::join!(history_call, turn_prefix_call);
     let history_slice = history_slice?;
     let turn_prefix_slice = turn_prefix_slice?;
+    super::compaction_trace::trace(
+        "compact.summarizer_resolved",
+        serde_json::json!({
+            "summaryBytes": history_slice.summary.len()
+                + turn_prefix_slice
+                    .as_ref()
+                    .map_or(0, |slice| slice.summary.len()),
+        }),
+    );
 
     // The summarizer resolved while the run was aborted: the compaction is
     // cancelled before it commits (TS `_performCompaction`'s
@@ -527,6 +561,10 @@ pub async fn execute_compaction(
         .harness_digest
         .as_ref()
         .map(super::harness_digest::HarnessDigestInputs::render);
+    super::compaction_trace::trace(
+        "compact.digest_rendered",
+        serde_json::json!({ "digest": harness_digest.is_some() }),
+    );
     let entry = compaction_entry_for(
         &result,
         &details,
@@ -538,6 +576,13 @@ pub async fn execute_compaction(
     // snapshot ride on the durable row alongside the summary, boundary,
     // and token count.
     session.append_compaction(entry.clone())?;
+    super::compaction_trace::trace(
+        "compact.entry_appended",
+        serde_json::json!({
+            "firstKeptEntryId": first_kept_entry,
+            "persisted": session.is_persisted(),
+        }),
+    );
     Ok(CompactOutcome::Ran(Box::new(CompactRun {
         result,
         entry,
