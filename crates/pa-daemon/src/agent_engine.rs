@@ -4297,8 +4297,8 @@ impl AgentSessionEngine {
         // The park decision (pure): disabled / budget spent decline, a
         // reset parks until it (plus grace), capped at the policy bound.
         let parks_used = existing.as_ref().map_or(0, |park| park.park_count);
-        match provider_park_decision(parks_used, reset_ms, &policy) {
-            ProviderParkDecision::Park { resume_after_ms } => {}
+        let resume_after_ms = match provider_park_decision(parks_used, reset_ms, &policy) {
+            ProviderParkDecision::Park { resume_after_ms } => resume_after_ms,
             ProviderParkDecision::None {
                 reason: NoParkReason::NoReset,
             } => {
