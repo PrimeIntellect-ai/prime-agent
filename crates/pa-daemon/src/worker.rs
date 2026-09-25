@@ -5409,10 +5409,10 @@ impl TurnRunner {
         let events = self.events.clone();
         let turn_coalescer = Arc::clone(&coalescer);
         let agent_dir = crate::paths::agent_dir().unwrap_or_default();
-        // The settle tail's compact-trigger servicing reads the engine
-        // after the turn closure dropped its own clone (the shadowing
-        // clone below moves into the closure).
-        let settle_engine = std::sync::Arc::clone(&engine);
+        // The settle tail's background compact-trigger servicing owns its
+        // own engine clone (the turn closure below moves the shadowing
+        // clone).
+        let review_engine = std::sync::Arc::clone(&engine);
         // The turn's settled outcome reaches the waiting prompt only
         // after the runner flipped the session back to idle (TS
         // `promptAndWait` resolves after the full settle): the blocking
@@ -6046,25 +6046,32 @@ impl TurnRunner {
         // prompt's admission never waits on it. The round's own gates
         // (the armed trigger, queued work) keep the trigger armed for the
         // next settle when work is queued mid-review.
-        if settle_engine.compact_auto_refine_pending() {
-            let engine = std::sync::Arc::clone(&settle_engine);
+        {
+            let engine = review_engine;
             let core = Arc::clone(&self.core);
             let events = self.events.clone();
             tokio::spawn(async move {
-                pa_core::session_engine::compaction_trace::trace(
-                    "autorefine.review_started",
-                    serde_json::Value::Null,
-                );
-                let refined =
-                    tokio::task::spawn_blocking(move || engine.consume_compact_auto_refine())
-                        .await
-                        .unwrap_or_else(|error| {
-                            Err(anyhow::anyhow!("auto-refinement task failed: {error}"))
-                        });
-                pa_core::session_engine::compaction_trace::trace(
-                    "autorefine.review_done",
-                    serde_json::json!({ "ran": refined.is_ok() }),
-                );
+                // The pending pre-check and the round both take the
+                // engine's session mutex (`blocking_lock`): they run on
+                // the blocking pool, never on this async task — a
+                // `blocking_lock` from the runtime thread deadlocks the
+                // settle when the mutex is contended.
+                let refined = tokio::task::spawn_blocking(move || {
+                    pa_core::session_engine::compaction_trace::trace(
+                        "autorefine.review_started",
+                        serde_json::Value::Null,
+                    );
+                    let outcome = engine.consume_compact_auto_refine();
+                    pa_core::session_engine::compaction_trace::trace(
+                        "autorefine.review_done",
+                        serde_json::json!({ "ran": outcome.is_ok() }),
+                    );
+                    outcome
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    Err(anyhow::anyhow!("auto-refinement task failed: {error}"))
+                });
                 match refined {
                     Ok(Some(result)) => {
                         // TS `refine()` appends the TUI outcome row and

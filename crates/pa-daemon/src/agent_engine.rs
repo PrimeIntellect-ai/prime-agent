@@ -2011,13 +2011,6 @@ impl SessionEngine for AgentSessionEngine {
         self.consume_compact_auto_refine_round()
     }
 
-    /// The cheap pre-check for the turn-settle servicing (TS
-    /// `_compactAutoRefinePending`): the worker reads it before spawning
-    /// the background round.
-    fn compact_auto_refine_pending(&self) -> bool {
-        AgentSessionEngine::compact_auto_refine_pending(self)
-    }
-
     /// The worker's live session summary (the TS
     /// `createAgentSessionMessageSender` source): rendered into the
     /// sender identity block of direct worker-to-worker deliveries.
