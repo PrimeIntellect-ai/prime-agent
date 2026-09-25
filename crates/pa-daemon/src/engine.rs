@@ -584,6 +584,14 @@ pub trait SessionEngine: Send + Sync {
         None
     }
 
+    /// True while the session is parked waiting out a provider-reported
+    /// usage reset (TS `session.isQuotaParked`): the park ended the turn
+    /// cleanly and a durable wake resumes it. Scripted harness engines
+    /// never park.
+    fn is_quota_parked(&self) -> bool {
+        false
+    }
+
     /// Apply a live model switch (the daemon `set_model` command, TS
     /// `session.setModel`): the selection merges over the current one and
     /// a built session's agent and provider stream follow the new model on

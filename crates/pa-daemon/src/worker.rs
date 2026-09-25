@@ -2692,6 +2692,7 @@ impl Worker {
             self.engine.model_metadata(),
             self.engine.model_fallback_message(),
             self.user_bash.is_running(),
+            self.engine.is_quota_parked(),
         );
         // The worker's roster-delta counter at snapshot time, and the
         // process instance that read it — the pair is one snapshot:
@@ -6145,6 +6146,7 @@ pub(crate) fn push_roster_delta(context: &RosterPushContext) {
             context.engine.model_metadata(),
             context.engine.model_fallback_message(),
             context.user_bash.is_running(),
+            context.engine.is_quota_parked(),
         )
     };
     // The embedded counter is the pre-stamp value read under the order
@@ -6185,6 +6187,7 @@ pub(crate) fn session_summary(
     model: Option<Value>,
     model_fallback_message: Option<String>,
     bash_running: bool,
+    quota_parked: bool,
 ) -> SessionSummary {
     let store = core.store.as_ref();
     let streaming = core.busy;
@@ -6272,6 +6275,7 @@ pub(crate) fn session_summary(
         thinking_level: Some(thinking_level.to_string()),
         is_streaming: streaming,
         is_compacting: compacting,
+        is_quota_parked: Some(quota_parked),
         is_bash_running: Some(bash_running),
         is_running_tools: streaming && !core.running_tool_calls.is_empty(),
         attached_clients: core.attached_client_ids.len() as u32,
@@ -6911,13 +6915,21 @@ mod tests {
     fn summary_lifecycle_is_message_based() {
         let empty = SessionCore::test_core(None, "/tmp".to_string());
         assert_eq!(
-            session_summary(&empty, "default", None, None, /*bash_running=*/ false).lifecycle,
+            session_summary(
+                &empty, "default", None, None, /*bash_running=*/ false,
+                /*quota_parked=*/ false
+            )
+            .lifecycle,
             "draft"
         );
         let mut subagent = SessionCore::test_core(None, "/tmp".to_string());
         subagent.runtime_kind = "subagent".to_string();
         assert_eq!(
-            session_summary(&subagent, "default", None, None, /*bash_running=*/ false).lifecycle,
+            session_summary(
+                &subagent, "default", None, None, /*bash_running=*/ false,
+                /*quota_parked=*/ false
+            )
+            .lifecycle,
             "live"
         );
         // The busy-flip roster delta fires before the store flushes the
@@ -6930,28 +6942,46 @@ mod tests {
         // set (TS `isStreaming && pendingToolCalls.size > 0`): tools in
         // flight read true only while the turn streams.
         assert!(
-            session_summary(&busy, "default", None, None, /*bash_running=*/ false).is_running_tools
+            session_summary(
+                &busy, "default", None, None, /*bash_running=*/ false,
+                /*quota_parked=*/ false
+            )
+            .is_running_tools
         );
         busy.running_tool_calls.clear();
         assert!(
-            !session_summary(&busy, "default", None, None, /*bash_running=*/ false)
-                .is_running_tools
+            !session_summary(
+                &busy, "default", None, None, /*bash_running=*/ false,
+                /*quota_parked=*/ false
+            )
+            .is_running_tools
         );
         busy.running_tool_calls.insert("call-1".to_string());
         busy.busy = false;
         assert!(
-            !session_summary(&busy, "default", None, None, /*bash_running=*/ false)
-                .is_running_tools
+            !session_summary(
+                &busy, "default", None, None, /*bash_running=*/ false,
+                /*quota_parked=*/ false
+            )
+            .is_running_tools
         );
         // The user bash state rides the summary as its own flag (TS
         // `session.isBashRunning`).
         assert_eq!(
-            session_summary(&busy, "default", None, None, /*bash_running=*/ true).is_bash_running,
+            session_summary(
+                &busy, "default", None, None, /*bash_running=*/ true,
+                /*quota_parked=*/ false
+            )
+            .is_bash_running,
             Some(true)
         );
         busy.busy = true;
         assert_eq!(
-            session_summary(&busy, "default", None, None, /*bash_running=*/ false).lifecycle,
+            session_summary(
+                &busy, "default", None, None, /*bash_running=*/ false,
+                /*quota_parked=*/ false
+            )
+            .lifecycle,
             "live"
         );
         let dir = std::env::temp_dir().join(format!("pa-worker-lc-{}", uuid::Uuid::new_v4()));
@@ -6972,7 +7002,8 @@ mod tests {
                 "default",
                 None,
                 None,
-                /*bash_running=*/ false
+                /*bash_running=*/ false,
+                /*quota_parked=*/ false
             )
             .lifecycle,
             "live"

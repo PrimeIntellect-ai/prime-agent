@@ -142,6 +142,8 @@ pub fn provider_stream_failure_status(message: &AssistantMessage) -> Option<u16>
 /// Deterministic rejections never retry; auth gets one retry before it can be
 /// marked stale. A 404 is the exception: a live model briefly 404s on routing
 /// blips, so it counts as transient unavailability, not a permanent rejection.
+/// Safety filters deterministically reject identical requests, so they never
+/// retry (TS #2472: a content_filter rejection surfaces immediately).
 pub fn is_permanent_provider_failure_kind(
     kind: Option<&str>,
     retries_performed: u32,
@@ -149,7 +151,7 @@ pub fn is_permanent_provider_failure_kind(
 ) -> bool {
     match kind {
         Some("invalid_request") if status == Some(404) => false,
-        Some("invalid_request" | "refusal" | "permission") => true,
+        Some("invalid_request" | "refusal" | "permission" | "safety") => true,
         Some("auth") => retries_performed > 0,
         _ => false,
     }
@@ -432,6 +434,14 @@ mod tests {
             Some("permission"),
             0,
             None
+        ));
+        // TS #2472: safety filters deterministically reject identical
+        // requests, so they never retry.
+        assert!(is_permanent_provider_failure_kind(Some("safety"), 0, None));
+        assert!(is_permanent_provider_failure_kind(
+            Some("safety"),
+            0,
+            Some(400)
         ));
         // Auth retries once before it can be marked stale.
         assert!(!is_permanent_provider_failure_kind(

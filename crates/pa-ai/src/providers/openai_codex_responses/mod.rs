@@ -272,8 +272,8 @@ async fn run_stream(
                         .as_ref()
                         .map(tokio_util::sync::CancellationToken::is_cancelled)
                         .unwrap_or(false);
-                    // Only reset the chain while nothing was streamed yet:
-                    // after the first event the retry would duplicate
+                    // Only reset the chain before visible output starts:
+                    // retrying after content events would duplicate
                     // "start"/content events.
                     if !aborted
                         && !websocket_started
@@ -281,6 +281,11 @@ async fn run_stream(
                         && is_stale_codex_continuation_error(&error)
                     {
                         chain_reset_retried = true;
+                        // A failed attempt may have supplied response
+                        // metadata before rejecting the continuation. Do
+                        // not retain that dead anchor (TS #2374
+                        // `delete output.responseId`).
+                        output.response_id = None;
                         continue;
                     }
                     if aborted || error.is_non_transport_error() {
@@ -373,6 +378,30 @@ async fn run_stream(
     Ok(())
 }
 
+/// Whether one parsed Codex WebSocket event can produce assistant output
+/// consumed by the shared responses processor (TS #2374
+/// `isCodexVisibleResponseEvent`): the terminal families plus the output,
+/// reasoning, content, refusal, and function streams. Lifecycle
+/// (`response.created`/`response.in_progress`), telemetry, and vendor
+/// metadata cannot, so they stay internal and never mark the attempt as
+/// user-visible.
+fn is_codex_visible_response_event(event: &Value) -> bool {
+    let Some(event_type) = event.get("type").and_then(Value::as_str) else {
+        return false;
+    };
+    // `response.done` normalizes to `response.completed` before the TS
+    // classifier sees a mapped event, so the raw-type check here must
+    // accept it too (a terminal-only stream still starts visibly).
+    event_type == "response.completed"
+        || event_type == "response.done"
+        || event_type == "response.incomplete"
+        || event_type.starts_with("response.output_")
+        || event_type.starts_with("response.reasoning_")
+        || event_type.starts_with("response.content_")
+        || event_type.starts_with("response.refusal.")
+        || event_type.starts_with("response.function_")
+}
+
 /// One WebSocket attempt (port of the websocket branch of `streamOpenAICodexResponses`).
 #[allow(clippy::too_many_arguments)]
 async fn run_websocket_attempt(
@@ -444,7 +473,11 @@ async fn run_websocket_attempt(
         while let Some(event) = events.recv().await {
             match event {
                 websocket::WorkerEvent::Event(event) => {
-                    if !start_emitted {
+                    // Codex can emit lifecycle, telemetry, or vendor metadata
+                    // before rejecting a stale continuation. Keep the attempt
+                    // retryable until an event can produce output consumed by
+                    // the shared processor (TS #2374's visible-event gate).
+                    if !start_emitted && is_codex_visible_response_event(&event) {
                         start_emitted = true;
                         *websocket_started = true;
                         writer.push(AssistantMessageEvent::Start {
@@ -1073,5 +1106,472 @@ mod tests {
             "expected no item id on the degenerate replay: {function_call:?}"
         );
         assert_eq!(function_call.get("call_id"), Some(&json!("call_abc")));
+    }
+
+    // --- TS #2374: the stale-chain retry gate arms on real output only ---
+
+    /// Whether an event family can produce assistant output (the TS
+    /// `isCodexVisibleResponseEvent` classifier): the terminal, output,
+    /// reasoning, content, refusal, and function families do; lifecycle,
+    /// telemetry, and vendor metadata do not.
+    #[test]
+    fn codex_visible_event_classifier() {
+        let visible = [
+            "response.completed",
+            "response.done",
+            "response.incomplete",
+            "response.output_item.added",
+            "response.output_text.delta",
+            "response.reasoning_summary_part.added",
+            "response.content_part.added",
+            "response.refusal.delta",
+            "response.function_call_arguments.delta",
+        ];
+        for event_type in visible {
+            let event = json!({ "type": event_type });
+            assert!(
+                is_codex_visible_response_event(&event),
+                "{event_type} must be visible"
+            );
+        }
+        let internal = [
+            "response.created",
+            "response.in_progress",
+            "codex.response.metadata",
+            "responsesapi.websocket_timing",
+            "error",
+        ];
+        for event_type in internal {
+            let event = json!({ "type": event_type });
+            assert!(
+                !is_codex_visible_response_event(&event),
+                "{event_type} must stay internal"
+            );
+        }
+        // A missing type is not output.
+        assert!(!is_codex_visible_response_event(&json!({ "other": 1 })));
+    }
+
+    /// A mock Codex websocket server: one listener serving connections
+    /// sequentially, each connection answering its scripted requests. The
+    /// `response.create` bodies are captured (masked client frames), so
+    /// the tests can assert the continuation anchoring.
+    struct ScriptedCodexServer {
+        port: u16,
+        sent_bodies: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+    }
+
+    fn codex_response_events(response_id: &str, message_id: &str, text: &str) -> Vec<Value> {
+        vec![
+            json!({ "type": "response.created", "response": { "id": response_id } }),
+            json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": { "type": "message", "id": message_id, "role": "assistant", "status": "in_progress", "content": [] },
+            }),
+            json!({
+                "type": "response.content_part.added",
+                "output_index": 0,
+                "content_index": 0,
+                "part": { "type": "output_text", "text": "" },
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": text,
+            }),
+            // No `output_index` on the done item (the recorded-turn shape):
+            // the processor retires the slot keyed by the done event's own
+            // index before reading it back, so a done event carrying one
+            // would skip the item's text-signature capture.
+            json!({
+                "type": "response.output_item.done",
+                "item": { "type": "message", "id": message_id, "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": text }] },
+            }),
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": response_id,
+                    "status": "completed",
+                    "usage": { "input_tokens": 5, "output_tokens": 3, "total_tokens": 8 },
+                },
+            }),
+        ]
+    }
+
+    fn codex_error_events(code: &str, message: &str) -> Vec<Value> {
+        vec![json!({ "type": "error", "code": code, "message": message })]
+    }
+
+    /// Read one masked websocket frame from the client (the request body).
+    async fn read_client_frame(
+        socket: &mut tokio::net::TcpStream,
+    ) -> anyhow::Result<Option<(u8, Vec<u8>)>> {
+        use tokio::io::AsyncReadExt;
+        let mut header = [0u8; 2];
+        match socket.read_exact(&mut header).await {
+            Ok(_) => {}
+            Err(_) => return Ok(None),
+        }
+        let opcode = header[0] & 0x0F;
+        let masked = header[1] & 0x80 != 0;
+        let mut length = (header[1] & 0x7F) as u64;
+        if length == 126 {
+            let mut extended = [0u8; 2];
+            socket.read_exact(&mut extended).await?;
+            length = u16::from_be_bytes(extended) as u64;
+        } else if length == 127 {
+            let mut extended = [0u8; 8];
+            socket.read_exact(&mut extended).await?;
+            length = u64::from_be_bytes(extended);
+        }
+        let mut mask = [0u8; 4];
+        if masked {
+            socket.read_exact(&mut mask).await?;
+        }
+        let mut payload = vec![0u8; length as usize];
+        socket.read_exact(&mut payload).await?;
+        if masked {
+            for (index, byte) in payload.iter_mut().enumerate() {
+                *byte ^= mask[index % 4];
+            }
+        }
+        Ok(Some((opcode, payload)))
+    }
+
+    /// Write one unmasked websocket text frame (server -> client events).
+    async fn write_server_frame(
+        socket: &mut tokio::net::TcpStream,
+        payload: &Value,
+    ) -> anyhow::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let body = serde_json::to_string(payload)?;
+        let mut frame = vec![0x81u8];
+        let length = body.len();
+        if length < 126 {
+            frame.push(length as u8);
+        } else if length < 65_536 {
+            frame.push(126);
+            frame.extend_from_slice(&(length as u16).to_be_bytes());
+        } else {
+            frame.push(127);
+            frame.extend_from_slice(&(length as u64).to_be_bytes());
+        }
+        frame.extend_from_slice(body.as_bytes());
+        socket.write_all(&frame).await?;
+        Ok(())
+    }
+
+    /// Spawn the scripted server: `scripts[connection][request]` is the
+    /// event list the server answers that request with. A connection whose
+    /// scripts are exhausted is held until the client closes it.
+    async fn spawn_scripted_codex_server(scripts: Vec<Vec<Vec<Value>>>) -> ScriptedCodexServer {
+        use base64::Engine as _;
+        use sha1::Digest as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock bind");
+        let port = listener.local_addr().unwrap().port();
+        let sent_bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sent_bodies_handle = std::sync::Arc::clone(&sent_bodies);
+        tokio::spawn(async move {
+            let serve = async move {
+                for connection_scripts in scripts {
+                    let (mut socket, _) = listener.accept().await.expect("mock accept");
+                    let mut head = Vec::new();
+                    let mut byte = [0u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        use tokio::io::AsyncReadExt;
+                        socket.read_exact(&mut byte).await.expect("mock head");
+                        head.push(byte[0]);
+                    }
+                    let head_text = String::from_utf8_lossy(&head).to_string();
+                    let key = head_text
+                        .lines()
+                        .find_map(|line| {
+                            line.split_once(": ")
+                                .filter(|(name, _)| name.eq_ignore_ascii_case("sec-websocket-key"))
+                                .map(|(_, value)| value.trim().to_string())
+                        })
+                        .expect("upgrade key");
+                    let accept =
+                        base64::engine::general_purpose::STANDARD.encode(sha1::Sha1::digest(
+                            format!("{key}{}", "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").as_bytes(),
+                        ));
+                    use tokio::io::AsyncWriteExt;
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\n\r\n"
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .expect("mock write");
+                    let mut request_number = 0usize;
+                    loop {
+                        // One frame per iteration: requests answer their
+                        // script in order; a close frame ends the connection
+                        // (answered, so the client's close handshake
+                        // completes) and anything after the scripted
+                        // requests holds without a response.
+                        let Some((opcode, payload)) = read_client_frame(&mut socket).await? else {
+                            break;
+                        };
+                        if opcode == 8 {
+                            socket.write_all(&[0x88, 0x02, 0x03, 0xE8]).await?;
+                            break;
+                        }
+                        request_number += 1;
+                        let body: Value = serde_json::from_slice(&payload).expect("request json");
+                        sent_bodies_handle.lock().expect("bodies").push(body);
+                        if let Some(script) = connection_scripts.get(request_number - 1) {
+                            for event in script {
+                                write_server_frame(&mut socket, event).await?;
+                            }
+                            // A script that ends in an error closes the
+                            // connection (the real server ends the request
+                            // with the error; the client's read loop needs
+                            // the close to finish its terminal bookkeeping).
+                            let ends_in_error = script
+                                .last()
+                                .and_then(|event| event.get("type"))
+                                .and_then(Value::as_str)
+                                == Some("error");
+                            if ends_in_error {
+                                socket.write_all(&[0x88, 0x02, 0x03, 0xE8]).await?;
+                            }
+                        }
+                    }
+                }
+                Ok::<(), anyhow::Error>(())
+            };
+            let _ = serve.await;
+        });
+        ScriptedCodexServer { port, sent_bodies }
+    }
+
+    fn mock_codex_token() -> String {
+        use base64::Engine as _;
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(json!({ "alg": "RS256", "typ": "JWT" }).to_string());
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            json!({ "https://api.openai.com/auth": { "chatgpt_account_id": "acct_mock" } })
+                .to_string(),
+        );
+        format!("{header}.{payload}.sig")
+    }
+
+    fn codex_test_options(
+        _server: &ScriptedCodexServer,
+        session_id: &str,
+    ) -> OpenAICodexResponsesOptions {
+        OpenAICodexResponsesOptions {
+            base: StreamOptions {
+                api_key: Some(mock_codex_token()),
+                transport: Some(Transport::WebsocketCached),
+                session_id: Some(session_id.to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn codex_test_model(port: u16) -> Model {
+        Model {
+            base_url: format!("http://127.0.0.1:{port}"),
+            ..codex_wire_model()
+        }
+    }
+
+    fn codex_test_context(text: &str) -> Context {
+        Context {
+            system_prompt: Some("You are a helpful assistant.".to_string()),
+            messages: vec![crate::types::Message::User(crate::types::UserMessage {
+                content: crate::types::UserMessageContent::Text(text.to_string()),
+                timestamp: 1,
+                rest: Default::default(),
+            })],
+            tools: None,
+        }
+    }
+
+    /// The follow-up turn's context: the full conversation (the first
+    /// user row, the first assistant row, then the new user row), like
+    /// the TS fixture (`[...firstContext.messages, first, { user }]`).
+    fn codex_followup_context(first: &AssistantMessage, text: &str) -> Context {
+        Context {
+            system_prompt: Some("You are a helpful assistant.".to_string()),
+            messages: vec![
+                crate::types::Message::User(crate::types::UserMessage {
+                    content: crate::types::UserMessageContent::Text("Say hello".to_string()),
+                    timestamp: 1,
+                    rest: Default::default(),
+                }),
+                crate::types::Message::Assistant(first.clone()),
+                crate::types::Message::User(crate::types::UserMessage {
+                    content: crate::types::UserMessageContent::Text(text.to_string()),
+                    timestamp: 2,
+                    rest: Default::default(),
+                }),
+            ],
+            tools: None,
+        }
+    }
+
+    /// The first text block of a streamed assistant message.
+    fn codex_message_text(message: &AssistantMessage) -> Option<String> {
+        message.content.iter().find_map(|content| match content {
+            crate::types::AssistantContent::Text(text) => Some(text.text.clone()),
+            _ => None,
+        })
+    }
+
+    /// TS #2374 regression: lifecycle and vendor metadata events before a
+    /// stale `previous_response_id` rejection keep the attempt retryable —
+    /// the provider retries once on a fresh socket with the full request
+    /// body (no `previous_response_id`), the consumer sees exactly one
+    /// `start`, and the recovered response id lands.
+    #[tokio::test]
+    async fn recovers_stale_chain_after_metadata_events() {
+        let server = spawn_scripted_codex_server(vec![
+            // Connection 1: request 1 completes (the cached chain anchor),
+            // request 2 rejects the stale continuation after lifecycle and
+            // vendor metadata events.
+            vec![
+                codex_response_events("resp_1", "msg_1", "Hello"),
+                vec![
+                    json!({ "type": "response.created", "response": { "id": "resp_stale" } }),
+                    json!({ "type": "response.in_progress", "response": { "id": "resp_stale" } }),
+                    json!({ "type": "codex.response.metadata", "headers": {} }),
+                    json!({ "type": "responsesapi.websocket_timing", "elapsed_ms": 1 }),
+                    // The pre-fix gate died here: metadata armed the
+                    // start flag, the stale rejection surfaced.
+                    codex_error_events(
+                        "previous_response_not_found",
+                        "Previous response with id 'resp_1' not found.",
+                    )
+                    .remove(0),
+                ],
+            ],
+            // Connection 2: the chain-reset retry on a fresh socket.
+            vec![codex_response_events("resp_2", "msg_2", "Done")],
+        ])
+        .await;
+        let model = codex_test_model(server.port);
+        let session_id = format!("session-chain-reset-metadata-{}", std::process::id());
+        let options = codex_test_options(&server, &session_id);
+        let first =
+            stream_openai_codex_responses(&model, &codex_test_context("Say hello"), Some(&options))
+                .result()
+                .await;
+        assert_eq!(
+            codex_message_text(&first).as_deref(),
+            Some("Hello"),
+            "the first turn completes and anchors the chain"
+        );
+        assert_eq!(first.response_id.as_deref(), Some("resp_1"));
+        let second_stream = stream_openai_codex_responses(
+            &model,
+            &codex_followup_context(&first, "Now finish"),
+            Some(&options),
+        );
+        let events = second_stream.collect().await;
+        let second = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                AssistantMessageEvent::Done { message, .. } => Some(message.clone()),
+                AssistantMessageEvent::Error { error, .. } => Some(error.clone()),
+                _ => None,
+            })
+            .expect("terminal event");
+        assert_eq!(second.stop_reason, StopReason::Stop);
+        assert_eq!(codex_message_text(&second).as_deref(), Some("Done"));
+        assert_eq!(second.response_id.as_deref(), Some("resp_2"));
+        // Exactly one start on the recovered attempt, and a final done.
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, AssistantMessageEvent::Start { .. }))
+                .count(),
+            1
+        );
+        assert!(matches!(
+            events.last(),
+            Some(AssistantMessageEvent::Done { .. })
+        ));
+
+        let bodies = server.sent_bodies.lock().expect("bodies").clone();
+        assert_eq!(bodies.len(), 3, "two requests + one retry: {bodies:?}");
+        assert_eq!(
+            bodies[1].get("previous_response_id"),
+            Some(&json!("resp_1"))
+        );
+        assert!(
+            bodies[2].get("previous_response_id").is_none(),
+            "the retry sends the full context without the dead anchor: {bodies:?}"
+        );
+        // The metadata-supplied stale response id must not survive into
+        // the surfaced message.
+        assert_eq!(second.response_id.as_deref(), Some("resp_2"));
+    }
+
+    /// The second half of the TS #2374 fix: when the chain-reset retry also
+    /// fails, the surfaced error carries no dead continuation anchor (the
+    /// stale attempt's `response.created` id was cleared before retrying).
+    #[tokio::test]
+    async fn retry_failure_surfaces_no_stale_response_id() {
+        let server = spawn_scripted_codex_server(vec![
+            vec![
+                codex_response_events("resp_1", "msg_1", "Hello"),
+                vec![
+                    json!({ "type": "response.created", "response": { "id": "resp_stale" } }),
+                    codex_error_events(
+                        "previous_response_not_found",
+                        "Previous response with id 'resp_1' not found.",
+                    )
+                    .remove(0),
+                ],
+            ],
+            vec![codex_error_events(
+                "previous_response_not_found",
+                "Previous response with id 'resp_9' not found.",
+            )],
+        ])
+        .await;
+        let model = codex_test_model(server.port);
+        let session_id = format!("session-chain-reset-retry-fail-{}", std::process::id());
+        let options = codex_test_options(&server, &session_id);
+        let first =
+            stream_openai_codex_responses(&model, &codex_test_context("Say hello"), Some(&options))
+                .result()
+                .await;
+        assert_eq!(first.stop_reason, StopReason::Stop);
+
+        let second = stream_openai_codex_responses(
+            &model,
+            &codex_followup_context(&first, "Now finish"),
+            Some(&options),
+        )
+        .result()
+        .await;
+        assert_eq!(second.stop_reason, StopReason::Error);
+        assert_eq!(
+            second.error_message.as_deref(),
+            Some("Codex error: Previous response with id 'resp_9' not found.")
+        );
+        // The pre-fix bug kept the stale attempt's response id.
+        assert!(
+            second.response_id.is_none(),
+            "the dead continuation anchor must not survive the surfaced error"
+        );
+        let bodies = server.sent_bodies.lock().expect("bodies").clone();
+        assert_eq!(bodies.len(), 3, "two requests + one retry: {bodies:?}");
+        assert!(
+            bodies[2].get("previous_response_id").is_none(),
+            "the retry sends the full context: {bodies:?}"
+        );
     }
 }

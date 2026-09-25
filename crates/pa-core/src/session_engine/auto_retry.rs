@@ -18,6 +18,7 @@ use std::future::Future;
 use pa_agent::abort::AbortSignal;
 use pa_agent::types::{AssistantMessage, StopReason};
 
+use super::provider_park::{is_quota_block_failure, ParkDecisionCallback};
 use super::provider_retry::{
     is_agent_lifecycle_failure, is_context_overflow_failure, is_faux_provider_queue_exhausted,
     is_permanent_provider_failure_kind, is_unsupported_tool_failure, jittered_delay_ms,
@@ -68,6 +69,13 @@ pub enum AutoRetryEvent {
 /// happen; `wait` sleeps one delay (returning `false` aborts the loop, like
 /// the TS abort controller). Returns the final assistant message — error or
 /// not — so the caller renders it like every other outcome.
+///
+/// `park` is the quota-park seam (TS #2375): consulted when a
+/// server-requested wait exceeds the policy cap (this port's
+/// `reset-too-far`). A `Some` outcome parks the session — the chain
+/// surfaces the parked status as the final `auto_retry_end` instead of
+/// the give-up — and `None` keeps the immediate give-up.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_turn_with_auto_retry<A, AF, E, EF, W, WF>(
     policy: &ProviderRetryPolicy,
     context_window: u64,
@@ -75,6 +83,7 @@ pub async fn run_turn_with_auto_retry<A, AF, E, EF, W, WF>(
     mut attempt: A,
     mut emit: E,
     mut wait: W,
+    mut park: Option<ParkDecisionCallback<'_>>,
 ) -> anyhow::Result<AssistantMessage>
 where
     A: FnMut() -> AF,
@@ -156,16 +165,39 @@ where
                 jittered_delay_ms(delay_ms, retry_jitter_rand01())
             }
             ProviderRetryDelay::ExceedsCap { retry_after_ms } => {
+                // The give-up sentence of this arm is the park's abort
+                // message (the TS wait loop's `reset-too-far` analogue).
+                let abort = format!(
+                    "Provider requested a {}s wait before retrying (above retry.provider.maxRetryDelayMs={}ms)",
+                    retry_after_ms.div_ceil(1000),
+                    policy.max_retry_delay_ms,
+                );
+                // The park seam is a quota-failure seam (TS parks only
+                // from the wait path's `usage` arm): other
+                // server-requested waits keep the give-up.
+                let parked = if is_quota_block_failure(&message) {
+                    match park.as_deref_mut() {
+                        Some(park) => park(message.clone(), &abort).await,
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                let final_error = match parked {
+                    // The turn settles as the park's pause, not its death:
+                    // the parked status replaces the give-up (TS
+                    // `_finishQuotaParkedTurn`'s `finalError`).
+                    Some(outcome) => outcome.status_message,
+                    None => format!(
+                        "{abort}: {}",
+                        message.error_message.as_deref().unwrap_or("unknown error"),
+                    ),
+                };
                 emit(AutoRetryEvent::End {
                     success: false,
                     attempt: retries_performed - 1,
                     restored_model: None,
-                    final_error: Some(format!(
-                        "Provider requested a {}s wait before retrying (above retry.provider.maxRetryDelayMs={}ms): {}",
-                        retry_after_ms.div_ceil(1000),
-                        policy.max_retry_delay_ms,
-                        message.error_message.as_deref().unwrap_or("unknown error"),
-                    )),
+                    final_error: Some(final_error),
                 })
                 .await?;
                 return Ok(message);
@@ -279,6 +311,150 @@ mod tests {
         }
     }
 
+    /// A rate_limit failure whose server-requested wait exceeds the cap
+    /// parks the session when the park seam reports a park: the give-up
+    /// status becomes the parked sentence (TS #2375).
+    #[tokio::test]
+    async fn quota_reset_beyond_cap_parks_through_the_seam() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let parked_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let events_for_emit = Arc::clone(&events);
+        let parked_calls_for_seam = Arc::clone(&parked_calls);
+        let mut seam = move |message: AssistantMessage, abort: &str| {
+            let parked_calls = Arc::clone(&parked_calls_for_seam);
+            let abort = abort.to_string();
+            Box::pin(async move {
+                parked_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                // The seam sees the failed message and the give-up
+                // sentence; the park answers with the parked status.
+                assert_eq!(message.stop_reason, StopReason::Error);
+                assert!(abort.contains("Provider requested a 4363s wait"));
+                Some(
+                    crate::session_engine::provider_park::ProviderParkOutcome {
+                        status_message: format!(
+                            "{abort}. Session parked until 2026-09-24T00:00:00.000Z and will resume automatically: {}",
+                            message.error_message.as_deref().unwrap_or("unknown error"),
+                        ),
+                    },
+                )
+            }) as crate::session_engine::provider_park::ParkFuture
+        };
+        let message = run_turn_with_auto_retry(
+            &fast_policy(),
+            0,
+            None,
+            || async { Ok(error_message(Some("rate_limit"), None, Some(4_363_000))) },
+            move |event| {
+                let events = Arc::clone(&events_for_emit);
+                async move {
+                    events.lock().unwrap().push(event);
+                    Ok(())
+                }
+            },
+            |_| async { true },
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.stop_reason, StopReason::Error);
+        assert_eq!(
+            parked_calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the park seam runs exactly once at the give-up"
+        );
+        let events = events.lock().unwrap().clone();
+        // One parked end, no retry starts.
+        assert_eq!(events.len(), 1, "one parked end: {events:?}");
+        let final_error = match events.as_slice() {
+            [AutoRetryEvent::End {
+                success: false,
+                final_error: Some(final_error),
+                ..
+            }] => final_error.clone(),
+            other => panic!("expected one parked end, got {other:?}"),
+        };
+        assert!(final_error.contains("Session parked until 2026-09-24T00:00:00.000Z"));
+    }
+
+    /// A park seam that declines keeps the give-up: the surfaced status
+    /// stays the plain exceeds-cap sentence.
+    #[tokio::test]
+    async fn quota_reset_beyond_cap_keeps_the_give_up_when_the_seam_declines() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_emit = Arc::clone(&events);
+        let mut seam = move |_message: AssistantMessage, _abort: &str| {
+            Box::pin(async move { None }) as crate::session_engine::provider_park::ParkFuture
+        };
+        let message = run_turn_with_auto_retry(
+            &fast_policy(),
+            0,
+            None,
+            || async { Ok(error_message(Some("rate_limit"), None, Some(4_363_000))) },
+            move |event| {
+                let events = Arc::clone(&events_for_emit);
+                async move {
+                    events.lock().unwrap().push(event);
+                    Ok(())
+                }
+            },
+            |_| async { true },
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.stop_reason, StopReason::Error);
+        let events = events.lock().unwrap().clone();
+        let final_error = match events.as_slice() {
+            [AutoRetryEvent::End {
+                success: false,
+                final_error: Some(final_error),
+                ..
+            }] => final_error.clone(),
+            other => panic!("expected one give-up end, got {other:?}"),
+        };
+        assert!(final_error.contains("Provider requested a 4363s wait before retrying"));
+        assert!(!final_error.contains("Session parked"));
+    }
+
+    /// The park seam is only consulted for quota failures: a
+    /// server-requested wait on a non-quota failure keeps the give-up
+    /// even when a park is armed (TS parks only from the usage path).
+    #[tokio::test]
+    async fn non_quota_exceeds_cap_never_consults_the_park_seam() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_emit = Arc::clone(&events);
+        let seam_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let seam_ran_for_seam = Arc::clone(&seam_ran);
+        let mut seam = move |_message: AssistantMessage, _abort: &str| {
+            let seam_ran = Arc::clone(&seam_ran_for_seam);
+            Box::pin(async move {
+                seam_ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                None
+            }) as crate::session_engine::provider_park::ParkFuture
+        };
+        let _ = run_turn_with_auto_retry(
+            &fast_policy(),
+            0,
+            None,
+            || async { Ok(error_message(Some("server_error"), None, Some(4_363_000))) },
+            move |event| {
+                let events = Arc::clone(&events_for_emit);
+                async move {
+                    events.lock().unwrap().push(event);
+                    Ok(())
+                }
+            },
+            |_| async { true },
+            Some(&mut seam),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !seam_ran.load(std::sync::atomic::Ordering::SeqCst),
+            "the park seam must not run for a non-quota failure"
+        );
+    }
+
     #[tokio::test]
     async fn transient_failure_is_retried_until_success_with_events() {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -307,6 +483,7 @@ mod tests {
                 }
             },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
@@ -381,6 +558,7 @@ mod tests {
                 }
             },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
@@ -424,6 +602,7 @@ mod tests {
                 }
             },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
@@ -432,6 +611,46 @@ mod tests {
         // No retry happened, so no events: the caller renders the failed
         // assistant message itself (TS only emits retry events once a retry
         // was actually attempted).
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    /// TS #2472: a safety-filter failure (e.g. a content_filter
+    /// rejection) is a deterministic rejection — one attempt, no retry
+    /// loop, no retry events.
+    #[tokio::test]
+    async fn safety_failures_are_permanent_and_never_retry() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let events_for_emit = Arc::clone(&events);
+        let message = run_turn_with_auto_retry(
+            &fast_policy(),
+            0,
+            None,
+            || {
+                let attempts = Arc::clone(&attempts);
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(error_message(Some("safety"), Some(400), None))
+                }
+            },
+            move |event| {
+                let events = Arc::clone(&events_for_emit);
+                async move {
+                    events.lock().unwrap().push(event);
+                    Ok(())
+                }
+            },
+            |_| async { true },
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            attempts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a safety rejection must not retry"
+        );
+        assert_eq!(message.stop_reason, StopReason::Error);
         assert!(events.lock().unwrap().is_empty());
     }
 
@@ -466,6 +685,7 @@ mod tests {
                 }
             },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
@@ -495,6 +715,7 @@ mod tests {
                 }
             },
             |_| async { false },
+            None,
         )
         .await
         .unwrap();
@@ -523,6 +744,7 @@ mod tests {
             || async { Ok(error_message(Some("server_error"), None, None)) },
             |_| async { Ok(()) },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
@@ -553,6 +775,7 @@ mod tests {
                 }
             },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
@@ -603,6 +826,7 @@ mod tests {
                 }
             },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
@@ -620,6 +844,7 @@ mod tests {
             || async { Err(anyhow::anyhow!("turn crashed")) },
             |_| async { Ok(()) },
             |_| async { true },
+            None,
         )
         .await
         .unwrap_err();
@@ -656,6 +881,7 @@ mod tests {
                 }
             },
             |_| async { true },
+            None,
         )
         .await
         .unwrap();
