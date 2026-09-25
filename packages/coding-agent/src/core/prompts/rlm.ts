@@ -163,7 +163,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 			"",
 			"An `rlm` object is already in your global namespace. `await rlm.spawn('sub-task', name='api-reviewer')` spawns a child and returns immediately after task admission with `rlm_child_id`, `name`, `session_dir`, and `model`; it never waits for or returns the child's answer.",
 			"`name` is required: choose a stable child name that is unique among siblings.",
-			"A child inherits your model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector. An unavailable requested model fails spawn; decide whether to retry or omit `model`. Children also inherit your thinking level; the `thinking` option overrides it with any level the resolved child model supports, and an unsupported level fails spawn.",
+			"A child inherits your model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector. An unavailable requested model fails spawn; decide whether to retry or omit `model`. Children also inherit your thinking level; the `thinking` option overrides it with any level the resolved child model supports, and an unsupported level fails spawn. Pass `cwd='/path'` (absolute, or relative to your working directory) to start the child in another existing directory; by default a child inherits your working directory.",
 		);
 		parts.push(
 			hasAgentObserve

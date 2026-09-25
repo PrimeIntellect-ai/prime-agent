@@ -127,6 +127,7 @@ describe("daemon mode helpers", () => {
 					prompt: "complete and persist",
 					sessionName: "real-worker",
 					sessionDir: join(parentManager.getSessionArtifactDir()!, id),
+					cwd: tempDir,
 					model: { provider: "test", id: "model" } as Model<Api>,
 					thinkingLevel: "off" as const,
 					serviceTier: null,

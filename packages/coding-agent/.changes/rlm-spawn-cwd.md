@@ -1,0 +1,1 @@
+- Added an optional `cwd` keyword argument to `rlm.spawn` so a child session can start in a different existing directory (relative paths resolve against the parent's working directory); `rlm.create_session` now also rejects a `cwd` that is not a directory.

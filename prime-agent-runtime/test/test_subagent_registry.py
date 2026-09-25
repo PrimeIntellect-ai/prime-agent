@@ -77,6 +77,7 @@ class RlmSubagentRegistryTest(unittest.TestCase):
                     "check the API",
                     name="api-reviewer",
                     model="deepseek/deepseek-v4-flash",
+                    cwd="/tmp/project",
                 )
             )
 
@@ -87,6 +88,7 @@ class RlmSubagentRegistryTest(unittest.TestCase):
                 "kwargs": {
                     "name": "api-reviewer",
                     "model": "deepseek/deepseek-v4-flash",
+                    "cwd": "/tmp/project",
                 },
             },
         )

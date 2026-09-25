@@ -2940,7 +2940,7 @@ export class AgentDaemon {
 		parentState: ActiveSessionState,
 		options: CreateRlmSubagentRuntimeOptions,
 	): Promise<AgentSessionRuntime> {
-		const sessionManager = SessionManager.create(options.parentSession.sessionManager.getCwd(), options.sessionDir);
+		const sessionManager = SessionManager.create(options.cwd, options.sessionDir);
 		sessionManager.newSession({
 			parentSession: options.parentSession.sessionFile,
 			rlmDepth: options.rlmDepth,

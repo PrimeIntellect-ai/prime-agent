@@ -114,7 +114,7 @@ The runtime ships the call to the host as a `host_request` event and keeps its e
 
 ```python
 rlm
-spawn(prompt: str, *, name: str, model: str | None = None, thinking: str | None = None)
+spawn(prompt: str, *, name: str, model: str | None = None, thinking: str | None = None, cwd: str | None = None)
 find_models(query: str = "", limit: int = 8)
 list_subagents()
 delete_subagent(selector)
@@ -130,8 +130,9 @@ The kernel bootstrap places the `rlm` object in the user namespace, so a cell ca
 
 `name` is required. The other `rlm.spawn` options are:
 
-- `model`: an exact `provider/model` selector from `rlm.find_models()`; and
-- `thinking`: an explicit child reasoning level; must be valid for the resolved child model, defaults to the parent level (clamped to the child model).
+- `model`: an exact `provider/model` selector from `rlm.find_models()`;
+- `thinking`: an explicit child reasoning level; must be valid for the resolved child model, defaults to the parent level (clamped to the child model); and
+- `cwd`: the child working directory, absolute or relative to the parent cwd; must be an existing directory, defaults to the parent cwd.
 
 Unknown options fail instead of being ignored. Model search is bounded to active, non-expired credentials. If an exact selection is unavailable or fails auth preflight, spawn fails instead of silently falling back to another model. A child otherwise inherits the parent model.
 
