@@ -539,7 +539,7 @@ mod tests {
             .queue(
                 TOKEN_URL,
                 vec![
-                    ScriptedHttp::entry(200, r#"{"error":"authorization_pending"}"#),
+                    ScriptedHttp::entry(400, r#"{"error":"authorization_pending"}"#),
                     ScriptedHttp::entry(
                         200,
                         r#"{"access_token":"grok-access","refresh_token":"grok-refresh","expires_in":3600}"#,
@@ -589,8 +589,8 @@ mod tests {
             .queue(
                 TOKEN_URL,
                 vec![
-                    ScriptedHttp::entry(200, r#"{"error":"authorization_pending"}"#),
-                    ScriptedHttp::entry(200, r#"{"error":"slow_down","interval":0}"#),
+                    ScriptedHttp::entry(400, r#"{"error":"authorization_pending"}"#),
+                    ScriptedHttp::entry(400, r#"{"error":"slow_down","interval":0}"#),
                     ScriptedHttp::entry(
                         200,
                         r#"{"access_token":"grok-access","refresh_token":"grok-refresh"}"#,
@@ -614,7 +614,7 @@ mod tests {
             .queue(DEVICE_CODE_URL, vec![device_response("")])
             .queue(
                 TOKEN_URL,
-                vec![ScriptedHttp::entry(200, r#"{"error":"access_denied"}"#)],
+                vec![ScriptedHttp::entry(400, r#"{"error":"access_denied"}"#)],
             );
         let ui = ScriptedUi::new();
         let error = login_xai(&http, &ui).await.unwrap_err();
@@ -627,7 +627,7 @@ mod tests {
             .queue(DEVICE_CODE_URL, vec![device_response("")])
             .queue(
                 TOKEN_URL,
-                vec![ScriptedHttp::entry(200, r#"{"error":"expired_token"}"#)],
+                vec![ScriptedHttp::entry(400, r#"{"error":"expired_token"}"#)],
             );
         let ui = ScriptedUi::new();
         let error = login_xai(&http, &ui).await.unwrap_err();
@@ -713,7 +713,7 @@ mod tests {
             .queue(
                 TOKEN_URL,
                 vec![ScriptedHttp::entry(
-                    200,
+                    400,
                     r#"{"error":"authorization_pending"}"#,
                 )],
             );
@@ -762,7 +762,7 @@ mod tests {
             .queue(
                 TOKEN_URL,
                 vec![ScriptedHttp::entry(
-                    200,
+                    400,
                     r#"{"error":"authorization_pending"}"#,
                 )],
             );

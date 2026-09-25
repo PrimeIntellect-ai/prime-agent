@@ -724,7 +724,7 @@ mod tests {
                 "https://api.github.com/copilot_internal/v2/token",
                 ScriptedHttp::entry(
                     200,
-                    r#"{"token":"copilot-token","expires_at":4_000_000_000}"#,
+                    r#"{"token":"copilot-token","expires_at":4000000000}"#,
                 ),
             )
             .catch_all(ScriptedHttp::entry(200, "{}"))
@@ -817,7 +817,7 @@ mod tests {
             )
             .fixed(
                 "https://api.company.ghe.com/copilot_internal/v2/token",
-                ScriptedHttp::entry(200, r#"{"token":"copilot-e","expires_at":4_000_000_000}"#),
+                ScriptedHttp::entry(200, r#"{"token":"copilot-e","expires_at":4000000000}"#),
             )
             .catch_all(ScriptedHttp::entry(200, "{}"));
         let ui = ScriptedUi::new(ScriptedAnswer::value("company.ghe.com"));
@@ -956,7 +956,7 @@ mod tests {
             "https://api.github.com/copilot_internal/v2/token",
             ScriptedHttp::entry(
                 200,
-                r#"{"token":"copilot-fresh","expires_at":4_000_000_000}"#,
+                r#"{"token":"copilot-fresh","expires_at":4000000000}"#,
             ),
         );
         let credentials = refresh_github_copilot_token(&http, "gh-old", None)

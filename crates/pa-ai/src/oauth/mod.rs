@@ -25,20 +25,18 @@ mod types;
 mod xai;
 
 pub use anthropic::{
-    login_anthropic, refresh_anthropic_token, AnthropicCredentials, ANTHROPIC_CLIENT_ID,
+    login_anthropic, refresh_anthropic_token, AnthropicCredentials,
     LOGIN_CANCELLED as ANTHROPIC_LOGIN_CANCELLED,
 };
 pub use callback::CodexCallbackServer;
 pub use github_copilot::{
-    get_github_copilot_base_url, login_github_copilot, normalize_domain,
-    refresh_github_copilot_token, CopilotCredentials, COPILOT_CLIENT_HEADERS,
-    COPILOT_CLIENT_USER_AGENT, LOGIN_CANCELLED as COPILOT_LOGIN_CANCELLED,
+    get_github_copilot_base_url, login_github_copilot, refresh_github_copilot_token,
+    CopilotCredentials, LOGIN_CANCELLED as COPILOT_LOGIN_CANCELLED,
 };
 pub use openai_codex::{
     login_openai_codex, refresh_openai_codex_token, CodexLoginUi, OAuthCredentials,
     DEFAULT_ORIGINATOR, LOGIN_CANCELLED,
 };
-pub use pkce::generate_pkce;
 pub use provider_http::{
     ProviderHttp, ProviderHttpMethod, ProviderHttpRequest, ProviderHttpResponse,
     ReqwestProviderHttp,

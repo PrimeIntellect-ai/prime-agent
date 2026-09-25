@@ -17,17 +17,6 @@ pub struct OAuthPrompt {
     pub allow_empty: bool,
 }
 
-impl OAuthPrompt {
-    /// A required-line prompt (TS's common case: the paste fallbacks).
-    pub fn required(message: &str) -> Self {
-        OAuthPrompt {
-            message: message.to_string(),
-            placeholder: None,
-            allow_empty: false,
-        }
-    }
-}
-
 /// The interactive surface one login drives (TS
 /// `OAuthLoginCallbacks`): the browser URL block, the prompts, the
 /// progress lines, and the manual paste racing a local callback

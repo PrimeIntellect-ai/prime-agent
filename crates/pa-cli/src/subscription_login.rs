@@ -402,7 +402,7 @@ mod tests {
                 "https://api.github.com/copilot_internal/v2/token",
                 vec![ScriptedHttp::entry(
                     200,
-                    r#"{"token":"copilot-token","expires_at":4_000_000_000}"#,
+                    r#"{"token":"copilot-token","expires_at":4000000000}"#,
                 )],
             )
     }
