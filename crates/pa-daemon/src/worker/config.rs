@@ -4,7 +4,7 @@ use super::*;
 
 use std::path::PathBuf;
 
-use anyhow::{anyhow, Result, Context};
+use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 
 use crate::paths;

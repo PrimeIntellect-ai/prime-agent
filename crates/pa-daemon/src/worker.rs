@@ -10,15 +10,15 @@ mod config;
 mod env;
 mod session_core;
 
+pub(crate) use config::WorkerConfig;
+use env::KillCloseReason;
 pub use env::{
     WORKER_ACTIVE_SESSION_ID_ENV, WORKER_CWD_ENV, WORKER_INSTANCE_ID_ENV,
     WORKER_RECOVERY_JOURNAL_ENV, WORKER_ROLE_ENV, WORKER_SCRIPT_ENV, WORKER_SOCKET_ENV,
-    WORKER_SUPERVISOR_LOST_EXIT_MS_ENV, WORKER_SUPERVISOR_SOCKET_ENV, WORKER_TELEMETRY_DISABLED_ENV,
-    WORKER_TOKEN_ENV,
+    WORKER_SUPERVISOR_LOST_EXIT_MS_ENV, WORKER_SUPERVISOR_SOCKET_ENV,
+    WORKER_TELEMETRY_DISABLED_ENV, WORKER_TOKEN_ENV,
 };
-pub(crate) use config::WorkerConfig;
 pub(crate) use session_core::SessionCore;
-use env::KillCloseReason;
 
 use std::collections::VecDeque;
 use std::path::PathBuf;

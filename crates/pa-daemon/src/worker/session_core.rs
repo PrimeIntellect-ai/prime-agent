@@ -24,7 +24,7 @@ pub(crate) struct SessionCore {
     pub(crate) follow_up: VecDeque<QueuedItem>,
     pub(crate) busy: bool,
     pub(crate) created: bool,
-    attached_client_ids: Vec<String>,
+    pub(crate) attached_client_ids: Vec<String>,
     pub(crate) abort_requested: bool,
     /// A flow that detaches from the interrupted turn's events (TS
     /// `compact()`'s `_disconnectFromAgent()` before `abort()` — and the
@@ -46,17 +46,17 @@ pub(crate) struct SessionCore {
     pub(crate) auto_compaction_enabled: bool,
     /// The last broadcast queue snapshot (TS `_lastSessionActionSnapshot`):
     /// `session_action_update` fires only when the projection changed.
-    last_action_snapshot: Option<SessionActionSnapshot>,
+    pub(crate) last_action_snapshot: Option<SessionActionSnapshot>,
     /// This session's RLM recursion depth (children run at depth + 1).
-    rlm_depth: u32,
+    pub(crate) rlm_depth: u32,
     /// `top-level` | `subagent` (summary `runtimeKind`).
     pub(crate) runtime_kind: String,
     /// The subagent runtime identity (create `runtimeMetadata`): the child
     /// id under its parent and the parent's live/persisted ids, carried on
     /// every summary so the roster keys children `parentPath#childId`.
     pub(crate) rlm_child_id: Option<String>,
-    parent_active_session_id: Option<String>,
-    parent_session_id: Option<String>,
+    pub(crate) parent_active_session_id: Option<String>,
+    pub(crate) parent_session_id: Option<String>,
     /// The create command's harness `childScript` (the TS child runtime
     /// inherits the parent's `sessionConfig`; the Rust replacement keeps
     /// the seam across the runtime swap so a replacement session's
