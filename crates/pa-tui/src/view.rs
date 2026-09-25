@@ -1494,7 +1494,7 @@ impl AgentView {
             Some(dock)
         } else if let Some(picker) = &self.effort_picker {
             let mut dock = prompt_context;
-            dock.extend(picker.render(&self.theme, width));
+            dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
             Some(dock)
         } else if let Some(mcp_view) = self.mcp_view.as_mut() {
             let mut dock = prompt_context;
@@ -1543,11 +1543,11 @@ impl AgentView {
             if let Some(selector) = self.tree_selector.as_ref() {
                 dock.extend(selector.render(&self.theme, width));
             } else if let Some(selector) = self.fork_selector.as_ref() {
-                dock.extend(selector.render(&self.theme, width));
+                dock.extend(selector.render(&self.theme, width, self.editor.keybindings()));
             } else if let Some(loader) = self.share_loader.as_ref() {
                 dock.extend(self.render_share_loader(loader, width));
             } else if let Some(confirm) = self.confirm.as_ref() {
-                dock.extend(confirm.render(&self.theme, width));
+                dock.extend(confirm.render(&self.theme, width, self.editor.keybindings()));
             } else if let Some(selector) = self.provider_auth.as_mut() {
                 dock.extend(selector.render(&self.theme, width));
             } else if let Some(panel) = self.auth_panel.as_mut() {
@@ -1555,7 +1555,7 @@ impl AgentView {
             } else if let Some(message) = self.reload_box.as_ref() {
                 dock.extend(self.render_reload_box(message, width));
             } else if let Some(menu) = self.settings_menu.as_ref() {
-                dock.extend(menu.render(&self.theme, width));
+                dock.extend(menu.render(&self.theme, width, self.editor.keybindings()));
             }
             Some(dock)
         } else {
