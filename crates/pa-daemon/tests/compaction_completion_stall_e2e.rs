@@ -78,6 +78,7 @@ impl Drop for Supervisor {
 struct StallMock {
     requests: Arc<Mutex<Vec<Value>>>,
     turn_requests: Arc<Mutex<Vec<Instant>>>,
+    turn_bodies: Arc<Mutex<Vec<Value>>>,
     review_request_at: Arc<Mutex<Option<Instant>>>,
     review_replied_at: Arc<Mutex<Option<Instant>>>,
     summarizer_delay_ms: Arc<AtomicU64>,
@@ -88,12 +89,14 @@ impl StallMock {
     fn start() -> StallMock {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let turn_requests = Arc::new(Mutex::new(Vec::new()));
+        let turn_bodies = Arc::new(Mutex::new(Vec::new()));
         let review_request_at = Arc::new(Mutex::new(None));
         let review_replied_at = Arc::new(Mutex::new(None));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let port = listener.local_addr().expect("mock addr").port();
         let requests_for_thread = Arc::clone(&requests);
         let turn_requests_for_thread = Arc::clone(&turn_requests);
+        let turn_bodies_for_thread = Arc::clone(&turn_bodies);
         let review_request_for_thread = Arc::clone(&review_request_at);
         let review_replied_for_thread = Arc::clone(&review_replied_at);
         let summarizer_delay = Arc::new(AtomicU64::new(0));
@@ -105,6 +108,7 @@ impl StallMock {
                 let Ok(stream) = stream else { continue };
                 let requests = Arc::clone(&requests_for_thread);
                 let turn_requests = Arc::clone(&turn_requests_for_thread);
+                let turn_bodies = Arc::clone(&turn_bodies_for_thread);
                 let review_request = Arc::clone(&review_request_for_thread);
                 let review_replied = Arc::clone(&review_replied_for_thread);
                 let summarizer_delay = Arc::clone(&summarizer_delay_thread);
@@ -114,6 +118,7 @@ impl StallMock {
                         stream,
                         requests,
                         turn_requests,
+                        turn_bodies,
                         review_request,
                         review_replied,
                         summarizer_delay,
@@ -125,6 +130,7 @@ impl StallMock {
         StallMock {
             requests,
             turn_requests,
+            turn_bodies,
             review_request_at,
             review_replied_at,
             summarizer_delay_ms: summarizer_delay,
@@ -275,6 +281,7 @@ fn serve(
     mut stream: TcpStream,
     requests: Arc<Mutex<Vec<Value>>>,
     turn_requests: Arc<Mutex<Vec<Instant>>>,
+    turn_bodies: Arc<Mutex<Vec<Value>>>,
     review_request_at: Arc<Mutex<Option<Instant>>>,
     review_replied_at: Arc<Mutex<Option<Instant>>>,
     summarizer_delay_ms: Arc<AtomicU64>,
@@ -303,6 +310,7 @@ fn serve(
     let index = {
         let mut turns = turn_requests.lock().expect("turn lock");
         turns.push(Instant::now());
+        turn_bodies.lock().expect("turn lock").push(body.clone());
         turns.len() - 1
     };
     let crossing_index = FATTENING_TURNS + 1;
@@ -640,28 +648,32 @@ fn mocked_slow_review_never_holds_the_settled_compaction() {
 
     // A prompt admitted while the review is still in flight runs against
     // the COMPACTED context: the summary rides the request, the
-    // compacted-away bulk does not.
+    // compacted-away bulk does not. The assertion targets the last TURN
+    // request — the background review and the status-line recap make
+    // their own provider calls around the settle (the review deliberately
+    // reads the full trajectory), so `requests.last()` is not the turn.
     prompt_and_wait(
         &mut client,
         "pn",
         &session_id,
         "next turn while the review runs",
     );
-    let last_request = mock
-        .requests
+    let last_turn_request = mock
+        .turn_bodies
         .lock()
-        .expect("mock lock")
+        .expect("turn lock")
         .last()
         .cloned()
         .unwrap_or(Value::Null);
-    let request_text = serde_json::to_string(&last_request).unwrap_or_default();
+    let request_text = serde_json::to_string(&last_turn_request).unwrap_or_default();
     assert!(
         request_text.contains(CHECKPOINT_SUMMARY),
-        "the compacted context did not carry the summary"
+        "the compacted context did not carry the summary: {}",
+        request_text.chars().take(2_000).collect::<String>()
     );
     assert!(
         !request_text.contains(&"a".repeat(100_000)),
-        "the compacted-away bulk still rode the request"
+        "the compacted-away bulk still rode the turn request"
     );
 
     // The review's delayed reply lands in the background (bounded wait).
@@ -837,23 +849,25 @@ fn interrupted_threshold_compaction_settles_consistent() {
     assert!(!has_compaction, "an aborted compaction committed an entry");
 
     // The next prompt runs against the un-compacted context (the seeded
-    // bulk still rides the request — nothing was lost to the interrupt).
+    // bulk still rides the TURN request — nothing was lost to the
+    // interrupt).
     prompt_and_wait(
         &mut client,
         "pn",
         &session_id,
         "next turn after the interrupt",
     );
-    let last_request = mock
-        .requests
+    let last_turn_request = mock
+        .turn_bodies
         .lock()
-        .expect("mock lock")
+        .expect("turn lock")
         .last()
         .cloned()
         .unwrap_or(Value::Null);
-    let request_text = serde_json::to_string(&last_request).unwrap_or_default();
+    let request_text = serde_json::to_string(&last_turn_request).unwrap_or_default();
     assert!(
         request_text.contains(&"a".repeat(100_000)),
-        "the un-compacted bulk vanished from the context after the interrupt"
+        "the un-compacted bulk vanished from the turn context after the interrupt: {}",
+        request_text.chars().take(2_000).collect::<String>()
     );
 }
