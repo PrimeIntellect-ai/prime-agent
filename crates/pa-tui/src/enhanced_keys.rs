@@ -551,27 +551,67 @@ mod tests {
     #[test]
     fn only_direct_terminal_markers_skip_the_probe() {
         for env in [
-            TerminalEnvironment { kitty_window_id: Some("42"), ..Default::default() },
-            TerminalEnvironment { ghostty_resources_dir: Some("/ghostty"), ..Default::default() },
-            TerminalEnvironment { wezterm_pane: Some("3"), ..Default::default() },
-            TerminalEnvironment { term_program: Some("ghostty"), ..Default::default() },
+            TerminalEnvironment {
+                kitty_window_id: Some("42"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                ghostty_resources_dir: Some("/ghostty"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                wezterm_pane: Some("3"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                term_program: Some("ghostty"),
+                ..Default::default()
+            },
         ] {
             assert_eq!(keyboard_capability(&env), KeyboardCapability::Supported);
         }
         for env in [
-            TerminalEnvironment { term: Some("dumb"), ..Default::default() },
-            TerminalEnvironment { term: Some("linux"), ..Default::default() },
+            TerminalEnvironment {
+                term: Some("dumb"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                term: Some("linux"),
+                ..Default::default()
+            },
         ] {
             assert_eq!(keyboard_capability(&env), KeyboardCapability::Unsupported);
         }
         for env in [
             TerminalEnvironment::default(),
-            TerminalEnvironment { term: Some("xterm-ghostty"), ..Default::default() },
-            TerminalEnvironment { term_program: Some("vscode"), ..Default::default() },
-            TerminalEnvironment { term: Some("tmux-256color"), ghostty_resources_dir: Some("/ghostty"), ..Default::default() },
-            TerminalEnvironment { tmux: Some("/tmp/tmux"), kitty_window_id: Some("42"), ..Default::default() },
-            TerminalEnvironment { ssh_connection: Some("remote"), wezterm_pane: Some("3"), ..Default::default() },
-            TerminalEnvironment { zellij: Some("0"), ghostty_resources_dir: Some("/ghostty"), ..Default::default() },
+            TerminalEnvironment {
+                term: Some("xterm-ghostty"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                term_program: Some("vscode"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                term: Some("tmux-256color"),
+                ghostty_resources_dir: Some("/ghostty"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                tmux: Some("/tmp/tmux"),
+                kitty_window_id: Some("42"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                ssh_connection: Some("remote"),
+                wezterm_pane: Some("3"),
+                ..Default::default()
+            },
+            TerminalEnvironment {
+                zellij: Some("0"),
+                ghostty_resources_dir: Some("/ghostty"),
+                ..Default::default()
+            },
         ] {
             assert_eq!(keyboard_capability(&env), KeyboardCapability::Unknown);
         }
