@@ -482,7 +482,7 @@ fn typed_keys(text: &str) -> Vec<KeyEvent> {
 /// drives the pane while it runs and takes the settled outcome.
 struct OnboardingFlowTask {
     join: tokio::task::JoinHandle<crate::provider_auth::ProviderAuthOutcome>,
-    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cancel: crate::auth_panel::FlowCancel,
 }
 
 impl OnboardingFlowTask {
@@ -492,7 +492,7 @@ impl OnboardingFlowTask {
     /// (a `JoinHandle::abort` cannot reach a started `spawn_blocking`
     /// login — without the signal an exited pane would leave the login
     /// running to completion and still writing credentials).
-    fn spawn<F>(future: F, cancel: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self
+    fn spawn<F>(future: F, cancel: crate::auth_panel::FlowCancel) -> Self
     where
         F: std::future::Future<Output = crate::provider_auth::ProviderAuthOutcome> + Send + 'static,
     {
@@ -514,8 +514,7 @@ impl OnboardingFlowTask {
     /// login's request timeouts) — the exit never leaves a detached
     /// flow writing credentials in the background.
     async fn end(self) {
-        self.cancel
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.cancel.mark();
         let _ = self.join.await;
     }
 }
@@ -753,7 +752,7 @@ async fn run_onboarding_phase(
         heading: Some(crate::onboarding_flow::PRIME_LOGIN_HEADING.to_string()),
     });
     let prime_panel = session.auth_panel_handle();
-    let prime_cancel = prime_panel.cancel_flag();
+    let prime_cancel = prime_panel.cancel_signal();
     let prime_row_for_flow = prime_row.clone();
     let prime_auth = provider_auth.clone();
     let prime_flow = OnboardingFlowTask::spawn(
@@ -883,7 +882,7 @@ async fn run_onboarding_phase(
                     heading: None,
                 });
                 let panel = session.auth_panel_handle();
-                let prompt_cancel = panel.cancel_flag();
+                let prompt_cancel = panel.cancel_signal();
                 let row = row.clone();
                 let prompt_auth = provider_auth.clone();
                 let prompt_flow = OnboardingFlowTask::spawn(
@@ -944,7 +943,7 @@ async fn run_onboarding_phase(
                         heading: None,
                     });
                     let panel = session.auth_panel_handle();
-                    let service_cancel = panel.cancel_flag();
+                    let service_cancel = panel.cancel_signal();
                     let row = row.clone();
                     let service_auth = provider_auth.clone();
                     let provider_login = OnboardingFlowTask::spawn(

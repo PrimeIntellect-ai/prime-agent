@@ -246,6 +246,11 @@ async fn select_team(
         Ok(teams) => teams,
         Err(_) => return default_team_status(auth, inputs.prime_team_id),
     };
+    // The pane exited while the fetch ran: the stored key keeps its
+    // standing selection — the write below never lands.
+    if ui.is_cancelled() {
+        return default_team_status(auth, inputs.prime_team_id);
+    }
     if teams.is_empty() {
         auth.set_prime_inference_team_selection(None, Some(api_key));
         return match auth.drain_errors().pop() {
@@ -257,7 +262,13 @@ async fn select_team(
         StoredPrimeTeam::Team(team) => Some(team.team_id),
         _ => None,
     };
-    let chosen = match ui.select_team(&teams, current.as_deref()).await {
+    let picked = ui.select_team(&teams, current.as_deref()).await;
+    // The pane exited while the picker waited: the stored key keeps its
+    // standing selection — the binding writes below never land.
+    if ui.is_cancelled() {
+        return default_team_status(auth, inputs.prime_team_id);
+    }
+    let chosen = match picked {
         TeamChoice::Team(team) => {
             auth.set_prime_inference_team_selection(Some(team.clone()), Some(api_key));
             Some(format!("Using team \"{}\".", team.name))
