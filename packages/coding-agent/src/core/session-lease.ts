@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { lockSync } from "proper-lockfile";
-import { execFileSyncHidden, isProcessAlive } from "../utils/child-process.js";
+import { execFileSyncHidden, isProcessAlive, processIdExists } from "../utils/child-process.js";
 
 export const SESSION_LEASES_ENABLED_ENV = "PRIME_AGENT_INTERNAL_SESSION_LEASES";
 export const SESSION_LEASE_OWNER_ID_ENV = "PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID";
@@ -161,6 +161,10 @@ export function getPsProcessStartId(pid: number, query: ProcessQuery = runProces
 
 export function getProcessStartId(pid: number): string | undefined {
 	if (!Number.isInteger(pid) || pid <= 0) {
+		return undefined;
+	}
+	if (!processIdExists(pid)) {
+		// No process holds the pid: skip the start-id query, which could only fail the same way.
 		return undefined;
 	}
 	if (process.platform === "win32") {

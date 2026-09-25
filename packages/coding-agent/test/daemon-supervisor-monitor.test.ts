@@ -4251,7 +4251,8 @@ describe("daemon worker supervisor monitoring", () => {
 
 		try {
 			await supervisor.recoverUncertainWorkerOperations(worker);
-			expect(kill).not.toHaveBeenCalled();
+			// Signal 0 is a liveness probe, not a kill.
+			expect(kill.mock.calls.filter(([, signal]) => signal !== 0)).toHaveLength(0);
 			expect(markInterrupted).toHaveBeenCalledTimes(2);
 			expect(markInterrupted).toHaveBeenCalledWith("/tmp/root.jsonl", "root-active", ["model_stream"]);
 			expect(markInterrupted).toHaveBeenCalledWith("/tmp/child.jsonl", "child-active", ["tool_execution"]);

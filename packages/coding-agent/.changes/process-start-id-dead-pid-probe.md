@@ -1,0 +1,1 @@
+- Process start-id lookups skip the `ps`/PowerShell query for pids that no longer exist (a kill(0) probe instead of a subprocess); live pids are still queried on every call, so a reused pid is never served a stale identity.
