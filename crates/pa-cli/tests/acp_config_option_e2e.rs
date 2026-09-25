@@ -242,7 +242,7 @@ fn acp_in_process_config_option_advertises_and_applies() {
         .collect();
     assert!(
         values.contains(&json!(r#"["faux","plain-model"]"#)),
-        "{values}"
+        "{values:?}"
     );
     let effort = &options[1];
     assert_eq!(effort["id"], "thought_level");
