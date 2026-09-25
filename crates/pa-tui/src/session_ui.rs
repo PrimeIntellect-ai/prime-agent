@@ -7186,14 +7186,15 @@ impl SessionUi {
         view: &mut AgentView,
     ) {
         match self.try_set_model(provider, model_id, view).await {
-            SetModelOutcome::Switched => {}
+            // The switch recorded its own `Model: <id>` row; every other
+            // failure already rendered the error row.
+            SetModelOutcome::Switched | SetModelOutcome::Failed => {}
             SetModelOutcome::NeedsSignIn => {
                 self.error_row(
                     &format!("Authentication completed, but {provider} is still unavailable."),
                     view,
                 );
             }
-            SetModelOutcome::Failed => {}
         }
     }
 
