@@ -10,6 +10,7 @@
 //! requests, no state beyond the cursor and the scroll), so a live run
 //! keeps updating inside the open pane.
 
+use crate::chat::{ChatEntry, Detail};
 use crate::keybindings::{format_key_text, KeybindingsManager};
 use crate::menu_panel::{hug_row, menu_list_layout};
 use crate::theme::{Theme, ThemeColor};
@@ -49,6 +50,13 @@ pub struct RunsView {
     mode: Mode,
     /// The selected run's start index (stable across live growth).
     selected: Option<usize>,
+    /// The selected run's first tool card's wire id: a resync rebuild
+    /// shifts chat indices, so reconcile re-finds the run by identity
+    /// when its old start no longer matches.
+    selected_key: Option<String>,
+    /// The open detail pane's run first tool card's wire id, the same
+    /// contract as `selected_key`.
+    detail_key: Option<String>,
     /// The detail region's scroll position: how many rows the window
     /// rides lifted off the newest row (0 = bottom-anchored).
     scroll_from_end: usize,
@@ -65,6 +73,8 @@ impl RunsView {
         RunsView {
             mode: Mode::List,
             selected: runs.last().map(|run| run.start),
+            selected_key: None,
+            detail_key: None,
             scroll_from_end: 0,
             viewport_rows,
             detail_region_rows: std::cell::Cell::new(0),
@@ -72,13 +82,24 @@ impl RunsView {
     }
 
     /// One key press: the same key vocabulary as the shells view (the
-    /// select/cancel/confirm bindings, `app.modal.back` from the detail).
+    /// select/cancel/confirm bindings, `app.modal.back` from the
+    /// detail). The press settles, then the pointed-at runs' stable
+    /// ids refresh: a rebuild can shift chat indices between presses,
+    /// so reconcile re-finds these runs by those ids.
     pub fn handle_key(
         &mut self,
         key: &str,
         kb: &KeybindingsManager,
+        chat: &[ChatEntry],
         runs: &[ToolRun],
     ) -> RunsViewAction {
+        let action = self.press(key, kb, runs);
+        self.refresh_keys(chat, runs);
+        action
+    }
+
+    /// The press itself, over the pre-reconciled runs.
+    fn press(&mut self, key: &str, kb: &KeybindingsManager, runs: &[ToolRun]) -> RunsViewAction {
         if key == "ctrl+c" || kb.matches(key, "tui.select.cancel") {
             return RunsViewAction::Close;
         }
@@ -142,16 +163,29 @@ impl RunsView {
         }
     }
 
-    /// The runs changed (a live run grew or split): keep the cursor on a
-    /// surviving run and return `Close` when none remain.
-    pub fn reconcile(&mut self, runs: &[ToolRun]) -> Option<RunsViewAction> {
+    /// The runs changed (a live run grew or split, or a resync rebuild
+    /// shifted the chat): keep the cursor and the open detail on a
+    /// surviving run and return `Close` when none remain. A rebuild can
+    /// leave an old start pointing at nothing or at another run's
+    /// slot, so the survived run re-finds itself by its stable
+    /// first-card id first (the position walk stays the fallback).
+    pub fn reconcile(&mut self, chat: &[ChatEntry], runs: &[ToolRun]) -> Option<RunsViewAction> {
+        let by_key = |key: Option<&str>| {
+            key.and_then(|key| {
+                runs.iter()
+                    .find(|run| crate::tool_runs::run_key(chat, **run) == Some(key))
+                    .map(|run| run.start)
+            })
+        };
         if let Some(start) = self.selected {
             if !runs.iter().any(|run| run.start == start) {
-                self.selected = runs
-                    .iter()
-                    .map(|run| run.start)
-                    .filter(|run_start| *run_start <= start)
-                    .max()
+                self.selected = by_key(self.selected_key.as_deref())
+                    .or_else(|| {
+                        runs.iter()
+                            .map(|run| run.start)
+                            .filter(|run_start| *run_start <= start)
+                            .max()
+                    })
                     .or_else(|| runs.first().map(|run| run.start));
             }
         } else if let Some(run) = runs.last() {
@@ -159,11 +193,32 @@ impl RunsView {
         }
         if let Mode::Detail { start } = self.mode {
             if !runs.iter().any(|run| run.start == start) {
-                self.mode = Mode::List;
-                self.scroll_from_end = 0;
+                if let Some(start) = by_key(self.detail_key.as_deref()) {
+                    self.mode = Mode::Detail { start };
+                } else {
+                    self.mode = Mode::List;
+                    self.scroll_from_end = 0;
+                }
             }
         }
+        self.refresh_keys(chat, runs);
         (runs.is_empty()).then_some(RunsViewAction::Close)
+    }
+
+    /// Cache the pointed-at runs' stable ids (the selected run's and
+    /// the open detail's first tool card's wire id) while the chat
+    /// still agrees with the positions.
+    fn refresh_keys(&mut self, chat: &[ChatEntry], runs: &[ToolRun]) {
+        if let Some(start) = self.selected {
+            if let Some(run) = runs.iter().find(|run| run.start == start) {
+                self.selected_key = crate::tool_runs::run_key(chat, *run).map(str::to_string);
+            }
+        }
+        if let Mode::Detail { start } = self.mode {
+            if let Some(run) = runs.iter().find(|run| run.start == start) {
+                self.detail_key = crate::tool_runs::run_key(chat, *run).map(str::to_string);
+            }
+        }
     }
 
     /// Render the view's frame: the runs list, or one run's drill-in.
@@ -274,12 +329,21 @@ impl RunsView {
         };
         let summary = crate::tool_runs::run_summary(&view.chat, run);
         // The run's rows, exactly as the uncondensed overview rendered
-        // them (each member's own leading decision included).
+        // them (each member's own leading decision included): the
+        // drill-in pins the overview detail mode, so the ambient
+        // `details`/`all` never leaks expanded rows into the pane.
         let mut rows: Vec<Line> = Vec::new();
         for index in run.start..run.end {
             let entry = &view.chat[index];
             let preceded = index > 0 && view.is_compact_neighbor(&view.chat[index - 1]);
-            rows.extend(view.render_entry_uncondensed(index, entry, width, index == 0, preceded));
+            rows.extend(view.render_entry_uncondensed(
+                index,
+                entry,
+                width,
+                index == 0,
+                preceded,
+                Detail::Overview,
+            ));
         }
         let budget = self.viewport_rows.saturating_sub(DETAIL_FRAME_ROWS);
         let mut lines = Vec::new();
@@ -335,8 +399,7 @@ impl RunsView {
     fn list_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| fallback.to_string())
+                .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
         format!(
             "{}/{} move \u{b7} {} open \u{b7} {} close",
@@ -351,8 +414,7 @@ impl RunsView {
     fn detail_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| fallback.to_string())
+                .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
         format!(
             "{}/{} scroll \u{b7} {} back \u{b7} {} close",

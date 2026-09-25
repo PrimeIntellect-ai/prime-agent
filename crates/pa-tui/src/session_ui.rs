@@ -1380,7 +1380,7 @@ impl SessionUi {
             let closed = view
                 .runs_view
                 .as_mut()
-                .is_some_and(|runs_view| runs_view.reconcile(&runs).is_some());
+                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
             if closed {
                 view.runs_view = None;
             }
@@ -6386,7 +6386,7 @@ impl SessionUi {
         if view
             .runs_view
             .as_mut()
-            .is_some_and(|runs_view| runs_view.reconcile(&runs).is_some())
+            .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some())
         {
             view.runs_view = None;
             self.dirty = true;
@@ -6396,8 +6396,9 @@ impl SessionUi {
         let action = view
             .runs_view
             .as_mut()
-            .map(|runs_view| runs_view.handle_key(&id, &kb, &runs))
-            .unwrap_or(RunsViewAction::None);
+            .map_or(RunsViewAction::None, |runs_view| {
+                runs_view.handle_key(&id, &kb, &view.chat, &runs)
+            });
         match action {
             RunsViewAction::Close => {
                 view.runs_view = None;
@@ -8667,7 +8668,7 @@ impl SessionUi {
             let closed = view
                 .runs_view
                 .as_mut()
-                .is_some_and(|runs_view| runs_view.reconcile(&runs).is_some());
+                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
             if closed {
                 view.runs_view = None;
             }

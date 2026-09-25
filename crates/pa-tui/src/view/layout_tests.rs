@@ -587,3 +587,68 @@ fn an_assistant_crossing_the_glue_boundary_matches_the_full_rebuild() {
         "the split folds through the sparse window"
     );
 }
+
+#[test]
+fn a_glue_push_after_a_user_row_folds_at_its_own_slot() {
+    // [T x5 (one block), USER, tail rows...]: the window pauses with a
+    // selection on the tail rows, then one tool card lands after the
+    // user row. The push cannot extend the earlier run (the user row
+    // ends it), so the append folds at the push's own tail slot and
+    // the selection keeps its content. The walk used to fold the
+    // append through the earlier run's start, treating the new rows
+    // as inserted above the selection's content, so the copy jumped.
+    let card = |id: &str| {
+        ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+            id: id.to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({"command": "echo done"}),
+            started: true,
+            started_at: Some(std::time::Instant::now()),
+            ended_at: Some(std::time::Instant::now()),
+            result: Some(crate::chat::ToolResultView {
+                content: vec![serde_json::json!({"type": "text", "text": "done"})],
+                details: serde_json::Value::Null,
+                is_error: false,
+            }),
+            result_partial: false,
+            ..Default::default()
+        }))
+    };
+    let row_text = |frame: &[crate::Line], row: usize| -> String {
+        frame
+            .get(row)
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .unwrap_or_default()
+    };
+    let mut view = view();
+    view.detail = Detail::Overview;
+    for index in 0..5 {
+        view.push_entry(card(&format!("a{index}")));
+    }
+    view.push_entry(ChatEntry::User {
+        text: "the question".into(),
+    });
+    for index in 0..30 {
+        view.push_entry(ChatEntry::Status {
+            text: format!("original {index}"),
+            kind: StatusKind::Info,
+        });
+    }
+    view.render_frame(80, 12);
+    view.scroll_by(-6);
+    let frame = view.render_frame(80, 12);
+    let row = (1..1 + view.window_rows)
+        .find(|row| row_text(&frame, *row).contains("original"))
+        .unwrap();
+    assert!(view.begin_selection(row, 0));
+    view.extend_active_selection(row, 80);
+    let expected = row_text(&frame, row).trim_end().to_string();
+    view.push_entry(card("z0"));
+    view.render_frame(80, 12);
+    view.render_frame(80, 12);
+    assert_eq!(
+        view.end_active_selection(),
+        Some(expected),
+        "the paused selection keeps its content across the append"
+    );
+}

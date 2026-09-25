@@ -459,8 +459,8 @@ fn replayed_runs_condense_with_the_received_message_in_place() {
         "the wire timestamps carry the honest wall clock (63s - 18s): {all}"
     );
     assert!(
-        all.contains("Agent message received \u{b7} from parent fleet"),
-        "the received row keeps its place: {all}"
+        all.contains("Agent message received \u{b7} \u{2190} parent fleet"),
+        "the received row keeps its place (the #2752 directional glyph): {all}"
     );
     assert!(
         all.contains("steering note"),

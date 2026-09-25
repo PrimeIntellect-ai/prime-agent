@@ -422,7 +422,17 @@ impl AgentView {
         // Any other entry renders on its own: the plain append fold.
         let glued = crate::tool_runs::is_run_glue(&entry);
         let captured = glued.then(|| {
-            let start = self.member_start(self.chat.len().saturating_sub(1));
+            // The pushed glue can only extend a run that ends at the
+            // very tail: a non-glue last entry ends every earlier run,
+            // so the affected suffix starts at the push's own slot. The
+            // walk must not skip past that boundary row into the
+            // earlier run's start - a paused window would fold the
+            // append in above the content it is holding still.
+            let start = if self.chat.last().is_some_and(crate::tool_runs::is_run_glue) {
+                self.member_start(self.chat.len().saturating_sub(1))
+            } else {
+                self.chat.len()
+            };
             let before = self
                 .sparse_window_is_tail_anchored()
                 .then(|| (start, self.suffix_rows(start, self.layout_width)));
@@ -430,21 +440,18 @@ impl AgentView {
         });
         self.chat.push(entry);
         self.entry_layout.push([None, None, None]);
-        match captured {
-            Some((start, before)) => {
-                self.run_map.rebuild_from(&self.chat, start);
-                self.invalidate_run_suffix(start);
-                if let Some((start, before)) = before {
-                    let after = self.suffix_rows(start, self.layout_width);
-                    self.sparse_tail_delta(after as isize - before as isize, start);
-                }
+        if let Some((start, before)) = captured {
+            self.run_map.rebuild_from(&self.chat, start);
+            self.invalidate_run_suffix(start);
+            if let Some((start, before)) = before {
+                let after = self.suffix_rows(start, self.layout_width);
+                self.sparse_tail_delta(after as isize - before as isize, start);
             }
-            None => {
-                // A non-glue entry never joins a run: keep the map in
-                // lockstep with the chat vector (the push's own slot).
-                self.run_map.rebuild_from(&self.chat, self.chat.len() - 1);
-                self.sparse_note_append();
-            }
+        } else {
+            // A non-glue entry never joins a run: keep the map in
+            // lockstep with the chat vector (the push's own slot).
+            self.run_map.rebuild_from(&self.chat, self.chat.len() - 1);
+            self.sparse_note_append();
         }
     }
 
@@ -893,11 +900,21 @@ impl AgentView {
         if let Some(rows) = self.render_condensed(index, width) {
             return rows;
         }
-        self.render_entry_uncondensed(index, entry, width, first, preceded_by_tool_activity)
+        self.render_entry_uncondensed(
+            index,
+            entry,
+            width,
+            first,
+            preceded_by_tool_activity,
+            self.detail,
+        )
     }
 
     /// The uncondensed rendering of one entry (the runs view's drill-in
-    /// paints the exact rows a condensed block replaced).
+    /// paints the exact rows a condensed block replaced). `detail` is
+    /// the mode the rows render in: the transcript passes the ambient
+    /// mode, the drill-in pins the overview so its rows are exactly
+    /// the ones the block replaced.
     pub(crate) fn render_entry_uncondensed(
         &self,
         index: usize,
@@ -905,6 +922,7 @@ impl AgentView {
         width: usize,
         first: bool,
         preceded_by_tool_activity: bool,
+        detail: Detail,
     ) -> Vec<Line> {
         match entry {
             ChatEntry::Status { text, kind } => {
@@ -973,7 +991,7 @@ impl AgentView {
                     // `CompactionSummaryMessageComponent` renders the
                     // collapsed `EventSummary` until the Ctrl+O cycle
                     // reaches detail `all`.
-                    self.detail.tool_output_expanded(),
+                    detail.tool_output_expanded(),
                     &self.theme,
                     width,
                 ));
@@ -987,7 +1005,7 @@ impl AgentView {
                 let cache = caches.entry(index).or_default();
                 render_assistant(
                     message,
-                    self.detail,
+                    detail,
                     &self.theme,
                     &self.code_block_indent,
                     width,
@@ -1001,13 +1019,13 @@ impl AgentView {
                 // (the same spacing the assistant and agent-message rows
                 // use; consecutive tool cards stay flush).
                 let mut rows: Vec<Line> = Vec::new();
-                if self.conversation_leading(index, self.detail.tool_output_expanded()) {
+                if self.conversation_leading(index, detail.tool_output_expanded()) {
                     rows.push(Vec::new());
                 }
                 rows.extend(crate::tool_card::render_tool_card(
                     card,
                     self.pulse_frame,
-                    self.detail,
+                    detail,
                     &self.theme,
                     width,
                     self.show_images,
@@ -1028,7 +1046,7 @@ impl AgentView {
                 rows.extend(crate::bash_card::render_bash_execution(
                     card,
                     self.pulse_frame,
-                    self.detail.tool_output_expanded(),
+                    detail.tool_output_expanded(),
                     &cancel_hint,
                     &self.theme,
                     width,
@@ -1037,10 +1055,10 @@ impl AgentView {
             }
             ChatEntry::AgentMessage(row) => crate::custom_message::render::render_agent_message(
                 row,
-                self.detail,
+                detail,
                 &self.theme,
                 width,
-                self.conversation_leading(index, self.detail.tool_output_expanded()),
+                self.conversation_leading(index, detail.tool_output_expanded()),
             ),
             // TS `addMessageToChat`'s user case: `Spacer(1)` when the chat
             // is non-empty, then the card (the conversation-spacing scan the
@@ -1049,7 +1067,7 @@ impl AgentView {
             ChatEntry::SkillInvocation(row) => {
                 crate::custom_message::skill_invocation::render_skill_invocation(
                     row,
-                    self.detail,
+                    detail,
                     &self.theme,
                     width,
                     !first,
@@ -1058,7 +1076,7 @@ impl AgentView {
             ChatEntry::InjectedPrompt(row) => {
                 crate::custom_message::injected_prompt::render_injected_prompt(
                     row,
-                    self.detail,
+                    detail,
                     &self.theme,
                     width,
                 )
@@ -1066,16 +1084,16 @@ impl AgentView {
             ChatEntry::ShellCompletion(row) => {
                 crate::custom_message::render::render_shell_completion(
                     row,
-                    self.detail,
+                    detail,
                     &self.theme,
                     width,
-                    self.conversation_leading(index, self.detail.tool_output_expanded()),
+                    self.conversation_leading(index, detail.tool_output_expanded()),
                 )
             }
             ChatEntry::RefinementOutcome(row) => {
                 crate::custom_message::refinement::render_refinement_outcome(
                     row,
-                    self.detail,
+                    detail,
                     &self.theme,
                     width,
                 )
