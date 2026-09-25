@@ -261,8 +261,10 @@ impl AssistantMessageEventStream {
     /// # Panics
     ///
     /// Panics if the shared-state `Mutex` is poisoned (a thread panicked
-    /// while holding the lock), or if the stream terminates without resolving
-    /// a final assistant message.
+    /// while holding the lock).
+    ///
+    /// A stream terminated without a resolved message (for example
+    /// `end(None)`) never resolves: this future hangs instead of panicking.
     pub async fn result(self) -> AssistantMessage {
         if let Some(message) = self.try_result() {
             return message;

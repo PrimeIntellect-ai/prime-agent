@@ -28,7 +28,7 @@ pub enum GoalCommand {
 ///
 /// Returns a usage-error string when the budget flag is given without a
 /// value or an objective, when the budget is not a positive integer, or
-/// when the objective is missing.
+/// when the objective is missing or exceeds the configured character limit.
 ///
 /// # Panics
 ///
@@ -159,8 +159,8 @@ const AUTONOMOUS_BUDGET_FLAGS: [&str; 8] = [
 ///
 /// # Errors
 ///
-/// Returns a usage-error string for an unknown budget flag, a missing or
-/// invalid flag value, or a duplicated flag.
+/// Returns a usage-error string for an unknown budget flag or a missing or
+/// invalid flag value.
 pub fn parse_autonomous_budget_options(tokens: &[String]) -> Result<AgentAutonomousConfig, String> {
     let mut config = AgentAutonomousConfig::default();
     let mut gate_commands: Vec<String> = Vec::new();

@@ -17,8 +17,8 @@ pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 ///
 /// # Errors
 ///
-/// Returns an error when the home directory cannot be resolved (unset
-/// `HOME` on Unix, unset `USERPROFILE` on Windows).
+/// Returns an error when the home directory cannot be resolved from the
+/// supported environment variables.
 pub fn home_dir() -> Result<PathBuf> {
     pa_types::platform::home_dir()
         .ok_or_else(|| anyhow!("home directory not found: set HOME (or USERPROFILE on Windows)"))

@@ -240,7 +240,7 @@ pub struct RefinementTranscript<'a> {
 /// Returns an error when a local refinement is requested on an unpersisted
 /// session, when the refinement plan (LLM or rollback) fails, when applying
 /// or persisting the refined harness state fails, or when appending the
-/// audit or notice entries fails.
+/// audit, outcome, or notice entries fails.
 pub async fn execute_refinement(
     session: &mut SessionManager,
     transcript: RefinementTranscript<'_>,
@@ -380,9 +380,9 @@ impl AgentSession {
     ///
     /// # Errors
     ///
-    /// Returns an error when the conversation history cannot be read, or
-    /// when the approving review's refinement run fails. A decline is
-    /// `Ok(None)`.
+    /// Returns an error when the conversation history cannot be read, when
+    /// the review request fails, or when the approving review's refinement
+    /// run fails. A decline is `Ok(None)`.
     pub async fn auto_refine_after_compaction(
         &self,
         model: &pa_types::ai::Model,

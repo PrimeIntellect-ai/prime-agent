@@ -152,7 +152,7 @@ impl Event {
 ///
 /// Returns a human-readable error string when the line is not valid JSON,
 /// is not a JSON object, names an unknown protocol event, or frames an
-/// id-less `done` or `host_request`.
+/// id-less `done`, `result`, or `host_request`.
 pub fn parse_event(line: &str) -> Result<Event, String> {
     let mut value: Value = serde_json::from_str(line)
         .map_err(|_| format!("unparseable protocol line: {}", clip(line)))?;

@@ -185,9 +185,8 @@ pub fn parse_models_config(content: &str) -> Result<ModelsConfig, String> {
 /// # Errors
 ///
 /// Returns a human-readable error string when a custom provider lacks the
-/// required base URL, API key, or API kind, declares no models and no
-/// overrides, or defines a model with a missing id or a zero
-/// `contextWindow`/`maxTokens`.
+/// required base URL, API key, or API kind, or defines a model with a
+/// missing id or a zero `contextWindow`/`maxTokens`.
 pub fn validate_config(
     config: &ModelsConfig,
     built_in_providers: &dyn Fn(&str) -> bool,

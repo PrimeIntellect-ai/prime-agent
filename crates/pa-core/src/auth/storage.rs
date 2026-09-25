@@ -14,9 +14,10 @@ use super::types::AuthStorageData;
 pub trait AuthStorageBackend: Send + Sync {
     /// # Errors
     ///
-    /// Returns an error when the backend fails to read, update, or write the
-    /// auth document (lock acquisition, file I/O, or the `update` callback's
-    /// own failure).
+    /// Returns an error when the backend fails to acquire its lock, when
+    /// the `update` callback fails, or when preparing or writing the auth
+    /// document fails. Reading the current document is best-effort: an
+    /// unreadable file reaches the callback as `None`, not an error.
     fn with_lock(
         &self,
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,

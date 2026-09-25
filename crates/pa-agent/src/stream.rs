@@ -234,8 +234,9 @@ impl AssistantMessageEventStreamHandle {
     ///
     /// # Panics
     ///
-    /// Panics if the `closed` or `result` mutex is poisoned (another thread
-    /// panicked while holding one of them).
+    /// Panics if the `closed` mutex is poisoned, or if the `result` mutex
+    /// is poisoned while storing a terminal event's message (another
+    /// thread panicked while holding one of them).
     pub fn push(&self, event: AssistantMessageEvent) {
         if *self.shared.closed.lock().unwrap() {
             return;
@@ -257,7 +258,8 @@ impl AssistantMessageEventStreamHandle {
     ///
     /// # Panics
     ///
-    /// Panics if the `closed` or `result` mutex is poisoned (another thread
+    /// Panics if the `closed` mutex is poisoned, or if the `result` mutex
+    /// is poisoned while storing a supplied result (another thread
     /// panicked while holding one of them).
     pub fn end(&self, result: Option<AssistantMessage>) {
         *self.shared.closed.lock().unwrap() = true;

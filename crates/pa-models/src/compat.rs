@@ -55,8 +55,8 @@ const THINKING_FORMATS: &[&str] = &[
 ///
 /// # Panics
 ///
-/// Never panics: the key-table `expect` is unreachable behind the preceding
-/// `None` early return.
+/// Never panics: the key-table `expect` is unreachable because the preceding
+/// `keys.is_none()` guard returns `false` before reaching it.
 pub fn is_model_compat(api: &str, compat: Option<&serde_json::Map<String, Value>>) -> bool {
     let Some(compat) = compat else {
         return true;

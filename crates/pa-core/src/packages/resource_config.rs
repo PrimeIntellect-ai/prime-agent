@@ -202,7 +202,8 @@ pub fn build_groups(resolved: &ResolvedPaths) -> Vec<ResourceGroup> {
 ///
 /// # Errors
 ///
-/// Returns an error when the settings update or save for the toggle fails.
+/// Never fails: both delegated toggle paths write through infallible
+/// settings setters and always return `Ok`.
 pub fn toggle_resource(
     settings: &mut SettingsManager,
     cwd: &Path,

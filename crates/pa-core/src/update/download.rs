@@ -26,8 +26,9 @@ pub struct DownloadBudget {
 ///
 /// # Errors
 ///
-/// Returns the last attempt's error when every download attempt fails or
-/// the wall-clock budget expires first.
+/// Returns the last attempt's error when every download attempt fails;
+/// when the wall-clock budget expires before an attempt runs, the
+/// budget-expiry error replaces it.
 pub async fn download_archive(
     url: &str,
     expected_sha256: &str,
@@ -129,9 +130,10 @@ fn sweep_staging(releases: &Path) {
 ///
 /// # Errors
 ///
-/// Returns an error when the probe child cannot be spawned, produces no
-/// stdout, times out or overruns its bounds, exits without success, or
-/// its output does not parse as a version.
+/// Returns an error when the probe child cannot be spawned, exposes no
+/// stdout pipe, times out or overruns its bounds, or exits without
+/// success. A successful probe returns the trimmed stdout verbatim:
+/// empty output and non-version text are `Ok`, not errors.
 pub async fn binary_reported_version(exe: &Path) -> Result<String> {
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     const MAX_VERSION_OUTPUT: usize = 512;

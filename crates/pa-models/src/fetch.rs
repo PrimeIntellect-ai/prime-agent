@@ -105,8 +105,9 @@ impl CatalogFetcher {
     /// # Errors
     ///
     /// Returns `FetchError::Transport` on request failure, refused
-    /// redirects, or a body over the byte cap; `FetchError::Status` on any
-    /// non-2xx status (304 returns `Ok(FetchOutcome::NotModified)`).
+    /// redirects (any 3xx besides 304), or a body over the byte cap;
+    /// `FetchError::Status` on any other non-2xx status (304 returns
+    /// `Ok(FetchOutcome::NotModified)`).
     pub async fn fetch(&self, url: &str, etag: Option<&str>) -> Result<FetchOutcome, FetchError> {
         self.fetch_with(url, etag, &[]).await
     }
@@ -117,8 +118,9 @@ impl CatalogFetcher {
     /// # Errors
     ///
     /// Returns `FetchError::Transport` on request failure, refused
-    /// redirects, or a body over the byte cap; `FetchError::Status` on any
-    /// non-2xx status (304 returns `Ok(FetchOutcome::NotModified)`).
+    /// redirects (any 3xx besides 304), or a body over the byte cap;
+    /// `FetchError::Status` on any other non-2xx status (304 returns
+    /// `Ok(FetchOutcome::NotModified)`).
     pub async fn fetch_with(
         &self,
         url: &str,
