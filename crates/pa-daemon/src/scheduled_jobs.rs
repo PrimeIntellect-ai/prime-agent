@@ -203,19 +203,23 @@ impl AgentCronSchedulerHooks for QueueHooks {
             } else {
                 (job.prompt.clone(), None, None)
             };
-            lane.push_back(QueuedItem {
-                message,
-                preview,
-                custom_message,
-                agent_message: None,
-                admission_id: None,
-                images: Vec::new(),
-                queue_key,
-                done: Some(done_tx),
-                queue_visible: true,
-                policy: crate::worker::TurnPolicy::Injected,
-                forced_batch: false,
-            });
+            crate::worker::enqueue_priority(
+                lane,
+                QueuedItem {
+                    priority: crate::worker::QueuePriority::Background,
+                    message,
+                    preview,
+                    custom_message,
+                    agent_message: None,
+                    admission_id: None,
+                    images: Vec::new(),
+                    queue_key,
+                    done: Some(done_tx),
+                    queue_visible: true,
+                    policy: crate::worker::TurnPolicy::Injected,
+                    forced_batch: false,
+                },
+            );
         }
         // The fire checkpoint (busy=true): a scheduled prompt is admitted
         // live work, and heartbeats/cron jobs run unattended — no client
