@@ -2016,9 +2016,16 @@ impl AgentsViewMode {
         }
         // The armed stop-or-delete confirm: "Press ctrl+x again to
         // stop|delete" (TS `renderHints`'s delete hint, keyed by the
-        // armed row's live work).
+        // armed row's CURRENT live work — a row that settles between
+        // the presses shows the word the confirm now carries).
         if let Some(pending) = &self.pending_delete {
-            let word = if pending.stop { "stop" } else { "delete" };
+            let stop = self
+                .rows
+                .iter()
+                .find(|row| row.identity == pending.identity)
+                .map(|row| self.delete_arm_word(row))
+                .unwrap_or(pending.stop);
+            let word = if stop { "stop" } else { "delete" };
             let hint = match self.keybindings.first_key("app.agents.delete") {
                 Some(key) => format!(
                     "Press {} again to {word}",
@@ -3325,6 +3332,50 @@ mod tests {
                 .is_some_and(|pending| !pending.stop),
             "the re-arm carries the current word: {:?}",
             mode.pending_delete
+        );
+    }
+
+    /// The confirm hint rides the armed row's CURRENT live work: a
+    /// running row arms as stop, and the same row settled between the
+    /// presses reads delete — the word the next press re-confirms,
+    /// never the stale stop the first press armed with.
+    #[test]
+    fn the_confirm_hint_rides_the_current_live_work() {
+        let mut mode = mode_with_parent_and_child();
+        let parent_row = mode
+            .rows
+            .iter()
+            .find(|row| row.kind == RowKind::Agent)
+            .expect("the parent row")
+            .clone();
+        mode.toggle_subagent_list(&parent_row);
+        mode.selected = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        mode.handle_key("ctrl+x");
+        let hint = mode
+            .render_hints(120, None)
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(
+            hint.contains("again to stop"),
+            "the running row's confirm reads stop: {hint}"
+        );
+        // The row settles: the arm survives on its identity and
+        // session key, but the hint reads the settled row.
+        mode.roster[1]["status"] = serde_json::json!("idle");
+        mode.rebuild_rows();
+        let hint = mode
+            .render_hints(120, None)
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(
+            hint.contains("again to delete"),
+            "the settled row's confirm reads delete: {hint}"
         );
     }
 
