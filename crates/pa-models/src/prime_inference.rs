@@ -186,8 +186,8 @@ pub fn is_private_prime_inference_model_id(model_id: &str) -> bool {
 ///
 /// # Panics
 ///
-/// Panics if the HMAC context cannot be built from the api key, which
-/// happens only for keys longer than SHA-256's 64-byte block size.
+/// Never for any input: `Hmac::<Sha256>::new_from_slice` accepts api keys of
+/// every length, so the context construction is infallible.
 pub fn scope_key(api_key: &str, team_id: &str) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(api_key.as_bytes()).expect("HMAC accepts any key length");

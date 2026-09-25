@@ -192,8 +192,10 @@ fn conversation_text(messages: &[AgentMessage], cap: usize) -> String {
 /// # Errors
 ///
 /// Returns an error when a requested rollback id is not in the refinement
-/// history, the LLM call fails, or its reply cannot be parsed into a
-/// proposal.
+/// history, when building the refinement request fails because the prompt
+/// leaves no output-token room in the model's context window, when the
+/// refinement call itself fails, or when its reply cannot be parsed into
+/// a proposal.
 pub async fn plan_refinement(
     messages: &[AgentMessage],
     state: &HarnessState,
