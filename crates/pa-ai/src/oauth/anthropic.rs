@@ -128,6 +128,7 @@ pub async fn refresh_anthropic_token(
         &body,
         "Anthropic token refresh",
         REFRESH_TIMEOUT_MS,
+        "",
     )
     .await?;
     Ok(credentials_from(token))
@@ -345,6 +346,7 @@ async fn exchange_authorization_code(
         &body,
         "Token exchange",
         DEFAULT_TOKEN_TIMEOUT_MS,
+        &format!(" redirect_uri={REDIRECT_URI}; response_type=authorization_code;"),
     )
     .await?;
     Ok(credentials_from(token))
@@ -363,10 +365,13 @@ async fn json_token_request(
     body: &str,
     label: &str,
     timeout_ms: u64,
+    wire_context: &str,
 ) -> Result<TokenResponse, String> {
     let response = post_json(http, url, body, timeout_ms)
         .await
-        .map_err(|message| format!("{label} request failed. url={url}; details={message}"))?;
+        .map_err(|message| {
+            format!("{label} request failed. url={url};{wire_context} details={message}")
+        })?;
     if !response.ok() {
         // TS `postJson` throws and the caller wraps the thrown error
         // (`formatErrorDetails` prints the Error head + message).
@@ -439,11 +444,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio::io::AsyncWriteExt as _;
 
-    /// The login binds the registered callback port (`53_692`), so the
-    /// tests serialize on this lock: parallel test threads never
-    /// collide on the one port (the OS answers the bind with
-    /// `address already in use` otherwise).
-    static CALLBACK_PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    use super::super::anthropic_callback::CALLBACK_PORT_LOCK;
 
     /// A scripted transport: url -> response, recording every posted
     /// body. Unknown urls fail the request (the TS suite throws on
@@ -660,7 +661,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        let skew = (credentials.expires - now - 3600 * 1000).abs();
+        let skew = (credentials.expires - now - (3600 * 1000 - EXPIRY_SKEW_MS)).abs();
         assert!(skew < 10_000, "the expiry arithmetic: {skew}");
         // The exchange's JSON body carries the TS grant.
         let body = http.first_body(TOKEN_URL);

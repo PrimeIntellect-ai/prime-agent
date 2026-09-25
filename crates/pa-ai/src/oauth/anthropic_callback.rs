@@ -53,6 +53,13 @@ impl CallbackShared {
     }
 }
 
+/// The tests that bind the registered callback port (`53_692`)
+/// serialize on this lock across the oauth test modules: parallel
+/// test threads never collide on the one port (the OS answers the
+/// bind with `address already in use` otherwise).
+#[cfg(test)]
+pub(crate) static CALLBACK_PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A running callback server.
 ///
 /// Dropping the server aborts its accept loop, releasing the
@@ -449,16 +456,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_bound_port_fails_the_start_clearly() {
+        let _port = CALLBACK_PORT_LOCK.lock().await;
         // The registered port is occupied, so the login fails (TS
-        // rejects the server promise). Skip when a concurrent test
-        // already holds the port.
-        let Ok(blocker) = std::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT)) else {
-            return;
-        };
+        // rejects the server promise with the bind error).
+        let blocker = std::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT))
+            .expect("the lock leaves the port free");
         let error = AnthropicCallbackServer::start("the-state")
             .await
             .unwrap_err();
-        assert!(error.contains("Could not start"), "{error}");
+        assert!(error.contains("port 53692"), "{error}");
+        assert!(error.contains("Address already in use"), "{error}");
         drop(blocker);
     }
 
