@@ -529,9 +529,9 @@ pub(crate) mod tests {
     use super::*;
     use crate::registry::ResidentWorker;
     use crate::rlm_ledger::RlmLedgerEdge;
-    use serde_json::Map;
     use crate::supervisor::ClientRouting;
     use pa_types::daemon::agent_roster::AgentRosterStatus;
+    use serde_json::Map;
 
     fn edge(child_id: &str, parent: &str, child: &str, depth: u32, name: &str) -> RlmLedgerEdge {
         RlmLedgerEdge {

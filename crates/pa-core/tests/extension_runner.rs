@@ -277,7 +277,7 @@ async fn scripted_session_executes_the_extension_tool() -> Result<()> {
         provider: "test".into(),
         base_url: "http://localhost".into(),
         reasoning: false,
-        cost: pa_types::ai::UsageCost::default(),
+        cost: pa_agent::types::UsageCost::default(),
         context_window: 1_000,
         max_tokens: 100,
     };

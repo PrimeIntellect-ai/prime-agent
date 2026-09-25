@@ -4471,7 +4471,7 @@ impl AgentSessionEngine {
                         .map(|_| ()),
                 }
             } else {
-                agent.continue_run().await.map(|()| ())
+                agent.continue_run().await
             }
         });
         let mut aborted = false;
