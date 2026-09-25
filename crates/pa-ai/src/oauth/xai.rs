@@ -161,7 +161,7 @@ pub async fn login_xai(
                 };
                 continue;
             }
-            Some("access_denied") | Some("authorization_denied") => {
+            Some("access_denied" | "authorization_denied") => {
                 return Err("xAI device authorization was denied".to_string());
             }
             Some("expired_token") => {

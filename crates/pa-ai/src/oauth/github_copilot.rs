@@ -18,9 +18,7 @@ use std::time::Duration;
 
 use url::Url;
 
-use super::provider_http::{
-    ProviderHttp, ProviderHttpMethod, ProviderHttpRequest, ProviderHttpResponse,
-};
+use super::provider_http::{ProviderHttp, ProviderHttpMethod, ProviderHttpRequest};
 use super::types::{OAuthLoginUi, OAuthPrompt};
 
 /// The OAuth app the TS flow ships (TS stores the id base64-encoded;
@@ -531,7 +529,7 @@ mod tests {
     /// order), a static map, and a catch-all default for the model
     /// policy POSTs; every request is recorded.
     struct ScriptedHttp {
-        queued: HashMap<String, VecDeque<ProviderHttpResponse>>,
+        queued: Mutex<HashMap<String, VecDeque<ProviderHttpResponse>>>,
         fixed: HashMap<String, ProviderHttpResponse>,
         catch_all: Option<ProviderHttpResponse>,
         requests: Mutex<Vec<ProviderHttpRequest>>,
@@ -540,7 +538,7 @@ mod tests {
     impl ScriptedHttp {
         fn new() -> Self {
             ScriptedHttp {
-                queued: HashMap::new(),
+                queued: Mutex::new(HashMap::new()),
                 fixed: HashMap::new(),
                 catch_all: None,
                 requests: Mutex::new(Vec::new()),
@@ -555,15 +553,11 @@ mod tests {
         }
 
         fn queue(mut self, url: &str, responses: Vec<ProviderHttpResponse>) -> Self {
-            self.queue_raw(url, responses);
-            self
-        }
-
-        fn queue_raw(&mut self, url: &str, responses: Vec<ProviderHttpResponse>) {
-            self.queued.insert(
+            self.queued.lock().unwrap().insert(
                 url.to_string(),
                 responses.into_iter().collect::<VecDeque<_>>(),
             );
+            self
         }
 
         fn fixed(mut self, url: &str, response: ProviderHttpResponse) -> Self {
@@ -597,6 +591,8 @@ mod tests {
             self.requests.lock().unwrap().push(request.clone());
             let response = self
                 .queued
+                .lock()
+                .unwrap()
                 .get_mut(&request.url)
                 .and_then(|queue| queue.pop_front())
                 .or_else(|| self.fixed.get(&request.url).cloned())
@@ -708,26 +704,29 @@ mod tests {
     /// The github.com happy flow's scripted endpoints (a fast poll:
     /// interval 0, pending once, then the token).
     fn github_http() -> ScriptedHttp {
-        let mut http = ScriptedHttp::new();
-        http.queue_raw(
-            "https://github.com/login/device/code",
-            vec![Self::entry(
-                200,
-                r#"{"device_code":"dev-1","user_code":"ABCD-1234","verification_uri":"https://github.com/login/device","interval":0,"expires_in":900}"#,
-            )],
-        );
-        http.queue_raw(
-            "https://github.com/login/oauth/access_token",
-            vec![
-                Self::entry(200, r#"{"error":"authorization_pending"}"#),
-                Self::entry(200, r#"{"access_token":"gh-token"}"#),
-            ],
-        );
-        http.fixed(
-            "https://api.github.com/copilot_internal/v2/token",
-            Self::entry(200, r#"{"token":"copilot-token","expires_at":4000000000}"#),
-        );
-        http.catch_all(Self::entry(200, "{}"))
+        ScriptedHttp::new()
+            .queue(
+                "https://github.com/login/device/code",
+                vec![ScriptedHttp::entry(
+                    200,
+                    r#"{"device_code":"dev-1","user_code":"ABCD-1234","verification_uri":"https://github.com/login/device","interval":0,"expires_in":900}"#,
+                )],
+            )
+            .queue(
+                "https://github.com/login/oauth/access_token",
+                vec![
+                    ScriptedHttp::entry(200, r#"{"error":"authorization_pending"}"#),
+                    ScriptedHttp::entry(200, r#"{"access_token":"gh-token"}"#),
+                ],
+            )
+            .fixed(
+                "https://api.github.com/copilot_internal/v2/token",
+                ScriptedHttp::entry(
+                    200,
+                    r#"{"token":"copilot-token","expires_at":4000000000}"#,
+                ),
+            )
+            .catch_all(ScriptedHttp::entry(200, "{}"))
     }
 
     #[tokio::test]
@@ -803,23 +802,23 @@ mod tests {
 
     #[tokio::test]
     async fn an_enterprise_domain_routes_every_endpoint() {
-        let mut http = ScriptedHttp::new();
-        http.queue_raw(
-            "https://company.ghe.com/login/device/code",
-            vec![ScriptedHttp::entry(
-                200,
-                r#"{"device_code":"dev-1","user_code":"CODE-1","verification_uri":"https://github.com/login/device","interval":0,"expires_in":900}"#,
-            )],
-        );
-        http.queue_raw(
-            "https://company.ghe.com/login/oauth/access_token",
-            vec![ScriptedHttp::entry(200, r#"{"access_token":"gh-e"}"#)],
-        );
-        http.fixed(
-            "https://api.company.ghe.com/copilot_internal/v2/token",
-            ScriptedHttp::entry(200, r#"{"token":"copilot-e","expires_at":4000000000}"#),
-        );
-        http.catch_all(ScriptedHttp::entry(200, "{}"));
+        let http = ScriptedHttp::new()
+            .queue(
+                "https://company.ghe.com/login/device/code",
+                vec![ScriptedHttp::entry(
+                    200,
+                    r#"{"device_code":"dev-1","user_code":"CODE-1","verification_uri":"https://github.com/login/device","interval":0,"expires_in":900}"#,
+                )],
+            )
+            .queue(
+                "https://company.ghe.com/login/oauth/access_token",
+                vec![ScriptedHttp::entry(200, r#"{"access_token":"gh-e"}"#)],
+            )
+            .fixed(
+                "https://api.company.ghe.com/copilot_internal/v2/token",
+                ScriptedHttp::entry(200, r#"{"token":"copilot-e","expires_at":4000000000}"#),
+            )
+            .catch_all(ScriptedHttp::entry(200, "{}"));
         let ui = ScriptedUi::new(ScriptedAnswer::value("company.ghe.com"));
         let credentials = login_github_copilot(&http, &ui).await.unwrap();
         assert_eq!(
@@ -852,32 +851,22 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_surface_ends_the_poll_between_waits() {
-        let mut http = ScriptedHttp::new();
-        http.queue_raw(
-            "https://github.com/login/device/code",
-            vec![ScriptedHttp::entry(
+        let http = ScriptedHttp::new()
+            .queue(
+                "https://github.com/login/device/code",
+                vec![ScriptedHttp::entry(
+                    200,
+                    r#"{"device_code":"dev-1","user_code":"CODE-1","verification_uri":"https://github.com/login/device","interval":0,"expires_in":900}"#,
+                )],
+            )
+            // The poll never answers a token; the cancel flips after the
+            // auth block lands.
+            .catch_all(ScriptedHttp::entry(
                 200,
-                r#"{"device_code":"dev-1","user_code":"CODE-1","verification_uri":"https://github.com/login/device","interval":0,"expires_in":900}"#,
-            )],
-        );
-        // The poll never answers a token; the cancel flips after the
-        // auth block lands.
-        http.catch_all(ScriptedHttp::entry(
-            200,
-            r#"{"error":"authorization_pending"}"#,
-        ));
-        let ui = ScriptedUi::new(ScriptedAnswer::value(""));
+                r#"{"error":"authorization_pending"}"#,
+            ));
+        let ui = Arc::new(ScriptedUi::new(ScriptedAnswer::value("")));
         let flag = Arc::clone(&ui.cancelled);
-        {
-            let mut guard = ui.progress.lock().unwrap();
-            let _ = &mut guard;
-        }
-        // Flip the flag through the auth capture (the shared cancel is
-        // the panel's seam; the scripted surface exposes the same
-        // store).
-        *ui.auth_url.lock().unwrap() = None;
-        drop(ui.progress.lock().unwrap());
-        let ui = Arc::new(ui);
         let flow_ui = Arc::clone(&ui);
         let flow = {
             let flow_http: Arc<ScriptedHttp> = Arc::new(http);
@@ -897,14 +886,14 @@ mod tests {
         let error = tokio::time::timeout(Duration::from_secs(10), flow)
             .await
             .expect("the cancelled poll settles promptly")
-            .unwrap();
+            .unwrap()
+            .unwrap_err();
         assert_eq!(error, LOGIN_CANCELLED);
     }
 
     #[tokio::test]
     async fn a_failed_device_flow_surfaces_the_ts_message() {
-        let mut http = ScriptedHttp::new();
-        http.queue_raw(
+        let http = ScriptedHttp::new().queue(
             "https://github.com/login/device/code",
             vec![ScriptedHttp::entry(500, "boom")],
         );
@@ -915,21 +904,21 @@ mod tests {
 
     #[tokio::test]
     async fn a_denied_authorization_surfaces_the_ts_message() {
-        let mut http = ScriptedHttp::new();
-        http.queue_raw(
-            "https://github.com/login/device/code",
-            vec![ScriptedHttp::entry(
-                200,
-                r#"{"device_code":"dev-1","user_code":"CODE-1","verification_uri":"https://github.com/login/device","interval":0,"expires_in":900}"#,
-            )],
-        );
-        http.queue_raw(
-            "https://github.com/login/oauth/access_token",
-            vec![ScriptedHttp::entry(
-                200,
-                r#"{"error":"access_denied","error_description":"user denied"}"#,
-            )],
-        );
+        let http = ScriptedHttp::new()
+            .queue(
+                "https://github.com/login/device/code",
+                vec![ScriptedHttp::entry(
+                    200,
+                    r#"{"device_code":"dev-1","user_code":"CODE-1","verification_uri":"https://github.com/login/device","interval":0,"expires_in":900}"#,
+                )],
+            )
+            .queue(
+                "https://github.com/login/oauth/access_token",
+                vec![ScriptedHttp::entry(
+                    200,
+                    r#"{"error":"access_denied","error_description":"user denied"}"#,
+                )],
+            );
         let ui = ScriptedUi::new(ScriptedAnswer::value(""));
         let error = login_github_copilot(&http, &ui).await.unwrap_err();
         assert_eq!(error, "Device flow failed: access_denied: user denied");
@@ -937,22 +926,22 @@ mod tests {
 
     #[tokio::test]
     async fn an_invalid_copilot_token_response_fails_the_fields() {
-        let mut http = ScriptedHttp::new();
-        http.queue_raw(
-            "https://github.com/login/device/code",
-            vec![ScriptedHttp::entry(
-                200,
-                r#"{"device_code":"dev-1","user_code":"CODE-1","verification_uri":"https://github.com/login/device","interval":0,"expires_in":900}"#,
-            )],
-        );
-        http.queue_raw(
-            "https://github.com/login/oauth/access_token",
-            vec![ScriptedHttp::entry(200, r#"{"access_token":"gh"}"#)],
-        );
-        http.fixed(
-            "https://api.github.com/copilot_internal/v2/token",
-            ScriptedHttp::entry(200, r#"{"token":"t"}"#),
-        );
+        let http = ScriptedHttp::new()
+            .queue(
+                "https://github.com/login/device/code",
+                vec![ScriptedHttp::entry(
+                    200,
+                    r#"{"device_code":"dev-1","user_code":"CODE-1","verification_uri":"https://github.com/login/device","interval":0,"expires_in":900}"#,
+                )],
+            )
+            .queue(
+                "https://github.com/login/oauth/access_token",
+                vec![ScriptedHttp::entry(200, r#"{"access_token":"gh"}"#)],
+            )
+            .fixed(
+                "https://api.github.com/copilot_internal/v2/token",
+                ScriptedHttp::entry(200, r#"{"token":"t"}"#),
+            );
         let ui = ScriptedUi::new(ScriptedAnswer::value(""));
         let error = login_github_copilot(&http, &ui).await.unwrap_err();
         assert_eq!(error, "Invalid Copilot token response fields");

@@ -90,7 +90,7 @@ impl ProviderHttp for ReqwestProviderHttp {
                 ProviderHttpMethod::Get => reqwest::Method::GET,
                 ProviderHttpMethod::Post => reqwest::Method::POST,
             };
-            let mut builder = reqwest::Client::builder()
+            let client = reqwest::Client::builder()
                 .timeout(Duration::from_millis(timeout_ms))
                 .redirect(reqwest::redirect::Policy::custom(move |attempt| {
                     // TS `redirect: "error"`: a redirected request
@@ -103,23 +103,20 @@ impl ProviderHttp for ReqwestProviderHttp {
                 }))
                 .build()
                 .map_err(|error| error.to_string())?;
+            let mut request_builder = client.request(method, &request.url);
             for (name, value) in &request.headers {
-                builder = builder.header(name, value);
+                request_builder = request_builder.header(name, value);
             }
             if let Some(body) = &request.body {
-                builder = builder.body(body.clone());
+                request_builder = request_builder.body(body.clone());
             }
-            let response = builder
-                .request(method, &request.url)
-                .send()
-                .await
-                .map_err(|error| {
-                    if error.is_timeout() {
-                        "the request timed out".to_string()
-                    } else {
-                        error.to_string()
-                    }
-                })?;
+            let response = request_builder.send().await.map_err(|error| {
+                if error.is_timeout() {
+                    "the request timed out".to_string()
+                } else {
+                    error.to_string()
+                }
+            })?;
             let status = response.status().as_u16();
             let body = response.text().await.map_err(|error| error.to_string())?;
             Ok(ProviderHttpResponse { status, body })

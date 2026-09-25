@@ -305,6 +305,8 @@ mod tests {
         {
             let response = self
                 .queued
+                .lock()
+                .unwrap()
                 .get_mut(&request.url)
                 .and_then(|queue| queue.pop_front());
             Box::pin(
@@ -313,9 +315,17 @@ mod tests {
         }
     }
 
-    /// A scripted surface: the paste answers and a shared cancel flag.
+    /// One scripted prompt answer: a value (blank included — TS
+    /// `allowEmpty`'s blank entry) or a cancel.
+    enum Answer {
+        Value(String),
+        Cancel,
+    }
+
+    /// A scripted surface: the prompt answer, the manual paste, and a
+    /// shared cancel flag.
     struct ScriptedUi {
-        prompt: Option<String>,
+        prompt: Answer,
         manual: Option<String>,
         cancelled: Arc<AtomicBool>,
     }
@@ -323,14 +333,19 @@ mod tests {
     impl ScriptedUi {
         fn new() -> Self {
             ScriptedUi {
-                prompt: None,
+                prompt: Answer::Value(String::new()),
                 manual: None,
                 cancelled: Arc::new(AtomicBool::new(false)),
             }
         }
 
         fn prompt(mut self, answer: &str) -> Self {
-            self.prompt = Some(answer.to_string());
+            self.prompt = Answer::Value(answer.to_string());
+            self
+        }
+
+        fn cancelled_prompt(mut self) -> Self {
+            self.prompt = Answer::Cancel;
             self
         }
 
@@ -344,16 +359,12 @@ mod tests {
 
         fn on_prompt(
             &self,
-            prompt: &OAuthPrompt,
+            _prompt: &OAuthPrompt,
         ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
-            let answer = self
-                .prompt
-                .as_ref()
-                .map(|answer| {
-                    let allow_blank = prompt.allow_empty && answer.is_empty();
-                    (!allow_blank).then(|| answer.to_string())
-                })
-                .unwrap_or(None);
+            let answer = match &self.prompt {
+                Answer::Value(value) => Some(value.clone()),
+                Answer::Cancel => None,
+            };
             Box::pin(std::future::ready(answer))
         }
 

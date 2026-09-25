@@ -32,7 +32,7 @@ pub struct CallbackCode {
 }
 
 /// Settled once per login; the first settle wins.
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct CallbackShared {
     result: tokio::sync::Mutex<Option<Option<CallbackCode>>>,
     notify: tokio::sync::Notify,
@@ -58,6 +58,7 @@ impl CallbackShared {
 /// Dropping the server aborts its accept loop, releasing the
 /// listener's port — a settled or cancelled login never wedges the
 /// registered redirect port for the next one.
+#[derive(Debug)]
 pub struct AnthropicCallbackServer {
     shared: Arc<CallbackShared>,
     port: u16,
@@ -185,18 +186,19 @@ async fn serve_callback(mut stream: tokio::net::TcpStream, shared: &CallbackShar
         .await;
         return;
     }
-    let code = query_param(query, "code");
-    let echoed = query_param(query, "state");
-    if code.as_deref().map(str::is_empty).unwrap_or(true) || echoed.is_none() {
-        let _ = write_response(
-            &mut stream,
-            "400 Bad Request",
-            error_page("Missing code or state parameter.", None),
-        )
-        .await;
-        return;
-    }
-    if echoed.as_deref() != Some(state) {
+    let (code, echoed) = match (query_param(query, "code"), query_param(query, "state")) {
+        (Some(code), Some(echoed)) if !code.is_empty() => (code, echoed),
+        _ => {
+            let _ = write_response(
+                &mut stream,
+                "400 Bad Request",
+                error_page("Missing code or state parameter.", None),
+            )
+            .await;
+            return;
+        }
+    };
+    if echoed != state {
         let _ = write_response(
             &mut stream,
             "400 Bad Request",
@@ -205,7 +207,6 @@ async fn serve_callback(mut stream: tokio::net::TcpStream, shared: &CallbackShar
         .await;
         return;
     }
-    let code = code.unwrap_or_default();
     shared
         .settle(Some(CallbackCode {
             code,
@@ -360,6 +361,7 @@ fn error_page(message: &str, details: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// One live server on a free loopback port, with its port.
     async fn live(state: &str) -> (AnthropicCallbackServer, u16) {

@@ -372,7 +372,7 @@ async fn json_token_request(
         // (`formatErrorDetails` prints the Error head + message).
         return Err(format!(
             "{label} request failed. url={url}; details=Error: HTTP request failed. status={}; url={url}; body={}",
-            response.status
+            response.status, response.body
         ));
     }
     let json: serde_json::Value = serde_json::from_str(&response.body).map_err(|error| {
@@ -431,6 +431,7 @@ async fn post_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::oauth::anthropic_callback::CALLBACK_PORT;
     use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
@@ -742,7 +743,7 @@ mod tests {
             Some(ScriptedAnswer::value("   ")),
             Some(ScriptedAnswer::value("the-prompted-code")),
         );
-        let credentials = login_anthropic(&http, &ui).await.unwrap();
+        login_anthropic(&http, &ui).await.unwrap();
         let body = http.first_body(TOKEN_URL);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["code"], "the-prompted-code");
