@@ -542,7 +542,7 @@ mod tests {
                 .expect("model_catalog_changed never landed");
             match tokio::time::timeout(remaining, events.recv()).await {
                 Ok(Ok(frame)) if frame.outbound_type == "model_catalog_changed" => return,
-                Ok(Ok(_)) => {},
+                Ok(Ok(_)) => {}
                 Ok(Err(error)) => panic!("event stream error: {error}"),
                 Err(_) => panic!("model_catalog_changed never landed"),
             }
