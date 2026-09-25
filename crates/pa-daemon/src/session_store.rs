@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(test)]
@@ -52,6 +52,10 @@ pub(crate) fn new_entry_id(used: &HashMap<String, ()>) -> String {
 }
 
 pub use pa_types::session::SessionHeader;
+
+/// The roster scan lives in `session_scan` (the bounded-header reshape of
+/// the listing loop); re-exported for the listing call sites.
+pub use crate::session_scan::list_sessions;
 
 /// One stored entry: message lifecycle, bookkeeping, or a custom record.
 /// Fields beyond the entry envelope are preserved as raw JSON.
@@ -197,21 +201,86 @@ fn fold_child_usage_attributions(entries: &mut [SessionEntry]) {
     }
 }
 
-/// Read the first line of a session file and parse it as a header.
-pub fn read_session_header(path: &Path) -> Option<SessionHeader> {
-    let file = fs::File::open(path).ok()?;
-    let mut first = String::new();
-    std::io::BufReader::new(file).read_line(&mut first).ok()?;
-    let value: Value = serde_json::from_str(first.trim()).ok()?;
+/// The bounded first-line read cap for header-only judgments (TS
+/// `SESSION_LIST_HEADER_PREFIX_MAX_CHARS`): a session header line is a
+/// serialized `SessionHeader` and lands well inside 512 bytes.
+pub const SESSION_LIST_HEADER_READ_MAX_BYTES: usize = 512;
+
+/// Parse one session file line as the `session` header (the TS
+/// `readSessionHeader` body): a JSON object tagged `session` that
+/// deserializes into the typed header.
+pub(crate) fn parse_session_header_line(line: &str) -> Option<SessionHeader> {
+    let value: Value = serde_json::from_str(line.trim()).ok()?;
     if value.get("type").and_then(Value::as_str) != Some("session") {
         return None;
     }
     serde_json::from_value(value).ok()
 }
 
-/// A session file is valid when its first line is a `session` header with an id.
+/// Read the file's first line when it ends within `max_bytes` bytes.
+///
+/// `None` when no line ends within the bound (an over-long first line, an
+/// unreadable file, an empty file): the caller judges such a file with a full
+/// read, never on truncated bytes. A final line without a trailing newline is
+/// still a line (`str::lines` reads one too).
+pub(crate) fn read_first_line_bounded(path: &Path, max_bytes: usize) -> Option<Vec<u8>> {
+    let mut file = fs::File::open(path).ok()?;
+    // One byte over the cap separates "a line that fits the cap" (judgeable)
+    // from "an over-long line" (not): a newline at index `max_bytes` still
+    // bounds a complete `max_bytes`-byte line.
+    let mut buf = vec![0u8; max_bytes + 1];
+    let mut filled = 0;
+    while filled < buf.len() {
+        let read = file.read(&mut buf[filled..]).ok()?;
+        if read == 0 {
+            return (filled > 0).then(|| strip_line_return(&buf[..filled]));
+        }
+        if let Some(at) = buf[filled..filled + read]
+            .iter()
+            .position(|&byte| byte == b'\n')
+        {
+            if filled + at > max_bytes {
+                return None;
+            }
+            return Some(strip_line_return(&buf[..filled + at]));
+        }
+        filled += read;
+    }
+    None
+}
+
+/// Drop one `\r\n` line return off the line's own bytes, like `str::lines`.
+fn strip_line_return(line: &[u8]) -> Vec<u8> {
+    let mut line = line.to_vec();
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    line
+}
+
+/// The session file's header, read from the first line bounded to
+/// [`SESSION_LIST_HEADER_READ_MAX_BYTES`] (the TS `isValidSessionFile`
+/// precedent: judge a file by its header line, not a full-file read).
+/// `None` also covers an over-long first line: the bounded read refuses to
+/// judge a truncated one.
+pub fn read_session_header_bounded(path: &Path) -> Option<SessionHeader> {
+    let line = read_first_line_bounded(path, SESSION_LIST_HEADER_READ_MAX_BYTES)?;
+    let text = std::str::from_utf8(&line).ok()?;
+    parse_session_header_line(text)
+}
+
+/// Read the first line of a session file and parse it as a header.
+pub fn read_session_header(path: &Path) -> Option<SessionHeader> {
+    let file = fs::File::open(path).ok()?;
+    let mut first = String::new();
+    std::io::BufReader::new(file).read_line(&mut first).ok()?;
+    parse_session_header_line(&first)
+}
+
+/// A session file is valid when its first line is a `session` header with an
+/// id, judged on the bounded header read.
 pub fn is_valid_session_file(path: &Path) -> bool {
-    read_session_header(path).is_some_and(|header| !header.id.is_empty())
+    read_session_header_bounded(path).is_some_and(|header| !header.id.is_empty())
 }
 
 impl SessionFile {
@@ -1694,25 +1763,6 @@ fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
     Some(())
 }
 
-/// List every valid session file in a directory, most recently modified first
-/// (port of `SessionManager.listAll`).
-pub fn list_sessions(session_dir: &Path) -> Vec<SessionInfo> {
-    let Ok(read) = fs::read_dir(session_dir) else {
-        return Vec::new();
-    };
-    let mut infos: Vec<(SessionInfo, std::time::SystemTime)> = read
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("jsonl"))
-        .filter_map(|path| {
-            let modified = fs::metadata(&path).and_then(|m| m.modified()).ok()?;
-            read_session_info(&path).map(|info| (info, modified))
-        })
-        .collect();
-    infos.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
-    infos.into_iter().map(|(info, _)| info).collect()
-}
-
 /// Most recent valid session for a cwd (port of `findMostRecentSessionForCwd`).
 pub fn find_most_recent_session_for_cwd(session_dir: &Path, cwd: &str) -> Option<PathBuf> {
     list_sessions(session_dir)
@@ -1748,6 +1798,82 @@ mod tests {
     fn captured_attribution_fixture() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/attribution-fold-captured.jsonl")
+    }
+
+    #[test]
+    fn bounded_header_matches_the_line_read() {
+        let dir = temp_dir();
+        let mut session = SessionFile::create("/repo", None, 0);
+        session.append_message(json!({"role": "user", "content": "hi", "timestamp": 1u64}));
+        let path = dir.join(session_file_name(session.session_id()));
+        session.set_path(path.clone());
+        session.rewrite().unwrap();
+        assert_eq!(
+            read_session_header_bounded(&path),
+            read_session_header(&path)
+        );
+        assert!(is_valid_session_file(&path));
+    }
+
+    #[test]
+    fn bounded_header_rejects_a_non_json_first_line() {
+        let dir = temp_dir();
+        let path = dir.join("bad.jsonl");
+        fs::write(&path, "truncated junk without json\n").unwrap();
+        assert_eq!(read_session_header_bounded(&path), None);
+        assert!(!is_valid_session_file(&path));
+    }
+
+    #[test]
+    fn bounded_header_refuses_an_over_long_first_line() {
+        let dir = temp_dir();
+        // A cwd long enough to push the serialized header past the 512-byte
+        // bound: the bounded read judges nothing; the line read still does.
+        let mut session = SessionFile::create(&format!("/repo/{}", "x".repeat(600)), None, 0);
+        let path = dir.join(session_file_name(session.session_id()));
+        session.set_path(path.clone());
+        session.rewrite().unwrap();
+        assert_eq!(read_session_header_bounded(&path), None);
+        assert!(read_session_header(&path).is_some());
+    }
+
+    #[test]
+    fn bounded_header_reads_an_unterminated_first_line() {
+        let dir = temp_dir();
+        let mut session = SessionFile::create("/repo", None, 0);
+        let path = dir.join(session_file_name(session.session_id()));
+        session.set_path(path.clone());
+        session.rewrite().unwrap();
+        let header_line = fs::read_to_string(&path).unwrap();
+        fs::write(&path, header_line.trim_end()).unwrap();
+        assert_eq!(
+            read_session_header_bounded(&path),
+            read_session_header(&path)
+        );
+    }
+
+    #[test]
+    fn bounded_header_strips_a_crlf_line_return() {
+        let dir = temp_dir();
+        let mut session = SessionFile::create("/repo", None, 0);
+        let path = dir.join(session_file_name(session.session_id()));
+        session.set_path(path.clone());
+        session.rewrite().unwrap();
+        let header_line = fs::read_to_string(&path).unwrap();
+        fs::write(&path, format!("{}\r\n", header_line.trim_end())).unwrap();
+        assert_eq!(
+            read_session_header_bounded(&path),
+            read_session_header(&path)
+        );
+    }
+
+    #[test]
+    fn bounded_header_treats_an_empty_file_as_headerless() {
+        let dir = temp_dir();
+        let path = dir.join("empty.jsonl");
+        fs::write(&path, "").unwrap();
+        assert_eq!(read_session_header_bounded(&path), None);
+        assert!(!is_valid_session_file(&path));
     }
 
     #[test]

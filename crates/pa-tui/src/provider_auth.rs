@@ -363,15 +363,23 @@ impl ProviderAuthSelector {
     /// The panel's rendered rows.
     pub fn render(&mut self, theme: &Theme, width: usize) -> Vec<Line> {
         let mut lines: Vec<Line> = Vec::new();
-        lines.push(Vec::new());
-        lines.push(vec![
-            theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))
-        ]);
-        lines.push(vec![crate::Span::raw(format!("  {}", self.title()))]);
-        if !self.subtitle().is_empty() {
+        // The logout selector and the API-key prompt keep their framed
+        // header (the rule, the title, the subtitle); the login menu
+        // matches the /model and /mcp pickers (the operator's
+        // 2026-09-25 directive): the search bar is the frame's first
+        // row — no header block, no leading blank.
+        let framed = self.is_logout() || !matches!(self.mode, Mode::List);
+        if framed {
+            lines.push(Vec::new());
             lines.push(vec![
-                theme.fg_span(ThemeColor::Muted, format!("  {}", self.subtitle()))
+                theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))
             ]);
+            lines.push(vec![crate::Span::raw(format!("  {}", self.title()))]);
+            if !self.subtitle().is_empty() {
+                lines.push(vec![
+                    theme.fg_span(ThemeColor::Muted, format!("  {}", self.subtitle()))
+                ]);
+            }
         }
         match &self.mode {
             Mode::Prompt { input, .. } => {
@@ -464,9 +472,16 @@ impl ProviderAuthSelector {
             ThemeColor::Muted,
             "  ↑↓ navigate  enter select  escape cancel".to_string(),
         )]);
-        lines.push(vec![
-            theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))
-        ]);
+        if framed {
+            lines.push(vec![
+                theme.fg_span(ThemeColor::Border, "─".repeat(width.max(1)))
+            ]);
+        } else {
+            // One blank line of spacing below the shortcuts (the pickers'
+            // grammar): the hint is the frame's last content row, never
+            // a rule.
+            lines.push(Vec::new());
+        }
         lines
     }
 }
@@ -610,10 +625,12 @@ mod tests {
 
     #[test]
     fn the_panel_renders_the_ts_chrome() {
-        // The selector carries no tab machinery (the operator's
-        // 2026-09-24 directive: /login is the providers picker alone) —
-        // the panel chrome is the bordered search field, the rows, and
-        // the hint, with no tab labels and no switch hint.
+        // The login menu matches the /model and /mcp pickers (the
+        // operator's 2026-09-25 directive): the frame opens with the
+        // search field itself (its top rule, the placeholder row, its
+        // bottom rule) — no header block, no leading blank — the rows
+        // follow, and the hint is the last content row with one blank
+        // under it.
         let mut selector =
             ProviderAuthSelector::new(AuthSelectorKind::Login, vec![openai(), linear()]);
         selector.render(&theme(), 80);
@@ -626,16 +643,40 @@ mod tests {
                     .collect::<String>()
             })
             .collect::<Vec<_>>();
-        assert!(text.iter().any(|row| row.contains("Providers")));
-        assert!(text
+        assert!(
+            text[0].starts_with('─'),
+            "the search field's top rule opens the frame: {text:?}"
+        );
+        assert!(
+            text[1].contains("Search providers"),
+            "the placeholder row rides directly under the top rule: {text:?}"
+        );
+        assert!(
+            text[2].starts_with('─'),
+            "the search field's bottom rule follows: {text:?}"
+        );
+        assert!(
+            !text.iter().any(|row| row.trim() == "Providers"),
+            "no title row rides the login menu: {text:?}"
+        );
+        assert!(!text
             .iter()
             .any(|row| row.contains("Connect with a subscription or API key.")));
         assert!(!text.iter().any(|row| row.contains("MCP Connections")));
         assert!(text.iter().any(|row| row.contains("OpenAI · api key")));
-        assert!(text.iter().any(|row| row.contains("Search providers")));
         assert!(
             !text.iter().any(|row| row.contains("tabs")),
             "no tab hint rides the panel: {text:?}"
+        );
+        assert_eq!(rows.last(), Some(&Vec::new()), "one blank under the hint");
+        let hint_index = text
+            .iter()
+            .position(|row| row.contains("↑↓ navigate"))
+            .expect("the hint row");
+        assert_eq!(
+            hint_index,
+            text.len() - 2,
+            "the hint is the last content row: {text:?}"
         );
     }
 
