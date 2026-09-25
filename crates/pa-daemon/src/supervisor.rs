@@ -11,13 +11,13 @@ mod adoption;
 mod launch_budget;
 mod options;
 
-pub use options::SupervisorOptions;
-pub(crate) use options::ClientRouting;
 use adoption::{AdoptionBoot, AdoptionOutcome};
 use launch_budget::{
     DEFAULT_WORKER_CONNECT_TIMEOUT_MS, WORKER_AUTH_FLOOR_MS, WORKER_CONNECT_BACKOFF_MS,
     WORKER_CONNECT_PROBE_MS, WORKER_CONNECT_TIMEOUT_ENV,
 };
+pub(crate) use options::ClientRouting;
+pub use options::SupervisorOptions;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
