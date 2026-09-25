@@ -203,7 +203,8 @@ impl AgentCronSchedulerHooks for QueueHooks {
             } else {
                 (job.prompt.clone(), None, None)
             };
-            lane.push_back(QueuedItem {
+            crate::worker::enqueue_priority(lane, QueuedItem {
+                priority: crate::worker::QueuePriority::Background,
                 message,
                 preview,
                 custom_message,
