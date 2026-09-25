@@ -65,7 +65,13 @@ pub(crate) fn markdown_rows(
 /// (the operator's 2026-09-24 directive: "mail envelope glyph GREEN not
 /// purple") — the Success color, the palette's green. The muted label,
 /// then the participant (and the preview when present) joined by the dim
-/// `·` separators.
+/// `·` separators. The participant renders its DIRECTIONAL GLYPH (the
+/// operator's 2026-09-24 arrow directive: "instead of saying to child xyz
+/// make use an arrow or smt. and when receiving messages, left arrow or
+/// smt?"): the parse layer's TS-shaped `to <role> <name>` /
+/// `from <role> <name>` becomes `→ <role> <name>` on sent rows and
+/// `← <role> <name>` on received ones — a render-side transform only, the
+/// role and name stay visible, and the wire/store forms never change.
 pub(crate) fn agent_message_summary_line(
     direction: AgentMessageDirection,
     participant: &str,
@@ -80,7 +86,10 @@ pub(crate) fn agent_message_summary_line(
             theme.fg_style(ThemeColor::Muted),
         ),
         Span::styled(" \u{b7} ".to_string(), theme.fg_style(ThemeColor::Dim)),
-        Span::styled(participant.to_string(), theme.fg_style(ThemeColor::Dim)),
+        Span::styled(
+            directional_participant(participant),
+            theme.fg_style(ThemeColor::Dim),
+        ),
     ];
     if let Some(preview) = preview {
         line.push(Span::styled(
@@ -93,6 +102,23 @@ pub(crate) fn agent_message_summary_line(
         ));
     }
     line
+}
+
+/// The participant's directional form (the operator's 2026-09-24 arrow
+/// directive, render-side only): `to <role> <name>` renders
+/// `→ <role> <name>` and `from <role> <name>` renders `← <role> <name>`;
+/// anything else (an already-glyphed or malformed participant) passes
+/// through unchanged.
+fn directional_participant(participant: &str) -> String {
+    participant
+        .strip_prefix("to ")
+        .map(|rest| format!("\u{2192} {rest}"))
+        .or_else(|| {
+            participant
+                .strip_prefix("from ")
+                .map(|rest| format!("\u{2190} {rest}"))
+        })
+        .unwrap_or_else(|| participant.to_string())
 }
 
 /// The collapsed one-line preview of the message body: every source line
@@ -335,7 +361,7 @@ mod tests {
         let header = flat(&rows[1]);
         assert_eq!(
             header.trim_end(),
-            " \u{2709} Agent message received \u{b7} from child model-probe \u{b7} ready"
+            " \u{2709} Agent message received \u{b7} \u{2190} child model-probe \u{b7} ready"
         );
         // Colors: green envelope (the operator's 2026-09-24 directive),
         // muted label, dim participant, preview, and the separators.
@@ -351,7 +377,7 @@ mod tests {
         assert_eq!(rows[1][4], Span::styled(" \u{b7} ".to_string(), dim));
         assert_eq!(
             rows[1][5],
-            Span::styled("from child model-probe".to_string(), dim)
+            Span::styled("\u{2190} child model-probe".to_string(), dim)
         );
         assert_eq!(rows[1][6], Span::styled(" \u{b7} ".to_string(), dim));
         assert_eq!(rows[1][7], Span::styled("ready".to_string(), dim));
@@ -370,7 +396,7 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(
             flat(&rows[0]).trim_end(),
-            " \u{2709} Agent message received \u{b7} from parent root"
+            " \u{2709} Agent message received \u{b7} \u{2190} parent root"
         );
     }
 
@@ -395,6 +421,39 @@ mod tests {
         assert!(header.contains("word"), "preview kept: {header:?}");
         assert!(header.ends_with("\u{2026}"), "ellipsis: {header:?}");
         assert!(str_width(&header) <= 58, "fits the line: {header:?}");
+    }
+
+    /// The participant renders its directional glyph (the operator's
+    /// 2026-09-24 arrow directive): sent rows point `→` toward the
+    /// recipient, received rows carry `←` from the sender, the role and
+    /// name stay visible, and the word forms never render.
+    #[test]
+    fn agent_message_participants_render_directional_glyphs() {
+        assert_eq!(
+            directional_participant("to child xyz"),
+            "\u{2192} child xyz"
+        );
+        assert_eq!(
+            directional_participant("from child model-probe"),
+            "\u{2190} child model-probe"
+        );
+        // A malformed or already-glyphed participant passes through.
+        assert_eq!(directional_participant("root"), "root");
+        let row = AgentMessageRow {
+            direction: AgentMessageDirection::Sent,
+            participant: "to parent fleet-main-governance".to_string(),
+            message: "report".to_string(),
+        };
+        let rows = render_agent_message(&row, Detail::Overview, &theme(), 80, false);
+        let header = flat(&rows[0]);
+        assert!(
+            header.contains("\u{2192} parent fleet-main-governance"),
+            "the sent row points at the recipient: {header}"
+        );
+        assert!(
+            !header.contains("to parent"),
+            "the word form never renders: {header}"
+        );
     }
 
     #[test]

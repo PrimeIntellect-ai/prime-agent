@@ -146,7 +146,7 @@ fn sent_agent_messages_render_below_the_code() {
     assert!(
         flat[1]
             .trim_end()
-            .starts_with(" \u{2709} Agent message sent \u{b7} to parent Worker"),
+            .starts_with(" \u{2709} Agent message sent \u{b7} \u{2192} parent Worker"),
         "got: {flat:?}"
     );
     assert!(!flat[1].contains("Ping."), "no body when collapsed");
@@ -160,7 +160,7 @@ fn sent_agent_messages_render_below_the_code() {
     assert_eq!(flat[summary - 1], "", "blank between code and receipt");
     assert_eq!(
         flat[summary].trim_end(),
-        " \u{2709} Agent message sent \u{b7} to parent Worker"
+        " \u{2709} Agent message sent \u{b7} \u{2192} parent Worker"
     );
     assert_eq!(flat[summary + 1], " \u{2570}\u{2500} Ping.");
     assert_eq!(flat[summary + 2], "    Then report back.");
@@ -192,7 +192,9 @@ fn sent_agent_message_labels_and_participant_fallbacks() {
         let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
         let text = text_of(&lines[1]);
         assert!(
-            text.contains(&format!("\u{2709} {label} \u{b7} to child worker-active")),
+            text.contains(&format!(
+                "\u{2709} {label} \u{b7} \u{2192} child worker-active"
+            )),
             "got: {text}"
         );
     }
@@ -208,7 +210,7 @@ fn sent_agent_message_labels_and_participant_fallbacks() {
     let card = cell_card("send()", details, false, false);
     let lines = render(&card, 0, Detail::Overview, &theme(), 100, true);
     assert!(
-        text_of(&lines[1]).contains("Agent message queued \u{b7} to peer-session"),
+        text_of(&lines[1]).contains("Agent message queued \u{b7} \u{2192} peer-session"),
         "got: {}",
         text_of(&lines[1])
     );
