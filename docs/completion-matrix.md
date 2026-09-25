@@ -124,8 +124,8 @@ the lane.
 
 Done: thin supervisor + per-session worker processes (stages 1-3, #79/#82/#89),
 session self-registration/adoption, chunked snapshot streaming (#74),
-compaction (#85), side questions (#70), status-line recap (#81/#83),
-queue/retry/restart/kill, `send_message` arm, worker robustness (#88),
+compaction (#85), side questions (#70), status-line recap (#81/#83;
+removed 2026-09-25 by operator directive), queue/retry/restart/kill, `send_message` arm, worker robustness (#88),
 32 of ~106 TS command types (`pa-daemon/src/protocol.rs` L25-58
 `KNOWN_COMMAND_TYPES` vs `daemon-supervisor.ts` L244 `DAEMON_COMMAND_TYPES`).
 
@@ -303,8 +303,12 @@ implemented (TS `modes/rpc/`, `modes/acp/`).
 
 Done: append-only JSONL session files with TS-parity entry sets (#88: session,
 session_state, message, model_change, service_tier_change,
-thinking_level_change, custom_message, compaction, agent_status),
-checkpoint/restart recovery journal, status-line request parity (#81/#83).
+thinking_level_change, custom_message, compaction, agent_status;
+the agent_status entry kind went with the status-line recap's removal,
+2026-09-25 by operator directive - old journals' entries degrade to
+verbatim unknown rows),
+checkpoint/restart recovery journal, status-line request parity (#81/#83;
+removed with the recap, 2026-09-25).
 
 Remaining: none for `toolResult` entries - the pa-core persisted-session
 listener writes them (hermetic scripted-tool test), the daemon worker

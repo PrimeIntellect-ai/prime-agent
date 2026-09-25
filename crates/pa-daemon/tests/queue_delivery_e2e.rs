@@ -227,39 +227,6 @@ fn serve(
         reader.read_exact(&mut body_bytes)?;
     }
     let body: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
-    let last_user = body["messages"]
-        .as_array()
-        .and_then(|messages| {
-            messages
-                .iter()
-                .rev()
-                .find(|message| message["role"] == "user")
-                .map(|message| match &message["content"] {
-                    Value::String(text) => text.clone(),
-                    content => content.to_string(),
-                })
-        })
-        .unwrap_or_default();
-    // The post-turn dashboard status request (TS `daemon-session-summarizer`
-    // against the small summary model): it is not a turn - serve the canned
-    // verdict without a delay and without consuming a scripted answer.
-    if last_user.starts_with("<agent-state>") {
-        let answer = "<recap>serving the queued prompts</recap>\n<status>NEEDS_INPUT</status>";
-        let mut payload = String::new();
-        for data in [
-            chunk(json!({"role": "assistant", "content": answer}), None),
-            chunk(json!({}), Some("stop")),
-        ] {
-            payload.push_str(&format!("data: {data}\n\n"));
-        }
-        payload.push_str("data: [DONE]\n\n");
-        return stream.write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{payload}"
-            )
-            .as_bytes(),
-        );
-    }
     // The gated busy turn: its answer parks until the test releases the
     // hold (the full parked lane was observed while the turn was busy).
     // The gate matches the prompt TEXT, so extract it from the last
@@ -290,7 +257,7 @@ fn serve(
     bodies
         .lock()
         .expect("mock lock")
-        .push(format!("#{index}: {last_user}"));
+        .push(format!("#{index}: {marker_text}"));
     if !held {
         std::thread::sleep(Duration::from_millis(ANSWER_DELAY_MS));
     }

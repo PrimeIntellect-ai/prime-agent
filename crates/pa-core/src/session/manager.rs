@@ -414,6 +414,10 @@ pub struct SessionManager {
     session_dir: PathBuf,
     cwd: PathBuf,
     persist: bool,
+    /// Whether the manager carries a session directory of its own (any
+    /// persisted manager, and the daemon's mirrored engine session): the
+    /// session-owned artifacts (local harness state) resolve under it.
+    session_dir_backed: bool,
     flushed: bool,
     has_assistant_entry: bool,
     append_ownership: super::window::AppendOwnership,
@@ -442,6 +446,7 @@ impl SessionManager {
             session_dir,
             cwd,
             persist,
+            session_dir_backed: persist,
             flushed: false,
             has_assistant_entry: false,
             append_ownership: super::window::AppendOwnership::Unleased,
@@ -470,6 +475,25 @@ impl SessionManager {
     /// Create an in-memory (non-persisted) manager.
     pub fn in_memory(cwd: &Path) -> Self {
         Self::new_with(cwd.to_path_buf(), cwd.to_path_buf(), None, false)
+    }
+
+    /// Create an in-memory (non-persisted) manager pinned to a session's
+    /// own directory: the daemon worker owns the durable file and mirrors
+    /// the entries, but the session's identity (its directory, the local
+    /// harness state's home) stays the session's own.
+    pub fn in_memory_in_session_dir(cwd: &Path, session_dir: &Path) -> Self {
+        let mut manager = Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), None, false);
+        manager.session_dir_backed = true;
+        manager
+    }
+
+    /// Whether the manager carries a session directory of its own: a
+    /// fresh in-memory manager holds only the cwd fallback, while every
+    /// session-backed manager (persisted, or the daemon's mirrored
+    /// engine session) does. Session-owned artifacts (the local harness
+    /// state) need it.
+    pub fn has_session_dir(&self) -> bool {
+        self.session_dir_backed
     }
 
     /// Open an existing session file (repair + migrate), or a fresh one.
@@ -576,6 +600,7 @@ impl SessionManager {
             manager.session_dir = session_dir;
             manager.session_file = Some(path);
             manager.persist = true;
+            manager.session_dir_backed = true;
             manager.flushed = true;
             manager.file_entries = window.entries().to_vec();
             manager.has_assistant_entry = true;
@@ -741,30 +766,6 @@ impl SessionManager {
             .rev()
             .find_map(|line| match serde_json::from_str::<FileEntry>(line) {
                 Ok(FileEntry::GitState { payload, .. }) => Some(payload.git),
-                _ => None,
-            })
-    }
-
-    /// Newest agent status reachable without hydration (same order as
-    /// [`Self::latest_git_context`]).
-    pub(crate) fn latest_agent_status_entry(&self) -> Option<pa_types::session::AgentStatus> {
-        let on_branch = self.active_branch_entries().iter().rev().find_map(|entry| {
-            if let FileEntry::AgentStatus { payload, .. } = entry {
-                Some(payload.status.clone())
-            } else {
-                None
-            }
-        });
-        if on_branch.is_some() {
-            return on_branch;
-        }
-        self.window
-            .as_ref()?
-            .metadata_entries()
-            .iter()
-            .rev()
-            .find_map(|line| match serde_json::from_str::<FileEntry>(line) {
-                Ok(FileEntry::AgentStatus { payload, .. }) => Some(payload.status),
                 _ => None,
             })
     }
@@ -1204,6 +1205,7 @@ impl SessionManager {
         self.session_id.clone_from(&session_id);
         self.session_file = Some(target.clone());
         self.persist = true;
+        self.session_dir_backed = true;
         let timestamp = format_iso_now();
         let git = capture_git_context(&self.cwd);
         let header = FileEntry::Header {

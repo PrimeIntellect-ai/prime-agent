@@ -111,6 +111,11 @@ pub(crate) struct SessionWindow {
     has_thinking_level: bool,
     has_service_tier: bool,
     model: Option<(String, String)>,
+    /// The model in effect at the retained-window boundary (the newest
+    /// `model_change` in the discarded prefix): the per-model usage fold's
+    /// timeline seed — `model` above is the leaf's model, not the
+    /// boundary's.
+    boundary_model: Option<(String, String)>,
     thinking_level: String,
     service_tier: Option<pa_types::ai::ServiceTier>,
     retained_ids: std::collections::HashSet<String>,
@@ -380,6 +385,7 @@ impl SessionFile {
             has_thinking_level: window.has_thinking_level(),
             has_service_tier: window.has_service_tier(),
             model: context.model,
+            boundary_model: window.boundary_model().cloned(),
             thinking_level: context.thinking_level,
             service_tier: context.service_tier,
             retained_ids: window
@@ -633,6 +639,15 @@ impl SessionFile {
         }
         positions.reverse();
         positions
+    }
+
+    /// The model in effect at the retained-window boundary (the newest
+    /// `model_change` in the discarded prefix; `None` on a full-history
+    /// load): the per-model cost fold seeds its timeline with it, so
+    /// retained rows before the branch's first in-window `model_change`
+    /// bill on the boundary's model instead of the leaf's.
+    pub(crate) fn window_boundary_model(&self) -> Option<(String, String)> {
+        self.window.as_ref()?.boundary_model.clone()
     }
 
     pub(crate) fn restored_settings(&self) -> pa_core::session::SessionContext {
@@ -1180,8 +1195,6 @@ pub struct SessionInfo {
     /// `SESSION_LIST_SEARCH_TEXT_MAX_CHARS` (TS `allMessagesText`: the
     /// agents-view full-transcript search corpus).
     pub all_messages_text: String,
-    /// The latest `agent_status` recap (`summary` is searchable).
-    pub agent_status: Option<Value>,
     /// TS `SessionInfo.usage`: the own-usage summary — assistant
     /// aggregates plus summarization calls, minus every attributed child
     /// block (`session_usage::UsageScan`; the child's own row carries the
@@ -1350,7 +1363,6 @@ struct SessionScanAccumulator {
     message_count: usize,
     first_message: String,
     all_messages_text: String,
-    agent_status: Option<Value>,
     last_activity_ms: Option<u64>,
     usage_scan: crate::session_usage::UsageScan,
 }
@@ -1397,7 +1409,6 @@ impl SessionScanState {
                 message_count: self.acc.message_count,
                 first_message: self.acc.first_message.clone(),
                 all_messages_text: self.acc.all_messages_text.clone(),
-                agent_status: self.acc.agent_status.clone(),
                 last_activity_ms: self.acc.last_activity_ms,
                 usage_scan: self.acc.usage_scan.clone(),
             },
@@ -1512,8 +1523,6 @@ struct SessionInfoEntry {
     model_id: Option<Value>,
     #[serde(default)]
     thinking_level: Option<Value>,
-    #[serde(default)]
-    status: Option<Value>,
     #[serde(default)]
     message: Option<SessionInfoMessage>,
     /// `child_usage_attributed`: the parent entry the aggregate folds into.
@@ -1674,7 +1683,6 @@ impl SessionScanState {
                 acc.first_message.clone()
             },
             all_messages_text: acc.all_messages_text.clone(),
-            agent_status: acc.agent_status.clone(),
             usage,
             // Ledger-derived (`withPassiveRlmDescendantInfos`), never the
             // file scan's: the listing arm attaches it from the spawn
@@ -1735,7 +1743,6 @@ fn fold_scan_entry(acc: &mut SessionScanAccumulator, raw: &str) -> Option<()> {
                 acc.thinking_level = Some(level.to_string());
             }
         }
-        "agent_status" => acc.agent_status = entry.status,
         "child_usage_attributed" => {
             acc.usage_scan.fold_child_attribution(
                 entry.target_id.as_deref(),
@@ -2356,7 +2363,7 @@ mod tests {
     }
 
     #[test]
-    fn scan_builds_transcript_search_text_and_latest_agent_status() {
+    fn scan_builds_transcript_search_text() {
         let dir = temp_dir();
         let mut session = SessionFile::create("/tmp", None, 0);
         let path = dir.join(session_file_name(session.session_id()));
@@ -2373,28 +2380,10 @@ mod tests {
         session.append_message(
             json!({"role": "toolResult", "content": "tool noise", "timestamp": 3u64}),
         );
-        session.append_entry(
-            "agent_status",
-            json!({
-                "status": { "summary": "first recap", "basedOnMessageCount": 1 }
-            }),
-        );
-        session.append_entry(
-            "agent_status",
-            json!({
-                "status": { "summary": "login fix landed", "basedOnMessageCount": 2 }
-            }),
-        );
         session.rewrite().unwrap();
 
         let info = read_session_info(&path).unwrap();
         assert_eq!(info.all_messages_text, "fix the login bug fixed in auth.rs");
-        assert_eq!(
-            info.agent_status,
-            Some(json!({
-                "summary": "login fix landed", "basedOnMessageCount": 2
-            }))
-        );
         let _ = fs::remove_dir_all(&dir);
     }
 

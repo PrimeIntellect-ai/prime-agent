@@ -544,71 +544,6 @@ impl SessionCore {
     }
 }
 
-impl crate::status_line::StatusSession for SessionCore {
-    fn status_messages(&self) -> Vec<Value> {
-        self.store
-            .as_ref()
-            .map(super::session_store::SessionFile::messages)
-            .unwrap_or_default()
-    }
-
-    fn status_busy(&self) -> bool {
-        self.busy
-    }
-
-    fn status_active_session_id(&self) -> String {
-        self.active_session_id.clone()
-    }
-
-    fn status_generation(&self) -> String {
-        self.generation.clone()
-    }
-
-    fn status_next_sequence(&mut self) -> u64 {
-        self.last_event_sequence += 1;
-        self.last_event_sequence
-    }
-
-    fn status_append_agent_status(
-        &mut self,
-        status: &crate::status_line::PersistedAgentStatus,
-    ) -> Result<()> {
-        let Some(store) = self.store.as_mut() else {
-            return Ok(());
-        };
-        let persisted = pa_types::session::AgentStatus {
-            summary: status.summary.clone(),
-            task_state: status
-                .task_state
-                .map(crate::status_line::AgentTaskState::persisted),
-            based_on_message_count: status.based_on_message_count as u64,
-        };
-        store.persist_entry(
-            "agent_status",
-            json!({ "status": serde_json::to_value(&persisted)? }),
-        )?;
-        Ok(())
-    }
-
-    fn status_latest_agent_status(&self) -> Option<crate::status_line::PersistedAgentStatus> {
-        let store = self.store.as_ref()?;
-        let entry = store
-            .entries()
-            .iter()
-            .rev()
-            .find(|entry| entry.type_ == "agent_status")?;
-        let status: pa_types::session::AgentStatus =
-            serde_json::from_value(entry.fields.get("status")?.clone()).ok()?;
-        Some(crate::status_line::PersistedAgentStatus {
-            summary: status.summary,
-            task_state: status
-                .task_state
-                .map(crate::status_line::AgentTaskState::from_persisted),
-            based_on_message_count: status.based_on_message_count as usize,
-        })
-    }
-}
-
 /// One outbound frame: the serialized JSON payload plus its private-frame
 /// `outboundType` (`session_event` or `side_question_event`), mirroring the
 /// TS worker frame header. The supervisor fans frames out per its own
@@ -626,14 +561,6 @@ impl OutboundFrame {
         OutboundFrame {
             payload,
             outbound_type: "session_event",
-            seq: 0,
-        }
-    }
-
-    pub(crate) fn session_status(payload: Vec<u8>) -> Self {
-        OutboundFrame {
-            payload,
-            outbound_type: "session_status",
             seq: 0,
         }
     }
@@ -816,9 +743,6 @@ pub struct Worker {
     idle_notify: Arc<Notify>,
     pub(crate) events: Arc<EventPump>,
     recovery: Arc<Mutex<Option<WorkerRecoveryJournal>>>,
-    /// Post-turn status-line runner (seeded from persisted verdicts at
-    /// session create).
-    status_runner: std::sync::Arc<crate::status_line::StatusLineRunner<SessionCore>>,
     /// Live side-question runs (registry, guards, event frames).
     side_questions: crate::side_question::SideQuestionManager,
     /// Single-use peer-transport grants (worker memory only).
@@ -1034,18 +958,6 @@ impl Worker {
         let recovery = Arc::new(Mutex::new(None));
         let work_notify = Arc::new(Notify::new());
         let idle_notify = Arc::new(Notify::new());
-        // The post-turn status line: turn-end notifications (debounced) and
-        // periodic sweeps ask the small dashboard model for a recap.
-        let status_runner = std::sync::Arc::new(crate::status_line::StatusLineRunner::new(
-            std::sync::Arc::clone(&core),
-            config.agent_dir.clone(),
-            events.clone(),
-        ));
-        let (status_notify, status_rx) = tokio::sync::mpsc::unbounded_channel();
-        let status_runner_handle = std::sync::Arc::clone(&status_runner);
-        tokio::spawn(async move {
-            status_runner.run(status_rx).await;
-        });
         // The supervisor link and worker token for roster pushes: one
         // construction shared by the turn runner's busy-flip pushes and
         // the command arms' switch pushes (the same env the runner reads,
@@ -1326,7 +1238,6 @@ impl Worker {
                 events: events.clone(),
                 engine: std::sync::Arc::clone(&engine),
                 active_session_id,
-                status_notify,
                 roster_pushes: roster_pushes.clone(),
             };
             tokio::spawn(async move {
@@ -1386,7 +1297,6 @@ impl Worker {
             idle_notify,
             events,
             recovery,
-            status_runner: status_runner_handle,
             side_questions,
             peer_grants: PeerGrantStore::new(),
             compaction,
@@ -2657,9 +2567,6 @@ impl Worker {
                 let _ = engine.ensure_core_session_async(&model).await;
             });
         }
-        // Seed the status line from the latest persisted verdict (a respawned
-        // worker resumes with the pre-crash verdict).
-        self.status_runner.seed_from_session();
         // Bind the schedule catalog onto the session (artifact partition,
         // job rebind, scheduler start) — TS `rebindCronJobsToState`.
         self.bind_scheduled_jobs().await;
@@ -3527,15 +3434,11 @@ impl Worker {
     /// Refresh the replacement session's derived state (TS
     /// `refreshReplacedSessionState` on the `sessionReplaced` event): the
     /// moved-to session's depth re-seeds the worker core and the engine's
-    /// RLM identity (a resumed subagent keeps its persisted depth), and
-    /// the wire summary re-seeds from the new session. The schedule
+    /// RLM identity (a resumed subagent keeps its persisted depth). The schedule
     /// catalog rebind runs separately (`bind_scheduled_jobs`), like the
     /// TS dispatch handlers that call `rebindCronJobsToState` after the
     /// runtime call.
     pub(crate) fn refresh_replaced_session_state(&self) {
-        // The status line re-seeds from the moved-to session's persisted
-        // verdict (TS `summarizer.forget` + `seed` on the replacement).
-        self.status_runner.seed_from_session();
         let (rlm_depth, summary, child_script) = {
             let mut core = self
                 .core
@@ -4422,7 +4325,6 @@ impl Worker {
             scoped_models: core.scoped_models.clone(),
             active_tool_names: Vec::new(),
             context_usage: None,
-            recap: None,
         }
     }
 
@@ -4899,6 +4801,59 @@ fn restore_queue_snapshot(
 /// level: sequence + meta under the core lock, then one broadcast (the
 /// free-standing form of `Worker::emit_worker_event`, shared with the
 /// goal admission sink).
+/// Record one durable custom row of the background compact-trigger
+/// review and broadcast its `message_start`/`message_end` pair (the TS
+/// `_emit` for rows the session appends outside a turn): the same shape
+/// `Worker::emit_custom_row` persists for the `/refine` command's rows.
+///
+/// `review_session_id` fences the row against the session moves a branch
+/// navigation or replacement makes while the review's model call was in
+/// flight (the round's branch-version check already drops its harness
+/// edits; this drops the ROWS): the worker's live store answers with a
+/// different session id — the review resolved against the abandoned
+/// conversation, so its rows never persist or broadcast into the
+/// moved-to session. Returns whether the row landed.
+fn emit_refinement_row(
+    core: &Arc<Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+    review_session_id: &str,
+    message: Value,
+) -> bool {
+    {
+        let mut core = core.lock().unwrap();
+        let Some(store) = core.store.as_mut() else {
+            return false;
+        };
+        if store.session_id() != review_session_id {
+            pa_core::session_engine::compaction_trace::trace(
+                "autorefine.rows_dropped_session_moved",
+                serde_json::Value::Null,
+            );
+            return false;
+        }
+        let _ = store.persist_entry(
+            "custom_message",
+            json!({
+                "customType": message.get("customType").cloned().unwrap_or(Value::Null),
+                "content": message.get("content").cloned().unwrap_or(Value::Null),
+                "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
+                "details": message.get("details").cloned().unwrap_or(Value::Null),
+            }),
+        );
+    }
+    emit_worker_event_with(
+        core,
+        events,
+        json!({ "type": "message_start", "message": message }),
+    );
+    emit_worker_event_with(
+        core,
+        events,
+        json!({ "type": "message_end", "message": message }),
+    );
+    true
+}
+
 pub(crate) fn emit_worker_event_with(
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,
@@ -5211,7 +5166,6 @@ struct TurnRunner {
     /// Shared worker recovery journal (queue snapshot persistence).
     recovery: Arc<Mutex<Option<WorkerRecoveryJournal>>>,
     active_session_id: String,
-    status_notify: tokio::sync::mpsc::UnboundedSender<()>,
     /// The coalescing roster push queue: the busy flips enqueue here and
     /// the queue's consumer composes and ships the summary (the
     /// event-driven arm lives in [`crate::roster_activity`]).
@@ -5420,6 +5374,18 @@ impl TurnRunner {
         let events = self.events.clone();
         let turn_coalescer = Arc::clone(&coalescer);
         let agent_dir = crate::paths::agent_dir().unwrap_or_default();
+        // The settle tail's background compact-trigger servicing owns its
+        // own engine clone (the turn closure below moves the shadowing
+        // clone), and fences its rows on the session identity it serviced
+        // (a branch move or replacement swaps the store mid-review).
+        let review_engine = std::sync::Arc::clone(&engine);
+        let review_session_id = {
+            let core = self.core.lock().unwrap();
+            core.store
+                .as_ref()
+                .map(|store| store.session_id().to_string())
+                .unwrap_or_default()
+        };
         // The turn's settled outcome reaches the waiting prompt only
         // after the runner flipped the session back to idle (TS
         // `promptAndWait` resolves after the full settle): the blocking
@@ -5541,6 +5507,12 @@ impl TurnRunner {
                 } = event
                 {
                     if !entry.is_null() {
+                        let repin_started = std::time::Instant::now();
+                        let durable_entries = core
+                            .store
+                            .as_ref()
+                            .and_then(|store| store.branch().len().checked_sub(1))
+                            .unwrap_or(0);
                         if let Some(id) = core.store.as_ref().and_then(|store| {
                             store.durable_first_kept_entry_id(keep_recent_tokens(
                                 &core.cwd, &agent_dir,
@@ -5553,6 +5525,13 @@ impl TurnRunner {
                                 result.insert("firstKeptEntryId".to_string(), json!(id));
                             }
                         }
+                        pa_core::session_engine::compaction_trace::trace(
+                            "emit.compaction_repin",
+                            serde_json::json!({
+                                "durableEntries": durable_entries,
+                                "micros": repin_started.elapsed().as_micros(),
+                            }),
+                        );
                     }
                 }
                 match &event {
@@ -5599,7 +5578,14 @@ impl TurnRunner {
                         // A skipped compaction carries a null entry (the
                         // skip shape): publish the event, never persist it.
                         if let Some(store) = core.store.as_mut().filter(|_| !entry.is_null()) {
+                            let persist_started = std::time::Instant::now();
                             let _ = store.persist_entry("compaction", entry.clone());
+                            pa_core::session_engine::compaction_trace::trace(
+                                "emit.compaction_persist",
+                                serde_json::json!({
+                                    "micros": persist_started.elapsed().as_micros(),
+                                }),
+                            );
                         }
                     }
                     // The durable mirror of a goal-state change (TS
@@ -5626,6 +5612,12 @@ impl TurnRunner {
                         // waiting on it (the parent's continuation request
                         // is in flight before any child's first turn).
                         engine.on_turn_done();
+                        pa_core::session_engine::compaction_trace::trace(
+                            "turn.done_emitted",
+                            serde_json::json!({
+                                "ok": matches!(result, Ok(())),
+                            }),
+                        );
                         Some(match result {
                             Ok(()) => TurnSettle::Completed,
                             Err(error) => TurnSettle::Failed(error.clone()),
@@ -5991,9 +5983,6 @@ impl TurnRunner {
             },
         );
         let _ = self.emit_action_update(&snapshot);
-        // A finished turn is the cue to refresh the session's status line
-        // (the runner debounces a burst into one request).
-        let _ = self.status_notify.send(());
         self.idle_notify.notify_waiters();
         // The settled prompts' admissions clear (TS `clearAdmission` in
         // the prompt arm's finally).
@@ -6010,6 +5999,80 @@ impl TurnRunner {
             for done in items_done {
                 let _ = done.send(result.clone());
             }
+        }
+        // The compact-trigger review a compaction armed this run services
+        // off the settle (TS `_scheduleAutoRefineAfterCompaction` ->
+        // `setTimeout(0)` background `_maybeAutoRefine("compact")`): the
+        // turn settled and the waiting prompts resolved, so the review's
+        // model call runs as a background round and the queued next
+        // prompt's admission never waits on it. The round's own gates
+        // (the armed trigger, queued work) keep the trigger armed for the
+        // next settle when work is queued mid-review.
+        {
+            let engine = review_engine;
+            let core = Arc::clone(&self.core);
+            let events = self.events.clone();
+            let review_session_id = review_session_id.clone();
+            tokio::spawn(async move {
+                // The pending pre-check and the round both take the
+                // engine's session mutex (`blocking_lock`): they run on
+                // the blocking pool, never on this async task — a
+                // `blocking_lock` from the runtime thread deadlocks the
+                // settle when the mutex is contended.
+                let refined = tokio::task::spawn_blocking(move || {
+                    pa_core::session_engine::compaction_trace::trace(
+                        "autorefine.review_started",
+                        serde_json::Value::Null,
+                    );
+                    let outcome = engine.consume_compact_auto_refine();
+                    pa_core::session_engine::compaction_trace::trace(
+                        "autorefine.review_done",
+                        serde_json::json!({ "ran": outcome.is_ok() }),
+                    );
+                    outcome
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    Err(anyhow::anyhow!("auto-refinement task failed: {error}"))
+                });
+                match refined {
+                    Ok(Some(result)) => {
+                        // TS `refine()` appends the TUI outcome row and
+                        // the model-facing notice (when edits applied) as
+                        // durable rows: persist both to the session file
+                        // and broadcast their message pairs like the
+                        // `/refine` command — each row fenced on the
+                        // session identity the review serviced (a branch
+                        // move or replacement swaps the store mid-review;
+                        // the row never lands on the moved-to session).
+                        let outcome_row =
+                            pa_core::session_engine::refine::create_refinement_outcome_message(
+                                &result,
+                            );
+                        if let Ok(value) = serde_json::to_value(
+                            pa_types::session::AgentMessage::Custom(outcome_row),
+                        ) {
+                            emit_refinement_row(&core, &events, &review_session_id, value);
+                        }
+                        if result.applied_edits.iter().any(|edit| edit.applied) {
+                            let notice =
+                                pa_core::session_engine::refine::create_refinement_notice_message(
+                                    &result,
+                                    pa_core::session_engine::refine::RefinementSource::Auto,
+                                );
+                            if let Ok(value) = serde_json::to_value(
+                                pa_types::session::AgentMessage::Custom(notice),
+                            ) {
+                                emit_refinement_row(&core, &events, &review_session_id, value);
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
+                    }
+                }
+            });
         }
     }
 
@@ -6301,9 +6364,6 @@ pub(crate) fn session_summary(
         usage,
         worker_state: Some("ready".to_string()),
         worker_pid: Some(std::process::id()),
-        status_label: None,
-        summary: None,
-        task_state: None,
         // Set by the caller when the snapshot backs a roster push (the
         // push-order lock reads the pre-stamp counter); authoritative
         // pulls embed the live counter in `summary_locked` instead.
@@ -8949,7 +9009,6 @@ mod turn_stream_tests {
             active_action: None,
             running_tool_calls: std::collections::HashSet::new(),
         }));
-        let (status_notify, _status_rx) = tokio::sync::mpsc::unbounded_channel();
         TurnRunner {
             core,
             input_pauses: crate::session_input_pause::InputPauseTable::new(),
@@ -8960,7 +9019,6 @@ mod turn_stream_tests {
             engine,
             recovery: Arc::new(Mutex::new(None)),
             active_session_id: "burst-session".to_string(),
-            status_notify,
             roster_pushes: crate::roster_activity::RosterPushQueue::disabled(),
         }
     }
@@ -9806,7 +9864,6 @@ mod turn_stream_tests {
             Arc::clone(&events),
             roster_pushes.clone(),
         );
-        let (status_notify, _status_rx) = tokio::sync::mpsc::unbounded_channel();
         TurnRunner {
             recovery: Arc::new(Mutex::new(None)),
             core,
@@ -9817,7 +9874,6 @@ mod turn_stream_tests {
             events,
             engine,
             active_session_id: "feed-session".to_string(),
-            status_notify,
             roster_pushes,
         }
     }

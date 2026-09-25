@@ -632,7 +632,10 @@ ignored. Daemon restart was required. Relevance to the pa-daemon redesign:
 
 The f6 attach cross-side fingerprint (battery `run_battery.py`) locks the projected
 event sequence: agent_start/turn_start, the user message_start+message_end pair,
-assistant start/updates/end ordering, turn_end/agent_end presence, session_status.
+assistant start/updates/end ordering, turn_end/agent_end presence, session_status
+(the Rust side stopped emitting `session_status` on 2026-09-25 with the
+status-line recap removal, operator directive; the row's `session_status` term
+is TS-side evidence only now).
 Two TS wire behaviors are deliberately out of that row's scope and still open:
 
 - The per-turn harness digest rides TS turns as a `custom` message pair

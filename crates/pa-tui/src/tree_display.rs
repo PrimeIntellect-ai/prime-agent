@@ -291,7 +291,6 @@ pub fn entry_display_text(
         }
         FileEntry::Header { .. }
         | FileEntry::SessionState { .. }
-        | FileEntry::AgentStatus { .. }
         | FileEntry::GitState { .. }
         | FileEntry::Unknown { .. } => Vec::new(),
     };
