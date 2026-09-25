@@ -2727,17 +2727,10 @@ async fn run_agents_view_surface(
         }
     }
 
-    // The view decided to leave: arm the force-quit deadline so the
-    // teardown below (terminal restore, roster unsubscribe over a possibly
-    // dead daemon) is best-effort and cannot hold the process open. A
-    // selection (or a new session) is a view switch, not an exit: the
-    // process keeps running and TS has no exit deadline on this path —
-    // its teardown may take its full drain second while the app simply
-    // waits, so the deadline covers only the leaves that end this process.
+    // The view decided to leave. The force-quit deadline arms below,
+    // after the stop-or-delete drain settles: a confirmed request
+    // completes before any deadline can cut it down.
     let handing_off = mode.opened.is_some() || mode.new_session;
-    if matches!(renderer, Renderer::Terminal { .. }) && !handing_off {
-        exit_guard.arm_for_exit();
-    }
     // A selection hands the pane to the chat it opened (TS `result.type !== "exit"`);
     // exiting releases the alternate screen.
     let frames = renderer.finish(mode.opened.is_some() || mode.new_session);
@@ -2755,12 +2748,6 @@ async fn run_agents_view_surface(
                 .await;
         });
     }
-    // A selection hands the terminal to a session run: the process keeps
-    // going, so retire the watchdog. A selection-less exit ends the
-    // process, where the deadline dies with it — or fires if it wedged.
-    if mode.opened.is_some() || mode.new_session {
-        exit_guard.cancel();
-    }
     let opened = mode.opened.take();
     // An in-flight stop-or-delete dispatch settles before the connection
     // closes (bounded): an exit right after the second ctrl+x must not
@@ -2772,6 +2759,22 @@ async fn run_agents_view_surface(
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     for dispatch in delete_dispatches {
         let _ = tokio::time::timeout_at(deadline, dispatch).await;
+    }
+    // The force-quit deadline arms only after the drain: the drain
+    // window is bounded, so it never wedges, and the watchdog then
+    // covers the teardown's remaining best-effort leaves (the client
+    // close over a possibly dead daemon, the return path). A selection
+    // (or a new session) is a view switch, not an exit: the process
+    // keeps running and TS has no exit deadline on this path, so the
+    // deadline covers only the leaves that end this process.
+    if matches!(renderer, Renderer::Terminal { .. }) && !handing_off {
+        exit_guard.arm_for_exit();
+    }
+    // A handoff retires the watchdog: the process keeps going. A
+    // selection-less exit ends the process, where the deadline dies
+    // with it — or fires if it wedged.
+    if handing_off {
+        exit_guard.cancel();
     }
     // A handoff returns the roster connection for the flow's next view run
     // (TS `persistentState.rosterClient`); a selection-less exit closes it.
