@@ -420,6 +420,15 @@ fn a_dropped_run_loses_the_detail_even_to_an_impostor_start() {
         !text.iter().any(|row| row.contains("scroll")),
         "no drill-in rides on the impostor: {text:?}"
     );
+    // The cursor re-fell to the surviving run through the fallback (not
+    // the impostor coincidence) and the refresh adopted the survivor's
+    // OWN identity - never the stale c-run key.
+    assert_eq!(pane.selected, Some(1), "the cursor lands on the survivor");
+    assert_eq!(
+        pane.selected_key.as_deref(),
+        Some("e0"),
+        "the refresh adopts the survivor's identity"
+    );
 }
 
 fn kb() -> KeybindingsManager {

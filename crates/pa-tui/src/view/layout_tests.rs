@@ -703,6 +703,56 @@ fn an_orphan_result_keeps_its_own_row_and_breaks_runs() {
 }
 
 #[test]
+fn a_background_shell_run_keeps_its_block_uncached() {
+    // An ipython cell whose final result carries a still-running
+    // background shell keeps its run LIVE: the block re-renders on
+    // every pulse frame (the working icon and the wall-clock run on)
+    // instead of caching its first paint.
+    let card = |id: &str, shell: bool| {
+        ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+            id: id.to_string(),
+            name: "ipython".to_string(),
+            args: if shell {
+                serde_json::json!({"code": "bash('sleep 60')"})
+            } else {
+                serde_json::json!({"code": "print(1)"})
+            },
+            started: true,
+            started_at: Some(std::time::Instant::now()),
+            ended_at: Some(std::time::Instant::now()),
+            result: Some(crate::chat::ToolResultView {
+                content: Vec::new(),
+                details: if shell {
+                    serde_json::json!({
+                        "result": "<BashHandle pid=123 running command='sleep 60'>"
+                    })
+                } else {
+                    serde_json::Value::Null
+                },
+                is_error: false,
+            }),
+            result_partial: false,
+            ..Default::default()
+        }))
+    };
+    let mut view = view();
+    view.detail = Detail::Overview;
+    for index in 0..4 {
+        view.push_entry(card(&format!("c{index}"), false));
+    }
+    view.push_entry(card("c4", true));
+    let run = view
+        .condensed_runs()
+        .first()
+        .copied()
+        .expect("the five-call run condenses");
+    assert!(
+        !view.entry_cacheable_at(run.start, &view.chat[run.start]),
+        "the live block never caches while the background shell runs"
+    );
+}
+
+#[test]
 fn an_assistant_growth_folds_at_its_own_slot() {
     // [T x5 (one block), ASSISTANT(text), tail rows...]: the window
     // pauses with a selection on the tail rows, then the assistant

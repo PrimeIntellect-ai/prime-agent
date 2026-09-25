@@ -83,11 +83,13 @@ impl AgentView {
             match self.run_map.slot(index) {
                 Some(RunSlot::Start(run)) => {
                     let stable = |member: &ChatEntry| match member {
-                        ChatEntry::Tool(card) => !matches!(
-                            crate::tool_card::panel_status(card),
-                            crate::tool_card::PanelStatus::Queued
-                                | crate::tool_card::PanelStatus::Running
-                        ),
+                        ChatEntry::Tool(card) => {
+                            !matches!(
+                                crate::tool_card::panel_status(card),
+                                crate::tool_card::PanelStatus::Queued
+                                    | crate::tool_card::PanelStatus::Running
+                            ) && !crate::tool_card::ipython::background_shell_running(card)
+                        }
                         ChatEntry::Assistant(message) => !message.streaming,
                         _ => true,
                     };

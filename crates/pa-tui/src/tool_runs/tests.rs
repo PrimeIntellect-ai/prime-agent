@@ -409,6 +409,56 @@ fn rebuild_from_keeps_the_prefix() {
 }
 
 #[test]
+fn a_live_run_extends_the_wire_span_to_now() {
+    // The wire stamps settle every card (the replay path), but the run
+    // stays live through a still-running background shell: the clock
+    // extends to now instead of freezing at the last settled stamp.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or_default();
+    let wire_card = |id: &str, shell: bool| {
+        ChatEntry::Tool(Box::new(ToolCallCard {
+            id: id.to_string(),
+            name: "ipython".to_string(),
+            args: serde_json::json!({"code": "print(1)"}),
+            started: true,
+            started_ms: Some(now - 60_000),
+            ended_ms: Some(now - 50_000),
+            result: Some(ToolResultView {
+                content: Vec::new(),
+                details: if shell {
+                    serde_json::json!({
+                        "result": "<BashHandle pid=123 running command='sleep 60'>"
+                    })
+                } else {
+                    serde_json::Value::Null
+                },
+                is_error: false,
+            }),
+            result_partial: false,
+            ..Default::default()
+        }))
+    };
+    let mut chat: Vec<ChatEntry> = Vec::new();
+    for index in 0..4 {
+        chat.push(wire_card(&format!("c{index}"), false));
+    }
+    chat.push(wire_card("c4", true));
+    let map = run_map(&chat);
+    let run = map.run_at(0).expect("the five-call run condenses");
+    let summary = run_summary(&chat, run);
+    assert!(summary.live, "the background shell keeps the run live");
+    let Some(wall) = summary.wall_ms else {
+        panic!("the wire span renders");
+    };
+    assert!(
+        wall > 10_000,
+        "the clock extends past the settled 10s span: {wall}ms"
+    );
+}
+
+#[test]
 fn a_run_with_a_running_background_shell_stays_live() {
     // An ipython cell that launched a background shell settles itself
     // (the final result lands) while the spawned shell keeps working:

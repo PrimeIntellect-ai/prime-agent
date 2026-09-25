@@ -199,11 +199,12 @@ fn instant_wall_ms(cards: &[&ToolCallCard], live: bool) -> Option<u64> {
         .map(|elapsed| elapsed.as_millis() as u64)
 }
 
-/// The run's wall-clock in milliseconds from the wire message timestamps
-/// (the replay path carries `timestamp` on every stored assistant and
-/// toolResult message - reading existing fields only, no schema
-/// change): `None` unless EVERY card carries both stamps.
-fn wire_wall_ms(cards: &[&ToolCallCard]) -> Option<u64> {
+/// The run's wall-clock span (start, end) in milliseconds from the wire
+/// message timestamps (the replay path carries `timestamp` on every
+/// stored assistant and toolResult message - reading existing fields
+/// only, no schema change): `None` unless EVERY card carries both
+/// stamps.
+fn wire_span_ms(cards: &[&ToolCallCard]) -> Option<(u64, u64)> {
     let mut start: Option<u64> = None;
     let mut end: Option<u64> = None;
     for card in cards {
@@ -212,7 +213,27 @@ fn wire_wall_ms(cards: &[&ToolCallCard]) -> Option<u64> {
         start = Some(start.map_or(started, |seen: u64| seen.min(started)));
         end = Some(end.map_or(ended, |seen: u64| seen.max(ended)));
     }
-    end?.checked_sub(start?)
+    Some((start?, end?))
+}
+
+/// The run's wall-clock in milliseconds: the wire span when every card
+/// carries both stamps - EXTENDED to `now` while the run is live (the
+/// block keeps working: a still-running background shell, so the
+/// elapsed clock runs on instead of freezing at the last settled
+/// stamp) - else the live instants.
+fn wall_ms(cards: &[&ToolCallCard], live: bool) -> Option<u64> {
+    match wire_span_ms(cards) {
+        Some((start, end)) => Some(if live {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_millis() as u64)
+                .unwrap_or(end);
+            now.max(end).saturating_sub(start)
+        } else {
+            end.saturating_sub(start)
+        }),
+        None => instant_wall_ms(cards, live),
+    }
 }
 
 /// Derive the condensed block's summary from the run's entries.
@@ -243,7 +264,7 @@ pub fn run_summary(chat: &[ChatEntry], run: ToolRun) -> RunSummary {
             live = true;
         }
     }
-    let wall_ms = wire_wall_ms(&cards).or_else(|| instant_wall_ms(&cards, live));
+    let wall_clock = wall_ms(&cards, live);
     let mut classes: Vec<ClassCount> = Vec::new();
     for card in &cards {
         let label = class_label(card);
@@ -269,7 +290,7 @@ pub fn run_summary(chat: &[ChatEntry], run: ToolRun) -> RunSummary {
         calls: run.calls,
         live,
         failed,
-        wall_ms,
+        wall_ms: wall_clock,
         classes,
     }
 }
