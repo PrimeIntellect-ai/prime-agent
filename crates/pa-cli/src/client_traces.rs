@@ -238,11 +238,12 @@ impl TracesCommands for ClientTraces {
         })
     }
 
-    /// TS `runPrimeAgentTracesLogin`: the terminal login flow (the
-    /// run loop hands the terminal over around the call).
-    fn login(&self) -> TracesFuture<TraceLoginOutcome> {
+    /// TS `runPrimeAgentTracesLogin`: the login flow against the inline
+    /// auth panel (the TUI mounts it; the panel channel carries the
+    /// flow's surfaces and the settled outcome).
+    fn login(&self, panel: pa_tui::auth_panel::AuthPanelHandle) -> TracesFuture<TraceLoginOutcome> {
         let agent_dir = self.agent_dir.clone();
-        Box::pin(async move { crate::traces_login::run_traces_login(&agent_dir).await })
+        Box::pin(async move { crate::traces_login::run_traces_login(&agent_dir, panel).await })
     }
 }
 
@@ -269,16 +270,17 @@ mod tests {
     async fn the_setting_writes_and_reads_the_agent_traces_flag() {
         let (_dir, agent) = temp_agent_dir();
         let traces = ClientTraces::new("/tmp", agent.clone());
-        // Sharing defaults ON; nothing is written until the user opts out.
-        assert!(traces.enabled().await, "the default is on");
+        // Sharing defaults OFF (opt-in); nothing is written until a choice
+        // is made — the onboarding question or this command.
+        assert!(!traces.enabled().await, "the default is off");
         traces
-            .set_enabled(false)
+            .set_enabled(true)
             .await
-            .expect("the opt-out write persists");
+            .expect("the opt-in write persists");
         // A fresh manager over the same directories reads the write (TS
         // reloads settings before reporting the flag).
         let traces = ClientTraces::new("/tmp", agent.clone());
-        assert!(!traces.enabled().await);
+        assert!(traces.enabled().await);
     }
 
     #[tokio::test]

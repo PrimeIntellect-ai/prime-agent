@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use pa_core::auth::{AuthCredential, AuthSource, AuthStatus};
 use pa_core::models::ModelRegistry;
 use pa_tui::provider_auth::{
-    AuthCategory, AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
+    AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
     ProviderAuthFuture, ProviderAuthOutcome, ProviderRow, ProviderRowsFuture,
 };
 
@@ -208,58 +208,6 @@ impl ProviderAuth {
         pa_core::auth::AuthStorage::create(&self.agent_dir)
     }
 
-    /// The MCP manager over the same settings + builtin catalog the
-    /// `/mcp` flows use (`TerminalMcpAuth::manager`).
-    fn mcp_manager(&self) -> pa_core::mcp::McpManager {
-        let cwd = self.cwd.clone();
-        let agent_dir = self.agent_dir.clone();
-        let catalog_cwd = self.cwd.clone();
-        let catalog_agent_dir = self.agent_dir.clone();
-        pa_core::mcp::McpManager::new(pa_core::mcp::McpManagerOptions {
-            auth_storage: self.auth_storage_with_oauth(),
-            get_user_servers: Box::new(move || {
-                let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
-                Some(
-                    settings
-                        .settings()
-                        .mcp_servers
-                        .clone()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|(server, config)| {
-                            serde_json::from_value::<pa_core::mcp::McpServerConfig>(config)
-                                .ok()
-                                .map(|parsed| (server, parsed))
-                        })
-                        .collect(),
-                )
-            }),
-            begin_login: None,
-            agent_dir: Some(self.agent_dir.clone()),
-            get_catalog_sources: Some(Box::new({
-                let cwd = catalog_cwd;
-                let agent_dir = catalog_agent_dir;
-                move || {
-                    let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
-                    settings
-                        .settings()
-                        .mcp_catalog_sources
-                        .clone()
-                        .unwrap_or_default()
-                }
-            })),
-            remote_source: None,
-            probe_override: None,
-        })
-    }
-
-    fn auth_storage_with_oauth(&self) -> pa_core::auth::AuthStorage {
-        pa_core::auth::AuthStorage::create_with_oauth(
-            &self.agent_dir,
-            std::sync::Arc::new(pa_core::mcp::McpOAuth::new()),
-        )
-    }
-
     /// The stored credential + auth status of one provider id.
     fn credential_status(&self, provider_id: &str) -> (Option<AuthCredential>, AuthStatus) {
         let auth = self.auth_storage();
@@ -302,15 +250,36 @@ impl ProviderAuthCommands for ProviderAuth {
     /// their unported state.
     fn login(&self, provider: &ProviderRow, api_key: Option<&str>) -> ProviderAuthFuture {
         let provider_row = provider.clone();
-        let cwd = self.cwd.clone();
         let agent_dir = self.agent_dir.clone();
         let api_key = api_key.map(str::to_string);
         Box::pin(async move {
             // The auth-store writes and the MCP manager locks stay off
-            // the async workers (the terminal is suspended around the
-            // flow).
+            // the async workers.
+            tokio::task::spawn_blocking(move || login_blocking(provider_row, agent_dir, api_key))
+                .await
+                .expect("the login task ran")
+        })
+    }
+
+    /// TS `loginProvider` for the panel-driven flows (the MCP OAuth
+    /// login, the Prime Inference login): the flow drives the inline
+    /// auth panel (progress lines, prompts, the team picker render in
+    /// the TUI; the oneshot replies answer the flow) and never touches
+    /// the terminal.
+    fn login_on_panel(
+        &self,
+        provider: &ProviderRow,
+        panel: pa_tui::auth_panel::AuthPanelHandle,
+    ) -> ProviderAuthFuture {
+        let provider_row = provider.clone();
+        let cwd = self.cwd.clone();
+        let agent_dir = self.agent_dir.clone();
+        Box::pin(async move {
+            // The auth-store writes, the MCP manager locks, and the
+            // panel round-trips stay off the async workers (a prompt's
+            // answer arrives from the TUI loop's thread).
             tokio::task::spawn_blocking(move || {
-                login_blocking(provider_row, cwd, agent_dir, api_key)
+                login_blocking_on_panel(provider_row, cwd, agent_dir, panel)
             })
             .await
             .expect("the login task ran")
@@ -346,26 +315,7 @@ impl ProviderAuth {
                     id: id.to_string(),
                     name: name.to_string(),
                     auth_type: AuthType::Oauth,
-                    category: AuthCategory::Provider,
                     status: status_indicator(credential.as_ref(), &status, AuthType::Oauth),
-                    flow: AuthFlow::TerminalFlow,
-                });
-            }
-
-            // The MCP OAuth integrations (Service rows; the device flow
-            // runs like `/mcp login`).
-            for mcp in provider.mcp_manager().list_status() {
-                if !mcp.uses_oauth {
-                    continue;
-                }
-                let id = format!("mcp:{}", mcp.server);
-                let (credential, status) = provider.credential_status(&id);
-                rows.push(ProviderRow {
-                    status: status_indicator(credential.as_ref(), &status, AuthType::Oauth),
-                    id,
-                    name: mcp.label,
-                    auth_type: AuthType::Oauth,
-                    category: AuthCategory::Service,
                     flow: AuthFlow::TerminalFlow,
                 });
             }
@@ -405,21 +355,9 @@ impl ProviderAuth {
                     id: provider_id.clone(),
                     name: display_name(&provider_id),
                     auth_type: AuthType::ApiKey,
-                    category: AuthCategory::Provider,
                     flow,
                 });
             }
-
-            // The web search credential (a service, not a model provider).
-            let (credential, status) = provider.credential_status(SERPER_CREDENTIAL_ID);
-            rows.push(ProviderRow {
-                status: status_indicator(credential.as_ref(), &status, AuthType::ApiKey),
-                id: SERPER_CREDENTIAL_ID.to_string(),
-                name: SERPER_CREDENTIAL_NAME.to_string(),
-                auth_type: AuthType::ApiKey,
-                category: AuthCategory::Service,
-                flow: AuthFlow::ApiKeyPrompt,
-            });
 
             // TS sort: configured first, prime-inference first among them,
             // then oauth before api key by name.
@@ -478,11 +416,6 @@ impl ProviderAuth {
                 id: provider_id,
                 name,
                 auth_type,
-                category: if is_serper || is_mcp {
-                    AuthCategory::Service
-                } else {
-                    AuthCategory::Provider
-                },
                 status: Some(AuthStatusIndicator {
                     style: AuthStatusStyle::Success,
                     label: "configured".to_string(),
@@ -496,65 +429,15 @@ impl ProviderAuth {
 }
 
 /// The login flow body (blocking: the auth store and the MCP manager stay
-/// off the async workers).
+/// off the async workers). The panel-driven rows (the MCP OAuth logins,
+/// the Prime Inference login) route to [`login_blocking_on_panel`]; this
+/// body serves the panel-prompted key store and the unported OAuth
+/// stubs.
 fn login_blocking(
     provider_row: ProviderRow,
-    cwd: PathBuf,
     agent_dir: PathBuf,
     api_key: Option<String>,
 ) -> ProviderAuthOutcome {
-    if let Some(server) = provider_row.id.strip_prefix("mcp:") {
-        let auth = crate::mcp_login::TerminalMcpAuth::new(cwd, agent_dir);
-        // The MCP flow awaits its OAuth transport; drive it to completion
-        // on the dedicated thread (the terminal stays suspended).
-        let outcome = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map(|runtime| {
-                runtime.block_on(pa_tui::client_auth::run_mcp_auth_command(
-                    &auth,
-                    &format!("login {server}"),
-                ))
-            })
-            .unwrap_or_else(|error: std::io::Error| format!("login failed: {error}"));
-        return if outcome.starts_with("Usage:") {
-            ProviderAuthOutcome::Error(outcome)
-        } else {
-            ProviderAuthOutcome::Status(outcome)
-        };
-    }
-    if provider_row.id == PRIME_INFERENCE_PROVIDER_ID {
-        // TS `loginProvider`'s prime-inference dispatch: the terminal
-        // API-key flow (the paste prompt, the whoami check, the team
-        // selection; the browser challenge stays unported). The flow
-        // awaits its transport, so drive it to completion on the
-        // dedicated thread (the terminal stays suspended).
-        return tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map(|runtime| {
-                runtime.block_on(crate::prime_inference_login::run_prime_inference_login(
-                    crate::prime_inference_login::PrimeLoginInputs {
-                        agent_dir: &agent_dir,
-                        provider_name: &provider_row.name,
-                        config: &pa_core::auth::resolve_prime_inference_auth_config(),
-                        http: &pa_core::auth::ReqwestPrimeHttp,
-                        prime_cli_config_path: crate::prime_inference_login::prime_cli_config_path(
-                            &agent_dir,
-                        )
-                        .as_deref(),
-                        prime_team_id: std::env::var("PRIME_TEAM_ID").ok().as_deref(),
-                    },
-                    &crate::prime_inference_login::TerminalPrimeLoginUi,
-                ))
-            })
-            .unwrap_or_else(|error| {
-                ProviderAuthOutcome::Error(format!(
-                    "Failed to login to {}: {error}",
-                    provider_row.name
-                ))
-            });
-    }
     if provider_row.auth_type == AuthType::Oauth {
         return ProviderAuthOutcome::Error(format!(
             "{} subscription login is not available in this build yet.",
@@ -582,6 +465,74 @@ fn login_blocking(
         "Saved API key for {}. Credentials saved to {}",
         provider_row.name,
         agent_dir.join("auth.json").display()
+    ))
+}
+
+/// The login flow body for the panel-driven rows (the MCP OAuth logins,
+/// the Prime Inference login): blocking on the dedicated thread — the
+/// flow awaits its transport AND the panel's prompt/picker replies (the
+/// answers arrive from the TUI loop's thread), and the inline auth panel
+/// carries every surface the plain terminal used to.
+fn login_blocking_on_panel(
+    provider_row: ProviderRow,
+    cwd: PathBuf,
+    agent_dir: PathBuf,
+    panel: pa_tui::auth_panel::AuthPanelHandle,
+) -> ProviderAuthOutcome {
+    if let Some(server) = provider_row.id.strip_prefix("mcp:") {
+        let auth = crate::mcp_login::TerminalMcpAuth::new(cwd, agent_dir);
+        let outcome = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(|runtime| {
+                runtime.block_on(pa_tui::client_auth::run_mcp_auth_command(
+                    &auth,
+                    &format!("login {server}"),
+                    panel,
+                ))
+            })
+            .unwrap_or_else(|error: std::io::Error| format!("login failed: {error}"));
+        return if outcome.starts_with("Usage:") {
+            ProviderAuthOutcome::Error(outcome)
+        } else {
+            ProviderAuthOutcome::Status(outcome)
+        };
+    }
+    // TS `loginProvider`'s prime-inference dispatch: the API-key flow
+    // (the paste prompt, the whoami check, the team selection; the
+    // browser challenge stays unported) rendered through the panel.
+    if provider_row.id == PRIME_INFERENCE_PROVIDER_ID {
+        return tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map(|runtime| {
+                runtime.block_on(crate::prime_inference_login::run_prime_inference_login(
+                    crate::prime_inference_login::PrimeLoginInputs {
+                        agent_dir: &agent_dir,
+                        provider_name: &provider_row.name,
+                        config: &pa_core::auth::resolve_prime_inference_auth_config(),
+                        http: &pa_core::auth::ReqwestPrimeHttp,
+                        prime_cli_config_path: crate::prime_inference_login::prime_cli_config_path(
+                            &agent_dir,
+                        )
+                        .as_deref(),
+                        prime_team_id: std::env::var("PRIME_TEAM_ID").ok().as_deref(),
+                    },
+                    &crate::prime_inference_login::PanelPrimeLoginUi::new(panel),
+                ))
+            })
+            .unwrap_or_else(|error| {
+                ProviderAuthOutcome::Error(format!(
+                    "Failed to login to {}: {error}",
+                    provider_row.name
+                ))
+            });
+    }
+    // Any other row that reaches the panel body reports the stub (the
+    // session routes only the panel rows here).
+    ProviderAuthOutcome::Error(format!(
+        "{} subscription login is not available in this build yet.",
+        provider_row.name
     ))
 }
 
@@ -728,7 +679,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_options_lists_the_subscription_and_mcp_rows() {
+    async fn login_options_list_providers_only() {
         let dir = tempfile::tempdir().expect("temp dir");
         let agent = dir.path().join("agent");
         std::fs::create_dir_all(&agent).expect("agent dir");
@@ -743,14 +694,17 @@ mod tests {
                 "the {id} subscription row renders"
             );
         }
-        // The web search credential is a service row.
-        assert!(rows.iter().any(|row| row.id == "serper"));
+        // The operator's 2026-09-24 directive: /login is providers only —
+        // the service rows (MCP OAuth integrations, the web search
+        // credential) never appear; the /mcp view owns MCP logins.
+        assert!(!rows.iter().any(|row| row.id == "serper"));
+        assert!(!rows.iter().any(|row| row.id.starts_with("mcp:")));
         // Prime Inference sorts first among the api-key rows (TS rule).
         assert!(
             rows.iter()
                 .position(|row| row.id == PRIME_INFERENCE_PROVIDER_ID)
-                <= rows.iter().position(|row| row.id == "serper"),
-            "prime-inference sorts before the service rows"
+                < rows.iter().position(|row| row.id == "anthropic"),
+            "prime-inference sorts before the other api-key rows"
         );
     }
 
@@ -764,7 +718,6 @@ mod tests {
             id: "openai".to_string(),
             name: "OpenAI".to_string(),
             auth_type: AuthType::ApiKey,
-            category: AuthCategory::Provider,
             status: None,
             flow: AuthFlow::ApiKeyPrompt,
         };

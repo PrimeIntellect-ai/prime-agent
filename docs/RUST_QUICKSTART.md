@@ -56,7 +56,7 @@ gh run download "$run" --repo PrimeIntellect-ai/prime-agent \
 cd /tmp/pa
 shasum -a 256 -c SHA256SUMS                                   # verify the tarball
 mkdir -p ~/.local/share/prime-agent-rust
-tar xzf prime-agent-*-aarch64-apple-darwin.tar.gz -C ~/.local/share/prime-agent-rust
+tar xzf prime-agent-*-darwin-arm64.tar.gz -C ~/.local/share/prime-agent-rust
 # Load-bearing without the launcher (see the daemon section below): the Rust
 # daemon must get its OWN socket so it never touches the TS daemon.
 export PRIME_AGENT_DAEMON_SOCKET="${TMPDIR:-/tmp}/prime-agent-rust-$(id -u)/daemon.sock"
@@ -72,6 +72,12 @@ workspace version, the binary inside answers `<version>-continuous.<sha>`):
 | macOS Intel (incl. Rosetta shells) | `Darwin x86_64` | `x86_64-apple-darwin` | `artifacts-x86_64-apple-darwin` |
 | Linux x86_64 | `Linux x86_64` | `x86_64-unknown-linux-gnu` | `artifacts-x86_64-unknown-linux-gnu` |
 | Linux arm64 | `Linux aarch64` | `aarch64-unknown-linux-gnu` | `artifacts-aarch64-unknown-linux-gnu` |
+
+Linux floor: the GNU/Linux artifacts are built inside an Ubuntu 22.04
+(glibc 2.35) container — they start on any glibc >= 2.35, and
+`install-rust.sh` refuses installs on older glibc (or musl) systems with
+the exact floor instead of installing a binary the dynamic loader will
+not start.
 
 No tags, no releases: the repo's release history belongs to the TypeScript
 product, and versioned Rust releases come when the port graduates
