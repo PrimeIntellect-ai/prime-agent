@@ -1407,17 +1407,15 @@ impl AgentSessionEngine {
         // refine path's local harness state and the session's identity)
         // while staying non-persisted: the worker owns the durable
         // session file and mirrors the entries into it.
-        let session_manager = self
-            .config
-            .session_dir
-            .as_deref()
-            .map(|session_dir| {
+        let session_manager = match self.config.session_dir.as_deref() {
+            Some(session_dir) => {
                 pa_core::session::manager::SessionManager::in_memory_in_session_dir(
                     &cwd,
                     session_dir,
                 )
-            })
-            .unwrap_or_else(|| pa_core::session::manager::SessionManager::in_memory(&cwd));
+            }
+            None => pa_core::session::manager::SessionManager::in_memory(&cwd),
+        };
         let session_file = self
             .session_file
             .lock()
