@@ -1097,8 +1097,11 @@ impl AgentView {
         match entry {
             // The tool panel's `label · status` header row (TS
             // `ToolExecutionComponent`'s panel header line; the ipython
-            // shell's fixed summary row — either way card row 0).
-            ChatEntry::Tool(_) => {
+            // shell's fixed summary row — either way card row 0)
+            // and the shell-completion summary row (TS
+            // `ShellCompletionComponent`: `line: leadingSpace ? 1 : 0`):
+            // one row after the leading spacer, by the same rule.
+            ChatEntry::Tool(_) | ChatEntry::ShellCompletion(_) => {
                 vec![usize::from(self.conversation_leading(
                     index,
                     self.entry_tool_expanded(index),
@@ -1126,14 +1129,6 @@ impl AgentView {
                     width,
                 );
                 (lead..lead + header).collect()
-            }
-            // The summary row (TS `ShellCompletionComponent`: `line:
-            // leadingSpace ? 1 : 0`, height 1).
-            ChatEntry::ShellCompletion(_) => {
-                vec![usize::from(self.conversation_leading(
-                    index,
-                    self.entry_tool_expanded(index),
-                ))]
             }
             // The `[skill]` label row below the box's opening blank (TS
             // wraps the label and the name line; the collapsed card folds

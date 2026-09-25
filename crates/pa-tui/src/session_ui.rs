@@ -6023,10 +6023,10 @@ impl SessionUi {
                 // when its release reports none (the release-side
                 // re-check alone would let a modifier slip through).
                 self.fullscreen_press_modified = event.shift || event.alt || event.ctrl;
-                self.fullscreen_pressed_hyperlink = if !self.fullscreen_press_modified {
-                    view.frame_link_at(row, col)
-                } else {
+                self.fullscreen_pressed_hyperlink = if self.fullscreen_press_modified {
                     None
+                } else {
+                    view.frame_link_at(row, col)
                 };
                 self.fullscreen_pressed_click = if !self.fullscreen_press_modified
                     && self.fullscreen_pressed_hyperlink.is_none()
