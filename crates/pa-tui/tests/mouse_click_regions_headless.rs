@@ -434,11 +434,14 @@ fn clicking_a_transcript_link_opens_it() {
     // window shows it without scrolling (the top window folds it under
     // the fold). One idle hold lets the attach render land before the
     // probe frame.
-    let probe = run_plan(vec![HeadlessStep::WaitMs(700)]);
+    // Both runs settle identically before the probe/press: the attach
+    // and stats renders land inside the hold, so the probe's last frame is
+    // the same settled frame the plan's press dispatches against.
+    let probe = run_plan(vec![HeadlessStep::WaitMs(1500)]);
     let (_, link_row, link_col, _) = locate(&probe.0, "spec")
         .unwrap_or_else(|| panic!("the link label renders: {:#?}", probe.0));
     let opened = run_plan(vec![
-        HeadlessStep::WaitMs(700),
+        HeadlessStep::WaitMs(1500),
         HeadlessStep::Mouse(press(link_col + 1, link_row + 1)),
         HeadlessStep::Mouse(release(link_col + 1, link_row + 1)),
     ]);

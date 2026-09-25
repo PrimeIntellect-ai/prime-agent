@@ -3146,17 +3146,17 @@ mod tests {
             .iter()
             .position(|line| row_text(line).contains("docs"))
             .expect("the link label");
-        // The visible column of the label: the OSC 8 wrapper bytes ride in
-        // the span content, so the stripped row gives the column the hit
-        // test reasons in.
-        let stripped: String = crate::hyperlinks::strip_osc8_content(&row_text(&frame[link_row]));
+        // The visible column of the label: the OSC 8 wrapper and the
+        // leading OSC 133 zone markers ride zero-width in the span
+        // content, so the stripped row gives the column the hit test
+        // reasons in.
+        let (_, rest) = crate::osc133::split_leading_markers(&frame[link_row]);
+        let raw: String = rest.iter().map(|s| s.content.as_str()).collect();
+        let stripped = crate::hyperlinks::strip_osc8_content(&raw);
         let link_col = stripped.find("docs").expect("the label column");
         assert_eq!(
             v.frame_link_at(link_row, link_col).as_deref(),
-            Some("https://example.com/docs"),
-            "row={:?} ranges={:?}",
-            row_text(&frame[link_row]),
-            crate::hyperlinks::frame_link_ranges(&frame)
+            Some("https://example.com/docs")
         );
         crate::hyperlinks::set_hyperlinks_override(None);
     }
