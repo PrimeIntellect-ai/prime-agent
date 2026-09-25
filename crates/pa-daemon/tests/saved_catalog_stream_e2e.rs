@@ -161,6 +161,10 @@ fn write_fixture(
 /// budget (self-calibrating against the machine's speed).
 #[test]
 fn the_saved_catalog_streams_per_file_during_the_scan() {
+    // The scan's head: small newest-first rows (the stream's first
+    // frames), one per file, stamped in increasing recency so the mtime
+    // order is deterministic (the newest is first).
+    const SMALL_FILES: usize = 30;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let sessions_dir = agent_dir.join("sessions");
@@ -168,11 +172,8 @@ fn the_saved_catalog_streams_per_file_during_the_scan() {
 
     // The scan's tail: one grown file (its fold is the dominant cost),
     // stamped the OLDEST so the mtime order scans it LAST.
-    let base = SystemTime::now() - Duration::from_secs(60 * 60 * 24);
+    let base = SystemTime::now() - Duration::from_hours(24);
     write_fixture(&sessions_dir, "grown-store", "grown store", 60_000, base);
-    // The scan's head: small newest-first rows, stamped in increasing
-    // recency so the mtime order is deterministic (the newest is first).
-    const SMALL_FILES: usize = 30;
     for index in 0..SMALL_FILES {
         write_fixture(
             &sessions_dir,

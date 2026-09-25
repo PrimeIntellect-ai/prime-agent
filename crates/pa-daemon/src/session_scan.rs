@@ -305,7 +305,7 @@ mod tests {
     #[test]
     fn list_sessions_with_emits_rows_newest_first_with_scan_counts() {
         let dir = temp_dir();
-        let base = SystemTime::now() - std::time::Duration::from_secs(3600);
+        let base = SystemTime::now() - std::time::Duration::from_hours(1);
         for (index, name) in ["old row", "mid row", "new row"].iter().enumerate() {
             let path = write_session(&dir, "/repo/x", Some(name), 1);
             let file = fs::File::options().write(true).open(&path).unwrap();

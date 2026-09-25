@@ -757,6 +757,9 @@ mod tests {
         top_summary["sessionId"] = json!("root-persisted");
         top_summary["id"] = json!("root-persisted");
         top_summary["sessionFile"] = json!(root_file.to_string_lossy());
+        // The real worker's summary carries its lifecycle (the view's
+        // visibility gate); the passivation preserves it.
+        top_summary["lifecycle"] = json!("live");
         top_summary.as_object_mut().unwrap().remove("rlmChildId");
         top_summary
             .as_object_mut()
