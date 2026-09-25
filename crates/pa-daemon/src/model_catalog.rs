@@ -649,9 +649,9 @@ mod tests {
             "the private fetch rode the new effective team header ({expected_team}): {refreshed_heads:?}"
         );
         assert!(
-            refreshed_heads
-                .iter()
-                .all(|head| !head.to_ascii_lowercase().contains("x-prime-team-id: team-a")),
+            refreshed_heads.iter().all(|head| !head
+                .to_ascii_lowercase()
+                .contains("x-prime-team-id: team-a")),
             "the old account's team never rides the refreshed fetches: {refreshed_heads:?}"
         );
     }
