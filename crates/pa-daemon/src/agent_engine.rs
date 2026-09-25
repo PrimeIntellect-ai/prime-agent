@@ -846,7 +846,13 @@ impl AgentSessionEngine {
         // wake) by leaving the session unparked.
         let job_id = match persisted.job_id {
             Some(job_id) if self.quota_wake_job_active(&job_id) => Some(job_id),
-            Some(job_id) if self.quota_wake_job_exists(&job_id) => None,
+            Some(job_id)
+                if self.cron_wiring().is_some_and(|wiring| {
+                    wiring.store.list().iter().any(|job| job.id == job_id)
+                }) =>
+            {
+                None
+            }
             Some(_) | None => self.create_quota_resume_job(persisted.resume_at_ms).await,
         };
         *self
@@ -858,15 +864,6 @@ impl AgentSessionEngine {
             job_id,
             wake_retries: 0,
         });
-    }
-
-    /// Whether the park's wake job still exists in any state (scheduled,
-    /// fired, or cancelled).
-    fn quota_wake_job_exists(&self, job_id: &str) -> bool {
-        let Some(wiring) = self.cron_wiring() else {
-            return false;
-        };
-        wiring.store.list().iter().any(|job| job.id == job_id)
     }
 
     /// The TS replacement teardown (`teardownForReplacement` ->
@@ -4222,7 +4219,7 @@ impl AgentSessionEngine {
     ) -> Option<pa_core::session_engine::provider_park::ProviderParkOutcome> {
         use pa_core::session_engine::provider_park::{
             is_quota_block_failure, provider_park_decision, quota_failure_reset_ms,
-            quota_parked_final_error, ProviderParkDecision, ProviderParkOutcome,
+            quota_parked_final_error, NoParkReason, ProviderParkDecision, ProviderParkOutcome,
         };
         let error = message
             .error_message
@@ -4260,8 +4257,29 @@ impl AgentSessionEngine {
                     let rebuilt = self.create_quota_resume_job(park.resume_at_ms).await?;
                     (park.resume_at_ms, Some(rebuilt))
                 };
-                self.rebuild_wake_in_state(park, resume_at_ms, job_id, message)
+                if park.job_id != job_id {
+                    // A vanished wake is rebuilt without consuming a park
+                    // (TS `_restoreQuotaWakeJob`'s rebuild arm — the
+                    // replacement entry records the new job so the next
+                    // restore reuses it).
+                    *self
+                        .quota_park
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(QuotaParkState {
+                            park_count: park.park_count,
+                            resume_at_ms,
+                            job_id: job_id.clone(),
+                            wake_retries: park.wake_retries,
+                        });
+                    self.append_quota_park_entry(
+                        resume_at_ms,
+                        park.park_count,
+                        job_id.as_deref(),
+                        Some(message.provider.as_str()),
+                    )
                     .await;
+                }
                 let resume_at_iso = pa_core::session::manager::format_iso(resume_at_ms as i64);
                 return Some(ProviderParkOutcome {
                     status_message: format!(
@@ -4279,36 +4297,38 @@ impl AgentSessionEngine {
         // The park decision (pure): disabled / budget spent decline, a
         // reset parks until it (plus grace), capped at the policy bound.
         let parks_used = existing.as_ref().map_or(0, |park| park.park_count);
-        let decision = provider_park_decision(parks_used, reset_ms, &policy);
-        let ProviderParkDecision::Park { resume_after_ms } = decision else {
-            match (decision, existing) {
-                (
-                    ProviderParkDecision::None {
-                        reason: pa_core::session_engine::provider_park::NoParkReason::NoReset,
-                    },
-                    Some(park),
-                ) if park.resume_at_ms <= now_ms => {
-                    // The wake fired but its probe could not re-park (no
-                    // reported reset): re-arm one short probe, bounded so a
-                    // park that can never wake ends instead of parking
-                    // forever (TS `_recoverQuotaParkWake`).
-                    return self.recover_quota_park_wake(park, &error).await;
-                }
-                (_, Some(park)) if park.resume_at_ms <= now_ms => {
-                    // A stale park whose episode ended here: its wake
-                    // already fired, so nothing else would resume it (TS
-                    // abort arm's stale-park clear).
-                    if let Some(job_id) = &park.job_id {
-                        self.cancel_quota_resume_job(job_id);
-                    }
-                    *self
-                        .quota_park
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-                }
-                _ => {}
+        match provider_park_decision(parks_used, reset_ms, &policy) {
+            ProviderParkDecision::Park { resume_after_ms } => {}
+            ProviderParkDecision::None {
+                reason: NoParkReason::NoReset,
+            } => {
+                let Some(park) = existing.filter(|park| park.resume_at_ms <= now_ms) else {
+                    return None;
+                };
+                // The wake fired but its probe could not re-park (no
+                // reported reset): re-arm one short probe, bounded so a
+                // park that can never wake ends instead of parking
+                // forever (TS `_recoverQuotaParkWake`).
+                return self.recover_quota_park_wake(park, &error).await;
             }
-            return None;
+            ProviderParkDecision::None {
+                reason: NoParkReason::Disabled | NoParkReason::ParkBudget,
+            } => {
+                let Some(park) = existing.filter(|park| park.resume_at_ms <= now_ms) else {
+                    return None;
+                };
+                // A stale park whose episode ended here: its wake
+                // already fired, so nothing else would resume it (TS
+                // abort arm's stale-park clear).
+                if let Some(job_id) = &park.job_id {
+                    self.cancel_quota_resume_job(job_id);
+                }
+                *self
+                    .quota_park
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                return None;
+            }
         };
         let resume_at_ms = now_ms.saturating_add(resume_after_ms);
         // Arm the durable wake first: without a wake the park would be a
@@ -4325,38 +4345,16 @@ impl AgentSessionEngine {
             .quota_park
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
-        self.append_quota_park_entry(resume_at_ms, park_count, Some(job_id.as_str()), message)
-            .await;
+        self.append_quota_park_entry(
+            resume_at_ms,
+            park_count,
+            Some(job_id.as_str()),
+            Some(message.provider.as_str()),
+        )
+        .await;
         Some(ProviderParkOutcome {
             status_message: quota_parked_final_error(abort, resume_at_ms, &error),
         })
-    }
-
-    /// Keep the rebuilt wake on the live park state (a vanished wake is
-    /// rebuilt without consuming a park, TS `_restoreQuotaWakeJob`'s
-    /// rebuild arm — the replacement entry records the new job so the
-    /// next restore reuses it).
-    async fn rebuild_wake_in_state(
-        &self,
-        park: &QuotaParkState,
-        resume_at_ms: u64,
-        job_id: Option<String>,
-        message: &pa_agent::types::AssistantMessage,
-    ) {
-        if park.job_id == job_id {
-            return;
-        }
-        *self
-            .quota_park
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(QuotaParkState {
-            park_count: park.park_count,
-            resume_at_ms,
-            job_id: job_id.clone(),
-            wake_retries: park.wake_retries,
-        });
-        self.append_quota_park_entry(resume_at_ms, park.park_count, job_id.as_deref(), message)
-            .await;
     }
 
     /// Wake re-arm for a park whose wake was consumed without resuming
@@ -4374,7 +4372,7 @@ impl AgentSessionEngine {
             if let Some(job_id) = &park.job_id {
                 self.cancel_quota_resume_job(job_id);
             }
-            self.append_quota_resume_drop_entry("wake-error").await;
+            self.append_quota_resume_entry("wake-error").await;
             *self
                 .quota_park
                 .lock()
@@ -4393,7 +4391,11 @@ impl AgentSessionEngine {
             .quota_park
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(state);
-        self.append_quota_resume_rearm_entry(resume_at_ms, park.park_count, Some(job_id.as_str()))
+        // The re-armed wake needs a replacement entry (TS
+        // `_recoverQuotaParkWake` appends one so a restart reads the
+        // replacement wake instead of the spent one; it carries no
+        // provider field, like the TS).
+        self.append_quota_park_entry(resume_at_ms, park.park_count, Some(job_id.as_str()), None)
             .await;
         let resume_at_iso = pa_core::session::manager::format_iso(resume_at_ms as i64);
         Some(pa_core::session_engine::provider_park::ProviderParkOutcome {
@@ -4403,9 +4405,9 @@ impl AgentSessionEngine {
         })
     }
 
-    /// Record the dropped park's transition (TS `_recoverQuotaParkWake`'s
-    /// spent-retries arm: the resume entry records the outcome).
-    async fn append_quota_resume_drop_entry(&self, outcome: &str) {
+    /// Record a park's resume (or drop) transition (TS
+    /// `QUOTA_RESUME_CUSTOM_ENTRY_TYPE`'s outcome field).
+    async fn append_quota_resume_entry(&self, outcome: &str) {
         let persistence = self
             .session
             .lock()
@@ -4419,35 +4421,6 @@ impl AgentSessionEngine {
         let _ = session.append_custom_entry(
             pa_core::session_engine::provider_park::PROVIDER_QUOTA_RESUME_ENTRY,
             Some(serde_json::json!({ "outcome": outcome })),
-        );
-    }
-
-    /// Record a re-armed wake as the park's replacement entry (TS
-    /// `_recoverQuotaParkWake` appends a park entry so a restart reads
-    /// the replacement wake instead of the spent one).
-    async fn append_quota_resume_rearm_entry(
-        &self,
-        resume_at_ms: u64,
-        park_count: u32,
-        job_id: Option<&str>,
-    ) {
-        let persistence = self
-            .session
-            .lock()
-            .await
-            .as_ref()
-            .map(|engine| engine.session.shared_persistence());
-        let Some(persistence) = persistence else {
-            return;
-        };
-        let mut session = persistence.lock().await;
-        let _ = session.append_custom_entry(
-            pa_core::session_engine::provider_park::PROVIDER_QUOTA_PARK_ENTRY,
-            Some(serde_json::json!({
-                "resumeAt": pa_core::session::manager::format_iso(resume_at_ms as i64),
-                "parkCount": park_count,
-                "jobId": job_id,
-            })),
         );
     }
 
@@ -4473,13 +4446,13 @@ impl AgentSessionEngine {
         resume_at_ms: u64,
         park_count: u32,
         job_id: Option<&str>,
-        message: &pa_agent::types::AssistantMessage,
+        provider: Option<&str>,
     ) {
         let data = serde_json::json!({
             "resumeAt": pa_core::session::manager::format_iso(resume_at_ms as i64),
             "parkCount": park_count,
             "jobId": job_id,
-            "provider": message.provider,
+            "provider": provider,
         });
         let persistence = self
             .session
@@ -4515,19 +4488,7 @@ impl AgentSessionEngine {
             self.cancel_quota_resume_job(job_id);
         }
         let outcome = if wake_probe { "wake" } else { "early" };
-        let persistence = self
-            .session
-            .lock()
-            .await
-            .as_ref()
-            .map(|engine| engine.session.shared_persistence());
-        if let Some(persistence) = persistence {
-            let mut session = persistence.lock().await;
-            let _ = session.append_custom_entry(
-                pa_core::session_engine::provider_park::PROVIDER_QUOTA_RESUME_ENTRY,
-                Some(serde_json::json!({ "outcome": outcome })),
-            );
-        }
+        self.append_quota_resume_entry(outcome).await;
         if wake_probe {
             return;
         }
