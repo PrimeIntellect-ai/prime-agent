@@ -1228,8 +1228,16 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         let body = serde_json::to_string(payload)?;
         let mut frame = vec![0x81u8];
-        assert!(body.len() < 126, "mock frames are small");
-        frame.push(body.len() as u8);
+        let length = body.len();
+        if length < 126 {
+            frame.push(length as u8);
+        } else if length < 65_536 {
+            frame.push(126);
+            frame.extend_from_slice(&(length as u16).to_be_bytes());
+        } else {
+            frame.push(127);
+            frame.extend_from_slice(&(length as u64).to_be_bytes());
+        }
         frame.extend_from_slice(body.as_bytes());
         socket.write_all(&frame).await?;
         Ok(())

@@ -5538,10 +5538,12 @@ pub(crate) mod tests {
     async fn spent_park_budget_clears_the_stale_park() {
         let dir = tempfile::TempDir::new().unwrap();
         let engine = park_engine(dir.path());
-        // Arm a wake in the past: the budget check runs against a wake
-        // that already fired (the stale-park clear path).
+        // Arm a wake, then age the park state past its wake time: the
+        // budget check runs against a wake that already fired (the
+        // store only accepts future one-shots; the state is what the
+        // consumed-wake paths read).
         let fired_job_id = engine
-            .create_quota_resume_job(crate::util::now_ms() - 60_000)
+            .create_quota_resume_job(crate::util::now_ms() + 60_000)
             .await
             .expect("wake job");
         *engine.quota_park.lock().expect("park state") = Some(QuotaParkState {
@@ -5571,7 +5573,7 @@ pub(crate) mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let engine = park_engine(dir.path());
         let fired_job_id = engine
-            .create_quota_resume_job(crate::util::now_ms() - 60_000)
+            .create_quota_resume_job(crate::util::now_ms() + 60_000)
             .await
             .expect("wake job");
         *engine.quota_park.lock().expect("park state") = Some(QuotaParkState {
