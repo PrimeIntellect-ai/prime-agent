@@ -303,7 +303,7 @@ impl DeleteAction {
     /// happened (the honest-success check: a `cancelled: false` or a
     /// `deleted: false` in a `success` response means the command ran
     /// but changed nothing — reported as such, never as success).
-    fn effect_happened(&self, response: &crate::daemon_client::DaemonResponse) -> bool {
+    fn effect_happened(&self, response: &pa_types::daemon::DaemonResponse) -> bool {
         let Some(data) = response.data.as_ref() else {
             return true;
         };
@@ -375,28 +375,20 @@ fn spawn_delete_dispatch(
             Ok(response) if response.success && action.effect_happened(&response) => {
                 action.success_message()
             }
-            Ok(response) if response.success => format!(
-                "{} did not change anything: {}",
-                action.fail_word(),
-                response
+            Ok(response) if response.success && action.effect_happened(&response) => {
+                action.success_message()
+            }
+            Ok(response) if response.success => {
+                // The wire ran but changed nothing: the status carries
+                // what the wire said, never the button's hope.
+                let summary = response
                     .data
                     .as_ref()
-                    .map(|data| {
-                        crate::width::truncate_line(
-                            &vec![crate::Span::raw(
-                                serde_json::to_string(data).unwrap_or_default(),
-                            )],
-                            120,
-                            "\u{2026}",
-                        )
-                    })
-                    .first()
-                    .map(|line| line
-                        .iter()
-                        .map(|span| span.content.clone())
-                        .collect::<String>())
-                    .unwrap_or_else(|| "nothing changed".into())
-            ),
+                    .and_then(|data| data.get("ok").or(Some(data)))
+                    .map(serde_json::Value::to_string)
+                    .unwrap_or_else(|| "nothing changed".to_string());
+                format!("{} did not change anything: {summary}", action.fail_word())
+            }
             Ok(response) => {
                 let error = response
                     .error
@@ -998,8 +990,9 @@ impl AgentsViewMode {
     /// and a deleted saved row leaves the catalog immediately (the live
     /// roster push covers the other arms; saved rows have no push).
     fn delete_result(&mut self, message: String) {
-        self.status = Some(message);
-        if message.starts_with("Deleted session ") {
+        let deleted_saved = message.starts_with("Deleted session ");
+        self.status = Some(message.clone());
+        if deleted_saved {
             self.saved.retain(|saved| {
                 saved
                     .get("path")
@@ -1295,15 +1288,15 @@ impl AgentsViewMode {
         // any other key clears the arm.
         if !has_query && self.keybindings.matches(key, "app.agents.delete") {
             if was_delete_armed.as_ref().is_some_and(|pending| {
-                self.rows
-                    .get(self.selected)
-                    .is_some_and(|row| row.identity == pending.identity)
-                    // The armed word must still match the row's live work:
-                    // a row that settled between the presses (running ->
-                    // idle) re-arms rather than executing the stale word
-                    // (the hint said stop; the row now deletes - the
-                    // confirm rides the CURRENT state).
-                    && self.delete_arm_word(row) == pending.stop
+                self.rows.get(self.selected).is_some_and(|row| {
+                    row.identity == pending.identity
+                        // The armed word must still match the row's live
+                        // work: a row that settled between the presses
+                        // (running -> idle) re-arms rather than executing
+                        // the stale word (the hint said stop; the row now
+                        // deletes - the confirm rides the CURRENT state).
+                        && self.delete_arm_word(row) == pending.stop
+                })
             }) {
                 if let Some(action) = self.delete_action_for_selected() {
                     self.pending_delete_action = Some(action);
@@ -3006,7 +2999,7 @@ mod tests {
             child_id: "child-c".to_string(),
             name: "worker one".to_string(),
         };
-        let response = crate::daemon_client::DaemonResponse {
+        let response = pa_types::daemon::DaemonResponse {
             success: true,
             data: Some(serde_json::json!({"cancelled": false})),
             error: None,
@@ -3015,7 +3008,7 @@ mod tests {
             error_info: None,
         };
         assert!(!action.effect_happened(&response));
-        let response = crate::daemon_client::DaemonResponse {
+        let response = pa_types::daemon::DaemonResponse {
             success: true,
             data: Some(serde_json::json!({"cancelled": true})),
             error: None,
@@ -3029,7 +3022,7 @@ mod tests {
             child_id: "child-c".to_string(),
             name: "worker one".to_string(),
         };
-        let response = crate::daemon_client::DaemonResponse {
+        let response = pa_types::daemon::DaemonResponse {
             success: true,
             data: Some(serde_json::json!({"deleted": false})),
             error: None,
