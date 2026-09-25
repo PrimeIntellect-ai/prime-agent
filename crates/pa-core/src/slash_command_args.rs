@@ -23,6 +23,17 @@ pub enum GoalCommand {
 }
 
 /// Parse `/goal [status|clear|stop|pause|resume|[--budget <tokens>] <objective>]`.
+///
+/// # Errors
+///
+/// Returns a usage-error string when the budget flag is given without a
+/// value or an objective, when the budget is not a positive integer, or
+/// when the objective is missing.
+///
+/// # Panics
+///
+/// The `expect` on the `=` separator cannot fire: the branch is guarded by
+/// the flag-prefix checks that require it.
 pub fn parse_goal_command(args: &str) -> Result<GoalCommand, String> {
     let rest = args.trim();
     let normalized = rest.to_lowercase();
@@ -97,6 +108,11 @@ pub enum AutonomousCommand {
 }
 
 /// Parse `/autonomous [status|off|on [--max-continuations <n>] ...]`.
+///
+/// # Errors
+///
+/// Returns a usage-error string for an unexpected subcommand, trailing
+/// arguments after `status`/`off`, or invalid budget options.
 pub fn parse_autonomous_command(args: &str) -> Result<AutonomousCommand, String> {
     let tokens = parse_command_args(args);
     if tokens.is_empty() || tokens[0].to_lowercase() == "status" {
@@ -140,6 +156,11 @@ const AUTONOMOUS_BUDGET_FLAGS: [&str; 8] = [
 ];
 
 /// `parseAutonomousBudgetOptions`: `--flag value` and `--flag=value` pairs.
+///
+/// # Errors
+///
+/// Returns a usage-error string for an unknown budget flag, a missing or
+/// invalid flag value, or a duplicated flag.
 pub fn parse_autonomous_budget_options(tokens: &[String]) -> Result<AgentAutonomousConfig, String> {
     let mut config = AgentAutonomousConfig::default();
     let mut gate_commands: Vec<String> = Vec::new();

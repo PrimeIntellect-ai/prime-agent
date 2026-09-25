@@ -199,6 +199,10 @@ pub fn build_groups(resolved: &ResolvedPaths) -> Vec<ResourceGroup> {
 /// `toggleResource`): top-level resources get `+pattern`/`-pattern`
 /// entries in their scope's resource array, package resources get filter
 /// entries on their package's object form. Returns the written pattern.
+///
+/// # Errors
+///
+/// Returns an error when the settings update or save for the toggle fails.
 pub fn toggle_resource(
     settings: &mut SettingsManager,
     cwd: &Path,

@@ -239,7 +239,7 @@ fn resolve_prompt_path(path: &str, cwd: &Path) -> PathBuf {
     }
 }
 
-/// Load templates from agentDir/prompts/, cwd/{CONFIG_DIR_NAME}/prompts/, and
+/// Load templates from agentDir/prompts/, `cwd/{CONFIG_DIR_NAME}/prompts/`, and
 /// explicit paths (later entries win nothing: templates append in order).
 pub fn load_prompt_templates(options: &LoadPromptTemplatesOptions) -> Vec<PromptTemplate> {
     let mut templates = Vec::new();

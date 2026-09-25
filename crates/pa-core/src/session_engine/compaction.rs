@@ -4,7 +4,7 @@
 
 use pa_types::session::{AgentMessage, FileEntry};
 
-/// Default compaction settings (TS DEFAULT_COMPACTION_SETTINGS).
+/// Default compaction settings (TS `DEFAULT_COMPACTION_SETTINGS`).
 pub const DEFAULT_RESERVE_TOKENS: u64 = 16_384;
 pub const DEFAULT_KEEP_RECENT_TOKENS: u64 = 20_000;
 
@@ -214,6 +214,14 @@ pub struct ContextTokensEstimate {
     pub last_usage_index: Option<usize>,
 }
 
+/// Estimate the context tokens of the live messages (TS
+/// `estimateContextTokens`): the last valid assistant usage plus chars/4
+/// estimates for the messages that trail it.
+///
+/// # Panics
+///
+/// The `expect` on the usage at the found index cannot fire: the index
+/// comes from an `rposition` over messages whose usage is present.
 pub fn estimate_context_tokens(messages: &[AgentMessage]) -> ContextTokensEstimate {
     match messages
         .iter()
@@ -301,7 +309,7 @@ pub fn threshold_compaction_due(
 }
 
 /// Valid cut point indices: user/assistant/custom/branch/compaction-summary
-/// messages plus branch_summary and custom_message entries. Never tool results.
+/// messages plus `branch_summary` and `custom_message` entries. Never tool results.
 pub fn find_valid_cut_points(
     entries: &[FileEntry],
     start_index: usize,
@@ -365,6 +373,11 @@ pub struct CutPointResult {
 }
 
 /// Find the cut point keeping approximately `keep_recent_tokens`.
+///
+/// # Panics
+///
+/// The `unwrap` on the last cut point cannot fire: the cut-point list was
+/// checked non-empty above.
 pub fn find_cut_point(
     entries: &[FileEntry],
     start_index: usize,

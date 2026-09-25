@@ -23,6 +23,11 @@ pub struct DownloadBudget {
 /// Stream `url` to `destination` verifying the archive digest while bytes
 /// arrive (a digest mismatch is caught without a second pass). Retries the
 /// whole download while the budget remains.
+///
+/// # Errors
+///
+/// Returns the last attempt's error when every download attempt fails or
+/// the wall-clock budget expires first.
 pub async fn download_archive(
     url: &str,
     expected_sha256: &str,
@@ -121,6 +126,12 @@ fn sweep_staging(releases: &Path) {
 /// kill once the read bound is hit), and stdout is read to a bounded
 /// length, so a payload binary that hangs or streams cannot exhaust the
 /// updater.
+///
+/// # Errors
+///
+/// Returns an error when the probe child cannot be spawned, produces no
+/// stdout, times out or overruns its bounds, exits without success, or
+/// its output does not parse as a version.
 pub async fn binary_reported_version(exe: &Path) -> Result<String> {
     const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
     const MAX_VERSION_OUTPUT: usize = 512;
@@ -185,6 +196,13 @@ pub async fn binary_reported_version(exe: &Path) -> Result<String> {
 /// silently reactivated. Returns the release directory (spec §7: the
 /// candidate is created at `Downloading`/`Staged` and never removed by the
 /// update flow).
+///
+/// # Errors
+///
+/// Returns an error when the existing release fails re-validation, the
+/// staging scratch cannot be created, the archive's digest no longer
+/// matches after extraction, the unpack fails, or the staged tree cannot
+/// be renamed or fsynced into place.
 pub fn stage_archive(
     archive: &Path,
     archive_sha256: &str,
@@ -245,6 +263,13 @@ fn file_digest(path: &Path) -> Result<String> {
 /// place: a manual install can never write over a running binary (the
 /// in-place `cp` class of corrupted installs) and a crash can never leave
 /// a partial release under its final name.
+///
+/// # Errors
+///
+/// Returns an error when the payload path cannot be resolved or is not a
+/// directory or regular file, when the staging scratch cannot be created,
+/// when the payload's `--version` probe fails, when the copy fails its
+/// digest check, or when the staged tree cannot be renamed into place.
 pub async fn stage_local_payload(
     payload: &Path,
     root: &Path,
