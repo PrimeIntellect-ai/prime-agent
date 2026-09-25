@@ -18,6 +18,11 @@ pub(crate) fn append_truncated(
     max_chars: usize,
 ) {
     if *chars >= max_chars {
+        if !text.is_empty() {
+            // The buffer filled exactly on an earlier frame; the dropped
+            // remainder still counts as truncation.
+            *truncated = true;
+        }
         return;
     }
     let remaining = max_chars - *chars;
@@ -312,6 +317,10 @@ mod tests {
                         expected = expected.chars().take(cap).collect();
                         expected_truncated = true;
                     }
+                } else if !text.is_empty() {
+                    // The buffer filled exactly on an earlier frame; the dropped
+                    // remainder still counts as truncation (TS #2423).
+                    expected_truncated = true;
                 }
                 assert_eq!(
                     (actual.as_str(), truncated, count),
@@ -323,5 +332,26 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn exact_fill_remainder_counts_as_truncation() {
+        // The buffer filled exactly on an earlier frame; a later non-empty
+        // frame is dropped but still marks the stream truncated (TS #2423:
+        // without this, exactly-filled streams reported no truncation).
+        let mut buffer = String::from("abcd");
+        let mut truncated = false;
+        let mut count = 4;
+        append_truncated(&mut buffer, &mut truncated, &mut count, "ef", 4);
+        assert!(truncated);
+        assert_eq!(buffer, "abcd");
+        assert_eq!(count, 4);
+
+        // Empty frames never flip the flag.
+        let mut empty = String::new();
+        let mut never = false;
+        let mut zero = 0;
+        append_truncated(&mut empty, &mut never, &mut zero, "", 4);
+        assert!(!never);
     }
 }

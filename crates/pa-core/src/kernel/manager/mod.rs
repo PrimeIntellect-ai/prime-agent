@@ -14,7 +14,7 @@ use std::io::Write;
 
 use anyhow::anyhow;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{oneshot, Notify};
 
 use crate::kernel::cancellation::{merge_signals, AbortSignal};
@@ -29,6 +29,10 @@ use crate::kernel::state_snapshot::{
 
 const READY_TIMEOUT_MS: u64 = 30_000;
 const REPAIR_STEP_TIMEOUT_MS: u64 = 30_000;
+/// Largest legit frame is an attachment display event, base64 capped at
+/// MAX_ATTACHMENT_DATA_CHARS; a line that cannot complete within this ceiling
+/// is corruption the protocol repair owns, not output worth buffering until OOM.
+const MAX_PROTOCOL_LINE_BYTES: usize = 32 * 1024 * 1024;
 /// Runtime-minted host-request ids never repeat; the bound only guards a
 /// misbehaving runtime from growing the dedup set forever.
 const MAX_HANDLED_HOST_REQUEST_IDS: usize = 1024;
@@ -193,6 +197,22 @@ struct RepairHandle {
     slot: Arc<MemoSlot>,
 }
 
+/// File-stat identity of a snapshot manifest (TS `manifestStatOf`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ManifestStat {
+    mtime: std::time::SystemTime,
+    size: u64,
+}
+
+/// One-shot post-restore snapshot skip: the debounced auto-snapshot that
+/// follows a successful bootstrap would rewrite identical content — or, after
+/// a failed restore, clobber the healthy on-disk payload with a skills-only
+/// namespace — so it is skipped while the namespace is unchanged.
+struct RestoredNamespaceSkip {
+    manifest_stat: Option<ManifestStat>,
+    completed_executions: u64,
+}
+
 struct Guarded {
     state: KernelState,
     start_generation: u64,
@@ -204,8 +224,29 @@ struct Guarded {
     /// A repair discarded its kernel: the next fresh start must re-run the runtime bootstrap.
     pending_rebootstrap: bool,
     /// Restore the saved namespace on that fresh start too (false when the
-    /// snapshot itself is the declared culprit).
+    /// snapshot itself is the declared culprit). A failed non-repair restore
+    /// re-arms it: the namespace never got the saved state, so the on-disk
+    /// payload must stay the fresher copy (dispose flush skips it).
     pending_restore: bool,
+    /// Settled-execution counter: the post-restore skip arm and the debounced
+    /// snapshot compare it to spot a real cell in between.
+    completed_executions: u64,
+    /// A restore attempt failed outright or revived only part of the saved
+    /// namespace: the on-disk payload stays the fresher copy, so the dispose
+    /// flush must not overwrite it. Unlike `pending_restore`, the reprovision
+    /// retry does not clear it — only a fully-successful restore does.
+    restore_incomplete: bool,
+    /// The restore settle's execution count: the debounced auto-snapshot the
+    /// bootstrap schedules stays suppressed until a third execution (any user
+    /// cell) settles, so a zero/near-zero debounce cannot fire before the
+    /// post-restore skip arm is installed (production order: bootstrap, then
+    /// the arm).
+    restore_boot_hold: Option<u64>,
+    /// Tri-state manifest stat of the last non-repair restore ATTEMPT:
+    /// `None` = no attempt yet, `Some(None)` = manifest was missing at it.
+    restored_manifest_stat: Option<Option<ManifestStat>>,
+    /// Armed one-shot post-restore snapshot skip (see `RestoredNamespaceSkip`).
+    restored_namespace_skip: Option<RestoredNamespaceSkip>,
     /// Unattributed stream text that arrived between cells; surfaced on the next execution.
     pending_background_output: String,
     pending_background_output_chars: usize,
@@ -317,6 +358,11 @@ impl ReplKernelManager {
                 startup_protocol_error: None,
                 pending_rebootstrap: false,
                 pending_restore: false,
+                completed_executions: 0,
+                restore_incomplete: false,
+                restore_boot_hold: None,
+                restored_manifest_stat: None,
+                restored_namespace_skip: None,
                 pending_background_output: String::new(),
                 pending_background_output_chars: 0,
                 pending_background_output_truncated: false,
@@ -573,6 +619,16 @@ impl ReplKernelManager {
     /// live handles (rlm, skills) over anything restored.
     pub async fn restore_state(&self) -> Option<RestoreResult> {
         self.perform_restore(false).await
+    }
+
+    /// Arm the one-shot post-restore snapshot skip: the debounced auto-snapshot
+    /// the bootstrap scheduled would rewrite identical content — or, after a
+    /// failed restore, clobber the healthy on-disk payload with a skills-only
+    /// namespace — so it is skipped while the namespace is unchanged. Call
+    /// after the bootstrap succeeds; its own settled execution must not
+    /// defeat the arm. No-op when no non-repair restore was attempted.
+    pub fn mark_restored_namespace_fresh(&self) {
+        self.inner.mark_restored_namespace_fresh();
     }
 
     /// Live user-defined top-level names, or `None` if the kernel isn\'t running.
