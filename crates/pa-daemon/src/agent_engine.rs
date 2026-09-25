@@ -1403,11 +1403,24 @@ impl AgentSessionEngine {
             std::fs::create_dir_all(session_dir)?;
         }
         let cwd = self.cwd();
+        let session_file = self
+            .session_file
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
         // The engine session carries the session's own directory (the
         // refine path's local harness state and the session's identity)
         // while staying non-persisted: the worker owns the durable
-        // session file and mirrors the entries into it.
-        let session_manager = match self.config.session_dir.as_deref() {
+        // session file and mirrors the entries into it. The configured
+        // session dir leads; the session file's parent (the create
+        // command's sessionDir) is the daemon's own fallback — the
+        // engine config itself is built without one.
+        let session_manager = match self
+            .config
+            .session_dir
+            .as_deref()
+            .or_else(|| session_file.as_deref().and_then(std::path::Path::parent))
+        {
             Some(session_dir) => {
                 pa_core::session::manager::SessionManager::in_memory_in_session_dir(
                     &cwd,
@@ -1416,11 +1429,6 @@ impl AgentSessionEngine {
             }
             None => pa_core::session::manager::SessionManager::in_memory(&cwd),
         };
-        let session_file = self
-            .session_file
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
         // Children inherit the parent model selector; the engine resolves
         // the model here, after the create command set the rest of the
         // parent identity.
