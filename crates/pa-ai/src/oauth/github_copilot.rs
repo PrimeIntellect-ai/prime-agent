@@ -338,7 +338,7 @@ async fn start_device_flow(http: &dyn ProviderHttp, domain: &str) -> Result<Devi
         .map_err(|_| "Invalid device code response".to_string())?;
     let field = |name: &str| {
         json.get(name)
-            .map(serde_json::Value::clone)
+            .cloned()
             .ok_or_else(|| "Invalid device code response fields".to_string())
     };
     let device_code = field("device_code")?
@@ -450,17 +450,17 @@ async fn poll_for_github_access_token(
             .unwrap_or_default()
             .to_string();
         match error.as_str() {
-            "authorization_pending" => continue,
+            "authorization_pending" => {}
             "slow_down" => {
                 slow_down_responses += 1;
                 let advertised = json
                     .get("interval")
                     .and_then(serde_json::Value::as_f64)
                     .filter(|seconds| *seconds > 0.0);
-                interval_ms = advertised
-                    .map_or((interval_ms + 5000).max(1000), |seconds| (seconds * 1000.0) as u64);
+                interval_ms = advertised.map_or((interval_ms + 5000).max(1000), |seconds| {
+                    (seconds * 1000.0) as u64
+                });
                 interval_multiplier = SLOW_DOWN_POLL_INTERVAL_MULTIPLIER;
-                continue;
             }
             other => {
                 let description = json

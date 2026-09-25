@@ -61,6 +61,8 @@ impl CallbackShared {
 #[derive(Debug)]
 pub struct AnthropicCallbackServer {
     shared: Arc<CallbackShared>,
+    #[cfg(test)]
+    port: u16,
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -95,6 +97,8 @@ impl AnthropicCallbackServer {
         let listener = TcpListener::bind((host, port))
             .await
             .map_err(|error| format!("port {port}: {error}"))?;
+        #[cfg(test)]
+        let bound_port = listener.local_addr().map_or(port, |addr| addr.port());
         let shared = Arc::new(CallbackShared::default());
         let task_shared = Arc::clone(&shared);
         let state = state.to_string();
@@ -112,11 +116,27 @@ impl AnthropicCallbackServer {
         });
         Ok(AnthropicCallbackServer {
             shared,
+            #[cfg(test)]
+            port: bound_port,
             task: Some(task),
         })
     }
 
-    /// Wait for the browser redirect to settle: the code and state.
+    /// The bound port (tests pick free ports and read the listener's).
+    #[cfg(test)]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Cancel: settle the waiter with `None` (TS `cancelWait`; the
+    /// tests drive the cancellation path).
+    #[cfg(test)]
+    pub async fn cancel(&self) {
+        self.shared.settle(None).await;
+    }
+
+    /// Wait for the browser redirect to settle: the code and state,
+    /// or `None` when the wait was cancelled.
     pub async fn wait_for_code(&self) -> Option<CallbackCode> {
         loop {
             if let Some(result) = self.shared.result.lock().await.take() {
@@ -125,7 +145,6 @@ impl AnthropicCallbackServer {
             self.shared.notify.notified().await;
         }
     }
-
 }
 
 /// One browser request: read it, answer it, settle the login only on a
