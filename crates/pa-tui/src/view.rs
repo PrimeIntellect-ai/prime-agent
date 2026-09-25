@@ -1168,7 +1168,6 @@ impl AgentView {
             ChatEntry::Status { .. }
             | ChatEntry::User { .. }
             | ChatEntry::SlashCommand { .. }
-            | ChatEntry::SlashCommandResult { .. }
             | ChatEntry::Assistant(_)
             | ChatEntry::ClientMarkdown { .. }
             | ChatEntry::ClientText { .. }
