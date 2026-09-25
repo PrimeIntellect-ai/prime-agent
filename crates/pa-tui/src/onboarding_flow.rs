@@ -129,10 +129,10 @@ impl ProviderPicker {
         None
     }
 
-    /// One paste payload (TS the field's paste): the query accepts pasted
-    /// text, and the filter re-clamps the selection and resets the scroll
-    /// exactly like a typed query — a paste that shrinks the match list
-    /// never strands the cursor on a row that no longer exists.
+    /// One paste payload (TS the field's paste): the paste lands in the
+    /// query, and the filter's re-clamp keeps the selection inside the
+    /// match list — a shrunk match list never strands the cursor on a
+    /// row that no longer exists.
     pub fn handle_paste(&mut self, text: &str) {
         self.search.paste(text);
         self.selected = self.selected.min(self.filtered().len());
