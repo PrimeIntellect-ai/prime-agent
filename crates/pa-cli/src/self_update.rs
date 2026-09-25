@@ -124,7 +124,7 @@ pub fn run(options: &SelfUpdateOptions, persisted_wire: Option<String>) -> i32 {
                     };
                     let mut settings = pa_core::settings::SettingsManager::create(
                         &cwd,
-                        &crate::config::get_agent_dir(),
+                        crate::config::get_agent_dir(),
                     );
                     if settings.set_update_channel(settings_channel).is_ok() {
                         println!("Updates now follow the {wire} channel.");

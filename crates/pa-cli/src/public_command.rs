@@ -634,7 +634,7 @@ fn run_update(args: &[String]) -> PublicCommandResult {
     let persisted_wire = std::env::current_dir()
         .ok()
         .and_then(|cwd| {
-            pa_core::settings::SettingsManager::create(&cwd, &crate::config::get_agent_dir())
+            pa_core::settings::SettingsManager::create(&cwd, crate::config::get_agent_dir())
                 .get_update_channel()
         })
         .map(crate::self_update::settings_channel_wire_name)
@@ -643,7 +643,7 @@ fn run_update(args: &[String]) -> PublicCommandResult {
         options.force,
         options.channel,
         persisted_wire.as_deref(),
-        std::io::IsTerminal::is_terminal(&std::io::stdin()),
+        std::io::stdin().is_terminal(),
     ) {
         return handled_with_exit(abort_code);
     }
