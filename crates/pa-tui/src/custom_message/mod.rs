@@ -520,7 +520,9 @@ mod tests {
             other => panic!("agent message row: {other:?}"),
         };
         assert_eq!(
-            entry(base(json!({ "activeSessionId": "aaa111", "sessionId": "s1" }))),
+            entry(base(
+                json!({ "activeSessionId": "aaa111", "sessionId": "s1" })
+            )),
             "aaa111"
         );
         assert_eq!(

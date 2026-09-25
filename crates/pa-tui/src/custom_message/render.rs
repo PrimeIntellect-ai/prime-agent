@@ -7,7 +7,7 @@
 //! through the chat status rows).
 
 use super::{
-    AGENT_MESSAGE_LABEL, AgentMessageDirection, AgentMessageRow, CustomPanelRow, ShellCompletionRow,
+    AgentMessageDirection, AgentMessageRow, CustomPanelRow, ShellCompletionRow, AGENT_MESSAGE_LABEL,
 };
 use crate::chat::Detail;
 use crate::theme::{Theme, ThemeBg, ThemeColor};
