@@ -382,7 +382,7 @@ impl SessionFile {
             .into_iter()
             .chain(window.take_raw_entries())
         {
-            let Ok(entry) = serde_json::from_str(line) else {
+            let Ok(entry) = serde_json::from_str(&line) else {
                 return Self::open(path);
             };
             file.push_index(entry);
