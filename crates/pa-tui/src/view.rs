@@ -565,6 +565,12 @@ impl AgentView {
                 matches!(entry, ChatEntry::Tool(card) if card.id == *tool_call_id && card.result.is_none())
             });
             if let Some(index) = pending {
+                // The matched card's result settles IN PLACE: prepare
+                // the sparse fold first - the card's rows (or its run's
+                // block) can grow or wrap when the result lands, and
+                // `mark_entry_stale` alone never captures the row delta
+                // for a tail-anchored window.
+                self.prepare_entry_mutation(index);
                 if let Some(ChatEntry::Tool(card)) = self.chat.get_mut(index) {
                     card.started = true;
                     // Replayed cards never saw the live execution: the

@@ -846,6 +846,64 @@ fn a_solo_card_growth_folds_at_its_own_slot() {
 }
 
 #[test]
+fn a_replayed_result_into_a_pending_card_folds_its_row_delta() {
+    // [status rows..., T x4 (an UNCONDENSED sequence of QUEUED cards)]:
+    // the window pauses with a selection on a card row, then the
+    // result REPLAYS into the pending card - the card's rows grow when
+    // the result lands. The replay prepares the sparse fold (exactly
+    // like the live settle path), so the tail-anchored window keeps
+    // its geometry and the selection stays on the card's rows.
+    let queued_card = |id: &str| {
+        ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+            id: id.to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({"command": format!("echo out {id}")}),
+            ..Default::default()
+        }))
+    };
+    let row_text = |frame: &[crate::Line], row: usize| -> String {
+        frame
+            .get(row)
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .unwrap_or_default()
+    };
+    let mut view = view();
+    view.detail = Detail::Overview;
+    for index in 0..30 {
+        view.push_entry(ChatEntry::Status {
+            text: format!("original {index}"),
+            kind: StatusKind::Info,
+        });
+    }
+    for index in 0..4 {
+        view.push_entry(queued_card(&format!("b{index}")));
+    }
+    let frame = view.render_frame(80, 12);
+    let row = (1..1 + view.window_rows)
+        .find(|row| row_text(&frame, *row).contains("out b3"))
+        .unwrap();
+    assert!(view.begin_selection(row, 0));
+    view.extend_active_selection(row, 80);
+    // The replay: the result lands on the pending card.
+    view.push(crate::session::TranscriptItem::ToolResult {
+        tool_call_id: "b3".to_string(),
+        tool_name: "bash".to_string(),
+        text: "done".to_string(),
+        content: Vec::new(),
+        details: serde_json::Value::Null,
+        is_error: false,
+        timestamp: 2,
+    });
+    view.render_frame(80, 12);
+    view.render_frame(80, 12);
+    let selected = view.end_active_selection();
+    assert!(
+        selected.as_deref().is_some_and(|text| text.contains("b3")),
+        "the selection stays on the card's own rows (never a drifted row): {selected:?}"
+    );
+}
+
+#[test]
 fn a_background_shell_run_keeps_its_block_uncached() {
     // An ipython cell whose final result carries a still-running
     // background shell keeps its run LIVE: the block re-renders on
