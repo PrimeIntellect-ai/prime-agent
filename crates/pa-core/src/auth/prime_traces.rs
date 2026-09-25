@@ -234,6 +234,19 @@ fn decrypt_prime_challenge_result(
         .map_err(|_| "Prime login challenge result is not UTF-8".to_string())
 }
 
+/// The challenge URL's query: the code, plus the scope when the arm
+/// passes one. A plain sync fn on purpose: the serializer's encoding
+/// callback is not `Sync`, so it must never name a local inside the
+/// async login (the future would carry the type and lose `Send`).
+fn prime_challenge_query(code: &str, scope: Option<&str>) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("code", code);
+    if let Some(scope) = scope {
+        serializer.append_pair("scope", scope);
+    }
+    serializer.finish()
+}
+
 /// TS `runPrimeBrowserLogin`: the keypair, the challenge, the auth URL
 /// callback, and the status poll. The scope rides the URL only when the
 /// arm passes one (the traces arm's `agent_traces`; the inference arm
@@ -256,12 +269,7 @@ pub(super) async fn run_prime_browser_login(
     let challenge = generate_prime_challenge(http, base_url, &public_key, timeout_ms).await?;
     // TS builds the URL with `URLSearchParams` (space encodes as `+`):
     // the query carries the code and, when the arm passes one, its scope.
-    let mut query = url::form_urlencoded::Serializer::new(String::new());
-    query.append_pair("code", &challenge.challenge);
-    if let Some(scope) = scope {
-        query.append_pair("scope", scope);
-    }
-    let query = query.finish();
+    let query = prime_challenge_query(&challenge.challenge, scope);
     let auth_url = format!("{frontend_url}/dashboard/tokens/challenge?{query}");
     on_auth(&PrimeAuthInfo {
         url: auth_url,
