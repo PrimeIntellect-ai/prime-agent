@@ -2,7 +2,6 @@
 
 import json
 import re
-import shlex
 from pathlib import Path
 
 INSTALLS = {
@@ -31,7 +30,7 @@ def patch_collect_command(task_dir: Path) -> str:
     # collect command must not honor repo-local diff prefix settings: a candidate
     # that sets diff.srcPrefix/diff.dstPrefix (or diff.mnemonicPrefix, or
     # diff.noprefix) would emit headers like "diff --git i/tests/conftest.py
-    # j/tests/conftest.py" or prefix-less ones, which _patch_paths cannot attribute
+    # j/tests/conftest.py" or prefix-less ones, which _header_path cannot attribute
     # to a path. -c overrides any repo config.
     return (
         "rm -rf /logs/artifacts && "
@@ -87,79 +86,144 @@ def _decode_patch(raw: bytes | str) -> str:
     return raw.decode("utf-8", errors="strict")
 
 
-def _patch_paths(header: str) -> tuple[str, str]:
-    """Extract the a-side and b-side paths from a diff --git header.
+_C_ESCAPES = {
+    "a": "\a",
+    "b": "\b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+    "\\": "\\",
+    '"': '"',
+}
 
-    A header that yields no a/ or b/ token cannot be attributed to a path, so it is
-    rejected instead of kept: git config (diff.srcPrefix, diff.dstPrefix, or
-    diff.mnemonicPrefix) can produce headers such as
-    ``diff --git i/tests/conftest.py j/tests/conftest.py``, and a kept-but-unattributed
-    section would smuggle test-control edits into the verifier.
+
+def _unquote_c_style(text: str) -> tuple[str, int]:
+    """Decode the C-quoted name at the start of text, like git's unquote_c_style.
+
+    Returns the name and the index just past the closing quote. Unknown escapes or a
+    missing closing quote fail closed; git rejects those headers too. Octal escapes
+    are bytes, decoded here as Latin-1 code points (not UTF-8 text); TEST_CONTROL
+    only inspects ASCII structure, so that is harmless.
     """
-    tokens = shlex.split(header)
-    a_path = ""
-    b_path = ""
-    for token in tokens:
-        if token.startswith("a/") and not a_path:
-            a_path = token[2:]
-        elif token.startswith("b/") and not b_path:
-            b_path = token[2:]
-    if not a_path or not b_path:
-        raise RuntimeError(
-            f"diff --git header has no a/ or b/ path; refusing to filter: {header.strip()[:80]!r}"
-        )
-    return a_path, b_path
+    out: list[str] = []
+    i = 1
+    while i < len(text):
+        ch = text[i]
+        i += 1
+        if ch == '"':
+            return "".join(out), i
+        if ch != "\\":
+            out.append(ch)
+            continue
+        esc = text[i : i + 1]
+        if esc in _C_ESCAPES:
+            out.append(_C_ESCAPES[esc])
+            i += 1
+        elif octal := re.match(r"[0-3][0-7]{2}", text[i:]):
+            out.append(chr(int(octal.group(), 8)))
+            i += octal.end()
+        else:
+            break
+    raise RuntimeError(f"malformed quoted path in candidate patch: {text[:80]!r}")
 
 
-def _unquote_path(raw: str) -> str:
-    """Strip surrounding quotes from a traditional ---/+++ path token."""
-    raw = raw.strip().split("\t")[0]
-    if raw.startswith('"') and raw.endswith('"'):
-        return raw[1:-1]
-    return raw
+def _header_path(text: str, *, prefixed: bool = True) -> str | None:
+    """Resolve one path after a name-bearing header keyword, like git's find_name.
 
-
-def _strip_diff_prefix(path: str) -> str:
-    return path[2:] if len(path) > 2 and path[1] == "/" and path[0] in "ab" else path
-
-
-def _hunk_expected_lines(header: str) -> int | None:
-    # Anchored to the real header shape (-N[,M] then +N[,M] then @@): a greedy
-    # pattern could capture a fake "+N,M @@" from arbitrary function-context
-    # text, inflating the count and keeping in_hunk true past the real hunk end.
-    m = re.search(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", header)
-    if not m:
+    Unquoted names end at CR/LF like git's find_name (and at TAB for prefixed names).
+    Prefixed names (diff --git, ---, +++) must carry the pinned a/ or b/ prefix, which
+    is stripped; rename/copy names carry none, and /dev/null is an absent side. A NUL
+    would be truncated by git's C strings, so it is refused rather than matched.
+    """
+    if text.startswith('"'):
+        name = _unquote_c_style(text)[0]
+    else:
+        name = text.rstrip("\r\n")
+        if prefixed:
+            name = name.split("\t")[0]
+    if "\x00" in name or "//" in name:
+        # git's squash_slash collapses "//" (pkg//tests/x.py -> pkg/tests/x.py) and its C
+        # strings end at NUL, so both would be matched against a name git does not use.
+        raise RuntimeError(f"patch path contains NUL or //; refusing to filter: {text.strip()[:80]!r}")
+    if not prefixed:
+        return name
+    if name == "/dev/null":
         return None
-    return 1 if m.group(2) is None else int(m.group(2))
+    if name[:2] not in ("a/", "b/") or len(name) < 3:
+        raise RuntimeError(f"patch header has no a/ or b/ path; refusing to filter: {text.strip()[:80]!r}")
+    return name[2:]
 
 
-def _in_traditional_section(current: list[str]) -> bool:
-    return bool(current) and current[0].startswith("--- ")
+def _git_header_paths(line: str) -> list[str]:
+    """Both names of a diff --git line, like git's git_header_name; either may be C-quoted."""
+    rest = line[len("diff --git ") :].rstrip("\r\n")
+    if rest.startswith('"'):
+        _, end = _unquote_c_style(rest)
+        first, second = rest[:end], rest[end:].lstrip(" ")
+    elif (quote := rest.find(' "')) >= 0:
+        # git_header_name: with an unquoted first name, a double quote can only start
+        # the second name.
+        first, second = rest[:quote], rest[quote + 1 :]
+    else:
+        first, _, second = rest.partition(" ")
+        if " " in second:
+            # Unquoted names with spaces are only parseable when both sides name the
+            # same path, so the separator is the middle character of the line.
+            mid = len(rest) // 2
+            if len(rest) % 2 == 0 or rest[mid] != " " or rest[2:mid] != rest[mid + 3 :]:
+                raise RuntimeError(f"unparseable diff --git header; refusing to filter: {rest[:80]!r}")
+            first, second = rest[:mid], rest[mid + 1 :]
+    return [p for p in (_header_path(first), _header_path(second)) if p]
+
+
+def _hunk_counts(header: str) -> tuple[int, int]:
+    # Anchored to the real header shape: a line starting with @@ that is not a hunk
+    # header is garbage git would skip, and skipping it would lose hunk-end detection.
+    m = re.match(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", header)
+    if not m:
+        raise RuntimeError(f"malformed hunk header in candidate patch: {header.strip()[:80]!r}")
+    old, new = m.groups()
+    return (1 if old is None else int(old), 1 if new is None else int(new))
+
+
+_NAME_HEADERS = (
+    "--- ",
+    "+++ ",
+    "rename from ",
+    "rename to ",
+    "rename old ",
+    "rename new ",
+    "copy from ",
+    "copy to ",
+)
 
 
 def filter_test_control(raw: bytes | str) -> str:
-    """Drop hunks that modify test-control paths from a unified diff.
+    """Drop sections that touch test-control paths from a unified diff.
 
-    The input may be raw bytes (as returned by Runtime.read) or text.
-    Only diff --git headers are recognized; a patch without any
-    recognized header is rejected so traditional header-less diffs
-    cannot bypass the filter, and any header whose a/ or b/ path is
-    missing is rejected so diff-prefix tampering cannot smuggle
-    test-control edits through as unattributable sections.
+    The input may be raw bytes (as returned by Runtime.read) or text. Every
+    name-bearing header line (diff --git, ---, +++, rename/copy) is resolved with
+    git's unquoting and prefix rules, a section is dropped when any resolved path
+    is test-control, and a header the resolver cannot read raises, so no header
+    form smuggles a test-control file past the check. A patch without a
+    diff --git header is rejected so traditional header-less diffs cannot bypass
+    the filter.
     """
     patch = _decode_patch(raw)
     kept: list[str] = []
     current: list[str] = []
-    a_path = ""
-    b_path = ""
+    paths: list[str] = []
     saw_header = False
-    in_hunk = False
-    hunk_lines_left: int | None = None
+    saw_hunk = False
+    old_left = new_left = 0
+
+    def flush() -> None:
+        if current and not any(map(TEST_CONTROL.fullmatch, paths)):
+            kept.extend(current)
+
     for line in patch.splitlines(keepends=True):
-        if in_hunk and hunk_lines_left is not None and hunk_lines_left <= 0:
-            # The previous hunk's line count is exhausted; a --- here is a new
-            # traditional file header (git apply treats it as such), not hunk content.
-            in_hunk = False
         if line.startswith("diff --git "):
             if not saw_header and current:
                 # Content before the first header is traditional-diff preamble:
@@ -167,42 +231,45 @@ def filter_test_control(raw: bytes | str) -> str:
                 raise RuntimeError(
                     "candidate patch has content before the first diff --git header; refusing to filter",
                 )
-            if current and not (TEST_CONTROL.fullmatch(a_path) or TEST_CONTROL.fullmatch(b_path)):
-                kept.extend(current)
-            current = [line]
-            a_path, b_path = _patch_paths(line)
-            saw_header = True
-            in_hunk = False
-            hunk_lines_left = None
-        elif (
-            line.startswith("--- ")
-            and current
-            and not in_hunk
-            and _strip_diff_prefix(_unquote_path(line[4:])) not in (a_path, b_path)
-        ):
-            # Traditional-diff header between hunks: git apply parses it as a new
-            # file patch after the preceding section, so it cannot ride along a
-            # kept section's attribution. Route it through TEST_CONTROL on its
-            # own a/b paths; a test-control traditional section is dropped.
-            if current and not (TEST_CONTROL.fullmatch(a_path) or TEST_CONTROL.fullmatch(b_path)):
-                kept.extend(current)
-            current = [line]
-            a_path = _strip_diff_prefix(_unquote_path(line[4:]))
-            b_path = ""
-            in_hunk = False
-            hunk_lines_left = None
-        elif b_path == "" and line.startswith("+++ ") and current and _in_traditional_section(current):
+            flush()
+            current, paths = [line], _git_header_paths(line)
+            saw_header, saw_hunk, old_left, new_left = True, False, 0, 0
+        elif old_left > 0 or new_left > 0:
+            # git's parse_fragment: '-' consumes an old line, '+' a new line, context both,
+            # '\\ No newline' none; the hunk ends when both counts are exhausted.
+            if line.startswith("-"):
+                old_left -= 1
+            elif line.startswith("+"):
+                new_left -= 1
+            elif not line.startswith("\\"):
+                old_left -= 1
+                new_left -= 1
             current.append(line)
-            b_path = _strip_diff_prefix(_unquote_path(line[4:]))
+        elif line.startswith("@@"):
+            saw_hunk, (old_left, new_left) = True, _hunk_counts(line)
+            current.append(line)
+        elif line.startswith(_NAME_HEADERS):
+            if saw_hunk:
+                # A header after this section's hunks is a separate (traditional) file
+                # patch for git apply, so it gets its own path attribution.
+                flush()
+                current, paths, saw_hunk = [], [], False
+            keyword = next(k for k in _NAME_HEADERS if line.startswith(k))
+            text = line[len(keyword) :]
+            prefixed = keyword in ("--- ", "+++ ")
+            path = _header_path(text, prefixed=prefixed)
+            if prefixed and path and " " in path and "\t" not in text and not text.startswith('"'):
+                # git's traditional parser strips a space-separated timestamp from the
+                # name; real git TAB-terminates unquoted names that contain spaces.
+                raise RuntimeError(
+                    f"---/+++ name has a space but no TAB; refusing to filter: {text.strip()[:80]!r}"
+                )
+            if path:
+                paths.append(path)
+            current.append(line)
         else:
-            if line.startswith("@@"):
-                in_hunk = True
-                hunk_lines_left = _hunk_expected_lines(line)
-            elif in_hunk and hunk_lines_left is not None and not line.startswith("\\"):
-                hunk_lines_left -= 1
             current.append(line)
-    if current and not (TEST_CONTROL.fullmatch(a_path) or TEST_CONTROL.fullmatch(b_path)):
-        kept.extend(current)
+    flush()
     if not saw_header and patch.strip():
         raise RuntimeError("candidate patch has no diff --git header; refusing to filter")
     return "".join(kept)

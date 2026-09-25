@@ -843,7 +843,7 @@ class TestFilterTestControl:
             f"index 1234567..89abcde 100644\n"
             f"--- a/{a}\n"
             f"+++ b/{b}\n"
-            f"@@ -1 +1 @@\n+x = 1\n"
+            f"@@ -0,0 +1 @@\n+x = 1\n"
         )
 
     @pytest.mark.parametrize(
@@ -956,7 +956,7 @@ class TestFilterTestControl:
 
         patch = (
             "diff --git a/src/keep.py b/src/keep.py\n"
-            "@@ -1,1 +1,1 @@ ctx +9,9 @@ tail\n"
+            "@@ -1,0 +1,1 @@ ctx +9,9 @@ tail\n"
             "+x\n"
             "--- a/testing/test_helpers.py\n"
             "+++ b/testing/test_helpers.py\n"
@@ -993,3 +993,78 @@ class TestFilterTestControl:
         )
         result = filter_test_control(patch)
         assert "keep.py" in result and "weird" not in result
+
+    @pytest.mark.parametrize(
+        "patch,verdict",
+        [
+            # 1: ---/+++ names inside a git section are authoritative for git apply
+            (
+                "diff --git a/src/ok.py b/src/ok.py\n--- a/src/ok.py\n+++ b/tests/conftest.py\n"
+                "@@ -1 +1 @@\n-old = 1\n+import pytest\n",
+                "drop",
+            ),
+            # 2: copy to (also rename to) materializes a test-control file
+            ("diff --git a/setup.py b/setup.py\ncopy from setup.py\ncopy to conftest.py\n", "drop"),
+            # 3: over-escaped C-quoted names (never git-emitted) decode to tests/conftest.py
+            (
+                'diff --git "a/\\164ests\\057conftest.py" "b/\\164ests\\057conftest.py"\n'
+                "new file mode 100644\n"
+                '--- /dev/null\n+++ "b/\\164ests\\057conftest.py"\n@@ -0,0 +1 @@\n+import pytest\n',
+                "drop",
+            ),
+            # 4: a non-hunk @@ line must not disable hunk-end detection (git skips it as garbage)
+            (
+                "diff --git a/src/ok.py b/src/ok.py\n--- a/src/ok.py\n+++ b/src/ok.py\n@@ -1 +1 @@\n-a\n+b\n"
+                "@@ zzz\n--- a/tests/conftest.py\n+++ b/tests/conftest.py\n@@ -0,0 +1 @@\n+import pytest\n",
+                "raise",
+            ),
+            # 5: git truncates names at NUL
+            (
+                "diff --git a/src/ok.py b/src/ok.py\n--- a/src/ok.py\n+++ b/conftest.py\x00junk\n"
+                "@@ -1 +1 @@\n-a\n+b\n",
+                "raise",
+            ),
+            # honest: real git output for a rename to a non-ASCII (C-quoted) name is kept verbatim
+            (
+                'diff --git a/src/old.py "b/src/na\\303\\257ve.py"\n'
+                "similarity index 50%\nrename from src/old.py\n"
+                'rename to "src/na\\303\\257ve.py"\nindex 7d4290a..f14524f 100644\n--- a/src/old.py\n'
+                '+++ "b/src/na\\303\\257ve.py"\n@@ -1 +1,2 @@\n x = 1\n+z = 2\n',
+                "keep",
+            ),
+            # 6: git ends an unquoted name at \r, so conftest.py\r is root conftest.py
+            (
+                "diff --git a/src/ok.py b/src/ok.py\n--- a/src/ok.py\n+++ b/conftest.py\r\n"
+                "@@ -1 +1 @@\n-old = 1\n+import pytest\n",
+                "drop",
+            ),
+            # 7: git's squash_slash makes pkg//tests/test_x.py the scored test file
+            (
+                "diff --git a/pkg//tests/test_x.py b/pkg//tests/test_x.py\n--- a/pkg//tests/test_x.py\n"
+                "+++ b/pkg//tests/test_x.py\n@@ -1,2 +1,2 @@\n def test_x():\n"
+                "-    assert False\n+    assert True\n",
+                "raise",
+            ),
+            # 8: a traditional header strips a space-separated timestamp from the name
+            (
+                "diff --git a/src/ok.py b/src/ok.py\n--- a/src/ok.py\n+++ b/src/ok.py\n@@ -1 +1 @@\n-a\n+b\n"
+                "--- /dev/null\n+++ b/conftest.py 2024-01-01 00:00:00.000000000 +0000\n"
+                "@@ -0,0 +1 @@\n+import pytest\n",
+                "raise",
+            ),
+            # honest: real git output deleting a file whose first line is a `-- ` comment
+            (
+                "diff --git a/src/q.sql b/src/q.sql\ndeleted file mode 100644\nindex 94e2fce..0000000\n"
+                "--- a/src/q.sql\n+++ /dev/null\n@@ -1,2 +0,0 @@\n--- c\n-SELECT 1;\n",
+                "keep",
+            ),
+        ],
+    )
+    def test_git_name_semantics(self, patch: str, verdict: str) -> None:
+        from scripts.evals.short_swe.verified_verifier import filter_test_control
+
+        if verdict == "raise":
+            with pytest.raises(RuntimeError):
+                filter_test_control(patch)
+        else:
+            assert filter_test_control(patch) == (patch if verdict == "keep" else "")
