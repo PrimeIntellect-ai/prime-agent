@@ -15,7 +15,7 @@ use super::state::UpdateState;
 // Update identity
 // ---------------------------------------------------------------------------
 
-/// Opaque update identifier (a UUIDv7 in practice). Typed so status records,
+/// Opaque update identifier (a `UUIDv7` in practice). Typed so status records,
 /// artifact paths, and prepare transactions cannot mix it up with session or
 /// request ids. Idempotency keys (prepare retry, join) compare whole ids.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
