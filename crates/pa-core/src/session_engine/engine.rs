@@ -834,31 +834,6 @@ impl SessionEngine {
             .ok_or_else(|| anyhow::anyhow!("Kernel is not running"))?;
         manager.bash_activity(action, activity_id, lines).await
     }
-
-    /// Per-server MCP tool listing through the session's kernel (the
-    /// runtime `mcp_status` request): one entry per requested server —
-    /// its tools, or the error string when that server failed or timed
-    /// out. `None` when the kernel cannot serve the listing (disposed, or
-    /// startup still failing under the caller's deadline). The session's
-    /// kernel is ensured first (the create-time prewarm may still be in
-    /// flight, so the view never races it), and the listing opens each
-    /// not-yet-connected server bounded by `per_server_timeout_ms` —
-    /// callers bound the whole call with their own deadline. The host's
-    /// MCP connections view reads this; the kernel's `mcp.config` host
-    /// handlers resolve each server against the engine's MCP manager.
-    pub async fn mcp_tool_listing(
-        &self,
-        servers: &[String],
-        per_server_timeout_ms: u64,
-    ) -> Option<Vec<serde_json::Value>> {
-        if servers.is_empty() {
-            return Some(Vec::new());
-        }
-        let manager = self.provisioner.ensure(None, None).await.ok()?;
-        manager
-            .mcp_tool_listing(servers, per_server_timeout_ms)
-            .await
-    }
 }
 
 #[cfg(test)]

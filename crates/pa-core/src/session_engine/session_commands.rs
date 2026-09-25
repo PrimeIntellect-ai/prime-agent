@@ -344,6 +344,13 @@ async fn execute_goal(
     {
         let mut driver = driver.lock().await;
         let mut session = session.lock().await;
+        // The clear's reply reflects the action, not the post-clear
+        // state (the operator's 2026-09-25 bug report): TS answers
+        // "No active goal." either way, which reads as the command
+        // having failed on the goal it just cleared. A clear that
+        // removed a goal record answers "Goal cleared."; the
+        // nothing-to-clear case keeps the plain status text.
+        let mut cleared_goal = false;
         match goal {
             GoalCommand::Status => {}
             // TS `_clearGoal`/`_pauseGoal`/`_startGoal` route through
@@ -351,6 +358,8 @@ async fn execute_goal(
             // waiting in the queue never runs behind the state change.
             GoalCommand::Clear => {
                 engine.purge_queued_goal_contexts();
+                cleared_goal =
+                    driver.state().objective.is_some() && driver.state().status != GoalStatus::Idle;
                 driver
                     .clear(&mut session)
                     .map_err(|error| format!("{error:#}"))?;
@@ -380,7 +389,11 @@ async fn execute_goal(
                 );
             }
         }
-        let status_text = goal_status_text(driver.state());
+        let status_text = if cleared_goal {
+            "Goal cleared.".to_string()
+        } else {
+            goal_status_text(driver.state())
+        };
         execution.push_message(slash_command_result(
             command,
             status_text,
