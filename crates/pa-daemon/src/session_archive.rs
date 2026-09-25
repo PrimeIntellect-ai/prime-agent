@@ -169,15 +169,13 @@ pub fn restore_session(
 
 /// Rename with a copy+delete fallback (rename fails across filesystems).
 fn move_file(source: &Path, destination: &Path) -> Result<()> {
-    match fs::rename(source, destination) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            fs::copy(source, destination).with_context(|| {
-                format!("copy {} -> {}", source.display(), destination.display())
-            })?;
-            fs::remove_file(source).with_context(|| format!("remove {}", source.display()))?;
-            Ok(())
-        }
+    if let Ok(()) = fs::rename(source, destination) {
+        Ok(())
+    } else {
+        fs::copy(source, destination)
+            .with_context(|| format!("copy {} -> {}", source.display(), destination.display()))?;
+        fs::remove_file(source).with_context(|| format!("remove {}", source.display()))?;
+        Ok(())
     }
 }
 
@@ -222,7 +220,7 @@ fn collect_candidates(
 
 /// Sweep cadence (TS idle-eviction precedent: a boot sweep, then a
 /// periodic re-sweep at the TS max sweep interval).
-const SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const SWEEP_INTERVAL: Duration = Duration::from_mins(5);
 /// The periodic loop sleeps in chunks so a shutdown exits promptly.
 const SWEEP_SLEEP_CHUNK: Duration = Duration::from_secs(5);
 

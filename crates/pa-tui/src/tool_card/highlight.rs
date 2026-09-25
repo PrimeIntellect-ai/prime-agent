@@ -3,7 +3,7 @@
 //! grammar through cli-highlight's theme mapping). Cell-level scope coloring
 //! only: cli-highlight's parent-scope wrap is invisible once a child token
 //! colors the same cells, so the render needs one color per cell, matching
-//! the `theme.ts` mapping (keyword -> syntaxKeyword, built_in/type ->
+//! the `theme.ts` mapping (keyword -> syntaxKeyword, `built_in/type` ->
 //! syntaxType, literal/number -> syntaxNumber, string -> syntaxString,
 //! comment -> syntaxComment, title -> syntaxFunction, params ->
 //! syntaxVariable, everything else default). F-string substitutions and
@@ -267,14 +267,14 @@ fn number_at(text: &str, i: usize) -> Option<usize> {
     // exponentfloat: `(\\b(digitpart)|pointfloat)[eE][+-]?digitpart[jJ]?\\b`.
     if let Some(base) = point.or(digit) {
         let mut end = i + base;
-        if matches!(bytes.get(end), Some(b'e') | Some(b'E')) {
+        if matches!(bytes.get(end), Some(b'e' | b'E')) {
             let mut exp = end + 1;
-            if matches!(bytes.get(exp), Some(b'+') | Some(b'-')) {
+            if matches!(bytes.get(exp), Some(b'+' | b'-')) {
                 exp += 1;
             }
             if let Some(exp_digits) = digitpart_at(bytes, exp) {
                 end = exp + exp_digits;
-                if matches!(bytes.get(end), Some(b'j') | Some(b'J')) {
+                if matches!(bytes.get(end), Some(b'j' | b'J')) {
                     end += 1;
                 }
                 if !ident_continues(text, end) {
@@ -286,7 +286,7 @@ fn number_at(text: &str, i: usize) -> Option<usize> {
     // pointfloat (a float must contain a decimal point).
     if let Some(point) = point {
         let mut end = i + point;
-        if matches!(bytes.get(end), Some(b'j') | Some(b'J')) {
+        if matches!(bytes.get(end), Some(b'j' | b'J')) {
             end += 1;
         }
         return Some(end - i);
@@ -294,12 +294,12 @@ fn number_at(text: &str, i: usize) -> Option<usize> {
     // decinteger `\\b([1-9](_?[0-9])*|0+(_?0)*)[lLjJ]?\\b`.
     if let Some(digit) = digit {
         let mut end = i + digit;
-        if matches!(bytes.get(end), Some(b'j') | Some(b'J')) {
+        if matches!(bytes.get(end), Some(b'j' | b'J')) {
             return Some(end + 1 - i);
         }
-        if matches!(bytes.get(end), Some(b'l') | Some(b'L')) {
+        if matches!(bytes.get(end), Some(b'l' | b'L')) {
             end += 1;
-            if matches!(bytes.get(end), Some(b'j') | Some(b'J')) {
+            if matches!(bytes.get(end), Some(b'j' | b'J')) {
                 end += 1;
             }
         }
@@ -309,9 +309,9 @@ fn number_at(text: &str, i: usize) -> Option<usize> {
     }
     // Binary, octal, and hex integers: `0[bBoOxX]` then the digit run.
     let radix_high = match (bytes.get(i).copied(), bytes.get(i + 1).copied()) {
-        (Some(b'0'), Some(b'b') | Some(b'B')) => b'1',
-        (Some(b'0'), Some(b'o') | Some(b'O')) => b'7',
-        (Some(b'0'), Some(b'x') | Some(b'X')) => b'F',
+        (Some(b'0'), Some(b'b' | b'B')) => b'1',
+        (Some(b'0'), Some(b'o' | b'O')) => b'7',
+        (Some(b'0'), Some(b'x' | b'X')) => b'F',
         _ => return None,
     };
     let digit_ok = |c: u8, high: u8| -> bool {
@@ -341,7 +341,7 @@ fn number_at(text: &str, i: usize) -> Option<usize> {
     if digits == 0 || ident_continues(text, end) {
         return None;
     }
-    if matches!(bytes.get(end), Some(b'l') | Some(b'L')) {
+    if matches!(bytes.get(end), Some(b'l' | b'L')) {
         end += 1;
         if ident_continues(text, end) {
             return None;
@@ -455,7 +455,7 @@ fn tokenize(code: &str) -> Vec<(String, Scope)> {
         let rest = &code[i..];
         let ch = rest.chars().next().expect("char boundary");
         if ch == '#' {
-            let end = rest.find('\n').map(|n| i + n).unwrap_or(code.len());
+            let end = rest.find('\n').map_or(code.len(), |n| i + n);
             flush_plain(&mut plain, &mut tokens);
             tokens.push((code[i..end].to_string(), Scope::Comment));
             i = end;
@@ -490,17 +490,14 @@ fn tokenize(code: &str) -> Vec<(String, Scope)> {
             // `def`/`class` open the function/class mode: the name (title)
             // and the parameter parens (params) follow.
             if (word == "def" || word == "class") && !ident_continues(code, i + word_len) {
-                match header_mode(code, i, word_len, &mut plain, &mut tokens) {
-                    Some(next) => {
-                        i = next;
-                        continue;
-                    }
-                    None => {
-                        flush_plain(&mut plain, &mut tokens);
-                        tokens.push((word.to_string(), Scope::Keyword));
-                        i += word_len;
-                        continue;
-                    }
+                if let Some(next) = header_mode(code, i, word_len, &mut plain, &mut tokens) {
+                    i = next;
+                    continue;
+                } else {
+                    flush_plain(&mut plain, &mut tokens);
+                    tokens.push((word.to_string(), Scope::Keyword));
+                    i += word_len;
+                    continue;
                 }
             }
             match scope {
@@ -575,7 +572,7 @@ fn header_mode(
             return Some(i + 1);
         }
         if ch == '#' {
-            let end = rest.find('\n').map(|n| i + n).unwrap_or(code.len());
+            let end = rest.find('\n').map_or(code.len(), |n| i + n);
             flush_params(&mut params_plain, tokens);
             tokens.push((code[i..end].to_string(), Scope::Comment));
             i = end;

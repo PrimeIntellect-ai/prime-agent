@@ -119,6 +119,13 @@ pub struct HeartbeatSessionActivity {
 
 /// Parse a schedule expression into a schedule plus its first run time.
 /// `now_millis` is the epoch time in milliseconds.
+///
+/// # Errors
+///
+/// Returns an error when the trimmed expression is empty, when an
+/// `in`/`every`/`each` delay cannot be parsed, when an `at <ISO date>` one-shot
+/// is invalid or not in the future, or when the expression is not a valid cron
+/// schedule with a next run time within one year.
 pub fn parse_agent_cron_schedule(
     input: &str,
     now_millis: u64,
@@ -259,6 +266,12 @@ pub fn normalize_heartbeat_schedule(input: Option<&str>) -> String {
     text.to_string()
 }
 
+/// Normalize an optional heartbeat delivery mode string.
+///
+/// # Errors
+///
+/// Returns an error when `value` is `Some` but is neither `"steer"` nor
+/// `"follow_up"`.
 pub fn normalize_heartbeat_delivery_mode(
     value: Option<&str>,
 ) -> anyhow::Result<Option<DeliveryMode>> {
@@ -280,12 +293,17 @@ pub fn resolve_heartbeat_streaming_behavior(delivery_mode: Option<DeliveryMode>)
 }
 
 /// Parse a `/heartbeat ...` command body.
+///
+/// # Errors
+///
+/// Returns an error when the command body is malformed: an unknown delivery
+/// mode is given, an `--every` option is used without an interval value, or
+/// the command ends with no instruction to set.
 pub fn parse_heartbeat_command(input: &str) -> anyhow::Result<ParsedHeartbeatCommand> {
     let text = input
         .strip_prefix("/heartbeat")
         .filter(|rest| rest.chars().next().is_none_or(char::is_whitespace))
-        .map(str::trim_start)
-        .unwrap_or_else(|| input.trim());
+        .map_or_else(|| input.trim(), str::trim_start);
     if text.is_empty() || text == "status" {
         return Ok(ParsedHeartbeatCommand::Status);
     }
@@ -513,8 +531,7 @@ fn consume_leading_every_schedule(text: &str) -> Option<(String, String)> {
                 let remainder = remainder
                     .strip_prefix("--")
                     .filter(|after| after.is_empty() || after.starts_with(char::is_whitespace))
-                    .map(str::trim)
-                    .unwrap_or(remainder)
+                    .map_or(remainder, str::trim)
                     .trim()
                     .to_string();
                 let interval = format!("{} {}", prefix.trim(), first_token);
@@ -526,10 +543,7 @@ fn consume_leading_every_schedule(text: &str) -> Option<(String, String)> {
 }
 
 pub fn is_heartbeat_cron_job(job: &AgentCronJob) -> bool {
-    matches!(
-        job.source.as_deref(),
-        Some("heartbeat") | Some("rlm_heartbeat")
-    )
+    matches!(job.source.as_deref(), Some("heartbeat" | "rlm_heartbeat"))
 }
 
 /// Whether a due heartbeat should wait instead of firing now.
@@ -555,6 +569,12 @@ pub fn should_defer_heartbeat_cron_job(
 }
 
 /// Next run time for a schedule after `after_millis`.
+///
+/// # Errors
+///
+/// Returns an error when an interval schedule has no interval or a zero
+/// interval, or when a cron expression is invalid or does not match within
+/// one year.
 pub fn next_run_at_for_schedule(
     schedule: &AgentCronSchedule,
     after_millis: u64,
@@ -808,10 +828,7 @@ fn parse_time_with_offset(time: &str) -> Option<(i64, i64)> {
         return None;
     }
     let hours: i64 = parts.first()?.parse().ok()?;
-    let minutes: i64 = parts
-        .get(1)
-        .map(|p| p.parse::<i64>().ok())
-        .unwrap_or(Some(0))?;
+    let minutes: i64 = parts.get(1).map_or(Some(0), |p| p.parse::<i64>().ok())?;
     let seconds_part = parts.get(2).copied().unwrap_or("0");
     let (seconds, millis) = match seconds_part.split_once('.') {
         Some((seconds, fraction)) => {
@@ -850,10 +867,7 @@ fn parse_offset(text: &str) -> Option<i64> {
     };
     let parts: Vec<&str> = rest.split(':').collect();
     let hours: i64 = parts.first()?.parse().ok()?;
-    let minutes: i64 = parts
-        .get(1)
-        .map(|p| p.parse::<i64>().ok())
-        .unwrap_or(Some(0))?;
+    let minutes: i64 = parts.get(1).map_or(Some(0), |p| p.parse::<i64>().ok())?;
     Some(sign * (hours * 60 + minutes) * 60_000)
 }
 

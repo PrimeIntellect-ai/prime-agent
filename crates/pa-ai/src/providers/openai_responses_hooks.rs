@@ -1,4 +1,4 @@
-//! OpenAI Responses stream hooks, reasoning-summary options, and service-tier
+//! `OpenAI` Responses stream hooks, reasoning-summary options, and service-tier
 //! pricing. Section of the port of
 //! `packages/ai/src/providers/openai-responses.ts`.
 
@@ -37,7 +37,7 @@ pub struct ResponsesStreamHooks {
     pub apply_service_tier_pricing: Option<ApplyServiceTierPricingFn>,
 }
 
-/// Multipliers per https://developers.openai.com/api/docs/pricing.
+/// Multipliers per <https://developers.openai.com/api/docs/pricing>.
 pub fn get_service_tier_cost_multiplier(model_id: &str, service_tier: Option<&str>) -> f64 {
     match service_tier {
         Some("flex") => 0.5,

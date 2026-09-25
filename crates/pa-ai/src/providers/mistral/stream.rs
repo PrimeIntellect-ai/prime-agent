@@ -107,12 +107,10 @@ fn json_object(value: Value) -> Map<String, Value> {
 /// Port of `mapChatStopReason`.
 fn map_chat_stop_reason(reason: Option<&str>) -> StopReason {
     match reason {
-        None => StopReason::Stop,
-        Some("stop") => StopReason::Stop,
-        Some("length") | Some("model_length") => StopReason::Length,
+        Some("length" | "model_length") => StopReason::Length,
         Some("tool_calls") => StopReason::ToolUse,
         Some("error") => StopReason::Error,
-        Some(_) => StopReason::Stop,
+        None | Some(_) => StopReason::Stop,
     }
 }
 
@@ -248,8 +246,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -350,8 +347,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -543,7 +539,6 @@ impl MistralStreamState {
                             delta: text_delta,
                             partial: output.clone(),
                         });
-                        continue;
                     }
                     Value::Object(_)
                         if item.get("type").and_then(Value::as_str) == Some("thinking") =>
@@ -571,7 +566,6 @@ impl MistralStreamState {
                             delta: thinking_delta,
                             partial: output.clone(),
                         });
-                        continue;
                     }
                     Value::Object(_)
                         if item.get("type").and_then(Value::as_str) == Some("text") =>

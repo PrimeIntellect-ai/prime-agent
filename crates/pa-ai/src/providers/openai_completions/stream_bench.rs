@@ -9,7 +9,7 @@ fn stream_delta_benchmark() {
         "provider": "benchmark", "baseUrl": "http://localhost", "reasoning": false,
         "input": ["text"],
         "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-        "contextWindow": 4000000, "maxTokens": 4000000
+        "contextWindow": 4_000_000, "maxTokens": 4_000_000
     }))
     .unwrap();
     let delta = "x".repeat(20);
@@ -48,7 +48,7 @@ fn stream_event_snapshots() {
         "provider": "parity", "baseUrl": "http://localhost", "reasoning": true,
         "input": ["text"],
         "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-        "contextWindow": 128000, "maxTokens": 8192
+        "contextWindow": 128_000, "maxTokens": 8192
     }))
     .unwrap();
     let output =
@@ -108,7 +108,7 @@ async fn abort_after_partial_preserves_content() {
         "provider": "abort", "baseUrl": format!("http://{addr}"), "reasoning": false,
         "input": ["text"],
         "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-        "contextWindow": 128000, "maxTokens": 8192
+        "contextWindow": 128_000, "maxTokens": 8192
     }))
     .unwrap();
     let token = tokio_util::sync::CancellationToken::new();

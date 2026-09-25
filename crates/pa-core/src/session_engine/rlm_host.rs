@@ -4,7 +4,7 @@
 //! `rlm.collect`, `rlm.progress.note`, and `rlm.delete_subagent`.
 //!
 //! Wire contract: the Python side (`rlm/__init__.py`) sends typed requests and
-//! parses strict snake_case replies. Pure normalization lives in
+//! parses strict `snake_case` replies. Pure normalization lives in
 //! `kernel/rlm_runtime`; this module owns payload validation and the split
 //! between what pa-core decides locally (shape checks, model search, note
 //! throttling) and what the child-session host owns (spawn, roster, collect).
@@ -216,6 +216,11 @@ impl RlmSubagentHost for NoRlmChildren {
 }
 
 /// `collect` against an empty roster: every target is a miss.
+///
+/// # Errors
+///
+/// Returns an error naming the first requested target when any targets are
+/// requested; an empty target list collects to an empty result.
 pub fn no_children_collect(targets: Vec<String>) -> anyhow::Result<Vec<RlmChildResult>> {
     if let Some(target) = targets.first() {
         anyhow::bail!("No direct RLM child matches \"{target}\" in the current parent session");
@@ -459,6 +464,7 @@ fn register_create_session(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmH
         host_handler(move |payload| {
             let host = Arc::clone(&host);
             Box::pin(async move {
+                const OPERATION: &str = "rlm.create_session";
                 let data = &payload.data;
                 let Some(prompt) = data.get("prompt").and_then(Value::as_str) else {
                     anyhow::bail!("rlm.create_session prompt must be a string");
@@ -466,7 +472,6 @@ fn register_create_session(handlers: &mut HostRequestHandlers, bridge: &Arc<RlmH
                 if prompt.trim().is_empty() {
                     anyhow::bail!("rlm.create_session prompt must not be empty");
                 }
-                const OPERATION: &str = "rlm.create_session";
                 let kwargs = kwargs_from_payload(data);
                 reject_unsupported_kwargs(
                     &kwargs,
@@ -764,23 +769,6 @@ mod tests {
 
     /// Write a models.json with one auth-configured custom provider.
     fn registry_with_custom_model(dir: &std::path::Path) -> Arc<ModelRegistry> {
-        std::fs::write(
-            dir.join("models.json"),
-            r#"{
-                "providers": {
-                    "test-provider": {
-                        "baseUrl": "http://localhost:9",
-                        "apiKey": "test-key",
-                        "api": "openai-completions",
-                        "models": [
-                            { "id": "glm-5.3", "name": "GLM 5.3", "contextWindow": 1000, "maxTokens": 100 },
-                            { "id": "glm-5.3-turbo", "name": "GLM Turbo", "contextWindow": 1000, "maxTokens": 100 }
-                        ]
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
         // Hermetic environment credential source: this sandbox exports
         // PRIME_API_KEY globally, which would unlock the built-in providers
         // and evict the custom catalog from the default empty-query limit.
@@ -799,6 +787,23 @@ mod tests {
                 String::new()
             }
         }
+        std::fs::write(
+            dir.join("models.json"),
+            r#"{
+                "providers": {
+                    "test-provider": {
+                        "baseUrl": "http://localhost:9",
+                        "apiKey": "test-key",
+                        "api": "openai-completions",
+                        "models": [
+                            { "id": "glm-5.3", "name": "GLM 5.3", "contextWindow": 1000, "maxTokens": 100 },
+                            { "id": "glm-5.3-turbo", "name": "GLM Turbo", "contextWindow": 1000, "maxTokens": 100 }
+                        ]
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
         let auth = crate::auth::AuthStorage::in_memory_with_env(
             Default::default(),
             std::sync::Arc::new(crate::auth::NoOAuth),

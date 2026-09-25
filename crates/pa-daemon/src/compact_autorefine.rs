@@ -14,9 +14,13 @@
 //!   interactive path: a compaction arms the trigger, the background
 //!   `_maybeAutoRefine("compact")` runs the review while the session is
 //!   idle, and streaming/compacting or queued work defers it to the next
-//!   boundary. The worker's turn loop is synchronous between turns, so
-//!   the round runs inline at the quiescent boundary — the same review,
-//!   the same gates, before the run's `Done` reaches attached clients.
+//!   boundary. The turn loop never consumes the round: the worker
+//!   services the armed trigger off each turn's settle, in a background
+//!   task after the queued prompts resolved — the compaction's settled
+//!   turn and the next prompt's admission never wait on the review's
+//!   model call (TS `setTimeout(0)`; the inline-before-`Done` shape held
+//!   the next prompt behind the whole review — the compaction
+//!   completion-stall measurement pinned it).
 //! * ACP (serializedRefine true) uses the serialized path: a compaction
 //!   arms the trigger and the serialized checkpoint between turns
 //!   consumes it (after the requested `refine.run`), with the session
@@ -24,12 +28,8 @@
 
 use pa_core::refinement::RefinementResult;
 use pa_core::session_engine::auto_refine_trigger::CompactAutoRefineSurface;
-use pa_core::session_engine::refine::{
-    create_refinement_notice_message, create_refinement_outcome_message, RefinementSource,
-};
 
 use crate::agent_engine::AgentSessionEngine;
-use crate::engine::EngineEvent;
 
 impl AgentSessionEngine {
     /// Whether a compaction armed the compact-trigger review on the built
@@ -57,7 +57,7 @@ impl AgentSessionEngine {
 
     /// Count one settled non-error assistant turn into the review
     /// prompt's turn line (TS `_assistantTurnsSinceAutoRefine`'s
-    /// message_end increment).
+    /// `message_end` increment).
     pub(crate) fn note_settled_turn_since_auto_refine_review(&self) {
         let guard = self.session.blocking_lock();
         if let Some(engine) = guard.as_deref() {
@@ -66,61 +66,8 @@ impl AgentSessionEngine {
         }
     }
 
-    /// Consume an armed trigger at one quiescent turn boundary (TS
-    /// `_maybeAutoRefine("compact")`'s gate order): the busy gates keep
-    /// the trigger armed — a streaming session or queued work defers the
-    /// round to the next boundary, exactly the TS pending-flag deferral.
-    /// An approved review broadcasts the refinement's durable rows
-    /// (the outcome row and, when edits applied, the model-facing notice)
-    /// through the turn loop's emit, so attached clients see the same
-    /// pairs the `/refine` command produces; a failed round keeps the
-    /// worker log surface (the daemon wire has no refine events).
-    /// Returns whether the emitter stayed alive.
-    pub(crate) fn run_compact_auto_refine(
-        &self,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
-    ) -> bool {
-        let outcome = self.consume_compact_auto_refine_round();
-        self.emit_compact_auto_refine_outcome(outcome, emit)
-    }
-
-    /// One round's outcome surface: the decline (and every silent gate)
-    /// stays quiet — TS surfaces nothing on a declined review — while an
-    /// approved round broadcasts its rows and a failure logs.
-    fn emit_compact_auto_refine_outcome(
-        &self,
-        outcome: anyhow::Result<Option<RefinementResult>>,
-        emit: &mut dyn FnMut(EngineEvent) -> bool,
-    ) -> bool {
-        let Ok(Some(result)) = outcome else {
-            if let Err(error) = outcome {
-                eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
-            }
-            return true;
-        };
-        // TS `refine()` appends the TUI outcome row and the model-facing
-        // notice (when edits applied) as durable rows; the worker
-        // broadcasts both like the `/refine` command, and its emit
-        // persists them to the session file.
-        let outcome_row = create_refinement_outcome_message(&result);
-        if !emit(EngineEvent::CustomMessage(
-            crate::session_commands::custom_message_value(&outcome_row),
-        )) {
-            return false;
-        }
-        if result.applied_edits.iter().any(|edit| edit.applied) {
-            let notice = create_refinement_notice_message(&result, RefinementSource::Auto);
-            if !emit(EngineEvent::CustomMessage(
-                crate::session_commands::custom_message_value(&notice),
-            )) {
-                return false;
-            }
-        }
-        true
-    }
-
     /// The shared round body (the `compact` command path and the turn
-    /// boundary both run it): the pending pre-check, the TS busy gates
+    /// settle both run it): the pending pre-check, the TS busy gates
     /// (streaming or queued work keeps the trigger armed for the next
     /// boundary), then the pa-core consumption with its gate/review/stamp
     /// sequence. `Ok(None)` is every silent outcome.
@@ -157,8 +104,17 @@ impl AgentSessionEngine {
         };
         let api_key = self.resolve_request_api_key(&model);
         let global_harness_dir = self.config.agent_dir.clone();
-        let guard = self.session.blocking_lock();
-        let Some(engine) = guard.as_deref() else {
+        // The lock covers the clone only (see `run_compaction`): the
+        // review below is a summarizer-style model call, and holding the
+        // session mutex across it serialized every client read seam
+        // behind the review — the same stall class the compaction itself
+        // already fixed. The cloned engine keeps the round alive across a
+        // racing rebuild; the round's gates are read before the call.
+        let engine = {
+            let guard = self.session.blocking_lock();
+            guard.clone()
+        };
+        let Some(engine) = engine else {
             return Ok(None);
         };
         self.runtime.block_on(async {
@@ -184,8 +140,8 @@ mod tests {
     use crate::engine::{CompactionOutcome, CompactionRequest, EngineEvent};
     use serde_json::json;
 
-    /// The faux model's per-request output budget (maxTokens 16_384 under the
-    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// The faux model's per-request output budget (maxTokens `16_384` under the
+    /// `32_000` request cap): threshold fixtures subtract it from the window
     /// alongside the headroom (the combined input+output ceiling).
     const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
@@ -258,13 +214,17 @@ mod tests {
         baseline + big_tokens / 2
     }
 
-    /// A settled compaction runs its compact-trigger review: the threshold
-    /// arm fires on the crossing turn, the review request consumes the
-    /// queued decline before the next turn runs, and the decline surfaces
-    /// nothing (no refinement rows — the queued replies prove the
-    /// consumption order).
+    /// A settled compaction arms its compact-trigger review but never
+    /// consumes it on the turn path: the threshold arm fires on the
+    /// crossing turn and the run settles with the trigger still armed
+    /// (TS schedules the review in the background after the settle — the
+    /// inline-before-`Done` shape held the queued next prompt behind the
+    /// review's model call); the worker's servicing body (the same
+    /// `consume_compact_auto_refine` the `/compact` command path uses)
+    /// then consumes the queued decline, and the NEXT turn after the
+    /// servicing sees the reply queued after the decline.
     #[test]
-    fn threshold_compaction_runs_the_compact_trigger_review() {
+    fn threshold_compaction_arms_the_review_off_the_turn_path() {
         let _faux = FAUX_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -288,7 +248,9 @@ mod tests {
         let mut events: Vec<EngineEvent> = Vec::new();
         admit(&engine, "seed turn".to_string(), &mut events);
         admit(&engine, big_prompt, &mut events);
-        // The threshold arm compacted and its review declined.
+        // The threshold arm compacted; the turn settled WITHOUT consuming
+        // the review: no refinement rows, and the trigger stays armed for
+        // the worker's settle servicing.
         assert_eq!(
             events
                 .iter()
@@ -299,11 +261,19 @@ mod tests {
         );
         assert!(
             refinement_rows(&events).is_empty(),
-            "the decline surfaced nothing"
+            "the turn path surfaced no review rows"
         );
         assert!(
+            engine.compact_auto_refine_pending(),
+            "the trigger stayed armed off the turn path"
+        );
+        // The worker's servicing body consumes the queued decline and
+        // surfaces nothing (the decline's silent contract).
+        let consumed = engine.consume_compact_auto_refine().expect("the round ran");
+        assert!(consumed.is_none(), "the decline surfaced nothing");
+        assert!(
             !engine.compact_auto_refine_pending(),
-            "the trigger was consumed"
+            "the servicing consumed the trigger"
         );
         // The review consumed the decline: the third turn sees the reply
         // queued after it, not the decline itself.
@@ -311,7 +281,7 @@ mod tests {
         assert_eq!(
             assistant_texts(&events).last().map(String::as_str),
             Some("third reply"),
-            "the review consumed the queued decline"
+            "the serviced review consumed the queued decline"
         );
     }
 

@@ -84,8 +84,7 @@ impl CompactionKernelProbe for EngineOwnedProbe {
     fn has_running_kernel(&self) -> bool {
         self.owned()
             .as_deref()
-            .map(crate::kernel::provisioner::IpythonKernelProvisioner::has_running_kernel)
-            .unwrap_or(false)
+            .is_some_and(crate::kernel::provisioner::IpythonKernelProvisioner::has_running_kernel)
     }
 
     fn prune_oversized_variables(
@@ -185,6 +184,12 @@ pub async fn capture_notice_content(probe: &dyn CompactionKernelProbe) -> Option
         return None;
     }
     let pruned = probe.prune_oversized_variables().await;
+    super::compaction_trace::trace(
+        "compact.kernel_pruned",
+        serde_json::json!({
+            "pruned": pruned.as_ref().map(std::vec::Vec::len),
+        }),
+    );
     let signal = crate::kernel::cancellation::AbortSignal::new();
     let timer = {
         let signal = signal.clone();
@@ -198,6 +203,12 @@ pub async fn capture_notice_content(probe: &dyn CompactionKernelProbe) -> Option
     };
     let names = probe.list_namespace_names(Some(signal)).await;
     timer.abort();
+    super::compaction_trace::trace(
+        "compact.kernel_listed",
+        serde_json::json!({
+            "names": names.as_ref().map(std::vec::Vec::len),
+        }),
+    );
     if names.is_none() && !probe.has_running_kernel() {
         return None;
     }
@@ -210,6 +221,12 @@ pub async fn capture_notice_content(probe: &dyn CompactionKernelProbe) -> Option
 /// turn so the notice precedes the failure it explains — and the row is
 /// returned for the surfaces to broadcast as a `message_start` /
 /// `message_end` pair. `None` when no notice landed (no running kernel).
+///
+/// # Errors
+///
+/// Returns the underlying I/O error when the durable notice row cannot be
+/// appended. A session with no running kernel returns `Ok(None)` without
+/// touching the disk.
 pub async fn sync_after_compaction(
     probe: &dyn CompactionKernelProbe,
     session: &Arc<tokio::sync::Mutex<SessionManager>>,

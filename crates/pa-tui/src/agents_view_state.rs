@@ -192,7 +192,7 @@ pub fn reconcile_unified_sessions(roster: &[Value], saved: &[Value]) -> Vec<Unif
         let Some(identity) = aliases.first().cloned() else {
             continue;
         };
-        let section = status.map(section_from_status).unwrap_or(Section::Idle);
+        let section = status.map_or(Section::Idle, section_from_status);
         let search = daemon_search_text(&summary);
         let index = records.len();
         for alias in &aliases {
@@ -406,8 +406,7 @@ pub fn filter_empty_sessions(records: &[UnifiedRecord], preserved: &[&str]) -> V
                 > 0
             || get_str(&summary, "sessionName").is_some()
             || get_str(&summary, "firstMessage")
-                .map(|text| !text.trim().is_empty() && text.trim() != "(no messages)")
-                .unwrap_or(false)
+                .is_some_and(|text| !text.trim().is_empty() && text.trim() != "(no messages)")
             || summary
                 .get("usage")
                 .and_then(|usage| usage.get("cost"))
@@ -607,8 +606,7 @@ pub(crate) fn truncate_text(value: &str, width: usize) -> String {
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 fn pad_start(value: &str, width: usize) -> String {
@@ -874,14 +872,13 @@ mod tests {
     fn search_matches_the_restricted_corpus_case_insensitively() {
         // The picker corpus is the session NAME, the durable ID, and the
         // CWD; the TS corpus fields — first message, transcript text,
-        // recap summary, file paths — never match.
+        // file paths — never match.
         let saved = vec![json!({
             "id": "sess-alpha",
             "path": "/x/alpha.jsonl",
             "name": "RoSTER worker",
             "firstMessage": "deploy the Gateway",
             "allMessagesText": "the gateway probe returned 503 twice",
-            "agentStatus": { "summary": "gateway deploy finished" },
             "cwd": "/home/u/API-server",
             "parentSessionPath": "/x/parent.jsonl",
         })];
@@ -898,7 +895,7 @@ mod tests {
         // subsequence).
         assert!(score_search(targets, &parse_search_query("rtwr")).is_some());
         // Content fields are gone from the picker: first messages, the
-        // capped transcript, the recap summary, and file paths never match.
+        // capped transcript, and file paths never match.
         for query in [
             "deploy the gateway",
             "GATEWAY PROBE",
@@ -917,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn merged_records_take_the_live_name_and_never_match_the_recap() {
+    fn merged_records_take_the_live_name() {
         // A merged record: live daemon summary plus saved enrichment.
         let roster = vec![roster_entry(
             "s1",
@@ -940,7 +937,7 @@ mod tests {
         let records = reconcile_unified_sessions(&roster, &saved);
         assert_eq!(records.len(), 1);
         // Daemon data wins for the merged targets; the saved transcript
-        // and recap text stay out of the corpus.
+        // stays out of the corpus.
         assert_eq!(records[0].search.name, "tuned retry policy");
         assert_eq!(records[0].search.id, "s1");
         assert_eq!(records[0].search.cwd, "/work/retry");

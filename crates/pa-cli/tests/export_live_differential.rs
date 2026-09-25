@@ -82,15 +82,13 @@ fn kill_worker(pid: &u32) {
 }
 
 fn process_alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .map(|stat| {
-            let rest = stat
-                .rsplit_once(')')
-                .map(|(_, rest)| rest)
-                .unwrap_or_default();
-            !rest.starts_with('Z')
-        })
-        .unwrap_or(false)
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        let rest = stat
+            .rsplit_once(')')
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        !rest.starts_with('Z')
+    })
 }
 
 fn child_pids_of(ppid: u32) -> Vec<u32> {
@@ -224,7 +222,7 @@ impl Wire {
         self.writer.flush().expect("flush");
         self.reader
             .get_ref()
-            .set_read_timeout(Some(Duration::from_secs(120)))
+            .set_read_timeout(Some(Duration::from_mins(2)))
             .expect("read timeout");
         loop {
             let mut response = String::new();

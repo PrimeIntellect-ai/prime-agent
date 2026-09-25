@@ -93,6 +93,10 @@ pub fn get_process_start_id(pid: u32) -> Option<String> {
 /// True only for a process that is actually running: zombies do not count.
 /// Errors when the platform cannot answer (the caller treats an unverifiable
 /// owner as alive rather than reclaiming its lease).
+///
+/// # Errors
+///
+/// Returns an error when the platform cannot answer the liveness check.
 pub fn is_process_alive(pid: u32) -> anyhow::Result<bool> {
     pa_types::platform::process::is_process_alive(pid)
 }
@@ -109,7 +113,7 @@ fn lease_directory(agent_dir: &Path, session_path: &Path) -> PathBuf {
 fn leases_enabled() -> bool {
     matches!(
         std::env::var(SESSION_LEASES_ENABLED_ENV).as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
+        Ok("1" | "true" | "yes")
     )
 }
 
@@ -187,7 +191,7 @@ fn reclaim_retry_delay_ms(
         return None;
     }
     let transient = error.kind() == std::io::ErrorKind::PermissionDenied
-        || matches!(error.raw_os_error(), Some(32) | Some(33));
+        || matches!(error.raw_os_error(), Some(32 | 33));
     transient.then(|| 10 * u64::from(attempt))
 }
 
@@ -430,6 +434,13 @@ pub fn live_lease_owner(agent_dir: &Path, session_path: &Path) -> Option<LiveLea
 
 /// Acquire the lease for one session file. Returns `None` when leases are
 /// disabled (default) or `session_path` is empty.
+///
+/// # Errors
+///
+/// Returns an error when the runtime acquire fails (another live owner
+/// holds the lease, the lease guard stays busy past its wait budget, or
+/// the lease directory or owner files cannot be created); the `Ok(None)`
+/// answers never error.
 pub fn acquire_session_lease(
     session_path: Option<&Path>,
     agent_dir: &Path,
@@ -448,6 +459,13 @@ pub fn acquire_session_lease(
 /// env flag): the CLI print-mode guard shares it so a resume either
 /// atomically owns the file's runtime lease or answers the refusal -
 /// no observe-then-open window for a second writer.
+///
+/// # Errors
+///
+/// Returns an error when another live owner already holds the lease
+/// (`SessionAlreadyActiveError`), when the lease guard stays busy past
+/// its wait budget, or when the lease directory or owner files cannot be
+/// created.
 pub fn acquire_runtime_session_lease(
     session_path: &Path,
     agent_dir: &Path,

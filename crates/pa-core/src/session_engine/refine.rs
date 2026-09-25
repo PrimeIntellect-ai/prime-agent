@@ -197,6 +197,11 @@ pub fn load_refinement_history(
 }
 
 /// The session's local harness state directory (under the session dir).
+///
+/// # Panics
+///
+/// The `expect` cannot fire: mapping the session dir onto the local harness
+/// dir is total for `Some` session dirs.
 pub fn local_harness_state_dir(session: &SessionManager) -> PathBuf {
     let session_dir = session.get_session_dir().to_path_buf();
     crate::refinement::get_local_harness_state_dir(Some(&session_dir))
@@ -229,6 +234,13 @@ pub struct RefinementTranscript<'a> {
 /// Run the full refinement flow: plan (LLM or rollback), re-read the target
 /// store, apply, persist state + history, and append the audit, outcome, and
 /// notice entries to the session. `refine_call` performs the model request.
+///
+/// # Errors
+///
+/// Returns an error when a local refinement is requested on an unpersisted
+/// session, when the refinement plan (LLM or rollback) fails, when applying
+/// or persisting the refined harness state fails, or when appending the
+/// audit, outcome, or notice entries fails.
 pub async fn execute_refinement(
     session: &mut SessionManager,
     transcript: RefinementTranscript<'_>,
@@ -253,12 +265,18 @@ pub async fn execute_refinement(
     } else {
         HarnessScope::Local
     };
+    // A local refinement needs the session's own directory: its harness
+    // state and artifact paths live there. The daemon's engine session is
+    // deliberately non-persisted (the worker owns the durable file and
+    // mirrors the entries) but carries the session's directory, so local
+    // refinement runs; a bare in-memory session with no directory of its
+    // own still bails.
     if options.rollback_id.is_none()
         && requested_scope == HarnessScope::Local
-        && !session.is_persisted()
+        && !session.has_session_dir()
     {
         anyhow::bail!(
-            "Local harness refinement requires a persisted session; use global refinement instead."
+            "Local harness refinement requires a session directory; use global refinement instead."
         );
     }
     // Planning state: global, or merged global+local for local refinements.
@@ -356,22 +374,44 @@ pub struct RefineOptions {
     pub rollback_id: Option<String>,
 }
 
+/// The compact-trigger round's resolution (TS `_maybeAutoRefine`'s arms):
+/// the reviewer's decline, the retention of an approving review behind an
+/// active agent turn, or the ran refinement.
+pub(crate) enum AutoRefineRound {
+    /// The reviewer declined (or the round resolved against a bumped
+    /// branch version): no refinement ran. The caller stamps the review
+    /// cooldown for a fresh round (TS's decline arm).
+    Declined,
+    /// The review approved while an agent turn was streaming: the
+    /// refinement run (its session-mutex hold and the live-context
+    /// rebuild) never runs mid-stream. The review is retained and the
+    /// next serviced boundary runs it (TS `_pendingAutoRefineReview`).
+    Deferred(AutoRefineReview),
+    /// The refinement ran (TS `_runApprovedRefine`'s success arm).
+    Ran(RefinementResult),
+}
+
 impl AgentSession {
-    /// The compact-trigger auto-refine round (TS `_runSerializedAutoRefineReview`
-    /// with `reason: "compact"`): the review gate first — an LLM call over the
-    /// conversation, the merged harness state, and the refinement history —
-    /// and, only when the reviewer approves, the refinement run carrying the
-    /// auto-refine instructions. `Ok(None)` is the reviewer's decline: no
-    /// refinement ran and nothing surfaces. The caller stamps its review
-    /// cooldown for every outcome (decline, success, and failure alike, the TS
-    /// contract).
-    pub async fn auto_refine_after_compaction(
+    /// The compact-trigger review (TS `_reviewAutoRefine`'s compact
+    /// round): the review gate first — an LLM call over the
+    /// conversation, the merged harness state, and the refinement
+    /// history — then the decline and the branch-version fence. `Ok(None)`
+    /// is the decline (or a round resolved against a bumped branch
+    /// version); `Ok(Some(review))` is a fresh approval the caller's arm
+    /// applies.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conversation history cannot be read or
+    /// when the review request fails; a decline is `Ok(None)`.
+    pub async fn review_compact_auto_refine(
         &self,
         model: &pa_types::ai::Model,
         api_key: Option<String>,
-        global_harness_dir: std::path::PathBuf,
+        global_harness_dir: &Path,
         turns_since_last_review: u32,
-    ) -> anyhow::Result<Option<RefinementResult>> {
+        branch_version: u64,
+    ) -> anyhow::Result<Option<AutoRefineReview>> {
         // The review reads the same planning inputs the refinement run
         // plans against (TS `_reviewAutoRefine`: the live conversation,
         // `_loadMergedHarnessState`, `_loadRefinementHistory`).
@@ -379,11 +419,11 @@ impl AgentSession {
             let session = self.session_handle().lock().await;
             let local_state =
                 load_harness_state(&local_harness_state_dir(&session), HarnessScope::Local);
-            let global_state = load_harness_state(&global_harness_dir, HarnessScope::Global);
+            let global_state = load_harness_state(global_harness_dir, HarnessScope::Global);
             (
                 session.history_snapshot(),
                 merge_harness_states(&global_state, Some(&local_state)),
-                load_global_refinement_history(&global_harness_dir),
+                load_global_refinement_history(global_harness_dir),
             )
         };
         // Refinement deliberately reviews historical messages, unlike ordinary
@@ -415,24 +455,86 @@ impl AgentSession {
         if !review.should_refine {
             return Ok(None);
         }
-        let options = RefineOptions {
-            global: false,
-            instructions: Some(auto_refine_instructions(
-                AUTO_REFINE_COMPACT_REASON,
-                &review,
-            )),
-            rollback_id: None,
+        // TS `_reviewAutoRefine`'s post-await branch check
+        // (`branchVersion !== this._autoRefineBranchVersion`): a branch
+        // move (or a replacement teardown's discard) bumped the version
+        // while the review's model call was in flight — the approval
+        // belongs to the abandoned conversation, so the refinement run
+        // (its harness edits, audit rows, and message rebuilds) never
+        // starts.
+        if !self.compact_auto_refine_branch_version_unchanged(branch_version) {
+            return Ok(None);
+        }
+        Ok(Some(review))
+    }
+
+    /// The serialized arm's compact-trigger round (TS
+    /// `_runSerializedAutoRefineReview` with `reason: "compact"`): the
+    /// review, and only when the reviewer approves, the refinement run
+    /// carrying the auto-refine instructions. `Ok(None)` is the
+    /// reviewer's decline: no refinement ran and nothing surfaces. The
+    /// serialized boundary is quiescent by construction (the serialized
+    /// path drains at turn boundaries and never runs inside a tool
+    /// loop), so this arm carries no active-agent gate; the interactive
+    /// arm's gate lives in the session-side consumption instead. The
+    /// caller stamps its review cooldown for every outcome (decline,
+    /// success, and failure alike, the TS contract).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conversation history cannot be read, when
+    /// the review request fails, or when the approving review's refinement
+    /// run fails. A decline is `Ok(None)`.
+    pub async fn auto_refine_after_compaction(
+        &self,
+        model: &pa_types::ai::Model,
+        api_key: Option<String>,
+        global_harness_dir: std::path::PathBuf,
+        turns_since_last_review: u32,
+        branch_version: u64,
+    ) -> anyhow::Result<Option<RefinementResult>> {
+        let Some(review) = self
+            .review_compact_auto_refine(
+                model,
+                api_key.clone(),
+                &global_harness_dir,
+                turns_since_last_review,
+                branch_version,
+            )
+            .await?
+        else {
+            return Ok(None);
         };
         Ok(Some(
-            self.refine(
-                &options,
-                RefinementSource::Auto,
-                model,
-                api_key,
-                global_harness_dir,
-            )
-            .await?,
+            self.run_approved_refine(&review, model, api_key, global_harness_dir)
+                .await?,
         ))
+    }
+
+    /// The approved review's refinement run (TS `_runApprovedRefine`):
+    /// the retained-review path and a fresh approval share it — the
+    /// auto-refine instructions built from the review, then the one
+    /// refinement run whose result consumes the review.
+    pub(crate) async fn run_approved_refine(
+        &self,
+        review: &AutoRefineReview,
+        model: &pa_types::ai::Model,
+        api_key: Option<String>,
+        global_harness_dir: std::path::PathBuf,
+    ) -> anyhow::Result<RefinementResult> {
+        let options = RefineOptions {
+            global: false,
+            instructions: Some(auto_refine_instructions(AUTO_REFINE_COMPACT_REASON, review)),
+            rollback_id: None,
+        };
+        self.refine(
+            &options,
+            RefinementSource::Auto,
+            model,
+            api_key,
+            global_harness_dir,
+        )
+        .await
     }
 }
 

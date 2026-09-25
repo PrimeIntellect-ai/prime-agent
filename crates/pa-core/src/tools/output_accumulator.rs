@@ -34,8 +34,7 @@ pub struct OutputSnapshot {
 fn default_temp_file_path(prefix: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let id = nanos ^ ((std::process::id() as u128) << 64);
     std::env::temp_dir().join(format!("{prefix}-{id:032x}.log"))
 }
@@ -144,7 +143,7 @@ fn decode_utf8_char(buf: &[u8]) -> Decoded {
         }
         cp = (cp << 6) | u32::from(b & 0x3F);
     }
-    if cp < min || (0xD800..=0xDFFF).contains(&cp) || cp > 0x10FFFF {
+    if cp < min || (0xD800..=0xDFFF).contains(&cp) || cp > 0x0010_FFFF {
         return Decoded::Invalid(len);
     }
     Decoded::Char(len)
@@ -187,24 +186,21 @@ impl OutputSpill {
         }
         let prefix = self.prefix.clone();
         let path = default_temp_file_path(&prefix);
-        match File::create(&path) {
-            Ok(mut file) => {
-                for chunk in replay {
-                    if file.write_all(chunk).is_err() {
-                        self.failed = true;
-                        self.file = None;
-                        self.path = None;
-                        let _ = std::fs::remove_file(&path);
-                        return;
-                    }
+        if let Ok(mut file) = File::create(&path) {
+            for chunk in replay {
+                if file.write_all(chunk).is_err() {
+                    self.failed = true;
+                    self.file = None;
+                    self.path = None;
+                    let _ = std::fs::remove_file(&path);
+                    return;
                 }
-                self.path = Some(path);
-                self.file = Some(file);
             }
-            Err(_) => {
-                self.failed = true;
-                self.path = None;
-            }
+            self.path = Some(path);
+            self.file = Some(file);
+        } else {
+            self.failed = true;
+            self.path = None;
         }
     }
 

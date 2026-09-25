@@ -33,6 +33,11 @@ impl AgentSessionEngine {
     /// Wire the worker's bash-completion queue seams. The worker calls
     /// this once at construction, before the first prompt's session
     /// build reads them in [`AgentSessionEngine::extra_host_handlers`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a sink mutex is poisoned (a holder panicked while
+    /// holding the completion or consumed-sink lock).
     pub fn set_bash_notice_sinks(
         &self,
         completion: crate::engine::BashCompletionSink,

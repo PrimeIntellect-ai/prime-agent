@@ -92,16 +92,7 @@ pub(crate) fn session_status_label(summary: &Value) -> String {
     {
         return "replied".to_string();
     }
-    if get_str(summary, "activity") == Some("working") {
-        return "classifying".to_string();
-    }
-    if get_str(summary, "taskState") == Some("error") {
-        return "error".to_string();
-    }
-    match get_str(summary, "taskState") {
-        Some("completed") => "completed".to_string(),
-        _ => "needs input".to_string(),
-    }
+    String::new()
 }
 
 /// The model column text: the bare model id plus `:level` when a thinking
@@ -175,7 +166,7 @@ pub struct AgentsViewRow {
     pub title: String,
     pub status_label: String,
     pub model: String,
-    /// The row's own activity text (`status · recap`).
+    /// The row's own activity text (the status label).
     pub activity: String,
     /// Own usage cost plus every descendant's (TS `recursiveCost`).
     pub cost: f64,
@@ -350,13 +341,66 @@ fn parent_reference_keys(record: &UnifiedRecord) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The `parent` record's session file, live summary first, saved catalog
+/// row second (both serve absolute paths).
+fn parent_record_file(parent: &UnifiedRecord) -> Option<&str> {
+    parent
+        .daemon
+        .as_ref()
+        .and_then(|daemon| daemon.get("sessionFile"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            parent
+                .saved
+                .as_ref()
+                .and_then(|saved| saved.get("path"))
+                .and_then(Value::as_str)
+        })
+}
+
+/// Whether `parent` sits exactly one level above `child`'s live summary:
+/// a spawned child's parent binding is depth-consistent (the parent is
+/// one level up); a fork's source binding sits at the SAME depth and is
+/// a sibling, never a parent.
+fn depth_consistent_parent(daemon: &Value, parent: &UnifiedRecord) -> bool {
+    let Some(depth) = daemon
+        .get("rlmDepth")
+        .and_then(Value::as_u64)
+        .filter(|depth| *depth > 0)
+    else {
+        return false;
+    };
+    let Some(parent_path) = daemon
+        .get("parentSessionPath")
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+    else {
+        return false;
+    };
+    let parent_depth = parent
+        .daemon
+        .as_ref()
+        .and_then(|daemon| daemon.get("rlmDepth"))
+        .and_then(Value::as_u64)
+        .or_else(|| {
+            parent
+                .saved
+                .as_ref()
+                .and_then(|saved| saved.get("rlmDepth"))
+                .and_then(Value::as_u64)
+        });
+    parent_record_file(parent) == Some(parent_path) && parent_depth == Some(depth - 1)
+}
+
 /// Whether `child` rolls up under `parent` (TS `isSubagentDescendantRecord`):
 /// agent lineage only — a branched/forked session links to its source but
 /// is a sibling chat, so it never nests or double-books totals. Resident
 /// children carry the subagent runtime kind; saved children go by depth.
+/// A live `top-level` runtime counts too when its opened file carries a
+/// spawn-consistent parent binding (the record index already links it).
 fn is_subagent_descendant(child: &UnifiedRecord, parent: &UnifiedRecord) -> bool {
     if let Some(daemon) = &child.daemon {
-        return is_subagent_summary(daemon);
+        return is_subagent_summary(daemon) || depth_consistent_parent(daemon, parent);
     }
     let child_depth = child
         .saved
@@ -593,6 +637,11 @@ struct BaseRow {
     recursive_cost: f64,
     descendant_count: usize,
     running_subagent_count: usize,
+    /// The descendant-tree model multiset (the summary row's model mix):
+    /// a real model string (never the `-` placeholder) -> its count. The
+    /// collapsed summary row otherwise hides every subagent's model — and
+    /// the mix is what tells the operator a tree runs a model blend.
+    descendant_models: std::collections::BTreeMap<String, usize>,
     record: usize,
     search_score: Option<f64>,
 }
@@ -635,7 +684,12 @@ pub fn build_rows(
     let mut base: Vec<BaseRow> = Vec::with_capacity(records.len());
     for (position, record) in records.iter().enumerate() {
         let summary = summary_for_record(record);
-        let kind = if is_subagent_summary(&summary) && !is_direct_scope_child(&summary) {
+        let kind = if !is_direct_scope_child(&summary)
+            && (is_subagent_summary(&summary)
+                || records
+                    .iter()
+                    .any(|parent| depth_consistent_parent(&summary, parent)))
+        {
             RowKind::Subagent
         } else {
             RowKind::Agent
@@ -649,15 +703,6 @@ pub fn build_rows(
             session_status_label(&summary)
         } else {
             String::new()
-        };
-        let recap = summary
-            .get("summary")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let activity = if recap.is_empty() {
-            status.clone()
-        } else {
-            format!("{status} · {recap}")
         };
         let age = relative_age(
             if summary
@@ -678,15 +723,16 @@ pub fn build_rows(
             now,
         );
         let rollup = rollups.get(&record.identity).copied().unwrap_or_default();
+        let model = session_model(&summary);
         base.push(BaseRow {
             kind,
             section: record.section,
             search_score: record.search_score,
             identity: record.identity.clone(),
             title: session_title(&summary),
-            status_label: status,
-            model: session_model(&summary),
-            activity,
+            status_label: status.clone(),
+            model,
+            activity: status,
             age,
             own_cost: summary
                 .get("usage")
@@ -696,6 +742,7 @@ pub fn build_rows(
             recursive_cost: rollup.cost,
             descendant_count: rollup.descendant_count,
             running_subagent_count: 0,
+            descendant_models: std::collections::BTreeMap::new(),
             summary,
             record: position,
         });
@@ -742,10 +789,17 @@ pub fn build_rows(
     }
     // Busy-descendant tally from the live rows, iterative over the parent
     // forest so deep chains cannot overflow (TS `runningSubagentCount`).
+    // The traversal is dynamically bounded — every row appended during the
+    // walk is itself traversed — so a chain of any depth folds before its
+    // parent (TS's `index < tallyOrder.length` loop; a fixed `0..len` range
+    // would strand grandchildren and their descendants out of every fold:
+    // the busy tally, the descendant counts, the cost rollups, and the
+    // summary row's model mix).
     let mut tally_order: Vec<usize> = (0..base.len())
         .filter(|index| !nested.contains(index))
         .collect();
-    for position in 0..tally_order.len() {
+    let mut position = 0;
+    while position < tally_order.len() {
         for child in children_by_parent
             .get(&tally_order[position])
             .into_iter()
@@ -753,17 +807,31 @@ pub fn build_rows(
         {
             tally_order.push(*child);
         }
+        position += 1;
     }
     for index in tally_order.iter().rev() {
         let mut running = 0;
         let mut descendants = 0;
         let mut descendants_cost = 0.0;
+        // The descendant model multiset rolls up in the same walk (the
+        // summary row renders the whole descendant tree's model mix,
+        // matching its descendant count's deliberate divergence): each
+        // child contributes its own model plus its already-rolled map.
+        let mut models: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
         for child in children_by_parent.get(index).into_iter().flatten() {
             running += (base[*child].section == Section::Running) as usize
                 + base[*child].running_subagent_count;
             descendants += 1 + base[*child].descendant_count;
             descendants_cost += base[*child].recursive_cost;
+            if base[*child].model != "-" {
+                *models.entry(base[*child].model.clone()).or_insert(0) += 1;
+            }
+            for (model, count) in &base[*child].descendant_models {
+                *models.entry(model.clone()).or_insert(0) += *count;
+            }
         }
+        base[*index].descendant_models = models;
         base[*index].running_subagent_count = running;
         // Rollups follow the unfiltered hierarchy; the per-pass walk is the
         // fallback when the caller passed none (TS `rollup ?? descendants`).
@@ -879,16 +947,42 @@ fn agents_row(row: &BaseRow, depth: usize, parent_identity: Option<&str>) -> Age
     }
 }
 
+/// The collapsed summary row's model mix (the operator's cost question:
+/// which models the subagent tree runs): `model×count` per distinct
+/// model, highest count first, then alphabetical —
+/// `glm-5.3-fast×2, opus-4-6`. Empty when no descendant carries
+/// model identity.
+fn model_mix(models: &std::collections::BTreeMap<String, usize>) -> String {
+    let mut entries: Vec<(&String, usize)> = models
+        .iter()
+        .map(|(model, count)| (model, *count))
+        .collect();
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+    entries
+        .into_iter()
+        .map(|(model, count)| {
+            if count > 1 {
+                format!("{model}\u{d7}{count}")
+            } else {
+                model.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The `N subagents` summary row under one agent (TS
 /// `createSubagentSummaryRow`, with the deliberate divergence that the
 /// count aggregates the whole descendant tree rather than the
 /// direct-children list): the running label counts the recursively
 /// running rows, and finished subagents stay reachable through the row
-/// even when nothing is running anymore.
+/// even when nothing is running anymore. The collapsed row is the one
+/// place the subagent tree's model mix surfaces — expanded
+/// children already render their own Model column.
 fn subagent_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsViewRow {
     let total = parent.descendant_count;
     let running = parent.running_subagent_count;
-    let title = if running > 0 {
+    let mut title = if running > 0 {
         format!(
             "{running} {} running",
             if running == 1 {
@@ -903,6 +997,11 @@ fn subagent_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> Agent
             if total == 1 { "subagent" } else { "subagents" }
         )
     };
+    let mix = model_mix(&parent.descendant_models);
+    if !mix.is_empty() {
+        title.push_str(" \u{b7} ");
+        title.push_str(&mix);
+    }
     AgentsViewRow {
         kind: RowKind::SubagentSummary,
         section: parent.section,
@@ -933,9 +1032,9 @@ fn compare_base(a: &BaseRow, b: &BaseRow, anchor: Option<&str>) -> std::cmp::Ord
             .filter(|value| !value.is_empty())
     }
     let timestamp = |summary: &Value, field: &str| {
-        get_str(summary, field)
-            .map(|value| crate::agents_view_state::timestamp_ms(Some(value)))
-            .unwrap_or(0)
+        get_str(summary, field).map_or(0, |value| {
+            crate::agents_view_state::timestamp_ms(Some(value))
+        })
     };
     // Search hits rank relevance first: the score decides before
     // anything else, retained ancestors (unscored) sink below every hit,
@@ -1057,15 +1156,15 @@ pub fn resolve_selection(
     identity: Option<&str>,
     key: Option<&SelectionKey>,
 ) -> usize {
-    if rows.is_empty() {
-        return 0;
-    }
     fn find_selectable<F: Fn(&AgentsViewRow) -> bool>(
         rows: &[AgentsViewRow],
         predicate: F,
     ) -> Option<usize> {
         rows.iter()
             .position(|row| row.selectable() && predicate(row))
+    }
+    if rows.is_empty() {
+        return 0;
     }
     let selected_summary_row = identity.is_some_and(|id| id.starts_with("subagents:"));
     let preserves_kind =
@@ -1163,6 +1262,83 @@ mod tests {
         let rollups = compute_rollups(&records);
         let expanded: HashSet<String> = expanded.iter().map(ToString::to_string).collect();
         build_rows(&records, scope, &expanded, &rollups, None)
+    }
+
+    /// An opened child session nests under its parent: the live
+    /// `top-level` runtime carries the opened file's spawn-time parent
+    /// binding one level below the parent, so the view renders it as a
+    /// child row behind the parent's collapsed summary, never as a new
+    /// top-level agent.
+    #[test]
+    fn an_opened_child_nests_under_its_parent() {
+        let mut opened = parent_summary("opened");
+        opened["rlmDepth"] = json!(1);
+        opened["parentSessionPath"] = json!("/x/parent.jsonl");
+        opened["sessionName"] = json!("opened child");
+        let mut parent = parent_summary("parent");
+        parent["rlmDepth"] = json!(0);
+        let roster = vec![
+            roster_entry("parent", "idle", parent),
+            roster_entry("opened", "idle", opened),
+        ];
+        let rows = rows_for(&roster, None, &[]);
+        assert_eq!(
+            rows.iter().filter(|row| row.kind == RowKind::Agent).count(),
+            1,
+            "the parent is the only agent row: {rows:?}"
+        );
+        let parent_row = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Agent)
+            .expect("the parent row");
+        assert_eq!(
+            parent_row.descendant_count, 1,
+            "the opened child rides the parent's aggregate: {rows:?}"
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.kind == RowKind::SubagentSummary && row.title == "1 subagent"),
+            "the parent's summary row labels the aggregate: {rows:?}"
+        );
+        let rows = rows_for(&roster, None, &["file:/x/parent.jsonl"]);
+        let child = rows
+            .iter()
+            .find(|row| row.title == "opened child")
+            .expect("the expanded list renders the opened child");
+        assert_eq!(child.kind, RowKind::Subagent);
+        assert_eq!(
+            child.parent_identity.as_deref(),
+            Some("file:/x/parent.jsonl")
+        );
+    }
+
+    /// A forked session links its header to its source at the SAME depth:
+    /// the fork is a sibling chat and stays a top-level row, and the
+    /// source's aggregate never counts it.
+    #[test]
+    fn a_fork_of_a_child_stays_a_sibling_row() {
+        let mut source = parent_summary("source");
+        source["rlmDepth"] = json!(1);
+        let mut fork = parent_summary("fork");
+        fork["rlmDepth"] = json!(1);
+        fork["parentSessionPath"] = json!("/x/source.jsonl");
+        fork["sessionName"] = json!("forked chat");
+        let roster = vec![
+            roster_entry("source", "idle", source),
+            roster_entry("fork", "idle", fork),
+        ];
+        let rows = rows_for(&roster, None, &[]);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.kind == RowKind::Agent && row.title != "source name")
+                .count(),
+            1,
+            "the fork renders as its own top-level row: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::SubagentSummary),
+            "the source's aggregate never counts the fork: {rows:?}"
+        );
     }
 
     /// The Model column reads every wire shape of the model selector: a
@@ -1270,6 +1446,84 @@ mod tests {
         assert_eq!(rows[4].kind, RowKind::Subagent);
         assert_eq!(rows[4].depth, 2);
         assert_eq!(rows[4].title, "grandchild");
+    }
+
+    /// The collapsed summary row carries the subagent tree's model mix
+    /// (the operator's cost question: which models the tree runs). The
+    /// count spans the whole descendant tree like the summary count
+    /// itself; `-` placeholders stay out; ties order alphabetically.
+    #[test]
+    fn summary_row_carries_the_descendant_model_mix() {
+        let mut glm_one = child_summary("c1", "p", "worker one");
+        glm_one["model"] = json!("internal/glm-5.3-fast");
+        let mut glm_two = child_summary("c2", "p", "worker two");
+        glm_two["model"] = json!("internal/glm-5.3-fast");
+        let mut opus = child_summary("c3", "p", "worker three");
+        opus["model"] = json!("anthropic/claude-opus-4-6");
+        let mut grandchild = child_summary("gc", "c3", "grandkid");
+        grandchild["rlmChildId"] = json!("child-gc");
+        grandchild["model"] = json!("anthropic/claude-opus-4-6");
+        let roster = vec![
+            roster_entry("p", "idle", parent_summary("p")),
+            roster_entry("c1", "idle", glm_one),
+            roster_entry("c2", "idle", glm_two),
+            roster_entry("c3", "idle", opus),
+            roster_entry("gc", "idle", grandchild),
+        ];
+        // Collapsed: the summary row is the only place the tree's model
+        // mix surfaces — two glm workers, two opus rows (a child plus
+        // its grandchild).
+        let rows = rows_for(&roster, None, &[]);
+        let summary = rows
+            .iter()
+            .find(|row| row.kind == RowKind::SubagentSummary)
+            .expect("summary row");
+        assert_eq!(
+            summary.title,
+            "4 subagents \u{b7} claude-opus-4-6\u{d7}2, glm-5.3-fast\u{d7}2"
+        );
+        // The child's own summary row counts only its subtree.
+        let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
+        let nested = rows
+            .iter()
+            .find(|row| row.kind == RowKind::SubagentSummary && row.depth == 2)
+            .expect("nested summary row");
+        assert_eq!(nested.title, "1 subagent \u{b7} claude-opus-4-6");
+        // A child without model identity stays out of the mix.
+        let roster = vec![
+            roster_entry("p", "idle", parent_summary("p")),
+            roster_entry("c", "idle", child_summary("c", "p", "worker one")),
+        ];
+        let rows = rows_for(&roster, None, &[]);
+        assert_eq!(rows[1].title, "1 subagent");
+        // A FOUR-level chain folds at every depth: the great-grandchild's
+        // model reaches the root's mix (the tally walk's dynamic bound —
+        // a fixed `0..len` range would strand the great-grandchild out of
+        // the rollup).
+        let mut gc = child_summary("gc", "c", "grandkid");
+        gc["rlmChildId"] = json!("child-gc");
+        gc["model"] = json!("anthropic/claude-opus-4-6");
+        let mut ggc = child_summary("ggc", "gc", "great-grandkid");
+        ggc["rlmChildId"] = json!("child-ggc");
+        ggc["model"] = json!("openai/gpt-5.6-sol");
+        let roster = vec![
+            roster_entry("p", "idle", parent_summary("p")),
+            roster_entry("c", "idle", child_summary("c", "p", "worker one")),
+            roster_entry("gc", "idle", gc),
+            roster_entry("ggc", "idle", ggc),
+        ];
+        let rows = rows_for(&roster, None, &[]);
+        let summary = rows
+            .iter()
+            .find(|row| row.kind == RowKind::SubagentSummary)
+            .expect("summary row");
+        // `worker one` carries no model identity, so the mix counts the
+        // grandchild (opus) and the great-grandchild (sol) only.
+        assert_eq!(
+            summary.title,
+            "3 subagents \u{b7} claude-opus-4-6, gpt-5.6-sol"
+        );
+        assert_eq!(rows[0].descendant_count, 3);
     }
 
     #[test]

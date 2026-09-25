@@ -1,7 +1,7 @@
 //! Tool-argument validation, the TS `validateToolArguments` contract
 //! (`packages/ai/src/utils/validation.ts`).
 //!
-//! The TS reference validates against TypeBox schemas with `Value.Convert`
+//! The TS reference validates against `TypeBox` schemas with `Value.Convert`
 //! (primitive coercion) plus a compiled validator. This port implements the
 //! JSON Schema subset that the product's tool schemas use: `type` (including
 //! type arrays), `properties`, `required`, `items`, `enum`, `const`,
@@ -18,6 +18,11 @@ use serde_json::Value;
 /// Mirrors TS `validateToolArguments(tool, toolCall)`: on failure it returns
 /// the preformatted error message (TS throws `Error(message)`); the caller
 /// wraps it into an error tool result.
+///
+/// # Errors
+///
+/// Returns the preformatted validation error message when the arguments fail
+/// the tool's schema checks (after coercion).
 pub fn validate_tool_arguments(
     tool_name: &str,
     schema: &Value,
@@ -55,7 +60,7 @@ fn schema_type(schema: &Value) -> Vec<&str> {
     }
 }
 
-/// Primitive coercion mirroring TypeBox `Value.Convert`: string values are
+/// Primitive coercion mirroring `TypeBox` `Value.Convert`: string values are
 /// parsed into number/boolean when the schema requests it, and number/boolean
 /// values are stringified when the schema requests a string.
 fn coerce(schema: &Value, value: &mut Value) {
@@ -145,12 +150,10 @@ fn coerce_children(schema: &Value, value: &mut Value) {
 }
 
 fn number_value(n: f64) -> Value {
-    if n.fract() == 0.0 && n.abs() < 9.007199254740992e15 {
+    if n.fract() == 0.0 && n.abs() < 9.007_199_254_740_992e15 {
         Value::from(n as i64)
     } else {
-        serde_json::Number::from_f64(n)
-            .map(Value::Number)
-            .unwrap_or(Value::Null)
+        serde_json::Number::from_f64(n).map_or(Value::Null, Value::Number)
     }
 }
 
@@ -205,12 +208,11 @@ fn check(schema: &Value, value: &Value, path: &str, errors: &mut Vec<(String, St
                     } else {
                         format!("{path}.{key}")
                     };
-                    match map.get(key) {
-                        Some(v) => check(sub_schema, v, &sub_path, errors),
-                        None => {
-                            // Optional properties are skipped, mirroring
-                            // standard JSON Schema.
-                        }
+                    if let Some(v) = map.get(key) {
+                        check(sub_schema, v, &sub_path, errors);
+                    } else {
+                        // Optional properties are skipped, mirroring
+                        // standard JSON Schema.
                     }
                 }
             }
@@ -306,7 +308,6 @@ fn type_name(value: &Value) -> &'static str {
 
 fn type_matches(ty: &str, value: &Value) -> bool {
     match ty {
-        "any" | "unknown" => true,
         "null" => value.is_null(),
         "boolean" => value.is_boolean(),
         "integer" => value.is_i64() || value.is_u64(),

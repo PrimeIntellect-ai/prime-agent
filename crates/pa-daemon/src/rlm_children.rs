@@ -235,6 +235,11 @@ pub struct SupervisorChildSessions {
     inner: Arc<SupervisorChildSessionsInner>,
 }
 
+/// The `delete_subagent` completion hook (the worker wires its
+/// context-tree cache invalidation): called once per completed delete
+/// with the deleted child's id.
+pub type DeleteNotifier = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
 struct SupervisorChildSessionsInner {
     link: Arc<SupervisorLink>,
     agent_dir: PathBuf,
@@ -254,7 +259,7 @@ struct SupervisorChildSessionsInner {
     /// `None` until the engine wires it.
     settle_hook: std::sync::Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     /// The worker's model-allowlist refusal telemetry (`model refused`):
-    /// spawn/create_session refusals emit through the engine's shared
+    /// `spawn/create_session` refusals emit through the engine's shared
     /// lazily-built client.
     model_refusal_telemetry: std::sync::Arc<crate::model_allowlist::ModelRefusalTelemetry>,
     /// The engine's child-usage attribution producer (wired once the
@@ -262,6 +267,11 @@ struct SupervisorChildSessionsInner {
     /// into it — the producer owns the target row and the durable
     /// append).
     usage_sink: std::sync::Mutex<Option<std::sync::Arc<dyn RlmChildUsageSink>>>,
+    /// The delete notification hook (wired by the worker with its
+    /// context-tree cache handle): a deleted child must leave the cached
+    /// `/context` children immediately, not ride out the next background
+    /// refresh.
+    delete_notifier: std::sync::Mutex<Option<DeleteNotifier>>,
 }
 
 impl Clone for SupervisorChildSessions {
@@ -291,8 +301,25 @@ impl SupervisorChildSessions {
                 settle_hook: std::sync::Mutex::new(None),
                 model_refusal_telemetry,
                 usage_sink: std::sync::Mutex::new(None),
+                delete_notifier: std::sync::Mutex::new(None),
             }),
         }
+    }
+
+    /// Wire the delete notification hook (the worker's context-tree cache
+    /// invalidation): called once per completed `delete_subagent` with
+    /// the deleted child's id.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the delete-notifier mutex is poisoned (a holder
+    /// panicked while holding the lock).
+    pub fn set_delete_notifier(&self, notifier: DeleteNotifier) {
+        *self
+            .inner
+            .delete_notifier
+            .lock()
+            .expect("delete notifier lock") = Some(notifier);
     }
 
     /// The worker saw the parent's turn end: release prompt tasks waiting
@@ -306,6 +333,11 @@ impl SupervisorChildSessions {
     /// once per settled child run — the natural settle watcher, the
     /// cancel walk, and the delete path — so a goal continuation owed
     /// behind descendant work re-evaluates when descendants settle.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the settle-hook mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_settle_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
         *self.inner.settle_hook.lock().expect("settle hook lock") = Some(hook);
     }
@@ -315,6 +347,11 @@ impl SupervisorChildSessions {
     /// capture-before-unlink teardown paths) deliver per-origin batches
     /// into this sink (TS `flushPendingChildUsageAttribution`'s Rust
     /// seam — the producer owns the target row and the durable append).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the usage-sink mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_usage_sink(&self, sink: Arc<dyn RlmChildUsageSink>) {
         *self.inner.usage_sink.lock().expect("usage sink lock") = Some(sink);
     }
@@ -343,18 +380,34 @@ impl SupervisorChildSessions {
     /// notice (the parent session is going away), and each child's own
     /// close cascades to its children through the child worker's kill
     /// handler with the same close reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first close failure after walking every child (a
+    /// failed close keeps the child tracked so the caller can retry); a
+    /// child whose session is already gone is a completed no-op.
     pub async fn close_children(&self, reason: ChildCloseReason) -> Result<()> {
         self.inner.close_children_inner(reason).await
     }
 
     /// Replace the parent identity (the worker session sets it once its own
     /// session exists).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_identity(&self, identity: ParentIdentity) {
         *self.inner.identity.lock().expect("identity lock") = identity;
     }
 
     /// The inherited RLM depth bound (TS `getRlmMaxDepthStatus().maxDepth`
     /// before any chat override).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn rlm_max_depth(&self) -> u32 {
         self.inner
             .identity
@@ -385,6 +438,11 @@ impl SupervisorChildSessions {
     /// run status, elapsed duration, answer preview, and session dir.
     /// `parent_id` (the parent's own RLM node id) is overlaid by the
     /// worker, which owns that identity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub async fn child_snapshots(&self) -> Vec<Value> {
         let model = self
             .inner
@@ -498,6 +556,11 @@ impl SupervisorChildSessions {
 
     /// Set only the inherited model selector (the engine resolves its model
     /// when it builds the session, after the create command arrived).
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_model(&self, model: String) {
         self.inner.identity.lock().expect("identity lock").model = Some(model);
     }
@@ -505,6 +568,11 @@ impl SupervisorChildSessions {
     /// Set the session's RLM depth bound (TS `setRlmMaxDepth`): the
     /// registry is the bound every spawn checks, so the override is the
     /// live limit children respect immediately.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identity mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn set_rlm_max_depth(&self, max_depth: u32) {
         self.inner
             .identity
@@ -528,6 +596,12 @@ impl SupervisorChildSessions {
     /// child is torn down with its ledger tombstone, `"not_found"` for an
     /// unknown id. A teardown failure surfaces as `Err` (the TS delete
     /// throws through the wire arm).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the child teardown fails (the kill of the
+    /// child worker times out or errors), which the TS delete throws
+    /// through the wire arm.
     pub async fn delete_inactive_subagent(&self, child_id: &str) -> Result<&'static str> {
         self.inner.delete_inactive_subagent(child_id).await
     }
@@ -986,26 +1060,25 @@ impl SupervisorChildSessionsInner {
             // Still running (a timed-out slice or a re-queued continuation):
             // re-check liveness so a dead worker cannot spin the watch.
             let busy = self.child_busy(&active_session_id).await;
-            match busy {
-                Ok(_) => unreachable_polls = 0,
-                Err(_) => {
-                    unreachable_polls += 1;
-                    if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
-                        {
-                            let mut state = record.lock().await;
-                            if state.closed_by_parent || state.notice_delivered {
-                                return;
-                            }
-                            state.settled_status = Some("error");
-                            state.error = Some("Child worker unreachable".to_string());
+            if busy.is_ok() {
+                unreachable_polls = 0;
+            } else {
+                unreachable_polls += 1;
+                if unreachable_polls >= WATCH_MAX_UNREACHABLE_POLLS {
+                    {
+                        let mut state = record.lock().await;
+                        if state.closed_by_parent || state.notice_delivered {
+                            return;
                         }
-                        // A dead child keeps whatever rows its file already
-                        // holds; capture them before the terminal notice.
-                        self.emit_child_usage(record).await;
-                        self.deliver_settle_notice(record).await;
-                        self.fire_settle_hook();
-                        return;
+                        state.settled_status = Some("error");
+                        state.error = Some("Child worker unreachable".to_string());
                     }
+                    // A dead child keeps whatever rows its file already
+                    // holds; capture them before the terminal notice.
+                    self.emit_child_usage(record).await;
+                    self.deliver_settle_notice(record).await;
+                    self.fire_settle_hook();
+                    return;
                 }
             }
             tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
@@ -1241,22 +1314,12 @@ impl SupervisorChildSessionsInner {
                         turn_started = true;
                         break;
                     }
-                    Ok(false) if Instant::now() >= start_deadline => break,
-                    Ok(false) => {}
-                    Err(_) if Instant::now() >= start_deadline => break,
-                    Err(_) => {}
+                    Ok(false) | Err(_) if Instant::now() >= start_deadline => break,
+                    Ok(false) | Err(_) => {}
                 }
                 tokio::time::sleep(Duration::from_millis(FOLLOWUP_START_POLL_MS)).await;
             }
-            if !turn_started {
-                // The turn never showed busy: it either completed
-                // between two polls (its rows are on disk — bill them) or
-                // the delivery never started a turn (the cursor walk is a
-                // no-op). Observe once before the tail decides whether
-                // another delivery is owed — the TS subscription never
-                // stops observing a live child.
-                self.emit_child_usage(&record).await;
-            } else {
+            if turn_started {
                 // Phase 2: slice-wait until the turn settles (the
                 // task-run watcher's cadence, minus its settle
                 // bookkeeping).
@@ -1301,6 +1364,14 @@ impl SupervisorChildSessionsInner {
                     }
                     tokio::time::sleep(Duration::from_millis(WATCH_POLL_INTERVAL_MS)).await;
                 }
+            } else {
+                // The turn never showed busy: it either completed
+                // between two polls (its rows are on disk — bill them) or
+                // the delivery never started a turn (the cursor walk is a
+                // no-op). Observe once before the tail decides whether
+                // another delivery is owed — the TS subscription never
+                // stops observing a live child.
+                self.emit_child_usage(&record).await;
             }
             // The tail: a delivery that arrived while this watcher was
             // live re-arms it for another turn (the flag was set instead
@@ -1907,6 +1978,26 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 let record = record.lock().await;
                 SupervisorChildSessions::entry(&record)
             };
+            // The deletion commits BEFORE the best-effort terminal
+            // notice: the notice's supervisor delivery can ride its full
+            // timeout, and a deleted child must leave the registry and the
+            // cached context tree immediately, not after it.
+            this.children
+                .lock()
+                .await
+                .retain(|candidate| !Arc::ptr_eq(candidate, &record));
+            // The cached context-tree rows must not outlive the child: a
+            // deleted subagent leaves `/context` immediately (the
+            // background refresh would otherwise resurrect it through the
+            // settled-children backfill until its next walk).
+            if let Some(notify) = this
+                .delete_notifier
+                .lock()
+                .expect("delete notifier lock")
+                .clone()
+            {
+                notify(&entry.rlm_child_id);
+            }
             // A still-running child was cut short by the delete: the parent
             // session receives the cancelled terminal notice (TS
             // `completeDeletion`, reason `Deleted by parent orchestrator`).
@@ -1927,10 +2018,6 @@ impl RlmSubagentHost for SupervisorChildSessions {
                     this.deliver_terminal_notice(&notice).await;
                 }
             }
-            this.children
-                .lock()
-                .await
-                .retain(|candidate| !Arc::ptr_eq(candidate, &record));
             Ok(RlmDeleteSubagentResult {
                 subagent: entry,
                 outcome: Some("deleted"),
@@ -2490,7 +2577,7 @@ mod usage_emit_tests {
         assert_eq!(origin, pa_types::session::ChildUsageOrigin::SpawnTask);
         assert_eq!(usage.input, 50_208);
         assert_eq!(usage.output, 2_929);
-        assert!((usage.cost.total.as_f64() - 0.0089957).abs() < 1e-9);
+        assert!((usage.cost.total.as_f64() - 0.008_995_7).abs() < 1e-9);
         let consumed = record.lock().await.attributed_rows;
         assert!(consumed > 0);
 

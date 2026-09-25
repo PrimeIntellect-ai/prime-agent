@@ -10,7 +10,7 @@
 //!    lifecycle stays reachable via its resume selector, TS parity) and
 //!    the woken worker runs the turn against the mock provider.
 //!
-//! Unix-only e2e (AF_UNIX sockets): compiles to nothing elsewhere, like the
+//! Unix-only e2e (`AF_UNIX` sockets): compiles to nothing elsewhere, like the
 //! other pa-daemon e2e verifiers.
 #![cfg(unix)]
 
@@ -57,7 +57,7 @@ fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-archive",
         "object": "chat.completion.chunk",
-        "created": 1750000000,
+        "created": 1_750_000_000,
         "model": "mock-1",
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
     })
@@ -176,7 +176,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -189,7 +189,7 @@ impl Client {
     }
 
     fn read_response(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -283,11 +283,10 @@ fn log_mentions(agent_dir: &Path, needle: &str) -> bool {
     let Ok(entries) = std::fs::read_dir(agent_dir.join("logs")) else {
         return false;
     };
-    entries.flatten().map(|entry| entry.path()).any(|path| {
-        std::fs::read_to_string(&path)
-            .map(|content| content.contains(needle))
-            .unwrap_or(false)
-    })
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .any(|path| std::fs::read_to_string(&path).is_ok_and(|content| content.contains(needle)))
 }
 
 #[test]
@@ -372,7 +371,7 @@ fn an_archived_session_resumes_through_the_wake() {
                             "id": "mock-1",
                             "name": "Mock 1",
                             "api": "openai-completions",
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096
                         }
                     ]

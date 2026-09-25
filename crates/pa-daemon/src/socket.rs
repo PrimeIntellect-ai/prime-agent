@@ -32,7 +32,7 @@ pub async fn can_connect(path: &Path, timeout: Duration) -> bool {
 
 /// Staleness after which the cleanup lock of a crashed holder is reclaimed
 /// (TS `DAEMON_SOCKET_LOCK_STALE_MS`).
-const LOCK_STALE_AFTER: Duration = Duration::from_millis(5000);
+const LOCK_STALE_AFTER: Duration = Duration::from_secs(5);
 /// Live-lock retry cadence (TS `DAEMON_SOCKET_RELEASE_POLL_MS`) and cap
 /// (TS `acquireDaemonSocketPathLease`'s 600 retries): ~15s total.
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(25);
@@ -69,6 +69,13 @@ async fn acquire_cleanup_lock(path: &Path) -> Result<pa_core::platform::LockDir>
 /// (Windows) have no filesystem residue - the first listener creates the
 /// pipe - so preparing the path is a no-op there (the TS `prepareDaemonSocketPath`
 /// returns early on win32 for the same reason).
+///
+/// # Errors
+///
+/// Returns an error when the parent directory cannot be created, the
+/// socket path cannot be stat'ed, a live listener already answers on the
+/// socket (in use), the cross-process cleanup lock cannot be acquired,
+/// or the locked cleanup itself fails.
 #[cfg(unix)]
 pub async fn prepare_socket_path(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -113,7 +120,7 @@ async fn prepare_locked_socket_path(path: &Path) -> Result<()> {
     if can_connect(path, Duration::from_millis(250)).await {
         return Err(anyhow!("Daemon socket already in use: {}", path.display()));
     }
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(1000);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(25)).await;
         if !path.exists() {

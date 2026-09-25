@@ -52,6 +52,13 @@ pub fn load_theme(name: &str) -> Theme {
 /// Every error return funnels through the one exit restore: an early `?`
 /// after the mount (a stream read, a draw failure) must not hand the shell
 /// a terminal still in TUI state.
+///
+/// # Errors
+///
+/// Returns `Err` when the surface fails to mount or the replay loop fails
+/// (raw-mode enable, the alternate-screen enter, a stream read, or a
+/// draw); the exit restore runs first, so the shell never keeps a
+/// TUI-state terminal.
 pub fn run_app(
     stream: Box<dyn SessionStream>,
     options: AppOptions,
@@ -136,7 +143,6 @@ fn run_app_surface(
                 Event::Paste(text) => {
                     view.editor.handle_paste(&text);
                 }
-                Event::Resize(_, _) => {}
                 _ => {}
             }
         }
@@ -234,10 +240,11 @@ pub fn dispatch_events(editor: &mut Editor, on_submit: &mut dyn FnMut(&str)) {
                 editor.add_to_history(&text);
                 on_submit(&text);
             }
-            EditorEvent::Changed(_) | EditorEvent::AutocompleteToggled(_) => {}
             // This minimal harness owns no terminal clipboard channel;
             // the full session UI (session_ui.rs) performs the copy.
-            EditorEvent::ClipboardWrite(_) => {}
+            EditorEvent::Changed(_)
+            | EditorEvent::AutocompleteToggled(_)
+            | EditorEvent::ClipboardWrite(_) => {}
         }
     }
 }
@@ -264,16 +271,39 @@ pub(crate) fn draw(
     // terminals never display an intermediate, partly scrolled frame. A
     // terminal without mode 2026 support ignores the two escape sequences.
     crossterm::execute!(stdout(), terminal::BeginSynchronizedUpdate)?;
+    // TS cursor control (tui.ts `renderFullscreen`): the hardware cursor
+    // is positioned at the focused caret for IME on every frame, but is
+    // only shown when `showHardwareCursor` is on (default off). ratatui's
+    // `set_cursor_position` shows the cursor unconditionally, so it may
+    // carry the caret only in the show case — handing it the caret with
+    // the setting off would leave the terminal's own cursor visible at
+    // the caret while later paints drag it across every changed row (the
+    // cursor-glitch the operator reported).
+    let show_hardware_cursor = view.show_hardware_cursor;
     let painted = terminal.draw(|f| {
         let lines: Vec<ratatui::text::Line<'static>> =
             frame.iter().map(crate::markdown::to_ratatui_line).collect();
         f.render_widget(ratatui::text::Text::from(lines), frame_area);
-        if let Some((row, col)) = cursor {
-            if row < height && col < width {
-                f.set_cursor_position(ratatui::layout::Position::new(col as u16, row as u16));
+        if show_hardware_cursor {
+            if let Some((row, col)) = cursor {
+                if row < height && col < width {
+                    f.set_cursor_position(ratatui::layout::Position::new(col as u16, row as u16));
+                }
             }
         }
     });
+    // The hidden case still positions (TS's paint buffer ends with the
+    // caret MoveTo before the synchronized-update release): IME
+    // candidates anchor at the caret whether or not it is visible. The
+    // bare MoveTo rides the same sync bracket, after the paint.
+    if !show_hardware_cursor {
+        if let Some((row, col)) = cursor {
+            if row < height && col < width {
+                use crossterm::cursor::MoveTo;
+                crossterm::queue!(stdout(), MoveTo(col as u16, row as u16))?;
+            }
+        }
+    }
     let markers = if painted.is_ok() {
         emit_zone_markers(&emissions, cursor)
     } else {
@@ -293,11 +323,11 @@ fn emit_zone_markers(
     emissions: &[(usize, crate::osc133::RowMarkers)],
     cursor: Option<(usize, usize)>,
 ) -> Result<()> {
+    use crossterm::cursor::MoveTo;
+    use std::io::Write;
     if emissions.is_empty() {
         return Ok(());
     }
-    use crossterm::cursor::MoveTo;
-    use std::io::Write;
     let mut out = stdout();
     for (row, markers) in emissions {
         crossterm::queue!(out, MoveTo(0, *row as u16))?;

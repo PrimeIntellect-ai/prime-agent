@@ -23,7 +23,7 @@ const SHUTDOWN_CONVERGENCE_TIMEOUT_MS: u128 = 10_000;
 /// verdict is the divergence.
 pub(super) fn force_kill_daemon(pid: u32) -> bool {
     kill_daemon(pid);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     while std::time::Instant::now() < deadline {
         if !is_alive(pid) {
             return true;
@@ -31,7 +31,7 @@ pub(super) fn force_kill_daemon(pid: u32) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     kill_pid(pid as i32, Signal::Kill);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     loop {
         if !is_alive(pid) {
             return true;
@@ -117,7 +117,7 @@ pub(super) fn stop_tracked_process(pid: u32, expected_start_id: Option<&str>) ->
         }
     }
     kill_pid(pid as i32, Signal::Kill);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     while is_alive(pid) && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
@@ -142,8 +142,7 @@ pub(super) fn terminate_verified_residuals(
         let listeners = super::scan_listening_daemons(root);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis())
-            .unwrap_or(0);
+            .map_or(0, |elapsed| elapsed.as_millis());
         if listeners.is_empty() {
             previous_signature = None;
             quiet_since = quiet_since.or(Some(now));
@@ -186,9 +185,10 @@ pub(super) fn record_residuals(
     reason: &str,
 ) {
     for listener in listeners {
-        let identity = process_start_id(listener.pid)
-            .map(|start_id| format!("pid {}, start {start_id}", listener.pid))
-            .unwrap_or_else(|| format!("pid {}, process identity unavailable", listener.pid));
+        let identity = process_start_id(listener.pid).map_or_else(
+            || format!("pid {}, process identity unavailable", listener.pid),
+            |start_id| format!("pid {}, start {start_id}", listener.pid),
+        );
         failed.push((
             listener.socket_path.display().to_string(),
             format!("daemon {reason} ({identity})"),
@@ -206,7 +206,7 @@ pub(super) fn terminate_verified_listener(listener: &DiscoveredDaemonProcess) ->
         return false;
     }
     kill_pid(listener.pid as i32, Signal::Term);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
     while process_start_id(listener.pid).as_deref() == Some(start_id.as_str())
         && std::time::Instant::now() < deadline
     {
@@ -218,7 +218,7 @@ pub(super) fn terminate_verified_listener(listener: &DiscoveredDaemonProcess) ->
         // single post-SIGKILL check races a slow teardown or reads a
         // mid-death process as survived, so poll the identity until it
         // changes or the deadline lapses.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1_000);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
         while process_start_id(listener.pid).as_deref() == Some(start_id.as_str())
             && std::time::Instant::now() < deadline
         {

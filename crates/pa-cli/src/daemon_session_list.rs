@@ -262,15 +262,14 @@ fn format_session_age(modified: Option<&str>, now_ms: u64) -> String {
 pub(crate) fn parse_iso_ms(text: &str) -> Option<u64> {
     let text = text.trim();
     let (date, rest) = text.split_once('T')?;
-    let (time, offset_ms) = match rest.strip_suffix('Z') {
-        Some(time) => (time, 0i64),
-        None => {
-            let index = rest
-                .rfind('+')
-                .or_else(|| rest[1..].rfind('-').map(|i| i + 1))?;
-            let offset = parse_offset(&rest[index..])?;
-            (&rest[..index], offset)
-        }
+    let (time, offset_ms) = if let Some(time) = rest.strip_suffix('Z') {
+        (time, 0i64)
+    } else {
+        let index = rest
+            .rfind('+')
+            .or_else(|| rest[1..].rfind('-').map(|i| i + 1))?;
+        let offset = parse_offset(&rest[index..])?;
+        (&rest[..index], offset)
     };
     let (year, month, day) = parse_date_parts(date)?;
     let (hour, minute, second, millis) = parse_time_parts(time)?;
@@ -360,8 +359,7 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 #[cfg(test)]

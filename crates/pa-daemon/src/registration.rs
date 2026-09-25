@@ -72,6 +72,11 @@ pub struct RegistrationHandle {
 
 impl RegistrationHandle {
     /// Record the persisted session id and trigger a re-registration.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the session-id mutex is poisoned (a holder panicked
+    /// while holding the lock).
     pub fn notify_session_created(&self, session_id: String) {
         *self.session_id.lock().unwrap() = Some(session_id.clone());
         let _ = self

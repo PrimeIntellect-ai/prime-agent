@@ -300,30 +300,28 @@ impl TurnBoundary {
         )
         .await?;
         let arm_finished = loop {
-            match self
+            let outcome = self
                 .overflow_recovery_attempt(
                     engine,
                     model,
                     api_key.clone(),
                     OverflowBoundary::SettledTurn,
                 )
-                .await?
-            {
+                .await?;
+            if let OverflowOutcome::RetryTurn = outcome {
                 // The retried turn settled: its serialized checkpoint
                 // drains the trigger the overflow compaction scheduled
                 // before the arm re-checks the new turn.
-                OverflowOutcome::RetryTurn => {
-                    self.consume_compact_auto_refine(
-                        engine,
-                        model,
-                        api_key.clone(),
-                        global_harness_dir.clone(),
-                        RefineSurface::Checkpoint,
-                    )
-                    .await?;
-                    continue;
-                }
-                outcome => break matches!(outcome, OverflowOutcome::Finished),
+                self.consume_compact_auto_refine(
+                    engine,
+                    model,
+                    api_key.clone(),
+                    global_harness_dir.clone(),
+                    RefineSurface::Checkpoint,
+                )
+                .await?;
+            } else {
+                break matches!(outcome, OverflowOutcome::Finished);
             }
         };
         if !arm_finished {
@@ -379,7 +377,7 @@ impl TurnBoundary {
             .await
     }
 
-    /// TS `_assistantTurnsSinceAutoRefine` (the message_end increments): the
+    /// TS `_assistantTurnsSinceAutoRefine` (the `message_end` increments): the
     /// settled non-error, non-aborted assistant turns appended since the
     /// last boundary call, added to the counter the review prompt's trigger
     /// line carries.
@@ -479,7 +477,10 @@ impl TurnBoundary {
         let turns = self.assistant_turns_since_review;
         let outcome = engine
             .session
-            .auto_refine_after_compaction(model, api_key, global_harness_dir, turns)
+            // The headless print boundary never moves branches (the
+            // session is single-branch for the run), so the branch
+            // invalidation version stays at its initial 0.
+            .auto_refine_after_compaction(model, api_key, global_harness_dir, turns, 0)
             .await;
         // Every review attempt stamps the cooldown and resets the turn
         // counter (TS stamps decline, success, and failure alike).
@@ -978,8 +979,8 @@ mod tests {
     use pa_types::session::FileEntry;
     use serde_json::json;
 
-    /// The faux model's per-request output budget (maxTokens 16_384 under the
-    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// The faux model's per-request output budget (maxTokens `16_384` under the
+    /// `32_000` request cap): threshold fixtures subtract it from the window
     /// alongside the headroom (the combined input+output ceiling).
     const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
@@ -1041,7 +1042,7 @@ mod tests {
         let mock = std::sync::Arc::new(pa_telemetry::MockSink::new());
         let mut config = pa_telemetry::TelemetryClientConfig::new("install-1");
         config.batch_size = 1;
-        config.flush_interval = std::time::Duration::from_secs(600);
+        config.flush_interval = std::time::Duration::from_mins(10);
         config.sinks = vec![mock.clone() as std::sync::Arc<dyn pa_telemetry::TelemetrySink>];
         let client = pa_telemetry::TelemetryClient::spawn(config).expect("spawn client");
         let telemetry = pa_core::session_engine::telemetry::TelemetryWiring {
@@ -1388,7 +1389,7 @@ mod tests {
             }),
             json!({
                 "compaction": {
-                    "enabled": true, "reserveTokens": 1, "keepRecentTokens": 100000
+                    "enabled": true, "reserveTokens": 1, "keepRecentTokens": 100_000
                 }
             }),
             None,
@@ -1758,7 +1759,7 @@ mod tests {
             json!({ "responses": [{"text": "seed reply"}] }),
             json!({
                 "compaction": {
-                    "enabled": true, "reserveTokens": 1, "keepRecentTokens": 100000
+                    "enabled": true, "reserveTokens": 1, "keepRecentTokens": 100_000
                 }
             }),
             None,

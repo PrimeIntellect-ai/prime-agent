@@ -197,10 +197,7 @@ fn load_templates_from_dir(
         if !name.ends_with(".md") {
             continue;
         }
-        if !std::fs::metadata(&path)
-            .map(|meta| meta.is_file())
-            .unwrap_or(false)
-        {
+        if !std::fs::metadata(&path).is_ok_and(|meta| meta.is_file()) {
             continue;
         }
         if let Some(template) = load_template_from_file(&path, get_source_info(&path)) {
@@ -242,7 +239,7 @@ fn resolve_prompt_path(path: &str, cwd: &Path) -> PathBuf {
     }
 }
 
-/// Load templates from agentDir/prompts/, cwd/{CONFIG_DIR_NAME}/prompts/, and
+/// Load templates from agentDir/prompts/, `cwd/{CONFIG_DIR_NAME}/prompts/`, and
 /// explicit paths (later entries win nothing: templates append in order).
 pub fn load_prompt_templates(options: &LoadPromptTemplatesOptions) -> Vec<PromptTemplate> {
     let mut templates = Vec::new();
@@ -253,9 +250,7 @@ pub fn load_prompt_templates(options: &LoadPromptTemplatesOptions) -> Vec<Prompt
         .join("prompts");
 
     let is_under = |target: &Path, root: &Path| -> bool {
-        std::fs::canonicalize(root)
-            .map(|root| target == root || target.starts_with(root))
-            .unwrap_or(false)
+        std::fs::canonicalize(root).is_ok_and(|root| target == root || target.starts_with(root))
             || target == root
             || target.starts_with(root)
     };

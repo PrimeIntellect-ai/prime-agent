@@ -1,0 +1,192 @@
+# CI gates for the prime-agent Rust port: the tip-compiles-tests guarantee
+# plus PR gating, in one workflow (the shape of the TS product's ci.yml).
+#
+# Promoted from ci/workflows/ci.yml (see ci/workflows/README.md; promotion
+# needs a push credential with the `workflow` scope). Two triggers, one
+# gate set mirroring `make check` exactly (fmt --all --check, clippy --workspace
+# --all-targets -- -D warnings, cargo test --workspace) on the pinned
+# toolchain (1.98.1) and runner image the continuous/release builds use:
+#
+#   push to main/rust — every merge is a push. continuous.yml proves the
+#   release binaries link; THIS workflow proves the tip's test/bench/example
+#   targets compile (`cargo check --workspace --all-targets`) and the test
+#   suites pass (the test suite sharded 4-ways below). Until ci.yml existed
+#   no workflow ever compiled tests on the tip or ran any test: on 2026-09-23
+#   alone that gap let #2620's epoch hunk-skip and #2632's missing IsTerminal
+#   import land as red tip builds, #2632's missed initial_images fixture and
+#   #2627's fork_from test-target errors land as latent compile breaks, and
+#   #2635's login-recovery test land red — none noticed by CI.
+#
+#   pull_request against main/rust — the same gates on the merge candidate,
+#   so the merge bar stops relying solely on review bots.
+#
+# The test phase is sharded: `cargo test --workspace` ran every test binary
+# serially in one job (~13 minutes; the per-PR wall-clock floor). It is now
+# the union of four parallel shard jobs: scripts/ci_test_shard.py enumerates
+# the workspace's test binaries via `cargo metadata --no-deps` and each shard
+# runs the units whose stable crc32 hash lands in its slice — every binary
+# lands in exactly one shard on every run (never rebalanced mid-suite), so
+# flake attribution stays put when tests are added or renamed. The union
+# covers exactly what the serial `cargo test --workspace` built and ran:
+# lib/bin/doc unittests, every tests/ integration target, the
+# example/bench compile targets (compile parity, `--no-run`), and the
+# workspace bins the serial build left in the profile dir as a side effect
+# (each shard links them up front — the e2e suites look each other's
+# binaries up there). The summary
+# job audits the shard manifests — same enumeration, disjoint shards, every
+# assigned unit executed — and merges the failure reports into one table
+# naming the failing binaries; the gate is green only when all shards are.
+#
+# Strictly read-only: contents: read, persist-credentials: false, no secrets.
+# The windows-cross/windows/deny jobs remain staged at ci/workflows/ci.yml
+# until windows-readiness lands and a deny policy decision is made (see
+# ci/workflows/README.md).
+#
+name: ci
+
+on:
+  push:
+    branches: [main, rust]
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main, rust]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # PRs: a newer push supersedes the stale gates. Pushes: the newest tip
+  # supersedes the older run — under this fleet's merge cadence a queued
+  # (non-canceling) push run would lag hours behind and bill stale tips.
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Draft PRs do not gate (no billing on work-in-progress pushes); the
+    # ready_for_review trigger runs the gates once a draft is marked ready.
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy-test:
+    name: check + clippy (workspace)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          # Red gates cache too: an iterating PR keeps its dependency set
+          # warm instead of paying a cold rebuild per fix push.
+          cache-on-failure: true
+      # --locked everywhere: the lockfile is committed, so a PR that changes
+      # Cargo.toml without its lockfile in the same push fails here instead
+      # of in a teammate's local build.
+      # --all-targets compiles the test/bench/example targets the release
+      # builds never touch (#2632's missed `initial_images` fixture was
+      # exactly this class: a latent test-target compile break no workflow
+      # could see).
+      - name: Check (workspace, all targets, locked)
+        run: cargo check --workspace --all-targets --locked
+      - name: Clippy (workspace, all targets, deny warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  # The test suite, sharded 4-ways: each shard runs the test binaries whose
+  # stable crc32 hash lands in its slice (scripts/ci_test_shard.py); fmt and
+  # clippy run above, a shard job runs ONLY its test subset. The union of
+  # the shards is exactly the old serial `cargo test --workspace`.
+  test-shard:
+    name: test shard ${{ matrix.shard }}/4
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    if: github.event_name == 'push' || !github.event.pull_request.draft
+    strategy:
+      # One red shard must not cancel the others: their own conclusions are
+      # the per-shard signal the summary merges.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@ce678459e9fc7500d337468f904b95f1b5c10b5e # 1.98.1 action pin; toolchain pinned below
+        with:
+          toolchain: "1.98.1"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          cache-on-failure: true
+          # Per-shard caches (the default key carries the job id, which is
+          # identical for all matrix legs); parallel legs would otherwise
+          # race onto one cache entry and only the first save would stick.
+          shared-key: shard-${{ matrix.shard }}
+      - name: Install uv (the kernel tests bootstrap the Python kernel venv with it)
+        run: |
+          python3 -m pip install --user uv
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # Sibling-binary parity: the serial `cargo test --workspace` built every
+      # workspace bin into the shared profile dir as a side effect, and the
+      # e2e suites look each other's binaries up there (pa-cli's
+      # daemon_commands_e2e spawns pa-daemon this way). A shard builds its
+      # test subset only, so the bins are built explicitly once up front —
+      # first measured on run 36085993711, where the missing pa-daemon bin
+      # failed exactly this suite.
+      - name: Build the workspace bins (sibling-binary parity for the e2e suites)
+        run: cargo build --locked --workspace --bins
+      - name: Run this shard's test subset
+        run: |
+          python3 scripts/ci_test_shard.py             --shard ${{ matrix.shard }} --total 4             --manifest "$RUNNER_TEMP/shard-manifest-${{ matrix.shard }}.json"
+      - name: Upload the shard manifest (always — the summary audits it)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: shard-manifest-${{ matrix.shard }}
+          path: ${{ runner.temp }}/shard-manifest-${{ matrix.shard }}.json
+
+  # The aggregate: audits the partition (same enumeration everywhere,
+  # disjoint shards, every assigned unit executed — coverage can never
+  # silently regress) and merges the per-shard failure reports into one
+  # table naming the failing binaries. Green only when every shard is green.
+  test-summary:
+    name: test summary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    needs: [test-shard]
+    if: always() && (github.event_name == 'push' || !github.event.pull_request.draft)
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: shard-manifest-*
+          merge-multiple: true
+          path: manifests
+      - name: Audit the shards and merge their failure reports
+        run: python3 scripts/ci_test_shard_summary.py --total 4 --dir manifests
+
+  # windows-cross runs here once validated green at the tip (the staged
+  # ci/workflows/ci.yml carries it until then); the real windows-latest test
+  # job and cargo-deny stay staged as well — see ci/workflows/README.md.

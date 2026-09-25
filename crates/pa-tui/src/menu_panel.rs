@@ -247,6 +247,29 @@ pub(crate) fn hug_row(
         .collect()
 }
 
+/// The selected row's wash spans the full frame width (the agents-view
+/// treatment, the operator's 2026-09-24 "table fills the width" ruling):
+/// the row is truncated to the frame width and padded out to it, so the
+/// selection reads as one full-width table surface while the columns
+/// themselves keep their content-hug geometry.
+pub(crate) fn fill_row(theme: &Theme, row: Line, selected: bool, width: usize) -> Line {
+    let mut row = truncate_line(&row, width, "");
+    if !selected {
+        return row;
+    }
+    let used = crate::width::spans_width(&row);
+    if used < width {
+        row.push(Span::raw(" ".repeat(width - used)));
+    }
+    let wash = crate::onboarding::highlight_wash(theme);
+    row.into_iter()
+        .map(|mut span| {
+            span.style = span.style.bg(wash);
+            span
+        })
+        .collect()
+}
+
 /// The inline search field (TS `MenuSearchInput.render`, inline mode): a
 /// full-width border rule, the field row, a border rule. The field is the
 /// single-line input with its `"> "` prompt; an empty field shows the dim

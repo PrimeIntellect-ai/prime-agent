@@ -147,10 +147,9 @@ pub fn requires_tool_call_id(model_id: &str) -> bool {
 
 fn get_gemini_major_version(model_id: &str) -> Option<u64> {
     let lower = model_id.to_lowercase();
-    let stripped = lower
-        .strip_prefix("gemini")
-        .map(|rest| rest.strip_prefix("-live").unwrap_or(rest))
-        .unwrap_or(&lower);
+    let stripped = lower.strip_prefix("gemini").map_or(lower.as_str(), |rest| {
+        rest.strip_prefix("-live").unwrap_or(rest)
+    });
     let digits = stripped.strip_prefix('-')?;
     let major: String = digits.chars().take_while(char::is_ascii_digit).collect();
     major.parse().ok()
@@ -364,12 +363,11 @@ pub fn convert_messages(model: &Model, context: &Context) -> Vec<Value> {
                     let has_function_response = last
                         .get("parts")
                         .and_then(|value| value.as_array())
-                        .map(|parts| {
+                        .is_some_and(|parts| {
                             parts
                                 .iter()
                                 .any(|part| part.get("functionResponse").is_some())
-                        })
-                        .unwrap_or(false);
+                        });
                     if is_user && has_function_response {
                         last.get_mut("parts")
                             .and_then(|value| value.as_array_mut())
@@ -435,7 +433,7 @@ fn sanitize_for_openapi(schema: &Value) -> Value {
 /// Convert tools to Gemini function declarations.
 ///
 /// By default uses `parametersJsonSchema` (full JSON Schema). `use_parameters`
-/// switches to the legacy OpenAPI `parameters` field (needed for Cloud Code
+/// switches to the legacy `OpenAPI` `parameters` field (needed for Cloud Code
 /// Assist with Claude models).
 pub fn convert_tools(tools: &[Tool], use_parameters: bool) -> Option<Vec<Value>> {
     if tools.is_empty() {

@@ -86,7 +86,7 @@ fn chunk(delta: Value, finish_reason: Option<&str>, usage: Value) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
-        "created": 1750000000,
+        "created": 1_750_000_000,
         "model": "mock-1",
         "choices": [{
             "index": 0,
@@ -108,23 +108,8 @@ fn small_usage() -> Value {
 /// The crossing turn's reported usage (the f14-auto battery shape).
 fn crossing_usage() -> Value {
     json!({
-        "prompt_tokens": 126000, "completion_tokens": 10, "total_tokens": 126010,
+        "prompt_tokens": 126_000, "completion_tokens": 10, "total_tokens": 126_010,
         "prompt_tokens_details": {"cached_tokens": 80},
-    })
-}
-
-/// The dashboard status-line recap (`status_line.rs`) rides the same
-/// provider entry, so its request also lands on the mock. It summarizes
-/// the session's user-visible rows -- the outcome disclosure included --
-/// so the wire-purity scan over model-context requests must skip it.
-fn is_status_line_request(body: &Value) -> bool {
-    body["messages"].as_array().is_some_and(|messages| {
-        messages.iter().any(|message| {
-            message["role"] == "system"
-                && message["content"]
-                    .as_str()
-                    .is_some_and(|text| text.starts_with("You generate a status line"))
-        })
     })
 }
 
@@ -210,7 +195,7 @@ fn serve(
         json!({
             "id": "chatcmpl-test",
             "object": "chat.completion.chunk",
-            "created": 1750000000,
+            "created": 1_750_000_000,
             "model": "mock-1",
             "choices": [],
             "usage": usage,
@@ -305,7 +290,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -348,7 +333,7 @@ impl Client {
     /// Read lines until the response for `id` arrives, parking broadcast
     /// events on the way.
     fn read_response(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -385,7 +370,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
                             "id": "mock-1",
                             "name": "Mock 1",
                             "api": "openai-completions",
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096,
                         }
                     ]
@@ -541,8 +526,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
             path.extension()
                 .is_some_and(|extension| extension == "jsonl")
                 && std::fs::read_to_string(path)
-                    .map(|content| content.contains("compaction_outcome"))
-                    .unwrap_or(false)
+                    .is_ok_and(|content| content.contains("compaction_outcome"))
         })
         .expect("the durable outcome row in the session file");
     let persisted = std::fs::read_to_string(&session_file).expect("read session file");
@@ -577,7 +561,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
     let requests = mock.requests.lock().expect("mock lock").clone();
     let next_turn_request = requests[before_next..]
         .iter()
-        .find(|body| !is_summarizer_request(body) && !is_status_line_request(body))
+        .find(|body| !is_summarizer_request(body))
         .expect("the next turn reached the provider")
         .clone();
     let serialized = serde_json::to_string(&next_turn_request).expect("serialize request");

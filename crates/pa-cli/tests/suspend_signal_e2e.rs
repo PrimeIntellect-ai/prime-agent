@@ -46,6 +46,15 @@ use pa_tui::interactive::{
 const MOUSE_ENABLE: &str = "\x1b[?1002h\x1b[?1006h";
 const MOUSE_DISABLE: &str = "\x1b[?1006l\x1b[?1002l";
 
+/// The kitty capability query crossterm's support check writes (`\x1b[?u`
+/// then the primary-device-attributes query in one write). The port runs
+/// it once per process (the first mount); a resume that writes it again
+/// re-arms the 2s support check — crossterm's filtered poll holds the
+/// process-global event-reader lock for its whole budget, and the app
+/// reader's input goes blind until it expires (the strace-proven
+/// ~2s-after-every-resume blackout).
+const KITTY_QUERY: &str = "\x1b[?u\x1b[c";
+
 /// The child-mode socket: set (with the socket path) only when this very
 /// binary is re-executed as the product-under-test.
 const CHILD_SOCKET_ENV: &str = "PA_SUSPEND_CHILD_SOCKET";
@@ -123,6 +132,10 @@ fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
     // tracking (the seam bytes) before any input is handled.
     harness.wait_from_start(MOUSE_ENABLE, "startup mouse enable");
 
+    // The first mount runs the kitty capability query once (the
+    // once-per-process contract's positive side: the probe exists).
+    harness.wait_from_start(KITTY_QUERY, "the first mount's kitty query");
+
     // Ctrl+Z: the app.suspend binding. The renderer releases tracking
     // before the process group stops, so the disable bytes arrive while
     // the process is still running.
@@ -164,12 +177,34 @@ fn ctrl_z_releases_tracking_stops_and_sigcont_re_applies() {
     // editor draws the typed cells at their positions and parks the
     // cursor right after them — row 22 (the prompt dock line of the
     // fixed 24-row frame), column 7 ("hi" after the "> " prompt).
+    //
+    // The wait is bounded tight: a resume that re-queried kitty leaves
+    // the app reader starved behind crossterm's support check for the
+    // check's whole 2s budget, and the typed bytes only render when it
+    // expires — the fixed resume leaves the reader free and renders in
+    // well under a second even on a loaded VM (the pre-fix run took
+    // 2.0s here, 10/10, strace-verified).
     let mark_typed = harness.mark();
     harness.write(b"hi");
-    harness.wait_from(
+    harness.wait_from_bounded(
         mark_typed,
         "\x1b[22;7H",
         "the resumed editor renders the typed text",
+        Duration::from_millis(1500),
+    );
+
+    // The regression lock: the resume never re-queries kitty. Drain the
+    // tail so the assertion sees everything the child wrote since the
+    // SIGCONT — the once-per-process probe's query bytes must be absent
+    // from the whole resume (a re-armed probe re-blindes the reader for
+    // its 2s support check; the byte-level evidence of the fix is that
+    // the query appears exactly once, on the first mount).
+    harness.drain_until_quiet(4);
+    let resume_region = harness.region_since(mark_resume);
+    assert!(
+        find_subsequence(&resume_region, KITTY_QUERY.as_bytes()).is_none(),
+        "the SIGCONT resume re-queried the kitty protocol; the query is \
+         once-per-process and must not run again"
     );
 
     harness.finish();
@@ -234,6 +269,14 @@ impl SuspendHarness {
         self.master.wait_from(mark, needle, what);
     }
 
+    fn wait_from_bounded(&mut self, mark: usize, needle: &str, what: &str, bound: Duration) {
+        self.master.wait_from_bounded(mark, needle, what, bound);
+    }
+
+    fn region_since(&self, mark: usize) -> Vec<u8> {
+        self.master.region_since(mark)
+    }
+
     fn drain_until_quiet(&mut self, quiet_polls: usize) {
         self.master.drain_until_quiet(quiet_polls);
     }
@@ -266,6 +309,12 @@ impl PtyReader {
         self.output.len()
     }
 
+    /// The bytes collected since the given mark (the region the
+    /// no-re-query assertion inspects).
+    fn region_since(&self, mark: usize) -> Vec<u8> {
+        self.output[mark..].to_vec()
+    }
+
     fn write(&mut self, payload: &[u8]) {
         self.file.write_all(payload).expect("write to the pty");
     }
@@ -281,8 +330,7 @@ impl PtyReader {
         while quiet < quiet_polls {
             let mut buffer = [0u8; 8192];
             match self.file.read(&mut buffer) {
-                Ok(0) => quiet += 1,
-                Err(_) => quiet += 1,
+                Ok(0) | Err(_) => quiet += 1,
                 Ok(n) => {
                     self.output.extend_from_slice(&buffer[..n]);
                     quiet = 0;
@@ -314,6 +362,33 @@ impl PtyReader {
                 );
             }
             std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// `wait_from` with a caller-chosen bound: the paths this pins (the
+    /// resume's input freedom) must answer well inside the bound, while
+    /// the regression they lock out (the re-armed kitty support check's
+    /// 2s event-reader starvation) exceeds it.
+    fn wait_from_bounded(&mut self, mark: usize, needle: &str, what: &str, bound: Duration) {
+        let deadline = Instant::now() + bound;
+        loop {
+            if find_subsequence(&self.output[mark..], needle.as_bytes()).is_some() {
+                return;
+            }
+            let mut buffer = [0u8; 8192];
+            let result = self.file.read(&mut buffer);
+            match result {
+                Ok(0) | Err(_) => {}
+                Ok(n) => self.output.extend_from_slice(&buffer[..n]),
+            }
+            if Instant::now() > deadline {
+                let text = String::from_utf8_lossy(&self.output[mark..]);
+                panic!(
+                    "{what} missed the {bound:?} bound (needle {needle:?}); \
+                     pty tail since mark:\n{text}"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 }

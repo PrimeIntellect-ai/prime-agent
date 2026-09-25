@@ -1,9 +1,9 @@
-//! PostHog feature-flag client (gradual rollouts).
+//! `PostHog` feature-flag client (gradual rollouts).
 //!
 //! v1 scope: fetch + [`FlagsClient::flag_enabled`] with an in-memory TTL
 //! cache; no product gating lives in this crate. Decisions are anonymous —
 //! the only identity is the pseudonymous installation id (`distinct_id`).
-//! When PostHog is unreachable the configured default is served and the
+//! When `PostHog` is unreachable the configured default is served and the
 //! (empty) result is cached for the TTL so an offline client never
 //! request-storms.
 
@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 /// How long a decide response (or a failed fetch) stays authoritative.
-pub const FLAG_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+pub const FLAG_CACHE_TTL: Duration = Duration::from_mins(5);
 
 const DECIDE_API_VERSION: &str = "v=3";
 
-/// PostHog decide client for one installation.
+/// `PostHog` decide client for one installation.
 pub struct FlagsClient {
     http: reqwest::Client,
     decide_url: String,
@@ -37,6 +37,13 @@ struct CacheEntry {
 }
 
 impl FlagsClient {
+    /// New decide client for one installation: fetches the endpoint's
+    /// `/decide/` flags for `distinct_id`, on a 1.5s request timeout.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal reqwest HTTP client (rustls backend) cannot
+    /// be built.
     pub fn new(endpoint: &crate::sinks::PostHogEndpoint, distinct_id: impl Into<String>) -> Self {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_millis(1500))
@@ -66,16 +73,13 @@ impl FlagsClient {
             let value = value.unwrap_or(Value::Null);
             return truthy(&value).unwrap_or(default);
         }
-        match self.fetch().await {
-            Some(flags) => {
-                let value = flags.get(name).cloned().unwrap_or(Value::Null);
-                self.store(flags);
-                truthy(&value).unwrap_or(default)
-            }
-            None => {
-                self.store(HashMap::new());
-                default
-            }
+        if let Some(flags) = self.fetch().await {
+            let value = flags.get(name).cloned().unwrap_or(Value::Null);
+            self.store(flags);
+            truthy(&value).unwrap_or(default)
+        } else {
+            self.store(HashMap::new());
+            default
         }
     }
 
@@ -131,7 +135,7 @@ impl FlagsClient {
     }
 }
 
-/// PostHog flag values are `true`/`false` (booleans) or multivariate strings.
+/// `PostHog` flag values are `true`/`false` (booleans) or multivariate strings.
 /// A string other than `"false"` is an enabled variant.
 fn truthy(value: &Value) -> Option<bool> {
     match value {

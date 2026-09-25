@@ -211,12 +211,12 @@ fn visit_summary(
         let collapsed = summary.split_whitespace().collect::<Vec<_>>().join(" ");
         match rows {
             SummaryRows::Paint(output) => {
-                output.extend(collapsed_summary_rows(&collapsed, body, width))
+                output.extend(collapsed_summary_rows(&collapsed, body, width));
             }
             SummaryRows::Count(count) => {
                 *count +=
                     crate::width::wrapped_text_count(&collapsed, width.saturating_sub(1).max(1))
-                        .min(2)
+                        .min(2);
             }
         }
         return;
@@ -235,7 +235,7 @@ fn visit_summary(
     md.body = body;
     match rows {
         SummaryRows::Count(count) => {
-            *count += crate::markdown::markdown_row_count(summary, content_width, &md)
+            *count += crate::markdown::markdown_row_count(summary, content_width, &md);
         }
         SummaryRows::Paint(output) => {
             let painted = crate::markdown::render_markdown(summary, content_width, &md);

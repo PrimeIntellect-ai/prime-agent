@@ -72,6 +72,12 @@ impl BashExecutionCard {
     /// One streamed chunk (TS `appendOutput`): strip ANSI, normalize
     /// carriage returns, then merge into the accumulated lines (the first
     /// new line continues the last open line).
+    ///
+    /// # Panics
+    ///
+    /// Cannot panic: the `expect` guards a branch invariant
+    /// (`output_lines` is non-empty exactly on the branch that takes
+    /// `last_mut`).
     pub fn append_output(&mut self, chunk: &str) {
         let clean = strip_ansi(chunk).replace("\r\n", "\n").replace('\r', "\n");
         if clean.is_empty() {

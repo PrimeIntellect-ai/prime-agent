@@ -53,7 +53,7 @@ const STOP_SETTLE_POLL: Duration = Duration::from_millis(50);
 /// before it answers the `worker is starting` shape (a sibling's whole
 /// launch — spawn, connect, create replay — holds the lock; the wait
 /// must cover it without parking a wedged client forever).
-const OPENING_LOCK_WAIT: Duration = Duration::from_secs(120);
+const OPENING_LOCK_WAIT: Duration = Duration::from_mins(2);
 
 /// What reusing one resident answered: the live binding's summary, or a
 /// holder whose teardown frees the file (the caller settles it and
@@ -101,9 +101,10 @@ struct ReuseCandidates {
 /// comparison rule: canonicalize when the path exists, keep the raw path
 /// otherwise — the file exists by construction here).
 fn canonical_opening_key(path: &Path) -> String {
-    path.canonicalize()
-        .map(|canonical| canonical.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string_lossy().to_string())
+    path.canonicalize().map_or_else(
+        |_| path.to_string_lossy().to_string(),
+        |canonical| canonical.to_string_lossy().to_string(),
+    )
 }
 
 /// Whether one resident's process is provably gone, identity-aware (the

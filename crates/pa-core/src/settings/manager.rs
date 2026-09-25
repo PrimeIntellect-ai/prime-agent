@@ -124,6 +124,11 @@ impl SettingsManager {
     }
 
     /// Reload both scopes from storage.
+    ///
+    /// # Errors
+    ///
+    /// The current implementation never returns `Err`; scope load problems
+    /// are recorded as load errors on the manager instead.
     pub fn reload(&mut self) -> Result<()> {
         let mut errors = std::mem::take(&mut self.errors);
         let (global, global_raw, global_load_error) =
@@ -153,22 +158,42 @@ impl SettingsManager {
     }
 
     /// Persist the global scope (sibling-module setters share this).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub(crate) fn save_global_scope(&mut self) -> Result<()> {
         self.save_global()
     }
 
     // -- persisted setters --------------------------------------------------
 
+    /// `defaultProvider` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_default_provider(&mut self, provider: String) -> Result<()> {
         self.global.default_provider = Some(provider);
         self.save_global()
     }
 
+    /// `defaultModel` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_default_model(&mut self, model: String) -> Result<()> {
         self.global.default_model = Some(model);
         self.save_global()
     }
 
+    /// `defaultModel` + `defaultProvider` setter (the model switch's
+    /// combined write).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_default_model_and_provider(
         &mut self,
         provider: String,
@@ -248,26 +273,51 @@ impl SettingsManager {
         self.global.recent_models = Some(recent);
     }
 
+    /// `steeringMode` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_steering_mode(&mut self, mode: QueueModeSetting) -> Result<()> {
         self.global.steering_mode = Some(mode);
         self.save_global()
     }
 
+    /// `followUpMode` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_follow_up_mode(&mut self, mode: QueueModeSetting) -> Result<()> {
         self.global.follow_up_mode = Some(mode);
         self.save_global()
     }
 
+    /// `theme` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_theme(&mut self, theme: String) -> Result<()> {
         self.global.theme = Some(theme);
         self.save_global()
     }
 
+    /// `updateChannel` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_update_channel(&mut self, channel: UpdateChannel) -> Result<()> {
         self.global.update_channel = Some(channel);
         self.save_global()
     }
 
+    /// `defaultThinkingLevel` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_default_thinking_level(&mut self, level: ThinkingLevelSetting) -> Result<()> {
         self.global.default_thinking_level = Some(level);
         self.save_global()
@@ -275,6 +325,10 @@ impl SettingsManager {
 
     /// TS `setRetryEnabled`: the auto-retry toggle the provider retry
     /// policy reads (`retry.enabled`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_retry_enabled(&mut self, enabled: bool) -> Result<()> {
         self.global
             .retry
@@ -287,6 +341,10 @@ impl SettingsManager {
     /// (`compaction.enabled` in the global settings file). The connection
     /// state's `autoCompactionEnabled` is this value in TS, so a daemon
     /// restart re-seeds the flag from the persisted setting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_compaction_enabled(&mut self, enabled: bool) -> Result<()> {
         self.global
             .compaction
@@ -295,33 +353,63 @@ impl SettingsManager {
         self.save_global()
     }
 
+    /// `transport` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_transport(&mut self, transport: TransportSetting) -> Result<()> {
         self.global.transport = Some(transport);
         self.save_global()
     }
 
+    /// `rlmMaxDepth` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_rlm_max_depth(&mut self, depth: u64) -> Result<()> {
         self.global.rlm_max_depth = Some(depth);
         self.save_global()
     }
 
+    /// `telemetry.enabled` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_telemetry_enabled(&mut self, enabled: bool) -> Result<()> {
         let telemetry = self.global.telemetry.get_or_insert_with(Default::default);
         telemetry.enabled = Some(enabled);
         self.save_global()
     }
 
+    /// `telemetry.noticeShown` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_telemetry_notice_shown(&mut self, shown: bool) -> Result<()> {
         let telemetry = self.global.telemetry.get_or_insert_with(Default::default);
         telemetry.notice_shown = Some(shown);
         self.save_global()
     }
 
+    /// `onboardingShown` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_onboarding_shown(&mut self, shown: bool) -> Result<()> {
         self.global.onboarding_shown = Some(shown);
         self.save_global()
     }
 
+    /// `onboardingCompleted` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_onboarding_completed(&mut self, completed: bool) -> Result<()> {
         self.global.onboarding_completed = Some(completed);
         self.save_global()
@@ -346,18 +434,37 @@ impl SettingsManager {
             .unwrap_or(true)
     }
 
-    /// `agentTraces.enabled`: unset means ON. Sharing stays on until the
-    /// user opts out (`/traces`), and the value persists only then, like
-    /// the compaction default — so a fresh install never sees the opt-in
-    /// question. (TS defaults this setting off and asks on first run.)
+    /// `agentTraces.enabled`: unset means OFF — trace sharing is
+    /// opt-in, exactly the TS default. The first-run onboarding question
+    /// is the opt-in moment; `/traces` stays the change path, and the
+    /// value persists only when a choice is made.
     pub fn get_agent_traces_enabled(&self) -> bool {
         self.merged
             .agent_traces
             .as_ref()
             .and_then(|traces| traces.enabled)
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
 
+    /// Whether a trace-sharing choice was ever written: the
+    /// `agentTraces.enabled` key present in the merged settings. A
+    /// provisioned or copied-config home carries one, and the first-run
+    /// flow never asks such a home the trace question — the standing
+    /// choice stands and the flow completes silently. Only a fresh home
+    /// (no choice written) is asked, once.
+    pub fn agent_traces_choice_written(&self) -> bool {
+        self.merged
+            .agent_traces
+            .as_ref()
+            .and_then(|traces| traces.enabled)
+            .is_some()
+    }
+
+    /// `agentTraces.enabled` setter.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_agent_traces_enabled(&mut self, enabled: bool) -> Result<()> {
         let traces = self
             .global
@@ -516,6 +623,10 @@ impl SettingsManager {
     /// TS `setDefaultServiceTier`: the persisted default a fresh session
     /// starts from; the stored string is the same vocabulary
     /// `get_default_service_tier` parses.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the global settings file cannot be written.
     pub fn set_default_service_tier(&mut self, tier: pa_types::ai::ServiceTier) -> Result<()> {
         use pa_types::ai::ServiceTier;
         let name = match tier {
@@ -599,10 +710,10 @@ impl SettingsManager {
                 .retry
                 .as_ref()
                 .and_then(|retry| retry.max_retries)
-                .map(|retries| retries.min(u32::MAX as u64) as u32)
-                .unwrap_or(
+                .map_or(
                     crate::session_engine::provider_retry::DEFAULT_PROVIDER_RETRY_POLICY
                         .max_retries,
+                    |retries| retries.min(u32::MAX as u64) as u32,
                 ),
             base_delay_ms: self
                 .merged
@@ -643,8 +754,9 @@ impl SettingsManager {
                 .unwrap_or(defaults.enabled),
             max_retries: failover
                 .and_then(|failover| failover.max_retries)
-                .map(|retries| retries.min(u32::MAX as u64) as u32)
-                .unwrap_or(defaults.max_retries),
+                .map_or(defaults.max_retries, |retries| {
+                    retries.min(u32::MAX as u64) as u32
+                }),
             base_delay_ms: failover
                 .and_then(|failover| failover.base_delay_ms)
                 .unwrap_or(defaults.base_delay_ms),
@@ -937,16 +1049,35 @@ mod tests {
     }
 
     #[test]
-    fn agent_traces_default_on_and_persist_the_opt_out() {
-        // Unset means ON: the default is the configuration, so nothing
-        // is written for a fresh home. An explicit opt-out writes the
+    fn agent_traces_default_off_and_persist_the_opt_in() {
+        // Unset means OFF (sharing is opt-in): the first-run onboarding
+        // question is the opt-in moment, and the answer writes the
         // global scope and survives a reload.
         let mut manager = SettingsManager::in_memory(Settings::default());
+        assert!(!manager.get_agent_traces_enabled());
+        manager.set_agent_traces_enabled(true).unwrap();
+        assert!(manager.get_agent_traces_enabled());
+        manager.reload().unwrap();
         assert!(manager.get_agent_traces_enabled());
         manager.set_agent_traces_enabled(false).unwrap();
         assert!(!manager.get_agent_traces_enabled());
+    }
+
+    #[test]
+    fn agent_traces_choice_written_marks_a_provisioned_home() {
+        // The choice-written predicate separates a fresh home (nothing
+        // written — the flow asks the question once) from a provisioned or
+        // copied-config home (any standing choice — the flow completes
+        // silently). Both answer values count: the predicate is about the
+        // choice being made, not its direction.
+        let mut manager = SettingsManager::in_memory(Settings::default());
+        assert!(!manager.agent_traces_choice_written());
+        manager.set_agent_traces_enabled(false).unwrap();
+        assert!(manager.agent_traces_choice_written());
         manager.reload().unwrap();
-        assert!(!manager.get_agent_traces_enabled());
+        assert!(manager.agent_traces_choice_written());
+        manager.set_agent_traces_enabled(true).unwrap();
+        assert!(manager.agent_traces_choice_written());
     }
 
     #[test]

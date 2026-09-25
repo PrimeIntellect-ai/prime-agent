@@ -23,11 +23,38 @@ windows-cross:
 	cargo check --workspace --target x86_64-pc-windows-gnu --all-targets
 	cargo clippy --workspace --target x86_64-pc-windows-gnu --all-targets -- -D warnings
 
-# Lints the staged workflow files (see ci/workflows/README.md for why they are
-# not under .github/ yet).
+# Lints the live workflow files (.github/workflows/; promoted from
+# ci/workflows/ via make activate-workflows) plus the still-staged
+# ci/workflows/ci.yml, which is clean under actionlint. The staged
+# benchmark.yml still carries pre-existing findings (the custom
+# self-hosted `prime-sandbox` label needs an actionlint.yaml labels
+# config; SC2012 info) and stays out of this gate until its lane owner
+# cleans it up.
 actionlint:
 	@command -v actionlint >/dev/null 2>&1 || { echo "actionlint not installed (see rhysd/actionlint releases)"; exit 1; }
-	actionlint ci/workflows/ci.yml ci/workflows/release.yml ci/workflows/continuous.yml ci/workflows/benchmark.yml
+	actionlint .github/workflows/ci.yml .github/workflows/continuous.yml .github/workflows/release.yml ci/workflows/ci.yml
+
+# GLIBC baseline gate (the continuous.yml/release.yml build-gnu jobs): a
+# GNU/Linux artifact must not require symbols above GLIBC_2.35, the Ubuntu
+# 22.04 release baseline. No-op on non-GNU hosts; the authoritative gate runs
+# in CI inside the ubuntu:22.04 build container. POSIX sh throughout: make
+# runs recipes with /bin/sh, which is dash on Ubuntu (no [[ ]], no ==).
+glibc-gate:
+	@case "$(TARGET)" in *-linux-gnu) \
+		if ! objdump -T target/release/prime-agent >/dev/null 2>&1; then \
+			echo "glibc-gate: unable to inspect target/release/prime-agent with objdump (build first - the dry-run targets run cargo build before this gate)" >&2; exit 1; \
+		fi; \
+		syms="$$(objdump -T target/release/prime-agent | grep -o 'GLIBC_[0-9.]*' || true)"; \
+		if [ -z "$$syms" ]; then \
+			echo "glibc-gate: no GLIBC symbols found in target/release/prime-agent - refusing to pass without evidence" >&2; exit 1; \
+		fi; \
+		max_glibc="$$(printf '%s\n' "$$syms" | sort -Vu | tail -1)"; \
+		echo "highest GLIBC symbol required: $${max_glibc}"; \
+		top="$$(printf '%s\nGLIBC_2.35\n' "$$max_glibc" | sort -Vu | tail -1)"; \
+		if [ "$$top" != "GLIBC_2.35" ]; then \
+			echo "binary requires $${max_glibc}, above the GLIBC_2.35 (Ubuntu 22.04) baseline" >&2; exit 1; \
+		fi \
+		;; esac
 
 # Perf wave + regression gate (benchmark.yml job, the local mirror): runs the
 # TS binary and a fresh release build side by side in a fresh Prime sandbox
@@ -67,6 +94,7 @@ catalog-assets-fixture:
 
 release-dry-run:
 	cargo build --release --locked --workspace
+	$(MAKE) glibc-gate
 	python3 scripts/release/bundle_catalog.py generate --$(CATALOG_ASSETS_MODE) --out $(CATALOG_ASSETS_DIR)
 	python3 scripts/release/assemble_artifacts.py \
 		--repo-root . --version "$(VERSION)" --target "$(TARGET)" $(RUNTIME_FLAG) \
@@ -81,6 +109,7 @@ GIT_SHA := $(shell git rev-parse HEAD)
 
 continuous-dry-run:
 	cargo build --release --locked --workspace
+	$(MAKE) glibc-gate
 	python3 scripts/release/bundle_catalog.py generate --$(CATALOG_ASSETS_MODE) --out $(CATALOG_ASSETS_DIR)
 	python3 scripts/release/assemble_artifacts.py \
 		--repo-root . --version "$(VERSION)" --target "$(TARGET)" $(RUNTIME_FLAG) \
@@ -122,4 +151,4 @@ activate-workflows:
 	git push origin main
 	@echo "workflows live: verify with gh workflow list (continuous + release active)"
 
-.PHONY: check deny windows-cross actionlint perf-wave release-dry-run continuous-dry-run audit-build package activate-workflows catalog-assets catalog-assets-fixture catalog-assets-gates
+.PHONY: check deny windows-cross actionlint perf-wave glibc-gate release-dry-run continuous-dry-run audit-build package activate-workflows catalog-assets catalog-assets-fixture catalog-assets-gates

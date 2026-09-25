@@ -90,7 +90,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(300);
+        let deadline = Instant::now() + Duration::from_mins(5);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -99,7 +99,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -127,7 +127,7 @@ impl Client {
 
     /// The response for `id`, collecting every session event on the way.
     fn request(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(300);
+        let deadline = Instant::now() + Duration::from_mins(5);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -286,8 +286,7 @@ impl Harness {
                 event.get("type").and_then(Value::as_str) == Some("message_end")
                     && event["message"]["customType"]
                         .as_str()
-                        .map(|custom| custom.starts_with("session_slash_command"))
-                        .unwrap_or(false)
+                        .is_some_and(|custom| custom.starts_with("session_slash_command"))
             })
             .filter_map(|event| event["message"]["content"].as_str().map(str::to_string))
             .find(|text| text.starts_with("Goal") || text.starts_with("No active goal"));
@@ -364,8 +363,10 @@ impl Harness {
                     && node["entry"]["message"]["role"] == "user"
                     && message_text(&node["entry"]["message"]["content"]).as_deref() == Some(text)
             })
-            .map(|node| node["entry"]["id"].as_str().expect("entry id").to_string())
-            .unwrap_or_else(|| panic!("the user message node: {nodes:?}"))
+            .map_or_else(
+                || panic!("the user message node: {nodes:?}"),
+                |node| node["entry"]["id"].as_str().expect("entry id").to_string(),
+            )
     }
 
     /// The tree\'s current leaf id.
@@ -476,4 +477,42 @@ fn navigate_tree_moves_follow_the_branchs_goal_state() {
             && row["data"]["objective"].as_str() == Some(OBJECTIVE)),
         "the abandoned branch lost its goal rows: {rows:?}"
     );
+}
+
+/// The clear's reply reflects the action it took (the operator's
+/// 2026-09-25 bug report): clearing a held goal record answers
+/// "Goal cleared." — never the nothing-to-clear "No active goal." the TS
+/// post-state read produces — announces the empty state, and clearing
+/// again answers the plain status text.
+#[test]
+fn goal_clear_answers_the_action_it_took() {
+    let mut harness = setup("goal-clear-reply");
+
+    // The f18 battery pattern: seed a turn, start the goal, then pause it
+    // so the minted continuation is withdrawn and the loop goes quiet
+    // with the goal record (paused) held on the branch.
+    harness.prompt("s0", "seed turn before the goal");
+    harness.prompt_racing_the_loop("g1", &format!("/goal {OBJECTIVE}"));
+    harness.prompt_racing_the_loop("g2", "/goal pause");
+    harness.client.drain_events(Duration::from_secs(1));
+
+    // Clearing the held record answers the action and announces the
+    // empty state.
+    let announced = harness.announced_goal_statuses().len();
+    harness.prompt("q1", "/goal clear");
+    assert_eq!(harness.last_goal_status(), "Goal cleared.");
+    assert!(
+        harness.announced_goal_statuses()[announced..]
+            .iter()
+            .any(|status| status == "idle"),
+        "the clear never announced the empty state: {:?}",
+        harness.client.events
+    );
+
+    // Clearing again (nothing to clear) and the plain status both answer
+    // the unchanged status text.
+    harness.prompt("q2", "/goal clear");
+    assert_eq!(harness.last_goal_status(), "No active goal.");
+    harness.prompt("q3", "/goal status");
+    assert_eq!(harness.last_goal_status(), "No active goal.");
 }

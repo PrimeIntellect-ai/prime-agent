@@ -58,7 +58,7 @@ fn test_lock() -> MutexGuard<'static, ()> {
 }
 
 /// The kernel Python with prime-agent-runtime installed; set
-/// PA_E2E_KERNEL_PYTHON to point at an explicit interpreter instead.
+/// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -68,11 +68,10 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -247,7 +246,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -256,7 +255,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -269,7 +268,7 @@ impl Client {
     }
 
     fn read_response(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(240);
+        let deadline = Instant::now() + Duration::from_mins(4);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -391,7 +390,7 @@ fn await_receipt(dir: &Path, name: &str) -> String {
 /// Poll for a kernel cell's receipt content (the cwd rebind verifier
 /// reads the full path the cell wrote).
 fn await_receipt_text(receipt: &Path) -> String {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         if let Ok(content) = std::fs::read_to_string(receipt) {
             return content;
@@ -442,7 +441,7 @@ fn new_session_disposes_the_kernel_and_starts_cold() {
     assert_eq!(hello["type"], "daemon_hello");
     let session_id = create_session(&mut client, dir.path(), &script, "c1");
     run_turn(&mut client, &session_id, "seed the marker", "t1");
-    let first = await_new_kernel(&baseline, Duration::from_secs(120));
+    let first = await_new_kernel(&baseline, Duration::from_mins(2));
     assert_eq!(await_receipt(dir.path(), "seed"), "seeded");
 
     // The replacement: TS disposes the old runtime first.
@@ -452,7 +451,7 @@ fn new_session_disposes_the_kernel_and_starts_cold() {
     );
     let replaced = client.read_response("n1");
     assert_eq!(replaced["success"], true, "new_session failed: {replaced}");
-    let _replacement = await_kernel_turnover(&baseline, &first, Duration::from_secs(120));
+    let _replacement = await_kernel_turnover(&baseline, &first, Duration::from_mins(2));
 
     // The fresh session's kernel executes the probe on a cold namespace.
     run_turn(&mut client, &session_id, "probe the marker", "t2");
@@ -486,7 +485,7 @@ fn switch_session_disposes_the_kernel_and_a_failed_target_keeps_it() {
     assert_eq!(hello["type"], "daemon_hello");
     let session_id = create_session(&mut client, dir.path(), &script, "c1");
     run_turn(&mut client, &session_id, "seed the marker", "t1");
-    let first = await_new_kernel(&baseline, Duration::from_secs(120));
+    let first = await_new_kernel(&baseline, Duration::from_mins(2));
     assert_eq!(await_receipt(dir.path(), "seed"), "seeded");
 
     // A missing switch target fails at the prepare: the live session and
@@ -542,7 +541,7 @@ fn switch_session_disposes_the_kernel_and_a_failed_target_keeps_it() {
         switched["success"], true,
         "switch_session failed: {switched}"
     );
-    let _replacement = await_kernel_turnover(&baseline, &first, Duration::from_secs(120));
+    let _replacement = await_kernel_turnover(&baseline, &first, Duration::from_mins(2));
     run_turn(&mut client, &session_id, "probe the marker", "t2");
     assert_eq!(
         await_receipt(dir.path(), "probe"),
@@ -573,7 +572,7 @@ fn fork_disposes_the_kernel_and_starts_cold() {
     assert_eq!(hello["type"], "daemon_hello");
     let session_id = create_session(&mut client, dir.path(), &script, "c1");
     run_turn(&mut client, &session_id, "seed the marker", "t1");
-    let first = await_new_kernel(&baseline, Duration::from_secs(120));
+    let first = await_new_kernel(&baseline, Duration::from_mins(2));
     assert_eq!(await_receipt(dir.path(), "seed"), "seeded");
 
     // Fork before the first user message: the fork's branch is empty and
@@ -594,7 +593,7 @@ fn fork_disposes_the_kernel_and_starts_cold() {
         forked["data"]["cancelled"], false,
         "fork cancelled: {forked}"
     );
-    let _replacement = await_kernel_turnover(&baseline, &first, Duration::from_secs(120));
+    let _replacement = await_kernel_turnover(&baseline, &first, Duration::from_mins(2));
 
     // The fork's kernel executes the probe on a cold namespace.
     run_turn(&mut client, &session_id, "probe the marker", "t2");
@@ -733,7 +732,7 @@ fn navigate_tree_keeps_the_kernel_warm() {
     assert_eq!(hello["type"], "daemon_hello");
     let session_id = create_session(&mut client, dir.path(), &script, "c1");
     run_turn(&mut client, &session_id, "seed the marker", "t1");
-    let first = await_new_kernel(&baseline, Duration::from_secs(120));
+    let first = await_new_kernel(&baseline, Duration::from_mins(2));
     assert_eq!(await_receipt(dir.path(), "seed"), "seeded");
 
     // A branch move to the first user message: in-place context rebuild,

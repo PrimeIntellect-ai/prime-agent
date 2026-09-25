@@ -27,6 +27,10 @@ pub enum TranscriptItem {
         id: String,
         name: String,
         arguments: String,
+        /// The parent assistant message's wire `timestamp` (Unix
+        /// milliseconds): reading an existing field for the condensed
+        /// runs' wall-clock - no schema change.
+        timestamp: u64,
     },
     ToolResult {
         tool_call_id: String,
@@ -40,6 +44,8 @@ pub enum TranscriptItem {
         /// structured output exactly like live ones.
         details: serde_json::Value,
         is_error: bool,
+        /// The message's wire `timestamp` (Unix milliseconds).
+        timestamp: u64,
     },
     BashExecution {
         command: String,
@@ -49,10 +55,6 @@ pub enum TranscriptItem {
         truncated: bool,
         full_output_path: Option<String>,
         excluded: bool,
-    },
-    AgentStatus {
-        summary: String,
-        task_state: String,
     },
     ModelChange {
         provider: String,
@@ -81,6 +83,13 @@ pub enum SessionEvent {
 /// Source of session events. Implementations range from a JSONL capture
 /// (replay) to a live daemon connection.
 pub trait SessionStream: Send {
+    /// Pull the next event, `End` once the stream is finished.
+    ///
+    /// # Errors
+    ///
+    /// Implementations report their own transport or decode failures;
+    /// the bundled JSONL replay stream never returns `Err` (its entries
+    /// were validated at load).
     fn poll(&mut self) -> Result<SessionEvent>;
 }
 
@@ -101,6 +110,12 @@ impl JsonlSessionStream {
     }
 
     /// Load all entries from a session JSONL file (skip undecodable lines).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the file cannot be read, or a non-empty line
+    /// fails to decode as an entry (the error carries the line's
+    /// 1-based number).
     pub fn from_path(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading session {}", path.display()))?;
@@ -109,6 +124,12 @@ impl JsonlSessionStream {
     }
 }
 
+/// Parse session JSONL text into file entries, ignoring blank lines.
+///
+/// # Errors
+///
+/// Returns `Err` on the first non-blank line that does not decode as a
+/// `FileEntry` (the error carries the line's 1-based number).
 pub fn parse_jsonl(raw: &str) -> Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
     for (i, line) in raw.lines().enumerate() {
@@ -131,14 +152,6 @@ pub fn parse_jsonl(raw: &str) -> Result<Vec<FileEntry>> {
 pub fn entry_to_items(entry: &FileEntry) -> Vec<TranscriptItem> {
     match entry {
         FileEntry::Message { message, .. } => message_to_items(message),
-        FileEntry::AgentStatus { payload, .. } => vec![TranscriptItem::AgentStatus {
-            summary: payload.status.summary.clone(),
-            task_state: payload
-                .status
-                .task_state
-                .map(|t| format!("{t:?}").to_lowercase())
-                .unwrap_or_default(),
-        }],
         FileEntry::ModelChange { payload, .. } => vec![TranscriptItem::ModelChange {
             provider: payload.provider.clone(),
             model_id: payload.model_id.clone(),
@@ -220,6 +233,7 @@ fn message_to_items(message: &AgentMessage) -> Vec<TranscriptItem> {
                             id: tc.id.clone(),
                             name: tc.name.clone(),
                             arguments: serde_json::to_string(&tc.arguments).unwrap_or_default(),
+                            timestamp: a.timestamp,
                         });
                     }
                 }
@@ -247,6 +261,7 @@ fn message_to_items(message: &AgentMessage) -> Vec<TranscriptItem> {
                 .collect(),
             details: t.details.clone().unwrap_or(serde_json::Value::Null),
             is_error: t.is_error,
+            timestamp: t.timestamp,
         }],
         AgentMessage::BashExecution(b) => vec![TranscriptItem::BashExecution {
             command: b.command.clone(),

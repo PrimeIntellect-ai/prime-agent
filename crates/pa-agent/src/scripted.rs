@@ -32,7 +32,7 @@ pub enum ScriptedTurn {
     /// Full event script; must end with a terminal `done`/`error` event
     /// (like a well-formed provider stream).
     Events(Vec<ScriptStep>),
-    /// The stream function call itself fails (violating the TS StreamFn
+    /// The stream function call itself fails (violating the TS `StreamFn`
     /// contract; exercises the loop's run-failure path).
     FailStart(String),
     /// Emit the prelude, then stall until the abort signal fires, then emit a
@@ -59,6 +59,11 @@ impl ScriptedProvider {
     }
 
     /// Queue a scripted turn.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `turns` mutex is poisoned (another thread panicked while
+    /// holding it).
     pub fn push_turn(&self, turn: ScriptedTurn) {
         self.turns.lock().unwrap().push_back(turn);
     }
@@ -113,11 +118,21 @@ impl ScriptedProvider {
     }
 
     /// Recorded LLM contexts (one per stream call).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `calls` mutex is poisoned (another thread panicked while
+    /// holding it).
     pub fn calls(&self) -> Vec<LlmContext> {
         self.calls.lock().unwrap().clone()
     }
 
     /// The `StreamFn` for this provider.
+    ///
+    /// # Panics
+    ///
+    /// The returned stream function panics if the `calls` or `turns` mutex is
+    /// poisoned (another thread panicked while holding one of them).
     pub fn stream_fn(self: &Arc<Self>) -> StreamFn {
         let provider = Arc::clone(self);
         Arc::new(move |_model, context, _options| {
@@ -231,7 +246,6 @@ impl ModelStream for ScriptedStream {
                         match prelude.pop_front() {
                             Some(ScriptStep::SleepMs(ms)) => {
                                 tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
-                                continue;
                             }
                             Some(ScriptStep::Event(event)) => {
                                 if let Some(message) = event.terminal_message() {

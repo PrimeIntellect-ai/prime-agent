@@ -337,11 +337,11 @@ pub const APP_KEYBINDINGS: &[(&str, KeybindingDefinition)] = &[
         "app.tools.expand",
         def!(&["ctrl+o"], "Cycle conversation detail", scope "editor"),
     ),
-    ("app.subagents.focus", def!(&["alt+a"], "Focus activity")),
     (
-        "app.heartbeats.open",
-        def!(&["ctrl+r"], "Manage heartbeats"),
+        "app.transcript.runs",
+        def!(&["alt+t"], "Open the condensed tool runs view"),
     ),
+    ("app.subagents.focus", def!(&["alt+a"], "Focus activity")),
     (
         "app.heartbeats.openSelected",
         def!(&["right"], "Open selected heartbeat"),
@@ -609,7 +609,7 @@ fn legacy_migration(id: &str) -> Option<&'static str> {
         .map(|(_, current)| *current)
 }
 
-/// The config object as an ordered entry list (serde_json maps sort keys,
+/// The config object as an ordered entry list (`serde_json` maps sort keys,
 /// so the TS object order — definition ids first, extras sorted after — is
 /// carried by this vector; [`write_json_object`] renders it in order).
 pub type OrderedConfig = Vec<(String, serde_json::Value)>;
@@ -775,6 +775,11 @@ fn stringify_value(value: &serde_json::Value, indent: usize) -> Result<String> {
 /// with migrated names (and the definition-first ordering) when any legacy
 /// id was found; a missing or malformed file is a no-op. Returns whether
 /// the file was rewritten.
+///
+/// # Errors
+///
+/// Returns `Err` when serializing or writing the rewritten
+/// `keybindings.json` fails.
 pub fn migrate_keybindings_file(agent_dir: &Path) -> Result<bool> {
     let config_path = agent_dir.join("keybindings.json");
     let Some(raw) = load_raw_config(&config_path) else {
@@ -1247,9 +1252,18 @@ mod tests {
             KeybindingsManager::with_user_bindings(cfg(&[("tui.editor.redo", &["ctrl+r"])]));
         assert!(rebound.matches("ctrl+r", "tui.editor.redo"));
         assert!(!rebound.matches("ctrl+shift+z", "tui.editor.redo"));
-        // The same-scope freeing still applies: ctrl+r is the heartbeats
-        // key in the app scope, so it keeps its binding there.
-        assert!(rebound.matches("ctrl+r", "app.heartbeats.open"));
+    }
+
+    /// The heartbeats shortcut is gone (the operator's 2026-09-24
+    /// directive: "Remove the shortcut of ctrl+r for heartbeats btw"):
+    /// ctrl+r binds nothing by default (the /heartbeats command and the
+    /// activity dock's heartbeats group own the open paths), and the
+    /// rebind-freeing test no longer keeps an app-scope claim for it.
+    #[test]
+    fn ctrl_r_is_unbound_by_default() {
+        let kb = KeybindingsManager::new();
+        assert!(kb.get_keys("app.heartbeats.open").is_empty());
+        assert!(!kb.matches("ctrl+r", "app.heartbeats.open"));
     }
 
     #[test]
@@ -1451,10 +1465,6 @@ mod tests {
             vec!["up".to_string(), "ctrl+o".to_string()]
         );
         assert!(kb.get_keys("app.tools.expand").is_empty());
-        assert_eq!(
-            kb.get_keys("app.heartbeats.open"),
-            vec!["ctrl+r".to_string()]
-        );
         // No scope => a claim never frees its default.
         assert_eq!(kb.get_keys("app.agents.new"), vec!["ctrl+n".to_string()]);
     }

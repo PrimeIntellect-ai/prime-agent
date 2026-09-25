@@ -268,7 +268,7 @@ fn simplify_runner_command(line: &str) -> Option<String> {
     }
     if matches!(
         words.first().map(String::as_str),
-        Some("python") | Some("python3")
+        Some("python" | "python3")
     ) && words.get(1).map(String::as_str) == Some("-m")
         && words.get(2).map(String::as_str) == Some("pytest")
     {
@@ -284,7 +284,7 @@ fn simplify_runner_command(line: &str) -> Option<String> {
     None
 }
 
-/// Shorten file-mutation commands (cat >, tee, apply_patch) for display.
+/// Shorten file-mutation commands (cat >, tee, `apply_patch`) for display.
 fn simplify_mutation_command(line: &str) -> Option<String> {
     let words = shell_words(line);
     if words.is_empty() {

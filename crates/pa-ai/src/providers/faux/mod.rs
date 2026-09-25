@@ -66,9 +66,7 @@ pub fn faux_tool_call(
     id: Option<&str>,
 ) -> AssistantContent {
     AssistantContent::ToolCall(ToolCall {
-        id: id
-            .map(std::string::ToString::to_string)
-            .unwrap_or_else(|| random_id("tool")),
+        id: id.map_or_else(|| random_id("tool"), std::string::ToString::to_string),
         name: name.to_string(),
         arguments: arguments.as_object().cloned().unwrap_or_default(),
         thought_signature: None,
@@ -171,26 +169,52 @@ impl FauxProviderRegistration {
     }
 
     /// Call count across all requests against this registration.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the counter `Mutex` is poisoned (a thread panicked while
+    /// holding the lock).
     pub fn call_count(&self) -> u64 {
         *self.state.call_count.lock().unwrap()
     }
 
     /// The API key each recorded request carried (per call, in order):
     /// summarizer arms that must follow the session's live key pin on it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the recorded-keys `Mutex` is poisoned (a thread panicked
+    /// while holding the lock).
     pub fn received_api_keys(&self) -> Vec<Option<String>> {
         self.state.received_api_keys.lock().unwrap().clone()
     }
 
     /// Replace the queued responses.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pending `Mutex` is poisoned (a thread panicked while
+    /// holding the lock).
     pub fn set_responses(&self, responses: Vec<FauxResponseStep>) {
         *self.state.pending.lock().unwrap() = responses;
     }
 
     /// Append to the queued responses.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pending `Mutex` is poisoned (a thread panicked while
+    /// holding the lock).
     pub fn append_responses(&self, responses: Vec<FauxResponseStep>) {
         self.state.pending.lock().unwrap().extend(responses);
     }
 
+    /// Number of queued responses.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pending `Mutex` is poisoned (a thread panicked while
+    /// holding the lock).
     pub fn get_pending_response_count(&self) -> usize {
         self.state.pending.lock().unwrap().len()
     }
@@ -438,10 +462,7 @@ async fn stream_with_deltas(
 ) {
     let mut partial = message.clone();
     partial.content = Vec::new();
-    if signal
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
-    {
+    if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
         let aborted = create_aborted_message(&partial);
         writer.push(AssistantMessageEvent::Error {
             reason: ErrorStopReason::Aborted,
@@ -456,10 +477,7 @@ async fn stream_with_deltas(
     });
 
     for index in 0..message.content.len() {
-        if signal
-            .map(tokio_util::sync::CancellationToken::is_cancelled)
-            .unwrap_or(false)
-        {
+        if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
             let aborted = create_aborted_message(&partial);
             writer.push(AssistantMessageEvent::Error {
                 reason: ErrorStopReason::Aborted,
@@ -491,10 +509,7 @@ async fn stream_with_deltas(
                     max_token_size,
                 ) {
                     schedule_chunk(&chunk, tokens_per_second).await;
-                    if signal
-                        .map(tokio_util::sync::CancellationToken::is_cancelled)
-                        .unwrap_or(false)
-                    {
+                    if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
                         let aborted = create_aborted_message(&partial);
                         writer.push(AssistantMessageEvent::Error {
                             reason: ErrorStopReason::Aborted,
@@ -534,10 +549,7 @@ async fn stream_with_deltas(
                     split_string_by_token_size(&text_block.text, min_token_size, max_token_size)
                 {
                     schedule_chunk(&chunk, tokens_per_second).await;
-                    if signal
-                        .map(tokio_util::sync::CancellationToken::is_cancelled)
-                        .unwrap_or(false)
-                    {
+                    if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
                         let aborted = create_aborted_message(&partial);
                         writer.push(AssistantMessageEvent::Error {
                             reason: ErrorStopReason::Aborted,
@@ -579,10 +591,7 @@ async fn stream_with_deltas(
                     split_string_by_token_size(&arguments_text, min_token_size, max_token_size)
                 {
                     schedule_chunk(&chunk, tokens_per_second).await;
-                    if signal
-                        .map(tokio_util::sync::CancellationToken::is_cancelled)
-                        .unwrap_or(false)
-                    {
+                    if signal.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
                         let aborted = create_aborted_message(&partial);
                         writer.push(AssistantMessageEvent::Error {
                             reason: ErrorStopReason::Aborted,
@@ -637,61 +646,6 @@ pub struct RegisterFauxProviderOptions {
 
 /// Register a faux provider and return its handle.
 pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProviderRegistration {
-    let api = options.api.unwrap_or_else(|| random_id(DEFAULT_API));
-    let provider_name = options
-        .provider
-        .unwrap_or_else(|| DEFAULT_PROVIDER.to_string());
-    let source_id = random_id("faux-provider");
-    let max = options.token_size_max.unwrap_or(DEFAULT_MAX_TOKEN_SIZE);
-    let min = options
-        .token_size_min
-        .unwrap_or(DEFAULT_MIN_TOKEN_SIZE)
-        .clamp(1, max);
-    let state = Arc::new(FauxSharedState {
-        call_count: Mutex::new(0),
-        received_api_keys: Mutex::new(Vec::new()),
-        pending: Mutex::new(Vec::new()),
-        prompt_cache: Mutex::new(HashMap::new()),
-    });
-    let tokens_per_second = options.tokens_per_second;
-
-    let model_definitions = options.models.unwrap_or_else(|| {
-        vec![FauxModelDefinition {
-            id: DEFAULT_MODEL_ID.to_string(),
-            name: Some(DEFAULT_MODEL_NAME.to_string()),
-            reasoning: Some(false),
-            input: Some(vec![ModelInput::Text, ModelInput::Image]),
-            cost: None,
-            context_window: Some(128_000),
-            max_tokens: Some(16_384),
-        }]
-    });
-    let models: Vec<Model> = model_definitions
-        .iter()
-        .map(|definition| Model {
-            id: definition.id.clone(),
-            name: definition
-                .name
-                .clone()
-                .unwrap_or_else(|| definition.id.clone()),
-            api: api.clone(),
-            provider: provider_name.clone(),
-            base_url: DEFAULT_BASE_URL.to_string(),
-            reasoning: definition.reasoning.unwrap_or(false),
-            thinking_level_map: None,
-            input: definition
-                .input
-                .clone()
-                .unwrap_or_else(|| vec![ModelInput::Text, ModelInput::Image]),
-            cost: definition.cost.unwrap_or_else(zero_model_cost),
-            context_window: definition.context_window.unwrap_or(128_000),
-            max_tokens: definition.max_tokens.unwrap_or(16_384),
-            featured: None,
-            headers: None,
-            compat: None,
-        })
-        .collect();
-
     struct FauxStream {
         api: String,
         provider: String,
@@ -776,17 +730,17 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
                         if delay_ms > 0 {
                             let hold =
                                 tokio::time::sleep(std::time::Duration::from_millis(delay_ms));
-                            let cancelled =
-                                match options.as_ref().and_then(|options| options.signal.clone()) {
-                                    Some(signal) => tokio::select! {
-                                        _ = hold => false,
-                                        _ = signal.cancelled() => true,
-                                    },
-                                    None => {
-                                        hold.await;
-                                        false
-                                    }
-                                };
+                            let cancelled = if let Some(signal) =
+                                options.as_ref().and_then(|options| options.signal.clone())
+                            {
+                                tokio::select! {
+                                    _ = hold => false,
+                                    _ = signal.cancelled() => true,
+                                }
+                            } else {
+                                hold.await;
+                                false
+                            };
                             if cancelled {
                                 // The real providers' abort path: the request
                                 // dies mid-flight (ProviderError::Aborted),
@@ -852,6 +806,61 @@ pub fn register_faux_provider(options: RegisterFauxProviderOptions) -> FauxProvi
             self.stream(model, context, options.as_ref())
         }
     }
+
+    let api = options.api.unwrap_or_else(|| random_id(DEFAULT_API));
+    let provider_name = options
+        .provider
+        .unwrap_or_else(|| DEFAULT_PROVIDER.to_string());
+    let source_id = random_id("faux-provider");
+    let max = options.token_size_max.unwrap_or(DEFAULT_MAX_TOKEN_SIZE);
+    let min = options
+        .token_size_min
+        .unwrap_or(DEFAULT_MIN_TOKEN_SIZE)
+        .clamp(1, max);
+    let state = Arc::new(FauxSharedState {
+        call_count: Mutex::new(0),
+        received_api_keys: Mutex::new(Vec::new()),
+        pending: Mutex::new(Vec::new()),
+        prompt_cache: Mutex::new(HashMap::new()),
+    });
+    let tokens_per_second = options.tokens_per_second;
+
+    let model_definitions = options.models.unwrap_or_else(|| {
+        vec![FauxModelDefinition {
+            id: DEFAULT_MODEL_ID.to_string(),
+            name: Some(DEFAULT_MODEL_NAME.to_string()),
+            reasoning: Some(false),
+            input: Some(vec![ModelInput::Text, ModelInput::Image]),
+            cost: None,
+            context_window: Some(128_000),
+            max_tokens: Some(16_384),
+        }]
+    });
+    let models: Vec<Model> = model_definitions
+        .iter()
+        .map(|definition| Model {
+            id: definition.id.clone(),
+            name: definition
+                .name
+                .clone()
+                .unwrap_or_else(|| definition.id.clone()),
+            api: api.clone(),
+            provider: provider_name.clone(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            reasoning: definition.reasoning.unwrap_or(false),
+            thinking_level_map: None,
+            input: definition
+                .input
+                .clone()
+                .unwrap_or_else(|| vec![ModelInput::Text, ModelInput::Image]),
+            cost: definition.cost.unwrap_or_else(zero_model_cost),
+            context_window: definition.context_window.unwrap_or(128_000),
+            max_tokens: definition.max_tokens.unwrap_or(16_384),
+            featured: None,
+            headers: None,
+            compat: None,
+        })
+        .collect();
 
     let stream_impl = FauxStream {
         api: api.clone(),

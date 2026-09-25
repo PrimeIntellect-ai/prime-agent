@@ -26,6 +26,12 @@ path = "src/main.rs"
 [dev-dependencies]
 tempfile = "3"
 base64 = "0.22"
+# The release-workflow test parses the CI workflow YAML and builds fixture
+# tarballs/manifests for the promote-job layout gates (the same versions the
+# workspace already resolves for pa-core's update/release seam).
+serde_yaml = "0.9"
+tar = "0.4"
+flate2 = "1"
 # The traces login tests encrypt the challenge result with the flow's own
 # public key (same versions the workspace resolves for the engine).
 rsa = { version = "0.9", features = ["sha2", "pem"] }
@@ -44,3 +50,16 @@ unnecessary_to_owned = "warn"
 uninlined_format_args = "warn"
 collapsible_if = "warn"
 redundant_closure_for_method_calls = "warn"
+unnested_or_patterns = "warn"
+unreadable_literal = "warn"
+duration_suboptimal_units = "warn"
+map_unwrap_or = "warn"
+match_same_arms = "warn"
+single_match_else = "warn"
+needless_continue = "warn"
+items_after_statements = "warn"
+if_not_else = "warn"
+semicolon_if_nothing_returned = "warn"
+missing_errors_doc = "warn"
+missing_panics_doc = "warn"
+doc_markdown = "warn"

@@ -22,7 +22,7 @@ impl Inner {
                     if activity_id.len() == 32
                         && activity_id.chars().all(|c| c.is_ascii_hexdigit())
                         && pid > 0
-                        && matches!(active, Some(true) | Some(false))
+                        && matches!(active, Some(true | false))
                     {
                         let mut g = lock(&self.guarded);
                         if active == Some(true) {
@@ -45,10 +45,10 @@ impl Inner {
             }
             Event::HostRequest { id, data } => self.start_host_request(&id, data),
             Event::Stdout { id, text } => {
-                self.route_stream(id.as_deref(), StreamName::Stdout, &text)
+                self.route_stream(id.as_deref(), StreamName::Stdout, &text);
             }
             Event::Stderr { id, text } => {
-                self.route_stream(id.as_deref(), StreamName::Stderr, &text)
+                self.route_stream(id.as_deref(), StreamName::Stderr, &text);
             }
             Event::Result { id, text } => {
                 let execution = lock(&self.guarded).active_execution.clone();

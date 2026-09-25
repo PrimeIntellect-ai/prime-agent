@@ -180,6 +180,12 @@ fn resolve_unique_match(
 /// Resolve a `--resume` selector against the session directory, mirroring
 /// `resolveSessionPath`: path-like selectors pass through, then exact and
 /// partial matches are tried local-first, global second.
+///
+/// # Errors
+///
+/// Returns [`SessionSelectorError::Ambiguous`] when a match tier contains
+/// several sessions, and [`SessionSelectorError::NotFound`] when no session
+/// matches the selector.
 pub fn resolve_session_path(
     selector: &str,
     cwd: &Path,
@@ -436,7 +442,7 @@ mod tests {
         let older = write_session(dir.path(), "older", "/work");
         let newer = write_session(dir.path(), "newer", "/work");
         // Same mtime granularity: nudge the newer file forward in time.
-        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let future = std::time::SystemTime::now() + std::time::Duration::from_mins(1);
         let file = std::fs::File::options().append(true).open(&newer).unwrap();
         file.set_modified(future).unwrap();
         assert_eq!(

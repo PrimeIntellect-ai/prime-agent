@@ -34,9 +34,7 @@ use crate::kernel::state_snapshot::{manifest_path_in, snapshot_path_in};
 /// Above core count because boots are IO-bound, capped so a fan-out can't
 /// thrash the FS past the ready-handshake window.
 fn default_kernel_boot_concurrency() -> usize {
-    let cores = std::thread::available_parallelism()
-        .map(std::num::NonZero::get)
-        .unwrap_or(4);
+    let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
     16.min((cores * 2).max(4))
 }
 
@@ -113,9 +111,9 @@ pub struct IpythonKernelProvisionerOptions {
     /// Python override. Must have prime-agent-runtime installed.
     pub python: Option<PathBuf>,
     pub env: HashMap<String, String>,
-    /// Command prefix prepended to every kernel bash() invocation.
+    /// Command prefix prepended to every kernel `bash()` invocation.
     pub command_prefix: Option<String>,
-    /// Trusted shell path injected for kernel bash(); `None` on platforms
+    /// Trusted shell path injected for kernel `bash()`; `None` on platforms
     /// without one, where the runtime's teaching error fires instead.
     pub shell_path: Option<PathBuf>,
     pub session_id: Option<String>,
@@ -216,7 +214,7 @@ impl IpythonKernelProvisioner {
 
     /// Whether a kernel has finished starting and is currently running.
     pub fn has_running_kernel(&self) -> bool {
-        self.manager().map(|m| m.is_running()).unwrap_or(false)
+        self.manager().is_some_and(|m| m.is_running())
     }
 
     /// Start the kernel in the background. Failures are swallowed here and
@@ -231,6 +229,12 @@ impl IpythonKernelProvisioner {
     /// The kernel manager, starting it first when necessary. Concurrent
     /// callers join one startup; the current startup stage is replayed to
     /// listeners that attach mid-flight.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the abort signal is already cancelled or fires
+    /// during the wait, when the provisioner was disposed, or when the kernel
+    /// startup fails (all joined callers see the same failure).
     pub async fn ensure(
         &self,
         on_progress: Option<KernelBootstrapProgressHandler>,
@@ -333,7 +337,7 @@ impl IpythonKernelProvisioner {
     /// Dispose the kernel owned by this provisioner, including one still
     /// starting up. A still-queued boot drops out of the boot gate.
     pub async fn dispose(&self, options: Option<KernelShutdownOptions>) {
-        let snapshot = options.map(|o| o.snapshot).unwrap_or(true);
+        let snapshot = options.is_none_or(|o| o.snapshot);
         {
             let mut state = self.lock_state();
             state.dispose_snapshot = snapshot;
@@ -393,8 +397,7 @@ fn resolve_startup_retries() -> u32 {
         Ok(raw) => raw
             .trim()
             .parse::<u32>()
-            .map(|n| n.min(5))
-            .unwrap_or(DEFAULT_STARTUP_RETRIES),
+            .map_or(DEFAULT_STARTUP_RETRIES, |n| n.min(5)),
         Err(_) => DEFAULT_STARTUP_RETRIES,
     }
 }
@@ -910,7 +913,7 @@ mod tests {
         let started = std::time::Instant::now();
         let _ = provisioner.ensure(None, None).await;
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(5_000),
+            started.elapsed() < std::time::Duration::from_secs(5),
             "dispose during retry must cancel the backoff promptly"
         );
     }

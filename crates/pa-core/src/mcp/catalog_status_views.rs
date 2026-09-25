@@ -69,9 +69,7 @@ impl SnapshotCredentials {
 }
 
 fn bearer_token_present(bearer_token_env_var: &str) -> bool {
-    std::env::var(bearer_token_env_var)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
+    std::env::var(bearer_token_env_var).is_ok_and(|value| !value.trim().is_empty())
 }
 
 /// Options for [`http_connection_status`].
@@ -155,8 +153,10 @@ pub(crate) fn http_connection_status(
                     }
                 }
             },
-            Err(super::catalog_views::OAuthGrantUsabilityReason::Unbound)
-            | Err(super::catalog_views::OAuthGrantUsabilityReason::CrossEndpoint) => {
+            Err(
+                super::catalog_views::OAuthGrantUsabilityReason::Unbound
+                | super::catalog_views::OAuthGrantUsabilityReason::CrossEndpoint,
+            ) => {
                 // Endpoint binding: a token must prove where it belongs.
                 return HttpStatusResult {
                     status: McpConnectionStatus::Error,
@@ -248,8 +248,10 @@ pub(crate) fn http_connection_status(
             options.endpoint,
         ) {
             Ok(()) => {}
-            Err(super::catalog_views::McpStaticTokenUsabilityReason::Unbound)
-            | Err(super::catalog_views::McpStaticTokenUsabilityReason::CrossEndpoint) => {
+            Err(
+                super::catalog_views::McpStaticTokenUsabilityReason::Unbound
+                | super::catalog_views::McpStaticTokenUsabilityReason::CrossEndpoint,
+            ) => {
                 return HttpStatusResult {
                     status: McpConnectionStatus::Error,
                     login_pending: false,

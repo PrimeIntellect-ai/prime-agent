@@ -78,7 +78,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -87,7 +87,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -111,7 +111,7 @@ impl Client {
         self.writer
             .write_all(line.as_bytes())
             .unwrap_or_else(|error| panic!("write command {id}: {error}"));
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -136,7 +136,7 @@ fn write_models_json(agent_dir: &Path, base_url: &str) {
                         "name": "Mock 1",
                         "api": "openai-completions",
                         "baseUrl": base_url,
-                        "contextWindow": 128000,
+                        "contextWindow": 128_000,
                         "maxTokens": 4096,
                     }
                 ]
@@ -215,7 +215,7 @@ fn offline_daemon_serves_the_bundled_catalog_fallback() {
         .expect("a bundled featured model");
     assert_eq!(fable["name"], "Claude Fable 5");
     assert_eq!(fable["cost"]["input"], 10);
-    assert_eq!(fable["contextWindow"], 1000000);
+    assert_eq!(fable["contextWindow"], 1_000_000);
     // The configured providers: prime-inference (the models.json key) and
     // nothing else — no ambient credentials authorize other providers.
     let providers: Vec<&str> = data["configuredProviders"]

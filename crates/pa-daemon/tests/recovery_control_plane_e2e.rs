@@ -7,7 +7,7 @@
 //! list answers would land only after the whole pass, past the latency
 //! bound, with every relaunched worker already up.
 //!
-//! Linux-only e2e (AF_UNIX sockets, `kill -9` semantics): compiles to
+//! Linux-only e2e (`AF_UNIX` sockets, `kill -9` semantics): compiles to
 //! nothing elsewhere, like the other pa-daemon e2e verifiers.
 #![cfg(unix)]
 
@@ -187,7 +187,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -260,7 +260,7 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
         );
     }
     let supervisor_pid = daemon.child.id();
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     let worker_pids = loop {
         let children = child_pids_of(supervisor_pid);
         if children.len() == SESSIONS {
@@ -326,7 +326,7 @@ fn control_plane_stays_responsive_while_a_large_adoption_pass_recovers() {
     // covers the update restore pass; plain-restart adoption is covered by
     // the client's reconnect retry).
     let log_path = pa_daemon::paths::daemon_log_path(&socket, &agent_dir);
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         if distinct(workers_registered_since(&log_path, &restart_before)).len() == SESSIONS {
             break;

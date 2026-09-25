@@ -1,4 +1,4 @@
-//! OpenAI Completions error surface.
+//! `OpenAI` Completions error surface.
 //! Section of the port of `packages/ai/src/providers/openai-completions.ts`:
 //! the user-facing error message for a failed request, composed exactly like
 //! the `openai` npm SDK (`APIError.makeMessage`, openai 6.47.0) whose message
@@ -73,7 +73,7 @@ pub fn openai_http_error(
     })
 }
 
-/// The OpenRouter extra-information field the TS provider appends to the
+/// The `OpenRouter` extra-information field the TS provider appends to the
 /// error message: `error.metadata.raw` on the SDK error (the response body's
 /// `error` object). `None` unless truthy per JS rules.
 pub fn openrouter_raw_metadata(error: &ProviderError) -> Option<String> {
@@ -92,7 +92,7 @@ fn js_truthy(value: &Value) -> bool {
     match value {
         Value::Null => false,
         Value::Bool(bool) => *bool,
-        Value::Number(number) => number.as_f64().map(|number| number != 0.0).unwrap_or(true),
+        Value::Number(number) => number.as_f64() != Some(0.0),
         Value::String(text) => !text.is_empty(),
         _ => true,
     }
@@ -123,7 +123,7 @@ fn js_to_string(value: &Value) -> String {
 mod tests {
     use super::*;
 
-    /// The exact composition the TS `openai` SDK produces for an OpenAI error
+    /// The exact composition the TS `openai` SDK produces for an `OpenAI` error
     /// body and the TS provider surfaces verbatim (the parity harness's
     /// scripted overflow probe: `{"error": {"message": ...}}` with status 400).
     #[test]

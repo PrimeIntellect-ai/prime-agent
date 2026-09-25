@@ -36,6 +36,91 @@ pub struct CompactOptions<'a> {
     /// sessions without harness state (verification harnesses building
     /// the loop directly; the engine always wires one).
     pub harness_digest: Option<super::harness_digest::HarnessDigestInputs>,
+    /// The auxiliary-model routing context (TS #2411): when present, the
+    /// summarizer wire calls resolve their model through the
+    /// `auxiliaryModel` setting with a context-window fit check, falling
+    /// back to the caller's session model. `None` keeps the session model.
+    pub auxiliary: Option<&'a super::auxiliary_model::AuxiliaryModelContext>,
+}
+
+/// The history summary's completion budget (TS `generateSummary`:
+/// `Math.floor(0.8 * reserveTokens)`): multiply before dividing so
+/// sub-5 budgets round toward the true floor instead of collapsing to
+/// zero (`/ 5 * 4` truncates first and yields 0 for reserves 1–4, and
+/// 4 for 9 where the TS floor is 7).
+pub(crate) fn history_summary_completion_budget(reserve_tokens: u64) -> u64 {
+    reserve_tokens.saturating_mul(4) / 5
+}
+
+/// The split-turn prefix summary's completion budget (TS
+/// `generateTurnPrefixSummary`: `Math.floor(0.5 * reserveTokens)`).
+pub(crate) fn turn_prefix_summary_completion_budget(reserve_tokens: u64) -> u64 {
+    reserve_tokens / 2
+}
+
+/// The chars the summarizer request text occupies at the compaction
+/// module's chars/4 heuristic (TS #2411's estimator math).
+pub(crate) fn summarizer_request_tokens(request: &[AgentMessage]) -> u64 {
+    let chars: usize = request
+        .iter()
+        .map(|message| match message {
+            AgentMessage::User(user) => user.content.text().chars().count(),
+            _ => 0,
+        })
+        .sum();
+    (chars as u64).div_ceil(4)
+}
+
+/// Estimate the context window the compaction's summary calls need (TS
+/// #2411's `estimateSummaryRequestTokens`): the exact request bodies
+/// through the same builders as the wire calls
+/// ([`build_summarization_request`], [`build_turn_prefix_request`]), the
+/// chars/4 heuristic, the shared system prompt, and each call's
+/// completion budget — the largest slice wins, because routing must fit
+/// every request the compaction will issue. `history` and `turn_prefix`
+/// are the messages the run will summarize (see [`execute_compaction`]).
+pub fn estimate_summary_request_tokens(
+    history: &[AgentMessage],
+    turn_prefix: &[AgentMessage],
+    is_split_turn: bool,
+    previous_summary: Option<&str>,
+    custom_instructions: Option<&str>,
+    reserve_tokens: u64,
+) -> u64 {
+    let system_prompt_tokens = (super::compaction_utils::SUMMARIZATION_SYSTEM_PROMPT
+        .chars()
+        .count() as u64)
+        .div_ceil(4);
+    let mut required = 0u64;
+    // The history slice runs for every compaction except a split turn
+    // whose kept cut leaves no history ("No prior history." is a literal
+    // stand-in, no wire call).
+    let issues_history_call = !history.is_empty() || !(is_split_turn && !turn_prefix.is_empty());
+    if issues_history_call {
+        let request = super::compaction_exec::build_summarization_request(
+            history,
+            custom_instructions,
+            previous_summary,
+            reserve_tokens,
+        );
+        required = required.max(
+            system_prompt_tokens
+                + summarizer_request_tokens(&request)
+                + history_summary_completion_budget(reserve_tokens),
+        );
+    }
+    // A split turn's prefix summary is a separate request with its own
+    // body and a smaller completion budget, so it can exceed the history
+    // slice.
+    if !turn_prefix.is_empty() {
+        let request = super::compaction_exec::build_turn_prefix_request(turn_prefix);
+        required = required.max(
+            system_prompt_tokens
+                + summarizer_request_tokens(&request)
+                + turn_prefix_summary_completion_budget(reserve_tokens),
+        );
+    }
+    required
 }
 
 /// The model-visible message produced by a session entry (summarizer input).
@@ -67,7 +152,6 @@ fn message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
         )),
         // Prior compactions are kept context, not summarizer input; the new
         // compaction covers their retained span.
-        FileEntry::Compaction { .. } => None,
         _ => None,
     }
 }
@@ -85,7 +169,7 @@ fn context_tokens(entries: &[FileEntry], leaf_id: Option<&str>) -> u64 {
     estimate_context_tokens(&context.messages).tokens
 }
 
-/// Session AgentMessage -> LLM Message (post convertToLlm).
+/// Session `AgentMessage` -> LLM Message (post `convertToLlm`).
 fn to_llm_messages(messages: &[AgentMessage]) -> Vec<Message> {
     convert_to_llm(messages)
         .into_iter()
@@ -170,6 +254,11 @@ pub struct CompactionPreparation {
 /// (TS `prepareCompaction`): a branch that already ends in a compaction has
 /// nothing new to summarize, and a branch with no summarizable history has
 /// no compaction to run.
+///
+/// # Errors
+///
+/// Returns the TS `CompactionSkippedError` case as `Err`: the branch
+/// already ends in a compaction, or it carries no summarizable history.
 pub fn prepare_compaction(
     entries: &[FileEntry],
     keep_recent_tokens: u64,
@@ -235,6 +324,12 @@ pub fn prepare_compaction(
 
 /// Run compaction over the session: summarize the pre-cut prefix, persist the
 /// entry, and return the rebuilt post-compaction context messages.
+///
+/// # Errors
+///
+/// Returns an error when the compaction preparation or the summarizer call
+/// fails, or when the compaction entry cannot be persisted. A skipped
+/// compaction is a normal `Ok` outcome carrying the skip message.
 pub async fn execute_compaction(
     session: &mut SessionManager,
     options: CompactOptions<'_>,
@@ -268,7 +363,21 @@ pub async fn execute_compaction(
         .iter()
         .filter_map(message_from_entry)
         .collect();
+    super::compaction_trace::trace(
+        "compact.cut_prepared",
+        serde_json::json!({
+            "entries": entries.len(),
+            "firstKeptEntryIndex": cut.first_kept_entry_index,
+            "isSplitTurn": cut.is_split_turn,
+            "historyMessages": history.len(),
+            "turnPrefixMessages": turn_prefix_messages.len(),
+        }),
+    );
     let tokens_before = context_tokens(&entries, session.get_leaf_id());
+    super::compaction_trace::trace(
+        "compact.tokens_before_computed",
+        serde_json::json!({ "tokensBefore": tokens_before }),
+    );
     let prev_compaction_index = entries[..cut.first_kept_entry_index]
         .iter()
         .rposition(|entry| matches!(entry, FileEntry::Compaction { .. }));
@@ -294,14 +403,74 @@ pub async fn execute_compaction(
     // (TS passes the prior compaction's summary to `generateSummary`; the
     // turn-prefix call never gets it) — a non-split cut with no new
     // history still makes the update wire call.
-    let history_max_tokens = options.settings.reserve_tokens / 5 * 4; // floor(0.8 * reserve)
-    let turn_prefix_max_tokens = options.settings.reserve_tokens / 2; // floor(0.5 * reserve)
+    // TS #2411 (`_resolveAuxiliaryModel`): the summary calls run with
+    // their own prompt prefix (a different system prompt, no tools), so
+    // on the session model they can never hit the session's cached
+    // prefix and re-read their whole input at peak price — route them to
+    // the configured auxiliary model when it is set, usable, and its
+    // known window fits the exact requests this run will issue; fall back
+    // to the session model otherwise (the pre-#2411 behavior). The
+    // resolution reads settings.json/models.json/auth storage (and a
+    // `!command` secret key resolves a subprocess when configured), so it
+    // runs on the blocking pool, never the async executor.
+    let (model, api_key, summary_headers) = match options.auxiliary {
+        Some(context) => {
+            let required = estimate_summary_request_tokens(
+                &history,
+                &turn_prefix_messages,
+                cut.is_split_turn,
+                previous_summary.as_deref(),
+                options.custom_instructions,
+                options.settings.reserve_tokens,
+            );
+            let join = {
+                let context = context.clone();
+                let session_model = options.model.clone();
+                let session_api_key = options.api_key.clone();
+                tokio::task::spawn_blocking(move || {
+                    super::auxiliary_model::resolve_auxiliary_model(
+                        &context,
+                        "compaction summary",
+                        &session_model,
+                        session_api_key,
+                        Some(required),
+                    )
+                })
+            };
+            // A JoinError (the closure panicked) degrades to the session
+            // fallback; the resolver itself never panics — every unusable
+            // selector resolves to the fallback with the warning.
+            let routed =
+                join.await
+                    .unwrap_or_else(|_| super::auxiliary_model::ResolvedAuxiliaryModel {
+                        model: options.model.clone(),
+                        api_key: options.api_key.clone(),
+                        headers: None,
+                    });
+            (routed.model, routed.api_key, routed.headers)
+        }
+        None => (options.model.clone(), options.api_key.clone(), None),
+    };
+    let history_max_tokens = history_summary_completion_budget(options.settings.reserve_tokens);
+    let turn_prefix_max_tokens =
+        turn_prefix_summary_completion_budget(options.settings.reserve_tokens);
+    super::compaction_trace::trace(
+        "compact.summarizer_request",
+        serde_json::json!({
+            "historyMaxTokens": history_max_tokens,
+            "turnPrefixMaxTokens": turn_prefix_max_tokens,
+        }),
+    );
     let history_call = async {
         // The stand-in applies only inside the split arm (TS
         // `messagesToSummarize.length > 0 ? generateSummary(...) : "No
         // prior history."` — the arm runs when a turn prefix exists); a
         // cut without a turn prefix makes the history call below.
         if cut.is_split_turn && !turn_prefix_messages.is_empty() && history.is_empty() {
+            super::compaction_trace::trace(
+                "compact.summarizer_no_history",
+                serde_json::Value::Null,
+            );
             return Ok(SummarySlice {
                 summary: NO_PRIOR_HISTORY.to_string(),
                 usage: None,
@@ -314,8 +483,9 @@ pub async fn execute_compaction(
             options.settings.reserve_tokens,
         );
         complete_summary_call(
-            &options.model,
-            options.api_key.clone(),
+            &model,
+            api_key.clone(),
+            summary_headers.clone(),
             history_max_tokens,
             request,
             "Summarization failed",
@@ -328,8 +498,9 @@ pub async fn execute_compaction(
         }
         let request = build_turn_prefix_request(&turn_prefix_messages);
         let slice = complete_summary_call(
-            &options.model,
-            options.api_key.clone(),
+            &model,
+            api_key.clone(),
+            summary_headers.clone(),
             turn_prefix_max_tokens,
             request,
             "Turn prefix summarization failed",
@@ -340,6 +511,15 @@ pub async fn execute_compaction(
     let (history_slice, turn_prefix_slice) = tokio::join!(history_call, turn_prefix_call);
     let history_slice = history_slice?;
     let turn_prefix_slice = turn_prefix_slice?;
+    super::compaction_trace::trace(
+        "compact.summarizer_resolved",
+        serde_json::json!({
+            "summaryBytes": history_slice.summary.len()
+                + turn_prefix_slice
+                    .as_ref()
+                    .map_or(0, |slice| slice.summary.len()),
+        }),
+    );
 
     // The summarizer resolved while the run was aborted: the compaction is
     // cancelled before it commits (TS `_performCompaction`'s
@@ -381,6 +561,10 @@ pub async fn execute_compaction(
         .harness_digest
         .as_ref()
         .map(super::harness_digest::HarnessDigestInputs::render);
+    super::compaction_trace::trace(
+        "compact.digest_rendered",
+        serde_json::json!({ "digest": harness_digest.is_some() }),
+    );
     let entry = compaction_entry_for(
         &result,
         &details,
@@ -392,6 +576,13 @@ pub async fn execute_compaction(
     // snapshot ride on the durable row alongside the summary, boundary,
     // and token count.
     session.append_compaction(entry.clone())?;
+    super::compaction_trace::trace(
+        "compact.entry_appended",
+        serde_json::json!({
+            "firstKeptEntryId": first_kept_entry,
+            "persisted": session.is_persisted(),
+        }),
+    );
     Ok(CompactOutcome::Ran(Box::new(CompactRun {
         result,
         entry,
@@ -642,6 +833,7 @@ mod tests {
                 },
                 abort: None,
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -813,6 +1005,7 @@ mod tests {
                 settings: settings(2),
                 abort: None,
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -868,6 +1061,7 @@ mod tests {
                 settings: settings(2),
                 abort: None,
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -984,6 +1178,7 @@ mod tests {
                 },
                 abort: None,
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -1245,6 +1440,7 @@ mod tests {
                 settings,
                 abort: None,
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -1271,6 +1467,7 @@ mod tests {
                 settings,
                 abort: None,
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -1397,6 +1594,7 @@ mod tests {
                 settings,
                 abort: None,
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -1429,6 +1627,7 @@ mod tests {
                 },
                 abort: None,
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -1488,6 +1687,7 @@ mod tests {
                 },
                 abort: None,
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -1586,6 +1786,7 @@ mod tests {
                 },
                 abort: None,
                 harness_digest: Some(inputs),
+                auxiliary: None,
             },
         )
         .await
@@ -1657,6 +1858,7 @@ mod tests {
                 },
                 abort: None,
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -1697,6 +1899,7 @@ mod tests {
                 },
                 abort: Some(&signal),
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -1750,6 +1953,7 @@ mod tests {
                 },
                 abort: Some(&signal),
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -1783,6 +1987,7 @@ mod tests {
                 settings: super::super::compaction::CompactionSettings::default(),
                 abort: None,
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -1824,6 +2029,7 @@ mod tests {
                 },
                 abort: None,
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -1929,6 +2135,7 @@ mod tests {
                 },
                 abort: None,
                 harness_digest: None,
+                auxiliary: None,
             },
         )
         .await
@@ -1951,5 +2158,169 @@ mod tests {
             })
             .expect("compaction entry persisted");
         assert_eq!(persisted, run.entry);
+    }
+
+    /// An aux context whose settings pin one `auxiliaryModel` selector.
+    fn aux_context(
+        dir: &std::path::Path,
+        selector: Option<&str>,
+    ) -> crate::session_engine::auxiliary_model::AuxiliaryModelContext {
+        std::fs::write(
+            dir.join("settings.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "auxiliaryModel": selector,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        crate::session_engine::auxiliary_model::AuxiliaryModelContext {
+            cwd: dir.to_path_buf(),
+            agent_dir: dir.to_path_buf(),
+        }
+    }
+
+    /// The routing context present with a selector equal to the session
+    /// model keeps the session model: the compaction's wire call serves
+    /// on the session model (the faux factory records the model).
+    #[tokio::test]
+    async fn compaction_auxiliary_selector_equal_to_the_session_model_runs_on_the_session_model() {
+        let registration = faux_registration();
+        let model = registration.get_model();
+        let tmp = tempfile::tempdir().unwrap();
+        let aux = aux_context(tmp.path(), Some("faux/compact-m"));
+        let mut session = session_with_turns(tmp.path(), 3);
+        let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let recorder = seen_models.clone();
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
+            std::sync::Arc::new(
+                move |_context: &pa_types::ai::Context,
+                      _options: Option<&pa_ai::types::StreamOptions>,
+                      _call: u64,
+                      model: &pa_types::ai::Model| {
+                    recorder.lock().unwrap().push(model.id.clone());
+                    Ok(pa_ai::faux::faux_assistant_text_message(
+                        "the summary",
+                        pa_ai::faux::FauxAssistantMessageOptions::default(),
+                    ))
+                },
+            ),
+        )]);
+        let outcome = execute_compaction(
+            &mut session,
+            CompactOptions {
+                model,
+                api_key: None,
+                custom_instructions: None,
+                settings: super::super::compaction::CompactionSettings {
+                    keep_recent_tokens: 20,
+                    ..Default::default()
+                },
+                abort: None,
+                harness_digest: None,
+                auxiliary: Some(&aux),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, CompactOutcome::Ran(_)));
+        assert_eq!(seen_models.lock().unwrap().as_slice(), ["compact-m"]);
+        registration.unregister();
+    }
+
+    /// A selector that resolves to no model (unusable) falls back to the
+    /// session model with a warning: the compaction still runs.
+    #[tokio::test]
+    async fn compaction_auxiliary_selector_unusable_falls_back_to_the_session_model() {
+        let registration = faux_registration();
+        let model = registration.get_model();
+        let tmp = tempfile::tempdir().unwrap();
+        let aux = aux_context(tmp.path(), Some("testaux/missing-model"));
+        let mut session = session_with_turns(tmp.path(), 3);
+        let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let recorder = seen_models.clone();
+        registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
+            std::sync::Arc::new(
+                move |_context: &pa_types::ai::Context,
+                      _options: Option<&pa_ai::types::StreamOptions>,
+                      _call: u64,
+                      model: &pa_types::ai::Model| {
+                    recorder.lock().unwrap().push(model.id.clone());
+                    Ok(pa_ai::faux::faux_assistant_text_message(
+                        "the summary",
+                        pa_ai::faux::FauxAssistantMessageOptions::default(),
+                    ))
+                },
+            ),
+        )]);
+        let outcome = execute_compaction(
+            &mut session,
+            CompactOptions {
+                model,
+                api_key: None,
+                custom_instructions: None,
+                settings: super::super::compaction::CompactionSettings {
+                    keep_recent_tokens: 20,
+                    ..Default::default()
+                },
+                abort: None,
+                harness_digest: None,
+                auxiliary: Some(&aux),
+            },
+        )
+        .await
+        .unwrap();
+        let CompactOutcome::Ran(run) = outcome else {
+            panic!("expected the compaction to run on the fallback model");
+        };
+        assert_eq!(run.result.summary, "the summary");
+        assert_eq!(seen_models.lock().unwrap().as_slice(), ["compact-m"]);
+        registration.unregister();
+    }
+
+    /// The window estimate covers the exact wire bodies the compaction
+    /// will issue (TS #2411's `estimateSummaryRequestTokens`): a split
+    /// turn estimates BOTH the history request and the turn-prefix
+    /// request (each with the shared system prompt and its own
+    /// completion budget), and the no-history split arm estimates only the
+    /// prefix call.
+    #[test]
+    fn summary_window_estimate_covers_both_split_requests() {
+        let history = vec![user_message("some history to summarize")];
+        let turn_prefix = vec![user_message(&"a very long turn prefix ".repeat(2_000))];
+        let full =
+            estimate_summary_request_tokens(&history, &turn_prefix, true, None, None, 10_000);
+        let history_only =
+            estimate_summary_request_tokens(&history, &[], false, None, None, 10_000);
+        let prefix_only =
+            estimate_summary_request_tokens(&[], &turn_prefix, true, None, None, 10_000);
+        // A split turn must fit every request it will issue: the estimate
+        // is the larger of the two arms' estimates (each with the shared
+        // system prompt and its own completion budget).
+        assert_eq!(full, history_only.max(prefix_only));
+        assert!(full > history_only);
+        // The previous summary and the custom instructions grow the
+        // history request, so they grow the estimate.
+        let with_anchors = estimate_summary_request_tokens(
+            &history,
+            &[],
+            false,
+            Some("the previous summary text"),
+            Some("focus on the goal"),
+            10_000,
+        );
+        assert!(with_anchors > history_only);
+        // The completion budgets draw on the reserve: a larger reserve
+        // grows the estimate.
+        let bigger_reserve =
+            estimate_summary_request_tokens(&history, &[], false, None, None, 100_000);
+        assert!(bigger_reserve > history_only);
+    }
+
+    fn user_message(text: &str) -> AgentMessage {
+        AgentMessage::User(pa_types::ai::UserMessage {
+            content: UserContent::Text(text.to_string()),
+            timestamp: 0,
+            rest: Default::default(),
+        })
     }
 }

@@ -74,8 +74,6 @@ pub enum ChatEntry {
     /// A durable session-command echo row (`session_slash_command`):
     /// the command as typed, laid out like a user message.
     SlashCommand { text: String },
-    /// A durable session-command outcome row (`session_slash_command_result`).
-    SlashCommandResult { content: String },
     /// The compaction summary row (TS `CompactionSummaryMessageComponent`):
     /// `◆ Context compacted` with the summary below.
     CompactionSummary {
@@ -250,7 +248,7 @@ impl WorkingState {
     }
 }
 
-/// Spinner frames (TS `Loader` DEFAULT_FRAMES).
+/// Spinner frames (TS `Loader` `DEFAULT_FRAMES`).
 pub(crate) const LOADER_FRAMES: [&str; 10] = [
     "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
     "\u{2807}", "\u{280f}",
@@ -558,7 +556,7 @@ impl RetryState {
     }
 }
 
-/// The retry loader rows (TS auto_retry_start rendering: muted spinner +
+/// The retry loader rows (TS `auto_retry_start` rendering: muted spinner +
 /// the retry message).
 pub fn render_retry(retry: &RetryState, frame: usize, theme: &Theme, width: usize) -> Vec<Line> {
     let muted = theme.fg_style(ThemeColor::Muted);

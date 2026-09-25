@@ -154,7 +154,7 @@ emitted and flushed before the TUI starts.
 | property | type | notes |
 |---|---|---|
 | `duration_ms` | number | onboarding-task creation → completion |
-| `outcome` | string | `success` (fresh homes complete the flow silently — trace sharing ships pre-configured; the retained opt-out question has no error/abort path yet) |
+| `outcome` | string | `success` (a fresh home answers the question and a standing-choice home completes silently — no error/abort path in either yet) |
 | `auth_category` | string | `none` (no auth step in the flow) |
 | `provider_category` | string | `unknown` |
 
@@ -404,13 +404,15 @@ subagent inspection surface; emitted once per open action).
 The user opened an activity view from the dock (the operator's
 direct-navigation redesign): dock Enter or a second Alt+A opens the
 focused group's own view directly — the scoped agents view, the
-heartbeats view, or the bash view (the grouped panel is gone). The goal
-indicator is read-only and does not emit this event. No command, output,
-prompt, or goal content is collected.
+heartbeats view, or the bash view (the grouped panel is gone); the
+condensed tool runs pane opens through its own transcript key
+(`app.transcript.runs`, default Alt+T). The goal indicator is read-only
+and does not emit this event. No command, output, prompt, or goal
+content is collected.
 
 | property | type | notes |
 |---|---|---|
-| `kind` | string | `subagents` / `heartbeats` / `bash` |
+| `kind` | string | `subagents` / `heartbeats` / `bash` / `runs` (the condensed tool runs pane) |
 
 ### `tui menu opened`
 

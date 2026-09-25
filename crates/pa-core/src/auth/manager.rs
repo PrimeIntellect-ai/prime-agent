@@ -1,6 +1,6 @@
 //! `AuthStorage`: credential resolution with runtime overrides, environment
 //! keys, stored credentials, fallback resolvers, and stale-marking. Port of
-//! the AuthStorage class.
+//! the `AuthStorage` class.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -251,7 +251,7 @@ impl AuthStorage {
     /// In-memory storage with no ambient environment source: hermetic
     /// resolution for embedded hosts and test harnesses that must pin the
     /// model catalog scope (an ambient provider credential variable such
-    /// as PRIME_API_KEY cannot make models available through this
+    /// as `PRIME_API_KEY` cannot make models available through this
     /// storage). Otherwise behaves like [`AuthStorage::in_memory`].
     pub fn in_memory_without_env(data: AuthStorageData, oauth: Arc<dyn OAuthIntegration>) -> Self {
         Self::in_memory_with_env_source(data, oauth, Arc::new(NoEnvCredentials))
@@ -656,7 +656,7 @@ impl AuthStorage {
         self.reload();
     }
 
-    /// API-key resolution: runtime > (prime-inference: env) > stored (api_key
+    /// API-key resolution: runtime > (prime-inference: env) > stored (`api_key`
     /// resolved, oauth refreshed on expiry) > env > fallback. Stale sources
     /// are skipped.
     /// Provider-scoped request headers (prime-inference team header only).
@@ -749,8 +749,7 @@ impl AuthStorage {
                         AuthCredential::Oauth { expires, .. } => {
                             let now_ms = std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_millis() as i64)
-                                .unwrap_or(i64::MAX);
+                                .map_or(i64::MAX, |d| d.as_millis() as i64);
                             if now_ms >= *expires {
                                 // Refresh under the backend lock.
                                 if let Some(refreshed) = self.refresh_oauth(provider_id) {
@@ -839,8 +838,7 @@ impl AuthStorage {
             };
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(i64::MAX);
+                .map_or(i64::MAX, |d| d.as_millis() as i64);
             if now_ms < *expires {
                 refreshed = Some(credential);
                 return Ok(((), None));
@@ -1007,19 +1005,14 @@ mod tests {
     use super::*;
 
     /// Fixed environment credential source: hermetic against the ambient
-    /// process env (e.g. this sandbox exports PRIME_API_KEY globally).
+    /// process env (e.g. this sandbox exports `PRIME_API_KEY` globally).
     struct ScriptedEnv(HashMap<String, String>);
 
     impl EnvCredentialSource for ScriptedEnv {
         fn key_names(&self, provider: &str) -> Option<Vec<String>> {
             let names = pa_ai::env_api_keys::get_api_key_env_vars(provider)?
                 .into_iter()
-                .filter(|name| {
-                    self.0
-                        .get(*name)
-                        .map(|value| !value.is_empty())
-                        .unwrap_or(false)
-                })
+                .filter(|name| self.0.get(*name).is_some_and(|value| !value.is_empty()))
                 .map(str::to_string)
                 .collect::<Vec<_>>();
             (!names.is_empty()).then_some(names)

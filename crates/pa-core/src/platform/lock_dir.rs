@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Minimum staleness threshold, like proper-lockfile's floor.
-const MIN_STALE: Duration = Duration::from_millis(2000);
+const MIN_STALE: Duration = Duration::from_secs(2);
 
 /// The mtime bump proper-lockfile's precision probe writes: the next whole
 /// second plus 5ms, so a millisecond-precision filesystem records a time
@@ -179,6 +179,12 @@ impl LockDir {
     /// [`io::ErrorKind::WouldBlock`] (the TS protocol's ELOCKED); callers
     /// own retry policy. A lock older than `stale_after` is removed and
     /// retried once, so a crashed holder cannot wedge the file.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`io::ErrorKind::WouldBlock`] when a fresh lock is held by
+    /// another process, and any underlying I/O error (missing parent,
+    /// permissions, stale-reclaim failures) as-is.
     pub fn acquire(file: &Path, stale_after: Duration) -> io::Result<Self> {
         let path = Self::path_for(file);
         let stale_after = stale_after.max(MIN_STALE);

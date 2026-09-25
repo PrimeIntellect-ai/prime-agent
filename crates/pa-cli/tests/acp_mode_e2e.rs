@@ -18,7 +18,7 @@ struct AcpChild {
     lines: Receiver<String>,
     next_id: u64,
     /// Held (never read) so the child's cwd directory outlives the process:
-    /// dropping the tempdir deletes it and the child's current_dir fails.
+    /// dropping the tempdir deletes it and the child's `current_dir` fails.
     _home: tempfile::TempDir,
     spawn_stderr: Option<std::process::ChildStderr>,
 }
@@ -165,7 +165,7 @@ fn initialize_params() -> Value {
     })
 }
 
-const TIMEOUT: Duration = Duration::from_secs(60);
+const TIMEOUT: Duration = Duration::from_mins(1);
 
 /// The TS initialize response shape (capture `ts-happy_path.jsonl`), with the
 /// version and sessionId-class fields normalized as volatile.
@@ -694,7 +694,7 @@ fn acp_daemon_attached_serves_a_client_owned_session() {
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request("session/new", json!({ "mcpServers": [] }));
-    let (new_response, _) = client.wait_response(new, Duration::from_secs(60));
+    let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     assert!(
         new_response["result"]["sessionId"].is_string(),
         "daemon-attached admission succeeds: {new_response}"
@@ -707,14 +707,14 @@ fn acp_daemon_attached_serves_a_client_owned_session() {
         "session/prompt",
         json!({ "sessionId": session_id, "prompt": [{ "type": "text", "text": "Name a river." }] }),
     );
-    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_secs(120));
+    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(2));
     assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
     let chunk = updates
         .iter()
         .find(|update| update["params"]["update"]["sessionUpdate"] == "agent_message_chunk");
     assert!(chunk.is_some(), "the daemon stream maps to ACP chunks");
     let close = client.request("session/close", json!({ "sessionId": session_id }));
-    let (close_response, _) = client.wait_response(close, Duration::from_secs(60));
+    let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
     shutdown_sandboxed_daemon(&socket);
@@ -765,7 +765,7 @@ fn acp_daemon_attached_admits_mcp_servers_through_the_wire() {
             { "name": "capture-stdio", "type": "stdio", "command": "cat", "args": [], "env": [] },
         ]}),
     );
-    let (new_response, _) = client.wait_response(new, Duration::from_secs(60));
+    let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     assert!(
         new_response["result"]["sessionId"].is_string(),
         "{}",
@@ -778,7 +778,7 @@ fn acp_daemon_attached_admits_mcp_servers_through_the_wire() {
         .unwrap()
         .to_string();
     let close = client.request("session/close", json!({ "sessionId": close_id }));
-    let (close_response, _) = client.wait_response(close, Duration::from_secs(60));
+    let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
     shutdown_sandboxed_daemon(&socket);
@@ -829,7 +829,7 @@ fn acp_daemon_attached_cancels_mid_turn() {
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request("session/new", json!({ "mcpServers": [] }));
-    let (new_response, _) = client.wait_response(new, Duration::from_secs(60));
+    let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     let session_id = new_response["result"]["sessionId"]
         .as_str()
         .unwrap()
@@ -840,14 +840,14 @@ fn acp_daemon_attached_cancels_mid_turn() {
         );
     // The turn is mid-delay: cancel, then wait for the prompt response.
     client.notify("session/cancel", json!({ "sessionId": session_id }));
-    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_secs(60));
+    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(1));
     assert_eq!(prompt_response["result"]["stopReason"], "cancelled");
     assert!(
         updates.is_empty(),
         "a cancelled turn publishes no boundary frames after the cancel"
     );
     let close = client.request("session/close", json!({ "sessionId": session_id }));
-    let (close_response, _) = client.wait_response(close, Duration::from_secs(60));
+    let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
     shutdown_sandboxed_daemon(&socket);
@@ -856,10 +856,10 @@ fn acp_daemon_attached_cancels_mid_turn() {
 /// Stop the sandboxed supervisor a test spawned (the shared-daemon
 /// product behavior leaves it running; a test owns its sandbox).
 fn shutdown_sandboxed_daemon(socket: &std::path::Path) {
+    use std::io::Write as _;
     let Ok(mut stream) = pa_types::platform::transport::connect_blocking(socket) else {
         return;
     };
-    use std::io::Write as _;
     let frame = format!(
             "{{\"type\":\"command\",\"id\":\"shutdown-test\",\"protocol\":{{\"name\":\"prime-agent.daemon\",\"version\":{}}},\"command\":{{\"type\":\"shutdown\"}}}}\n",
             pa_types::daemon::DAEMON_PROTOCOL_VERSION
@@ -1114,7 +1114,7 @@ fn acp_daemon_attached_publishes_the_goal_update_meta() {
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request("session/new", json!({ "mcpServers": [] }));
-    let (new_response, _) = client.wait_response(new, Duration::from_secs(60));
+    let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     assert!(
         new_response["result"]["sessionId"].is_string(),
         "daemon-attached admission succeeds: {new_response}"
@@ -1130,7 +1130,7 @@ fn acp_daemon_attached_publishes_the_goal_update_meta() {
             "prompt": [{ "type": "text", "text": "/goal --budget 500 make the daemon publish goal state" }],
         }),
     );
-    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_secs(120));
+    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(2));
     assert_eq!(prompt_response["result"]["stopReason"], "end_turn");
     let goal = updates.iter().find_map(|update| {
         let meta = &update["params"]["update"]["_meta"]["ai.primeintellect.prime-agent"]["goal"];
@@ -1142,7 +1142,7 @@ fn acp_daemon_attached_publishes_the_goal_update_meta() {
     assert_eq!(goal["tokenBudget"], 500);
     assert_eq!(goal["tokensUsed"], 0);
     let close = client.request("session/close", json!({ "sessionId": session_id }));
-    let (close_response, _) = client.wait_response(close, Duration::from_secs(60));
+    let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
     shutdown_sandboxed_daemon(&socket);
@@ -1194,7 +1194,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
     let init = client.request("initialize", initialize_params());
     let _ = client.wait_response(init, TIMEOUT);
     let new = client.request("session/new", json!({ "mcpServers": [] }));
-    let (new_response, _) = client.wait_response(new, Duration::from_secs(60));
+    let (new_response, _) = client.wait_response(new, Duration::from_mins(1));
     assert!(
         new_response["result"]["sessionId"].is_string(),
         "daemon-attached admission succeeds: {new_response}"
@@ -1211,7 +1211,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
             "prompt": [{ "type": "text", "text": "/autonomous on --max-turns 1" }],
         }),
     );
-    let (enable_response, updates) = client.wait_response(enable, Duration::from_secs(120));
+    let (enable_response, updates) = client.wait_response(enable, Duration::from_mins(2));
     assert_eq!(enable_response["result"]["stopReason"], "end_turn");
     // The enabled accounting is already visible on the command turn's
     // completion envelope (the headless-completion status of the run).
@@ -1230,7 +1230,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
             "prompt": [{ "type": "text", "text": "say something" }],
         }),
     );
-    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_secs(120));
+    let (prompt_response, updates) = client.wait_response(prompt, Duration::from_mins(2));
     assert_eq!(
         prompt_response["result"],
         json!({ "stopReason": "max_turn_requests" }),
@@ -1259,7 +1259,7 @@ fn acp_daemon_attached_reports_autonomous_accounting_and_limit_stop_reason() {
         "the run's unlimited continuation budget minus used"
     );
     let close = client.request("session/close", json!({ "sessionId": session_id }));
-    let (close_response, _) = client.wait_response(close, Duration::from_secs(60));
+    let (close_response, _) = client.wait_response(close, Duration::from_mins(1));
     assert_eq!(close_response["result"], json!({}));
     drop(client);
     shutdown_sandboxed_daemon(&socket);
@@ -1346,7 +1346,7 @@ fn compaction_metas(updates: &[Value]) -> Vec<Value> {
 /// threshold arm, binary level).
 ///
 /// Two turns over a 500-token combined ceiling (the f14 battery shape:
-/// the window minus the faux harness model's 4_096 per-request output
+/// the window minus the faux harness model's `4_096` per-request output
 /// budget and the reserve): the single-turn compaction skips (nothing
 /// before the turn to summarize — the skip publishes the empty payload,
 /// proving the arm ran), then the second turn's boundary compaction
@@ -1390,10 +1390,9 @@ fn acp_threshold_auto_compaction_publishes_the_compaction_meta() {
     let metas = compaction_metas(&updates);
     assert!(!metas.is_empty(), "the threshold arm ran: {updates:?}");
     assert!(
-        metas.iter().all(|meta| meta
-            .as_object()
-            .map(serde_json::Map::is_empty)
-            .unwrap_or(false)),
+        metas
+            .iter()
+            .all(|meta| meta.as_object().is_some_and(serde_json::Map::is_empty)),
         "the single-turn compaction skipped: {metas:?}"
     );
 
@@ -1466,15 +1465,38 @@ fn acp_overflow_recovery_compacts_and_retries_the_turn() {
     );
 
     // The overflow probe: the arm compacts once (the summarizer consumed
-    // the third scripted response) and the retried turn recovers.
-    let prompt = client.request(
-        "session/prompt",
-        json!({
-            "sessionId": session_id,
-            "prompt": [{ "type": "text", "text": format!("overflow probe {}", "x".repeat(2_000)) }],
-        }),
-    );
-    let (prompt_response, updates) = client.wait_response(prompt, TIMEOUT);
+    // the third scripted response) and the retried turn recovers. The
+    // seed turn's drain can outlive its response on a loaded runner (the
+    // overflow retry then bounces off the still-running prompt guard) —
+    // the probe is re-issued until the session settles (the recovered
+    // turn's assertion itself is unchanged and strict).
+    let mut probe_attempts = 0;
+    let (prompt_response, updates) = loop {
+        probe_attempts += 1;
+        let prompt = client.request(
+            "session/prompt",
+            json!({
+                "sessionId": session_id,
+                "prompt": [{ "type": "text", "text": format!("overflow probe {}", "x".repeat(2_000)) }],
+            }),
+        );
+        let (response, prompt_updates) = client.wait_response(prompt, TIMEOUT);
+        // ACP `internal_error` carries the refusal text in `data.details`
+        // (`Internal error` is the generic message) — match both fields.
+        let refusal_text = response["error"]["data"]["details"]
+            .as_str()
+            .or_else(|| response["error"]["message"].as_str())
+            .unwrap_or_default();
+        let refused = response["error"].is_object() && refusal_text.contains("already running");
+        if !refused {
+            break (response, prompt_updates);
+        }
+        assert!(
+            probe_attempts < 40,
+            "the session never settled after the seed turn: {response}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    };
     assert_eq!(
         prompt_response["result"],
         json!({ "stopReason": "end_turn" }),

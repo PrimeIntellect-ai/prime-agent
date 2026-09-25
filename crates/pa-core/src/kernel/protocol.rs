@@ -147,6 +147,12 @@ impl Event {
 /// `done` and `host_request` route strictly by non-empty string id (the
 /// runtime mints uuid hex ids and echoes the host's uuids); silently dropping
 /// an id-less one would leave the awaiting request unsettled forever.
+///
+/// # Errors
+///
+/// Returns a human-readable error string when the line is not valid JSON,
+/// is not a JSON object, names an unknown protocol event, or frames an
+/// id-less `done`, `result`, or `host_request`.
 pub fn parse_event(line: &str) -> Result<Event, String> {
     let mut value: Value = serde_json::from_str(line)
         .map_err(|_| format!("unparseable protocol line: {}", clip(line)))?;
@@ -158,7 +164,7 @@ pub fn parse_event(line: &str) -> Result<Event, String> {
         Some(map)
             if matches!(
                 map.get("event").and_then(Value::as_str),
-                Some("display") | Some("host_request")
+                Some("display" | "host_request")
             ) =>
         {
             map.remove("data").unwrap_or(Value::Null)

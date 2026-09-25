@@ -19,11 +19,10 @@ use serde_json::{json, Value};
 /// ships the runtime sidecar. Skipped (with a note) on machines without a
 /// live install.
 fn kernel_python() -> Option<PathBuf> {
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -32,11 +31,10 @@ fn kernel_python() -> Option<PathBuf> {
 }
 
 fn release_dir() -> Option<PathBuf> {
-    let releases = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.local/share/prime-agent/releases"))
-            .unwrap_or_else(|_| "/home/ubuntu/.local/share/prime-agent/releases".to_string()),
-    );
+    let releases = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
+        |home| format!("{home}/.local/share/prime-agent/releases"),
+    ));
     let Ok(entries) = std::fs::read_dir(&releases) else {
         eprintln!("no releases dir at {releases:?}; skipping live kernel test");
         return None;
@@ -63,7 +61,7 @@ fn faux_script(dir: &Path) -> PathBuf {
             "modelId": "faux-1",
             "modelName": "Faux Model",
             "reasoning": false,
-            "contextWindow": 128000,
+            "contextWindow": 128_000,
             "tokensPerSecond": 30,
             "responses": [
                 {"content": [
@@ -154,7 +152,7 @@ impl Client {
     }
 
     fn read_line(&mut self) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -163,7 +161,7 @@ impl Client {
             let mut line = String::new();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -190,7 +188,7 @@ impl Client {
     }
 
     fn request(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -214,7 +212,7 @@ impl Client {
 
     /// Drain until the socket stays quiet for `quiet_ms`.
     fn drain_events(&mut self, quiet_ms: Duration) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         let mut last_line = Instant::now();
         loop {
             assert!(Instant::now() < deadline, "event drain timed out");
@@ -241,7 +239,7 @@ impl Client {
 }
 
 /// An abort on a running kernel cell settles the worker's turn at once:
-/// the turn unwinds (turn_end + agent_end reach attached clients within
+/// the turn unwinds (`turn_end` + `agent_end` reach attached clients within
 /// the budget) and the cell dies (its finish marker never appears). A
 /// wedge keeps the loader spinning while the cell runs out.
 #[test]
@@ -292,7 +290,7 @@ fn abort_during_a_kernel_cell_settles_the_daemon_turn_immediately() {
     );
     assert_eq!(started["success"], true, "prompt failed: {started}");
     let marker = cwd.join("wedge-started");
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_mins(3);
     while Instant::now() < deadline {
         if marker.exists() {
             break;

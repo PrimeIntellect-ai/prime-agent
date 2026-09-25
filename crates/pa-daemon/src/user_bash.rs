@@ -36,7 +36,7 @@ const SPILL_PREFIX: &str = "pa-bash";
 /// plus the per-invocation abort controllers), with a kill switch the
 /// `abort_bash` command pulls.
 pub(crate) struct UserBash {
-    /// The user-bash claim (execute_bash only; TS `runUserBash` guard).
+    /// The user-bash claim (`execute_bash` only; TS `runUserBash` guard).
     running: AtomicBool,
     /// Awaited bash runs in flight (TS `_bashAbortControllers.size`:
     /// `execute_bash_and_wait` runs count toward `isBashRunning` without
@@ -80,7 +80,7 @@ impl UserBash {
 
     /// Whether a user bash or an awaited bash run is in flight (TS
     /// `isBashRunning`: `_bashAbortControllers.size > 0 ||
-    /// `_userBashRunning`).
+    /// _userBashRunning`).
     pub(crate) fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst) || self.awaited.load(Ordering::SeqCst) > 0
     }

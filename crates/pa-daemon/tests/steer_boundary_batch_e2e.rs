@@ -26,11 +26,10 @@ use serde_json::{json, Value};
 /// ships the runtime sidecar. Skipped (with a note) on machines without a
 /// live install.
 fn kernel_python() -> Option<PathBuf> {
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -39,11 +38,10 @@ fn kernel_python() -> Option<PathBuf> {
 }
 
 fn release_dir() -> Option<PathBuf> {
-    let releases = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.local/share/prime-agent/releases"))
-            .unwrap_or_else(|_| "/home/ubuntu/.local/share/prime-agent/releases".to_string()),
-    );
+    let releases = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
+        |home| format!("{home}/.local/share/prime-agent/releases"),
+    ));
     let Ok(entries) = std::fs::read_dir(&releases) else {
         eprintln!("no releases dir at {releases:?}; skipping live kernel test");
         return None;
@@ -71,7 +69,7 @@ fn faux_script(dir: &Path) -> PathBuf {
             "modelId": "faux-1",
             "modelName": "Faux Model",
             "reasoning": false,
-            "contextWindow": 128000,
+            "contextWindow": 128_000,
             "tokensPerSecond": 30,
             "responses": [
                 {"content": [
@@ -166,7 +164,7 @@ impl Client {
     }
 
     fn read_line(&mut self) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -175,7 +173,7 @@ impl Client {
             let mut line = String::new();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -202,7 +200,7 @@ impl Client {
     }
 
     fn request(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -220,7 +218,7 @@ impl Client {
     }
 
     fn drain_events(&mut self, quiet_ms: Duration) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         let mut last_line = Instant::now();
         loop {
             assert!(Instant::now() < deadline, "event drain timed out");
@@ -251,7 +249,7 @@ impl Client {
     }
 }
 
-/// The delivered user rows (text) and the delivery agent_starts after the
+/// The delivered user rows (text) and the delivery `agent_starts` after the
 /// long turn's `agent_end`: the batch evidence.
 #[test]
 fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
@@ -300,7 +298,7 @@ fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
     // Park the steers strictly mid-tool: the cell writes its start marker,
     // then sleeps — every steer lands while the tool call runs.
     let marker = cwd.join("sleep-one-started");
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_mins(3);
     while Instant::now() < deadline {
         if marker.exists() {
             break;
@@ -334,7 +332,7 @@ fn multi_steer_parked_mid_run_co_delivers_as_one_batched_turn() {
     // follow-up lane delivers behind the steering lane, so its row plus a
     // quiet wire means the queue fully drained — true under either
     // delivery shape).
-    let settled = Instant::now() + Duration::from_secs(180);
+    let settled = Instant::now() + Duration::from_mins(3);
     loop {
         let before = client.events.len();
         client.drain_events(Duration::from_millis(500));
@@ -420,7 +418,7 @@ fn event_types(events: &[Value]) -> Vec<String> {
         .collect()
 }
 
-/// The (role, text) of every message_end row, in wire order — the
+/// The (role, text) of every `message_end` row, in wire order — the
 /// delivered-message trace (user rows and assistant replies).
 fn event_rows(events: &[Value]) -> Vec<(String, String)> {
     events

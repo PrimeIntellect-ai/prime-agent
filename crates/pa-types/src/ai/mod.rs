@@ -219,7 +219,7 @@ pub struct ProviderResponse {
 #[serde(rename_all = "camelCase")]
 pub struct TextContent {
     pub text: String,
-    /// OpenAI Responses message metadata: a legacy id string or a
+    /// `OpenAI` Responses message metadata: a legacy id string or a
     /// [`TextSignatureV1`] JSON payload (TS wire key `textSignature`; the
     /// camelCase rename keeps the provider signature attached to the block
     /// across the pa-ai <-> pa-agent wire-shape round trips, which have no
@@ -230,7 +230,7 @@ pub struct TextContent {
     pub rest: JsonMap,
 }
 
-/// OpenAI Responses text signature payload (`textSignature` holds its JSON).
+/// `OpenAI` Responses text signature payload (`textSignature` holds its JSON).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextSignatureV1 {
@@ -252,12 +252,12 @@ pub enum TextSignaturePhase {
 #[serde(rename_all = "camelCase")]
 pub struct ThinkingContent {
     pub thinking: String,
-    /// Provider reasoning item id (e.g. OpenAI Responses), or the encoded
+    /// Provider reasoning item id (e.g. `OpenAI` Responses), or the encoded
     /// reasoning-details payload for redacted blocks. TS wire key
     /// `thinkingSignature`; the camelCase rename keeps the provider
     /// signature attached to the block across the pa-ai <-> pa-agent
     /// wire-shape round trips (pa-agent has no catch-all field, so a
-    /// snake_case key was silently dropped there) and matches the TS
+    /// `snake_case` key was silently dropped there) and matches the TS
     /// product's session files and event frames.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_signature: Option<String>,
@@ -476,7 +476,7 @@ pub enum StopReason {
     Stop,
     Length,
     /// Terminal reason of a turn that ended in tool calls. Deserialization
-    /// also accepts the raw OpenAI wire value `tool_calls` (TS's loader
+    /// also accepts the raw `OpenAI` wire value `tool_calls` (TS's loader
     /// keeps any `stopReason` string, so a session file written by the TS
     /// product or a foreign tool never loses its assistant rows).
     #[serde(alias = "tool_calls")]
@@ -794,7 +794,7 @@ pub enum CacheControlFormat {
     Anthropic,
 }
 
-/// Compatibility settings for OpenAI Responses APIs.
+/// Compatibility settings for `OpenAI` Responses APIs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenAiResponsesCompat {
@@ -838,6 +838,13 @@ pub enum CompatKind {
 }
 
 impl ModelCompat {
+    /// Build a [`ModelCompat`] from a typed compat value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if serializing `kind` to a JSON value fails or if that value
+    /// is not a JSON object. Both are unreachable for the current compat
+    /// structs, which serialize to plain JSON objects.
     pub fn from_kind(kind: CompatKind) -> Self {
         let value = match &kind {
             CompatKind::AnthropicMessages(c) => serde_json::to_value(c),
@@ -855,6 +862,11 @@ impl ModelCompat {
     /// When only shared keys (e.g. `supportsLongCacheRetention`) are present,
     /// every shape encodes them identically; the completions shape is the
     /// fallback because it is the common case for OpenAI-compatible providers.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `serde_json` error when the raw object does not
+    /// deserialize into the compat struct its keys selected.
     pub fn kind(&self) -> Result<CompatKind, serde_json::Error> {
         let has_key = |keys: &[&str]| keys.iter().any(|k| self.raw.contains_key(*k));
         let value = Value::Object(self.raw.clone());
@@ -872,7 +884,7 @@ impl ModelCompat {
     }
 }
 
-/// OpenRouter provider routing preferences (`provider` request field).
+/// `OpenRouter` provider routing preferences (`provider` request field).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenRouterRouting {
@@ -911,7 +923,7 @@ pub enum DataCollection {
     Allow,
 }
 
-/// OpenRouter sort strategy: a string metric or a partitioned object.
+/// `OpenRouter` sort strategy: a string metric or a partitioned object.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OpenRouterSort {
@@ -924,7 +936,7 @@ pub enum OpenRouterSort {
     },
 }
 
-/// OpenRouter price cap, with string-or-number fields as in the upstream API.
+/// `OpenRouter` price cap, with string-or-number fields as in the upstream API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenRouterMaxPrice {
@@ -947,7 +959,7 @@ pub enum NumOrString {
     Str(String),
 }
 
-/// OpenRouter percentile threshold: a scalar or a percentile map.
+/// `OpenRouter` percentile threshold: a scalar or a percentile map.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum OpenRouterThreshold {
@@ -1007,7 +1019,7 @@ pub struct Model {
 }
 
 /// TS `supportsFastMode`: the fast-mode (priority) service tier exists on
-/// gpt-5.4/5.5/5.6 models served over the OpenAI Responses APIs. Shared by
+/// gpt-5.4/5.5/5.6 models served over the `OpenAI` Responses APIs. Shared by
 /// the surfaces that gate the `/fast` command on model eligibility (the TS
 /// product keeps the same function in the shared AI package).
 pub fn supports_fast_mode(model: &Model) -> bool {

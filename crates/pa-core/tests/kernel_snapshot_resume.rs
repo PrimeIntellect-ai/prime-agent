@@ -53,11 +53,10 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -92,7 +91,7 @@ fn faux_session(responses: Vec<FauxResponseStep>) -> FauxSession {
 }
 
 /// One assistant turn that calls the `ipython` tool with `code` (the
-/// loop's tool-call shape: `StopReason::ToolUse` + a ToolCall block).
+/// loop's tool-call shape: `StopReason::ToolUse` + a `ToolCall` block).
 fn ipython_tool_call_step(call_id: &str, code: &str) -> FauxResponseStep {
     let message = faux_assistant_message(
         vec![pa_types::ai::AssistantContentBlock::ToolCall(
@@ -158,7 +157,7 @@ async fn wait_for_boot(
     agent_dir: &Path,
     cold: bool,
 ) -> serde_json::Value {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         let events = kernel_bootstrap_events(client, agent_dir).await;
         if let Some(event) = events.iter().find(|event| {
@@ -352,7 +351,7 @@ async fn session_end_then_resume_prewarms_and_revives_the_namespace() {
     // generous ceiling only (the sandbox may be loaded), the structural
     // claim is "ready before the first prompt", proven by the event.
     assert!(
-        ready_elapsed < Duration::from_secs(60),
+        ready_elapsed < Duration::from_mins(1),
         "resume boot took too long: {ready_elapsed:?}"
     );
 

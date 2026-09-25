@@ -44,11 +44,10 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -119,7 +118,7 @@ async fn kernel_bootstrap_events(
 /// `kernel bootstrap` success event (the boot is a background task, and the
 /// client flushes on its interval, so both waits fold into this poll).
 async fn wait_for_kernel_boot(client: &pa_telemetry::TelemetryClient, agent_dir: &Path) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         let events = kernel_bootstrap_events(client, agent_dir).await;
         if events

@@ -32,7 +32,7 @@ use super::runtime::SessionRuntime;
 /// `agent_dir` (registry) or the no-children behavior (host).
 #[derive(Default)]
 pub struct RlmWiring {
-    /// Registry `rlm.find_models` searches. Defaults to the agent_dir catalog.
+    /// Registry `rlm.find_models` searches. Defaults to the `agent_dir` catalog.
     pub model_registry: Option<Arc<crate::models::registry::ModelRegistry>>,
     /// Child-session machinery backing `rlm.spawn`/`rlm.create_session` and
     /// the roster/collect/delete surface.
@@ -149,9 +149,10 @@ pub fn wire_session_runtime(
     let mutation_hook = cron_store
         .as_ref()
         .and_then(|wiring| wiring.mutation_hook.clone());
-    let cron_store = cron_store
-        .map(|wiring| wiring.store)
-        .unwrap_or_else(|| Arc::new(AgentCronJobStore::new(agent_dir.join("cron-jobs.json"))));
+    let cron_store = cron_store.map_or_else(
+        || Arc::new(AgentCronJobStore::new(agent_dir.join("cron-jobs.json"))),
+        |wiring| wiring.store,
+    );
     let mut runtime = SessionRuntime::new(&session, cron_store, active_session_id, binding);
     if let Some(purge) = goal_complete_purge {
         runtime.set_goal_complete_purge(purge);
@@ -210,7 +211,7 @@ pub fn kernel_python_skills(skills: &[Skill]) -> Vec<KernelPythonSkill> {
 /// goal/heartbeat bridge plus the pre-imported Python skills.
 ///
 /// The session's agent dir is propagated explicitly into the kernel env
-/// (PRIME_AGENT_CODING_AGENT_DIR): ambient inheritance is correct for the
+/// (`PRIME_AGENT_CODING_AGENT_DIR`): ambient inheritance is correct for the
 /// product paths, but an embedding host whose ambient env differs from the
 /// session's agent dir must not leak its own paths into the kernel. Same
 /// discipline as the daemon worker env (#109).

@@ -81,13 +81,14 @@ fn session_tree(
 ) -> Vec<TreeMember> {
     let mut members = Vec::new();
     let root = canonical_session_path(root_session_file);
-    let root_id = read_session_info(&root)
-        .map(|info| info.id)
-        .unwrap_or_else(|| {
+    let root_id = read_session_info(&root).map_or_else(
+        || {
             root.file_stem()
                 .map(|stem| stem.to_string_lossy().to_string())
                 .unwrap_or_default()
-        });
+        },
+        |info| info.id,
+    );
     if root_id.is_empty() {
         return members;
     }
@@ -627,7 +628,7 @@ mod tests {
             "cwd": "/work",
             "prompt": "liveness ping",
             "label": "lane-liveness",
-            "schedule": { "kind": "interval", "expression": "every 2m", "intervalMs": 120000 },
+            "schedule": { "kind": "interval", "expression": "every 2m", "intervalMs": 120_000 },
             "createdAt": "2026-01-01T00:00:00Z",
             "updatedAt": "2026-01-01T00:00:00Z",
             "runCount": 0,
@@ -741,7 +742,7 @@ mod tests {
                 "sessionFile": session_file.to_string_lossy(),
                 "cwd": "/work",
                 "prompt": "ping",
-                "schedule": { "kind": "interval", "expression": "every 2m", "intervalMs": 120000 },
+                "schedule": { "kind": "interval", "expression": "every 2m", "intervalMs": 120_000 },
                 "createdAt": "2026-01-01T00:00:00Z",
                 "updatedAt": "2026-01-01T00:00:00Z",
                 "runCount": 0,

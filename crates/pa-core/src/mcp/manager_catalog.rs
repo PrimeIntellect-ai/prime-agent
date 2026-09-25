@@ -1,4 +1,4 @@
-//! The catalog-driven McpManager surface: service-catalog resolution
+//! The catalog-driven `McpManager` surface: service-catalog resolution
 //! (compiled built-ins -> local sources -> remote snapshot), integrations
 //! over resolved descriptors with ENDPOINT PINNING (an installed record or
 //! bound credential keeps its approved endpoint even when the catalog URL
@@ -132,6 +132,16 @@ impl McpManager {
     /// Gather the paste-install inputs under a SHORT lock: the async install
     /// then runs without holding the manager mutex (the probe and the auth
     /// store await freely).
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable error when the server is not a known
+    /// service that collects exactly one pasted credential.
+    ///
+    /// # Panics
+    ///
+    /// The `expect` on the service's endpoint is unreachable: the
+    /// pasteability filter already rejects services without an endpoint.
     pub fn paste_install_inputs(&self, server: &str) -> Result<PasteInstallInputs, String> {
         let token = String::new();
         let _ = token;
@@ -182,9 +192,7 @@ fn now_ms() -> u64 {
 
 fn expand_tilde(path: &str) -> PathBuf {
     if path == "~" {
-        return std::env::var("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("~"));
+        return std::env::var("HOME").map_or_else(|_| PathBuf::from("~"), PathBuf::from);
     }
     if let Some(rest) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
@@ -455,6 +463,15 @@ pub struct PasteInstallInputs {
 /// flow): store the credential bound to the service endpoint (the pin),
 /// verify with a real handshake, and persist the record under the guard.
 /// Never holds a manager mutex across the probe.
+///
+/// # Errors
+///
+/// Returns a human-readable error when the pasted token is empty or the
+/// connection record cannot be written.
+///
+/// # Panics
+///
+/// Panics if the connection store mutex is poisoned.
 pub async fn install_static_token(
     inputs: PasteInstallInputs,
     token: &str,
@@ -544,6 +561,15 @@ pub async fn install_static_token(
 /// Remove one connection: delete its credential and its connection record
 /// (the durable endpoint pin) in one step — the view's remove-account
 /// action. Returns whether the credential was removed.
+///
+/// # Errors
+///
+/// Returns a human-readable error when the connection record cannot be
+/// written.
+///
+/// # Panics
+///
+/// Panics if the connection store mutex is poisoned.
 pub async fn remove_mcp_connection(
     handles: &McpConnectionHandles,
     server: &str,

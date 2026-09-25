@@ -91,7 +91,7 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path, kernel_python: &Path) -> Da
 }
 
 /// The kernel Python with prime-agent-runtime installed; set
-/// PA_E2E_KERNEL_PYTHON to point at an explicit interpreter instead.
+/// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -101,11 +101,10 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -157,7 +156,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -166,7 +165,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse response line"),
                 Err(error) => {
                     assert!(
@@ -179,7 +178,7 @@ impl Client {
     }
 
     fn read_response(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(240);
+        let deadline = Instant::now() + Duration::from_mins(4);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -253,7 +252,7 @@ fn run_turn(client: &mut Client, session_id: &str, message: &str, id: &str) {
 
 /// Poll for a kernel cell's receipt content (the cell writes its verdict).
 fn await_receipt(receipt: &Path) -> String {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         if let Ok(content) = std::fs::read_to_string(receipt) {
             return content;
@@ -428,7 +427,7 @@ fn new_session_closes_the_spawned_child_and_empties_the_roster() {
 
     // The child runs: its worker session is resident in the supervisor and
     // tracked in the parent's registry (the surface the close drains).
-    let child_row = wait_until(&mut client, Duration::from_secs(60), |client| {
+    let child_row = wait_until(&mut client, Duration::from_mins(1), |client| {
         let rows = rlm_children_rows(client, "g1", &parent_id);
         rows.into_iter()
             .find(|row| row["id"] == json!(child_id) && row["status"] == "running")
@@ -453,7 +452,7 @@ fn new_session_closes_the_spawned_child_and_empties_the_roster() {
     assert_eq!(replaced["success"], true, "new_session failed: {replaced}");
 
     // The child's observable state after: closed with the parent.
-    wait_until(&mut client, Duration::from_secs(60), |client| {
+    wait_until(&mut client, Duration::from_mins(1), |client| {
         let summaries = roster_summaries(client, "l2");
         summaries
             .iter()

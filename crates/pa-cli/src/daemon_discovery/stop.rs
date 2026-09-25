@@ -77,20 +77,20 @@ pub(crate) fn run_reap(json: bool, root: &DaemonStateRoot) -> i32 {
                 // Re-probe right before killing: a daemon classified
                 // unreachable at discovery may have started answering; never
                 // signal one that now responds.
-                if !probe_daemon(&action.daemon.socket_path).reachable {
-                    kill_daemon(pid.unwrap_or(0));
-                    remove_socket_file(&action.daemon.socket_path);
-                    reaped.push((
-                        socket_path,
-                        format!("killed unreachable daemon (pid {})", pid.unwrap_or(0)),
-                    ));
-                } else {
+                if probe_daemon(&action.daemon.socket_path).reachable {
                     apply(
                         reap_reachable_daemon(&action.daemon.socket_path, pid),
                         &socket_path,
                         &mut reaped,
                         &mut skipped,
                     );
+                } else {
+                    kill_daemon(pid.unwrap_or(0));
+                    remove_socket_file(&action.daemon.socket_path);
+                    reaped.push((
+                        socket_path,
+                        format!("killed unreachable daemon (pid {})", pid.unwrap_or(0)),
+                    ));
                 }
             }
             ReapActionKind::Shutdown => {
@@ -425,7 +425,7 @@ fn shutdown_daemon(socket_path: &Path, force: bool) -> bool {
     // of truth.
     let _ = client.request_with_timeout(shutdown, 1_500);
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(5_000);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
         if !probe_daemon(socket_path).reachable {
             return true;

@@ -179,6 +179,13 @@ impl EnvelopeParseError {
 /// Parse one JSONL command line into an envelope. Non-envelope lines are
 /// treated as bare commands (TS backward compat). Unknown command types are
 /// preserved as an error so callers can reply with the exact TS wire error.
+///
+/// # Errors
+///
+/// Returns an error when the line is not valid JSON, the envelope is
+/// malformed (missing id, a non-string clientId, a bad command payload),
+/// the protocol is too old, or the command type is unknown
+/// (`EnvelopeParseError`).
 pub fn parse_daemon_command_line(line: &str) -> Result<DaemonCommandEnvelope, EnvelopeParseError> {
     let value: Value = serde_json::from_str(line)
         .map_err(|e| EnvelopeParseError::Invalid(format!("invalid JSON: {e}")))?;
@@ -247,16 +254,15 @@ fn parse_daemon_command_value(
         .unwrap_or("unknown");
     // Keep the tag for the error after deserialization consumes the command value.
     let type_name = type_name.to_string();
-    let command = match serde_json::from_value::<DaemonCommand>(command_value) {
-        Ok(command) => command,
-        Err(_) => {
-            if !KNOWN_COMMAND_TYPES.contains(&type_name.as_str()) {
-                return Err(EnvelopeParseError::UnknownCommand(type_name));
-            }
-            return Err(EnvelopeParseError::Invalid(format!(
-                "malformed {type_name} command"
-            )));
+    let command = if let Ok(command) = serde_json::from_value::<DaemonCommand>(command_value) {
+        command
+    } else {
+        if !KNOWN_COMMAND_TYPES.contains(&type_name.as_str()) {
+            return Err(EnvelopeParseError::UnknownCommand(type_name));
         }
+        return Err(EnvelopeParseError::Invalid(format!(
+            "malformed {type_name} command"
+        )));
     };
     Ok(DaemonCommandEnvelope {
         id: envelope_id,
@@ -333,6 +339,13 @@ pub fn default_server_capabilities() -> Vec<DaemonServerCapability> {
 /// Parse a client command line the way the TS supervisor does: only
 /// `type: "command"` envelopes are accepted; bare commands fail with the
 /// protocol error, because the supervisor has no pre-envelope clients.
+///
+/// # Errors
+///
+/// Returns an error when the line is not valid JSON, is not a
+/// `type: "command"` envelope (bare commands fail as protocol-too-old),
+/// the envelope is malformed, the protocol is too old, or the command
+/// type is unknown (`EnvelopeParseError`).
 pub fn parse_supervisor_command_line(
     line: &str,
 ) -> Result<DaemonCommandEnvelope, EnvelopeParseError> {
@@ -805,32 +818,32 @@ pub fn command_active_session_id(command: &DaemonCommand) -> Option<&str> {
         } => Some(active_session_id),
         DaemonCommand::ListSavedSessions {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::Detach {
+        }
+        | DaemonCommand::Detach {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::AgentMessagesStatus {
+        }
+        | DaemonCommand::AgentMessagesStatus {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::AgentMessagesPause {
+        }
+        | DaemonCommand::AgentMessagesPause {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::AgentMessagesResume {
+        }
+        | DaemonCommand::AgentMessagesResume {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::CronList {
+        }
+        | DaemonCommand::CronList {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::HeartbeatsList {
+        }
+        | DaemonCommand::HeartbeatsList {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::CronCancel {
+        }
+        | DaemonCommand::CronCancel {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::RenameSavedSession {
+        }
+        | DaemonCommand::RenameSavedSession {
             active_session_id, ..
-        } => active_session_id.as_deref(),
-        DaemonCommand::DeleteSavedSession {
+        }
+        | DaemonCommand::DeleteSavedSession {
             active_session_id, ..
         } => active_session_id.as_deref(),
         // Control-plane commands carry no session selector.

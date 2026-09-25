@@ -51,11 +51,10 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -129,7 +128,7 @@ fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-wake",
         "object": "chat.completion.chunk",
-        "created": 1750000000,
+        "created": 1_750_000_000,
         "model": "mock-1",
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
     })
@@ -229,7 +228,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -238,7 +237,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -262,7 +261,7 @@ impl Client {
         self.writer
             .write_all(line.as_bytes())
             .unwrap_or_else(|error| panic!("write command {id}: {error}"));
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -345,6 +344,7 @@ fn create_session(client: &mut Client, id: &str, dir: &Path, agent_dir: &Path) -
 
 #[test]
 fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart() {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
     let Some(kernel_python) = kernel_python() else {
         return;
     };
@@ -353,7 +353,6 @@ fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart
     let agent_dir = dir.join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let socket = dir.join("daemon.sock");
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
     let url = spawn_mock(&NEXT);
     std::fs::write(
         agent_dir.join("models.json"),
@@ -368,7 +367,7 @@ fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart
                             "id": "mock-1",
                             "name": "Mock 1",
                             "api": "openai-completions",
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096
                         }
                     ]
@@ -424,7 +423,7 @@ fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart
     // THE ASSERT: the detached command finishes after the re-adoption and
     // its completion notice WAKES the idle session — the bash-done row
     // lands and the woken turn runs to its reply.
-    let messages = wait_until(Duration::from_secs(60), || {
+    let messages = wait_until(Duration::from_mins(1), || {
         let messages = client.messages(&active_id);
         (messages.contains("bash-done") && messages.contains("woken by the bash-done notice"))
             .then_some(messages)
@@ -708,7 +707,7 @@ fn a_boot_fires_the_adopted_worker_due_job_and_never_resurrects_the_killed_sibli
 }
 
 fn session_rows_containing(session_file: &Path, needle: &str) -> usize {
-    std::fs::read_to_string(session_file)
-        .map(|content| content.lines().filter(|line| line.contains(needle)).count())
-        .unwrap_or(0)
+    std::fs::read_to_string(session_file).map_or(0, |content| {
+        content.lines().filter(|line| line.contains(needle)).count()
+    })
 }

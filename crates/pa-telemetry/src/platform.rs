@@ -90,8 +90,8 @@ fn detect_libc_version() -> String {
     UNKNOWN.to_string()
 }
 
-/// AVX2 availability on x86_64 via /proc/cpuinfo (Linux); not applicable off
-/// x86_64; `unknown` where there is no probe.
+/// AVX2 availability on `x86_64` via /proc/cpuinfo (Linux); not applicable off
+/// `x86_64`; `unknown` where there is no probe.
 fn detect_cpu_baseline() -> &'static str {
     if cfg!(target_arch = "x86_64") {
         if cfg!(target_os = "linux") {

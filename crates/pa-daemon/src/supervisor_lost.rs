@@ -32,10 +32,10 @@ const DEFAULT_LOST_EXIT_MS: u64 = 5 * 60_000;
 /// TS `scheduleSupervisorAvailabilityCheck` cadence: the first check
 /// 1.5s after boot, then every 5s.
 const FIRST_CHECK: Duration = Duration::from_millis(1_500);
-const CHECK_INTERVAL: Duration = Duration::from_millis(5_000);
+const CHECK_INTERVAL: Duration = Duration::from_secs(5);
 /// Bounded probe: a supervisor socket that answers slower than this counts
 /// as unreachable for the window bookkeeping.
-const CONNECT_TIMEOUT: Duration = Duration::from_millis(1_000);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The supervisor-lost exit window (TS `workerSupervisorLostExitMs`): the
 /// env override when it is a finite non-negative number, else the default.
@@ -51,8 +51,7 @@ fn lost_exit_ms() -> u64 {
 fn lost_exit_ms_from(raw: Option<&str>) -> u64 {
     raw.and_then(|raw| raw.parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value >= 0.0)
-        .map(|value| value as u64)
-        .unwrap_or(DEFAULT_LOST_EXIT_MS)
+        .map_or(DEFAULT_LOST_EXIT_MS, |value| value as u64)
 }
 
 /// Whether the supervisor socket accepts connections (TS
@@ -155,7 +154,6 @@ mod tests {
     fn lost_exit_ms_from(raw: Option<&str>) -> u64 {
         raw.and_then(|raw| raw.parse::<f64>().ok())
             .filter(|value| value.is_finite() && *value >= 0.0)
-            .map(|value| value as u64)
-            .unwrap_or(DEFAULT_LOST_EXIT_MS)
+            .map_or(DEFAULT_LOST_EXIT_MS, |value| value as u64)
     }
 }

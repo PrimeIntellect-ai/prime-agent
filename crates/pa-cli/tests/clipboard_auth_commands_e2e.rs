@@ -47,15 +47,13 @@ fn kill_worker(pid: &u32) {
 }
 
 fn process_alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .map(|stat| {
-            let rest = stat
-                .rsplit_once(')')
-                .map(|(_, rest)| rest)
-                .unwrap_or_default();
-            !rest.starts_with('Z')
-        })
-        .unwrap_or(false)
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        let rest = stat
+            .rsplit_once(')')
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        !rest.starts_with('Z')
+    })
 }
 
 fn child_pids_of(ppid: u32) -> Vec<u32> {
@@ -171,8 +169,9 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
 use std::sync::{Arc, Mutex};
 
 use pa_tui::provider_auth::{
-    AuthCategory, AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
+    AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
     ProviderAuthFuture, ProviderAuthOutcome, ProviderRow, ProviderRowsFuture,
+    PRIME_INFERENCE_PROVIDER_ID,
 };
 use pa_tui::traces::{
     TraceLoginOutcome, TracePreviewInfo, TracePreviewOutcome, TraceUploadAllNote,
@@ -303,7 +302,10 @@ impl TracesCommands for ScriptedTraces {
         })
     }
 
-    fn login(&self) -> TracesFuture<TraceLoginOutcome> {
+    fn login(
+        &self,
+        _panel: pa_tui::auth_panel::AuthPanelHandle,
+    ) -> TracesFuture<TraceLoginOutcome> {
         // The scripted login flow: the queued outcomes answer in order,
         // defaulting to the credential's resolution.
         let outcome = self.logins.lock().unwrap().pop_front().unwrap_or_else(|| {
@@ -324,6 +326,9 @@ impl TracesCommands for ScriptedTraces {
 struct ScriptedProviderAuth {
     stored_keys: Mutex<std::collections::HashMap<String, String>>,
     calls: Mutex<Vec<String>>,
+    /// Whether the login catalog carries the Prime Inference row (the
+    /// panel-driven flow's team picker test drives it).
+    prime_row: bool,
 }
 
 impl ScriptedProviderAuth {
@@ -331,6 +336,14 @@ impl ScriptedProviderAuth {
         ScriptedProviderAuth {
             stored_keys: Mutex::new(Default::default()),
             calls: Mutex::new(Vec::new()),
+            prime_row: false,
+        }
+    }
+
+    fn with_prime_row() -> Self {
+        ScriptedProviderAuth {
+            prime_row: true,
+            ..ScriptedProviderAuth::new()
         }
     }
 
@@ -344,7 +357,6 @@ impl ScriptedProviderAuth {
             id: "openai".to_string(),
             name: name.to_string(),
             auth_type,
-            category: AuthCategory::Provider,
             status: (!configured).then(|| AuthStatusIndicator {
                 style: AuthStatusStyle::Muted,
                 label: "unconfigured".to_string(),
@@ -352,12 +364,33 @@ impl ScriptedProviderAuth {
             flow: AuthFlow::ApiKeyPrompt,
         }
     }
+
+    /// The Prime Inference row (the panel-driven flow the team picker
+    /// test drives).
+    fn prime_row(&self) -> ProviderRow {
+        ProviderRow {
+            id: PRIME_INFERENCE_PROVIDER_ID.to_string(),
+            name: "Prime Inference".to_string(),
+            auth_type: AuthType::ApiKey,
+            status: Some(AuthStatusIndicator {
+                style: AuthStatusStyle::Success,
+                label: "configured".to_string(),
+            }),
+            flow: AuthFlow::TerminalFlow,
+        }
+    }
 }
 
 impl ProviderAuthCommands for ScriptedProviderAuth {
     fn login_options(&self) -> ProviderRowsFuture {
         let row = self.openai_row("OpenAI", AuthType::ApiKey);
-        Box::pin(async move { vec![row] })
+        // TS sorts prime-inference first among the configured rows.
+        let rows = if self.prime_row {
+            vec![self.prime_row(), row]
+        } else {
+            vec![row]
+        };
+        Box::pin(async move { rows })
     }
 
     fn logout_options(&self) -> ProviderRowsFuture {
@@ -368,7 +401,6 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
                 .map(|id| ProviderRow {
                     name: "OpenAI".to_string(),
                     auth_type: AuthType::ApiKey,
-                    category: AuthCategory::Provider,
                     status: Some(AuthStatusIndicator {
                         style: AuthStatusStyle::Success,
                         label: "configured".to_string(),
@@ -407,6 +439,48 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
             ProviderAuthOutcome::Status(format!(
                 "Removed stored API key for {name}. Environment variables and models.json config are unchanged."
             ))
+        })
+    }
+
+    /// The panel-driven flow (the Prime Inference login): one progress
+    /// line, then the team picker; the pick settles the TS status.
+    fn login_on_panel(
+        &self,
+        provider: &ProviderRow,
+        panel: pa_tui::auth_panel::AuthPanelHandle,
+    ) -> ProviderAuthFuture {
+        let name = provider.name.clone();
+        self.calls
+            .lock()
+            .unwrap()
+            .push("login_on_panel".to_string());
+        Box::pin(async move {
+            panel.progress("Loading Prime teams...");
+            let teams = vec![
+                pa_tui::auth_panel::PrimeTeamOption {
+                    team_id: "team-acme".to_string(),
+                    name: "Acme Corp".to_string(),
+                    slug: Some("acme".to_string()),
+                    role: Some("Owner".to_string()),
+                    created_at: None,
+                },
+                pa_tui::auth_panel::PrimeTeamOption {
+                    team_id: "team-beta".to_string(),
+                    name: "Beta Team".to_string(),
+                    slug: None,
+                    role: None,
+                    created_at: None,
+                },
+            ];
+            match panel.select_team(teams, None).await {
+                pa_tui::auth_panel::PrimeTeamPick::Team(team) => ProviderAuthOutcome::Status(
+                    format!("Saved API key for {name}. Using team \"{}\".", team.name),
+                ),
+                pa_tui::auth_panel::PrimeTeamPick::PersonalAccount
+                | pa_tui::auth_panel::PrimeTeamPick::Cancelled => ProviderAuthOutcome::Status(
+                    format!("Saved API key for {name}. Using personal account."),
+                ),
+            }
         })
     }
 }
@@ -543,6 +617,7 @@ fn enter() -> pa_tui::interactive::HeadlessStep {
 /// headless capture holds the exact TS sequence).
 #[tokio::test]
 async fn tui_copy_emits_the_ts_osc52_sequence() {
+    use base64::Engine;
     // No platform clipboard tools in the verifier: the copy chain falls to
     // OSC 52 (the TS fallback when no tool copied).
     for var in [
@@ -617,12 +692,352 @@ async fn tui_copy_emits_the_ts_osc52_sequence() {
         "the usage error renders:\n{rendered}"
     );
     // The exact TS OSC 52 sequence for the scripted assistant text.
-    use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode("hello from scripted");
     assert_eq!(
         outcome.clipboard_emissions,
         vec![format!("\x1b]52;c;{encoded}\x07")],
         "the OSC 52 emission holds the TS byte shape"
+    );
+}
+
+/// Three consecutive `/copy` commands COALESCE into one toast (the count
+/// bump `(x3)`): every copy still registers (three OSC 52 emissions), but
+/// the frames never stack duplicate toast rows and no frame shows the
+/// label more than once — the toast is the compact ephemeral overlay, and
+/// once its TTL passes the acknowledgment is gone from the settled frame
+/// (never a durable transcript row).
+#[tokio::test]
+async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
+    use base64::Engine;
+    // No platform clipboard tools in the verifier: the copy chain falls to
+    // OSC 52 (the TS fallback when no tool copied).
+    for var in [
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "SSH_CONNECTION",
+        "SSH_CLIENT",
+        "MOSH_CONNECTION",
+    ] {
+        std::env::remove_var(var);
+    }
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+    let script = serde_json::json!({ "engine": "faux", "responses": [
+        { "text": "hello from scripted" },
+    ] });
+    let script_path = dir.path().join("script.json");
+    std::fs::write(&script_path, script.to_string()).expect("write script");
+    let session_id = create_session_via_daemon(
+        &supervisor.socket,
+        &script_path,
+        &script,
+        dir.path(),
+        &session_dir,
+    )
+    .await;
+    let options = command_options(
+        &supervisor.socket,
+        dir.path(),
+        &session_dir,
+        &script_path,
+        &session_id,
+        None,
+        None,
+        None,
+    );
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitMs(400),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            // Three consecutive copies inside the toast's TTL.
+            pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
+            pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
+            pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
+            // The coalesced count-bump toast renders (observed, not
+            // slept-for): the third copy's ack is the (x3) label.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Copied last agent message to clipboard (x3)".to_string(),
+                timeout_ms: 10_000,
+            },
+            // Past the toast's TTL: the overlay dismisses (the newest
+            // frame stops carrying the ack).
+            pa_tui::interactive::HeadlessStep::WaitGone {
+                needle: "Copied last agent message to clipboard".to_string(),
+                timeout_ms: 10_000,
+            },
+        ],
+        width: 120,
+        height: 36,
+    };
+    let outcome =
+        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
+            .await
+            .expect("interactive run");
+
+    // Verification seam: dump the captured frames for manual frame-diffing
+    // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
+    if let Ok(dir) = std::env::var("PA_TUI_DUMP_FRAMES") {
+        for (index, frame) in outcome.frames.iter().enumerate() {
+            let _ = std::fs::write(
+                std::path::Path::new(&dir).join(format!("frame-{index:03}.txt")),
+                frame,
+            );
+        }
+    }
+    let label = "Copied last agent message to clipboard";
+    // Every copy registered: the headless OSC 52 sink is one buffer for
+    // the whole run, so the exact TS sequence appears three times
+    // concatenated - one emission per copy.
+    let encoded = base64::engine::general_purpose::STANDARD.encode("hello from scripted");
+    let emission = format!("\x1b]52;c;{encoded}\x07");
+    let joined = outcome.clipboard_emissions.join("");
+    assert_eq!(
+        joined,
+        emission.repeat(3),
+        "every copy ran the OSC 52 chain"
+    );
+    // The coalesced toast acknowledges the count: three consecutive copies
+    // read as one "(x3)" toast, never stacked duplicate rows (the plan's
+    // WaitRender observed the label land; the run's frames confirm).
+    let coalesced_label = format!("{label} (x3)");
+    assert!(
+        outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains(&coalesced_label)),
+        "the coalesced count-bump toast renders"
+    );
+    for (index, frame) in outcome.frames.iter().enumerate() {
+        let rows = frame.lines().filter(|row| row.contains(label)).count();
+        assert!(
+            rows <= 1,
+            "frame {index} shows the copy toast at most once, got {rows}"
+        );
+    }
+    // The toast is ephemeral: past its TTL the settled frame no longer
+    // carries the acknowledgment (a durable status row would persist).
+    let last = outcome.frames.last().expect("the settled frame");
+    assert!(
+        !last.contains(label),
+        "the expired toast auto-dismisses:\n{last}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// /login Prime Inference: the inline team picker
+// ---------------------------------------------------------------------------
+
+/// One raw key step (the arrows and Esc the typed-text path cannot
+/// express).
+fn key(code: crossterm::event::KeyCode) -> pa_tui::interactive::HeadlessStep {
+    pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+        code,
+        crossterm::event::KeyModifiers::NONE,
+    ))
+}
+
+/// `/login` → the Prime Inference row → the login flow drives the inline
+/// auth panel: the progress line and the team PICKER render in the TUI
+/// (TS `PrimeTeamSelectorComponent`), Enter picks the team, and the
+/// settled status lands — with no terminal takeover anywhere in the
+/// frames.
+#[tokio::test]
+async fn tui_prime_login_renders_the_inline_team_picker() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+    let script = serde_json::json!({ "engine": "faux", "responses": [
+        { "text": "ok" },
+    ] });
+    let script_path = dir.path().join("script.json");
+    std::fs::write(&script_path, script.to_string()).expect("write script");
+    let session_id = create_session_via_daemon(
+        &supervisor.socket,
+        &script_path,
+        &script,
+        dir.path(),
+        &session_dir,
+    )
+    .await;
+    let auth = Arc::new(ScriptedProviderAuth::with_prime_row());
+    let auth_view = Arc::clone(&auth);
+    let options = command_options(
+        &supervisor.socket,
+        dir.path(),
+        &session_dir,
+        &script_path,
+        &session_id,
+        None,
+        Some(pa_tui::provider_auth::ProviderAuthCommandsHandle(
+            Arc::clone(&auth) as Arc<dyn ProviderAuthCommands>,
+        )),
+        None,
+    );
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            // The selector opens; Enter selects the Prime Inference row;
+            // the flow drives the inline auth panel (progress, then the
+            // team picker).
+            pa_tui::interactive::HeadlessStep::Submit("/login".to_string()),
+            enter(),
+            pa_tui::interactive::HeadlessStep::WaitMs(400),
+            // Personal rides first (TS order): down selects Acme Corp.
+            key(crossterm::event::KeyCode::Down),
+            enter(),
+            pa_tui::interactive::HeadlessStep::WaitMs(400),
+        ],
+        width: 120,
+        height: 36,
+    };
+    let outcome =
+        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
+            .await
+            .expect("interactive run");
+    let rendered = rendered_frames(&outcome);
+    // The login dialog's panel title (TS `LoginDialogComponent`).
+    assert!(
+        rendered.contains("Login to Prime Inference"),
+        "the auth panel mounts with the TS dialog title:\n{rendered}"
+    );
+    // The progress line rides the panel (TS `dialog.showProgress`).
+    assert!(
+        rendered.contains("Loading Prime teams..."),
+        "the panel renders the flow's progress:\n{rendered}"
+    );
+    // The team picker is the TS `PrimeTeamSelectorComponent` panel.
+    assert!(
+        rendered.contains("Select a Prime Team:"),
+        "the team picker mounts with the TS panel title:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Choose which account pays for Prime Inference usage."),
+        "the team picker renders the TS subtitle:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Search teams"),
+        "the team picker renders the TS search field:\n{rendered}"
+    );
+    // Personal first, the slug/role meta, the current marker on the
+    // stored selection (none stored: personal is current).
+    assert!(
+        rendered.contains("Personal"),
+        "the personal-account row renders:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("personal account · current"),
+        "the personal row carries its meta and the current marker:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Acme Corp"),
+        "the team row renders:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("slug: acme, role: owner"),
+        "the team row carries the TS slug/role meta (the role lowercased):\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Beta Team"),
+        "the second team row renders:\n{rendered}"
+    );
+    // The pick settles the TS status row.
+    assert!(
+        rendered.contains("Saved API key for Prime Inference. Using team \"Acme Corp\"."),
+        "the team pick settles the TS status:\n{rendered}"
+    );
+    assert_eq!(
+        auth_view.calls.lock().unwrap().clone(),
+        vec!["login_on_panel".to_string()],
+        "the panel flow ran"
+    );
+    // No terminal takeover anywhere: the flow never clears the screen
+    // (the old numbered prompt and the alt-screen leave are gone).
+    assert!(
+        !rendered.contains("\u{1b}[2J"),
+        "no clear-screen escape in any frame:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("\u{1b}[?1049l"),
+        "no alternate-screen leave in any frame:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Enter a team number"),
+        "the numbered stdin prompt is gone:\n{rendered}"
+    );
+}
+
+/// Esc on the team picker cancels the SELECTION (TS `onCancel`): the
+/// stored selection stays and the login completes with the default team
+/// status — the login itself is not cancelled.
+#[tokio::test]
+async fn tui_prime_login_escape_keeps_the_default_team_status() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+    let script = serde_json::json!({ "engine": "faux", "responses": [
+        { "text": "ok" },
+    ] });
+    let script_path = dir.path().join("script.json");
+    std::fs::write(&script_path, script.to_string()).expect("write script");
+    let session_id = create_session_via_daemon(
+        &supervisor.socket,
+        &script_path,
+        &script,
+        dir.path(),
+        &session_dir,
+    )
+    .await;
+    let auth = Arc::new(ScriptedProviderAuth::with_prime_row());
+    let options = command_options(
+        &supervisor.socket,
+        dir.path(),
+        &session_dir,
+        &script_path,
+        &session_id,
+        None,
+        Some(pa_tui::provider_auth::ProviderAuthCommandsHandle(
+            Arc::clone(&auth) as Arc<dyn ProviderAuthCommands>,
+        )),
+        None,
+    );
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("/login".to_string()),
+            enter(),
+            pa_tui::interactive::HeadlessStep::WaitMs(400),
+            key(crossterm::event::KeyCode::Esc),
+            pa_tui::interactive::HeadlessStep::WaitMs(400),
+        ],
+        width: 120,
+        height: 36,
+    };
+    let outcome =
+        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
+            .await
+            .expect("interactive run");
+    let rendered = rendered_frames(&outcome);
+    assert!(
+        rendered.contains("Select a Prime Team:"),
+        "the team picker mounted:\n{rendered}"
+    );
+    // TS `onCancel` resolves the default team status: the login itself
+    // succeeded (the key was stored before the picker).
+    assert!(
+        rendered.contains("Saved API key for Prime Inference. Using personal account."),
+        "the cancelled pick settles the default team status:\n{rendered}"
+    );
+    // The panel unmounted: a later frame no longer renders the picker.
+    let last = outcome.frames.last().expect("a final frame");
+    assert!(
+        !last.contains("Select a Prime Team:"),
+        "the panel unmounts after the settle:\n{last}"
     );
 }
 
@@ -1058,9 +1473,13 @@ async fn tui_traces_without_a_credential_runs_the_login_flow() {
         None,
     );
     let plan = pa_tui::interactive::HeadlessPlan {
-        steps: vec![pa_tui::interactive::HeadlessStep::Submit(
-            "/traces on".to_string(),
-        )],
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("/traces on".to_string()),
+            // The login flow runs in the background against the inline
+            // auth panel: the settle wait lets its outcome row land in
+            // the captured frames.
+            pa_tui::interactive::HeadlessStep::WaitMs(400),
+        ],
         width: 120,
         height: 36,
     };
@@ -1095,6 +1514,7 @@ async fn tui_traces_without_a_credential_runs_the_login_flow() {
     let plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Submit("/traces on".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitMs(400),
             pa_tui::interactive::HeadlessStep::Submit("/traces upload-current".to_string()),
             pa_tui::interactive::HeadlessStep::Submit("/traces upload-all".to_string()),
         ],
@@ -1170,9 +1590,13 @@ async fn tui_traces_login_enables_and_uploads() {
         None,
     );
     let plan = pa_tui::interactive::HeadlessPlan {
-        steps: vec![pa_tui::interactive::HeadlessStep::Submit(
-            "/traces on".to_string(),
-        )],
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("/traces on".to_string()),
+            // The login flow runs in the background against the inline
+            // auth panel: the settle wait lets its outcome row land in
+            // the captured frames.
+            pa_tui::interactive::HeadlessStep::WaitMs(400),
+        ],
         width: 120,
         height: 36,
     };
@@ -1258,8 +1682,8 @@ async fn tui_login_and_logout_run_the_provider_flows() {
             .expect("interactive run");
     let rendered = rendered_frames(&outcome);
     assert!(
-        rendered.contains("Providers"),
-        "the selector panel renders:\n{rendered}"
+        rendered.contains("Search providers"),
+        "the login menu's search bar renders (the picker grammar, no title):\n{rendered}"
     );
     assert!(
         rendered.contains("OpenAI · api key"),

@@ -22,8 +22,7 @@ fn fd_snapshot(pid: u32) -> Vec<String> {
     };
     for entry in entries.flatten() {
         let target = std::fs::read_link(entry.path())
-            .map(|t| t.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "?".to_string());
+            .map_or_else(|_| "?".to_string(), |t| t.to_string_lossy().to_string());
         targets.push(target);
     }
     targets
@@ -150,7 +149,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse response line"),
                 Err(error) => {
                     assert!(
@@ -344,6 +343,7 @@ fn supervisor_fd_count_stable_across_session_cycles() {
 /// worker's fds across many prompts on the same session.
 #[test]
 fn worker_fd_count_stable_across_prompts() {
+    const PROMPTS: usize = 30;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
@@ -397,7 +397,6 @@ fn worker_fd_count_stable_across_prompts() {
     );
     assert_eq!(client.read_response("a0")["success"], true, "attach failed");
 
-    const PROMPTS: usize = 30;
     let mut counts: Vec<usize> = Vec::new();
     for turn in 0..PROMPTS {
         let id = format!("p{turn}");
@@ -529,6 +528,7 @@ fn worker_socket_path(agent_dir: &Path, socket: &Path, worker_id: &str) -> PathB
 /// one). The per-connection event fan-out must die with the connection.
 #[test]
 fn worker_fd_table_stable_across_client_connection_churn() {
+    const PROBES: usize = 15;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
@@ -578,7 +578,6 @@ fn worker_fd_table_stable_across_client_connection_churn() {
         fd_classes(&baseline)
     );
 
-    const PROBES: usize = 15;
     for _ in 0..PROBES {
         probe_worker(&worker_socket);
         std::thread::sleep(Duration::from_millis(20));
@@ -694,7 +693,7 @@ fn supervisor_restart_loop_leaves_no_orphan_workers() {
         .expect("send SIGKILL to worker");
 
     // The restart loop runs to its failure budget and removes the session.
-    wait_until(Duration::from_secs(60), || {
+    wait_until(Duration::from_mins(1), || {
         client.send_command("l", serde_json::json!({ "type": "list" }));
         let list = client.read_response("l");
         list["data"]["sessions"]

@@ -11,7 +11,7 @@
 //! The containment rule rides along: a daemon (and its workers) on a
 //! DIFFERENT socket is never touched by the reap.
 //!
-//! Linux-only e2e (AF_UNIX sockets, /proc): compiles to nothing elsewhere,
+//! Linux-only e2e (`AF_UNIX` sockets, /proc): compiles to nothing elsewhere,
 //! like the other pa-daemon e2e verifiers.
 #![cfg(target_os = "linux")]
 
@@ -155,7 +155,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -505,7 +505,7 @@ fn boot_reap_never_touches_a_different_socket_daemon() {
     }
 }
 
-/// daemon_a2's own shutdown (the reopened session's worker dies with it).
+/// `daemon_a2`'s own shutdown (the reopened session's worker dies with it).
 fn client_a_send_shutdown(socket: &Path) -> Value {
     let (mut client, _) = Client::connect(socket);
     client.send_command("bye-a2", json!({ "type": "shutdown" }));

@@ -1,4 +1,4 @@
-//! OpenAI Responses stream event processor.
+//! `OpenAI` Responses stream event processor.
 //!
 //! Port of `processResponsesStream` from
 //! `packages/ai/src/providers/openai-responses-shared.ts`: output-item slots,
@@ -930,9 +930,8 @@ impl<'a> ResponsesStreamProcessor<'a> {
 
 fn map_responses_stop_reason(status: Option<&str>) -> StopReason {
     match status {
-        None | Some("completed") | Some("in_progress") | Some("queued") => StopReason::Stop,
+        None | Some("completed" | "in_progress" | "queued") => StopReason::Stop,
         Some("incomplete") => StopReason::Length,
-        Some("failed") | Some("cancelled") => StopReason::Error,
         Some(_) => StopReason::Error,
     }
 }

@@ -36,6 +36,15 @@ const CONNECT_TIMEOUT_MS: u64 = 3_000;
 /// Hello handshake budget. A daemon loading a very large session can take
 /// well over the 3s TS default to greet.
 const HELLO_TIMEOUT_MS: u64 = 15_000;
+/// Connect attempts before a connect/handshake failure surfaces (the
+/// fatal error paths the operator hit: "Timed out after 15000ms waiting
+/// for the Prime Agent daemon handshake" exited their TUI on the FIRST
+/// miss at box load). A loaded or restarting daemon usually greets within
+/// the retry window; the caller's error path only runs after the last
+/// attempt.
+pub(crate) const CONNECT_ATTEMPTS: u32 = 3;
+/// The first retry's backoff; each further attempt doubles it.
+const CONNECT_RETRY_BACKOFF_MS: u64 = 1_000;
 
 /// A non-response frame forwarded to the UI event loop. Payloads that are
 /// owned by the session engine stay raw JSON (`Value`) so the client keeps
@@ -68,8 +77,12 @@ pub enum DaemonClientEvent {
     /// the UI re-attaches through the supervisor, which respawns the
     /// worker and hands out a fresh peer ticket.
     DirectLinkLost { active_session_id: String },
-    /// `session_list_item` progress frame of `list_saved_sessions`.
-    SessionListItem { session: Value },
+    /// `session_list_item` progress frame of `list_saved_sessions`: one
+    /// saved row as the scan streams it (newest first), tagged with the
+    /// request id it belongs to (TS's connection routes the stream to
+    /// the originating `listDaemonSavedSessions` callbacks; the agents
+    /// view applies only the frames of its own in-flight fetch).
+    SessionListItem { session: Value, request_id: String },
     /// `session_list_progress` progress frame of `list_saved_sessions`.
     SessionListProgress { loaded: u64, total: u64 },
     /// `daemon_closing`: the supervisor is going down. An update restart
@@ -145,6 +158,11 @@ pub(crate) fn client_event_from_value(value: &Value) -> Option<DaemonClientEvent
         }),
         "session_list_item" => Some(DaemonClientEvent::SessionListItem {
             session: value.get("session").cloned().unwrap_or(Value::Null),
+            request_id: value
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
         }),
         "session_list_progress" => Some(DaemonClientEvent::SessionListProgress {
             loaded: value.get("loaded").and_then(Value::as_u64).unwrap_or(0),
@@ -278,12 +296,20 @@ pub struct DaemonClient {
     /// Direct-transport state (retained event sender + live worker link),
     /// one pointer so this struct stays small.
     direct: std::sync::Arc<crate::direct_transport::DirectState>,
+    /// The supervisor reader's death watch (see `reader_dead`).
+    reader_dead_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 impl DaemonClient {
     /// Connect to `socket_path`, complete the hello handshake, and return the
     /// client plus the event receiver. The event receiver must be polled or
     /// the reader task stalls once the channel's buffer fills.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the transport connect times out or fails, the
+    /// hello handshake times out or the connection closes first, or the
+    /// daemon speaks an unknown protocol.
     pub async fn connect(
         socket_path: &Path,
     ) -> Result<(Self, mpsc::UnboundedReceiver<DaemonClientEvent>)> {
@@ -309,6 +335,12 @@ impl DaemonClient {
         let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<DaemonClientEvent>();
         let retained_event_tx = event_tx.clone();
+        // The supervisor reader's death signal: the retained event sender
+        // keeps the event channel open after the reader exits (direct
+        // reader pumps may still feed it), so a channel close can never
+        // observe a supervisor socket loss — the watch is the observable
+        // signal the UI loop arms its reconnect driver on.
+        let (reader_dead_tx, reader_dead_rx) = tokio::sync::watch::channel(false);
         let (hello_tx, hello_rx) = oneshot::channel::<Value>();
         let shared = Arc::new(Shared {
             pending: Mutex::new(HashMap::new()),
@@ -328,8 +360,11 @@ impl DaemonClient {
             let _ = writer.shutdown().await;
         });
 
-        // Reader task: dispatch every inbound line.
-        tokio::spawn(async move {
+        // Reader task: dispatch every inbound line. The handle is kept so
+        // the handshake-failure paths can abort it: a daemon that accepts
+        // the socket but never greets must not leave a blocked reader task
+        // (and its socket halves) behind per retry attempt.
+        let reader_task = tokio::spawn(async move {
             let mut reader = BufReader::new(reader_half);
             let mut line = String::new();
             let mut hello_tx = Some(hello_tx);
@@ -367,21 +402,28 @@ impl DaemonClient {
                 }
             }
             // The supervisor socket closed: every supervisor-routed request
-            // in flight fails now instead of riding out its timeout.
+            // in flight fails now instead of riding out its timeout, and
+            // the death watch wakes the UI loop's reconnect driver.
+            let _ = reader_dead_tx.send(true);
             reader_shared.fail_pending("daemon_", "the daemon connection closed");
         });
 
         // Hello handshake: the supervisor sends daemon_hello immediately on
-        // connect (TS `waitForHello`).
+        // connect (TS `waitForHello`). Every failure path aborts the
+        // blocked reader task so a failed attempt leaks no socket halves.
         let hello = tokio::time::timeout(Duration::from_millis(HELLO_TIMEOUT_MS), hello_rx)
             .await
             .map_err(|_| {
+                reader_task.abort();
                 anyhow!(
                     "Timed out after {HELLO_TIMEOUT_MS}ms waiting for the Prime Agent daemon handshake. Socket: {}.",
                     socket_path.display()
                 )
             })?
-            .map_err(|_| anyhow!("the daemon connection closed before the handshake"))?;
+            .map_err(|_| {
+                reader_task.abort();
+                anyhow!("the daemon connection closed before the handshake")
+            })?;
         let protocol = hello
             .get("protocol")
             .cloned()
@@ -391,6 +433,7 @@ impl DaemonClient {
                 version: DAEMON_PROTOCOL_VERSION,
             });
         if protocol.name != DAEMON_PROTOCOL_NAME {
+            reader_task.abort();
             return Err(anyhow!(
                 "the daemon on {} speaks an unknown protocol \"{}\"",
                 socket_path.display(),
@@ -415,13 +458,54 @@ impl DaemonClient {
                 direct: std::sync::Arc::new(crate::direct_transport::DirectState::new(
                     retained_event_tx,
                 )),
+                reader_dead_rx,
             },
             event_rx,
         ))
     }
 
+    /// A fresh receiver for the supervisor reader's death watch: fires
+    /// (`true`) when the supervisor socket's reader task ends — a daemon
+    /// hiccup the UI loop's reconnect driver observes (the event channel
+    /// itself stays open: the retained sender keeps it alive for direct
+    /// reader pumps). Poll it with `watch::Receiver::changed`.
+    pub fn reader_dead(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.reader_dead_rx.clone()
+    }
+
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// [`Self::connect`] with bounded retries and doubling backoff: a
+    /// missed hello (a loaded daemon mid-fanout, a supervisor coming up
+    /// after a restart) is a hiccup, not a fatal condition — the one-shot
+    /// connect cost the operator their TUI twice on 2026-09-24 ("Timed
+    /// out after 15000ms waiting for the Prime Agent daemon handshake").
+    /// The caller's error path (fatal exit or view fallback) only runs
+    /// after the last attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns the last attempt's [`Self::connect`] error once the
+    /// bounded retries are exhausted.
+    pub async fn connect_with_retry(
+        socket_path: &Path,
+    ) -> Result<(Self, mpsc::UnboundedReceiver<DaemonClientEvent>)> {
+        let mut delay = CONNECT_RETRY_BACKOFF_MS;
+        for attempt in 1..=CONNECT_ATTEMPTS {
+            match DaemonClient::connect(socket_path).await {
+                Ok(pair) => return Ok(pair),
+                Err(error) => {
+                    if attempt == CONNECT_ATTEMPTS {
+                        return Err(error);
+                    }
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    delay = delay.saturating_mul(2);
+                }
+            }
+        }
+        unreachable!("the attempt range is non-empty")
     }
 
     /// Protocol identity negotiated in the hello handshake.
@@ -450,6 +534,12 @@ impl DaemonClient {
 
     /// Send one command envelope and wait for the matching response, using
     /// the TS default timeout for the command class.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` like [`Self::request_with_timeout`]: the frame
+    /// cannot be sent, the connection dies before the response, or the
+    /// command-class timeout elapses.
     pub async fn request(&self, command: DaemonCommand) -> Result<DaemonResponse> {
         let timeout_ms = match &command {
             DaemonCommand::PromptAndWait { .. } | DaemonCommand::WaitForIdle { .. } => {
@@ -468,6 +558,13 @@ impl DaemonClient {
     /// the supervisor (the request never reached the worker); a request that
     /// was sent and timed out surfaces the error instead of retrying, so a
     /// prompt can never execute twice.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the frame cannot be written (the connection is
+    /// closed), the reader dies before resolving, or the timeout elapses;
+    /// a direct frame that never reached the worker falls back to the
+    /// supervisor instead of failing.
     pub async fn request_with_timeout(
         &self,
         command: DaemonCommand,
@@ -497,6 +594,12 @@ impl DaemonClient {
     /// (`abort_compaction`) must reach the supervisor even when a direct
     /// link serves the session: the direct link IS the wedged worker in
     /// the case the supervisor arm exists for.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the supervisor request fails or times out, or
+    /// the response carries `success: false` (the daemon error string
+    /// surfaces).
     pub async fn request_ok_via_supervisor(&self, command: DaemonCommand) -> Result<Value> {
         let name = command_type_debug(&command);
         let response = self
@@ -516,6 +619,35 @@ impl DaemonClient {
             "daemon_{}",
             self.next_request_id.fetch_add(1, Ordering::SeqCst) + 1
         );
+        self.request_supervisor_with_id(command, &id, timeout_ms)
+            .await
+    }
+
+    /// One JSONL envelope on the supervisor connection, under the caller's
+    /// own envelope id: the streamed `session_list_item` frames of
+    /// `list_saved_sessions` carry it, so the caller can attribute the
+    /// catalog stream to its own fetch (TS's connection routes the
+    /// stream to the originating `listDaemonSavedSessions` callbacks).
+    /// The id must start with `daemon_` - the supervisor reader's
+    /// socket-close failure pass filters by that prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when the envelope cannot be serialized, the writer
+    /// send fails (the connection is already closed), the reader task
+    /// dies before resolving, or the timeout elapses.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the shared pending-request mutex is poisoned (a
+    /// thread panicked while holding it).
+    pub async fn request_supervisor_with_id(
+        &self,
+        command: DaemonCommand,
+        id: &str,
+        timeout_ms: u64,
+    ) -> Result<DaemonResponse> {
+        let id = id.to_string();
         let envelope = DaemonCommandEnvelope {
             frame_type: DaemonCommandFrameType::Command,
             id: id.clone(),
@@ -550,6 +682,11 @@ impl DaemonClient {
 
     /// Send a command and require `success: true`, surfacing the daemon error
     /// string otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when [`Self::request`] fails or the response
+    /// carries `success: false` (the daemon error string surfaces).
     pub async fn request_ok(&self, command: DaemonCommand) -> Result<Value> {
         let name = command_type_debug(&command);
         let response = self.request(command).await?;
@@ -661,6 +798,13 @@ impl DaemonClient {
     /// socket, and authenticate with the single-use grant. Every failure
     /// returns `Ok(false)` and leaves the plain supervisor connection in
     /// place.
+    ///
+    /// # Errors
+    ///
+    /// Never returns `Err`: every failure path (an unsupported
+    /// supervisor, a failed or refused ticket request, an invalid
+    /// ticket, or a failed worker connect) returns `Ok(false)` and keeps
+    /// the plain supervisor connection.
     pub async fn upgrade_direct(&self, active_session_id: &str) -> Result<bool> {
         if !supervisor_supports_direct(&self.hello) {
             return Ok(false);
@@ -711,6 +855,21 @@ impl DaemonClient {
         self.drop_direct();
         let _ = self.writer.send(String::new());
     }
+
+    /// Dispose the connection outright: like [`Self::close`], but the
+    /// writer sender is DROPPED too (a replacement dummy takes its
+    /// place), so the writer task finishes its queue, shuts the socket's
+    /// write half down, and the reader EOFs — a half-attached client is
+    /// never left running through the reconnect window. The failure
+    /// paths that replace an installed client use this (the plain
+    /// `close` keeps the writer alive for teardown-order cases).
+    pub fn hard_close(&mut self) {
+        self.direct.take_event_sender();
+        self.drop_direct();
+        let (replacement, _) = mpsc::unbounded_channel::<String>();
+        let writer = std::mem::replace(&mut self.writer, replacement);
+        let _ = writer.send(String::new());
+    }
 }
 
 /// Why a direct request failed: `NotSent` never reached the worker (safe to
@@ -753,6 +912,34 @@ pub fn is_daemon_rejection(error: &anyhow::Error) -> bool {
     error
         .chain()
         .any(|cause| cause.downcast_ref::<RequestRejected>().is_some())
+}
+
+/// Whether an error is a response/handshake timeout ("Timed out after
+/// Nms waiting for the Prime Agent daemon (response|handshake)"): a
+/// transient under-load failure, not a protocol error — the caller
+/// degrades (retry or surface the queued state) instead of exiting.
+pub fn is_daemon_timeout(error: &anyhow::Error) -> bool {
+    // Case-insensitive: the TUI's own bounded requests say
+    // "timed out after Nms ...", the daemon client's hello/connect paths
+    // "Timed out after Nms ...".
+    error
+        .chain()
+        .any(|cause| cause.to_string().to_lowercase().contains("timed out after"))
+}
+
+/// Whether an error means the daemon connection could not carry the
+/// request at all (a timeout, or a closed connection): a transient the
+/// submit path surfaces without exiting — the pane stays mounted for the
+/// reconnect driver to restore the connection.
+pub fn is_daemon_unreachable(error: &anyhow::Error) -> bool {
+    is_daemon_timeout(error)
+        || error.chain().any(|cause| {
+            let cause = cause.to_string().to_lowercase();
+            cause.contains("daemon connection")
+                || cause.contains("prime agent daemon closed")
+                || cause.contains("direct session connection closed")
+                || cause.contains("the session connection closed")
+        })
 }
 
 /// Unwrap a settled response into its `data`, surfacing the daemon

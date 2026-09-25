@@ -58,8 +58,7 @@ pub(crate) fn to_claude_code_name(name: &str) -> String {
     CLAUDE_CODE_TOOLS
         .iter()
         .find(|tool| tool.eq_ignore_ascii_case(name))
-        .map(std::string::ToString::to_string)
-        .unwrap_or_else(|| name.to_string())
+        .map_or_else(|| name.to_string(), std::string::ToString::to_string)
 }
 
 pub(crate) fn from_claude_code_name(name: &str, tools: Option<&[Tool]>) -> String {
@@ -263,18 +262,16 @@ fn map_thinking_level_to_effort(
         return match mapped.as_str() {
             "low" => AnthropicEffort::Low,
             "medium" => AnthropicEffort::Medium,
-            "high" => AnthropicEffort::High,
             "xhigh" => AnthropicEffort::Xhigh,
             "max" => AnthropicEffort::Max,
             _ => AnthropicEffort::High,
         };
     }
     match effective {
-        Some(ModelThinkingLevel::Minimal) | Some(ModelThinkingLevel::Low) => AnthropicEffort::Low,
+        Some(ModelThinkingLevel::Minimal | ModelThinkingLevel::Low) => AnthropicEffort::Low,
         Some(ModelThinkingLevel::Medium) => AnthropicEffort::Medium,
         Some(ModelThinkingLevel::Xhigh) => AnthropicEffort::Xhigh,
         Some(ModelThinkingLevel::Max) => AnthropicEffort::Max,
-        Some(ModelThinkingLevel::High) => AnthropicEffort::High,
         _ => AnthropicEffort::High,
     }
 }
@@ -290,8 +287,7 @@ pub(crate) fn should_use_fine_grained_tool_streaming_beta(
     context
         .tools
         .as_ref()
-        .map(|tools| !tools.is_empty())
-        .unwrap_or(false)
+        .is_some_and(|tools| !tools.is_empty())
         && !get_anthropic_compat(model).supports_eager_tool_input_streaming
 }
 
@@ -310,7 +306,6 @@ pub(crate) fn headers_to_pairs(headers: &Map<String, Value>) -> Vec<(String, Str
         .iter()
         .filter_map(|(key, value)| match value {
             Value::String(text) => Some((key.clone(), text.clone())),
-            Value::Null => None,
             _ => None,
         })
         .collect()

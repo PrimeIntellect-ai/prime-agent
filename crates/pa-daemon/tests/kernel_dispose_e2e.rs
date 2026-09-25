@@ -42,7 +42,7 @@ fn test_lock() -> MutexGuard<'static, ()> {
 }
 
 /// The kernel Python with prime-agent-runtime installed; set
-/// PA_E2E_KERNEL_PYTHON to point at an explicit interpreter instead.
+/// `PA_E2E_KERNEL_PYTHON` to point at an explicit interpreter instead.
 fn kernel_python() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("PA_E2E_KERNEL_PYTHON") {
         let explicit = PathBuf::from(explicit);
@@ -52,11 +52,10 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -219,7 +218,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -228,7 +227,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -241,7 +240,7 @@ impl Client {
     }
 
     fn read_response(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(240);
+        let deadline = Instant::now() + Duration::from_mins(4);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -364,7 +363,7 @@ fn kill_disposes_the_session_kernel() {
     let session_id = create_session_with_kernel(&mut client, dir.path(), &script, "c1");
 
     // The session's kernel booted and executed the cell.
-    let kernels = await_new_kernel(&baseline, Duration::from_secs(120));
+    let kernels = await_new_kernel(&baseline, Duration::from_mins(2));
     await_receipt(dir.path());
 
     // User delete: the routed `kill` closes the session (the supervisor
@@ -402,7 +401,7 @@ fn shutdown_disposes_session_kernels_before_the_worker_exits() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
     let _session_id = create_session_with_kernel(&mut client, dir.path(), &script, "c1");
-    await_new_kernel(&baseline, Duration::from_secs(120));
+    await_new_kernel(&baseline, Duration::from_mins(2));
     await_receipt(dir.path());
 
     // Daemon stop: the supervisor routes `shutdown` to the workers and
@@ -414,7 +413,7 @@ fn shutdown_disposes_session_kernels_before_the_worker_exits() {
     await_kernels_gone(&baseline, Duration::from_secs(90));
 }
 
-/// A SIGKILLed supervisor leaves orphaned workers: the supervisor-lost
+/// A `SIGKILLed` supervisor leaves orphaned workers: the supervisor-lost
 /// monitor exits them after the lost window, and the exit path (TS
 /// `shutdown(0)`'s session close) disposes the kernel first — the exit
 /// itself would orphan it forever.
@@ -437,7 +436,7 @@ fn orphan_exit_disposes_the_kernel_before_the_worker_exits() {
     let (mut client, hello) = Client::connect(&socket);
     assert_eq!(hello["type"], "daemon_hello");
     let _session_id = create_session_with_kernel(&mut client, dir.path(), &script, "c1");
-    await_new_kernel(&baseline, Duration::from_secs(120));
+    await_new_kernel(&baseline, Duration::from_mins(2));
     await_receipt(dir.path());
 
     // Hard-kill the supervisor: no graceful stop runs, so the worker's

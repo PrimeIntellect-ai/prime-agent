@@ -9,7 +9,7 @@
 //! The flow (the f21 worker-recovery pattern): a faux-scripted session
 //! over the real agent engine starts a goal, runs work turns, compacts
 //! (the post-compaction mint bumps `continuationsUsed` durably), is
-//! SIGKILLed, and recovers through the supervisor's respawn — then keeps
+//! `SIGKILLed`, and recovers through the supervisor's respawn — then keeps
 //! using the goal, with the second compact's mint continuing the count.
 #![cfg(unix)]
 
@@ -97,7 +97,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(300);
+        let deadline = Instant::now() + Duration::from_mins(5);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -106,7 +106,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -134,7 +134,7 @@ impl Client {
 
     /// The response for `id`, collecting every session event on the way.
     fn request(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(300);
+        let deadline = Instant::now() + Duration::from_mins(5);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -319,7 +319,7 @@ impl Harness {
         assert_eq!(done["success"], true, "prompt {id} failed: {done}");
     }
 
-    /// The last goal_update announcement's `continuationsUsed`.
+    /// The last `goal_update` announcement's `continuationsUsed`.
     fn announced_continuations(&self) -> Vec<u64> {
         self.client
             .events
@@ -444,7 +444,7 @@ fn killed_mid_goal_worker_rehydrates_the_goal_with_counts() {
     // Early attempts may race the respawn backoff, so the prompt retries
     // until the new worker serves it. The goal was paused before the
     // kill, so the recovery runs against a quiet driver.
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_mins(3);
     let recovered = loop {
         assert!(Instant::now() < deadline, "the session never recovered");
         harness.client.send_command(

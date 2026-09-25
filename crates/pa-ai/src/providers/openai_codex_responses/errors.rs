@@ -243,8 +243,7 @@ pub fn is_stale_codex_continuation_error(error: &CodexStreamError) -> bool {
         CodexStreamError::Api(api) => api
             .code
             .as_deref()
-            .map(|code| code.to_lowercase() == STALE_CONTINUATION_ERROR_CODE)
-            .unwrap_or(false),
+            .is_some_and(|code| code.to_lowercase() == STALE_CONTINUATION_ERROR_CODE),
         _ => false,
     }
 }
@@ -315,7 +314,7 @@ fn code_regex_match(code: &str) -> bool {
 
 /// Port of `parseErrorResponse`: map an HTTP error response to a
 /// [`CodexApiError`], honoring usage-limit friendly messages and the
-/// max(Retry-After header, resets_at) rule.
+/// max(Retry-After header, `resets_at`) rule.
 pub async fn parse_error_response(response: &mut HttpResponse) -> CodexApiError {
     let status = response.status;
     let mut message;
@@ -386,9 +385,7 @@ pub fn map_codex_event(event: Value) -> Result<MappedCodexEvent, CodexStreamErro
             .get("status_code")
             .and_then(Value::as_u64)
             .map(|s| s as u16);
-        let code = if !flat_code.is_empty() {
-            Some(flat_code.to_string())
-        } else {
+        let code = if flat_code.is_empty() {
             nested
                 .and_then(|nested| {
                     nested
@@ -397,20 +394,20 @@ pub fn map_codex_event(event: Value) -> Result<MappedCodexEvent, CodexStreamErro
                         .or_else(|| nested.get("type").and_then(Value::as_str))
                 })
                 .map(str::to_string)
+        } else {
+            Some(flat_code.to_string())
         };
         let usage_limit =
             nested.and_then(|nested| codex_usage_limit_message(&error_payload(nested), status));
-        let message = if !flat_message.is_empty() {
-            flat_message
-        } else {
+        let message = if flat_message.is_empty() {
             nested
                 .and_then(|nested| nested.get("message").and_then(Value::as_str))
                 .unwrap_or("")
+        } else {
+            flat_message
         };
-        let friendly = usage_limit
-            .as_ref()
-            .map(|(message, _)| message.clone())
-            .unwrap_or_else(|| {
+        let friendly = usage_limit.as_ref().map_or_else(
+            || {
                 format!(
                     "Codex error: {}",
                     if message.is_empty() {
@@ -419,7 +416,9 @@ pub fn map_codex_event(event: Value) -> Result<MappedCodexEvent, CodexStreamErro
                         message.to_string()
                     }
                 )
-            });
+            },
+            |(message, _)| message.clone(),
+        );
         return Err(CodexStreamError::Api(CodexApiError {
             message: friendly,
             code,
@@ -488,7 +487,7 @@ fn normalize_codex_status(status: &Value) -> Option<&'static str> {
     }
 }
 
-/// Multipliers per https://developers.openai.com/api/docs/pricing
+/// Multipliers per <https://developers.openai.com/api/docs/pricing>
 /// (retrieved 2026-08-21). Takes the wire-tier string to match the shared
 /// Responses hook signature.
 pub fn get_codex_service_tier_cost_multiplier(model_id: &str, service_tier: Option<&str>) -> f64 {
@@ -532,10 +531,7 @@ pub fn resolve_codex_service_tier(
     request_service_tier: Option<String>,
 ) -> Option<String> {
     if response_service_tier.as_deref() == Some("default")
-        && matches!(
-            request_service_tier.as_deref(),
-            Some("flex") | Some("priority")
-        )
+        && matches!(request_service_tier.as_deref(), Some("flex" | "priority"))
     {
         return request_service_tier;
     }

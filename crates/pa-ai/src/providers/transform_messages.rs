@@ -165,8 +165,7 @@ pub fn transform_messages_with_normalizer(
     let mut existing_tool_result_ids: HashSet<String> = HashSet::new();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis() as u64);
 
     let insert_synthetic_tool_results =
         |result: &mut Vec<Message>, pending: &mut Vec<ToolCall>, existing: &mut HashSet<String>| {

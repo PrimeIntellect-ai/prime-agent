@@ -29,6 +29,11 @@ pub fn socket_update_directory(agent_dir: &Path, socket_path: &str) -> PathBuf {
 /// Contend for the coordinator lock (spec §4): create the socket dir, write
 /// the intent record with this process's identity. An existing record with
 /// a live identity is a `Join`; a dead or unparseable record is overwritten.
+///
+/// # Errors
+/// Returns an error when the socket directory cannot be created, when the
+/// intent record cannot be written, or when the confirming re-read cannot
+/// parse the persisted record.
 pub fn acquire(
     agent_dir: &Path,
     socket_path: &str,
@@ -45,8 +50,7 @@ pub fn acquire(
                 .rest
                 .get("status_path")
                 .and_then(serde_json::Value::as_str)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| default_status_path(&socket_dir));
+                .map_or_else(|| default_status_path(&socket_dir), PathBuf::from);
             return Ok(AcquireOutcome::Join {
                 status_path: join_path,
             });
@@ -62,8 +66,7 @@ pub fn acquire(
             .rest
             .get("status_path")
             .and_then(serde_json::Value::as_str)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| default_status_path(&socket_dir));
+            .map_or_else(|| default_status_path(&socket_dir), PathBuf::from);
         return Ok(AcquireOutcome::Join {
             status_path: join_path,
         });
@@ -74,6 +77,9 @@ pub fn acquire(
 /// Hand the lock to the spawned coordinator: rewrite the intent record with
 /// the child's identity (it is alive by construction; if it dies, the next
 /// `Acquire` steals the dead record).
+///
+/// # Errors
+/// Returns an error when the intent record cannot be rewritten.
 pub fn hand_over(
     agent_dir: &Path,
     socket_path: &str,
@@ -89,6 +95,9 @@ pub fn hand_over(
 
 /// Release the lock at a terminal state (the coordinator owns it then; the
 /// removal is idempotent for the boot sweep).
+///
+/// # Errors
+/// Returns an error when the intent record cannot be removed.
 pub fn release(agent_dir: &Path, socket_path: &str) -> Result<()> {
     let socket_dir = socket_update_directory(agent_dir, socket_path);
     let intent_path = update_intent_path(&socket_dir);

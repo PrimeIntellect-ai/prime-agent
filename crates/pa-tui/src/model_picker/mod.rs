@@ -388,26 +388,28 @@ impl ModelPicker {
     }
 
     /// The inline list layout for the current width (TS
-    /// `updateResponsiveLayout`, inline shape).
+    /// `updateResponsiveLayout`, inline shape). The frame's trailing
+    /// blank row (the operator's 2026-09-24 spacing directive) rides the
+    /// reserved rows: the list shrinks first on a height-limited
+    /// terminal, never the frame's own head (a front-crop would hide the
+    /// bordered search field).
     pub(crate) fn list_layout(&self) -> usize {
-        let detail_rows = if self.render_width >= 58 { 4 } else { 5 };
-        let detail_rows = if self.viewport_rows >= 5 + detail_rows {
-            detail_rows
-        } else {
-            0
-        };
+        let detail_rows = self.detail_rows();
         crate::menu_panel::menu_list_layout(
             Some(self.viewport_rows),
             8,
             self.filtered.len(),
-            3 + detail_rows,
+            4 + detail_rows,
             1,
         )
     }
 
     pub(crate) fn detail_rows(&self) -> usize {
         let detail_rows = if self.render_width >= 58 { 4 } else { 5 };
-        if self.viewport_rows >= 5 + detail_rows {
+        // The fixed floor is the search field (3), the scroll row (1),
+        // the hint (1), and the trailing blank (1): the detail block
+        // needs that plus its own rows to render at all.
+        if self.viewport_rows >= 6 + detail_rows {
             detail_rows
         } else {
             0
@@ -532,7 +534,9 @@ impl ModelPicker {
     fn filter_models(&mut self, query: &str) {
         let query_changed = query != self.last_query;
         self.last_query = query.to_string();
-        if !query.trim().is_empty() {
+        if query.trim().is_empty() {
+            self.filtered = (0..self.all_models.len()).collect();
+        } else {
             let mut matches: Vec<(usize, SearchMatch)> = self
                 .all_models
                 .iter()
@@ -545,9 +549,9 @@ impl ModelPicker {
             let pinned =
                 |model: &Model| model.provider == PRIME_INFERENCE_PROVIDER_ID && configured(model);
             matches.sort_by(|(a_index, a_match), (b_index, b_match)| {
+                use std::cmp::Ordering;
                 let a = &self.all_models[*a_index];
                 let b = &self.all_models[*b_index];
-                use std::cmp::Ordering;
                 match (configured(b), configured(a)) {
                     (true, false) => return Ordering::Greater,
                     (false, true) => return Ordering::Less,
@@ -591,8 +595,6 @@ impl ModelPicker {
                 )
             });
             self.filtered = matches.into_iter().map(|(index, _)| index).collect();
-        } else {
-            self.filtered = (0..self.all_models.len()).collect();
         }
         self.selected = if query_changed {
             0
@@ -898,8 +900,7 @@ fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
         let end = text
             .char_indices()
             .find(|(_, c)| c.is_ascii_digit() != is_digit)
-            .map(|(index, _)| index)
-            .unwrap_or(text.len());
+            .map_or(text.len(), |(index, _)| index);
         Some((&text[..end], is_digit))
     }
     let mut a_rest = a;
@@ -955,7 +956,7 @@ mod tests {
             "thinkingLevelMap": map.map(|m| serde_json::from_str::<serde_json::Value>(m).unwrap()),
             "input": ["text"],
             "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
-            "contextWindow": 128000, "maxTokens": 4096,
+            "contextWindow": 128_000, "maxTokens": 4096,
         }))
         .expect("mock model deserializes")
     }
@@ -1157,6 +1158,10 @@ mod tests {
             rows[16],
             " \u{2191}/\u{2193} model \u{b7} \u{2190}/\u{2192} effort \u{b7} Enter select \u{b7} Esc close"
         );
+        // One blank line of spacing below the shortcuts (the operator's
+        // 2026-09-24 directive), never a rule.
+        assert_eq!(rows.len(), 18, "the frame ends on the blank: {rows:?}");
+        assert_eq!(rows[17], "");
     }
 
     #[test]

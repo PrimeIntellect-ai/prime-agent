@@ -131,7 +131,7 @@ fn rfc3339_nanos(timestamp: &str) -> Option<i64> {
     }
 
     let offset_secs = match b(idx) {
-        Some(b'Z') | Some(b'z') => {
+        Some(b'Z' | b'z') => {
             if idx + 1 != t.len() {
                 return None;
             }

@@ -80,7 +80,7 @@ fn daemon_binary() -> PathBuf {
     daemon
 }
 
-/// The installed TS binary, when present (PA_TS_BINARY or `prime-agent` on PATH).
+/// The installed TS binary, when present (`PA_TS_BINARY` or `prime-agent` on PATH).
 fn ts_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("PA_TS_BINARY") {
         let path = PathBuf::from(path);
@@ -188,7 +188,7 @@ impl Wire {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -197,7 +197,7 @@ impl Wire {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("daemon closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse daemon line"),
                 Err(_) if Instant::now() < deadline => {}
                 Err(error) => panic!("timed out waiting for daemon line: {error}"),

@@ -14,15 +14,92 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
 /// Per-request answer delay: the mock holds each response so the test can
 /// park more prompts behind the busy turn and watch the pickup projection
-/// while the delivered item's turn is still running.
+/// while the delivered item's turn is still running. The gated busy turn
+/// (below) does not wait on this clock: its answer parks until the test
+/// releases the hold, so the parked-lane setup survives any load.
 const ANSWER_DELAY_MS: u64 = 1200;
+
+/// The busy-turn hold: the mock parks the gated turn's answer until the
+/// test releases it. The answer clock alone is a wall-clock race: under
+/// battery load the busy turn can settle before every queue admission
+/// landed, and the runner legitimately delivered the parked-at-pickup
+/// prefix (TS `_pumpSessionInputs` batches `queuedActions(first.delivery)`,
+/// what is parked AT the boundary), so the full parked-lane projection
+/// the setup asserts never existed. Holding the answer makes the
+/// "park behind a busy turn" setup deterministic under any scheduler load.
+#[derive(Default)]
+struct HoldGate {
+    state: Mutex<HoldState>,
+    arrived: Condvar,
+    released: Condvar,
+}
+
+#[derive(Default)]
+struct HoldState {
+    /// The gated busy turn's prompt text; `None` gates nothing.
+    marker: Option<String>,
+    /// The gated turn's model request reached the mock (the turn is
+    /// streaming, so admissions behind it park deterministically).
+    request_arrived: bool,
+    released: bool,
+}
+
+impl HoldGate {
+    /// Gate the busy turn with the given prompt text (arm before the
+    /// turn starts).
+    fn arm(&self, marker: &str) {
+        let mut state = self.state.lock().expect("hold lock");
+        state.marker = Some(marker.to_string());
+        state.request_arrived = false;
+        state.released = false;
+    }
+
+    /// Wait until the gated turn's model request reaches the mock.
+    fn wait_request(&self) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut state = self.state.lock().expect("hold lock");
+        while !state.request_arrived {
+            assert!(
+                Instant::now() < deadline,
+                "the held busy turn's model request never reached the mock"
+            );
+            let (guard, _) = self
+                .arrived
+                .wait_timeout(state, Duration::from_millis(100))
+                .expect("hold lock");
+            state = guard;
+        }
+    }
+
+    /// Release the gated turn's answer.
+    fn release(&self) {
+        let mut state = self.state.lock().expect("hold lock");
+        state.released = true;
+        self.released.notify_all();
+    }
+
+    /// Serve side: mark the gated turn's arrival and hold its answer until
+    /// released. Returns whether this request is the gated turn.
+    fn observe(&self, last_user: &str) -> bool {
+        let mut state = self.state.lock().expect("hold lock");
+        if state.marker.as_deref() != Some(last_user) {
+            return false;
+        }
+        state.request_arrived = true;
+        self.arrived.notify_all();
+        while !state.released {
+            state = self.released.wait(state).expect("hold lock");
+        }
+        true
+    }
+}
 
 struct Supervisor {
     child: Child,
@@ -44,6 +121,8 @@ struct DelayedMock {
     requests: Arc<Mutex<usize>>,
     /// One excerpt per request, in order (the last user message text).
     bodies: Arc<Mutex<Vec<String>>>,
+    /// The gated busy turn (see [`HoldGate`]).
+    hold: Arc<HoldGate>,
     port: u16,
 }
 
@@ -51,23 +130,27 @@ impl DelayedMock {
     fn start() -> DelayedMock {
         let requests = Arc::new(Mutex::new(0usize));
         let bodies: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let hold = Arc::new(HoldGate::default());
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let port = listener.local_addr().expect("mock addr").port();
         let requests_for_thread = Arc::clone(&requests);
         let bodies_for_thread = Arc::clone(&bodies);
+        let hold_for_thread = Arc::clone(&hold);
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let requests = Arc::clone(&requests_for_thread);
                 let bodies = Arc::clone(&bodies_for_thread);
+                let hold = Arc::clone(&hold_for_thread);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, requests, bodies);
+                    let _ = serve(stream, requests, bodies, hold);
                 });
             }
         });
         DelayedMock {
             requests,
             bodies,
+            hold,
             port,
         }
     }
@@ -84,13 +167,30 @@ impl DelayedMock {
     fn request_log(&self) -> Vec<String> {
         self.bodies.lock().expect("mock lock").clone()
     }
+
+    /// Hold the busy turn's answer (gated by its prompt text) until
+    /// [`DelayedMock::release_busy_turn`]; arm before the turn starts.
+    fn hold_busy_turn(&self, text: &str) {
+        self.hold.arm(text);
+    }
+
+    /// Wait for the gated turn's model request: the busy turn is
+    /// streaming, so prompts sent next park behind it deterministically.
+    fn wait_busy_turn_request(&self) {
+        self.hold.wait_request();
+    }
+
+    /// Release the gated turn's answer.
+    fn release_busy_turn(&self) {
+        self.hold.release();
+    }
 }
 
 fn chunk(delta: Value, finish_reason: Option<&str>) -> String {
     json!({
         "id": "chatcmpl-test",
         "object": "chat.completion.chunk",
-        "created": 1750000000,
+        "created": 1_750_000_000,
         "model": "mock-1",
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
     })
@@ -101,6 +201,7 @@ fn serve(
     mut stream: TcpStream,
     requests: Arc<Mutex<usize>>,
     bodies: Arc<Mutex<Vec<String>>>,
+    hold: Arc<HoldGate>,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut head = String::new();
@@ -126,39 +227,28 @@ fn serve(
         reader.read_exact(&mut body_bytes)?;
     }
     let body: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
-    let last_user = body["messages"]
+    // The gated busy turn: its answer parks until the test releases the
+    // hold (the full parked lane was observed while the turn was busy).
+    // The gate matches the prompt TEXT, so extract it from the last
+    // user message whether the provider payload carries it as a plain
+    // string or as text parts.
+    let marker_text = body["messages"]
         .as_array()
         .and_then(|messages| {
             messages
                 .iter()
                 .rev()
                 .find(|message| message["role"] == "user")
-                .map(|message| match &message["content"] {
-                    Value::String(text) => text.clone(),
-                    content => content.to_string(),
+                .and_then(|message| match &message["content"] {
+                    Value::String(text) => Some(text.clone()),
+                    Value::Array(parts) => parts.iter().rev().find_map(|part| {
+                        part.get("text").and_then(Value::as_str).map(str::to_string)
+                    }),
+                    _ => None,
                 })
         })
         .unwrap_or_default();
-    // The post-turn dashboard status request (TS `daemon-session-summarizer`
-    // against the small summary model): it is not a turn - serve the canned
-    // verdict without a delay and without consuming a scripted answer.
-    if last_user.starts_with("<agent-state>") {
-        let answer = "<recap>serving the queued prompts</recap>\n<status>NEEDS_INPUT</status>";
-        let mut payload = String::new();
-        for data in [
-            chunk(json!({"role": "assistant", "content": answer}), None),
-            chunk(json!({}), Some("stop")),
-        ] {
-            payload.push_str(&format!("data: {data}\n\n"));
-        }
-        payload.push_str("data: [DONE]\n\n");
-        return stream.write_all(
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{payload}"
-            )
-            .as_bytes(),
-        );
-    }
+    let held = hold.observe(&marker_text);
     let index = {
         let mut requests = requests.lock().expect("mock lock");
         *requests += 1;
@@ -167,8 +257,10 @@ fn serve(
     bodies
         .lock()
         .expect("mock lock")
-        .push(format!("#{index}: {last_user}"));
-    std::thread::sleep(Duration::from_millis(ANSWER_DELAY_MS));
+        .push(format!("#{index}: {marker_text}"));
+    if !held {
+        std::thread::sleep(Duration::from_millis(ANSWER_DELAY_MS));
+    }
     let answer = format!("answer {index}");
     let mut payload = String::new();
     for data in [
@@ -240,7 +332,7 @@ impl Client {
     }
 
     fn read_line(&mut self) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -249,7 +341,7 @@ impl Client {
             let mut line = String::new();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -276,7 +368,7 @@ impl Client {
     }
 
     fn request(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(120);
+        let deadline = Instant::now() + Duration::from_mins(2);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -294,7 +386,7 @@ impl Client {
     }
 
     fn drain_events(&mut self, quiet_ms: Duration) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         let mut last_line = Instant::now();
         loop {
             assert!(Instant::now() < deadline, "event drain timed out");
@@ -344,7 +436,7 @@ fn setup(name: &str) -> (tempfile::TempDir, DelayedMock, Supervisor, Client, Str
                             "id": "mock-1",
                             "name": "Mock 1",
                             "api": "openai-completions",
-                            "contextWindow": 128000,
+                            "contextWindow": 128_000,
                             "maxTokens": 4096
                         }
                     ]
@@ -440,14 +532,17 @@ fn action_updates_with(events: &[Value], steering: &[&str], follow_ups: &[&str])
 fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
     let (_dir, mock, _supervisor, mut client, session_id) = setup("queue-pickup");
 
-    // Turn one runs (the mock holds its answer), and three prompts park
-    // behind it: two steers and one follow-up.
+    // Turn one runs (the mock HOLDS its answer until the parked lane was
+    // observed, so the busy window holds under any load), and three
+    // prompts park behind it: two steers and one follow-up.
+    mock.hold_busy_turn("turn one");
     let started = client.send(
         "p1",
         json!({ "type": "prompt", "activeSessionId": session_id, "message": "turn one" }),
     );
     assert_eq!(started["success"], true, "prompt failed: {started}");
-    std::thread::sleep(Duration::from_millis(300));
+    // The busy turn is streaming before anything parks behind it.
+    mock.wait_busy_turn_request();
     for (id, message, behavior) in [
         ("s1", "steer A", "steer"),
         ("s2", "steer B", "steer"),
@@ -468,11 +563,14 @@ fn queue_pickup_projection_reaches_clients_before_the_delivered_turn_starts() {
         "the parked queue must project as session_action_update, events: {:?}",
         event_types(&client.events)
     );
+    // The parked lane was observed while the busy turn still held its
+    // answer; release it and watch the boundary drain the lane.
+    mock.release_busy_turn();
 
     // Everything drains: three model requests (turn one + the steers'
     // ONE batched turn — the product default co-delivers the parked
     // steering prefix, Kevin's batch spec — + the follow-up's own turn).
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < deadline {
         if mock.count() >= 3 {
             break;
@@ -552,13 +650,19 @@ fn multi_item_queue_delivers_every_item_in_lane_order() {
 
     // A busy turn with a full parked lane: three steers and three
     // follow-ups behind it (dogfood: the queue appeared to accept only
-    // one message).
+    // one message). The mock HOLDS the busy turn's answer until the
+    // six-item lane was observed, so the parked window holds under any
+    // load (a wall-clock answer delay flakes full batteries: the turn
+    // settled mid-admissions and the runner legitimately drained the
+    // parked-at-pickup prefix before the full projection existed).
+    mock.hold_busy_turn("turn zero");
     let started = client.send(
         "p1",
         json!({ "type": "prompt", "activeSessionId": session_id, "message": "turn zero" }),
     );
     assert_eq!(started["success"], true, "prompt failed: {started}");
-    std::thread::sleep(Duration::from_millis(300));
+    // The busy turn is streaming before anything parks behind it.
+    mock.wait_busy_turn_request();
     for (id, message, behavior) in [
         ("s1", "steer one", "steer"),
         ("s2", "steer two", "steer"),
@@ -578,6 +682,10 @@ fn multi_item_queue_delivers_every_item_in_lane_order() {
     );
     let actions = &client.events[parked[0]]["actions"];
     assert_eq!(actions["queuedCount"], 6, "queuedCount counts both lanes");
+
+    // The six-item lane was observed while the busy turn still held its
+    // answer; release it so the boundary drains deterministically.
+    mock.release_busy_turn();
 
     // Five turns run: the starter, the three steers' ONE batched turn
     // (the product default co-delivers the parked steering prefix,
@@ -624,6 +732,178 @@ fn multi_item_queue_delivers_every_item_in_lane_order() {
         ],
         "every queued item delivers, the steering lane's rows co-delivered ahead of the follow-up lane"
     );
+}
+
+/// TS #2063 (RES-1306): a queue-visible delivery's active action rides
+/// the turn through its phases at the moments a client renders them —
+/// `preparing` projects at pickup (before the turn's first row; the
+/// queued strip shows it as the "Starting" row), `committing` at the
+/// turn's first row (the prompt becomes visible in the conversation, the
+/// boundary TS drops the Starting row at: the commit fence), `running`
+/// at the turn's first assistant frame — and the settle's projection
+/// carries no active action.
+#[test]
+fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
+    let (_dir, mock, _supervisor, mut client, session_id) = setup("active-action-phases");
+
+    // The busy turn holds its answer while a follow-up parks behind it.
+    mock.hold_busy_turn("turn one");
+    let started = client.send(
+        "p1",
+        json!({ "type": "prompt", "activeSessionId": session_id, "message": "turn one" }),
+    );
+    assert_eq!(started["success"], true, "prompt failed: {started}");
+    mock.wait_busy_turn_request();
+    let parked = client.send("f1", queued_prompt(&session_id, "follow C", "followUp"));
+    assert_eq!(parked["success"], true, "follow-up failed: {parked}");
+    // The parked lane projects while the busy turn still holds.
+    wait_for_projection(&mut client, &[], &["follow C"], "parked lane");
+    // Release: the busy turn settles and the follow-up's turn runs.
+    mock.release_busy_turn();
+    // Readiness wait for the follow-up's turn to reach the mock (the
+    // second request): the drain window is the poll interval, so the
+    // wait observes the request rather than sleeping blind.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while mock.count() < 2 {
+        client.drain_events(Duration::from_millis(200));
+        assert!(
+            Instant::now() < deadline,
+            "the follow-up's turn never reached the mock; requests: {:?}",
+            mock.request_log()
+        );
+    }
+    client.drain_events(Duration::from_secs(2));
+    assert_eq!(
+        mock.count(),
+        2,
+        "turn one, then follow C's turn: {:?}",
+        mock.request_log()
+    );
+    // The settle's projection (empty lanes, no active action) lands right
+    // after the turn's unwind frames — an observable readiness wait, not
+    // a fixed quiet window: the runner's post-turn work can outlast any
+    // fixed drain under load, and the parked-lane projections before the
+    // delivery (non-empty lanes) never match this shape.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let settled_index = loop {
+        client.drain_events(Duration::from_millis(400));
+        let found = client
+            .events
+            .iter()
+            .enumerate()
+            .find(|(_, event)| {
+                event.get("type").and_then(Value::as_str) == Some("session_action_update")
+                    && event["actions"]["steering"]
+                        .as_array()
+                        .is_some_and(Vec::is_empty)
+                    && event["actions"]["followUps"]
+                        .as_array()
+                        .is_some_and(Vec::is_empty)
+                    && event["actions"]["active"].is_null()
+            })
+            .map(|(index, _)| index);
+        if let Some(index) = found {
+            break index;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the settle's projection never fired; events: {:?}",
+            event_types(&client.events)
+        );
+    };
+
+    let events = &client.events;
+    let action_updates: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| {
+            event.get("type").and_then(Value::as_str) == Some("session_action_update")
+        })
+        .map(|(index, _)| index)
+        .collect();
+    let phase_at = |index: usize, phase: &str| {
+        events[index]["actions"]["active"]["phase"].as_str() == Some(phase)
+    };
+    // The `preparing` projection of follow C's delivery, before the turn
+    // starts: the strip's "Starting" row must land before the prompt row.
+    let preparing = action_updates
+        .iter()
+        .copied()
+        .find(|index| phase_at(*index, "preparing"))
+        .expect("the follow-up's preparing projection never fired");
+    assert_eq!(
+        events[preparing]["actions"]["active"]["label"], "follow C",
+        "the active label is the delivery's text (no labeled preview)"
+    );
+    let agent_starts: Vec<usize> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.get("type").and_then(Value::as_str) == Some("agent_start"))
+        .map(|(index, _)| index)
+        .collect();
+    assert!(
+        preparing < agent_starts[1],
+        "the pickup projection precedes the delivered turn's start (events: {:?})",
+        event_types(events)
+    );
+    // The turn's first row is the accepted prompt; the `committing`
+    // projection lands after it (the Starting row drops as the prompt
+    // becomes visible in the conversation).
+    let user_row = events
+        .iter()
+        .enumerate()
+        .find(|(_, event)| {
+            event.get("type").and_then(Value::as_str) == Some("message_start")
+                && event["message"]["role"] == "user"
+                && event["message"]["content"]
+                    .as_array()
+                    .and_then(|blocks| blocks.first())
+                    .and_then(|block| block["text"].as_str())
+                    == Some("follow C")
+        })
+        .map(|(index, _)| index)
+        .expect("the follow-up's accepted row never broadcast");
+    let committing = action_updates
+        .iter()
+        .copied()
+        .find(|index| phase_at(*index, "committing"))
+        .expect("the committing projection never fired");
+    assert!(
+        preparing < user_row && user_row < committing,
+        "preparing precedes the accepted row, committing follows it (events: {:?})",
+        event_types(events)
+    );
+    // The `running` projection lands after the turn's first assistant
+    // frame, and the settle's projection carries no active action.
+    let assistant_row = events
+        .iter()
+        .enumerate()
+        .find(|(index, event)| {
+            index > &user_row
+                && event.get("type").and_then(Value::as_str) == Some("message_start")
+                && event["message"]["role"] == "assistant"
+        })
+        .map(|(index, _)| index)
+        .expect("the follow-up's assistant row never broadcast");
+    let running = action_updates
+        .iter()
+        .copied()
+        .find(|index| phase_at(*index, "running"))
+        .expect("the running projection never fired");
+    assert!(
+        assistant_row < running,
+        "running follows the turn's first assistant frame (events: {:?})",
+        event_types(events)
+    );
+    // The settle's projection is the delivery's last queue frame: the
+    // empty-lane, no-active-action shape the readiness wait found.
+    assert_eq!(
+        action_updates.last(),
+        Some(&settled_index),
+        "the settle's projection is the last queue frame (events: {:?})",
+        event_types(events)
+    );
+    assert!(settled_index > running);
 }
 
 fn event_types(events: &[Value]) -> Vec<String> {

@@ -18,7 +18,7 @@ use crate::chat::{
 use crate::daemon_client::{DaemonClient, DaemonClientEvent};
 use crate::effort_picker::{self, EffortPickerAction};
 use crate::export_share::{self, GhAuthStatus, GistOutcome};
-use crate::goal_surface::{format_goal_status, tray_goal_label, GoalView};
+use crate::goal_surface::{format_goal_status, tray_goal_label, GoalPanel, GoalView};
 use crate::heartbeats_picker::{
     parse_heartbeats, scope_heartbeats, sort_heartbeats, HeartbeatAction, HeartbeatEntry,
     HeartbeatsPicker, HeartbeatsPickerAction,
@@ -34,6 +34,7 @@ use crate::model_picker::{CurrentModel, ModelPicker, ModelPickerAction, ModelPic
 use crate::prompt_stash::PromptStash;
 use crate::provider_auth::{AuthSelectorAction, AuthSelectorKind};
 use crate::queued::{QueueBrowseDirection, QueueLane};
+use crate::runs_view::{RunsView, RunsViewAction};
 use crate::snapshot::{
     assistant_message_parts, attach_data_from_response, event_to_update, reconstruct, TurnUpdate,
 };
@@ -60,7 +61,7 @@ const UI_REQUEST_TIMEOUT_MS: u64 = 10_000;
 /// How long a fetched model catalog stays fresh (TS
 /// `MODEL_CATALOG_REFRESH_TTL_MS`); a `/model` open past it refreshes
 /// again in the background.
-const MODEL_CATALOG_REFRESH_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const MODEL_CATALOG_REFRESH_TTL: std::time::Duration = std::time::Duration::from_mins(1);
 /// Cap on the detach request during the exit path: the client must exit
 /// promptly even when the worker socket is wedged.
 const EXIT_DETACH_TIMEOUT_MS: u64 = 600;
@@ -333,8 +334,13 @@ pub(crate) struct SessionUi {
     /// run loop folds them into the transcript).
     traces_upload_notes: mpsc::UnboundedSender<crate::traces::TraceUploadAllNote>,
     /// A parked `/traces login` (or the enable arm's credential-less
-    /// entry): the run loop hands the terminal over and runs the flow.
+    /// entry): the run loop mounts the inline auth panel and spawns the
+    /// flow once; the parked intent leaves with the spawn.
     pending_traces_login: Option<TracesLoginIntent>,
+    /// The in-flight traces login's enable intent: taken from the park
+    /// when the flow spawns (so a later key cannot spawn a second flow
+    /// over the same panel), consumed by the settle.
+    traces_login_run: Option<TracesLoginIntent>,
     /// Where the background catalog refresh delivers `get_model_catalog`
     /// responses (the run loop folds them into the picker catalog).
     catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
@@ -369,7 +375,7 @@ pub(crate) struct SessionUi {
     /// monotonically within a run.
     working_tokens: LoaderTokenTracker,
     /// The turn already surfaced its error (a failed assistant message or a
-    /// retry-exhausted banner); the turn_end error stays silent then (TS
+    /// retry-exhausted banner); the `turn_end` error stays silent then (TS
     /// renders the failure once, through the message or the retry banner).
     turn_error_shown: bool,
     /// Tool cards awaiting their final result (TS `pendingTools`): a
@@ -394,10 +400,10 @@ pub(crate) struct SessionUi {
     /// `/login` + `/logout`: the provider auth flows the composition root
     /// owns (credential storage, OAuth flows, the provider catalog).
     provider_auth: Option<crate::provider_auth::ProviderAuthCommandsHandle>,
-    /// A provider login that needs the plain terminal (browser OAuth /
-    /// the MCP device flow): the run loop hands the terminal over and
-    /// runs this row's flow.
-    pending_terminal_login: Option<crate::provider_auth::ProviderRow>,
+    /// The inline auth panel's request channel (the login flows drive the
+    /// panel through it; the run loop owns the receiving side and folds
+    /// each request into the mounted panel).
+    auth_panel_notes: mpsc::UnboundedSender<crate::auth_panel::AuthPanelRequest>,
     /// A `/update` run parked for the run loop: the child processes need
     /// the plain terminal, and a successful self-update replaces this
     /// process with the updated CLI.
@@ -440,7 +446,7 @@ pub(crate) struct SessionUi {
     /// The session's fetched skill commands (the `enableSkillCommands`
     /// toggle re-applies them without a daemon round trip).
     skill_commands_cache: Vec<crate::autocomplete::SlashCommandEntry>,
-    /// The current Python bash() registry snapshot from the owning kernel.
+    /// The current Python `bash()` registry snapshot from the owning kernel.
     bash_activities: Value,
     /// Monotonic id of the latest issued kernel-bash list request; a late
     /// response from an older request must not repaint a newer snapshot.
@@ -549,11 +555,11 @@ pub(crate) struct SessionUi {
     /// right after dispatch, because the renderer is the loop's terminal.
     suspend_requested: bool,
     /// The `/mcp` view's internal auth resolution (its Enter on a
-    /// connection, or the inline paste panel — the args for the client
-    /// auth commands, e.g. `login <server>`): dispatched by the loop
-    /// through the auth seam with its terminal-suspension bracket, never
-    /// through the typed-command path.
-    pending_mcp_auth: Option<String>,
+    /// connection, or the pasteable service's paste flow): the auth args
+    /// plus the inline auth panel's title; the loop mounts the panel and
+    /// spawns the command through the auth seam, never through the
+    /// typed-command path.
+    pending_mcp_auth: Option<McpAuthIntent>,
     /// The Tab-interception path restored the stashed browse draft into
     /// the editor when it opened the picker, so the editor holds the
     /// user's draft, not the command's typed partial: a picker apply
@@ -575,6 +581,15 @@ pub(crate) struct SessionUi {
 /// Why one transcript rebuild runs (TS: a session rebind renders through
 /// `renderCurrentSessionState`, a same-session resync through
 /// `renderResyncedSession` — the bash slot survives only the resync).
+/// The reattach outcome for `reattach_after_update`: the budget expiry
+/// (a queued attach waiting out a slow restore, §10.4) is a RETRY
+/// outcome — the reconnect driver schedules its next attempt; only a
+/// true attach error is an `Err`.
+pub(crate) enum ReattachOutcome {
+    Attached,
+    AttachBudgetExceeded,
+}
+
 pub(crate) enum RebuildKind {
     /// A new session took the view's place (`/new`, `/switch`, startup):
     /// the previous session's held cards die with its transcript.
@@ -631,6 +646,7 @@ impl SessionUi {
         reload_notes: mpsc::UnboundedSender<ReloadNote>,
         traces_upload_notes: mpsc::UnboundedSender<crate::traces::TraceUploadAllNote>,
         catalog_updates: mpsc::UnboundedSender<ModelCatalogUpdate>,
+        auth_panel_notes: mpsc::UnboundedSender<crate::auth_panel::AuthPanelRequest>,
         activity_updates: ActivityUpdates,
     ) -> Result<SessionUi> {
         let active_session_id = match &options.session {
@@ -666,8 +682,7 @@ impl SessionUi {
             fullscreen_enabled: options
                 .client_settings
                 .as_ref()
-                .map(|settings| settings.fullscreen())
-                .unwrap_or(true),
+                .is_none_or(|settings| settings.fullscreen()),
             service_tier: None,
             speed_display_enabled: false,
             speed_stats: None,
@@ -681,6 +696,7 @@ impl SessionUi {
             trace_upload: None,
             traces_upload_notes,
             pending_traces_login: None,
+            traces_login_run: None,
             pasted_images: Default::default(),
             next_image_marker_id: 1,
             pending_snapshot: None,
@@ -702,7 +718,7 @@ impl SessionUi {
             pending_confirm: None,
             traces: options.traces.clone(),
             provider_auth: options.provider_auth.clone(),
-            pending_terminal_login: None,
+            auth_panel_notes,
             pending_update: None,
             update_commands: options.update_commands.clone(),
             exit_requested: false,
@@ -775,11 +791,23 @@ impl SessionUi {
     /// `update_resume.complete` is surfaced as a banner line). The
     /// transcript rebuilds from the attach snapshot - the same machinery
     /// `/switch` uses - and the resumed-work banner lands after it.
+    ///
+    /// `lost` marks the unexpected-loss recovery path (not an update
+    /// restart): no update banner is painted — the caller's single
+    /// recovery row is the note.
     pub(crate) async fn reattach_after_update(
         &mut self,
         client: DaemonClient,
         view: &mut AgentView,
-    ) -> Result<()> {
+        lost: bool,
+    ) -> Result<ReattachOutcome> {
+        // One reattach attempt's budget (§10.4: a queued attach can
+        // legitimately wait out a slow restore — the budget's expiry is a
+        // RETRY outcome, never a fatal one). The bound lives INSIDE this
+        // function — a caller-side timeout would cancel this future
+        // mid-attach and skip the failure-path `close()` below, leaking
+        // the half-installed client's supervisor connection and reader.
+        const REATTACH_BUDGET: Duration = Duration::from_secs(30);
         let hello_resume = client
             .hello()
             .get("updateResume")
@@ -794,29 +822,57 @@ impl SessionUi {
         self.client = client;
         let durable = self.session_id.clone();
         if durable.is_empty() {
+            // A failed reattach must not leave the half-installed client
+            // (its supervisor connection and reader task) running for the
+            // process's lifetime: close it, and the reconnect driver
+            // installs a fresh one on its next attempt.
+            self.client.hard_close();
             anyhow::bail!("the session's durable id is unknown; cannot reattach");
         }
-        self.attach_session(&durable)
-            .await
-            .with_context(|| format!("reattaching session {durable} after the update"))?;
+        let attach = tokio::time::timeout(REATTACH_BUDGET, self.attach_session(&durable)).await;
+        match attach {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                // A failed reattach must not leave the half-installed
+                // client (its supervisor connection and reader task)
+                // running: dispose it outright (the writer drops, the
+                // socket shuts down, the reader EOFs), and the reconnect
+                // driver installs a fresh one on its next attempt.
+                self.client.hard_close();
+                return Err(
+                    error.context(format!("reattaching session {durable} after the update"))
+                );
+            }
+            Err(_) => {
+                // A wedged attach outlived the budget (§10.4: a queued
+                // attach can legitimately wait out a slow restore): same
+                // disposal, but the expiry is a RETRY outcome — the
+                // driver's next attempt owns the recovery, never a fatal
+                // exit.
+                self.client.hard_close();
+                return Ok(ReattachOutcome::AttachBudgetExceeded);
+            }
+        }
         // Flush the attach snapshot BEFORE the banner lands: `rebuild_view`
         // replaces the transcript from the snapshot, so the banner must come
         // after it to survive the rebuild (§10.5's visible end state).
         self.rebuild_view(view, RebuildKind::Resync);
-        match complete {
-            Some(false) => view.push_entry(crate::chat::ChatEntry::Status {
-                text: "Reconnected — the daemon is finishing its restore; queued work resumes when the session comes up.".to_string(),
-                kind: crate::chat::StatusKind::Info,
-            }),
-            _ => view.push_entry(crate::chat::ChatEntry::Status {
-                text: format!(
-                    "Reconnected to Prime Agent (update {update_id}) — your session and queued work resumed."
-                ),
-                kind: crate::chat::StatusKind::Info,
-            }),
+        if !lost {
+            match complete {
+                Some(false) => view.push_entry(crate::chat::ChatEntry::Status {
+                    text: "Reconnected — the daemon is finishing its restore; queued work resumes when the session comes up.".to_string(),
+                    kind: crate::chat::StatusKind::Info,
+                }),
+                _ => view.push_entry(crate::chat::ChatEntry::Status {
+                    text: format!(
+                        "Reconnected to Prime Agent (update {update_id}) — your session and queued work resumed."
+                    ),
+                    kind: crate::chat::StatusKind::Info,
+                }),
+            }
         }
         self.dirty = true;
-        Ok(())
+        Ok(ReattachOutcome::Attached)
     }
 
     /// Detach the current session and attach `id`, rebuilding the transcript
@@ -970,15 +1026,11 @@ impl SessionUi {
         // rebuilds from the snapshot): a turn that is still live behind the
         // re-attach keeps the spinner, one that died with the old link (or
         // never ran) does not.
-        let streaming = attach
-            .snapshot
-            .get("state")
-            .map(|state| {
-                ["isStreaming", "isCompacting"]
-                    .iter()
-                    .any(|flag| state.get(flag).and_then(Value::as_bool).unwrap_or(false))
-            })
-            .unwrap_or(false);
+        let streaming = attach.snapshot.get("state").is_some_and(|state| {
+            ["isStreaming", "isCompacting"]
+                .iter()
+                .any(|flag| state.get(flag).and_then(Value::as_bool).unwrap_or(false))
+        });
         self.turn_active = streaming;
         self.streaming_index = None;
         // TS `applyConnectionStateSnapshot` -> `bindPromptStashSession`: the
@@ -1054,12 +1106,15 @@ impl SessionUi {
         self.subagent_counts = counts;
 
         let goal = &self.goal_view.goal;
-        // The dock carries the goal only while it is actively being
-        // pursued: a completed goal's token totals are stale bookkeeping,
-        // not a live activity (the tray's TS label still covers the
-        // paused and budget-limited states).
-        let goal_tokens = (goal.status == pa_types::goal::GoalStatus::Active)
-            .then_some((goal.tokens_used, goal.token_budget));
+        // The dock is the goal's one chrome surface (the operator's
+        // 2026-09-24 directive moved it off the line below the prompt
+        // bar): every live state renders its row — pursuing reads the
+        // elapsed time ("make it 'Pursuing goal (time)'"), and the
+        // paused and budget-limited states keep their persistent label
+        // here too (the tray's TS cluster no longer exists to carry
+        // them; terminal states carry no row). The token budget lives
+        // inside the goal panel the row opens, not on the bar.
+        let goal_label = tray_goal_label(goal);
         // The dock's bash indicator counts only runs actively running
         // right now (operator scoping): finished runs stay as rows inside
         // the bash view, never in the indicator. The feed is the
@@ -1082,7 +1137,7 @@ impl SessionUi {
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
             bash_running,
             bash_total: bash_rows.len(),
-            goal_tokens,
+            goal_label,
             selected: self.activity_group,
             focused: self.subagents_focused,
         };
@@ -1095,6 +1150,7 @@ impl SessionUi {
                 crate::chrome::ActivityGroup::Subagents,
                 crate::chrome::ActivityGroup::Heartbeats,
                 crate::chrome::ActivityGroup::Bash,
+                crate::chrome::ActivityGroup::Goal,
             ]
             .into_iter()
             .find(|group| self.activity_selectable(*group))
@@ -1131,6 +1187,10 @@ impl SessionUi {
             crate::chrome::ActivityGroup::Bash => {
                 !crate::bash_view::parse_bash_activities(&self.bash_activities).is_empty()
             }
+            // The goal group rides the dock's goal row: it stays
+            // selectable exactly while that row renders — every live
+            // state (the same gate as the row itself).
+            crate::chrome::ActivityGroup::Goal => tray_goal_label(&self.goal_view.goal).is_some(),
         }
     }
 
@@ -1149,6 +1209,7 @@ impl SessionUi {
                 crate::chrome::ActivityGroup::Subagents,
                 crate::chrome::ActivityGroup::Heartbeats,
                 crate::chrome::ActivityGroup::Bash,
+                crate::chrome::ActivityGroup::Goal,
             ]
             .into_iter()
             .find(|group| self.activity_selectable(*group)) else {
@@ -1204,6 +1265,12 @@ impl SessionUi {
         // stats and clears the readout left over from the previous session.
         if matches!(kind, RebuildKind::Rebind) {
             view.bash_view = None;
+            view.runs_view = None;
+            // The goal panel dies with the old session too: it is a
+            // snapshot of the previous session's goal state, and until
+            // the new session's own `goal_update` lands it would keep
+            // owning the frame over the rebind with stale content.
+            view.goal_panel = None;
             self.speed_stats = None;
             view.chrome.speed_text = None;
         }
@@ -1303,6 +1370,21 @@ impl SessionUi {
                 }
             }
         }
+        // A resync rebuild replaces the transcript wholesale while an
+        // open runs pane survives it: reconcile the pane against the
+        // rebuilt runs (the cursor and the open detail can point at a
+        // run that vanished in the rebuild; the pane closes when no run
+        // survives).
+        if view.runs_view.is_some() {
+            let runs = view.condensed_runs();
+            let closed = view
+                .runs_view
+                .as_mut()
+                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
+            if closed {
+                view.runs_view = None;
+            }
+        }
         // The rebuilt chat follows the session's live state: an attached
         // turn that survived the re-attach keeps its loader (TS
         // `renderResyncedSession`), and no stale loader survives a rebuild.
@@ -1346,9 +1428,14 @@ impl SessionUi {
         let Ok(goal) = serde_json::from_value::<pa_types::goal::GoalState>(goal) else {
             return;
         };
-        let announce = self.goal_view.apply_update(goal);
+        let announce = self.goal_view.apply_update(goal.clone());
         if announce {
             self.announce_goal_status(view);
+        }
+        // An open goal panel rides the live state, never a stale
+        // snapshot of the objective it was opened to show.
+        if let Some(panel) = view.goal_panel.as_mut() {
+            panel.goal = goal;
         }
         self.sync_goal_tray(view);
     }
@@ -1375,14 +1462,11 @@ impl SessionUi {
         self.dirty = true;
     }
 
-    /// The tray goal label follows the current goal state (TS
-    /// `syncGoalTray`; the label itself is `getTrayGoalLabel`).
+    /// The goal's dock row follows the current goal state (the tray's
+    /// TS `getTrayGoalLabel` cluster is deliberately not ported — the
+    /// operator's 2026-09-24 directive moves "Pursuing goal" off the
+    /// line below the prompt bar; the dock's row below carries it).
     pub(crate) fn sync_goal_tray(&mut self, view: &mut AgentView) {
-        let label = tray_goal_label(&self.goal_view.goal);
-        if view.chrome.goal_label != label {
-            view.chrome.goal_label = label;
-            self.dirty = true;
-        }
         let previous = view.chrome.activity.clone();
         self.update_subagent_summary(view);
         if previous != view.chrome.activity {
@@ -1425,7 +1509,15 @@ impl SessionUi {
                 context_window: window,
             })
         });
-        self.cost_usd = data.get("cost").and_then(Value::as_f64);
+        // The top bar's spend is the FULL session+subagents total
+        // (`totalCost`, the /context root totalUsage's fold): the TS
+        // active-region `cost` drops pre-compaction spend, which reads
+        // as an inaccurate title after every compaction. Older daemons
+        // without the field fall back to the TS shape.
+        self.cost_usd = data
+            .get("totalCost")
+            .and_then(Value::as_f64)
+            .or_else(|| data.get("cost").and_then(Value::as_f64));
         self.dirty = true;
     }
 
@@ -2323,14 +2415,52 @@ impl SessionUi {
                             continue;
                         }
                     }
-                    if crate::daemon_client::is_daemon_rejection(&error) {
+                    if crate::daemon_client::is_daemon_timeout(&error) {
+                        // Sent but unanswered: the submission was on the
+                        // wire, so the turn may already be admitted and
+                        // running — restoring the draft would invite a
+                        // duplicate submission. The error row names the
+                        // uncertainty; the transcript's live turn (or the
+                        // next daemon answer) settles the truth.
+                        self.error_row(
+                            &format!(
+                                "{rendered} — the request was sent; the turn may still be in flight"
+                            ),
+                            view,
+                        );
+                        return Ok(());
+                    }
+                    // A DIRECT-link transport failure happened after the
+                    // frame was queued (`request_direct` sent it, the link
+                    // died answering): the daemon may have admitted the
+                    // turn — restoring the draft would invite a duplicate
+                    // submission, so the draft stays consumed (the timeout
+                    // arm's contract).
+                    let direct_sent = crate::daemon_client::is_daemon_unreachable(&error)
+                        && rendered
+                            .to_lowercase()
+                            .contains("session connection closed");
+                    if direct_sent {
+                        self.error_row(
+                            &format!(
+                                "{rendered} — the request may have been sent; the turn may still start"
+                            ),
+                            view,
+                        );
+                        return Ok(());
+                    }
+                    if crate::daemon_client::is_daemon_rejection(&error)
+                        || crate::daemon_client::is_daemon_unreachable(&error)
+                    {
                         // TS `onSubmit`'s prompt catch: the daemon answered
                         // with a refusal for THIS request (admission, queue
                         // capacity, a superseded session the rebind could
-                        // not recover, ...) — the connection is healthy, so
-                        // the `⚠ Error` row surfaces the refusal and the
-                        // draft returns to the editor; a refused prompt
-                        // never exits the UI.
+                        // not recover), or the connection refused the send
+                        // (nothing reached the daemon) — the `⚠ Error` row
+                        // surfaces it and the draft returns to the editor
+                        // (the submission never landed); a failed prompt
+                        // never exits the UI (the reconnect driver owns
+                        // the connection's recovery).
                         self.error_row(&rendered, view);
                         view.editor.set_text(text);
                         return Ok(());
@@ -2388,9 +2518,9 @@ impl SessionUi {
     /// not the delta — carries the token truth.
     fn track_stream_activity(&mut self, event: &Value, view: &mut AgentView) {
         let (activity, download) = match event.get("type").and_then(Value::as_str) {
-            Some("thinking_start") | Some("thinking_delta") => ("Thinking", true),
-            Some("text_start") | Some("text_delta") => ("Writing", true),
-            Some("toolcall_start") | Some("toolcall_delta") => ("Writing code", true),
+            Some("thinking_start" | "thinking_delta") => ("Thinking", true),
+            Some("text_start" | "text_delta") => ("Writing", true),
+            Some("toolcall_start" | "toolcall_delta") => ("Writing code", true),
             _ => return,
         };
         if let Some(working) = &mut view.working {
@@ -2693,31 +2823,31 @@ impl SessionUi {
             }
             // `/tree` (TS `showTreeSelector`): the session-tree navigator.
             "tree" => {
-                if !resolved.args.is_empty() {
-                    self.note("Usage: /tree", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("tree");
                     self.open_tree_selector(view, None).await?;
+                } else {
+                    self.note("Usage: /tree", view);
                 }
             }
             // `/fork` (TS `showUserMessageSelector`): fork from a user
             // message into a new session.
             "fork" => {
-                if !resolved.args.is_empty() {
-                    self.note("Usage: /fork", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("fork");
                     self.open_fork_selector(view).await?;
+                } else {
+                    self.note("Usage: /fork", view);
                 }
             }
             // `/clone` (TS `handleCloneCommand`): duplicate the session at
             // the current position.
             "clone" => {
-                if !resolved.args.is_empty() {
-                    self.note("Usage: /clone", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("clone");
                     self.handle_clone_command(view).await?;
+                } else {
+                    self.note("Usage: /clone", view);
                 }
             }
             // TS `handleCopyCommand`: the last assistant text (the
@@ -2725,13 +2855,13 @@ impl SessionUi {
             // clipboard (platform tools, OSC 52 fallback). An argument is
             // the usage error with the text kept in the editor.
             "copy" => {
-                if !resolved.args.is_empty() {
+                if resolved.args.is_empty() {
+                    self.track_command_used("copy");
+                    self.handle_copy_command(view).await?;
+                } else {
                     view.editor
                         .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
                     self.error_row("Usage: /copy", view);
-                } else {
-                    self.track_command_used("copy");
-                    self.handle_copy_command(view).await?;
                 }
             }
             // `/login` (TS `showConfigurationMenu("providers")`): the
@@ -2739,27 +2869,27 @@ impl SessionUi {
             // configuration menu stays unported; the panel is the same
             // TS `OAuthSelectorComponent` the tab mounts).
             "login" => {
-                if !resolved.args.is_empty() {
-                    view.editor
-                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
-                    self.error_row("Usage: /login", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("login");
                     self.open_provider_auth(AuthSelectorKind::Login, view)
                         .await?;
+                } else {
+                    view.editor
+                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
+                    self.error_row("Usage: /login", view);
                 }
             }
             // `/logout` (TS `showLogoutSelector`): the stored-credential
             // selector; an empty store answers the TS status directly.
             "logout" => {
-                if !resolved.args.is_empty() {
-                    view.editor
-                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
-                    self.error_row("Usage: /logout", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("logout");
                     self.open_provider_auth(AuthSelectorKind::Logout, view)
                         .await?;
+                } else {
+                    view.editor
+                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
+                    self.error_row("Usage: /logout", view);
                 }
             }
             // `/import <path.jsonl>` (TS `handleImportCommand`): the
@@ -2918,13 +3048,13 @@ impl SessionUi {
             // text stays in the editor); otherwise the session exports to a
             // temp file and uploads as a secret gist.
             "share" => {
-                if !resolved.args.is_empty() {
+                if resolved.args.is_empty() {
+                    self.track_command_used("share");
+                    self.handle_share_command(view).await?;
+                } else {
                     view.editor
                         .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
                     self.error_row("Usage: /share", view);
-                } else {
-                    self.track_command_used("share");
-                    self.handle_share_command(view).await?;
                 }
             }
             // `/hotkeys` (TS `handleHotkeysCommand` after
@@ -3470,8 +3600,8 @@ impl SessionUi {
 
     /// One key press while the provider selector owns the frame (TS
     /// `OAuthSelectorComponent.handleInput`): Enter closes the panel and
-    /// runs the row's flow; the terminal-suspending flows park for the
-    /// run loop to hand the terminal over first.
+    /// runs the row's flow; the panel-driven flows mount the inline auth
+    /// panel and spawn.
     async fn handle_provider_auth_key(
         &mut self,
         key: KeyEvent,
@@ -3498,17 +3628,25 @@ impl SessionUi {
             }
             AuthSelectorAction::Login { provider, api_key } => {
                 view.provider_auth = None;
-                match api_key {
-                    // The panel-prompted key: store it (TS
-                    // `showApiKeyLoginDialog`'s save path, no terminal
-                    // handover needed).
-                    Some(api_key) => {
-                        let auth = self.provider_auth.clone().expect("the selector was open");
-                        let outcome = auth.0.login(&provider, Some(&api_key)).await;
+                // The panel-prompted key: store it (TS
+                // `showApiKeyLoginDialog`'s save path, no panel
+                // needed).
+                if let Some(api_key) = api_key {
+                    let auth = self.provider_auth.clone().expect("the selector was open");
+                    let outcome = auth.0.login(&provider, Some(&api_key)).await;
+                    self.apply_auth_outcome(outcome, view);
+                } else {
+                    let auth = self.provider_auth.clone().expect("the selector was open");
+                    if provider.id.starts_with("mcp:")
+                        || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
+                    {
+                        self.start_provider_panel_login(&provider, auth, view);
+                    } else {
+                        // The unported OAuth subscription stubs: the
+                        // error row is the whole flow (nothing drives
+                        // the panel).
+                        let outcome = auth.0.login(&provider, None).await;
                         self.apply_auth_outcome(outcome, view);
-                    }
-                    None => {
-                        self.pending_terminal_login = Some(provider);
                     }
                 }
             }
@@ -3518,6 +3656,51 @@ impl SessionUi {
                 let outcome = auth.0.logout(&provider).await;
                 self.apply_auth_outcome(outcome, view);
             }
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Enter on a panel-driven login row (the MCP OAuth logins, the Prime
+    /// Inference login): mount the inline auth panel (TS `showAuthPanel`
+    /// mounts the login dialog as the flow starts) and spawn the flow
+    /// against it. The flow's requests fold into the panel through the
+    /// run loop's channel arm; the settled outcome lands the same way
+    /// (the flow never touches the terminal).
+    fn start_provider_panel_login(
+        &mut self,
+        provider: &crate::provider_auth::ProviderRow,
+        auth: crate::provider_auth::ProviderAuthCommandsHandle,
+        view: &mut AgentView,
+    ) {
+        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(format!(
+            "Login to {}",
+            provider.name
+        )));
+        let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        let provider = provider.clone();
+        tokio::spawn(async move {
+            let outcome = auth.0.login_on_panel(&provider, panel.clone()).await;
+            panel.send(crate::auth_panel::AuthPanelRequest::ProviderSettled { outcome });
+        });
+    }
+
+    /// One key press while the inline auth panel owns the frame (TS the
+    /// login dialog's / team selector's `handleInput`): the panel answers
+    /// its mounted input through the request's oneshot.
+    async fn handle_auth_panel_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
+        let Some(id) = key_event_to_id(&key) else {
+            return Ok(());
+        };
+        // The panel consumes Ctrl+C (cancel the mounted input, not the
+        // app): report the handled press so the force-quit guard stays in
+        // sync with the reader's observations.
+        if id == "ctrl+c" {
+            self.exit_guard.note_ctrl_c_handled();
+        }
+        if let Some(panel) = view.auth_panel.as_mut() {
+            let kb = view.editor.keybindings();
+            panel.handle_key(&id, kb);
         }
         self.dirty = true;
         Ok(())
@@ -3543,26 +3726,73 @@ impl SessionUi {
         }
     }
 
-    /// Whether a provider login parked for the plain terminal (the run
-    /// loop checks this after each key and hands the terminal over).
-    pub(crate) fn pending_terminal_login(&self) -> bool {
-        self.pending_terminal_login.is_some()
+    /// One paste payload while the inline auth panel owns the frame: the
+    /// payload lands in the panel's mounted input (the paste field or
+    /// the picker's search) — never in the hidden editor behind the
+    /// panel, where a later Enter could submit the secret as a prompt.
+    pub(crate) fn paste_to_auth_panel(&mut self, text: &str, view: &mut AgentView) {
+        if let Some(panel) = view.auth_panel.as_mut() {
+            panel.handle_paste(text);
+        }
+        self.dirty = true;
     }
 
-    /// The run loop hands the terminal over and calls this for a parked
-    /// terminal login flow (the TS auth panel prompts on the plain
-    /// terminal; this build runs the composition root's flow there).
-    pub(crate) async fn run_terminal_login(&mut self, view: &mut AgentView) -> Result<()> {
-        let Some(provider) = self.pending_terminal_login.take() else {
-            return Ok(());
-        };
-        let Some(auth) = self.provider_auth.clone() else {
-            return Ok(());
-        };
-        let outcome = auth.0.login(&provider, None).await;
-        self.apply_auth_outcome(outcome, view);
+    /// One request from a login flow driving the inline auth panel (the
+    /// run loop's channel arm folds it in): the render requests mount
+    /// into the panel (a request with no mounted panel cancels its flow
+    /// — the dropped oneshot reply, the same contract a closed terminal
+    /// input had); the settled requests unmount the panel and apply the
+    /// outcome (a flow that never needed input — the credential-reuse
+    /// paths — still settles).
+    pub(crate) async fn apply_auth_panel_request(
+        &mut self,
+        request: crate::auth_panel::AuthPanelRequest,
+        view: &mut AgentView,
+    ) {
+        use crate::auth_panel::AuthPanelRequest;
+        match request {
+            AuthPanelRequest::Progress { message } => {
+                if let Some(panel) = view.auth_panel.as_mut() {
+                    panel.push_progress(message);
+                }
+            }
+            AuthPanelRequest::AuthUrl { url, instructions } => {
+                if let Some(panel) = view.auth_panel.as_mut() {
+                    panel.show_auth_url(url, instructions);
+                }
+            }
+            AuthPanelRequest::PastePrompt {
+                prompt,
+                style,
+                reply,
+            } => {
+                if let Some(panel) = view.auth_panel.as_mut() {
+                    panel.mount_paste(prompt, style, reply);
+                }
+            }
+            AuthPanelRequest::SelectTeam {
+                teams,
+                current,
+                reply,
+            } => {
+                if let Some(panel) = view.auth_panel.as_mut() {
+                    panel.mount_teams(teams, current, reply);
+                }
+            }
+            AuthPanelRequest::ProviderSettled { outcome } => {
+                view.auth_panel = None;
+                self.apply_auth_outcome(outcome, view);
+            }
+            AuthPanelRequest::McpSettled { note } => {
+                view.auth_panel = None;
+                self.note(&note, view);
+            }
+            AuthPanelRequest::TracesSettled { outcome } => {
+                view.auth_panel = None;
+                self.finish_traces_login(outcome, view).await;
+            }
+        }
         self.dirty = true;
-        Ok(())
     }
 
     // ------------------------------------------------------------------
@@ -3800,8 +4030,8 @@ impl SessionUi {
             }
             "login" => {
                 // TS runs the login dialog; the terminal port parks the
-                // flow for the plain terminal (the run loop hands it
-                // over right after this key).
+                // flow against the inline auth panel (the run loop mounts
+                // it right after this key).
                 self.pending_traces_login = Some(TracesLoginIntent::Login);
             }
             _ => {
@@ -3839,27 +4069,51 @@ impl SessionUi {
         Ok(())
     }
 
-    /// Whether a parked `/traces login` waits for the terminal handoff
-    /// (the run loop checks this after each key).
+    /// Whether a parked `/traces login` waits for the panel mount (the
+    /// run loop checks this after each key).
     pub(crate) fn pending_traces_login(&self) -> bool {
         self.pending_traces_login.is_some()
     }
 
-    /// The parked traces login (the run loop hands the terminal over
-    /// around the flow; TS `runPrimeAgentTracesLogin`'s dialog surfaces
-    /// live on the plain terminal here). On success the enable intent
-    /// continues TS's `on` arm.
-    pub(crate) async fn run_traces_login(&mut self, view: &mut AgentView) -> Result<()> {
+    /// The parked traces login: mount the inline auth panel (TS the
+    /// login dialog mounts as the flow starts) and spawn the flow against
+    /// it; the settled outcome folds in through the panel channel and
+    /// continues the enable intent (TS's `on` arm).
+    pub(crate) fn run_traces_login(&mut self, view: &mut AgentView) {
+        // The park is consumed here (the intent moves to the in-flight
+        // run): the key-path check spawns the flow exactly once.
         let Some(intent) = self.pending_traces_login.take() else {
-            return Ok(());
+            return;
         };
         let Some(traces) = self.traces.clone() else {
-            return Ok(());
+            return;
         };
-        match traces.0.login().await {
+        self.traces_login_run = Some(intent);
+        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(
+            "Login to Prime Agent Traces",
+        ));
+        let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        tokio::spawn(async move {
+            let outcome = traces.0.login(panel.clone()).await;
+            panel.send(crate::auth_panel::AuthPanelRequest::TracesSettled { outcome });
+        });
+    }
+
+    /// A settled traces login (the panel channel's `TracesSettled`): the
+    /// outcome row lands, and the enable intent continues TS's `on` arm.
+    async fn finish_traces_login(
+        &mut self,
+        outcome: crate::traces::TraceLoginOutcome,
+        view: &mut AgentView,
+    ) {
+        let intent = self.traces_login_run.take();
+        let Some(traces) = self.traces.clone() else {
+            return;
+        };
+        match outcome {
             crate::traces::TraceLoginOutcome::Status(message) => {
                 self.note(&message, view);
-                if matches!(intent, TracesLoginIntent::Enable) {
+                if matches!(intent, Some(TracesLoginIntent::Enable)) {
                     // TS re-reads the credential after the login: still
                     // none is the TS error row; a resolved one continues
                     // the enable (set, flush, upload once).
@@ -3873,8 +4127,12 @@ impl SessionUi {
                             .and_then(|state| state.get("sessionFile"))
                             .and_then(Value::as_str)
                             .map(str::to_string);
-                        self.enable_traces(&traces, session_file.as_deref(), view)
-                            .await?;
+                        if let Err(error) = self
+                            .enable_traces(&traces, session_file.as_deref(), view)
+                            .await
+                        {
+                            self.error_row(&format!("{error:#}"), view);
+                        }
                     }
                 }
             }
@@ -3886,7 +4144,6 @@ impl SessionUi {
             crate::traces::TraceLoginOutcome::Cancelled => {}
         }
         self.dirty = true;
-        Ok(())
     }
 
     /// Whether a `/traces upload-all` sweep is in flight (the run loop
@@ -4204,11 +4461,21 @@ impl SessionUi {
                 let _ = self.handle_reload_command(view).await;
             }
             "show-hardware-cursor" => {
-                self.persist_bool_setting(
-                    |settings, enabled| settings.set_show_hardware_cursor(enabled),
-                    value,
-                    view,
-                );
+                // The show-images shape: a failed persist surfaces the
+                // error and changes nothing — the live flag flips only
+                // when the setting actually persisted, so the view and
+                // the on-disk state can never disagree.
+                if let Some(settings) = &self.client_settings {
+                    if let Err(error) = settings.set_show_hardware_cursor(value == "true") {
+                        self.error_row(&format!("{error:#}"), view);
+                        return;
+                    }
+                }
+                // The live TUI effect (TS persists through the settings
+                // manager, then calls `ui.setShowHardwareCursor(enabled)`
+                // in place): the very next frame shows or hides the
+                // hardware cursor at the focused caret.
+                view.show_hardware_cursor = value == "true";
             }
             "editor-padding" => {
                 if let Some(settings) = &self.client_settings {
@@ -4567,8 +4834,10 @@ impl SessionUi {
                 .editor
                 .keybindings()
                 .first_key("tui.viewport.follow")
-                .map(|key| crate::keybindings::format_key_text(&key))
-                .unwrap_or_else(|| "ctrl+shift+down".to_string());
+                .map_or_else(
+                    || "ctrl+shift+down".to_string(),
+                    |key| crate::keybindings::format_key_text(&key),
+                );
             format!("Fullscreen rendering on — wheel/pageUp scroll, {follow} follows output")
         } else {
             "Fullscreen rendering off".to_string()
@@ -4597,7 +4866,7 @@ impl SessionUi {
     /// Updates the footer tok/sec readout from a completed assistant
     /// message (TS `recordSpeedSample`): output tokens over the
     /// wall-clock span from the message timestamp (set at provider stream
-    /// start) to this message_end arrival. Timestamps keep the span true
+    /// start) to this `message_end` arrival. Timestamps keep the span true
     /// even when buffered session events replay back-to-back on attach.
     /// Aborted/failed responses and samples without a finite positive
     /// span or token count are skipped: some providers only fill usage at
@@ -5244,15 +5513,33 @@ impl SessionUi {
     }
 
     /// Run one internal MCP auth request (the `/mcp` view's resolution):
-    /// the client auth commands own the flow; an unavailable auth client
-    /// reports the TS note.
-    pub(crate) async fn run_mcp_auth(&mut self, args: &str, view: &mut AgentView) {
+    /// mount the inline auth panel (TS the login dialog / token paste
+    /// panel mounts as the flow starts) and spawn the command against
+    /// it; the settled line folds in through the panel channel. An
+    /// unavailable auth client reports the TS note.
+    pub(crate) fn run_mcp_auth(&mut self, view: &mut AgentView) {
+        let Some(intent) = self.pending_mcp_auth.take() else {
+            return;
+        };
         let Some(auth) = self.client_auth.clone() else {
             self.note("/mcp is not available in this client yet", view);
             return;
         };
-        let note = crate::client_auth::run_mcp_auth_command(auth.0.as_ref(), args).await;
-        self.note(&note, view);
+        view.auth_panel = Some(crate::auth_panel::AuthPanel::new(intent.title));
+        let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        let args = intent.args;
+        tokio::spawn(async move {
+            let note =
+                crate::client_auth::run_mcp_auth_command(auth.0.as_ref(), &args, panel.clone())
+                    .await;
+            panel.send(crate::auth_panel::AuthPanelRequest::McpSettled { note });
+        });
+    }
+
+    /// Whether the `/mcp` view parked an auth request for the loop to
+    /// spawn (checked after each dispatched key).
+    pub(crate) fn pending_mcp_auth(&self) -> bool {
+        self.pending_mcp_auth.is_some()
     }
 
     /// Open the `/model` picker over the cached catalog, its search
@@ -5299,9 +5586,10 @@ impl SessionUi {
 
     /// Open the inline `/mcp` connections view over the daemon's
     /// `get_mcp_connections` roster, its filter prefilled with `search`
-    /// (the Tab-intercepted partial). The request carries the kernel's
-    /// tool listing (it opens each connected generic server, bounded), so
-    /// it gets the wider deadline.
+    /// (the Tab-intercepted partial). The daemon answers from local state
+    /// (the roster and the resolved catalog views, no kernel round-trip),
+    /// so the open is as instant as the TS picker's and the ordinary
+    /// request deadline applies.
     /// `command` names the entry the user ran (`/mcp` or `/plugins`), so a
     /// failed roster load reports the command that failed.
     async fn open_mcp_view(
@@ -5312,7 +5600,7 @@ impl SessionUi {
     ) -> Result<()> {
         let data = match self
             .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS * 4),
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
                 DaemonCommand::GetMcpConnections {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
@@ -5340,11 +5628,10 @@ impl SessionUi {
     }
 
     /// One key press while the `/mcp` connections view is open: Esc or
-    /// Ctrl+C close it; Enter (or the paste panel) resolves the selected
+    /// Ctrl+C close it; Enter (or the paste flow) resolves the selected
     /// connection by parking `pending_mcp_auth`, which the input loop
-    /// runs once the key handler returns (so the auth flow keeps the
-    /// terminal-suspension bracket); everything else navigates or edits
-    /// the search field.
+    /// mounts the inline auth panel for once the key handler returns;
+    /// everything else navigates or edits the search field.
     async fn handle_mcp_view_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
         let Some(id) = key_event_to_id(&key) else {
             return Ok(());
@@ -5360,13 +5647,13 @@ impl SessionUi {
             .as_mut()
             .map(|mcp_view| mcp_view.handle_key(&id, view.editor.keybindings()));
         match action {
-            Some(crate::mcp_view::McpViewAction::None) => {}
+            Some(crate::mcp_view::McpViewAction::None) | None => {}
             Some(crate::mcp_view::McpViewAction::Cancel) => {
                 view.mcp_view = None;
                 self.picker_restored_draft = false;
                 self.dirty = true;
             }
-            Some(crate::mcp_view::McpViewAction::Select(server)) => {
+            Some(crate::mcp_view::McpViewAction::Select { server, label }) => {
                 view.mcp_view = None;
                 self.dirty = true;
                 // The Tab path leaves the typed `/mcp <partial>` behind;
@@ -5382,9 +5669,12 @@ impl SessionUi {
                 // flow. The typed-command arg path is gone, so the view
                 // resolves through the internal auth seam instead of a
                 // submitted `/mcp login <name>` string.
-                self.pending_mcp_auth = Some(format!("login {server}"));
+                self.pending_mcp_auth = Some(McpAuthIntent {
+                    args: format!("login {server}"),
+                    title: format!("Login to {label}"),
+                });
             }
-            Some(crate::mcp_view::McpViewAction::Paste(server)) => {
+            Some(crate::mcp_view::McpViewAction::Paste { server, label }) => {
                 view.mcp_view = None;
                 self.dirty = true;
                 if self.picker_restored_draft {
@@ -5394,24 +5684,13 @@ impl SessionUi {
                 }
                 // The inline paste panel's client surface: prompt for the
                 // token, store it bound to the service endpoint, verify.
-                self.pending_mcp_auth = Some(format!("paste {server}"));
+                self.pending_mcp_auth = Some(McpAuthIntent {
+                    args: format!("paste {server}"),
+                    title: format!("Connect {label}"),
+                });
             }
-            None => {}
         }
         Ok(())
-    }
-
-    /// Whether dispatching this input needs the terminal handed over
-    /// (raw-mode off, alternate screen left) so the auth flow can prompt.
-    /// `args` is the auth-args form (the `/mcp` view's internal
-    /// resolution, e.g. `login <name>`): a login suspends, a paste
-    /// prompts on the plain terminal too (its token prompt reads
-    /// stdin), so both hand the terminal over.
-    pub(crate) fn mcp_auth_needs_terminal(&self, args: &str) -> bool {
-        if self.client_auth.is_none() {
-            return false;
-        }
-        mcp_auth_args_need_terminal(args)
     }
 
     /// `/resume <selector>`: a session file path, an `<id>.jsonl` under the
@@ -5603,11 +5882,10 @@ impl SessionUi {
     /// tray while one is mounted.
     pub(crate) fn tray_override(&self, view: &AgentView) -> Option<String> {
         if self.ctrl_c_hint_visible() {
-            let key = self
-                .keybindings
-                .first_key("app.clear")
-                .map(|key| crate::keybindings::format_key_text(&key))
-                .unwrap_or_else(|| "Ctrl+C".to_string());
+            let key = self.keybindings.first_key("app.clear").map_or_else(
+                || "Ctrl+C".to_string(),
+                |key| crate::keybindings::format_key_text(&key),
+            );
             return Some(format!("Press {key} again to exit"));
         }
         streaming_tray_hint(
@@ -5634,7 +5912,7 @@ impl SessionUi {
             .as_mut()
             .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
         match action {
-            Some(ModelPickerAction::None) => {}
+            Some(ModelPickerAction::None) | None => {}
             Some(ModelPickerAction::Cancel) => {
                 view.model_picker = None;
                 self.picker_restored_draft = false;
@@ -5663,7 +5941,6 @@ impl SessionUi {
                     self.apply_thinking_level(&level, view).await;
                 }
             }
-            None => {}
         }
         self.update_fast_filter(view);
         Ok(())
@@ -5694,7 +5971,9 @@ impl SessionUi {
         let overlay_focused = view.model_picker.is_some()
             || view.effort_picker.is_some()
             || view.heartbeats_picker.is_some()
+            || view.goal_panel.is_some()
             || view.bash_view.is_some()
+            || view.runs_view.is_some()
             || view.tree_selector.is_some()
             || view.fork_selector.is_some()
             || view.share_loader.is_some()
@@ -5768,6 +6047,8 @@ impl SessionUi {
     /// overlay, not the TS `showStatus` chat row — sanctioned divergence),
     /// a failed write the failure row (TS `showError`).
     fn copy_selection(&mut self, text: &str, view: &mut AgentView) {
+        use base64::Engine;
+        use std::io::Write;
         let lines = text.lines().count().max(1);
         self.copies.push(text.to_string());
         self.track_selection(lines);
@@ -5775,8 +6056,6 @@ impl SessionUi {
             self.toast("Copied selection to clipboard", view);
             return;
         }
-        use base64::Engine;
-        use std::io::Write;
         let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
         let mut out = std::io::stdout();
         match out.write_all(format!("\x1b]52;c;{encoded}\x07").as_bytes()) {
@@ -5805,7 +6084,7 @@ impl SessionUi {
                         row,
                         col,
                         started: Instant::now(),
-                    })
+                    });
                 }
             },
             None => self.selection_auto_scroll = None,
@@ -5855,8 +6134,10 @@ impl SessionUi {
         }
         // The bash view owns the whole frame while open (like its key
         // dispatch): a paste never lands in the hidden editor prompt,
-        // where a later Enter would submit it unedited.
-        if view.bash_view.is_some() {
+        // where a later Enter would submit it unedited. The runs view
+        // owns the frame the same way, and the read-only goal panel
+        // consumes it the same way.
+        if view.bash_view.is_some() || view.runs_view.is_some() || view.goal_panel.is_some() {
             self.dirty = true;
             return;
         }
@@ -5884,7 +6165,7 @@ impl SessionUi {
             .as_mut()
             .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
         match action {
-            Some(EffortPickerAction::None) => {}
+            Some(EffortPickerAction::None) | None => {}
             Some(EffortPickerAction::Cancel) => {
                 view.effort_picker = None;
                 self.dirty = true;
@@ -5893,7 +6174,6 @@ impl SessionUi {
                 view.effort_picker = None;
                 self.apply_thinking_level(&level, view).await;
             }
-            None => {}
         }
         Ok(())
     }
@@ -5943,10 +6223,10 @@ impl SessionUi {
     /// about, and only that session's frames land.
     pub(crate) fn apply_bash_activity(&mut self, update: BashActivityUpdate, view: &mut AgentView) {
         let session = match &update {
-            BashActivityUpdate::List { session, .. } => session,
-            BashActivityUpdate::Tail { session, .. } => session,
-            BashActivityUpdate::Refresh { session } => session,
-            BashActivityUpdate::Error { session, .. } => session,
+            BashActivityUpdate::List { session, .. }
+            | BashActivityUpdate::Tail { session, .. }
+            | BashActivityUpdate::Refresh { session }
+            | BashActivityUpdate::Error { session, .. } => session,
         };
         if session != &self.active_session_id {
             return;
@@ -6077,7 +6357,105 @@ impl SessionUi {
                 self.emit_activity_opened("bash");
                 self.open_bash_view(view);
             }
+            crate::chrome::ActivityGroup::Goal => {
+                self.emit_activity_opened("goal");
+                self.open_goal_panel(view);
+            }
         }
+    }
+
+    /// Open the condensed tool runs view (the drill-in pane for the
+    /// collapsed transcript's condensed blocks): the pane reads the
+    /// view's own transcript - no wire requests, no state beyond the
+    /// cursor and the scroll.
+    fn open_runs_view(&mut self, view: &mut AgentView) {
+        let runs = view.condensed_runs();
+        view.runs_view = Some(RunsView::new(
+            picker_viewport_rows(view.terminal_rows()),
+            &view.chat,
+            &runs,
+        ));
+        self.dirty = true;
+    }
+
+    /// One key press while the condensed tool runs view is open: the view
+    /// owns the frame the same way as the bash view; its only action is
+    /// closing (the pane is pure presentation).
+    async fn handle_runs_view_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
+        let Some(id) = key_event_to_id(&key) else {
+            return Ok(());
+        };
+        if id == "ctrl+c" {
+            self.exit_guard.note_ctrl_c_handled();
+        }
+        let runs = view.condensed_runs();
+        // The runs change live under the open pane: reconcile BEFORE the
+        // key acts (the cursor and the open detail can point at a run
+        // that grew, split, or vanished since the last look), closing
+        // the pane when no run survives.
+        if view
+            .runs_view
+            .as_mut()
+            .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some())
+        {
+            view.runs_view = None;
+            self.dirty = true;
+            return Ok(());
+        }
+        let kb = view.editor.keybindings().clone();
+        let action = view
+            .runs_view
+            .as_mut()
+            .map_or(RunsViewAction::None, |runs_view| {
+                runs_view.handle_key(&id, &kb, &view.chat, &runs)
+            });
+        match action {
+            RunsViewAction::Close => {
+                view.runs_view = None;
+            }
+            RunsViewAction::None => {}
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// The dock's goal row opens the read-only goal panel (the
+    /// operator's 2026-09-24 directive: selecting the `Pursuing goal`
+    /// row shows "what the goal prompt is").
+    fn open_goal_panel(&mut self, view: &mut AgentView) {
+        view.goal_panel = Some(GoalPanel {
+            goal: self.goal_view.goal.clone(),
+            // The panel renders inside this row budget: a multi-screen
+            // objective clips (with a marker) instead of growing the dock
+            // past the frame, which would front-crop the title away.
+            viewport_rows: picker_viewport_rows(view.terminal_rows()),
+        });
+        self.subagents_focused = false;
+        self.update_subagent_summary(view);
+        self.dirty = true;
+    }
+
+    /// The goal panel owns the frame while open: the close and back
+    /// keys dismiss it; every other key is consumed (a read-only view).
+    async fn handle_goal_panel_key(&mut self, key: KeyEvent, view: &mut AgentView) -> Result<()> {
+        let Some(id) = key_event_to_id(&key) else {
+            return Ok(());
+        };
+        // The panel consumes Ctrl+C (close, not exit): report the handled
+        // press so the force-quit guard can disarm once the whole pair was
+        // consumed with TS semantics (the same discipline as the other
+        // modal handlers).
+        if id == "ctrl+c" {
+            self.exit_guard.note_ctrl_c_handled();
+        }
+        if view.editor.keybindings().matches(&id, "tui.select.cancel")
+            || view.editor.keybindings().matches(&id, "app.modal.back")
+            || view.editor.keybindings().matches(&id, "app.clear")
+        {
+            view.goal_panel = None;
+            self.dirty = true;
+        }
+        Ok(())
     }
 
     /// Fetch one bash activity's output tail off the key loop (a stalled
@@ -6785,8 +7163,7 @@ impl SessionUi {
                 .get("model")
                 .and_then(|model| model.get("id"))
                 .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| picked_model_id.to_string());
+                .map_or_else(|| picked_model_id.to_string(), str::to_string);
             view.chrome.model_id = Some(model_id);
             self.dirty = true;
         }
@@ -6932,6 +7309,25 @@ impl SessionUi {
         for entry in entries {
             view.push_entry(entry);
         }
+        // The rebuilt transcript replaces the chat wholesale while an
+        // open runs pane survives it: reconcile the pane against the
+        // rebuilt runs (the cursor and the open detail can point at a
+        // run that vanished in the rebuild; the pane closes when no
+        // run survives) - compaction sets `transcript_stale` and this
+        // rebuild lands after the update path already reconciled
+        // against the pre-rebuild chat, so without this seam the pane
+        // rides stale start indices and identity keys until the next
+        // key press.
+        if view.runs_view.is_some() {
+            let runs = view.condensed_runs();
+            let closed = view
+                .runs_view
+                .as_mut()
+                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
+            if closed {
+                view.runs_view = None;
+            }
+        }
         view.follow();
         self.dirty = true;
     }
@@ -6975,15 +7371,6 @@ impl SessionUi {
     /// the loop owns the renderer that hands the terminal over.
     pub(crate) fn take_suspend_request(&mut self) -> bool {
         std::mem::take(&mut self.suspend_requested)
-    }
-
-    /// Take the pending MCP auth request the connections view resolved to
-    /// (its Enter on a connection, or the inline paste panel): the args
-    /// run through the client auth commands directly — the typed-command
-    /// arg path is gone (`/mcp` is menu-only), so the view never resolves
-    /// through a submitted `/mcp <args>` string.
-    pub(crate) fn take_pending_mcp_auth(&mut self) -> Option<String> {
-        self.pending_mcp_auth.take()
     }
 
     /// Report the run's first suspend cycle (`tui suspend used`),
@@ -7041,6 +7428,14 @@ impl SessionUi {
         if view.bash_view.is_some() {
             return self.handle_bash_view_key(key, view).await;
         }
+        // The condensed tool runs view owns the frame the same way.
+        if view.runs_view.is_some() {
+            return self.handle_runs_view_key(key, view).await;
+        }
+        // The read-only goal panel owns the frame the same way.
+        if view.goal_panel.is_some() {
+            return self.handle_goal_panel_key(key, view).await;
+        }
         // The `/tree` and `/fork` selectors own the frame the same way.
         if view.tree_selector.is_some() {
             return self.handle_tree_selector_key(key, view).await;
@@ -7057,6 +7452,11 @@ impl SessionUi {
         // same way (TS's auth panel mounts over the prompt).
         if view.provider_auth.is_some() {
             return self.handle_provider_auth_key(key, view).await;
+        }
+        // The inline auth panel owns the frame the same way (TS the login
+        // dialog / team selector mounts over the prompt).
+        if view.auth_panel.is_some() {
+            return self.handle_auth_panel_key(key, view).await;
         }
         // The `/settings` menu owns the frame the same way (TS
         // `showSelector`).
@@ -7144,6 +7544,7 @@ impl SessionUi {
                     crate::chrome::ActivityGroup::Subagents,
                     crate::chrome::ActivityGroup::Heartbeats,
                     crate::chrome::ActivityGroup::Bash,
+                    crate::chrome::ActivityGroup::Goal,
                 ];
                 let current = groups
                     .iter()
@@ -7191,17 +7592,6 @@ impl SessionUi {
             .matches(&id, "app.clipboard.pasteImage")
         {
             self.handle_clipboard_image_paste(view).await;
-            return Ok(());
-        }
-        // The heartbeats-open action (default ctrl+r, TS the editor's
-        // `app.heartbeats.open` registration): open the `/heartbeats`
-        // management view from anywhere in the session.
-        if view
-            .editor
-            .keybindings()
-            .matches(&id, "app.heartbeats.open")
-        {
-            self.open_heartbeats_view(view);
             return Ok(());
         }
         if view.editor.keybindings().matches(&id, "app.input.clear") {
@@ -7365,6 +7755,21 @@ impl SessionUi {
             if let Some(pane) = view.side_pane.as_mut() {
                 pane.expanded = view.detail == crate::chat::Detail::All;
             }
+            self.dirty = true;
+            return Ok(());
+        }
+        // `app.transcript.runs` (default alt+t): the condensed tool runs
+        // view opens over the editor dock (the drill-in pane for the
+        // collapsed transcript's condensed blocks); with no condensed
+        // runs the key opens the same pane with its empty note - the
+        // affordance stays discoverable.
+        if view
+            .editor
+            .keybindings()
+            .matches(&id, "app.transcript.runs")
+        {
+            self.emit_activity_opened("runs");
+            self.open_runs_view(view);
             self.dirty = true;
             return Ok(());
         }
@@ -8246,10 +8651,12 @@ impl SessionUi {
             TurnUpdate::QueueUpdated {
                 steering,
                 follow_ups,
+                starting,
             } => {
                 view.queued = crate::queued::QueuedMessages {
                     steering,
                     follow_ups,
+                    starting,
                 };
                 // A queue change under an active browse reconciles the
                 // selection (TS `refreshQueueSelectionAt`): the cursor
@@ -8271,6 +8678,20 @@ impl SessionUi {
                 self.sync_queue_selection(view);
             }
             TurnUpdate::StatusUpdate => {}
+        }
+        // A transcript mutation reshaped the condensed runs: reconcile an
+        // open runs pane now (the cursor and the open detail can point at
+        // a run that grew, split, or vanished; the pane closes when no
+        // run survives).
+        if view.runs_view.is_some() {
+            let runs = view.condensed_runs();
+            let closed = view
+                .runs_view
+                .as_mut()
+                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
+            if closed {
+                view.runs_view = None;
+            }
         }
         self.dirty = true;
     }
@@ -8482,7 +8903,7 @@ impl SessionUi {
                     match &error_message {
                         Some(message) => card.set_failed(message),
                         None => {
-                            card.set_complete(exit_code, cancelled, truncated, full_output_path)
+                            card.set_complete(exit_code, cancelled, truncated, full_output_path);
                         }
                     }
                 }
@@ -8879,9 +9300,7 @@ impl SessionUi {
 /// The terminal's current column count (TS `this.ui.terminal.columns` for
 /// the goal status detail suffix); 80 when the size is unavailable.
 fn terminal_columns() -> usize {
-    crossterm::terminal::size()
-        .map(|(columns, _)| columns as usize)
-        .unwrap_or(80)
+    crossterm::terminal::size().map_or(80, |(columns, _)| columns as usize)
 }
 
 fn sorted_session_rows(mut sessions: Vec<Value>) -> Vec<Value> {
@@ -8932,10 +9351,10 @@ fn streaming_tray_hint(
 /// TS `isBashRunning` guard's warning: the clear key (app.clear) cancels
 /// the running user command, spelled through the effective keybindings.
 fn already_running_warning(keybindings: &crate::keybindings::KeybindingsManager) -> String {
-    let key = keybindings
-        .first_key("app.clear")
-        .map(|key| crate::keybindings::format_key_text(&key))
-        .unwrap_or_else(|| "Ctrl+C".to_string());
+    let key = keybindings.first_key("app.clear").map_or_else(
+        || "Ctrl+C".to_string(),
+        |key| crate::keybindings::format_key_text(&key),
+    );
     // TS `showWarning` renders `⚠ ${message}`: the prefix travels with the
     // row text (the StatusKind tier is color only).
     format!("\u{26a0} A bash command is already running. Press {key} to cancel it first.")
@@ -9091,11 +9510,13 @@ async fn describe_session_open_failure(
     })
 }
 
-/// The auth-args subcommands that prompt on the plain terminal: a login
-/// (OAuth/device flow) and a paste (its token prompt reads stdin from the
-/// terminal). Anything else (logout, malformed args) stays in-band.
-fn mcp_auth_args_need_terminal(args: &str) -> bool {
-    matches!(args.split_whitespace().next(), Some("login" | "paste"))
+/// The `/mcp` view's parked auth request: the auth-args form (e.g.
+/// `login <server>`) and the title the inline auth panel mounts (TS
+/// `Login to {label}` for the login dialog, `Connect {label}` for the
+/// token paste panel).
+pub(crate) struct McpAuthIntent {
+    pub(crate) args: String,
+    pub(crate) title: String,
 }
 
 /// The retry-episode collapse (SANCTIONED DIVERGENCE from TS, operator
@@ -9339,28 +9760,6 @@ mod loader_token_tests {
         stats.tokens += 100;
         stats.duration_ms += 500;
         assert_eq!(stats.average_rate(), 200.0);
-    }
-}
-
-#[cfg(test)]
-mod mcp_auth_terminal_tests {
-    use super::mcp_auth_args_need_terminal;
-
-    /// The inline paste panel's `paste <server>` prompts for the token on
-    /// the plain terminal (its read of stdin cannot happen under the raw
-    /// renderer), so it needs the same hand-over as a login.
-    #[test]
-    fn login_and_paste_need_the_terminal() {
-        assert!(mcp_auth_args_need_terminal("login anthropic"));
-        assert!(mcp_auth_args_need_terminal("paste anthropic"));
-    }
-
-    /// A logout and a bare/unknown subcommand stay in-band.
-    #[test]
-    fn logout_and_malformed_args_stay_in_band() {
-        assert!(!mcp_auth_args_need_terminal("logout anthropic"));
-        assert!(!mcp_auth_args_need_terminal(""));
-        assert!(!mcp_auth_args_need_terminal("refresh anthropic"));
     }
 }
 

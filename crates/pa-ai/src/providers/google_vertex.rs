@@ -131,8 +131,7 @@ fn resolve_custom_base_url(base_url: &str) -> Option<String> {
 
 fn base_url_includes_api_version(base_url: &str) -> bool {
     let path = url::Url::parse(base_url)
-        .map(|url| url.path().to_string())
-        .unwrap_or_else(|_| base_url.to_string());
+        .map_or_else(|_| base_url.to_string(), |url| url.path().to_string());
     path.split('/').any(|part| {
         let stripped = part.strip_prefix('v').unwrap_or("");
         !stripped.is_empty()
@@ -252,8 +251,7 @@ fn build_params(model: &Model, context: &Context, options: &GoogleVertexOptions)
     if context
         .tools
         .as_ref()
-        .map(|tools| !tools.is_empty())
-        .unwrap_or(false)
+        .is_some_and(|tools| !tools.is_empty())
     {
         if let Some(tool_choice) = options.tool_choice {
             body.insert(
@@ -283,8 +281,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -298,30 +295,27 @@ async fn run_stream(
 
     // Endpoint: <base>/projects/<project>/locations/<location>/publishers/google/models/<model>:streamGenerateContent?alt=sse
     let custom_base = resolve_custom_base_url(&model.base_url);
-    let url = match &custom_base {
-        Some(base) => {
-            if base_url_includes_api_version(base) {
-                format!(
-                    "{}/models/{}:streamGenerateContent?alt=sse",
-                    base.trim_end_matches('/'),
-                    model.id
-                )
-            } else {
-                format!(
-                    "{}/{VERTEX_API_VERSION}/models/{}:streamGenerateContent?alt=sse",
-                    base.trim_end_matches('/'),
-                    model.id
-                )
-            }
-        }
-        None => {
-            let project = resolve_project(&options).map_err(ProviderError::Message)?;
-            let location = resolve_location(&options).map_err(ProviderError::Message)?;
+    let url = if let Some(base) = &custom_base {
+        if base_url_includes_api_version(base) {
             format!(
-                "https://aiplatform.googleapis.com/{VERTEX_API_VERSION}/projects/{project}/locations/{location}/publishers/google/models/{}:streamGenerateContent?alt=sse",
+                "{}/models/{}:streamGenerateContent?alt=sse",
+                base.trim_end_matches('/'),
+                model.id
+            )
+        } else {
+            format!(
+                "{}/{VERTEX_API_VERSION}/models/{}:streamGenerateContent?alt=sse",
+                base.trim_end_matches('/'),
                 model.id
             )
         }
+    } else {
+        let project = resolve_project(&options).map_err(ProviderError::Message)?;
+        let location = resolve_location(&options).map_err(ProviderError::Message)?;
+        format!(
+            "https://aiplatform.googleapis.com/{VERTEX_API_VERSION}/projects/{project}/locations/{location}/publishers/google/models/{}:streamGenerateContent?alt=sse",
+            model.id
+        )
     };
 
     let mut headers: Vec<(String, String)> = Vec::new();
@@ -422,8 +416,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }

@@ -237,7 +237,7 @@ impl AgentSessionEngine {
                     engine
                         .session
                         .drop_trailing_assistant(TrailingAssistantFilter::Any)
-                        .await
+                        .await;
                 });
             }
         }
@@ -260,6 +260,10 @@ impl AgentSessionEngine {
         }) {
             return OverflowAttempt::Cancelled;
         }
+        pa_core::session_engine::compaction_trace::trace(
+            "auto.overflow_start_emitted",
+            serde_json::Value::Null,
+        );
         // TS `_runAutoCompaction` assigns `_autoCompactionAbortController`
         // for the overflow run too: an `abort_compaction` command lands in
         // the shared slot and cancels the in-flight summarizer.
@@ -338,6 +342,10 @@ impl AgentSessionEngine {
                 if !emit(EngineEvent::Compaction { entry, event }) {
                     return OverflowAttempt::Cancelled;
                 }
+                pa_core::session_engine::compaction_trace::trace(
+                    "auto.overflow_end_emitted",
+                    serde_json::Value::Null,
+                );
                 // The compaction rebuild re-adds the error turn from the
                 // kept tail: drop it again so the retried request is free
                 // of it (TS will-retry branch).
@@ -348,7 +356,7 @@ impl AgentSessionEngine {
                             engine
                                 .session
                                 .drop_trailing_assistant(TrailingAssistantFilter::ErrorOnly)
-                                .await
+                                .await;
                         });
                     }
                 }
@@ -758,7 +766,7 @@ mod tests {
         // everything, so the compaction has no history to summarize.
         let (engine, _dir) = faux_engine_with_compaction_settings(
             json!({ "responses": [overflow_error(0)] }),
-            json!({ "compaction": { "enabled": true, "reserveTokens": 1, "keepRecentTokens": 100000 } }),
+            json!({ "compaction": { "enabled": true, "reserveTokens": 1, "keepRecentTokens": 100_000 } }),
         );
         let mut events: Vec<EngineEvent> = Vec::new();
         admit(&engine, "overflow probe".to_string(), &mut events);

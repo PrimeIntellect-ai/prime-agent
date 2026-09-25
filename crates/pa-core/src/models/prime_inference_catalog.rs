@@ -12,7 +12,7 @@ use super::prime_inference::{is_private_prime_inference_model_id, PRIME_INFERENC
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MIN_CATALOG_COVERAGE: f64 = 0.5;
 
-/// One parsed catalog entry (packages/ai PrimeInferenceCatalogEntry).
+/// One parsed catalog entry (packages/ai `PrimeInferenceCatalogEntry`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PrimeInferenceCatalogEntry {
@@ -57,6 +57,17 @@ fn string_array(value: &serde_json::Value) -> Option<Vec<String>> {
 }
 
 /// Parse the catalog payload; invalid entries drop out, duplicates fail.
+///
+/// # Errors
+///
+/// Returns a human-readable error string when the payload carries no model
+/// array, contains duplicate model ids, or parses to an empty catalog while
+/// `allow_empty` is false.
+///
+/// # Panics
+///
+/// The `context_window.unwrap()` runs only when the specs guard proved the
+/// field present, so the unwrap is unreachable.
 pub fn parse_prime_inference_model_catalog(
     payload: &serde_json::Value,
     allow_empty: bool,
@@ -352,7 +363,7 @@ mod tests {
             "provider": "prime-inference", "baseUrl": PRIME_INFERENCE_BASE_URL,
             "reasoning": true, "input": ["text"],
             "cost": { "input": 1, "output": 2, "cacheRead": 0.1, "cacheWrite": 1.25 },
-            "contextWindow": 128000, "maxTokens": 8192, "featured": true,
+            "contextWindow": 128_000, "maxTokens": 8192, "featured": true,
             "compat": { "maxTokensField": "max_tokens" }
         }))
         .unwrap()]
@@ -365,7 +376,7 @@ mod tests {
                 {
                     "id": "z-ai/glm-5.3",
                     "pricing": { "input_usd_per_mtok": 0.6, "output_usd_per_mtok": 2.2 },
-                    "specs": { "context_window": 200000, "max_output_tokens": 16384,
+                    "specs": { "context_window": 200_000, "max_output_tokens": 16384,
                                "supports_reasoning": true,
                                "modalities": { "input": ["text"], "output": ["text"] } }
                 },

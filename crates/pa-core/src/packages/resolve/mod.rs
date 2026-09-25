@@ -85,7 +85,7 @@ pub struct ResolvedResource {
     pub metadata: PathMetadata,
 }
 
-/// The resolve() output: ranked resources per kind plus diagnostics.
+/// The `resolve()` output: ranked resources per kind plus diagnostics.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ResolvedPaths {
     pub extensions: Vec<ResolvedResource>,

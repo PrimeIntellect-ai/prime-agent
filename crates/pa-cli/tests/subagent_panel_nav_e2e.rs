@@ -288,15 +288,16 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
             .expect("parent session run");
 
     // The dock renders at attach as the one-line activity row (unfocused,
-    // hint-free by design; Enter is the direct launcher). The count is
-    // the live running count only (the operator's running-count
-    // directive): the passivated child is finished, so the segment reads
-    // zero — the dock stays mounted and selectable because the child
-    // remains browsable history.
+    // hint-free by design; Enter is the direct launcher). The subagents
+    // segment reads `\u{25c6} N subagents` — one consolidated item (the
+    // operator's 2026-09-25 consolidation), the running count riding
+    // the label in the dock's color: the passivated child is finished,
+    // so the count reads zero — the dock stays mounted and selectable
+    // because the child remains browsable history.
     let attached = first_frame_of(&parent_run.frames, "subagent");
     assert!(
         attached.contains("\u{25c6} 0 subagents"),
-        "the unfocused dock shows the running-only subagent count:\n{attached}"
+        "the unfocused dock shows the consolidated subagents segment:\n{attached}"
     );
     // The single Enter opened the scoped agents view directly: no
     // grouped panel frame ever renders.
@@ -332,6 +333,7 @@ async fn down_arrow_focuses_the_dock_and_enter_opens_the_scoped_agents_view() {
         selected_key: None,
         status_message: None,
         keybindings: pa_tui::keybindings::KeybindingsManager::new(),
+        show_hardware_cursor: false,
     };
     let view_plan = AgentsHeadlessPlan {
         steps: vec![
