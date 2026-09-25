@@ -1267,13 +1267,19 @@ mod tests {
             1,
             "the first turn persisted one digest row"
         );
-        let first_fingerprint = digest_rows[0]
+        let FileEntry::CustomMessage {
+            payload: first_row, ..
+        } = digest_rows[0]
+        else {
+            panic!("expected a digest custom entry");
+        };
+        let Some(first_fingerprint) = first_row
             .details
             .as_ref()
             .and_then(|details| details.get("stateFingerprint"))
             .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
-        let Some(first_fingerprint) = first_fingerprint else {
+            .map(str::to_string)
+        else {
             panic!("the persisted digest row carries its state fingerprint");
         };
 

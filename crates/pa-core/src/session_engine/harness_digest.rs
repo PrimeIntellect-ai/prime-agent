@@ -17,10 +17,7 @@ use crate::refinement::ranking::{
 };
 use crate::refinement::{load_harness_state, merge_harness_states, HarnessScope};
 
-use super::messages::{
-    COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, HARNESS_DIGEST_PREFIX,
-    HARNESS_DIGEST_SUFFIX,
-};
+use super::messages::{COMPACTION_SUMMARY_PREFIX, HARNESS_DIGEST_PREFIX, HARNESS_DIGEST_SUFFIX};
 
 /// Session-scoped digest inputs: where harness state lives and which
 /// interfaces the digest may reference.
@@ -667,6 +664,8 @@ mod tests {
     use crate::session::manager::SessionManager;
     use pa_agent::types::UserMessage;
     use serde_json::Value;
+
+    use super::super::messages::COMPACTION_SUMMARY_SUFFIX;
 
     #[test]
     fn empty_state_digest_renders_placeholder() {
