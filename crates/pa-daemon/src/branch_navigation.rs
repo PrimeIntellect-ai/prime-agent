@@ -184,7 +184,12 @@ impl TreeNavigation {
 
         // The abandoned-branch summary (TS `generateBranchSummary` over
         // `collectEntriesForBranchSummary`).
-        let mut summary: Option<(String, Option<Value>, Option<Value>)> = None;
+        let mut summary: Option<(
+            String,
+            Option<Value>,
+            Option<Value>,
+            Option<(String, String)>,
+        )> = None;
         let replace_instructions =
             payload.get("replaceInstructions").and_then(Value::as_bool) == Some(true);
         if summarize {
@@ -239,7 +244,7 @@ impl TreeNavigation {
                 }
                 match outcome {
                     crate::engine::BranchSummaryOutcome::Complete { run } => {
-                        summary = Some((run.summary, run.usage, run.details));
+                        summary = Some((run.summary, run.usage, run.details, run.model));
                     }
                     crate::engine::BranchSummaryOutcome::Aborted => {
                         return response_success(
@@ -271,13 +276,16 @@ impl TreeNavigation {
                 );
             };
             let mut summary_entry = None;
-            if let Some((summary, usage, details)) = summary {
+            if let Some((summary, usage, details, model)) = summary {
                 match store.append_branch_summary(
                     new_leaf.as_deref(),
                     &summary,
                     details,
                     None,
                     usage,
+                    model
+                        .as_ref()
+                        .map(|(provider, model_id)| (provider.as_str(), model_id.as_str())),
                 ) {
                     Ok(summary_id) => {
                         if let Some(label) = &label {

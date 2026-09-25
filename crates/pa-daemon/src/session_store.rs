@@ -635,6 +635,15 @@ impl SessionFile {
         positions
     }
 
+    /// The model the windowed load restored at the compaction boundary
+    /// (`None` on a full-history load): the per-model cost fold seeds its
+    /// timeline with it, so retained rows before the branch's first
+    /// `model_change` still resolve a bucket instead of dropping the
+    /// breakdown for a reopened compacted session.
+    pub(crate) fn window_model(&self) -> Option<(String, String)> {
+        self.window.as_ref()?.model.clone()
+    }
+
     pub(crate) fn restored_settings(&self) -> pa_core::session::SessionContext {
         let entries = self.branch_file_entries();
         let mut context = pa_core::session::build_session_context(&entries, self.leaf_id());

@@ -2475,6 +2475,7 @@ impl SessionEngine for AgentSessionEngine {
                             "readFiles": result.read_files,
                             "modifiedFiles": result.modified_files,
                         })),
+                        model: result.model,
                     },
                 }
             }

@@ -116,8 +116,12 @@ impl Worker {
                     let all_entries = store.entries();
                     let (own_usage, total_usage) =
                         compute_own_and_total_usage(&branch, all_entries);
-                    let own_usage_by_model =
-                        compute_own_usage_by_model(&branch, all_entries, &own_usage);
+                    let own_usage_by_model = compute_own_usage_by_model(
+                        &branch,
+                        all_entries,
+                        &own_usage,
+                        store.window_model().as_ref(),
+                    );
                     (own_usage, total_usage, own_usage_by_model)
                 }
                 None => (empty_usage(), empty_usage(), None),
@@ -456,10 +460,16 @@ pub(crate) fn compute_own_and_total_usage(
 /// Each assistant row folds into the bucket of the model on its message
 /// envelope (the request-time serving model — cost blocks were computed
 /// against that model's rates, so each bucket holds only spend billed at
-/// those rates); `compaction` / `branch_summary` rows follow the branch's
-/// `model_change` timeline (the summarizer runs on the session's current
-/// model). Child-usage attributions subtract from the target row's model
-/// bucket exactly like [`compute_own_and_total_usage`] subtracts from
+/// those rates); `compaction` / `branch_summary` rows fold on the model
+/// their entry records when the summary call named one (TS #2411 routes
+/// branch summaries to a configured auxiliary model — the timeline names
+/// the session's current model, not the routed one that billed) and
+/// otherwise follow the branch's `model_change` timeline, seeded with
+/// the window-restored model on a windowed load (the retained branch
+/// starts at the compaction boundary, whose rows billed on the restored
+/// model even when the discarded prefix's timeline rows never load).
+/// Child-usage attributions subtract from the target row's model bucket
+/// exactly like [`compute_own_and_total_usage`] subtracts from
 /// `ownUsage`, so the buckets sum to the node's own usage — and the sum
 /// is verified against the caller's `own_usage` before the breakdown is
 /// served. `None` when any usage-carrying row resolves to no model (a
@@ -474,6 +484,7 @@ pub(crate) fn compute_own_usage_by_model(
     branch: &[&crate::session_store::SessionEntry],
     all_entries: &[crate::session_store::SessionEntry],
     own_usage: &Value,
+    initial_model: Option<&(String, String)>,
 ) -> Option<Vec<Value>> {
     // The buckets in first-seen order: JSON arrays keep the fold order,
     // so the display renders the model the session started on first.
@@ -481,10 +492,14 @@ pub(crate) fn compute_own_usage_by_model(
     let mut position: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();
     let mut buckets: Vec<Value> = Vec::new();
-    // The branch's model timeline (compaction rows bill on the current
-    // model at their position) and the assistant id -> bucket map the
-    // attribution subtraction reads.
-    let mut current: Option<(String, String)> = None;
+    // The branch's model timeline seeded with the store's window-restored
+    // model when the load kept only a window (a reopened compacted
+    // session's retained branch starts at the boundary — rows before its
+    // first `model_change` billed on the restored model, and a full
+    // history keeps `None` so a foreign file still omits the breakdown)
+    // and the assistant id -> bucket map the attribution subtraction
+    // reads.
+    let mut current: Option<(String, String)> = initial_model.cloned();
     let mut assistant_buckets: std::collections::HashMap<&str, usize> =
         std::collections::HashMap::new();
     let mut unresolved = false;
@@ -555,7 +570,17 @@ pub(crate) fn compute_own_usage_by_model(
             _ => continue,
         };
         if let Some(usage) = usage {
-            match bucket_for(current.clone(), &mut buckets) {
+            // A row that records the model its summary call served on
+            // (TS #2411's auxiliary routing — persisted on the entry)
+            // outranks the timeline: the branch timeline names the
+            // session's current model, not the routed one that billed.
+            let row_model = (|| {
+                let provider = entry.fields.get("provider")?.as_str()?;
+                let model_id = entry.fields.get("modelId")?.as_str()?;
+                (!provider.is_empty() && !model_id.is_empty())
+                    .then(|| (provider.to_string(), model_id.to_string()))
+            })();
+            match bucket_for(row_model.or_else(|| current.clone()), &mut buckets) {
                 Some(at) => add_usage(&mut buckets[at], usage),
                 None => unresolved = true,
             }
@@ -1287,6 +1312,136 @@ mod tests {
         let (own, _) = compute_own_and_total_usage(&branch_refs_more, &entries_more);
         assert_eq!(own["input"], json!(0));
         assert_eq!(own["cost"]["total"].as_f64(), Some(0.0));
+    }
+
+    /// A `branch_summary` row served by an auxiliary model (TS #2411)
+    /// bills on the model its entry records, not the branch timeline's
+    /// current model: the routed call billed at the auxiliary model's
+    /// rates, so its spend belongs to that model's bucket while the
+    /// buckets still reconcile with the plain own-usage fold (the
+    /// Macroscope wrong-bucket round).
+    #[test]
+    fn branch_summary_usage_bills_on_the_row_recorded_auxiliary_model() {
+        let entry = |value: &Value, id: &str| crate::session_store::SessionEntry {
+            type_: value["type"].as_str().expect("type").to_string(),
+            id: id.to_string(),
+            parent_id: None,
+            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
+            fields: value
+                .as_object()
+                .expect("object")
+                .clone()
+                .into_iter()
+                .collect(),
+        };
+        let usage = |input: u64, output: u64| {
+            json!({
+                "input": input, "output": output, "cacheRead": 0, "cacheWrite": 0,
+                "totalTokens": input + output,
+                "cost": {"input": 0.1, "output": 0.2, "cacheRead": 0, "cacheWrite": 0, "total": 0.3},
+            })
+        };
+        let entries = vec![
+            entry(
+                &json!({"type": "model_change", "provider": "openai", "modelId": "gpt-a"}),
+                "m0",
+            ),
+            entry(
+                &json!({
+                    "type": "message",
+                    "message": {"role": "assistant", "content": "on it", "provider": "openai", "model": "gpt-a", "usage": usage(100, 10)},
+                }),
+                "e1",
+            ),
+            entry(
+                &json!({
+                    "type": "branch_summary",
+                    "summary": "explored",
+                    "usage": usage(50, 5),
+                    "provider": "anthropic",
+                    "modelId": "aux-opus-4",
+                }),
+                "b1",
+            ),
+        ];
+        let branch: Vec<&crate::session_store::SessionEntry> = entries.iter().collect();
+        let (own, _) = compute_own_and_total_usage(&branch, &entries);
+        let breakdown =
+            compute_own_usage_by_model(&branch, &entries, &own, None).expect("resolved");
+        assert_eq!(breakdown.len(), 2);
+        assert_eq!(breakdown[0]["provider"], json!("openai"));
+        assert_eq!(breakdown[0]["id"], json!("gpt-a"));
+        assert_eq!(breakdown[0]["ownUsage"]["totalTokens"], json!(110));
+        // The auxiliary summary lands on the routed model's bucket, not
+        // the timeline's current model.
+        assert_eq!(breakdown[1]["provider"], json!("anthropic"));
+        assert_eq!(breakdown[1]["id"], json!("aux-opus-4"));
+        assert_eq!(breakdown[1]["ownUsage"]["totalTokens"], json!(55));
+    }
+
+    /// A windowed load (a reopened compacted session) seeds the timeline
+    /// with the boundary's restored model: retained usage rows before the
+    /// branch's first `model_change` still resolve a bucket and the
+    /// breakdown is served instead of omitted — the target case this
+    /// change exists for (the Bugbot windowed-omission round). The same
+    /// walk without a seed (a full-history foreign file without
+    /// `model_change` rows) keeps omitting the breakdown.
+    #[test]
+    fn window_seed_resolves_rows_before_the_first_model_change() {
+        let entry = |value: &Value, id: &str| crate::session_store::SessionEntry {
+            type_: value["type"].as_str().expect("type").to_string(),
+            id: id.to_string(),
+            parent_id: None,
+            timestamp: "2024-01-01T00:00:00.000Z".to_string(),
+            fields: value
+                .as_object()
+                .expect("object")
+                .clone()
+                .into_iter()
+                .collect(),
+        };
+        let usage = |input: u64, output: u64| {
+            json!({
+                "input": input, "output": output, "cacheRead": 0, "cacheWrite": 0,
+                "totalTokens": input + output,
+                "cost": {"input": 0.1, "output": 0.2, "cacheRead": 0, "cacheWrite": 0, "total": 0.3},
+            })
+        };
+        // The retained branch starts at the compaction boundary: the
+        // summarizer's usage row carries no model of its own (a legacy
+        // row) and no `model_change` row precedes it on the walk.
+        let entries = vec![
+            entry(
+                &json!({"type": "branch_summary", "summary": "cut", "usage": usage(30, 3)}),
+                "b1",
+            ),
+            entry(
+                &json!({
+                    "type": "message",
+                    "message": {"role": "assistant", "content": "resumed", "provider": "openai", "model": "gpt-a", "usage": usage(100, 10)},
+                }),
+                "e1",
+            ),
+        ];
+        let branch: Vec<&crate::session_store::SessionEntry> = entries.iter().collect();
+        let (own, _) = compute_own_and_total_usage(&branch, &entries);
+        let seeded = compute_own_usage_by_model(
+            &branch,
+            &entries,
+            &own,
+            Some(&("openai".to_string(), "gpt-a".to_string())),
+        )
+        .expect("the seed resolves the boundary rows");
+        assert_eq!(seeded.len(), 1);
+        assert_eq!(seeded[0]["provider"], json!("openai"));
+        assert_eq!(seeded[0]["id"], json!("gpt-a"));
+        assert_eq!(seeded[0]["ownUsage"]["totalTokens"], json!(143));
+        // The unseeded walk keeps the foreign-file contract: a branch
+        // whose usage rows resolve to no model omits the breakdown.
+        assert_eq!(
+            compute_own_usage_by_model(&branch, &entries, &own, None),
+            None
+        );
     }
 
     /// `get_commands` / `get_resource_snapshot` on the scripted engine:
