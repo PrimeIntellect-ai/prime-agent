@@ -268,8 +268,7 @@ pub(crate) fn apply_patterns(
 pub(crate) fn glob_paths(pattern: &str, root: &Path) -> Vec<PathBuf> {
     let pattern = pattern
         .strip_prefix("./")
-        .map(str::to_string)
-        .unwrap_or_else(|| pattern.to_string());
+        .map_or_else(|| pattern.to_string(), str::to_string);
     let Ok(glob) = GlobBuilder::new(&pattern)
         .literal_separator(true)
         .backslash_escape(true)

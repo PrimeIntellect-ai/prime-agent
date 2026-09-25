@@ -237,7 +237,7 @@ impl AgentSessionEngine {
                     engine
                         .session
                         .drop_trailing_assistant(TrailingAssistantFilter::Any)
-                        .await
+                        .await;
                 });
             }
         }
@@ -356,7 +356,7 @@ impl AgentSessionEngine {
                             engine
                                 .session
                                 .drop_trailing_assistant(TrailingAssistantFilter::ErrorOnly)
-                                .await
+                                .await;
                         });
                     }
                 }

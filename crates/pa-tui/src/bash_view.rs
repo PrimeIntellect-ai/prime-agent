@@ -104,8 +104,7 @@ pub fn parse_bash_activities(data: &Value) -> Vec<BashActivity> {
                 status: row
                     .get("status")
                     .and_then(Value::as_str)
-                    .map(crate::menu_panel::scrub_controls)
-                    .unwrap_or_else(|| "unknown".to_string()),
+                    .map_or_else(|| "unknown".to_string(), crate::menu_panel::scrub_controls),
                 exit_code: row.get("exitCode").and_then(Value::as_i64),
                 duration_ms: row.get("durationMs").and_then(Value::as_u64),
             })
@@ -302,8 +301,7 @@ impl BashView {
         let loaded = self
             .output_tail
             .as_ref()
-            .map(|(_, output)| output.len())
-            .unwrap_or(0);
+            .map_or(0, |(_, output)| output.len());
         self.tail_complete = loaded < self.tail_window as usize || self.tail_window >= TAIL_LINES;
     }
 
@@ -337,8 +335,7 @@ impl BashView {
                 self.tail_window = self
                     .output_tail
                     .as_ref()
-                    .map(|(_, output)| output.len() as u32)
-                    .unwrap_or(FIRST_TAIL_LINES);
+                    .map_or(FIRST_TAIL_LINES, |(_, output)| output.len() as u32);
             }
             // Only a fetch failure releases the in-flight claims (the
             // lazy load's, the open retry's): a kill error knows nothing
@@ -773,8 +770,7 @@ impl BashView {
     fn list_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| fallback.to_string())
+                .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
         format!(
             "{}/{} move \u{b7} {} open \u{b7} {} close",
@@ -791,8 +787,7 @@ impl BashView {
     fn detail_hint(&self, kb: &KeybindingsManager) -> String {
         let key = |binding: &str, fallback: &str| {
             kb.first_key(binding)
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| fallback.to_string())
+                .map_or_else(|| fallback.to_string(), |key| format_key_text(&key))
         };
         let up_down = format!(
             "{}/{}",
@@ -938,8 +933,7 @@ impl Columns {
                 plain_cell(
                     &activity
                         .pid
-                        .map(|pid| pid.to_string())
-                        .unwrap_or_else(|| "\u{2014}".to_string()),
+                        .map_or_else(|| "\u{2014}".to_string(), |pid| pid.to_string()),
                     self.pid,
                 ),
             ),
@@ -1715,7 +1709,7 @@ mod tests {
                     view.set_output("a", &grown.join("\n"), view.detail_generation);
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -1745,7 +1739,7 @@ mod tests {
                     view.set_output("a", &full.join("\n"), view.detail_generation);
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -1788,7 +1782,7 @@ mod tests {
                     view.set_output("a", &tail.join("\n"), generation);
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -1866,7 +1860,7 @@ mod tests {
                     loaded = true;
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -1896,7 +1890,7 @@ mod tests {
                     retried = true;
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -1950,7 +1944,7 @@ mod tests {
                     view.set_output("a", &lines(FIRST_TAIL_LINES * 2).join("\n"), generation);
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -1969,7 +1963,7 @@ mod tests {
                     failed = true;
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -1988,7 +1982,7 @@ mod tests {
                     retried = true;
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }
@@ -2020,7 +2014,7 @@ mod tests {
                     generation = gen;
                     break;
                 }
-                BashViewAction::None => continue,
+                BashViewAction::None => {}
                 other => panic!("up only walks or loads: {other:?}"),
             }
         }

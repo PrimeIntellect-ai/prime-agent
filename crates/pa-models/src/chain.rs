@@ -139,8 +139,7 @@ impl ModelCatalog {
             ),
             prime_inference: PrimeInferenceCatalog::with_base_url(models_dir, pi_base_url),
             bundled: bundled_dir
-                .map(BundledAssets::from_dir)
-                .unwrap_or_else(BundledAssets::at_package_root),
+                .map_or_else(BundledAssets::at_package_root, BundledAssets::from_dir),
             templates,
             compiled,
             pi_base_url: Arc::from(pi_base_url),

@@ -300,30 +300,28 @@ impl TurnBoundary {
         )
         .await?;
         let arm_finished = loop {
-            match self
+            let outcome = self
                 .overflow_recovery_attempt(
                     engine,
                     model,
                     api_key.clone(),
                     OverflowBoundary::SettledTurn,
                 )
-                .await?
-            {
+                .await?;
+            if let OverflowOutcome::RetryTurn = outcome {
                 // The retried turn settled: its serialized checkpoint
                 // drains the trigger the overflow compaction scheduled
                 // before the arm re-checks the new turn.
-                OverflowOutcome::RetryTurn => {
-                    self.consume_compact_auto_refine(
-                        engine,
-                        model,
-                        api_key.clone(),
-                        global_harness_dir.clone(),
-                        RefineSurface::Checkpoint,
-                    )
-                    .await?;
-                    continue;
-                }
-                outcome => break matches!(outcome, OverflowOutcome::Finished),
+                self.consume_compact_auto_refine(
+                    engine,
+                    model,
+                    api_key.clone(),
+                    global_harness_dir.clone(),
+                    RefineSurface::Checkpoint,
+                )
+                .await?;
+            } else {
+                break matches!(outcome, OverflowOutcome::Finished);
             }
         };
         if !arm_finished {

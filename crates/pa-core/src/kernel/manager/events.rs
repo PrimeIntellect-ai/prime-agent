@@ -45,10 +45,10 @@ impl Inner {
             }
             Event::HostRequest { id, data } => self.start_host_request(&id, data),
             Event::Stdout { id, text } => {
-                self.route_stream(id.as_deref(), StreamName::Stdout, &text)
+                self.route_stream(id.as_deref(), StreamName::Stdout, &text);
             }
             Event::Stderr { id, text } => {
-                self.route_stream(id.as_deref(), StreamName::Stderr, &text)
+                self.route_stream(id.as_deref(), StreamName::Stderr, &text);
             }
             Event::Result { id, text } => {
                 let execution = lock(&self.guarded).active_execution.clone();

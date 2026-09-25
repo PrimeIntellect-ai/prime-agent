@@ -442,8 +442,7 @@ impl PhaseTelemetry {
         let now = std::time::Instant::now();
         let duration_ms = self
             .last_observed
-            .map(|last| now.duration_since(last).as_millis() as u64)
-            .unwrap_or(0);
+            .map_or(0, |last| now.duration_since(last).as_millis() as u64);
         self.last_observed = Some(now);
         let mut properties = pa_telemetry::base_properties("cli");
         properties.set("phase", serde_json::Value::from(event));
@@ -514,8 +513,7 @@ async fn track_update_completed(status: &UpdateStatus) {
             UPDATE_TELEMETRY_STATE_NAMES
                 .iter()
                 .find(|(state, _)| *state == status.state)
-                .map(|(_, name)| *name)
-                .unwrap_or("unknown"),
+                .map_or("unknown", |(_, name)| *name),
         ),
     );
     properties.set(

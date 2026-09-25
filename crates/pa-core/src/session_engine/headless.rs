@@ -125,7 +125,6 @@ pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTer
                         },
                     );
                     index -= 1;
-                    continue;
                 }
                 // A corrupt outcome is still part of the suffix; skip it
                 // without letting it hide earlier valid outcomes.
@@ -133,12 +132,9 @@ pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTer
                 | REFINEMENT_NOTICE_CUSTOM_TYPE
                 | HARNESS_DIGEST_CUSTOM_TYPE => {
                     index -= 1;
-                    continue;
                 }
-                SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE => break,
                 _ => break,
             },
-            AgentMessage::Assistant(_) => break,
             _ => break,
         }
     }

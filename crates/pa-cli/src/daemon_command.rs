@@ -440,7 +440,7 @@ fn parse_send_args(args: &[String]) -> Result<ParsedSendArgs> {
 // ---------------------------------------------------------------------------
 
 fn run_cron(client: &mut DaemonClient, args: &[String], json: bool) -> Result<()> {
-    let subcommand = args.first().map(String::as_str).unwrap_or("list");
+    let subcommand = args.first().map_or("list", String::as_str);
     match subcommand {
         "list" => run_cron_list(client, args, json),
         "add" | "schedule" => run_cron_add(client, args, json),
@@ -550,8 +550,7 @@ fn cron_job_id_and_next_run(data: &Value) -> Option<(String, String)> {
     let next_run = job
         .get("nextRunAt")
         .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| "-".to_string());
+        .map_or_else(|| "-".to_string(), str::to_string);
     Some((id, next_run))
 }
 

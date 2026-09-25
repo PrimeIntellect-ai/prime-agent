@@ -449,8 +449,7 @@ pub(crate) fn interrupted_compaction_disclosure(
     let declared_at = record
         .get("declaredAt")
         .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(crate::util::now_iso);
+        .map_or_else(crate::util::now_iso, str::to_string);
     let message = crate::session_commands::custom_message_value(
         &pa_core::session_engine::messages::create_compaction_outcome_message(
             "Compaction cancelled",

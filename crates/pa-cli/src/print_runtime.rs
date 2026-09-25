@@ -37,14 +37,7 @@ impl crate::mode::Runtime for PrintRuntime {
         match options.app_mode {
             // Runtime failures print themselves and exit non-zero; the typed
             // MissingSubsystem channel stays reserved for unwired subsystems.
-            AppMode::Print => match run_print_mode(options) {
-                Ok(code) => Ok(code),
-                Err(message) => {
-                    eprintln!("Error: {message}");
-                    Ok(1)
-                }
-            },
-            AppMode::Json => match run_print_mode(options) {
+            AppMode::Print | AppMode::Json => match run_print_mode(options) {
                 Ok(code) => Ok(code),
                 Err(message) => {
                     eprintln!("Error: {message}");
@@ -659,8 +652,9 @@ fn build_session_manager(
         let resolved =
             resolve_session_path(selector, &cwd, &session_dir).map_err(render_selector_error)?;
         let source = match resolved {
-            ResolvedSession::Path(path) | ResolvedSession::Local(path) => path,
-            ResolvedSession::Global { path, .. } => path,
+            ResolvedSession::Path(path)
+            | ResolvedSession::Local(path)
+            | ResolvedSession::Global { path, .. } => path,
         };
         return SessionManager::fork_from(&source, &cwd, &session_dir);
     }
@@ -812,15 +806,16 @@ fn open_session_file(
     fallback_cwd: &std::path::Path,
     explicit_cwd_override: Option<&std::path::Path>,
 ) -> Result<pa_core::session::manager::SessionManager, String> {
-    let session_cwd = explicit_cwd_override
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| {
+    let session_cwd = explicit_cwd_override.map_or_else(
+        || {
             let header = pa_core::session::manager::read_session_header(path);
-            header
-                .filter(|header| !header.cwd.is_empty())
-                .map(|header| std::path::PathBuf::from(&header.cwd))
-                .unwrap_or_else(|| fallback_cwd.to_path_buf())
-        });
+            header.filter(|header| !header.cwd.is_empty()).map_or_else(
+                || fallback_cwd.to_path_buf(),
+                |header| std::path::PathBuf::from(&header.cwd),
+            )
+        },
+        std::path::Path::to_path_buf,
+    );
     let manager = pa_core::session::manager::SessionManager::open(&session_cwd, session_dir, path);
     // main.ts getMissingSessionCwdIssue: a session stored against a deleted
     // directory must not silently continue somewhere else.
