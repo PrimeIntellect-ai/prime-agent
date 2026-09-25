@@ -2833,9 +2833,97 @@ async fn tui_settings_menu_cycles_rows() {
         "the settings menu rendered its first row:\n{rendered}"
     );
     assert!(
-        rendered.contains("Type to search · Enter/Space to change · Esc to cancel"),
+        rendered.contains("Type to search · Enter/Space change · Esc close"),
         "the settings hint rendered:\n{rendered}"
     );
+}
+
+/// The operator's Esc-ordering pin (2026-09-25): while a turn streams, the
+/// cwd completion menu (`./` + Tab) lists the non-hidden entries only (the
+/// `.claude` directory stays out of the menu), and Esc closes the menu
+/// without interrupting the running turn — the abort ladder runs only when
+/// no menu is open.
+#[tokio::test]
+async fn tui_esc_closes_the_completion_menu_without_interrupting_the_turn() {
+    use crossterm::event::KeyCode;
+
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    std::fs::create_dir_all(dir.path().join(".claude")).expect("dot dir");
+    std::fs::write(dir.path().join("main.rs"), "fn main() {}").expect("write");
+    std::fs::write(dir.path().join("notes.md"), "notes").expect("write");
+    // One turn: a fast text block marks it provably streaming, then the
+    // slow thinking block keeps it alive while the menu interaction runs.
+    let script = serde_json::json!({
+        "engine": "faux",
+        "tokensPerSecond": 4,
+        "responses": [
+            { "content": [
+                { "type": "text", "text": "the turn is streaming" },
+                { "type": "thinking",
+                  "thinking": "a long slow thinking pass keeps the turn streaming while the completion menu opens and escape closes it" },
+                { "type": "text", "text": "the final answer streams after the menu check" },
+            ] },
+        ],
+    });
+    std::fs::write(dir.path().join("script.json"), script.to_string()).expect("write script");
+    let supervisor = spawn_supervisor(dir.path());
+    let options = base_options(&supervisor, dir.path(), &session_dir);
+    let key = |code: KeyCode| {
+        pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
+            code,
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    };
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("start the long turn".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "the turn is streaming".to_string(),
+                timeout_ms: 30_000,
+            },
+            // The editor stays live during the turn: `./` + Tab opens the
+            // cwd completion menu over it.
+            pa_tui::interactive::HeadlessStep::Type("./".to_string()),
+            key(KeyCode::Tab),
+            pa_tui::interactive::HeadlessStep::SettleIdle,
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "notes.md".to_string(),
+                timeout_ms: 30_000,
+            },
+            // Esc closes the menu; the turn keeps running to its final
+            // answer (a leaked abort would kill it mid-stream).
+            key(KeyCode::Esc),
+            pa_tui::interactive::HeadlessStep::WaitGone {
+                needle: "notes.md".to_string(),
+                timeout_ms: 10_000,
+            },
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 60_000 },
+        ],
+        width: 100,
+        height: 34,
+    };
+    let outcome =
+        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
+            .await
+            .expect("interactive run");
+    let rendered = outcome.frames.join("\n");
+    // The menu listed the cwd's non-hidden entries and never the dot dir.
+    assert!(
+        rendered.contains("main.rs") && rendered.contains("notes.md"),
+        "the cwd completion menu listed the non-hidden entries:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains(".claude"),
+        "the dot dir never lists in the cwd browse:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("the final answer streams after the menu check"),
+        "Esc closed the menu and the turn ran to its final answer (no leaked abort):\n{rendered}"
+    );
+    drop(supervisor);
 }
 
 /// Prompt-stash verifier (TS `prompt-stash-state.ts` + the
