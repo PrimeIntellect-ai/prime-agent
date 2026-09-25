@@ -385,15 +385,13 @@ fn headless_image_model_router(
         .clone();
     // The decide closure takes its own copies; the swap closure moves the
     // originals (the last uses).
-    let decide_cwd = cwd.clone();
     let decide_agent_dir = agent_dir.clone();
     let decide = std::sync::Arc::new(
         move |carries_images: bool| -> Result<Option<pa_core::models::ResolvedImageModel>, String> {
             if !carries_images {
                 return Ok(None);
             }
-            let settings =
-                pa_core::settings::SettingsManager::create(&decide_cwd, &decide_agent_dir);
+            let settings = pa_core::settings::SettingsManager::create(&cwd, &decide_agent_dir);
             let image_model_reference = settings.get_image_model();
             let block_images = settings.get_block_images();
             let auth = pa_core::auth::AuthStorage::create(&decide_agent_dir);
