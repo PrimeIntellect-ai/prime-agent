@@ -191,21 +191,27 @@ impl AgentSession {
                 .compact_auto_refine
                 .lock()
                 .expect("compact auto-refine state lock");
+            // The round is done: the in-flight guard always releases,
+            // fresh or stale alike (the next consumption may start).
             state.in_flight = false;
-            // TS stamps the cooldown and resets the turn counter for every
-            // attempt — decline, success, and failure alike — so a persistent
-            // failure cannot retry a full review on every boundary.
-            state.last_review_at = Some(now_millis());
-            state.settled_turns_since_review = 0;
             // A branch move (or a session rebuild's discard) bumped the
             // version while this round's model call was in flight (TS
             // `_reviewAutoRefine`'s `branchVersion !==
             // this._autoRefineBranchVersion` check after the await): the
             // resolved review belongs to the abandoned conversation, so
-            // its edits and rows never surface.
+            // its edits and rows never surface — and its completion does
+            // NOT stamp the moved-to branch's cooldown or reset its
+            // settled-turn count (a stale round must not throttle the
+            // new branch's own trigger).
             if state.branch_version != branch_version {
                 return Ok(None);
             }
+            // TS stamps the cooldown and resets the turn counter for every
+            // fresh attempt — decline, success, and failure alike — so a
+            // persistent failure cannot retry a full review on every
+            // boundary.
+            state.last_review_at = Some(now_millis());
+            state.settled_turns_since_review = 0;
             outcome
         };
         outcome
