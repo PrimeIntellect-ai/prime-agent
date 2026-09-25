@@ -359,16 +359,17 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(emittedSequences, []); // No data events during paste
 		});
 
-		it("should handle paste arriving in chunks", () => {
-			processInput("\x1b[200~");
-			assert.deepStrictEqual(emittedPaste, []);
-
-			processInput("hello ");
-			assert.deepStrictEqual(emittedPaste, []);
-
-			processInput("world\x1b[201~");
-			assert.deepStrictEqual(emittedPaste, ["hello world"]);
-			assert.deepStrictEqual(emittedSequences, []);
+		it("should handle paste start and end markers split at any chunk boundary", () => {
+			const input = "a\x1b[200~hello\x1b[201~b";
+			for (let i = 1; i < input.length; i++) {
+				for (let j = i + 1; j < input.length; j++) {
+					buffer.clear();
+					emittedSequences.length = 0;
+					emittedPaste.length = 0;
+					for (const chunk of [input.slice(0, i), input.slice(i, j), input.slice(j)]) processInput(chunk);
+					assert.deepStrictEqual([emittedSequences, emittedPaste], [["a", "b"], ["hello"]]);
+				}
+			}
 		});
 
 		it("should handle paste with input before and after", () => {
