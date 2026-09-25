@@ -68,12 +68,6 @@ impl MegaMock {
     fn url(&self) -> String {
         format!("http://127.0.0.1:{}/v1", self.port)
     }
-
-    /// Every request the mock answered (the seeded turns, the crossing
-    /// turn, the compaction's summarizer call, the status-line recaps).
-    fn request_count(&self) -> usize {
-        self.requests.lock().expect("mock lock").len()
-    }
 }
 
 fn chunk(delta: Value, finish_reason: Option<&str>, usage: Value) -> String {
