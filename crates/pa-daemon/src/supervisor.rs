@@ -3826,6 +3826,27 @@ impl Supervisor {
         // stop's completion - the definitive verdict once the process is
         // provably gone.
         if resident.descriptor.lock().await.stop_requested_at.is_some() {
+            // The registering process is the identity the stop must
+            // retire: the persisted descriptor still carries the stopped
+            // worker's stale pid, so observing the registrant's live
+            // identity first keeps the retire pass's escalation - and the
+            // descriptor's death - tied to the process that actually
+            // holds the session (TS `adoptOrRecoverWorker` persists the
+            // observed start id after its authenticated connect).
+            // Without this, a replacement registrant's stop would retire
+            // the stale pid, conclude the replacement was gone, and
+            // orphan the live worker as an unadoptable lease holder.
+            {
+                let mut descriptor = resident.descriptor.lock().await;
+                if descriptor.pid != registration.pid {
+                    descriptor.pid = registration.pid;
+                }
+                if let Some(start_id) = crate::lease::get_process_start_id(registration.pid as u32)
+                {
+                    descriptor.process_start_id = Some(start_id);
+                }
+                let _ = crate::descriptor::persist_worker(&resident.descriptor_path, &descriptor);
+            }
             self.finish_tombstoned_stop(&resident, true).await;
             return Err(anyhow!(
                 "session worker {} is stopping: the stop was forwarded; registration refused",
