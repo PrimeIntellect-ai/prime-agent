@@ -3661,8 +3661,7 @@ impl SessionUi {
                 if let Some(api_key) = api_key {
                     let auth = self.provider_auth.clone().expect("the selector was open");
                     let outcome = auth.0.login(&provider, Some(&api_key)).await;
-                    self.apply_auth_outcome(outcome, Some(&provider.id), view)
-                        .await;
+                    self.apply_auth_outcome(outcome, &provider.id, view).await;
                 } else {
                     let auth = self.provider_auth.clone().expect("the selector was open");
                     if provider.id.starts_with("mcp:")
@@ -3674,15 +3673,15 @@ impl SessionUi {
                         // error row is the whole flow (nothing drives
                         // the panel).
                         let outcome = auth.0.login(&provider, None).await;
-                        self.apply_auth_outcome(outcome, Some(&provider.id), view)
-                            .await;
+                        self.apply_auth_outcome(outcome, &provider.id, view).await;
                     }
                 }
             }
             AuthSelectorAction::Logout { provider } => {
                 view.provider_auth = None;
                 // A logout voids a parked sign-in for the same provider
-                // (the credential the retry needs is being removed).
+                // (the credential the retry needs is being removed), so
+                // the logout's own status row never reads as a sign-in.
                 if self
                     .pending_model_sign_in
                     .as_ref()
@@ -3692,7 +3691,7 @@ impl SessionUi {
                 }
                 let auth = self.provider_auth.clone().expect("the selector was open");
                 let outcome = auth.0.logout(&provider).await;
-                self.apply_auth_outcome(outcome, None, view).await;
+                self.apply_auth_outcome(outcome, &provider.id, view).await;
             }
         }
         self.dirty = true;
@@ -3755,15 +3754,14 @@ impl SessionUi {
     async fn apply_auth_outcome(
         &mut self,
         outcome: crate::provider_auth::ProviderAuthOutcome,
-        provider: Option<&str>,
+        provider: &str,
         view: &mut AgentView,
     ) {
-        let parked = provider.and_then(|provider| {
-            self.pending_model_sign_in
-                .as_ref()
-                .filter(|pending| pending.provider == provider)
-                .cloned()
-        });
+        let parked = self
+            .pending_model_sign_in
+            .as_ref()
+            .filter(|pending| pending.provider == provider)
+            .cloned();
         match outcome {
             crate::provider_auth::ProviderAuthOutcome::Status(message) => {
                 self.note(&message, view);
@@ -3843,8 +3841,7 @@ impl SessionUi {
             }
             AuthPanelRequest::ProviderSettled { provider, outcome } => {
                 view.auth_panel = None;
-                self.apply_auth_outcome(outcome, Some(&provider), view)
-                    .await;
+                self.apply_auth_outcome(outcome, &provider, view).await;
             }
             AuthPanelRequest::McpSettled { note } => {
                 view.auth_panel = None;
