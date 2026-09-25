@@ -220,7 +220,7 @@ enum TracesLoginIntent {
 #[derive(Debug)]
 enum SetModelOutcome {
     Switched,
-    NeedsSignIn { provider: String },
+    NeedsSignIn,
     Failed,
 }
 
@@ -6006,7 +6006,7 @@ impl SessionUi {
                     // provider is not signed in — the selection routes to
                     // the provider's sign-in flow and applies after the
                     // login lands.
-                    SetModelOutcome::NeedsSignIn { .. } => {
+                    SetModelOutcome::NeedsSignIn => {
                         self.begin_model_sign_in(&applied, view).await;
                     }
                     SetModelOutcome::Failed => {}
@@ -7143,10 +7143,8 @@ impl SessionUi {
                 SetModelOutcome::Switched
             }
             Err(error) => {
-                if let Some(provider) =
-                    crate::daemon_client::rejected_provider_unauthenticated(&error)
-                {
-                    return SetModelOutcome::NeedsSignIn { provider };
+                if crate::daemon_client::rejected_provider_unauthenticated(&error).is_some() {
+                    return SetModelOutcome::NeedsSignIn;
                 }
                 // TS `showError`: the ⚠ Error row with the error tone.
                 view.push_entry(ChatEntry::Status {
@@ -7223,7 +7221,7 @@ impl SessionUi {
             // The login succeeded but the provider still refuses the
             // switch: TS's post-login re-check message (never a second
             // sign-in route).
-            SetModelOutcome::NeedsSignIn { .. } => {
+            SetModelOutcome::NeedsSignIn => {
                 self.error_row(
                     &format!("Authentication completed, but {provider} is still unavailable."),
                     view,

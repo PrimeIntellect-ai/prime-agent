@@ -463,14 +463,15 @@ mod tests {
     fn resolution_classifies_the_sign_in_refusal() {
         let dir = tempfile::tempdir().expect("tempdir");
         models_fixture(dir.path());
+        let agent_dir = dir.path().join("agent");
         // The signed-in provider keeps resolving (the regression guard).
-        let model = resolve_available_model(dir.path(), "prime-inference", "mock-1")
+        let model = resolve_available_model(&agent_dir, "prime-inference", "mock-1")
             .expect("the signed-in provider resolves");
         assert_eq!(model.id, "mock-1");
 
         // A built-in provider without a credential: the typed refusal.
         let (provider, model_id) = first_built_in_anthropic_model();
-        let error = resolve_available_model(dir.path(), &provider, &model_id)
+        let error = resolve_available_model(&agent_dir, &provider, &model_id)
             .expect_err("an unsigned provider refuses with the sign-in class");
         assert_eq!(
             error,

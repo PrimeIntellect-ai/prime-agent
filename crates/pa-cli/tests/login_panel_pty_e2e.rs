@@ -295,8 +295,11 @@ impl ProviderAuthCommands for ScriptedModelPickerAuth {
         api_key: Option<&str>,
     ) -> Pin<Box<dyn std::future::Future<Output = ProviderAuthOutcome> + Send>> {
         let name = provider.name.clone();
+        // Own the borrowed key before the boxed future (the trait's
+        // future has no lifetime).
+        let api_key = api_key.map(str::to_string);
         Box::pin(async move {
-            if api_key.is_some_and(|key| !key.is_empty()) {
+            if api_key.as_deref().is_some_and(|key| !key.is_empty()) {
                 ProviderAuthOutcome::Status(format!("Saved API key for {name}."))
             } else {
                 ProviderAuthOutcome::Error(format!(
