@@ -561,8 +561,7 @@ fn block_rows_read_like_the_grammar() {
     );
     assert!(
         !text.iter().any(|row| row.contains("expand")),
-        "no drill-in hint rides the block: {:?}",
-        text
+        "no drill-in hint rides the block: {text:?}"
     );
 }
 

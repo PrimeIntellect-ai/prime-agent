@@ -531,7 +531,7 @@ fn an_assistant_crossing_the_glue_boundary_matches_the_full_rebuild() {
         }
     }
     let assert_two_blocks = |view: &AgentView| {
-        let runs = condensed_runs(&view);
+        let runs = condensed_runs(view);
         assert_eq!(runs.len(), 2, "two blocks around the visible assistant");
         assert_eq!(runs[0].calls, 5);
         assert_eq!(runs[1].calls, 5);
