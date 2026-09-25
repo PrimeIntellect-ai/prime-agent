@@ -175,7 +175,7 @@ Every theme must define the color tokens below except `mdBody`, which defaults t
 | `selectedBg` | Selected line background |
 | `userMessageBg` | User message background |
 | `userMessageText` | User message text |
-| `customMessageBg` | Extension message background |
+| `customMessageBg` | Background for extension-rendered message cards (not used by built-in messages) |
 | `customMessageText` | Extension message text |
 | `customMessageLabel` | Extension message label |
 | `toolPendingBg` | Tool box (pending) |

@@ -1,14 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import {
-	Clickable,
-	Container,
-	Markdown,
-	type MarkdownTheme,
-	Spacer,
-	Text,
-	truncateToWidth,
-	visibleWidth,
-} from "@earendil-works/pi-tui";
+import { Markdown, type MarkdownTheme, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { GOAL_CONTEXT_CUSTOM_TYPE, type GoalContextDetails } from "../../../core/goals.js";
 import {
 	ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
@@ -26,8 +17,7 @@ import {
 	type RlmChildTerminalNoticeDetails,
 } from "../../../core/messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
-import { expandCollapseHint } from "./keybinding-hints.js";
-import { ShellCompletionComponent } from "./shell-completion.js";
+import { type EventView, ExpandableEventMessage } from "./expandable-event-message.js";
 
 type InjectedPromptDetails =
 	| AsyncBashCompletionDetails
@@ -89,52 +79,25 @@ function heartbeatPromptSchedule(schedule: string | undefined): string {
 	return compact === "prompt" ? "scheduled" : `every ${compact}`;
 }
 
-export class InjectedPromptMessageComponent extends Container {
-	private readonly content = new Container();
-	private readonly header = new Text("", 1, 0);
-	private expanded = false;
-
+export class InjectedPromptMessageComponent extends ExpandableEventMessage {
 	constructor(
 		private readonly message: InjectedPromptMessage,
 		private readonly markdownTheme: MarkdownTheme = getMarkdownTheme(),
 	) {
-		super();
-		if (this.message.customType !== ASYNC_BASH_COMPLETION_CUSTOM_TYPE) this.addChild(new Spacer(1));
-		this.addChild(this.content);
+		super(true);
 		this.updateDisplay();
 	}
 
-	setExpanded(expanded: boolean): void {
-		if (this.expanded === expanded) {
-			return;
-		}
-		this.expanded = expanded;
-		this.updateDisplay();
-	}
-
-	override invalidate(): void {
-		super.invalidate();
-		this.updateDisplay();
-	}
-
-	private updateDisplay(): void {
-		this.content.clear();
-		if (this.message.customType === ASYNC_BASH_COMPLETION_CUSTOM_TYPE) {
-			const shell = new ShellCompletionComponent(this.message);
-			shell.setExpanded(this.expanded);
-			this.content.addChild(shell);
-			return;
-		}
-		this.header.setText(this.headerText());
-		this.content.addChild(new Clickable(this.header, () => this.setExpanded(!this.expanded)));
-		if (this.expanded && this.message.customType !== IPYTHON_STATE_RESTORED_CUSTOM_TYPE) {
-			this.content.addChild(
-				new Markdown(readCustomText(this.message), 1, 0, this.markdownTheme, {
-					color: (text: string) => theme.fg("customMessageText", text),
-				}),
-			);
-			return;
-		}
+	protected override view(): EventView {
+		const showBody = this.expanded && this.message.customType !== IPYTHON_STATE_RESTORED_CUSTOM_TYPE;
+		return {
+			header: this.headerText(),
+			body: showBody
+				? new Markdown(readCustomText(this.message), 0, 0, this.markdownTheme, {
+						color: (text: string) => theme.fg("customMessageText", text),
+					})
+				: undefined,
+		};
 	}
 
 	private headerText(): string {
@@ -151,30 +114,25 @@ export class InjectedPromptMessageComponent extends Container {
 			const skills = details?.skills?.length
 				? ` · ${truncateToWidth(details.skills.join(", "), Math.max(20, 90 - "Python skills unavailable · ".length))}`
 				: "";
-			const hint = this.expanded ? "" : ` ${expandCollapseHint("app.tools.expand", false)}`;
-			return theme.fg("muted", "Python skills unavailable") + theme.fg("dim", skills + hint);
+			return theme.fg("muted", "Python skills unavailable") + theme.fg("dim", skills);
 		}
 		if (
 			this.message.customType === RLM_CHILD_FAILURE_CUSTOM_TYPE ||
 			this.message.customType === RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE
 		) {
-			const hint = this.expanded ? "" : ` ${expandCollapseHint("app.tools.expand", false)}`;
-			return theme.fg("muted", "RLM child status") + theme.fg("dim", hint);
+			return theme.fg("muted", "RLM child status");
 		}
 
 		const details = this.message.details;
 		const title = goalLabel(details as GoalContextDetails | undefined);
-		const meta = this.metaText();
-		const hint = this.expanded ? "" : ` ${expandCollapseHint("app.tools.expand", false)}`;
-		return theme.fg("muted", title) + meta + theme.fg("dim", hint);
+		return theme.fg("muted", title) + this.metaText();
 	}
 
 	private heartbeatHeaderText(): string {
 		const details = this.message.details as HeartbeatPromptDetails | undefined;
 		const pulse = theme.fg("error", "♥");
 		const schedule = theme.fg("muted", heartbeatPromptSchedule(details?.schedule));
-		const hint = this.expanded ? "" : ` ${expandCollapseHint("app.tools.expand", false)}`;
-		return `${pulse} ${theme.fg("muted", "Heartbeat prompt")}${theme.fg("dim", " · ")}${schedule}${theme.fg("dim", hint)}`;
+		return `${pulse} ${theme.fg("muted", "Heartbeat prompt")}${theme.fg("dim", " · ")}${schedule}`;
 	}
 
 	private metaText(): string {

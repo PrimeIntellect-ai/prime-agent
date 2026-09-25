@@ -105,7 +105,11 @@ describe("compact compaction messages", () => {
 			append(reopened);
 			expect(live.chatContainer.render(80)).toEqual(reopened.chatContainer.render(80));
 			const lines = live.chatContainer.render(80).map((line: string) => stripAnsi(line).trimEnd());
-			expect(lines.slice(0, 3)).toEqual([" Before compaction", "", " ◆ Context compacted"]);
+			expect(lines.slice(0, 3)).toEqual([
+				" Before compaction",
+				"",
+				` ◆ Context compacted${expanded ? " · Compacted from 100 tokens" : ""}`,
+			]);
 			expect(lines.at(-1)).not.toBe("");
 			expect(lines.join("\n").includes("Compacted from")).toBe(expanded);
 			expect(lines.join("\n")).toContain("Retained the next task.");

@@ -222,7 +222,7 @@ describe("McpConnectionOutcomeMessageComponent", () => {
 		);
 	});
 
-	test("a disconnect expands to its own metadata line and survives transcript replay", () => {
+	test("a disconnect expands with its metadata on the header row and survives transcript replay", () => {
 		const details = { kind: "disconnect", label: "Granola", removal: "removed", connectionId: "granola" } as const;
 		const component = outcomeComponent(details);
 		component.setExpanded(true);

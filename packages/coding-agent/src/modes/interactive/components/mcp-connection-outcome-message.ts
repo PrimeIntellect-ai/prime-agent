@@ -1,12 +1,12 @@
-import { Spacer, Text } from "@earendil-works/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import {
 	isMcpDisconnectionOutcome,
 	type McpConnectionOutcomeMessage,
 	type McpDisconnectionOutcomeDetails,
 	type McpOutcomeDetails,
 } from "../../../core/messages.js";
-import { theme } from "../theme/theme.js";
-import { ExpandableEventMessage } from "./expandable-event-message.js";
+import { type ThemeColor, theme } from "../theme/theme.js";
+import { type EventView, ExpandableEventMessage } from "./expandable-event-message.js";
 
 function outcomeHeader(details: McpOutcomeDetails): string {
 	if (isMcpDisconnectionOutcome(details)) return `Disconnected ${details.label}`;
@@ -90,47 +90,43 @@ function disconnectionOrigin(details: McpDisconnectionOutcomeDetails): string {
 
 /**
  * Durable MCP connect/disconnect outcome: the header states the outcome, the
- * body adds only what the header omits, and the metadata line is the toggle.
+ * body adds only what the header omits, and the header row carries the metadata.
  * Disconnects use the muted key rather than the connect purple (a disconnect
  * is no refinement) or the error red (it succeeded) — the same grey /plugins
  * already uses for "Not connected".
  */
 export class McpConnectionOutcomeMessageComponent extends ExpandableEventMessage {
 	constructor(private readonly message: McpConnectionOutcomeMessage) {
-		super();
+		super(true);
 		this.updateDisplay();
 	}
 
-	protected updateDisplay(): void {
+	protected override view(): EventView {
 		const { details } = this.message;
 		// The diamond colour follows the outcome: purple is success
 		// (connected); anything needing attention — a rejected token, an
 		// unfinished verification, a disconnect — is warning orange.
-		const headerColor =
-			isMcpDisconnectionOutcome(details) || details.verification !== "connected" ? "warning" : "refinementHeader";
-		this.clear();
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg(headerColor, `◆ ${outcomeHeader(details)}`), 1, 0));
+		const attention = isMcpDisconnectionOutcome(details) || details.verification !== "connected";
+		const header = theme.fg(attention ? "warning" : "refinementHeader", `◆ ${outcomeHeader(details)}`);
 		const body = outcomeBody(details);
 		// The purple summary is the success tone; non-success outcomes dim.
-		const bodyTone =
-			isMcpDisconnectionOutcome(details) || details.verification !== "connected" ? "dim" : "refinementSummary";
-		if (body) this.addSummary(body, undefined, bodyTone);
-		if (this.expanded) {
-			this.addChild(new Text(theme.fg("dim", outcomeMetadata(details)), 1, 0));
-		}
+		const bodyTone: ThemeColor = attention ? "dim" : "refinementSummary";
+		if (!this.expanded) return { header, preview: body ? { text: body, color: bodyTone } : undefined };
+		return {
+			header,
+			metadata: outcomeMetadata(details),
+			body: body ? new Text(theme.fg(bodyTone, body), 0, 0) : undefined,
+		};
 	}
 }
 
 export class MalformedMcpConnectionOutcomeMessageComponent extends ExpandableEventMessage {
 	constructor() {
-		super();
+		super(true);
 		this.updateDisplay();
 	}
 
-	protected updateDisplay(): void {
-		this.clear();
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("error", "[Malformed MCP connection outcome message]"), 1, 0));
+	protected override view(): EventView {
+		return { header: theme.fg("error", "[Malformed MCP connection outcome message]") };
 	}
 }

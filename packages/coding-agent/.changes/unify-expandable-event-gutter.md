@@ -1,0 +1,1 @@
+- Changed expanded compaction, branch summary, skill, harness refinement, MCP connection, goal and heartbeat prompt, background shell completion, and extension messages to show their details under the same ╰─ gutter as tool calls and agent messages; skill, branch summary, and extension messages no longer use a background box.

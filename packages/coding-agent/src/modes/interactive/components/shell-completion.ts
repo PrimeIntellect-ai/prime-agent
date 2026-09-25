@@ -6,6 +6,7 @@ import {
 	type CustomMessage,
 } from "../../../core/messages.js";
 import { theme } from "../theme/theme.js";
+import { guttered } from "./expandable-event-message.js";
 
 export interface ShellCompletion {
 	details: AsyncBashCompletionDetails;
@@ -153,7 +154,7 @@ export class ShellCompletionComponent implements Component {
 			: typeof this.message.content === "string"
 				? this.message.content
 				: JSON.stringify(this.message.content);
-		const lines = [header, ...new Text(raw, 1, 0).render(width)];
+		const lines = [header, ...guttered(width, (bodyWidth) => new Text(raw, 0, 0).render(bodyWidth))];
 		return leadingSpace ? ["", ...lines] : lines;
 	}
 }
