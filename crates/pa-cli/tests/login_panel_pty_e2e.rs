@@ -282,6 +282,10 @@ impl ProviderAuthCommands for ScriptedModelPickerAuth {
             auth_type: AuthType::ApiKey,
             status: None,
             flow: AuthFlow::ApiKeyPrompt,
+            // The lane's menu-rule field: a working API-key login row is
+            // available (Enter routes the picked model's sign-in through
+            // it; an unavailable row renders dimmed and inert).
+            available: true,
         };
         Box::pin(async move { vec![row] })
     }
