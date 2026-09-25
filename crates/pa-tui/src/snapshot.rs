@@ -447,8 +447,8 @@ fn model_id_value(model: &Value) -> Option<String> {
 ///
 /// Returns `Err` when the payload does not decode into `AttachData`
 /// (an unrecognizable daemon attach result).
-pub fn attach_data_from_response(data: &Value) -> anyhow::Result<AttachData> {
-    serde_json::from_value(data.clone()).map_err(|error| {
+pub fn attach_data_from_response(data: Value) -> anyhow::Result<AttachData> {
+    serde_json::from_value(data).map_err(|error| {
         anyhow::anyhow!("the daemon returned an unrecognizable attach result: {error}")
     })
 }
@@ -2030,7 +2030,7 @@ mod tests {
 
     #[test]
     fn reconstructs_slim_attach() {
-        let data = attach_data_from_response(&slim_attach()).unwrap();
+        let data = attach_data_from_response(slim_attach()).unwrap();
         assert_eq!(data.active_session_id, "abc123def456");
         let view = reconstruct(&data);
         assert_eq!(view.chat.len(), 2);
@@ -2050,7 +2050,7 @@ mod tests {
             "steering": ["turn right"],
             "followUps": ["then summarize"],
         });
-        let data = attach_data_from_response(&attach).unwrap();
+        let data = attach_data_from_response(attach).unwrap();
         let view = reconstruct(&data);
         assert_eq!(
             view.queued,
@@ -2079,7 +2079,7 @@ mod tests {
                 "label": "queued before compaction",
             },
         });
-        let data = attach_data_from_response(&attach).unwrap();
+        let data = attach_data_from_response(attach).unwrap();
         let view = reconstruct(&data);
         assert_eq!(
             view.queued.starting,
@@ -3137,7 +3137,7 @@ mod tests {
             },
             "lastEventSequence": 3
         });
-        let data = attach_data_from_response(&attach).unwrap();
+        let data = attach_data_from_response(attach).unwrap();
         let reconstructed = reconstruct(&data);
         let goal = reconstructed.goal.expect("snapshot goal");
         assert_eq!(goal.status, pa_types::goal::GoalStatus::Active);

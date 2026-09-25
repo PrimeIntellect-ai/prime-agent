@@ -837,6 +837,10 @@ impl AgentSessionEngine {
                 built.session.rebuild_branch_context(entries).await?;
             }
         }
+        // The window walk and the retained-context replay allocated
+        // transient entry trees several times the retained size; both are
+        // consumed here, so release their freed heap to the OS.
+        pa_core::memory_release::trim_freed_heap();
         Ok(())
     }
 

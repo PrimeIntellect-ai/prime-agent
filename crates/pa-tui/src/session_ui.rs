@@ -974,7 +974,7 @@ impl SessionUi {
             }
         };
         let data = attached;
-        let attach = attach_data_from_response(&data)?;
+        let attach = attach_data_from_response(data)?;
         // The bash slot follows the attached session's live state (TS
         // `applyConnectionStateSnapshot` patches `isBashRunning`): the
         // captured state drives the next rebuild's resync edge. The
@@ -1079,6 +1079,11 @@ impl SessionUi {
         // images into the paste registry.
         let stash_session_id = self.session_id.clone();
         self.bind_prompt_stash_session(&stash_session_id);
+        // The attach fold held the wire frame, its decoded tree, and the
+        // folded transcript together; the frame and tree drop here, so
+        // return their freed heap to the OS instead of keeping the load's
+        // peak resident for the TUI's lifetime.
+        crate::memory_release::trim_freed_heap();
         Ok(())
     }
 

@@ -681,6 +681,18 @@ impl WindowedSessionStore {
             reads,
         }))
     }
+    /// Move the retained raw JSONL rows out (the daemon's `SessionFile`
+    /// build consumes them once; holding both the raw lines and the parsed
+    /// store doubles the load's resident peak).
+    pub fn take_raw_entries(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.raw_entries)
+    }
+
+    /// Move the retained metadata rows out (same single-consumer contract).
+    pub fn take_metadata_entries(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.metadata_entries)
+    }
+
     pub fn has_non_bootstrap_entries(&self) -> bool {
         self.snapshot.non_bootstrap
     }

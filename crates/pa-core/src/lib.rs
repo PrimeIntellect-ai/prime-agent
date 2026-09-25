@@ -48,6 +48,7 @@ pub mod extensions;
 pub mod goals;
 pub mod kernel;
 pub mod mcp;
+pub mod memory_release;
 pub mod models;
 pub mod packages;
 pub mod platform;

@@ -1798,6 +1798,11 @@ impl Worker {
         if let Err(error) = self.write_frame(&sink.writer, &header, &payload).await {
             eprintln!("pa-daemon worker response write failed: {error:#}");
         }
+        // A large frame (an attach snapshot, a full-history tree) carried
+        // big transient Value trees; the frame is out, so return their
+        // freed heap to the OS instead of letting the arenas hold the
+        // phase's peak for the process lifetime.
+        pa_core::memory_release::trim_freed_heap_if_large(payload.len());
     }
 
     pub(crate) async fn dispatch(&self, command_type: &str, payload: &Value) -> DaemonResponse {
@@ -1846,6 +1851,9 @@ impl Worker {
                     return response_failure(None, command_type, &error.to_string(), None);
                 }
             }
+            // The hydrated full file was a transient whole-file copy on
+            // top of the installed history: release its freed heap.
+            pa_core::memory_release::trim_freed_heap();
         }
         match command_type {
             "create" => self.handle_create(payload).await,
@@ -2624,6 +2632,11 @@ impl Worker {
             data["interruptedCompactionPersisted"] =
                 serde_json::json!(interrupted_compaction_persisted);
         }
+        // A resumed create just rebuilt the store from the session file:
+        // its load copies (window walks, parsed entry trees) are dropped
+        // by now — return that freed heap to the OS so the load's peak
+        // does not stay resident.
+        pa_core::memory_release::trim_freed_heap();
         response_success(None, "create", Some(data))
     }
 
@@ -2734,16 +2747,20 @@ impl Worker {
         let cursor = json!({ "generation": generation, "sequence": last_event_sequence });
         let summary_value = serde_json::to_value(&summary).unwrap_or(Value::Null);
         let state_value = serde_json::to_value(&state).unwrap_or(Value::Null);
-        let snapshot = json!({
+        // The messages move into the snapshot once: the old `json!` build
+        // deep-copied them here and moved the original into the non-slim
+        // top level, holding two message trees per attach.
+        let mut snapshot = json!({
             "activeSessionId": active_session_id,
             "summary": summary_value,
             "state": state_value,
-            "messages": messages,
+            "messages": Value::Null,
             "lastEventSequence": last_event_sequence,
             "lastEventCursor": cursor,
             // RLM child roster; empty for top-level daemon sessions.
             "children": [],
         });
+        snapshot["messages"] = Value::Array(messages);
         // Slim clients read summary/messages from the snapshot; duplicating
         // them at the top level would serialize the history twice per attach
         // (port of `createAttachResult`).
@@ -2759,7 +2776,10 @@ impl Worker {
         });
         if !slim {
             result["state"] = summary_value;
-            result["messages"] = Value::Array(messages);
+            // The non-slim top-level duplication (same wire bytes as
+            // before): one message tree lives in the snapshot, the
+            // duplicate is cloned out of it.
+            result["messages"] = snapshot["messages"].clone();
         }
         result["snapshot"] = snapshot;
         result["replay"] = json!(replay);
