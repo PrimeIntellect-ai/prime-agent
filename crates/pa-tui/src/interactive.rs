@@ -70,7 +70,8 @@ pub struct ModelSelection {
 }
 
 /// Adoption telemetry for interactive-view interactions (schema v1 events
-/// `tui scroll used`, `tui selection used`, and `tui exit`). pa-tui stays
+/// `tui scroll used`, `tui selection used`, `tui click used`, and
+/// `tui exit`). pa-tui stays
 /// pa-types-only, so the
 /// composition root implements this against the telemetry client.
 /// The seam is object-safe (held as `Arc<dyn InteractionTelemetry>` in the
@@ -87,6 +88,10 @@ pub trait InteractionTelemetry: Send + Sync {
     /// The run's first selection copy (`tui selection used`): `lines` is
     /// the copied text's line count.
     fn selection_used(&self, lines: usize) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
+    /// The run's first clean-click dispatch (`tui click used`): `action`
+    /// is the dispatched surface class (`open_link` / `toggle_entry` /
+    /// `toggle_side_bash` / `editor_cursor`).
+    fn click_used(&self, action: &'static str) -> Pin<Box<dyn Future<Output = ()> + Send + '_>>;
     /// A builtin client command was submitted (`agent command used`):
     /// `command` is the canonical name (`model`, `effort`, ...). Session
     /// commands report through the session telemetry instead.

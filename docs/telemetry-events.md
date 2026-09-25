@@ -276,6 +276,16 @@ client run (adoption; later copies in the same run are not reported).
 |---|---|---|
 | `lines` | number | the copied text's line count |
 
+### `tui click used`
+
+The interactive transcript viewport's first clean left press/release dispatch
+on a fullscreen click surface per client run (adoption; later clicks in the
+same run are not reported). Touch taps ride the same pairs.
+
+| property | type | notes |
+|---|---|---|
+| `action` | string | `open_link` (a rendered OSC 8 link opened) / `toggle_entry` (an entry's header/summary row flipped its own expansion) / `toggle_side_bash` (the side-question pane's bash header) / `editor_cursor` (the dock editor's content rows placed the caret) |
+
 ### `tui enhanced keys`
 
 The terminal enhanced-key modes settled for an interactive run (adoption:

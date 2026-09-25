@@ -572,6 +572,8 @@ pub(crate) struct SessionUi {
     selection_auto_scroll: Option<SelectionAutoScroll>,
     /// Whether this run already reported its first selection copy.
     selection_adoption_emitted: bool,
+    /// Whether this run already reported its first click dispatch.
+    click_adoption_emitted: bool,
     /// Texts copied out by finished selections this run (headless runs
     /// have no terminal to write OSC 52 to; the verifier reads these).
     pub(crate) copies: Vec<String>,
@@ -790,6 +792,7 @@ impl SessionUi {
             suspend_adoption_emitted: false,
             selection_auto_scroll: None,
             selection_adoption_emitted: false,
+            click_adoption_emitted: false,
             opened_urls: Vec::new(),
             fullscreen_left_dragged: false,
             fullscreen_pressed_hyperlink: None,
@@ -6100,6 +6103,7 @@ impl SessionUi {
             .or_else(|| view.frame_link_at(row, col));
         if let Some(url) = url {
             self.open_link(&url);
+            self.track_click("open_link");
             self.dirty = true;
             return;
         }
@@ -6120,6 +6124,11 @@ impl SessionUi {
                 view.place_editor_cursor_from_click(row - pressed.anchor, col - pressed.col);
             }
         }
+        self.track_click(match pressed.action {
+            crate::click_regions::ClickAction::ToggleEntry { .. } => "toggle_entry",
+            crate::click_regions::ClickAction::ToggleSidePaneBash => "toggle_side_bash",
+            crate::click_regions::ClickAction::EditorCursor => "editor_cursor",
+        });
         self.dirty = true;
     }
 
@@ -7437,6 +7446,21 @@ impl SessionUi {
         if let Some(telemetry) = self.telemetry.clone() {
             tokio::spawn(async move {
                 telemetry.selection_used(lines).await;
+            });
+        }
+    }
+
+    /// Report the run's first clean-click dispatch (`tui click used`),
+    /// fire-and-forget like the selection event: the release never waits
+    /// on the telemetry flush. `action` is the dispatched surface class.
+    fn track_click(&mut self, action: &'static str) {
+        if self.click_adoption_emitted {
+            return;
+        }
+        self.click_adoption_emitted = true;
+        if let Some(telemetry) = self.telemetry.clone() {
+            tokio::spawn(async move {
+                telemetry.click_used(action).await;
             });
         }
     }
