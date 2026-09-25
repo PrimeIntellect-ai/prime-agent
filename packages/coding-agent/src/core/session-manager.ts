@@ -21,7 +21,7 @@ import { v7 as uuidv7 } from "uuid";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
 import { realpathIfPresentSync, writeFileAtomicSync } from "../utils/atomic-file.js";
 import { readBytesSync, readFirstLineSync, readLinesAsBuffers } from "../utils/file-lines.js";
-import { captureGitContext, type GitContext, gitContextsEqual } from "../utils/git.js";
+import { captureGitContext, captureGitContextAsync, type GitContext, gitContextsEqual } from "../utils/git.js";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -1158,6 +1158,37 @@ function isMessageWithContent(message: AgentMessage): message is Message {
 	return typeof (message as Message).role === "string" && "content" in message;
 }
 
+// Repo changes that leave no entry are only observed at the next capture.
+function entryMayHaveRunTool(entry: SessionEntry): boolean {
+	switch (entry.type) {
+		case "child_usage_attributed":
+		case "custom":
+		case "custom_message":
+			return true;
+		case "message":
+			break;
+		default:
+			return false;
+	}
+	const message = entry.message;
+	switch (message.role) {
+		case "assistant":
+			return message.content.some((item) => item.type === "toolCall");
+		case "toolResult":
+			return true;
+		case "user":
+			return false;
+		default:
+			// Custom roles (!bash, extension messages) are app code; conservatively assume they may have touched the repo.
+			return true;
+	}
+}
+
+function gitContextOptionallyEqual(a: GitContext | undefined, b: GitContext | undefined): boolean {
+	if (a === undefined || b === undefined) return a === b;
+	return gitContextsEqual(a, b);
+}
+
 function extractTextContent(message: Message): string {
 	const content = message.content;
 	if (typeof content === "string") {
@@ -1761,6 +1792,10 @@ export class SessionManager {
 	// and must not hold it across an append.
 	private leafBranchCache: { leafId: string | null; entries: SessionEntry[] } | null = null;
 	private persistListeners = new Set<SessionPersistListener>();
+	private gitCaptureChain: Promise<void> = Promise.resolve();
+	private toolsRanSinceGitCapture = false;
+	private lastGitCapture: GitContext | null | undefined = undefined;
+	private gitCaptureActiveContext: GitContext | undefined = undefined;
 
 	private constructor(
 		cwd: string,
@@ -2057,6 +2092,9 @@ export class SessionManager {
 		if (entry.type === "message" && entry.message.role === "assistant") {
 			this.hasAssistantEntry = true;
 		}
+		if (entryMayHaveRunTool(entry)) {
+			this.toolsRanSinceGitCapture = true;
+		}
 		this.byId.set(entry.id, entry);
 		this.leafId = entry.id;
 		this._persist(entry);
@@ -2290,13 +2328,38 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	recordGitStateIfChanged(): string | undefined {
-		if (!this.persist) return undefined;
-		const git = captureGitContext(this.cwd);
-		if (!git) return undefined;
-		const last = this.getActiveGitContext();
-		if (last && gitContextsEqual(last, git)) return undefined;
-		return this.appendGitState(git);
+	// Skipped while no agent-side code (entryMayHaveRunTool) has run and the
+	// active path still holds the last capture: without a tool, the repo cannot have moved.
+	recordGitStateIfChanged(): Promise<string | undefined> {
+		if (!this.persist) return Promise.resolve(undefined);
+		const run = this.gitCaptureChain.then(() => this.recordGitStateUncached());
+		this.gitCaptureChain = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
+	}
+
+	private async recordGitStateUncached(): Promise<string | undefined> {
+		if (
+			this.lastGitCapture !== undefined &&
+			!this.toolsRanSinceGitCapture &&
+			gitContextOptionallyEqual(this.gitCaptureActiveContext, this.getActiveGitContext())
+		) {
+			return undefined;
+		}
+		// Tool activity landing while this capture runs must still invalidate the next skip check.
+		this.toolsRanSinceGitCapture = false;
+		try {
+			const git = await captureGitContextAsync(this.cwd);
+			this.lastGitCapture = git;
+			if (!git) return undefined;
+			const last = this.getActiveGitContext();
+			if (last && gitContextsEqual(last, git)) return undefined;
+			return this.appendGitState(git);
+		} finally {
+			this.gitCaptureActiveContext = this.getActiveGitContext();
+		}
 	}
 
 	private getActiveGitContext(): GitContext | undefined {

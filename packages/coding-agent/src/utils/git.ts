@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import hostedGitInfo from "hosted-git-info";
-import { spawnSyncHidden } from "./child-process.js";
+import { execFileHidden, spawnSyncHidden } from "./child-process.js";
 
 /**
  * Parsed git URL information.
@@ -258,15 +258,89 @@ function runGit(cwd: string, args: string[]): string | null {
 	return result.stdout.trim() || null;
 }
 
-export function captureGitContext(cwd: string): GitContext | null {
-	const commit = runGit(cwd, ["rev-parse", "HEAD"]);
-	const branch = runGit(cwd, ["branch", "--show-current"]);
-	const remote = runGit(cwd, ["remote", "get-url", "origin"]);
-	if (!commit && !branch && !remote) return null;
+function runGitAsync(cwd: string, args: string[]): Promise<string | null> {
+	return new Promise((resolvePromise) => {
+		execFileHidden("git", ["--no-optional-locks", ...args], { cwd, encoding: "utf8" }, (error, stdout) => {
+			if (error || !stdout.trim()) {
+				resolvePromise(null);
+				return;
+			}
+			resolvePromise(stdout.trim());
+		});
+	});
+}
 
+// Repo URL per cwd, cached for the process lifetime: remotes rarely change while a process runs.
+const repoUrlByCwd = new Map<string, string | null>();
+const repoUrlInFlightByCwd = new Map<string, Promise<string | null>>();
+
+function repoUrlFromRemote(remote: string | null): string | null {
+	if (!remote) return null;
+	return parseGitUrl(remote)?.repo ?? remote;
+}
+
+function resolveRepoUrl(cwd: string): string | null {
+	const cached = repoUrlByCwd.get(cwd);
+	if (cached !== undefined) return cached;
+	const repo = repoUrlFromRemote(runGit(cwd, ["remote", "get-url", "origin"]));
+	repoUrlByCwd.set(cwd, repo);
+	return repo;
+}
+
+async function resolveRepoUrlAsync(cwd: string): Promise<string | null> {
+	const cached = repoUrlByCwd.get(cwd);
+	if (cached !== undefined) return cached;
+	const inFlight = repoUrlInFlightByCwd.get(cwd);
+	if (inFlight) return inFlight;
+	const pending = runGitAsync(cwd, ["remote", "get-url", "origin"]).then((remote) => {
+		const repo = repoUrlFromRemote(remote);
+		repoUrlByCwd.set(cwd, repo);
+		repoUrlInFlightByCwd.delete(cwd);
+		return repo;
+	});
+	repoUrlInFlightByCwd.set(cwd, pending);
+	return pending;
+}
+
+// Branch from the HEAD file, mirroring `git branch --show-current`: attached HEAD
+// yields the branch (incl. unborn); detached or dot-led ref names (invalid in git) yield undefined.
+function readBranchFromHead(paths: GitPaths): string | undefined {
+	try {
+		const content = readFileSync(paths.headPath, "utf8").trim();
+		if (!content.startsWith("ref: refs/heads/")) return undefined;
+		const branch = content.slice("ref: refs/heads/".length);
+		if (!branch || branch.startsWith(".")) return undefined;
+		return branch;
+	} catch {
+		return undefined;
+	}
+}
+
+function buildGitContext(commit: string | null, branch: string | undefined, repoUrl: string | null): GitContext | null {
+	if (!commit && !branch && !repoUrl) return null;
 	const context: GitContext = {};
-	if (remote) context.repoUrl = parseGitUrl(remote)?.repo ?? remote;
+	if (repoUrl) context.repoUrl = repoUrl;
 	if (commit) context.commit = commit;
 	if (branch) context.branch = branch;
 	return context;
+}
+
+// Unlike a raw git invocation, this does not honor GIT_DIR-style env overrides or bare repositories.
+export function captureGitContext(cwd: string): GitContext | null {
+	const paths = findGitPaths(cwd);
+	if (!paths) return null;
+	const branch = readBranchFromHead(paths);
+	const commit = runGit(cwd, ["rev-parse", "HEAD"]);
+	return buildGitContext(commit, branch, resolveRepoUrl(cwd));
+}
+
+export async function captureGitContextAsync(cwd: string): Promise<GitContext | null> {
+	const paths = findGitPaths(cwd);
+	if (!paths) return null;
+	const commitPromise = runGitAsync(cwd, ["rev-parse", "HEAD"]);
+	const repoUrlPromise = resolveRepoUrlAsync(cwd);
+	const branch = readBranchFromHead(paths);
+	const commit = await commitPromise;
+	const repoUrl = await repoUrlPromise;
+	return buildGitContext(commit, branch, repoUrl);
 }
