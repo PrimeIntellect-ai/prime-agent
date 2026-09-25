@@ -1,6 +1,8 @@
 //! The inline panel frame of the `/model` picker: bordered search field,
-//! effort rows, scroll indicator, selection detail, key hint. Geometry is
-//! the TS `ModelSelectorComponent` inline path (menu-panel.ts primitives).
+//! effort rows, scroll indicator, selection detail, key hint, one blank
+//! line below the hint (the operator's 2026-09-24 spacing directive).
+//! Geometry is the TS `ModelSelectorComponent` inline path (menu-panel.ts
+//! primitives).
 
 use pa_types::ai::{Model, ModelThinkingLevel};
 
@@ -79,6 +81,11 @@ pub(super) fn render(
     }
 
     lines.push(hint_line(theme, width, kb));
+    // One blank line of spacing below the shortcuts (the operator's
+    // 2026-09-24 directive on the `/model` view: the hint is the
+    // frame's last content row, a single blank rides under it — never
+    // a rule).
+    lines.push(Vec::new());
     lines
 }
 
