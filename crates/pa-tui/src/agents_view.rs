@@ -991,13 +991,13 @@ impl AgentsViewMode {
     /// parentActiveSessionId, else the parent row's live session (the
     /// daemon scopes the child lookup by the parent's session — the
     /// child's own activeSessionId is never the target).
-    fn child_parent_session_key(&self, row: &AgentsViewRow) -> Option<&str> {
+    fn child_parent_session_key(&self, row: &AgentsViewRow) -> Option<String> {
         if let Some(parent_id) = row
             .summary
             .get("parentActiveSessionId")
             .and_then(Value::as_str)
         {
-            return Some(parent_id);
+            return Some(parent_id.to_string());
         }
         row.parent_identity
             .as_deref()
@@ -1008,6 +1008,7 @@ impl AgentsViewMode {
                     .get("activeSessionId")
                     .and_then(Value::as_str)
             })
+            .map(str::to_string)
     }
 
     /// The arm's session key: the session the execution itself targets —
@@ -1017,7 +1018,7 @@ impl AgentsViewMode {
     /// the session the first press confirmed.
     fn armed_session_key(&self, row: &AgentsViewRow) -> Option<String> {
         if row.kind == RowKind::Subagent || row.summary.get("rlmChildId").is_some() {
-            return self.child_parent_session_key(row).map(str::to_string);
+            return self.child_parent_session_key(row);
         }
         row.summary
             .get("activeSessionId")
@@ -1073,7 +1074,7 @@ impl AgentsViewMode {
             // scoped promoted child has no parent row in the list, so the
             // summary's own parentActiveSessionId carries the parent
             // session; the nested child walks its parent row.
-            let active_session_id = self.child_parent_session_key(row)?.to_string();
+            let active_session_id = self.child_parent_session_key(row)?;
             if self.delete_arm_word(row) {
                 return Some(DeleteAction::StopSubagent {
                     active_session_id,
@@ -3263,7 +3264,7 @@ mod tests {
         );
         assert_eq!(
             no_effect_summary(Some(&serde_json::json!({"queued": true}))),
-            "{"queued":true}"
+            r#"{"queued":true}"#
         );
         assert_eq!(no_effect_summary(None), "nothing changed");
     }
