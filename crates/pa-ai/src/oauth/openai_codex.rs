@@ -208,9 +208,10 @@ async fn wait_for_code(
         CallbackOutcome::Code(None) => {
             if manual_available {
                 match answer_or_cancelled(ui, manual_answer).await {
-                    Ok(None) => return Err(LOGIN_CANCELLED.to_string()),
                     Ok(Some(input)) => parse_paste(&input, state)?,
-                    Err(_) => return Err(LOGIN_CANCELLED.to_string()),
+                    // A cancelled paste answer and a cancelled wait both
+                    // end the login.
+                    Ok(None) | Err(_) => return Err(LOGIN_CANCELLED.to_string()),
                 }
             } else {
                 None
