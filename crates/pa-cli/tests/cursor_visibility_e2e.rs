@@ -368,8 +368,6 @@ impl PtyReader {
         while quiet < quiet_polls {
             let mut buffer = [0u8; 8192];
             match self.file.read(&mut buffer) {
-                // EOF and a transient read error both count as a quiet
-                // poll (the merged arms are the lint-swept form).
                 Ok(0) | Err(_) => quiet += 1,
                 Ok(n) => {
                     self.output.extend_from_slice(&buffer[..n]);
