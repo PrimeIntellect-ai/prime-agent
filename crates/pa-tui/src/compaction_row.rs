@@ -180,15 +180,29 @@ pub fn render_compaction_stream(
     for (offset, line) in wrapped[rows_to_paint].iter().enumerate() {
         let mut row: Line = Vec::new();
         if truncated && offset == 0 {
+            // The ellipsis marks the cut on the oldest kept row. Its two
+            // columns come out of that row's own content — the row is
+            // sliced to `content_width - 2` columns first — so the
+            // prefix never pushes the line past the width and
+            // `truncate_line` never clips the row's tail.
             row.push(Span::styled(
                 "\u{2026} ".to_string(),
                 theme.fg_style(ThemeColor::Dim),
             ));
+            row.extend(crate::width::slice_line_by_column(
+                &line
+                    .iter()
+                    .map(|span| Span::styled(span.content.clone(), body))
+                    .collect::<Line>(),
+                0,
+                content_width.saturating_sub(2),
+            ));
+        } else {
+            row.extend(
+                line.iter()
+                    .map(|span| Span::styled(span.content.clone(), body)),
+            );
         }
-        row.extend(
-            line.iter()
-                .map(|span| Span::styled(span.content.clone(), body)),
-        );
         painted.push(row);
     }
     crate::branch::branch_rows(painted, theme)
