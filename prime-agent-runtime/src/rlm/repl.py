@@ -939,10 +939,13 @@ def _revive_with_live_globals(
         if not changed:
             return memo.setdefault(id(value), value)
         rebuilt_partial = functools.partial(rebuilt, *args, **keywords)
-        # Attributes can hold __main__ callables with frozen globals; revive
-        # them like function attributes below.
+        # Memoize before the attribute walk: attributes can hold the partial
+        # itself (a self-cycle or mutual partials), and unlike the function
+        # branch below there is no outer memo entry yet. Once set, the
+        # not-changed fast path also returns the rebuilt one.
+        memo[id(value)] = rebuilt_partial
         rebuilt_partial.__dict__.update({key: revive(attr) for key, attr in value.__dict__.items()})
-        return memo.setdefault(id(value), rebuilt_partial)
+        return rebuilt_partial
     atoms = (int, float, str, bytes, bool, type(None))
     # dill loads __main__.__dict__ by reference, so a saved globals() IS the live ns: never walk it.
     if value is ns:
@@ -958,10 +961,22 @@ def _revive_with_live_globals(
                 if revived is not item:
                     value.discard(item)
                     value.add(revived)
-        else:
-            for key, item in enumerate(value) if isinstance(value, list) else value.items():
+        elif isinstance(value, list):
+            for key, item in enumerate(value):
                 revived = item if type(item) in atoms else revive(item)
                 if revived is not item:
+                    value[key] = revived
+        else:
+            # Keys can be __main__ callables too: revive them, or lookups
+            # through the dict keep observing frozen globals. The snapshot
+            # tolerates the delete+reinsert a rebuilt key needs.
+            for key, item in list(value.items()):
+                revived = item if type(item) in atoms else revive(item)
+                revived_key = key if type(key) in atoms else revive(key)
+                if revived_key is not key:
+                    del value[key]
+                    value[revived_key] = revived
+                elif revived is not item:
                     value[key] = revived
         return value
     if type(value) is tuple:

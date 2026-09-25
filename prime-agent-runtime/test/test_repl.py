@@ -802,6 +802,30 @@ class ReplTest(unittest.TestCase):
             "(2, 2)",
         )
 
+    def test_restore_self_referential_partial_survives_pr2471(self):
+        code = (
+            "import functools\nG = 1\ndef base():\n    return G\n"
+            "p = functools.partial(base)\np.self = p\nq = functools.partial(base)\nr = functools.partial(base)\nq.peer = r\nr.peer = q"
+        )
+        self._snapshot_restore("sp", code, self.enterContext(tempfile.TemporaryDirectory()))
+        # Cross-record identity is the documented per-record aliasing limit
+        # (each record unpickles independently); the cycle guarantees are:
+        # no RecursionError, the self-cycle identity within one record, and
+        # live globals through the revived peers.
+        events = self.repl.execute("sp4", "G = 2\n(p(), p.self is p, q.peer(), r.peer())")
+        self.assertEqual(one(events, "result")["text"], "(2, True, 2, 2)")
+
+    def test_restore_revives_function_dictionary_keys_pr2471(self):
+        code = "G = 1\ndef reader():\n    return G\ntable = {reader: 'v'}"
+        self._snapshot_restore("dk", code, self.enterContext(tempfile.TemporaryDirectory()))
+        # The revived key observes live globals and keeps the dict usable;
+        # identity with the separately-restored `reader` name is the
+        # documented per-record aliasing limit.
+        events = self.repl.execute(
+            "dk4", "G = 2\nk = next(iter(table))\n(k(), table[k])"
+        )
+        self.assertEqual(one(events, "result")["text"], "(2, 'v')")
+
     def test_restore_rebuilt_partial_revives_function_attributes_pr2471(self):
         code = (
             "import functools\nG = 1\ndef helper():\n    return G\ndef apply(fn):\n    return fn()\n"
