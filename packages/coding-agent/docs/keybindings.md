@@ -131,7 +131,7 @@ Models, Providers, and MCP Connections open as separate pickers. Use `escape` to
 | `app.message.moveEarlier` | `ctrl+alt+up` | Move the selected pending message one place earlier in its queue |
 | `app.message.moveLater` | `ctrl+alt+down` | Move the selected pending message one place later in its queue |
 
-Ctrl+O changes presentation only: the default hides thinking and collapses tools and diffs; the first press reveals thinking and file diffs; the second expands tool output and full agent-to-agent message bodies; the third returns to the default. Compact sent and received message notices remain visible in every mode. This also works for restored conversations and new streaming content. Ctrl+J, Ctrl+T, and Ctrl+P no longer control conversation expansion.
+Ctrl+O cycles the conversation detail level and saves it as the `chatDetail` setting, so new, resumed, and attached chats open at the level you last picked. It never rewrites messages or the session file. Overview hides thinking and collapses tools and diffs; details (the default) reveals thinking and file diffs; all output expands tool output and full agent-to-agent message bodies; the next press returns to overview. Compact sent and received message notices remain visible in every mode. This also works for restored conversations and new streaming content. Ctrl+J, Ctrl+T, and Ctrl+P no longer control conversation expansion.
 
 ### Tree Navigation
 
