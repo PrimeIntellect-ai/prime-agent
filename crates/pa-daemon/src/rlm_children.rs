@@ -263,6 +263,23 @@ impl DeletedChild {
     }
 }
 
+/// One spawn-name reservation's RAII release: the pending name must free
+/// when the admission settles, fails, OR the spawn future is cancelled
+/// mid-admission - the boxed [`RlmHostFuture`] is a cancellable future,
+/// and a dropped admission that kept its manual release after the last
+/// await would reject every later same-name spawn for the host's lifetime
+/// (TS releases in every path around `_createRlmSubagentRuntime`).
+struct SpawnNameReservationGuard {
+    inner: std::sync::Arc<SupervisorChildSessionsInner>,
+    name: String,
+}
+
+impl Drop for SpawnNameReservationGuard {
+    fn drop(&mut self) {
+        self.inner.release_spawn_name(&self.name);
+    }
+}
+
 /// RLM children as supervisor-managed daemon sessions. A cheap shared handle:
 /// the daemon hands the same children registry to every kernel handler call.
 pub struct SupervisorChildSessions {
@@ -294,9 +311,12 @@ struct SupervisorChildSessionsInner {
     /// deleted child leaves its identity behind the registry so `collect`
     /// can answer a just-deleted selector with the settled cancelled
     /// envelope the delete receipt promised instead of the
-    /// unknown-selector error. Entries live until this parent session's
-    /// host dies, exactly like TS.
-    deleted_children: std::sync::Mutex<Vec<DeletedChild>>,
+    /// unknown-selector error. Keyed by child id exactly like TS's Map -
+    /// a second receipt for the same child overwrites the first and can
+    /// never stack a duplicate that would turn the settled answer into
+    /// the ambiguous-selector error. Entries live until this parent
+    /// session's host dies, exactly like TS.
+    deleted_children: std::sync::Mutex<std::collections::HashMap<String, DeletedChild>>,
     /// Bumped once per completed parent turn (the worker's `EngineEvent::Done`
     /// boundary). Prompt tasks spawned mid-turn wait for the next bump so
     /// the parent's continuation request is always in flight (and its
@@ -346,7 +366,7 @@ impl SupervisorChildSessions {
                 identity: std::sync::Mutex::new(ParentIdentity::with_default_depth()),
                 children: Mutex::new(Vec::new()),
                 pending_spawn_names: std::sync::Mutex::new(std::collections::HashSet::new()),
-                deleted_children: std::sync::Mutex::new(Vec::new()),
+                deleted_children: std::sync::Mutex::new(std::collections::HashMap::new()),
                 turn_done: tokio::sync::watch::Sender::new(0),
                 settle_hook: std::sync::Mutex::new(None),
                 model_refusal_telemetry,
@@ -751,7 +771,11 @@ impl SupervisorChildSessionsInner {
     /// Record a delete receipt's tombstone (TS #2388: every accepted-delete
     /// removal of a record funnels here, the live-delete and the inactive
     /// delete alike): the cancelled collect envelope reads only these
-    /// fields, so the retained identity stays bounded.
+    /// fields, so the retained identity stays bounded. The map is keyed by
+    /// child id like TS's `_deletedRlmChildRuns`, so a second receipt for
+    /// the same child (two deletes racing the same selector between the
+    /// kill and the registry removal) overwrites the tombstone instead of
+    /// stacking a duplicate.
     fn remember_deleted_child(&self, record: &ChildRecord) {
         let deleted = DeletedChild {
             rlm_child_id: record.rlm_child_id.clone(),
@@ -769,7 +793,7 @@ impl SupervisorChildSessionsInner {
         self.deleted_children
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(deleted);
+            .insert(deleted.rlm_child_id.clone(), deleted);
     }
 
     /// The per-child session directory under the parent's artifacts tree
@@ -1822,15 +1846,20 @@ impl RlmSubagentHost for SupervisorChildSessions {
             // so two parallel same-name spawns cannot both pass the
             // availability check and both register durable children. A
             // default name embeds its fresh child id and never reserves
-            // (TS parity).
-            let reserved_name = request
+            // (TS parity). The RAII guard owns the release: it frees the
+            // name at the admission settle, on every failure path, and on
+            // cancellation (a dropped host future) alike.
+            let _reservation = request
                 .name
                 .is_some()
                 .then(|| {
                     if !this.reserve_spawn_name(&name) {
                         return Err(spawn_name_unavailable(&name, identity.rlm_depth + 1));
                     }
-                    Ok(name.clone())
+                    Ok(SpawnNameReservationGuard {
+                        inner: Arc::clone(&this),
+                        name: name.clone(),
+                    })
                 })
                 .transpose()?;
             let admission = async {
@@ -1895,15 +1924,12 @@ impl RlmSubagentHost for SupervisorChildSessions {
                 anyhow::Ok((record, created, model))
             }
             .await;
-            // The admission settled either way (TS #2396
-            // `releaseReservedSessionName`): a successful registration made
-            // the name durable - it transfers from the pending reservation
-            // to the live registry - and a failed admission frees it for
-            // the next spawn, so no failure path leaks the reservation.
-            if let Some(reserved) = reserved_name.as_deref() {
-                this.release_spawn_name(reserved);
-            }
             let (record, created, model) = admission?;
+            // The reservation's guard is still bound: the release runs at
+            // this scope's end (a successful registration made the name
+            // durable - it transfers from the pending reservation to the
+            // live registry), on every earlier failure path's `?`, and on
+            // cancellation of the host future itself.
             // The task prompt runs detached from the spawn admission (TS
             // `void (async () => ...)`): the handle returns at registration
             // and the child's first turn starts after the parent's own
@@ -2184,7 +2210,7 @@ impl RlmSubagentHost for SupervisorChildSessions {
                             .deleted_children
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
-                            .iter()
+                            .values()
                             .filter(|deleted| deleted.matches(target))
                             .cloned()
                             .collect::<Vec<_>>();
@@ -3110,6 +3136,44 @@ mod spawn_name_reservation_tests {
             .await
             .expect_err("the admitted child owns the name");
         assert_eq!(respawn.to_string(), unavailable);
+    }
+
+    /// A cancelled admission frees the reserved name: the boxed
+    /// `RlmHostFuture` is a cancellable future, so the kernel can drop a
+    /// spawn mid-admission - the reservation must release with the future
+    /// or every later same-name spawn is rejected for the host's
+    /// lifetime.
+    #[tokio::test]
+    async fn a_cancelled_spawn_admission_frees_the_reserved_name() {
+        let (create_seen_tx, mut create_seen_rx) = mpsc::unbounded_channel();
+        let (verdict_tx, verdict_rx) = mpsc::unbounded_channel();
+        let sessions = sessions_with_gated_supervisor(create_seen_tx, verdict_rx).await;
+
+        // The spawn parks inside its create admission.
+        let parked = tokio::spawn(sessions.spawn(spawn_request("abandoned", "a parked admission")));
+        create_seen_rx
+            .recv()
+            .await
+            .expect("the create must reach the gated supervisor");
+        assert!(sessions.spawn_name_reserved("abandoned"));
+
+        // The host future is cancelled mid-admission: the reservation
+        // must release with the future.
+        parked.abort();
+        let _ = parked.await;
+        assert!(!sessions.spawn_name_reserved("abandoned"));
+
+        // The abandoned create's handler still holds the gated
+        // supervisor's verdict gate on its dead connection; hand it a
+        // failure to retire it, then queue the retry's admission.
+        verdict_tx.send(false).expect("retire the abandoned create");
+        verdict_tx.send(true).expect("admit the retry");
+        let handle = sessions
+            .spawn(spawn_request("abandoned", "retry after cancellation"))
+            .await
+            .expect("the freed name admits again");
+        assert_eq!(handle.name, "abandoned");
+        assert!(!sessions.spawn_name_reserved("abandoned"));
     }
 
     /// The failure path: a failed admission (the create errors after the
