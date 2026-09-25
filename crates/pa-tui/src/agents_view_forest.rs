@@ -929,16 +929,13 @@ pub fn build_rows(
         anchor,
     };
     let mut rows: Vec<AgentsViewRow> = Vec::new();
+    let walk = EmitWalk {
+        exposed_running: &exposed_running,
+        exposed_inactive: &exposed_inactive,
+        on_running_path: false,
+    };
     for root in visible_roots {
-        forest.emit(
-            root,
-            0,
-            None,
-            false,
-            &exposed_running,
-            &exposed_inactive,
-            &mut rows,
-        );
+        forest.emit(root, 0, None, &walk, &mut rows);
     }
     rows
 }
@@ -952,6 +949,29 @@ struct RowForest<'a> {
     anchor: Option<&'a str>,
 }
 
+/// The per-pass state the emit walk threads: the flatten-exposure sets
+/// (which ancestor's flatten already renders a line's content) and the
+/// running-path flag (a row reached through a running line's expansion
+/// keeps its inactive line collapsed — see `emit`). Bundling the walk
+/// state keeps the walk's helpers under the too-many-arguments lint.
+struct EmitWalk<'a> {
+    exposed_running: &'a HashSet<String>,
+    exposed_inactive: &'a HashSet<String>,
+    on_running_path: bool,
+}
+
+impl EmitWalk<'_> {
+    /// The variant rows under a running line's expansion walk with: the
+    /// same exposure sets, flagged as on the running path.
+    fn running_path(&self) -> EmitWalk<'_> {
+        EmitWalk {
+            exposed_running: self.exposed_running,
+            exposed_inactive: self.exposed_inactive,
+            on_running_path: true,
+        }
+    }
+}
+
 impl RowForest<'_> {
     /// Emit one row, then its summary lines, then their expanded children
     /// (TS `emit`, plus the operator's running/inactive split): depth and
@@ -962,24 +982,22 @@ impl RowForest<'_> {
     /// way through running children) — and a line whose content an
     /// ancestor's flatten already exposes does not render, so every
     /// agent keeps exactly one visible row however many lines are open.
-    /// `on_running_path` marks rows reached through a running line's
-    /// expansion: their inactive line keeps rendering its collapsed row
-    /// but never EXPANDS there — the operator's rule that the running
-    /// expansion carries running rows only holds even when a child's
-    /// inactive line is open elsewhere (the inactive rows stay reachable
-    /// through the parent's own inactive line). The inactive expansion
-    /// keeps the mirror reachability on purpose: a child's running line
-    /// opened from within the parent's inactive view reveals its live
-    /// worker (the nested toggle is the one visible path while the
-    /// parent's running line is collapsed).
+    /// The walk's `on_running_path` flag marks rows reached through a
+    /// running line's expansion: their inactive line keeps rendering its
+    /// collapsed row but never EXPANDS there — the operator's rule that
+    /// the running expansion carries running rows only holds even when a
+    /// child's inactive line is open elsewhere (the inactive rows stay
+    /// reachable through the parent's own inactive line). The inactive
+    /// expansion keeps the mirror reachability on purpose: a child's
+    /// running line opened from within the parent's inactive view
+    /// reveals its live worker (the nested toggle is the one visible
+    /// path while the parent's running line is collapsed).
     fn emit(
         &self,
         index: usize,
         depth: usize,
         parent_identity: Option<&str>,
-        on_running_path: bool,
-        exposed_running: &HashSet<String>,
-        exposed_inactive: &HashSet<String>,
+        walk: &EmitWalk,
         rows: &mut Vec<AgentsViewRow>,
     ) {
         let row = &self.base[index];
@@ -996,20 +1014,13 @@ impl RowForest<'_> {
             .iter()
             .copied()
             .partition(|child| self.base[*child].section == Section::Running);
-        if row.running_subagent_count > 0 && !exposed_running.contains(&row.identity) {
+        if row.running_subagent_count > 0 && !walk.exposed_running.contains(&row.identity) {
             let is_expanded = self.expanded_running.contains(&row.identity);
             rows.push(running_summary_row(row, depth + 1, is_expanded));
             if is_expanded {
+                let inner = walk.running_path();
                 for child in &running_kids {
-                    self.emit(
-                        *child,
-                        depth + 1,
-                        Some(&row.identity),
-                        true,
-                        exposed_running,
-                        exposed_inactive,
-                        rows,
-                    );
+                    self.emit(*child, depth + 1, Some(&row.identity), &inner, rows);
                 }
                 for child in &other_kids {
                     if self.base[*child].running_subagent_count > 0 {
@@ -1017,8 +1028,7 @@ impl RowForest<'_> {
                             *child,
                             depth + 1,
                             Some(&row.identity),
-                            exposed_running,
-                            exposed_inactive,
+                            &inner,
                             rows,
                         );
                     }
@@ -1028,21 +1038,13 @@ impl RowForest<'_> {
         let inactive = row
             .descendant_count
             .saturating_sub(row.running_subagent_count);
-        if inactive > 0 && !exposed_inactive.contains(&row.identity) {
+        if inactive > 0 && !walk.exposed_inactive.contains(&row.identity) {
             let is_expanded =
-                !on_running_path && self.expanded_inactive.contains(&row.identity);
+                !walk.on_running_path && self.expanded_inactive.contains(&row.identity);
             rows.push(inactive_summary_row(row, depth + 1, is_expanded));
             if is_expanded {
                 for child in &other_kids {
-                    self.emit(
-                        *child,
-                        depth + 1,
-                        Some(&row.identity),
-                        false,
-                        exposed_running,
-                        exposed_inactive,
-                        rows,
-                    );
+                    self.emit(*child, depth + 1, Some(&row.identity), walk, rows);
                 }
                 for child in &running_kids {
                     let child_inactive = self.base[*child]
@@ -1053,8 +1055,7 @@ impl RowForest<'_> {
                             *child,
                             depth + 1,
                             Some(&row.identity),
-                            exposed_running,
-                            exposed_inactive,
+                            walk,
                             rows,
                         );
                     }
@@ -1078,8 +1079,7 @@ impl RowForest<'_> {
         index: usize,
         depth: usize,
         visible_parent: Option<&str>,
-        exposed_running: &HashSet<String>,
-        exposed_inactive: &HashSet<String>,
+        walk: &EmitWalk,
         rows: &mut Vec<AgentsViewRow>,
     ) {
         // (ancestor, depth, is_running_child): a running child emits its
@@ -1088,15 +1088,7 @@ impl RowForest<'_> {
         let mut stack: Vec<(usize, usize, bool)> = vec![(index, depth, false)];
         while let Some((node, at_depth, is_running_child)) = stack.pop() {
             if is_running_child {
-                self.emit(
-                    node,
-                    at_depth,
-                    visible_parent,
-                    true,
-                    exposed_running,
-                    exposed_inactive,
-                    rows,
-                );
+                self.emit(node, at_depth, visible_parent, walk, rows);
                 continue;
             }
             let mut sorted = self
@@ -1129,8 +1121,7 @@ impl RowForest<'_> {
         index: usize,
         depth: usize,
         visible_parent: Option<&str>,
-        exposed_running: &HashSet<String>,
-        exposed_inactive: &HashSet<String>,
+        walk: &EmitWalk,
         rows: &mut Vec<AgentsViewRow>,
     ) {
         // (ancestor, depth, is_inactive_child): a not-running child emits
@@ -1139,15 +1130,7 @@ impl RowForest<'_> {
         let mut stack: Vec<(usize, usize, bool)> = vec![(index, depth, false)];
         while let Some((node, at_depth, is_inactive_child)) = stack.pop() {
             if is_inactive_child {
-                self.emit(
-                    node,
-                    at_depth,
-                    visible_parent,
-                    false,
-                    exposed_running,
-                    exposed_inactive,
-                    rows,
-                );
+                self.emit(node, at_depth, visible_parent, walk, rows);
                 continue;
             }
             let mut sorted = self
