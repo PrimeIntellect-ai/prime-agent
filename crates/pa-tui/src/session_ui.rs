@@ -7301,6 +7301,25 @@ impl SessionUi {
         for entry in entries {
             view.push_entry(entry);
         }
+        // The rebuilt transcript replaces the chat wholesale while an
+        // open runs pane survives it: reconcile the pane against the
+        // rebuilt runs (the cursor and the open detail can point at a
+        // run that vanished in the rebuild; the pane closes when no
+        // run survives) - compaction sets `transcript_stale` and this
+        // rebuild lands after the update path already reconciled
+        // against the pre-rebuild chat, so without this seam the pane
+        // rides stale start indices and identity keys until the next
+        // key press.
+        if view.runs_view.is_some() {
+            let runs = view.condensed_runs();
+            let closed = view
+                .runs_view
+                .as_mut()
+                .is_some_and(|runs_view| runs_view.reconcile(&view.chat, &runs).is_some());
+            if closed {
+                view.runs_view = None;
+            }
+        }
         view.follow();
         self.dirty = true;
     }
