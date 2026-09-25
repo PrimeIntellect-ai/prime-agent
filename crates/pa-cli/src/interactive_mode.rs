@@ -100,14 +100,14 @@ impl StartupModelProbe {
         let auth_category = match status.source {
             // TS `telemetryAuthCategory`: the stored credential reports
             // its type.
-            Some(AuthSource::Stored) => credential
-                .as_ref()
-                .map(|credential| credential.credential_type().to_string())
-                .unwrap_or_else(|| "stored".to_string()),
+            Some(AuthSource::Stored) => credential.as_ref().map_or_else(
+                || "stored".to_string(),
+                |credential| credential.credential_type().to_string(),
+            ),
             Some(AuthSource::Runtime) => "runtime_api_key".to_string(),
             Some(AuthSource::Environment) => "environment".to_string(),
             Some(AuthSource::PrimeCli) => "prime_cli".to_string(),
-            Some(AuthSource::ModelsJsonKey) | Some(AuthSource::ModelsJsonCommand) => {
+            Some(AuthSource::ModelsJsonKey | AuthSource::ModelsJsonCommand) => {
                 "models_json".to_string()
             }
             Some(AuthSource::Fallback) => "fallback".to_string(),
