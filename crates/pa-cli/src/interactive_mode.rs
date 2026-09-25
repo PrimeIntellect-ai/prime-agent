@@ -1818,12 +1818,14 @@ mod tests {
             "unexpected error: {error:#}"
         );
 
-        // A parseable but headerless source file: the row loads, only the
-        // header is missing.
+        // A parseable but headerless source file: the loader finalizes it
+        // to zero entries (the pa-core `forkFrom` contract the manager's
+        // own test asserts), so the failure is the empty-or-invalid one —
+        // never a half-copied fork.
         let headerless = session_dir.join("headerless.jsonl");
         std::fs::write(
             &headerless,
-            "{\"type\":\"notamodeledentry\",\"note\":\"kept verbatim\"}\n",
+            "{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":[]},\"timestamp\":0},\"id\":\"aaaa1\",\"parentId\":null}\n",
         )
         .expect("write headerless file");
         let error = fork_startup_selection(
@@ -1835,7 +1837,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("Cannot fork: source session has no header: "),
+                .contains("Cannot fork: source session file is empty or invalid: "),
             "unexpected error: {error:#}"
         );
 
