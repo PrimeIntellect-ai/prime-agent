@@ -1,9 +1,11 @@
-//! End-to-end verifier for the `/mcp` connections view: a settings-declared
-//! stdio MCP server (the committed echo fixture) must appear in the
-//! daemon's `get_mcp_connections` roster with its `echo` tool listed by
-//! the session kernel, and the headless TUI driving `/mcp` must render the
-//! inline view — the connection row with its status, the tool detail, the
-//! key hint — while the login/logout argument arms keep their notes.
+//! End-to-end verifier for the `/mcp` service catalog view: a
+//! settings-declared stdio MCP server (the committed echo fixture) must
+//! appear in the daemon's `get_mcp_connections` roster and in the
+//! resolved service cards, answered from local state (no kernel
+//! round-trip, so the view opens instantly), and the headless TUI
+//! driving `/mcp` must render the inline view — the connected card with
+//! its status, one fixed detail line, the key hint — while the
+//! login/logout argument arms keep their notes.
 #![cfg(unix)]
 
 use std::io::Write as _;
@@ -31,6 +33,22 @@ fn scripted_engine(dir: &Path) -> PathBuf {
     std::fs::write(
         &script,
         json!({ "engine": "faux", "responses": [] }).to_string(),
+    )
+    .expect("write script");
+    script
+}
+
+/// The held-turn script: the one scripted response paces its stream closed
+/// (`delayMs`) well past the probe window, so the turn it drives holds the
+/// session slot across its provider wait exactly like a real running turn.
+fn held_engine(dir: &Path) -> PathBuf {
+    let script = dir.join("script.json");
+    std::fs::write(
+        &script,
+        json!({ "engine": "faux", "responses": [
+            { "text": "a slow scripted turn", "delayMs": 20_000 },
+        ] })
+        .to_string(),
     )
     .expect("write script");
     script
@@ -244,8 +262,32 @@ fn headless_options(socket: &Path, dir: &Path) -> pa_tui::interactive::Interacti
     }
 }
 
+/// The empty `PromptInput` (the same explicit shape the interactive
+/// daemon e2e uses; the struct carries no `Default`).
+fn empty_prompt_input() -> pa_types::daemon::PromptInput {
+    pa_types::daemon::PromptInput {
+        content: None,
+        images: None,
+        streaming_behavior: None,
+        queue_if_busy: None,
+        expand_prompt_templates: None,
+        source: None,
+        agent_message_id: None,
+        custom_message: None,
+        queue_key: None,
+        prefix_messages: None,
+        admission_id: None,
+    }
+}
+
 /// Create a live session through the daemon protocol, returning its id.
 async fn create_session(socket: &Path, dir: &Path) -> String {
+    create_session_with(socket, dir, &scripted_engine(dir)).await
+}
+
+/// Create a live session driven by the given script (the empty-response
+/// default or the held-turn variant).
+async fn create_session_with(socket: &Path, dir: &Path, script: &Path) -> String {
     let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(socket)
         .await
         .expect("connect supervisor");
@@ -259,7 +301,7 @@ async fn create_session(socket: &Path, dir: &Path) -> String {
             config: Some(json!({
                 "cwd": dir.display().to_string(),
                 "sessionDir": dir.join("agent").join("sessions").display().to_string(),
-                "script": scripted_engine(dir).display().to_string(),
+                "script": script.display().to_string(),
             })),
             telemetry_disabled: None,
             runtime_metadata: None,
@@ -278,27 +320,30 @@ async fn create_session(socket: &Path, dir: &Path) -> String {
         .to_string()
 }
 
-/// The daemon seam: poll `get_mcp_connections` until the fixture
-/// connection's kernel tool listing lands (the first session also
-/// bootstraps the kernel venv, so the deadline absorbs it), then assert
-/// the roster shape — the connected fixture server with its `echo` tool,
-/// plus the disconnected built-ins.
-async fn assert_roster_with_tools(socket: &Path, dir: &Path) {
+/// The daemon seam: `get_mcp_connections` answers from local state —
+/// the roster and the resolved service catalog, never a kernel
+/// round-trip — so the FIRST request after create returns within the
+/// interactive deadline (the old handler waited out the session build
+/// and then listed each connected server's tools, freezing `/mcp` for
+/// seconds). Assert the fast answer's shape: the connected fixture
+/// roster row (no live tool listing), its service card, and the
+/// disconnected built-ins.
+async fn assert_roster_answers_fast(socket: &Path, dir: &Path) {
     let session = create_session(socket, dir).await;
     let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(socket)
         .await
         .expect("connect supervisor");
-    // The first listing also bootstraps the session's kernel (uv venv +
-    // runtime install on a cold machine), so both the request deadline and
-    // the kernel-open window can expire on early polls; retry both inside
-    // the overall deadline.
-    let deadline = Instant::now() + Duration::from_mins(7);
+    // The worker's created flag commits before the create response, but
+    // a fresh supervisor can still be settling: retry within the
+    // overall deadline, and every single request must answer fast.
+    let deadline = Instant::now() + Duration::from_mins(2);
     let mut last_error = String::new();
     let data = loop {
         assert!(
             Instant::now() < deadline,
-            "fixture-echo never listed its echo tool; last error: {last_error}"
+            "get_mcp_connections never answered; last error: {last_error}"
         );
+        let request_started = Instant::now();
         let request = client
             .request_ok(DaemonCommand::GetMcpConnections {
                 id: None,
@@ -306,22 +351,18 @@ async fn assert_roster_with_tools(socket: &Path, dir: &Path) {
                 rest: Default::default(),
             })
             .await;
+        let elapsed = request_started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "get_mcp_connections took {elapsed:?}: the view open must be instant"
+        );
         match request {
             Err(error) => {
                 last_error = format!("{error:#}");
-                tokio::time::sleep(Duration::from_secs(3)).await;
+                tokio::time::sleep(Duration::from_secs(1)).await;
                 continue;
             }
-            Ok(data) => {
-                let listed = data
-                    .pointer("/connections/0/tools/0/name")
-                    .and_then(Value::as_str)
-                    == Some("echo");
-                if listed {
-                    break data;
-                }
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
+            Ok(data) => break data,
         }
     };
     client.close();
@@ -335,11 +376,10 @@ async fn assert_roster_with_tools(socket: &Path, dir: &Path) {
         .expect("fixture-echo entry");
     assert_eq!(fixture.get("connected"), Some(&json!(true)));
     assert_eq!(fixture.get("authKind"), Some(&json!("stdio")));
-    assert_eq!(fixture.pointer("/tools/0/name"), Some(&json!("echo")));
-    assert_eq!(
-        fixture.pointer("/tools/0/description"),
-        Some(&json!("Echoes the message argument back."))
-    );
+    // No live tool listing rides the roster (the picker opens from local
+    // state; the kernel stays untouched).
+    assert_eq!(fixture.get("tools"), None, "no tools overlay: {fixture}");
+    assert_eq!(fixture.get("error"), None, "no error overlay: {fixture}");
     // The disconnected built-ins keep their roster rows.
     let linear = connections
         .iter()
@@ -347,21 +387,47 @@ async fn assert_roster_with_tools(socket: &Path, dir: &Path) {
         .expect("linear entry");
     assert_eq!(linear.get("connected"), Some(&json!(false)));
     assert_eq!(linear.get("authKind"), Some(&json!("subscription")));
+    // The service cards: the fixture's user-declared stdio card is
+    // connected-first with its account id (TS `buildPluginViews` rank).
+    let services = data
+        .get("services")
+        .and_then(Value::as_array)
+        .expect("services array");
+    let fixture_card = services
+        .iter()
+        .find(|service| service.get("serviceId").and_then(Value::as_str) == Some("fixture-echo"))
+        .expect("fixture-echo card");
+    assert_eq!(
+        fixture_card.get("connectionStatus"),
+        Some(&json!("connected")),
+        "the user stdio card: {fixture_card}"
+    );
+    assert_eq!(fixture_card.get("source"), Some(&json!("user")));
+    assert_eq!(
+        fixture_card.get("connectionIds"),
+        Some(&json!(["fixture-echo"])),
+        "the account id joins the card: {fixture_card}"
+    );
+    assert_eq!(
+        services[0].get("serviceId"),
+        Some(&json!("fixture-echo")),
+        "connected cards lead (TS rank): {services:?}"
+    );
 }
 
 /// The TUI surface: the headless client opens `/mcp`, the inline view
-/// renders the connection roster with the fixture's status and tool, Esc
-/// closes it, Enter dispatches the selected connection's login command,
-/// and the argument arms keep their notes.
+/// renders the service catalog — the connected fixture card with its
+/// status flush right, ONE fixed detail line, the hint — Esc closes it,
+/// Enter dispatches the selected card's login command, and the argument
+/// arms keep their notes.
 #[tokio::test]
 async fn mcp_view_lists_the_configured_mock_connection() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     std::fs::create_dir_all(dir.path().join("agent").join("sessions")).expect("session dir");
     let supervisor = spawn_supervisor(dir.path());
 
-    // Part A: the daemon seam (this run also warms the kernel venv, so
-    // the headless session below starts against a ready environment).
-    assert_roster_with_tools(&supervisor.socket, dir.path()).await;
+    // Part A: the daemon seam answers from local state, instantly.
+    assert_roster_answers_fast(&supervisor.socket, dir.path()).await;
 
     // Part B: the rendered surface. Escape closes; a second open plus
     // Enter resolves to the fixture's login command (this client wires no
@@ -393,8 +459,8 @@ async fn mcp_view_lists_the_configured_mock_connection() {
     assert!(!outcome.frames.is_empty(), "frames were captured");
     let rendered = outcome.frames.join("\n");
 
-    // The inline view: the bordered search field, the connection row
-    // with its status flush right, the tool detail block, the hint.
+    // The inline view: the bordered search field, the connected fixture
+    // card with its status flush right, ONE fixed detail line, the hint.
     assert!(
         rendered.contains("Search MCP connections"),
         "search field rendered:\n{rendered}"
@@ -408,20 +474,14 @@ async fn mcp_view_lists_the_configured_mock_connection() {
         "status rendered:\n{rendered}"
     );
     assert!(
-        rendered.contains("1 tool"),
-        "tool count rendered:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("Echoes the message argument back."),
-        "tool detail rendered:\n{rendered}"
-    );
-    assert!(
-        rendered.contains("Linear"),
-        "built-in roster rows rendered:\n{rendered}"
-    );
-    assert!(
         rendered.contains("Enter manage accounts \u{b7} Esc close"),
         "key hint rendered:\n{rendered}"
+    );
+    // The live tool listing is gone: the picker opens from local state,
+    // and no kernel ever boots for the view.
+    assert!(
+        !rendered.contains("Echoes the message argument back."),
+        "no live tool detail: {rendered}"
     );
     // Esc closed the view: a frame after the last open one shows the
     // editor dock again (no search field).
@@ -444,4 +504,66 @@ async fn mcp_view_lists_the_configured_mock_connection() {
         rendered.contains("/mcp is not available in this client yet"),
         "Enter dispatched the login and the logout arm stayed routed:\n{rendered}"
     );
+}
+
+/// The mid-turn open (the operator's freeze): a running turn holds the
+/// session slot across its provider wait, and the old daemon handler
+/// waited out the whole session-build window before answering the roster
+/// alone, so `/mcp`/`/plugins` opened mid-turn froze the view for the
+/// bound (the `SESSION_BUILD_WAIT` seconds the freeze reported). The TS
+/// picker builds its rows from local state, so the mid-turn open is
+/// instant: the held-turn probe must answer within the interactive
+/// deadline.
+#[tokio::test]
+async fn get_mcp_connections_answers_instantly_mid_turn() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    std::fs::create_dir_all(dir.path().join("agent").join("sessions")).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+    let script = held_engine(dir.path());
+    let session = create_session_with(&supervisor.socket, dir.path(), &script).await;
+    let (client, _events) = pa_tui::daemon_client::DaemonClient::connect(&supervisor.socket)
+        .await
+        .expect("connect supervisor");
+    client
+        .request_ok(DaemonCommand::Prompt {
+            id: None,
+            active_session_id: session.clone(),
+            message: "hold this turn open".to_string(),
+            input: empty_prompt_input(),
+            rest: Default::default(),
+        })
+        .await
+        .expect("start the held turn");
+    // The held turn's admission settles before the probe: the scripted
+    // response keeps the stream closed for the whole assertion window, so
+    // the session slot stays held across the provider wait.
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    let started = Instant::now();
+    let data = client
+        .request_ok(DaemonCommand::GetMcpConnections {
+            id: None,
+            active_session_id: session.clone(),
+            rest: Default::default(),
+        })
+        .await
+        .expect("mid-turn get_mcp_connections");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "mid-turn get_mcp_connections took {elapsed:?}: the catalog open must be instant (the TS picker reads local state; the old handler waited out the session-build bound and froze the open mid-turn)"
+    );
+    // The roster itself answered with the connected fixture (local state,
+    // not a kernel listing).
+    let connections = data
+        .get("connections")
+        .and_then(Value::as_array)
+        .expect("connections array");
+    assert!(
+        connections.iter().any(|entry| {
+            entry.get("server").and_then(Value::as_str) == Some("fixture-echo")
+                && entry.get("connected") == Some(&json!(true))
+        }),
+        "the roster answered mid-turn: {connections:?}"
+    );
+    client.close();
 }
