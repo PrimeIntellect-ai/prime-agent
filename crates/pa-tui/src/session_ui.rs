@@ -1632,11 +1632,7 @@ impl SessionUi {
     /// login draws the ban-risk warning once per session, gated by the
     /// settings toggle (`warnings.anthropicExtraUsage`, TS default
     /// true — an absent settings seam keeps the default).
-    fn maybe_warn_anthropic_subscription_auth(
-        &mut self,
-        provider: &str,
-        view: &mut AgentView,
-    ) {
+    fn maybe_warn_anthropic_subscription_auth(&mut self, provider: &str, view: &mut AgentView) {
         if provider != crate::provider_auth::ANTHROPIC_PROVIDER_ID
             || self.anthropic_subscription_warning_shown
             || self
