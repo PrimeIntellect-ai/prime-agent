@@ -33,6 +33,17 @@ impl AuthType {
     }
 }
 
+/// The credential surface a provider row belongs to (TS `category`):
+/// model providers, or services (MCP integrations, web search). The
+/// login selector renders providers only (the operator's 2026-09-24
+/// split: /mcp owns the services' logins); logout lists every stored
+/// credential regardless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthCategory {
+    Provider,
+    Service,
+}
+
 /// How the login runs: the TUI prompts for the key in the panel, or the
 /// composition root runs the provider's flow against the inline auth
 /// panel (TS splits the same way: `showApiKeyLoginDialog` vs the
