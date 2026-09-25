@@ -338,7 +338,9 @@ async fn apply_in_process_model_switch(
             .unwrap_or(pa_types::ai::ModelThinkingLevel::Medium)
     };
     let effective = pa_ai::models::clamp_thinking_level(&model, requested);
-    apply_level_change(session, mode, effective, model.reasoning).await?;
+    apply_level_change(session, mode, effective, model.reasoning)
+        .await
+        .map_err(|error| anyhow::anyhow!("{error:?}"))?;
     // The session's live model is the switched model (the session-command
     // executors follow it).
     *mode.model.lock().await = Some(model);
