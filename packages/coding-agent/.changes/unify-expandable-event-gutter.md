@@ -1,0 +1,1 @@
+- Changed expanded compaction, branch, skill, harness refinement, MCP connection, injected prompt, and extension messages to show their details under the same ╰─ gutter as tool calls and agent messages; skill, branch, and extension cards no longer use a background box.

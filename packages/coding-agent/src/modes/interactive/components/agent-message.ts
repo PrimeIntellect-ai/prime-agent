@@ -1,13 +1,7 @@
-import {
-	type Component,
-	Container,
-	type MarkdownTheme,
-	Text,
-	truncateToWidth,
-	wrapTextWithAnsi,
-} from "@earendil-works/pi-tui";
+import { type Component, Container, type MarkdownTheme, Text, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { type AgentSessionMessage, formatAgentMessageParticipant } from "../../../core/agent-messages.js";
 import { getMarkdownTheme, theme } from "../theme/theme.js";
+import { guttered } from "./expandable-event-message.js";
 
 /** `◆ <label> · <participant>[ · <preview>]` summary line shared by received and sent agent-message UI. */
 export function agentMessageSummaryLine(label: string, participant: string, preview?: string): string {
@@ -20,16 +14,15 @@ export function agentMessageSummaryLine(label: string, participant: string, prev
 
 /** `╰─`-guttered message body lines shared by received and sent agent-message UI. */
 export function agentMessageBodyLines(message: string, width: number): string[] {
-	const safeWidth = Math.max(1, width);
-	const textWidth = Math.max(1, safeWidth - 4);
-	const bodyLines = message.split("\n").flatMap((line) => {
-		const wrapped = wrapTextWithAnsi(line, textWidth);
-		return wrapped.length > 0 ? wrapped : [""];
-	});
-	return bodyLines.map((line, index) => {
-		const prefix = index === 0 ? theme.fg("dim", "╰─ ") : "   ";
-		return truncateToWidth(` ${prefix}${theme.fg("customMessageText", line)}`, safeWidth, "");
-	});
+	return guttered(width, (bodyWidth) =>
+		message
+			.split("\n")
+			.flatMap((line) => {
+				const wrapped = wrapTextWithAnsi(line, bodyWidth);
+				return wrapped.length > 0 ? wrapped : [""];
+			})
+			.map((line) => theme.fg("customMessageText", line)),
+	);
 }
 
 class AgentMessageBodyComponent implements Component {

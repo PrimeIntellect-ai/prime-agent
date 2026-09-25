@@ -1,10 +1,10 @@
-import { Clickable, type Component, Spacer, Text } from "@earendil-works/pi-tui";
+import { type Component, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import type { RefinementOutcomeMessage } from "../../../core/messages.js";
 import type { AppliedRefinementEdit, HarnessEntry } from "../../../core/refinement/refinement.js";
 import { generateDiffString } from "../../../core/tools/edit-diff.js";
 import { theme } from "../theme/theme.js";
 import { renderRichDiff } from "./diff.js";
-import { ExpandableEventMessage } from "./expandable-event-message.js";
+import { type EventView, ExpandableEventMessage } from "./expandable-event-message.js";
 
 type EditFieldKey = (typeof EDIT_FIELDS)[number]["key"];
 
@@ -144,7 +144,7 @@ function editFieldRows(edit: AppliedRefinementEdit): EditFieldRows[] {
 	}));
 }
 
-/** Expanded fields share the same line gutters and background blocks as file edits. */
+/** One edit's fields and diff rows; the gutter provides the indent. */
 class RefinementEditSection implements Component {
 	constructor(
 		private readonly label: string,
@@ -154,20 +154,18 @@ class RefinementEditSection implements Component {
 	invalidate(): void {}
 
 	render(width: number): string[] {
-		if (width < 1) return [];
-		const lines = new Text(this.label, 1, 0).render(width);
+		const lines = new Text(this.label, 0, 0).render(width);
 		for (const field of this.fields) {
-			lines.push(...new Text(theme.fg("muted", field.label), 1, 0).render(width));
+			lines.push(...new Text(theme.fg("muted", field.label), 0, 0).render(width));
 			if (field.change) {
 				const { diff } = generateDiffString(
 					field.change.removed.join("\n"),
 					field.change.added.join("\n"),
 					Number.MAX_SAFE_INTEGER,
 				);
-				const inset = width > 1 ? " " : "";
-				for (const row of renderRichDiff(diff, width - inset.length)) lines.push(`${inset}${row}`);
+				for (const row of renderRichDiff(diff, width)) lines.push(row);
 			} else {
-				for (const row of new Text(field.value.join("\n"), 1, 0).render(width)) lines.push(row);
+				for (const row of new Text(field.value.join("\n"), 0, 0).render(width)) lines.push(row);
 			}
 		}
 		return lines;
@@ -176,64 +174,44 @@ class RefinementEditSection implements Component {
 
 /** Durable refinement outcome with per-edit details available on demand. */
 export class RefinementOutcomeMessageComponent extends ExpandableEventMessage {
-	private summaryExpanded = false;
 	constructor(private readonly message: RefinementOutcomeMessage) {
-		super();
+		super(true);
 		this.updateDisplay();
 	}
 
-	setEditDiffsExpanded(expanded: boolean): void {
-		if (this.summaryExpanded === expanded) return;
-		this.summaryExpanded = expanded;
-		this.updateDisplay();
-	}
-
-	protected updateDisplay(): void {
-		this.clear();
-
+	protected override view(): EventView {
 		const { summary, edits, scope, rollbackOf, refinementId } = this.message.details;
-		this.addChild(new Spacer(1));
 		const outcome = refinementHeader(this.message);
-		const header = outcome.startsWith("Harness refined ·") ? "Harness refined" : outcome;
-		this.addChild(
-			new Clickable(new Text(theme.fg("refinementHeader", `◆ ${header}`), 1, 0), () => this.toggleExpanded()),
-		);
-		this.addSummary(
-			summary.trim() || "No summary was recorded for this harness change.",
-			undefined,
-			"refinementSummary",
-		);
-		if (this.expanded) {
-			this.addChild(new Spacer(1));
-			this.addChild(
-				new Text(
-					theme.fg(
-						"dim",
-						`${outcome} · Refinement ${refinementId} · ${scope}${rollbackOf ? ` · rollback of ${rollbackOf}` : ""}`,
-					),
-					1,
-					0,
-				),
-			);
-
-			for (const edit of edits) {
-				this.addChild(new Spacer(1));
-				this.addChild(new RefinementEditSection(editLabel(edit, scope), editFieldRows(edit)));
-				if (edit.reason) this.addChild(new Text(theme.fg("muted", `Reason: ${edit.reason}`), 1, 0));
-			}
+		const summaryText = summary.trim() || "No summary was recorded for this harness change.";
+		if (!this.expanded) {
+			const header = outcome.startsWith("Harness refined ·") ? "Harness refined" : outcome;
+			return {
+				header: theme.fg("refinementHeader", `◆ ${header}`),
+				preview: { text: summaryText, color: "refinementSummary" },
+			};
 		}
+		const body = new Container();
+		body.addChild(new Text(theme.fg("refinementSummary", summaryText), 0, 0));
+		for (const edit of edits) {
+			body.addChild(new Spacer(1));
+			body.addChild(new RefinementEditSection(editLabel(edit, scope), editFieldRows(edit)));
+			if (edit.reason) body.addChild(new Text(theme.fg("muted", `Reason: ${edit.reason}`), 0, 0));
+		}
+		return {
+			header: theme.fg("refinementHeader", `◆ ${outcome}`),
+			metadata: `Refinement ${refinementId} · ${scope}${rollbackOf ? ` · rollback of ${rollbackOf}` : ""}`,
+			body,
+		};
 	}
 }
 
 export class MalformedRefinementOutcomeMessageComponent extends ExpandableEventMessage {
 	constructor() {
-		super();
+		super(true);
 		this.updateDisplay();
 	}
 
-	protected updateDisplay(): void {
-		this.clear();
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("error", "[Malformed refinement outcome message]"), 1, 0));
+	protected override view(): EventView {
+		return { header: theme.fg("error", "[Malformed refinement outcome message]") };
 	}
 }
