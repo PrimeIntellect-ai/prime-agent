@@ -111,9 +111,9 @@ pub struct IpythonKernelProvisionerOptions {
     /// Python override. Must have prime-agent-runtime installed.
     pub python: Option<PathBuf>,
     pub env: HashMap<String, String>,
-    /// Command prefix prepended to every kernel bash() invocation.
+    /// Command prefix prepended to every kernel `bash()` invocation.
     pub command_prefix: Option<String>,
-    /// Trusted shell path injected for kernel bash(); `None` on platforms
+    /// Trusted shell path injected for kernel `bash()`; `None` on platforms
     /// without one, where the runtime's teaching error fires instead.
     pub shell_path: Option<PathBuf>,
     pub session_id: Option<String>,
@@ -229,6 +229,12 @@ impl IpythonKernelProvisioner {
     /// The kernel manager, starting it first when necessary. Concurrent
     /// callers join one startup; the current startup stage is replayed to
     /// listeners that attach mid-flight.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the abort signal is already cancelled or fires
+    /// during the wait, when the provisioner was disposed, or when the kernel
+    /// startup fails (all joined callers see the same failure).
     pub async fn ensure(
         &self,
         on_progress: Option<KernelBootstrapProgressHandler>,

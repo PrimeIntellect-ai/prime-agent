@@ -285,6 +285,12 @@ pub fn is_valid_session_file(path: &Path) -> bool {
 
 impl SessionFile {
     /// Load an existing session file. Errors when the header is missing/invalid.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file cannot be read, is empty, or its
+    /// header is missing or invalid; malformed entry lines are skipped,
+    /// matching the TS loader.
     pub fn open(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)
             .with_context(|| format!("read session file {}", path.display()))?;
@@ -323,6 +329,12 @@ impl SessionFile {
     }
 
     /// Load the verified compacted context without decoding old message bodies.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the windowed load fails or the window holds
+    /// no session header; a malformed retained row falls back to the
+    /// full [`SessionFile::open`] load, so its errors surface here too.
     pub fn open_windowed(path: &Path) -> Result<Self> {
         let Some(window) = pa_core::session::window::WindowedSessionStore::open(path)? else {
             return Self::open(path);
@@ -938,6 +950,13 @@ impl SessionFile {
     }
 
     /// Write the full file atomically (header + every entry), like `_rewriteFile`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the store only holds a window (the full
+    /// history is required), or when the session dir, the temp file, the
+    /// write, flush, sync, or the final rename fails; an empty path
+    /// answers `Ok(())` without writing.
     pub fn rewrite(&self) -> Result<()> {
         anyhow::ensure!(
             self.window.is_none(),
@@ -979,6 +998,13 @@ impl SessionFile {
     /// the file holds. `sync_data` past the flush only enforces
     /// durability — when it fails the entry stays indexed (a reload of
     /// the file would load it as the leaf) and the error still surfaces.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the entry cannot be written: the append (or
+    /// the rewriting bootstrap on a missing file) fails, or the
+    /// post-write durability sync fails — the entry stays indexed and
+    /// the error still surfaces.
     pub fn persist_entry(&mut self, entry_type: &str, fields: Value) -> Result<String> {
         self.persist_entry_at(entry_type, fields, &crate::util::now_iso())
     }
@@ -989,6 +1015,13 @@ impl SessionFile {
     /// already persisted the disclosure but died before the supervisor
     /// consumed the record replays the same declaration, and the create
     /// handler recognizes its own row instead of duplicating it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the entry cannot be written: the
+    /// window-backed file is missing, the entry cannot be serialized, or
+    /// the append, the rewriting bootstrap, or the post-write durability
+    /// sync fails.
     pub fn persist_entry_at(
         &mut self,
         entry_type: &str,

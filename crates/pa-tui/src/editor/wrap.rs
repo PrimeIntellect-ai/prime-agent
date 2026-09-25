@@ -194,7 +194,7 @@ pub(crate) fn segment_with_markers(
     result
 }
 
-/// `[image #N]` (the TS IMAGE_MARKER_REGEX grammar): the byte length of
+/// `[image #N]` (the TS `IMAGE_MARKER_REGEX` grammar): the byte length of
 /// the marker, or `None` when the head is malformed.
 fn parse_image_marker(s: &str) -> Option<usize> {
     let rest = s.strip_prefix("[image #")?;
@@ -752,7 +752,7 @@ mod tests {
 
     /// The marker scan matches the TS regex grammars exactly (editor.ts:44
     /// segmentWithMarkers): a loose `[paste #1 junk]` head with a VALID id
-    /// is NOT atomic (PASTE_MARKER_REGEX rejects it), and a miss advances
+    /// is NOT atomic (`PASTE_MARKER_REGEX` rejects it), and a miss advances
     /// one char so `[[paste #1]]` keeps the INNER marker (matchAll
     /// semantics), never skipping to the first `]`.
     #[test]

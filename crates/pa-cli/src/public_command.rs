@@ -84,7 +84,7 @@ fn handled_with_exit(exit_code: i32) -> PublicCommandResult {
     }
 }
 
-/// A handled invocation whose fail() branch already printed an error: the
+/// A handled invocation whose `fail()` branch already printed an error: the
 /// exit code is 1, matching `process.exitCode = 1` in the TS `fail` helper.
 fn handled_failed() -> PublicCommandResult {
     PublicCommandResult {

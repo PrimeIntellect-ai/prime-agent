@@ -204,6 +204,20 @@ pub struct WindowedSessionStore {
 impl WindowedSessionStore {
     /// Return `None` for old schemas, torn rows, or ambiguous ancestry so callers
     /// can use their ordinary full reader. No size or message-count admission cap.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the session file cannot be
+    /// opened or read, or when a retained metadata row cannot be re-parsed.
+    /// Old schemas, torn rows, and ambiguous ancestry yield `Ok(None)`, not
+    /// an error.
+    ///
+    /// # Panics
+    ///
+    /// Two internal `expect`s cannot fire: retained window rows reach their
+    /// push only after a successful parse (an unparsable row returns
+    /// `Ok(None)` first), and the header `expect` runs only after the
+    /// deconstruction above proved it present.
     pub fn open(path: &Path) -> io::Result<Option<Self>> {
         // The generation certificate anchors on unix inode identity; a
         // same-length replace is indistinguishable under the weak non-unix
@@ -759,6 +773,12 @@ impl WindowedSessionStore {
     /// This store is read-only: disk appends are included, while the selected
     /// leaf remains pinned. Mutable stores must merge their own pending rows
     /// rather than replacing their state with this snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when reading the session file fails or the blocking
+    /// read task fails to join; an already-full store succeeds without
+    /// touching the disk.
     pub async fn ensure_full_history(&mut self) -> anyhow::Result<()> {
         if self.full {
             return Ok(());

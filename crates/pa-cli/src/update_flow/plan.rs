@@ -75,6 +75,15 @@ fn running_release_anchor() -> Result<RunningRelease> {
 /// anchors on the running binary's release directory, stricter than TS's
 /// launcher read, so an inconsistent installation is refused before any
 /// candidate is selected).
+///
+/// # Errors
+/// Returns an error when the compiled installation is damaged (neither the
+/// active nor the previous launcher reads), when a rollback has no valid
+/// previous release or its executable fails validation, when this binary
+/// does not run from a managed release directory or the installation is
+/// inconsistent (the release directory, the binary's own version report, or
+/// the active launcher disagree), when the release manifest cannot be
+/// fetched, or when no verified archive is available for the platform.
 pub async fn plan(
     install_root: &Path,
     force: bool,

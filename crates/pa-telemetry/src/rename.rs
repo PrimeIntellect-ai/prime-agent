@@ -79,6 +79,12 @@ fn classify(error: &io::Error) -> RenameFailure {
 /// On Windows, retries destination-busy failures (EPERM/EACCES/EBUSY) up to
 /// [`WIN32_RENAME_ATTEMPTS`] total attempts with a `10ms * attempt` backoff;
 /// every other failure - and every failure on Unix - surfaces immediately.
+///
+/// # Errors
+///
+/// Returns the underlying `std::fs::rename` error unchanged: on Windows
+/// it is the final retry's error, everywhere else the single attempt's
+/// error.
 pub fn rename_onto(from: &Path, to: &Path) -> io::Result<()> {
     let platform_windows = cfg!(windows);
     let mut attempt = 1;

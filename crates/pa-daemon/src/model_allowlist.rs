@@ -118,9 +118,16 @@ impl ModelRefusalTelemetry {
 
     /// Emit the refusal's `model refused` event (best-effort; no-op when
     /// opted out). The client binds to `cwd` — the settings posture is
-    /// scoped (the PostHog endpoint and local mirror read the project
+    /// scoped (the `PostHog` endpoint and local mirror read the project
     /// scope), so a session that moved directories rebinds instead of
     /// reporting through the old project.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an internal mutex is poisoned (the noted-refusals or
+    /// the client-slot lock, after a holder panicked while holding it).
+    /// The client-bound expect right after a fresh bind is an internal
+    /// invariant and cannot fire.
     pub fn note_refused(&self, surface: &str, selector: &str, cwd: &Path) {
         if !self.enabled {
             return;

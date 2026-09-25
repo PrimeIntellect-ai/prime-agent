@@ -31,7 +31,7 @@
 //!   the supervisor-socket env var propagates to every process a session
 //!   worker spawns (kernels, bash children, tool servers), and an env-only
 //!   match would kill a session's whole process tree at the next daemon
-//!   boot - the readoption_wake regression this gate exists for. The
+//!   boot - the `readoption_wake` regression this gate exists for. The
 //!   target's own endpoint path gates only the cleanup unlink (a
 //!   validated deterministic name); the kill never depends on the
 //!   endpoint file.
@@ -914,7 +914,7 @@ mod tests {
     /// SIGTERM/`kill` cannot be delivered while it is stopped... SIGKILL
     /// CAN (it cannot be caught, blocked, or ignored - but a STOPPED task
     /// still answers SIGKILL immediately), so this verifies the dead-signal
-    /// path instead: an un-signaled pid (0) reports AlreadyGone.
+    /// path instead: an un-signaled pid (0) reports `AlreadyGone`.
     #[tokio::test]
     async fn a_vanished_pid_reports_already_gone() {
         let mut child = std::process::Command::new("true")

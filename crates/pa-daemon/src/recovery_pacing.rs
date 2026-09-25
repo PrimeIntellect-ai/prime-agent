@@ -18,11 +18,11 @@ pub(crate) const ADOPTION_CONCURRENCY: usize = 4;
 
 /// Run background jobs with bounded concurrency: at most `limit` tasks
 /// alive at once, the next job spawned only when one finishes (a huge
-/// descriptor directory must not materialize a task and a JoinHandle
+/// descriptor directory must not materialize a task and a `JoinHandle`
 /// per job before the cap ever applies). The pass stays fully
 /// concurrent with the accept loop and control-plane commands; only the
 /// jobs' own fan-out is bounded. Returns when every job has finished
-/// (a panicked job settles with its JoinError, like the previous
+/// (a panicked job settles with its `JoinError`, like the previous
 /// unbounded fan-out, and the freed slot spawns the next job).
 pub(crate) async fn run_bounded<F, Fut>(jobs: Vec<F>, limit: usize)
 where

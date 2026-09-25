@@ -26,7 +26,7 @@ const DELIVERY_TIMEOUT_MS: u64 = 15_000;
 pub(crate) enum PeerDeliveryOutcome {
     /// The target answered this response (a failure response is final
     /// too - the target refused the delivery). Boxed: the response's
-    /// insertion-ordered JSON maps (preserve_order, wire parity) would
+    /// insertion-ordered JSON maps (`preserve_order`, wire parity) would
     /// dwarf the empty variants (`large_enum_variant`).
     Answered(Box<DaemonResponse>),
     /// The link could not be established (connect, hello, or the grant

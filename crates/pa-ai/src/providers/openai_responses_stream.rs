@@ -1,4 +1,4 @@
-//! OpenAI Responses stream event processor.
+//! `OpenAI` Responses stream event processor.
 //!
 //! Port of `processResponsesStream` from
 //! `packages/ai/src/providers/openai-responses-shared.ts`: output-item slots,

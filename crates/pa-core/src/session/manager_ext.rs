@@ -1,4 +1,4 @@
-//! SessionManager part 2: queries, branches, labels, status entries.
+//! `SessionManager` part 2: queries, branches, labels, status entries.
 //! Port of the tail of core/session-manager.ts (getBranch/getTree/branch*).
 
 use pa_types::session::{
@@ -24,7 +24,7 @@ impl SessionManager {
     }
 
     /// True when the session holds user-meaningful content beyond the default
-    /// creation prefix (model_change, thinking_level_change, service_tier_change).
+    /// creation prefix (`model_change`, `thinking_level_change`, `service_tier_change`).
     pub fn has_user_content(&self) -> bool {
         let owned_entries = self.get_entries();
         let content_entries: Vec<&FileEntry> = owned_entries
@@ -53,6 +53,11 @@ impl SessionManager {
         content_entries.len() > start
     }
 
+    /// Append an agent-status row; returns the new entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
     pub fn append_agent_status(
         &mut self,
         summary: &str,
@@ -74,6 +79,11 @@ impl SessionManager {
         Ok(id)
     }
 
+    /// Append a `git_state` row; returns the new entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
     pub fn append_git_state(&mut self, git: GitContext) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
@@ -113,6 +123,11 @@ impl SessionManager {
         self.latest_agent_status_entry()
     }
 
+    /// Append a custom message entry; returns the new entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
     pub fn append_custom_message_entry(
         &mut self,
         custom_type: &str,
@@ -136,6 +151,14 @@ impl SessionManager {
     }
 
     /// Append a label change for a target entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
+    ///
+    /// # Panics
+    ///
+    /// Asserts that the target entry exists.
     pub fn append_label_change(
         &mut self,
         target_id: &str,
@@ -211,6 +234,10 @@ impl SessionManager {
     }
 
     /// Move the leaf to `branch_from_id` (the session keeps its file).
+    ///
+    /// # Panics
+    ///
+    /// Asserts that the target entry exists.
     pub fn branch(&mut self, branch_from_id: &str) {
         assert!(
             self.get_entry_by_id(branch_from_id).is_some(),
@@ -225,6 +252,15 @@ impl SessionManager {
     }
 
     /// Branch with a summary message describing what the abandoned branch held.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append of the
+    /// summary row fails; the leaf is restored to its previous position.
+    ///
+    /// # Panics
+    ///
+    /// Asserts that the given branch target entry exists.
     pub fn branch_with_summary(
         &mut self,
         branch_from_id: Option<&str>,

@@ -389,7 +389,16 @@ impl AgentView {
             .into_iter()
             .flatten()
         {
-            point.line = (point.line as isize - delta).max(0) as usize;
+            // The tail-relative points sit in the TAIL_SELECTION_ORIGIN
+            // band - within an `isize` of the integer's ceiling - so
+            // the shift works in usize: a growth lowers the point
+            // toward zero, a shrink raises it toward the origin, and
+            // neither conversion can overflow.
+            point.line = if delta >= 0 {
+                point.line.saturating_sub(delta as usize)
+            } else {
+                point.line.saturating_add(delta.unsigned_abs())
+            };
         }
     }
 

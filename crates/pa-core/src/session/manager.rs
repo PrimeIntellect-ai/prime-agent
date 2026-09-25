@@ -1,4 +1,4 @@
-//! SessionManager: the stateful session writer. Port of the class half of
+//! `SessionManager`: the stateful session writer. Port of the class half of
 //! core/session-manager.ts (create/new/append/persist, crash repair, index).
 
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ fn create_session_id() -> String {
     create_uuid_v7()
 }
 
-/// UUIDv7 (timestamp-ordered, like the TS createSessionId).
+/// `UUIDv7` (timestamp-ordered, like the TS `createSessionId`).
 fn create_uuid_v7() -> String {
     uuid::Uuid::now_v7().to_string()
 }
@@ -360,10 +360,10 @@ fn forked_branch_entries(entries: Vec<FileEntry>) -> Vec<FileEntry> {
         .collect()
 }
 
-/// The nearest kept ancestor for one dropped git_state row: walk the
+/// The nearest kept ancestor for one dropped `git_state` row: walk the
 /// dropped parents until an id that survives the fork (or a null parent),
 /// memoizing every ACYCLIC node the walk passed so shared chains resolve
-/// once. A cycle (malformed git_state rows parenting at each other) stops
+/// once. A cycle (malformed `git_state` rows parenting at each other) stops
 /// at the first repeated id WITHOUT memoizing: the terminal depends on the
 /// walk's start, so caching it would make the outcome depend on which
 /// child resolves first.
@@ -462,7 +462,7 @@ impl SessionManager {
         manager
     }
 
-    /// Create a persisted manager rooted at session_dir.
+    /// Create a persisted manager rooted at `session_dir`.
     pub fn persisted(cwd: &Path, session_dir: &Path) -> Self {
         Self::new_with(cwd.to_path_buf(), session_dir.to_path_buf(), None, true)
     }
@@ -489,6 +489,12 @@ impl SessionManager {
     /// children re-linked to the nearest kept ancestor (TS `liveParent`).
     /// The new header carries the source path as `parentSession`, the
     /// resolved RLM depth, and the TARGET cwd's git context.
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable error string when the source session file is
+    /// empty or invalid, has no header, or when the forked session file
+    /// cannot be flushed.
     pub fn fork_from(
         source_path: &Path,
         target_cwd: &Path,
@@ -544,6 +550,10 @@ impl SessionManager {
     ///
     /// Production windowed managers come from [`Self::adopt_window`]; this
     /// constructor serves the window tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the windowed session store cannot be opened.
     #[cfg(test)]
     pub async fn open_windowed(
         cwd: &Path,
@@ -612,6 +622,13 @@ impl SessionManager {
 
     /// Capture a historical read request while locked; await it after releasing
     /// the session mutex. Current unpersisted rows are merged into the snapshot.
+    ///
+    /// # Errors
+    ///
+    /// The returned future errors when reading the session file fails, or
+    /// when the file read panics and the blocking task fails to join. When
+    /// the manager holds no windowed store, the retained entries are
+    /// returned without touching the disk.
     pub fn history_snapshot(
         &self,
     ) -> impl std::future::Future<Output = anyhow::Result<Vec<FileEntry>>> + Send + 'static {
@@ -789,6 +806,12 @@ impl SessionManager {
 
     /// Hydrate before historical reads or mutation. Loading uses a blocking
     /// worker; the selected leaf is retained and disk appends are preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the full-history hydration of the windowed
+    /// store fails. A manager without a window is already hydrated and
+    /// succeeds without touching the disk.
     #[cfg(test)]
     pub async fn ensure_full_history(&mut self) -> anyhow::Result<()> {
         let Some(window) = self.window.as_mut() else {
@@ -816,6 +839,11 @@ impl SessionManager {
     }
 
     /// Switch to a different session file (resume/branch).
+    ///
+    /// # Panics
+    ///
+    /// The `unwrap` on the session file path is guarded by the existence
+    /// check right above it, so it cannot fail.
     pub fn set_session_file(
         &mut self,
         session_file: PathBuf,
@@ -866,6 +894,11 @@ impl SessionManager {
     }
 
     /// Create a new session; returns the session file path when persisting.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an explicit session id is requested while persisting and
+    /// a session file for that id already exists.
     pub fn new_session(&mut self, options: &NewSessionOptions) -> Option<PathBuf> {
         let mut session_id = options.id.clone().unwrap_or_else(create_session_id);
         let mut session_file: Option<PathBuf> = None;
@@ -1051,6 +1084,11 @@ impl SessionManager {
     }
 
     /// Entries excluding the session header (TS `getEntries()`).
+    ///
+    /// # Panics
+    ///
+    /// Asserts that the manager holds no windowed store: hydrate the full
+    /// session history first.
     pub fn get_entries(&self) -> Vec<FileEntry> {
         assert!(
             self.window.is_none(),
@@ -1064,6 +1102,11 @@ impl SessionManager {
     }
 
     /// All entries including the header (whole-file views).
+    ///
+    /// # Panics
+    ///
+    /// Asserts that the manager holds no windowed store: hydrate the full
+    /// session history first.
     pub fn get_all_entries(&self) -> &[FileEntry] {
         assert!(
             self.window.is_none(),
@@ -1116,6 +1159,12 @@ impl SessionManager {
     }
 
     /// Force-write all in-memory entries immediately (pre-model durability).
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the session file rewrite
+    /// fails; unpersisted or already-flushed managers succeed without
+    /// touching the disk.
     pub fn flush_now(&mut self) -> std::io::Result<()> {
         if !self.persist || self.session_file.is_none() {
             return Ok(());
@@ -1129,6 +1178,11 @@ impl SessionManager {
     }
 
     /// Materialize an in-memory session into a persisted file.
+    ///
+    /// # Panics
+    ///
+    /// Asserts that the manager holds no windowed store: hydrate the full
+    /// session history first.
     pub fn materialize_session_file(&mut self, session_dir: Option<PathBuf>) -> PathBuf {
         assert!(
             self.window.is_none(),
@@ -1190,6 +1244,11 @@ impl SessionManager {
     }
 
     /// The session tree (branch children + label state) over current entries.
+    ///
+    /// # Panics
+    ///
+    /// Asserts that the manager holds no windowed store: hydrate the full
+    /// session history first.
     pub fn get_tree(&self) -> SessionTree {
         assert!(
             self.window.is_none(),
@@ -1297,6 +1356,11 @@ impl SessionManager {
     }
 
     /// Append a conversation message; returns the new entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails; the
+    /// entry is not kept in the in-memory index.
     pub fn append_message(&mut self, message: AgentMessage) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
@@ -1333,6 +1397,11 @@ impl SessionManager {
         (id, write_error)
     }
 
+    /// Append a thinking-level change; returns the new entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
     pub fn append_thinking_level_change(
         &mut self,
         thinking_level: &str,
@@ -1348,6 +1417,11 @@ impl SessionManager {
         Ok(id)
     }
 
+    /// Append a service-tier change; returns the new entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
     pub fn append_service_tier_change(
         &mut self,
         service_tier: Option<pa_types::ai::ServiceTier>,
@@ -1361,6 +1435,11 @@ impl SessionManager {
         Ok(id)
     }
 
+    /// Append a model change; returns the new entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
     pub fn append_model_change(
         &mut self,
         provider: &str,
@@ -1382,6 +1461,10 @@ impl SessionManager {
     /// payload is stored (TS keeps `details`, `fromHook`,
     /// `customInstructions`, `usage`, and `harnessDigest` on the durable
     /// row; later compactions and branch summarization read them back).
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
     pub fn append_compaction(
         &mut self,
         payload: pa_types::session::CompactionEntry,
@@ -1392,6 +1475,11 @@ impl SessionManager {
         Ok(id)
     }
 
+    /// Append a custom entry; returns the new entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
     pub fn append_custom_entry(
         &mut self,
         custom_type: &str,
@@ -1444,6 +1532,10 @@ impl SessionManager {
     }
 
     /// Append a custom message entry (compaction/refine notices, prompts).
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
     pub fn append_custom_message(
         &mut self,
         custom_type: &str,
@@ -1505,6 +1597,12 @@ impl SessionManager {
 
     /// Fold child usage into the target assistant message and record the
     /// attribution entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-input error when the target assistant message
+    /// entry is missing, or the underlying I/O error when the durable
+    /// append fails.
     pub fn append_child_usage_attribution(
         &mut self,
         target_id: &str,
@@ -1552,6 +1650,12 @@ impl SessionManager {
         Ok(id)
     }
 
+    /// Append a session-info row (the session name); returns the new entry
+    /// id.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
     pub fn append_session_info(&mut self, name: &str) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
@@ -1565,6 +1669,11 @@ impl SessionManager {
     }
 
     /// Look up an entry by id (file position index).
+    ///
+    /// # Panics
+    ///
+    /// Asserts that the manager holds no windowed store: hydrate the full
+    /// session history first.
     pub fn get_entry_by_id(&self, id: &str) -> Option<&FileEntry> {
         assert!(
             self.window.is_none(),
@@ -1574,6 +1683,11 @@ impl SessionManager {
     }
 
     /// The active label for a target entry id.
+    ///
+    /// # Panics
+    ///
+    /// Asserts that the manager holds no windowed store: hydrate the full
+    /// session history first.
     pub fn get_label(&self, target_id: &str) -> Option<String> {
         assert!(
             self.window.is_none(),
@@ -1583,6 +1697,11 @@ impl SessionManager {
     }
 
     /// The timestamp of the label entry that set the target's active label.
+    ///
+    /// # Panics
+    ///
+    /// Asserts that the manager holds no windowed store: hydrate the full
+    /// session history first.
     pub fn get_label_timestamp(&self, target_id: &str) -> Option<String> {
         assert!(
             self.window.is_none(),
@@ -1592,6 +1711,11 @@ impl SessionManager {
     }
 
     /// Move the leaf (used by branch/branchWithSummary).
+    ///
+    /// # Panics
+    ///
+    /// Asserts that the manager holds no windowed store: hydrate the full
+    /// session history first.
     pub(crate) fn set_leaf_id(&mut self, leaf_id: Option<&str>) {
         assert!(
             self.window.is_none(),
@@ -1618,6 +1742,11 @@ impl SessionManager {
         }
     }
 
+    /// Append a session-state row; returns the new entry id.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying I/O error when the durable append fails.
     pub fn append_session_state(&mut self, status: SessionStateStatus) -> std::io::Result<String> {
         let base = self.next_base();
         let id = base.id.clone().unwrap_or_default();
@@ -1950,7 +2079,7 @@ mod tests {
         );
     }
 
-    /// Malformed-but-parseable git_state parents can form a cycle (a's
+    /// Malformed-but-parseable `git_state` parents can form a cycle (a's
     /// dropped parent is b, b's is a): the fork's parent walk terminates at
     /// the first repeated id instead of looping forever.
     #[test]

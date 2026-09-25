@@ -24,7 +24,7 @@ pub use pa_types::ai::{
     UserMessage,
 };
 
-/// JSON tool parameter schema. In the TS reference this is a TypeBox schema;
+/// JSON tool parameter schema. In the TS reference this is a `TypeBox` schema;
 /// here it is stored as the raw JSON value.
 pub type JsonSchema = serde_json::Value;
 
@@ -174,8 +174,12 @@ impl ModelExt for Model {
 // Stop-reason mapping helpers
 // ---------------------------------------------------------------------------
 
-/// Map a [`StopReason`] to the terminal reason of a `done` event. Panics for
-/// `error`/`aborted`, which only terminate streams through `error` events.
+/// Map a [`StopReason`] to the terminal reason of a `done` event.
+///
+/// # Panics
+///
+/// Panics for `error`/`aborted`, which only terminate streams through `error`
+/// events.
 pub fn done_reason(reason: StopReason) -> DoneStopReason {
     match reason {
         StopReason::Stop => DoneStopReason::Stop,

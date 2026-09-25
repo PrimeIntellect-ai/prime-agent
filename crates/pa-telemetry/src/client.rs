@@ -26,7 +26,7 @@ pub const DEFAULT_QUEUE_CAPACITY: usize = 1024;
 /// Client configuration.
 #[derive(Clone)]
 pub struct TelemetryClientConfig {
-    /// Pseudonymous installation id (sink-side identity, e.g. PostHog
+    /// Pseudonymous installation id (sink-side identity, e.g. `PostHog`
     /// `distinct_id`). Load via [`crate::install_id`].
     pub install_id: String,
     /// Base properties merged under every event's own properties
@@ -100,8 +100,15 @@ impl TelemetryClient {
         }
     }
 
-    /// Spawn the background worker. Fails only if there is no tokio runtime
-    /// on the current thread.
+    /// Spawn the background worker onto the current tokio runtime.
+    /// Requires a tokio runtime on the current thread — `tokio::spawn`
+    /// panics without one, so runtime-less callers use
+    /// [`TelemetryClient::inert`] instead.
+    ///
+    /// # Errors
+    ///
+    /// Never returns `Err`; the client handle is constructed
+    /// unconditionally.
     pub fn spawn(config: TelemetryClientConfig) -> anyhow::Result<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         let dropped = Arc::new(AtomicU64::new(0));
@@ -138,6 +145,13 @@ impl TelemetryClient {
 
     /// Drain and flush everything tracked so far. Returns when the batches
     /// have been handed to every sink (or dropped by their policy).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the worker stops before it can reply: the flush
+    /// response channel is dropped without an answer (e.g. the runtime shuts
+    /// down mid-flush). A worker that is already gone is not an error; the
+    /// call returns `Ok(())` without doing anything.
     pub async fn flush(&self) -> anyhow::Result<()> {
         let (tx, rx) = oneshot::channel();
         if self.tx.send(Cmd::Flush(tx)).is_err() {
@@ -149,6 +163,14 @@ impl TelemetryClient {
 
     /// Flush once and stop the worker. Subsequent `track` calls are counted as
     /// dropped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the worker stops before it can reply: the
+    /// shutdown response channel is dropped without an answer (e.g. the
+    /// runtime shuts down during the final flush). A worker that is already
+    /// gone is not an error; the call returns `Ok(())` without doing
+    /// anything.
     pub async fn shutdown(&self) -> anyhow::Result<()> {
         let (tx, rx) = oneshot::channel();
         if self.tx.send(Cmd::Shutdown(tx)).is_err() {

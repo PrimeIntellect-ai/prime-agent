@@ -57,7 +57,7 @@ impl AgentSessionEngine {
 
     /// Count one settled non-error assistant turn into the review
     /// prompt's turn line (TS `_assistantTurnsSinceAutoRefine`'s
-    /// message_end increment).
+    /// `message_end` increment).
     pub(crate) fn note_settled_turn_since_auto_refine_review(&self) {
         let guard = self.session.blocking_lock();
         if let Some(engine) = guard.as_deref() {
@@ -184,8 +184,8 @@ mod tests {
     use crate::engine::{CompactionOutcome, CompactionRequest, EngineEvent};
     use serde_json::json;
 
-    /// The faux model's per-request output budget (maxTokens 16_384 under the
-    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// The faux model's per-request output budget (maxTokens `16_384` under the
+    /// `32_000` request cap): threshold fixtures subtract it from the window
     /// alongside the headroom (the combined input+output ceiling).
     const FAUX_REQUEST_BUDGET: u64 = 16_384;
 

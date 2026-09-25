@@ -22,6 +22,11 @@ pub const EXTENDED_THINKING_LEVELS: [ModelThinkingLevel; 7] = [
 pub const SUPPORTED_THINKING_LEVELS: [ModelThinkingLevel; 7] = EXTENDED_THINKING_LEVELS;
 
 /// Ordinal position of a level within [`EXTENDED_THINKING_LEVELS`].
+///
+/// # Panics
+///
+/// Panics if `level` is not one of the variants listed in
+/// [`EXTENDED_THINKING_LEVELS`].
 pub fn thinking_level_index(level: ModelThinkingLevel) -> usize {
     EXTENDED_THINKING_LEVELS
         .iter()

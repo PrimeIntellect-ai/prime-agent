@@ -55,7 +55,7 @@ pub(crate) struct PromptAdmissionTable {
 }
 
 impl PromptAdmissionTable {
-    /// The TS parse-time registration: a prompt/prompt_and_wait carrying
+    /// The TS parse-time registration: a `prompt/prompt_and_wait` carrying
     /// an `admissionId` reserves it (duplicates answer the TS error).
     pub(crate) fn register(
         &self,

@@ -136,6 +136,13 @@ pub(super) fn save(path: &Path, snapshot: &Snapshot) -> io::Result<()> {
     result
 }
 
+/// Persist the live certified snapshot for `path` to the sidecar cache.
+///
+/// # Errors
+///
+/// Returns the sidecar write error when a live snapshot exists and saving
+/// it fails; a path without a live snapshot succeeds without touching the
+/// disk.
 pub fn flush(path: &Path) -> io::Result<()> {
     let snapshot = live_snapshots()
         .lock()
@@ -158,6 +165,12 @@ pub enum AppendOwnership {
 /// Append authoritative JSONL bytes. Only a caller holding the existing session
 /// lease may incrementally certify the cache. Rows must have fresh writer IDs.
 /// Cache failures never fail a successful durable append.
+///
+/// # Errors
+///
+/// Returns the underlying I/O error while performing the durable append
+/// itself (open, write, flush, sync); a failed incremental cache
+/// certification is dropped, not surfaced.
 pub fn append_cached(path: &Path, bytes: &[u8], ownership: AppendOwnership) -> io::Result<()> {
     let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
     file.write_all(bytes)?;

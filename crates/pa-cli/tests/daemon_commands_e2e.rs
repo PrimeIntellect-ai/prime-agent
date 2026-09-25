@@ -80,7 +80,7 @@ fn daemon_binary() -> PathBuf {
     daemon
 }
 
-/// The installed TS binary, when present (PA_TS_BINARY or `prime-agent` on PATH).
+/// The installed TS binary, when present (`PA_TS_BINARY` or `prime-agent` on PATH).
 fn ts_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("PA_TS_BINARY") {
         let path = PathBuf::from(path);

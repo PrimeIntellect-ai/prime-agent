@@ -239,7 +239,7 @@ impl Client {
 }
 
 /// An abort on a running kernel cell settles the worker's turn at once:
-/// the turn unwinds (turn_end + agent_end reach attached clients within
+/// the turn unwinds (`turn_end` + `agent_end` reach attached clients within
 /// the budget) and the cell dies (its finish marker never appears). A
 /// wedge keeps the loader spinning while the cell runs out.
 #[test]

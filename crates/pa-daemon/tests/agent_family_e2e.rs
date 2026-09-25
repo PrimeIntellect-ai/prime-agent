@@ -7,12 +7,12 @@
 //! registry bound to the parent (the same registry `rlm.list_subagents`
 //! and the worker's own controller read). The parent-side sends go through
 //! the real kernel host handler (`agent_message.send` with
-//! receiver_role/receiver_name), resolving through the controller's
+//! `receiver_role/receiver_name`), resolving through the controller's
 //! family view and delivering over the supervisor route; the child is a
 //! real worker with a scripted engine whose kernel answers each delivered
 //! prompt with a real `agent_message.send` addressed to its parent.
 //!
-//! Linux-only e2e (AF_UNIX sockets), like the other pa-daemon verifiers.
+//! Linux-only e2e (`AF_UNIX` sockets), like the other pa-daemon verifiers.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};

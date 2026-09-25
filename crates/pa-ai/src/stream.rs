@@ -126,6 +126,10 @@ fn clamp_output_budget(model: &Model, context: &Context, options: Option<&mut St
 }
 
 /// Start streaming a completion for `model` using provider-native options.
+///
+/// # Errors
+///
+/// Returns `Err` when no API provider is registered for `model.api`.
 pub fn stream(
     model: &Model,
     context: &Context,
@@ -138,6 +142,10 @@ pub fn stream(
 }
 
 /// Await the final assistant message of a provider-native stream.
+///
+/// # Errors
+///
+/// Returns `Err` when no API provider is registered for `model.api`.
 pub async fn complete(
     model: &Model,
     context: &Context,
@@ -148,6 +156,10 @@ pub async fn complete(
 }
 
 /// Start a streaming completion with unified reasoning options (`streamSimple`).
+///
+/// # Errors
+///
+/// Returns `Err` when no API provider is registered for `model.api`.
 pub fn stream_simple(
     model: &Model,
     context: &Context,
@@ -165,6 +177,10 @@ pub fn stream_simple(
 }
 
 /// Await the final assistant message of a simple stream (`completeSimple`).
+///
+/// # Errors
+///
+/// Returns `Err` when no API provider is registered for `model.api`.
 pub async fn complete_simple(
     model: &Model,
     context: &Context,

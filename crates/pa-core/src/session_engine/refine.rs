@@ -197,6 +197,11 @@ pub fn load_refinement_history(
 }
 
 /// The session's local harness state directory (under the session dir).
+///
+/// # Panics
+///
+/// The `expect` cannot fire: mapping the session dir onto the local harness
+/// dir is total for `Some` session dirs.
 pub fn local_harness_state_dir(session: &SessionManager) -> PathBuf {
     let session_dir = session.get_session_dir().to_path_buf();
     crate::refinement::get_local_harness_state_dir(Some(&session_dir))
@@ -229,6 +234,13 @@ pub struct RefinementTranscript<'a> {
 /// Run the full refinement flow: plan (LLM or rollback), re-read the target
 /// store, apply, persist state + history, and append the audit, outcome, and
 /// notice entries to the session. `refine_call` performs the model request.
+///
+/// # Errors
+///
+/// Returns an error when a local refinement is requested on an unpersisted
+/// session, when the refinement plan (LLM or rollback) fails, when applying
+/// or persisting the refined harness state fails, or when appending the
+/// audit, outcome, or notice entries fails.
 pub async fn execute_refinement(
     session: &mut SessionManager,
     transcript: RefinementTranscript<'_>,
@@ -365,6 +377,12 @@ impl AgentSession {
     /// refinement ran and nothing surfaces. The caller stamps its review
     /// cooldown for every outcome (decline, success, and failure alike, the TS
     /// contract).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the conversation history cannot be read, when
+    /// the review request fails, or when the approving review's refinement
+    /// run fails. A decline is `Ok(None)`.
     pub async fn auto_refine_after_compaction(
         &self,
         model: &pa_types::ai::Model,

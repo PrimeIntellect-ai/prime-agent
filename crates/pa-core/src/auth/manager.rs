@@ -1,6 +1,6 @@
 //! `AuthStorage`: credential resolution with runtime overrides, environment
 //! keys, stored credentials, fallback resolvers, and stale-marking. Port of
-//! the AuthStorage class.
+//! the `AuthStorage` class.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -251,7 +251,7 @@ impl AuthStorage {
     /// In-memory storage with no ambient environment source: hermetic
     /// resolution for embedded hosts and test harnesses that must pin the
     /// model catalog scope (an ambient provider credential variable such
-    /// as PRIME_API_KEY cannot make models available through this
+    /// as `PRIME_API_KEY` cannot make models available through this
     /// storage). Otherwise behaves like [`AuthStorage::in_memory`].
     pub fn in_memory_without_env(data: AuthStorageData, oauth: Arc<dyn OAuthIntegration>) -> Self {
         Self::in_memory_with_env_source(data, oauth, Arc::new(NoEnvCredentials))
@@ -656,7 +656,7 @@ impl AuthStorage {
         self.reload();
     }
 
-    /// API-key resolution: runtime > (prime-inference: env) > stored (api_key
+    /// API-key resolution: runtime > (prime-inference: env) > stored (`api_key`
     /// resolved, oauth refreshed on expiry) > env > fallback. Stale sources
     /// are skipped.
     /// Provider-scoped request headers (prime-inference team header only).
@@ -1005,7 +1005,7 @@ mod tests {
     use super::*;
 
     /// Fixed environment credential source: hermetic against the ambient
-    /// process env (e.g. this sandbox exports PRIME_API_KEY globally).
+    /// process env (e.g. this sandbox exports `PRIME_API_KEY` globally).
     struct ScriptedEnv(HashMap<String, String>);
 
     impl EnvCredentialSource for ScriptedEnv {

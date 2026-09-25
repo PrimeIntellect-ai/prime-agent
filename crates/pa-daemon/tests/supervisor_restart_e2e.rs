@@ -6,7 +6,7 @@
 //! re-register within a bounded window, the roster rebuilds, and a scripted
 //! turn completes through an attach to the rebuilt roster.
 //!
-//! Linux-only e2e (AF_UNIX sockets, `kill -9` semantics): compiles to
+//! Linux-only e2e (`AF_UNIX` sockets, `kill -9` semantics): compiles to
 //! nothing elsewhere, like the other pa-daemon e2e verifiers.
 #![cfg(unix)]
 
