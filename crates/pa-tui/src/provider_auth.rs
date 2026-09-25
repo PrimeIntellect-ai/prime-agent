@@ -626,10 +626,11 @@ mod tests {
     #[test]
     fn the_panel_renders_the_ts_chrome() {
         // The login menu matches the /model and /mcp pickers (the
-        // operator's 2026-09-25 directive): the search bar is the
-        // frame's first row — no header block, no leading blank, no
-        // rules — the rows follow, and the hint is the last content
-        // row with one blank under it.
+        // operator's 2026-09-25 directive): the frame opens with the
+        // search field itself (its top rule, the placeholder row, its
+        // bottom rule) — no header block, no leading blank — the rows
+        // follow, and the hint is the last content row with one blank
+        // under it.
         let mut selector =
             ProviderAuthSelector::new(AuthSelectorKind::Login, vec![openai(), linear()]);
         selector.render(&theme(), 80);
@@ -643,11 +644,19 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(
-            text[0].contains("Search providers"),
-            "the search bar is the frame's first row: {text:?}"
+            text[0].starts_with('─'),
+            "the search field's top rule opens the frame: {text:?}"
         );
         assert!(
-            !text.iter().any(|row| row.contains("Providers")),
+            text[1].contains("Search providers"),
+            "the placeholder row rides directly under the top rule: {text:?}"
+        );
+        assert!(
+            text[2].starts_with('─'),
+            "the search field's bottom rule follows: {text:?}"
+        );
+        assert!(
+            !text.iter().any(|row| row.trim() == "Providers"),
             "no title row rides the login menu: {text:?}"
         );
         assert!(!text
@@ -658,11 +667,6 @@ mod tests {
         assert!(
             !text.iter().any(|row| row.contains("tabs")),
             "no tab hint rides the panel: {text:?}"
-        );
-        // The frame carries no rules and ends one blank under the hint.
-        assert!(
-            !text.iter().any(|row| row.contains("────")),
-            "no rules ride the login menu: {text:?}"
         );
         assert_eq!(rows.last(), Some(&Vec::new()), "one blank under the hint");
         let hint_index = text
