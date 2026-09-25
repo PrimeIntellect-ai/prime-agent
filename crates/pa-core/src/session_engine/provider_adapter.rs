@@ -128,7 +128,7 @@ fn stream_once(
             session_id: options.session_id.clone(),
             on_payload: None,
             on_response: None,
-            headers: (!headers.is_empty()).then(|| headers),
+            headers: (!headers.is_empty()).then_some(headers),
             metadata: None,
             timeout_ms: None,
         },
