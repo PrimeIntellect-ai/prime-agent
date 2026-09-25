@@ -170,7 +170,7 @@ pub fn notice_message(content: String) -> CustomMessage {
         display: false,
         details: None,
         timestamp: now_millis(),
-        rest: Default::default(),
+        rest: serde_json::Map::default(),
     }
 }
 
@@ -454,7 +454,7 @@ mod tests {
         SessionAgentMessage::User(pa_types::ai::UserMessage {
             content: UserContent::Text(text.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -550,7 +550,7 @@ mod tests {
     /// without a kernel keeps the "Already compacted" skip.
     #[tokio::test]
     async fn back_to_back_compact_runs_again_with_a_running_kernel() {
-        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = std::sync::Arc::default();
         let registration = faux_registration(vec![
             recording_step(seen.clone(), "the first compaction summary"),
             recording_step(seen.clone(), "the second compaction summary"),

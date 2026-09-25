@@ -605,7 +605,7 @@ mod tests {
             provider: "faux".to_string(),
             base_url: "http://localhost".to_string(),
             reasoning: false,
-            cost: Default::default(),
+            cost: pa_types::ai::UsageCost::default(),
             context_window: 100_000,
             max_tokens: 1_000,
         }
@@ -615,7 +615,7 @@ mod tests {
         SessionMessage::User(pa_types::ai::UserMessage {
             content: UserContent::Text(text.to_string()),
             timestamp: 1,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -624,7 +624,7 @@ mod tests {
             content: vec![AssistantContentBlock::Text(TextContent {
                 text: text.to_string(),
                 text_signature: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             })],
             api: "test".to_string(),
             provider: "faux".to_string(),
@@ -638,13 +638,13 @@ mod tests {
                 cache_read: 0,
                 cache_write: 0,
                 total_tokens: 50,
-                cost: Default::default(),
+                cost: pa_types::ai::UsageCost::default(),
             },
             stop_reason: StopReason::Stop,
             stop_reason_raw: None,
             error_message: None,
             timestamp: 1,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -1154,7 +1154,7 @@ mod tests {
             cache_read: 0,
             cache_write: 0,
             total_tokens: 130,
-            cost: Default::default(),
+            cost: pa_types::ai::UsageCost::default(),
         };
         session.append_message(assistant).unwrap();
         session

@@ -9,6 +9,7 @@
 //! outbox cursors the later daemon port replays.
 
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -271,8 +272,8 @@ async fn delay(ms: u64, cancel: Option<&TraceUploadCancel>) {
         None => tokio::time::sleep(std::time::Duration::from_millis(ms)).await,
         Some(cancel) => {
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_millis(ms)) => {}
-                _ = cancel.wait() => {}
+                () = tokio::time::sleep(std::time::Duration::from_millis(ms)) => {}
+                () = cancel.wait() => {}
             }
         }
     }
@@ -523,7 +524,10 @@ fn agent_trace_outbox_dir(agent_dir: &Path) -> PathBuf {
 fn agent_trace_outbox_entry_path(agent_dir: &Path, session_file: &Path) -> PathBuf {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(session_file.to_string_lossy().as_bytes());
-    let key: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    let key: String = digest.iter().fold(String::new(), |mut output, b| {
+        let _ = write!(output, "{b:02x}");
+        output
+    });
     agent_trace_outbox_dir(agent_dir).join(format!("{}.json", &key[..32]))
 }
 
@@ -695,7 +699,7 @@ impl TraceHttp for ReqwestTraceHttp {
                 Some(cancel) => {
                     tokio::select! {
                         result = send => result,
-                        _ = cancel.wait() => Err(TraceHttpError::Cancelled),
+                        () = cancel.wait() => Err(TraceHttpError::Cancelled),
                     }
                 }
                 None => send.await,
@@ -722,7 +726,9 @@ pub fn encode_uri_component(value: &str) -> String {
             | b'\''
             | b'('
             | b')' => out.push(byte as char),
-            other => out.push_str(&format!("%{other:02X}")),
+            other => {
+                let _ = write!(out, "%{other:02X}");
+            }
         }
     }
     out
@@ -1263,7 +1269,7 @@ pub async fn upload_all_traces(options: &TraceUploadAllOptions<'_>) -> TraceUplo
                 .unwrap_or(TRACE_UPLOAD_ALL_CONCURRENCY)
                 .max(1),
         )
-        .max(if cancelled() { 0 } else { 1 });
+        .max(usize::from(!cancelled()));
     let mut workers = Vec::with_capacity(worker_count);
     for _ in 0..worker_count {
         workers.push(async {

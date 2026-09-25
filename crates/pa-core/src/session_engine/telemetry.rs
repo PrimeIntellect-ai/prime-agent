@@ -1041,7 +1041,7 @@ mod tests {
                 cache_read: 50,
                 cache_write: 0,
                 total_tokens: 170,
-                cost: Default::default(),
+                cost: pa_types::ai::UsageCost::default(),
             },
             stop_reason: StopReason::Stop,
             stop_reason_raw: None,

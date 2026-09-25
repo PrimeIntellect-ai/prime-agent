@@ -717,8 +717,7 @@ fn user_content_text(content: &pa_types::ai::UserContent) -> String {
                 pa_types::ai::UserContentBlock::Text(text) => Some(text.text.clone()),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join(""),
+            .collect::<String>(),
     }
 }
 
@@ -736,8 +735,7 @@ fn observe_message_text(message: &pa_types::session::AgentMessage) -> String {
                 }
                 pa_types::ai::AssistantContentBlock::ToolCall(_) => None,
             })
-            .collect::<Vec<_>>()
-            .join(""),
+            .collect::<String>(),
         AgentMessage::ToolResult(message) => {
             user_content_text(&pa_types::ai::UserContent::Blocks(message.content.clone()))
         }
@@ -979,7 +977,7 @@ mod tests {
         let user = pa_types::session::AgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text("short".to_string()),
             timestamp: 42,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         });
         let preview = create_agent_observe_message_preview(&user, 3, 800);
         assert_eq!(preview.index, 3);
@@ -990,7 +988,7 @@ mod tests {
         let long = pa_types::session::AgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text("x".repeat(100)),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         });
         let clipped = create_agent_observe_message_preview(&long, 0, 10);
         assert!(clipped.truncated);

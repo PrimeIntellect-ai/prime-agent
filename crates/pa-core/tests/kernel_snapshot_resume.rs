@@ -103,7 +103,7 @@ fn ipython_tool_call_step(call_id: &str, code: &str) -> FauxResponseStep {
                     .cloned()
                     .expect("object"),
                 thought_signature: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         )],
         FauxAssistantMessageOptions {
@@ -189,7 +189,7 @@ async fn tool_result_texts(engine: &pa_core::session_engine::engine::SessionEngi
                     .iter()
                     .filter_map(|block| match block {
                         pa_agent::types::ToolResultContent::Text(text) => Some(text.text.clone()),
-                        _ => None,
+                        pa_agent::types::ToolResultContent::Image(_) => None,
                     })
                     .collect::<Vec<_>>()
                     .join("\n"),

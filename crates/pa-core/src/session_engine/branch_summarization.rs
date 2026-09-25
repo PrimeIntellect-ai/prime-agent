@@ -118,7 +118,7 @@ fn get_message_from_entry(entry: &FileEntry) -> Option<AgentMessage> {
                 display: payload.display,
                 details: payload.details.clone(),
                 timestamp: super::super::session::timestamp_to_millis(entry.timestamp()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }))
         }
         FileEntry::BranchSummary { payload, .. } => Some(AgentMessage::BranchSummary(
@@ -218,7 +218,7 @@ pub fn build_branch_summary_request(
         vec![AgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text(prompt_text),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })]
     };
     (messages, preparation)
@@ -489,7 +489,7 @@ mod tests {
                 id: Some(id.to_string()),
                 parent_id: parent.map(str::to_string),
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         }
     }
@@ -498,7 +498,7 @@ mod tests {
         AgentMessage::User(pa_types::ai::UserMessage {
             content: pa_types::ai::UserContent::Text(text.to_string()),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 
@@ -580,7 +580,7 @@ mod tests {
                 id: Some("c0".to_string()),
                 parent_id: None,
                 timestamp: Some("2024-01-01T00:00:00.000Z".to_string()),
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         };
         let message = get_message_from_entry(&compaction).unwrap();
@@ -602,7 +602,7 @@ mod tests {
             let _guard = FAUX_LOCK
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            pa_ai::faux::register_faux_provider(Default::default())
+            pa_ai::faux::register_faux_provider(pa_ai::faux::RegisterFauxProviderOptions::default())
         };
         let model = registration.get_model();
         let response = pa_ai::faux::faux_assistant_text_message(
@@ -675,7 +675,9 @@ mod tests {
                 let _guard = FAUX_LOCK
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                pa_ai::faux::register_faux_provider(Default::default())
+                pa_ai::faux::register_faux_provider(
+                    pa_ai::faux::RegisterFauxProviderOptions::default(),
+                )
             };
             let model = registration.get_model();
             let tmp = tempfile::tempdir().unwrap();
@@ -691,7 +693,8 @@ mod tests {
                 cwd: tmp.path().to_path_buf(),
                 agent_dir: tmp.path().to_path_buf(),
             };
-            let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+            let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+                std::sync::Arc::default();
             let recorder = seen_models.clone();
             registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
                 std::sync::Arc::new(

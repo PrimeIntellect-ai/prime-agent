@@ -120,7 +120,9 @@ async fn tool_call_round_trips_through_the_runner() -> Result<()> {
         pa_types::extension_rpc::ToolResultBlock::Text { text } => {
             assert_eq!(text, "Hello, world!");
         }
-        other => panic!("expected text block, got {other:?}"),
+        other @ pa_types::extension_rpc::ToolResultBlock::Image { .. } => {
+            panic!("expected text block, got {other:?}")
+        }
     }
     assert!(!result.is_error);
     runner.shutdown("test end").await?;
@@ -275,7 +277,7 @@ async fn scripted_session_executes_the_extension_tool() -> Result<()> {
         provider: "test".into(),
         base_url: "http://localhost".into(),
         reasoning: false,
-        cost: Default::default(),
+        cost: pa_types::ai::UsageCost::default(),
         context_window: 1_000,
         max_tokens: 100,
     };

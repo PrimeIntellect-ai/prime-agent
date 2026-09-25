@@ -3,6 +3,7 @@
 //! the `AuthStorage` class.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use super::resolve_config_value::{resolve_config_value, resolve_config_value_uncached};
@@ -23,7 +24,10 @@ fn fingerprint(source: AuthSource, material: &str) -> String {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut output, b| {
+        let _ = write!(output, "{b:02x}");
+        output
+    })
 }
 
 /// One candidate credential source.
@@ -312,7 +316,7 @@ impl AuthStorage {
             content = current;
             Ok(((), None))
         });
-        match result.and_then(|_| parse_storage_data(content.as_deref())) {
+        match result.and_then(|()| parse_storage_data(content.as_deref())) {
             Ok(data) => {
                 self.data = data;
                 self.load_error = None;
@@ -1349,7 +1353,7 @@ mod tests {
             update: &mut dyn FnMut(Option<String>) -> anyhow::Result<((), Option<String>)>,
         ) -> anyhow::Result<()> {
             let current = self.0.lock().unwrap().clone();
-            let (_, next) = update(current)?;
+            let ((), next) = update(current)?;
             match next {
                 Some(_) => Err(anyhow::anyhow!("the locked write failed")),
                 None => Ok(()),

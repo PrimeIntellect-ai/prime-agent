@@ -296,7 +296,7 @@ mod tests {
         assert_eq!(validate_description(""), vec!["description is required"]);
         assert!(validate_description("ok").is_empty());
         let long = "x".repeat(MAX_DESCRIPTION_LENGTH + 1);
-        assert!(validate_description(&long).len() == 1);
+        assert_eq!(validate_description(&long).len(), 1);
     }
 
     fn temp_skill(name: &str, dir: &std::path::Path) -> Skill {

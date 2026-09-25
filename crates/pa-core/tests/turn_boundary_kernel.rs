@@ -207,7 +207,7 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
                     cache_read: 0,
                     cache_write: 0,
                     total_tokens: 120,
-                    cost: Default::default(),
+                    cost: pa_types::ai::UsageCost::default(),
                 };
             }
         }

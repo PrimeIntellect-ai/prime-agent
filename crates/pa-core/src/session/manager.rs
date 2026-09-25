@@ -881,12 +881,11 @@ impl SessionManager {
         if self.persist {
             if options.id.is_some() {
                 let candidate = get_session_file_path(&self.session_dir, &session_id);
-                if candidate.exists() {
-                    panic!(
-                        "Session file already exists for id \"{session_id}\": {}",
-                        candidate.display()
-                    );
-                }
+                assert!(
+                    !candidate.exists(),
+                    "Session file already exists for id \"{session_id}\": {}",
+                    candidate.display()
+                );
                 session_file = Some(candidate);
             } else {
                 session_id = create_session_id();
@@ -1467,7 +1466,7 @@ impl SessionManager {
             payload: pa_types::session::CustomEntry {
                 custom_type: custom_type.to_string(),
                 data,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
             base,
         })?;
@@ -1490,7 +1489,7 @@ impl SessionManager {
             payload: pa_types::session::CustomEntry {
                 custom_type: custom_type.to_string(),
                 data,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
             base,
         });
@@ -1527,7 +1526,7 @@ impl SessionManager {
                 content,
                 details,
                 display,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
             base,
         })?;
@@ -1554,7 +1553,7 @@ impl SessionManager {
                 content,
                 details,
                 display,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
             base,
         });
@@ -1804,7 +1803,7 @@ mod tests {
                     cache_read: 80,
                     cache_write: 0,
                     total_tokens: 110,
-                    cost: Default::default(),
+                    cost: pa_types::ai::UsageCost::default(),
                 }),
                 harness_digest: None,
             })
@@ -1844,7 +1843,7 @@ mod tests {
                 stop_reason_raw: None,
                 error_message: None,
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }))
             .unwrap();
         let file = manager.get_session_file().unwrap().to_path_buf();
@@ -1879,7 +1878,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         });
         manager.append_message(assistant).unwrap();
         let file = manager.get_session_file().unwrap().to_path_buf();
@@ -1924,7 +1923,7 @@ mod tests {
             .append_message(AgentMessage::User(pa_types::ai::UserMessage {
                 content: pa_types::ai::UserContent::Text("original question".to_string()),
                 timestamp: 0,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }))
             .unwrap();
         let user_id = source.get_leaf_id().unwrap().to_string();
@@ -1941,7 +1940,7 @@ mod tests {
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         });
         source.append_message(assistant).unwrap();
         let assistant_id = source.get_leaf_id().unwrap().to_string();
@@ -1955,7 +1954,7 @@ mod tests {
                     id: Some("gitstate1".to_string()),
                     parent_id: Some(assistant_id.clone()),
                     timestamp: Some(format_iso_now()),
-                    rest: Default::default(),
+                    rest: serde_json::Map::default(),
                 },
             })
             .unwrap();
@@ -2023,7 +2022,7 @@ mod tests {
             .append_message(AgentMessage::User(pa_types::ai::UserMessage {
                 content: pa_types::ai::UserContent::Text("follow up".to_string()),
                 timestamp: 1,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             }))
             .unwrap();
         let after = std::fs::read_to_string(&fork_file).unwrap();

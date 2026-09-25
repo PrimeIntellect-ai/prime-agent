@@ -884,7 +884,7 @@ mod tests {
             provider: "test".into(),
             base_url: "http://localhost".into(),
             reasoning: false,
-            cost: Default::default(),
+            cost: pa_types::ai::UsageCost::default(),
             context_window: 1_000,
             max_tokens: 100,
         };
@@ -994,7 +994,7 @@ mod tests {
             provider: "test".into(),
             base_url: "http://localhost".into(),
             reasoning: false,
-            cost: Default::default(),
+            cost: pa_types::ai::UsageCost::default(),
             context_window: 1_000,
             max_tokens: 100,
         };
@@ -1057,7 +1057,7 @@ mod tests {
                 provider: "test".into(),
                 base_url: "http://localhost".into(),
                 reasoning: false,
-                cost: Default::default(),
+                cost: pa_types::ai::UsageCost::default(),
                 context_window: 1_000,
                 max_tokens: 100,
             }

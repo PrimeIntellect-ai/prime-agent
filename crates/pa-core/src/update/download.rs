@@ -3,6 +3,7 @@
 //! `releases/<version>-<platform>-<sha256>/`, and write the installer
 //! metadata (`install.rs` validates it on every later read).
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -95,7 +96,10 @@ async fn download_once(
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut output, b| {
+        let _ = write!(output, "{b:02x}");
+        output
+    })
 }
 
 /// The staging scratch prefix under `releases/`: a staging directory is

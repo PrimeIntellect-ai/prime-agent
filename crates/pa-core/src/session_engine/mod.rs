@@ -1213,7 +1213,7 @@ mod tests {
                 .iter()
                 .filter_map(|part| match part {
                     pa_agent::types::UserPart::Text(text) => Some(text.text.clone()),
-                    _ => None,
+                    pa_agent::types::UserPart::Image(_) => None,
                 })
                 .collect::<Vec<_>>()
                 .join(" "),
@@ -1379,7 +1379,7 @@ mod tests {
                 "sessionName": "lane",
             })),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         };
         session.prompt_injected_message(&notice).await.unwrap();
         session.agent().wait_for_idle().await;
@@ -1478,7 +1478,7 @@ mod tests {
                 "target": { "activeSessionId": "parent-1" },
             })),
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         };
         row_session.prompt_injected_message(&row).await.unwrap();
         row_session.agent().wait_for_idle().await;
@@ -1828,7 +1828,7 @@ mod slash_session_tests {
                 assert_eq!(command.name, "compact");
                 assert_eq!(command.args, "focus on tests");
             }
-            _ => panic!("expected a session command"),
+            PromptOutcome::Prompt => panic!("expected a session command"),
         }
         // No model call and no persisted user message.
         assert!(provider.calls().is_empty());
@@ -1882,12 +1882,12 @@ mod compaction_outcome_tests {
             response_model: None,
             response_id: None,
             diagnostics: None,
-            usage: Default::default(),
+            usage: pa_types::ai::Usage::default(),
             stop_reason: pa_types::ai::StopReason::Stop,
             stop_reason_raw: None,
             error_message: None,
             timestamp: 0,
-            rest: Default::default(),
+            rest: serde_json::Map::default(),
         })
     }
 

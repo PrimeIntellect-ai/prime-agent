@@ -145,7 +145,7 @@ async fn historical_refinement_is_read_only_on_trigger_not_in_hot_cache() {
 #[test]
 fn blank_rows_and_uncompacted_context_are_warm() {
     let dir = tempfile::tempdir().unwrap();
-    for (name, body) in [("blank", fixture().replace("\n", "\n\n")), ("plain", r#"{"type":"session","version":3,"id":"s","cwd":"/tmp","timestamp":"now"}\n{"type":"message","id":"m","parentId":null,"message":{"role":"user","content":"hi","timestamp":0}}\n"#.replace("\\n", "\n"))] {
+    for (name, body) in [("blank", fixture().replace('\n', "\n\n")), ("plain", r#"{"type":"session","version":3,"id":"s","cwd":"/tmp","timestamp":"now"}\n{"type":"message","id":"m","parentId":null,"message":{"role":"user","content":"hi","timestamp":0}}\n"#.replace("\\n", "\n"))] {
         let path = dir.path().join(name);
         std::fs::write(&path, &body).unwrap();
         WindowedSessionStore::open(&path).unwrap().unwrap();

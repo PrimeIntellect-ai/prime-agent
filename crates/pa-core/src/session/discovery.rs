@@ -337,7 +337,7 @@ mod tests {
                 parent_session: None,
                 rlm_depth: Some(0),
                 git: None,
-                rest: Default::default(),
+                rest: serde_json::Map::default(),
             },
         };
         std::fs::write(
@@ -403,7 +403,9 @@ mod tests {
                 sorted.sort();
                 assert_eq!(sorted, vec!["aaaa0001".to_string(), "aaaa0002".to_string()]);
             }
-            other => panic!("expected an ambiguous error, got {other:?}"),
+            other @ SessionSelectorError::NotFound { .. } => {
+                panic!("expected an ambiguous error, got {other:?}")
+            }
         }
         // The rendered message lists matches in scan order; only the shape is
         // order-independent to assert here.

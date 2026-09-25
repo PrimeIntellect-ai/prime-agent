@@ -2,6 +2,7 @@
 //! port): the channel manifest at the download base URL, validated with
 //! the same rules so a malformed manifest can never stage a wrong binary.
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -171,7 +172,10 @@ pub fn artifact_for_platform(release: &LatestRelease) -> Result<&ReleaseArtifact
 /// checks and tests that build fixture archives).
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    digest.iter().fold(String::new(), |mut output, b| {
+        let _ = write!(output, "{b:02x}");
+        output
+    })
 }
 
 #[cfg(test)]

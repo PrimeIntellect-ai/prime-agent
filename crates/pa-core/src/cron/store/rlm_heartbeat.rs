@@ -303,6 +303,6 @@ mod tests {
         let cancelled = store.cancel_rlm_heartbeats_for_session("live-1", now + 4);
         assert_eq!(cancelled.len(), 1);
         assert_eq!(second.status, JobStatus::Active);
-        assert!(cancelled[0].status == JobStatus::Cancelled);
+        assert_eq!(cancelled[0].status, JobStatus::Cancelled);
     }
 }
