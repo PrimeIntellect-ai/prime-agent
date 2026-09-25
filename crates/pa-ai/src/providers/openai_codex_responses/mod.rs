@@ -1488,7 +1488,20 @@ mod tests {
             use crate::providers::openai_codex_responses::session::session_state;
             let state = session_state().lock().expect("state");
             let entry = state.connections.get(&session_id);
-            eprintln!("[test] cached entry: {entry:?}");
+            let summary = entry.map(|entry| {
+                (
+                    entry.busy,
+                    entry.connection_id,
+                    entry.continuation.as_ref().map(|continuation| {
+                        (
+                            continuation.connection_id,
+                            continuation.last_response_id.clone(),
+                            continuation.last_response_items.len(),
+                        )
+                    }),
+                )
+            });
+            eprintln!("[test] cached entry: {summary:?}");
             drop(state);
         }
 
