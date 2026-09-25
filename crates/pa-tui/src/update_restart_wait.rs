@@ -95,7 +95,8 @@ pub(crate) fn is_update_restart_deadline_error(error: &anyhow::Error) -> bool {
 /// Case-insensitive: the hello/connect paths capitalize `Timed`, the
 /// session's own bounded requests say `timed out after ...`.
 fn is_daemon_transport_timeout(text: &str) -> bool {
-    let Some(rest) = text.to_lowercase().strip_prefix("timed out after ") else {
+    let lowered = text.to_lowercase();
+    let Some(rest) = lowered.strip_prefix("timed out after ") else {
         return false;
     };
     let Some((digits, tail)) = rest.split_once("ms ") else {
