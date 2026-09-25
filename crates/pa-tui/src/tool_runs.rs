@@ -129,10 +129,10 @@ pub struct ClassCount {
     pub count: usize,
 }
 
-/// The run's class label for one tool card: the ipython cell's own
-/// language (`python` or `bash` - a literal bash launch is bash), the
-/// bash tool's `bash`, or the card's tool name otherwise (the same label
-/// the card's own rows show).
+/// The run's class label for one tool card: the SAME language label
+/// the card's own rows display (a `%%bash` cell wrapping a python
+/// heredoc shows `bash · python`, and its class says exactly that), the
+/// bash tool's `bash`, or the card's tool name otherwise.
 fn class_label(card: &ToolCallCard) -> String {
     if card.name == "ipython" {
         let code = card
@@ -140,13 +140,14 @@ fn class_label(card: &ToolCallCard) -> String {
             .get("code")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
+        let preview = crate::code_preview::preview_ipython_code(code);
         let is_bash_cell = crate::code_preview::parse_ipython_bash_cell(code).is_some();
-        if is_bash_cell {
-            return "bash".to_string();
-        }
-        match crate::code_preview::preview_ipython_code(code).language {
-            crate::code_preview::CodePreviewLanguage::Bash => "bash".to_string(),
-            crate::code_preview::CodePreviewLanguage::Python => "python".to_string(),
+        match (is_bash_cell, preview.language) {
+            (true, crate::code_preview::CodePreviewLanguage::Python) => {
+                "bash \u{b7} python".to_string()
+            }
+            (true | false, crate::code_preview::CodePreviewLanguage::Bash) => "bash".to_string(),
+            (false, crate::code_preview::CodePreviewLanguage::Python) => "python".to_string(),
         }
     } else {
         card.name.clone()

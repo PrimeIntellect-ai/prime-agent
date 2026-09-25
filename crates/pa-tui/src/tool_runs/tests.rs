@@ -239,6 +239,33 @@ fn class_labels_follow_the_cards_and_receipts() {
 }
 
 #[test]
+fn a_bash_cell_wrapping_python_classifies_like_its_display() {
+    // A `%%bash` cell whose selected heredoc preview is python shows
+    // `bash · python` on its card rows - the run's class mirrors that
+    // exact label instead of a bare `bash`.
+    let cell = |id: &str| {
+        let mut card = settled_card(id, "ipython");
+        if let ChatEntry::Tool(card) = &mut card {
+            card.args = serde_json::json!({
+                "code": "%%bash\npython3 - <<'EOF'\nprint('hi')\nEOF\n"
+            });
+        }
+        card
+    };
+    let chat = vec![cell("c0"), cell("c1"), cell("c2"), cell("c3"), cell("c4")];
+    let map = run_map(&chat);
+    let summary = run_summary(&chat, map.run_at(0).expect("qualifies"));
+    assert_eq!(
+        summary.classes,
+        vec![ClassCount {
+            label: "bash \u{b7} python".to_string(),
+            count: 5
+        }],
+        "the class mirrors the card's own display label"
+    );
+}
+
+#[test]
 fn bash_cells_classify_as_bash() {
     let bash_cell = |id: &str| {
         let mut card = settled_card(id, "ipython");
