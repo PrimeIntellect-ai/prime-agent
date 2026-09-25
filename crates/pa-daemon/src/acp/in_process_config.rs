@@ -312,13 +312,19 @@ async fn apply_in_process_model_switch(
     // model's provider).
     *mode.api_key.lock().await = resolved.api_key.clone();
     // TS `session.setModel` persists the default provider/model so the
-    // next session starts on the switched model.
+    // next session starts on the switched model. A failed write rejects
+    // the switch with the live state applied (TS's call chain rejects
+    // after the model assignment and the durable row).
     {
         let mut settings = pa_core::settings::SettingsManager::create(
             mode.actual_cwd.as_path(),
             mode.agent_dir.as_path(),
         );
-        let _ = settings.set_default_model_and_provider(model.provider.clone(), model.id.clone());
+        if let Err(error) =
+            settings.set_default_model_and_provider(model.provider.clone(), model.id.clone())
+        {
+            anyhow::bail!(error);
+        }
     }
     // The thinking level follows the switch (TS
     // `_getThinkingLevelForModelSwitch` + `setThinkingLevel`): the current
@@ -418,9 +424,18 @@ async fn apply_level_change(
             mode.actual_cwd.as_path(),
             mode.agent_dir.as_path(),
         );
-        let _ = settings.set_default_thinking_level(
-            pa_core::settings::ThinkingLevelSetting::from_model_level(level),
-        );
+        // TS `setThinkingLevel`'s chain rejects on a failed settings
+        // write (the level assignment and the durable row already ran,
+        // exactly like the model switch).
+        settings
+            .set_default_thinking_level(pa_core::settings::ThinkingLevelSetting::from_model_level(
+                level,
+            ))
+            .map_err(|error| {
+                ConfigOptionError::Internal(format!(
+                    "thinking level default persist failed: {error:#}"
+                ))
+            })?;
     }
     Ok(())
 }

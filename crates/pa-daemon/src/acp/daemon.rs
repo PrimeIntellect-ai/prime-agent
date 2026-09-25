@@ -176,9 +176,13 @@ impl DaemonLink {
         let line = serde_json::to_string(&envelope)?;
         let (tx, rx) = oneshot::channel::<DaemonResponse>();
         self.pending.lock().unwrap().insert(id.clone(), tx);
-        self.writer
-            .send(line)
-            .map_err(|_| anyhow::anyhow!("the daemon connection is closed"))?;
+        if self.writer.send(line).is_err() {
+            // A closed writer leaves the pending slot behind otherwise; a
+            // link that never answers again would grow one entry per
+            // request.
+            self.pending.lock().unwrap().remove(&id);
+            anyhow::bail!("the daemon connection is closed");
+        }
         tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx)
             .await
             .map_err(|_| {
