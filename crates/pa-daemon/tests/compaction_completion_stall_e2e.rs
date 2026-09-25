@@ -430,9 +430,6 @@ fn serve(
     write_sse(&mut stream, reply, usage)
 }
 
-// The child is reaped in Supervisor::drop (kill + wait); clippy's
-// zombie_processes cannot see the Drop guard from the spawn site.
-#[allow(clippy::zombie_processes)]
 /// The daemon child's stderr lands beside the trace (its `eprintln`
 /// diagnostics — a failed background round names its error) so the
 /// deferral test can surface them.
@@ -440,6 +437,9 @@ fn daemon_stderr_path(trace_path: &Path) -> std::path::PathBuf {
     trace_path.with_file_name("daemon-stderr.log")
 }
 
+// The child is reaped in Supervisor::drop (kill + wait); clippy's
+// zombie_processes cannot see the Drop guard from the spawn site.
+#[allow(clippy::zombie_processes)]
 fn spawn_supervisor(socket: &Path, agent_dir: &Path, trace_path: &Path) -> Supervisor {
     std::fs::create_dir_all(agent_dir).expect("agent dir");
     let stderr_path = daemon_stderr_path(trace_path);
