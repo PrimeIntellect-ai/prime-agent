@@ -219,7 +219,7 @@ fn attach_data(id: &str) -> Value {
         }),
         json!({
             "role": "assistant",
-            "content": [{ "type": "text", "text": "the spec is at [spec](https://example.com/spec)" }],
+            "content": [{ "type": "text", "text": "the guide lives at [documentation](https://example.com/spec)" }],
         }),
     ];
     json!({
@@ -438,7 +438,7 @@ fn clicking_a_transcript_link_opens_it() {
     // and stats renders land inside the hold, so the probe's last frame is
     // the same settled frame the plan's press dispatches against.
     let probe = run_plan(vec![HeadlessStep::WaitMs(1500)]);
-    let (_, link_row, link_col, _) = locate(&probe.0, "spec")
+    let (_, link_row, link_col, _) = locate(&probe.0, "documentation")
         .unwrap_or_else(|| panic!("the link label renders: {:#?}", probe.0));
     let opened = run_plan(vec![
         HeadlessStep::WaitMs(1500),

@@ -5899,25 +5899,10 @@ impl SessionUi {
         let left_release_was_drag = !event.press
             && event.button == crate::mouse::BUTTON_LEFT
             && self.fullscreen_left_dragged;
-        if std::env::var("PA_TUI_CLICK_DEBUG").is_ok() {
-            eprintln!(
-                "[clickdbg] press={} button={} row={row} col={col} links={:?} targets={:?}",
-                event.press,
-                event.button,
-                view.frame_clicks_debug_links(),
-                view.frame_clicks_debug_targets().len()
-            );
-        }
         if left_press {
             self.fullscreen_left_dragged = event.motion;
             if !event.motion {
                 self.fullscreen_pressed_hyperlink = view.frame_link_at(row, col);
-                if std::env::var("PA_TUI_CLICK_DEBUG").is_ok() {
-                    eprintln!(
-                        "[clickdbg] captured hyperlink={:?}",
-                        self.fullscreen_pressed_hyperlink
-                    );
-                }
                 self.fullscreen_pressed_click = if !event.shift
                     && !event.alt
                     && !event.ctrl

@@ -617,17 +617,6 @@ impl AgentView {
         self.frame_clicks.link_at(row, col).map(str::to_string)
     }
 
-    /// Debug view of the frame's click links (the click e2e's tracing,
-    /// behind `PA_TUI_CLICK_DEBUG`).
-    pub(crate) fn frame_clicks_debug_links(&self) -> Vec<(usize, usize, usize, String)> {
-        self.frame_clicks.debug_links()
-    }
-
-    /// Debug view of the frame's click targets (the click e2e's tracing).
-    pub(crate) fn frame_clicks_debug_targets(&self) -> Vec<crate::click_regions::FrameClickTarget> {
-        self.frame_clicks.debug_targets()
-    }
-
     /// Focus the editor and place the caret at a clicked content cell (TS
     /// `Editor.placeCursorFromClick`): the row is the visible layout line
     /// index of the last dock render, the column the frame column.
