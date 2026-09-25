@@ -6126,10 +6126,7 @@ impl SessionUi {
         // where a later Enter would submit it unedited. The runs view
         // owns the frame the same way, and the read-only goal panel
         // consumes it the same way.
-        if view.bash_view.is_some()
-            || view.runs_view.is_some()
-            || view.goal_panel.is_some()
-        {
+        if view.bash_view.is_some() || view.runs_view.is_some() || view.goal_panel.is_some() {
             self.dirty = true;
             return;
         }
