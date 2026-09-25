@@ -1275,30 +1275,6 @@ async fn build_faux_engine_with(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use pa_agent::stream::AssistantMessageEvent;
-    use pa_agent::types::{
-        AgentEvent, AssistantContent, AssistantMessage, TextContent, ToolCall, Usage,
-    };
-
-    /// A minimal partial assistant message (the faux wire fields).
-    fn partial(content: Vec<AssistantContent>) -> AssistantMessage {
-        AssistantMessage {
-            content,
-            api: "faux".to_string(),
-            provider: "faux".to_string(),
-            model: "faux-1".to_string(),
-            response_model: None,
-            response_id: None,
-            diagnostics: None,
-            usage: Usage::zero(),
-            stop_reason: pa_agent::types::StopReason::Stop,
-            error_message: None,
-            stop_reason_raw: None,
-            timestamp: 0,
-        }
-    }
-
     // --- print-mode MCP wiring (TS `createAgentSessionServices` parity) ---
 
     /// The print session's MCP manager serves a settings-declared server
