@@ -784,16 +784,16 @@ async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
         }
     }
     let label = "Copied last agent message to clipboard";
-    // Every copy registered: three OSC 52 emissions.
+    // Every copy registered: the headless OSC 52 sink is one buffer for
+    // the whole run, so the exact TS sequence appears three times
+    // concatenated - one emission per copy.
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode("hello from scripted");
+    let emission = format!("\x1b]52;c;{encoded}\x07");
+    let joined = outcome.clipboard_emissions.join("");
     assert_eq!(
-        outcome.clipboard_emissions,
-        vec![
-            format!("\x1b]52;c;{encoded}\x07"),
-            format!("\x1b]52;c;{encoded}\x07"),
-            format!("\x1b]52;c;{encoded}\x07"),
-        ],
+        joined,
+        emission.repeat(3),
         "every copy ran the OSC 52 chain"
     );
     // The coalesced toast acknowledges the count: three consecutive copies
