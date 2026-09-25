@@ -6603,13 +6603,10 @@ fn is_rlm_child_status_item(item: &QueuedItem) -> bool {
     let Some(row) = item.custom_message.as_ref() else {
         return false;
     };
-    matches!(
-        row.get("customType").and_then(Value::as_str),
-        Some(
-            pa_core::session_engine::rlm_notices::RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE
-                | pa_core::session_engine::rlm_notices::RLM_CHILD_FAILURE_CUSTOM_TYPE
-        )
-    )
+    // One reserved-kind predicate, owned by the intake module (review
+    // round 3): the queue's classification and every client surface read
+    // the same exact match, so the kinds can never desync.
+    crate::child_status_notices::is_reserved_child_status_custom_type(row)
 }
 
 /// The active action's queue label (TS `compactRlmText(text, 160)`):

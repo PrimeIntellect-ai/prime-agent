@@ -54,10 +54,6 @@ pub(crate) fn reserved_intake_error() -> String {
 /// milliseconds, so the sweep only reclaims dead mints.
 const MINT_TTL: Duration = Duration::from_secs(60);
 
-/// Safety bound only (a parent parks one notice per child exit): the
-/// registry never grows past this even under a pathological loop.
-const MAX_PENDING_MINTS: usize = 1024;
-
 fn pending() -> &'static Mutex<HashMap<String, Instant>> {
     static REGISTRY: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
@@ -68,30 +64,26 @@ fn pending() -> &'static Mutex<HashMap<String, Instant>> {
 /// in the same worker process as the queue admission that consumes the
 /// mint, and the map is process memory, so a caller on the client command
 /// plane can never mint, observe, or replay one.
+///
+/// The registry has NO capacity bound on purpose (review round 3): a
+/// capacity eviction could drop a still-live mint and with it that
+/// child's outcome at admission — a burst of settling watchers must keep
+/// every notice deliverable. Growth is inherently bounded instead: each
+/// entry is a short uuid minted once per child-exit notice round-trip by
+/// the daemon's own delivery (nothing client-facing can mint), and dead
+/// mints age out with the sweep below.
 pub(crate) fn mint() -> String {
     let nonce = uuid::Uuid::new_v4().to_string();
     let mut registry = pending().lock().unwrap();
     let now = Instant::now();
     registry.retain(|_, minted| now.duration_since(*minted) < MINT_TTL);
-    // The bound is a safety valve, never a functional limit: when the
-    // registry sits at capacity, drop the oldest pending mint.
-    if registry.len() >= MAX_PENDING_MINTS {
-        let oldest = registry
-            .iter()
-            .min_by_key(|(_, minted)| **minted)
-            .map(|(nonce, _)| nonce.clone());
-        if let Some(oldest) = oldest {
-            registry.remove(&oldest);
-        }
-    }
     registry.insert(nonce.clone(), now);
     nonce
 }
 
 /// Consume a minted capability exactly once: the queue admission of a
 /// reserved-kind custom row requires it. `false` answers everything a
-/// caller could send — an absent, unknown, stale-evicted, or
-/// already-consumed nonce.
+/// caller could send — an absent, unknown, or already-consumed nonce.
 pub(crate) fn consume(nonce: Option<&str>) -> bool {
     let Some(nonce) = nonce else {
         return false;
