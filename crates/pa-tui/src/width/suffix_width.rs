@@ -6,7 +6,11 @@
 //! multi-megabyte token wrapped at 80 columns went quadratic (a rescan, a
 //! suffix clone, and a width-cache key per row). The cursor walks the same
 //! escape/grapheme atoms `str_width` does - once - and answers every
-//! advancing offset in amortized O(1).
+//! advancing offset in amortized O(1) for printable-ASCII text and for
+//! cuts at atom boundaries. A cut inside a grapheme cluster re-measures
+//! that cluster's remainder, so one unbounded cluster cut every few
+//! columns still costs O(remaining cluster bytes) per cut - the same
+//! price the pre-fix rescan paid there, not a regression.
 
 use super::{escape_len, grapheme_width};
 use unicode_segmentation::UnicodeSegmentation;
@@ -14,11 +18,11 @@ use unicode_segmentation::UnicodeSegmentation;
 /// Visible width of `&text[at..]` for one string, asked at monotonically
 /// advancing byte offsets (the row cut points of a wrap).
 ///
-/// Answers are byte-identical to `str_width(&text[at..])` for every `at`
-/// the wrap can produce: char boundaries, never inside an escape sequence
-/// (the wrap copies escape sequences whole). A cut inside a grapheme
-/// cluster is answered by re-measuring just that cluster remainder - the
-/// only per-cut cost - plus the settled width past it.
+/// Answers equal `str_width(&text[at..])` for every `at` the wrap can
+/// produce: char boundaries, never inside an escape sequence (the wrap
+/// copies escape sequences whole). A cut inside a grapheme cluster is
+/// answered by re-measuring just that cluster remainder - the only
+/// per-cut cost - plus the settled width past it.
 pub(crate) struct SuffixWidth<'s> {
     /// The whole string this cursor measures suffixes of.
     text: &'s str,
@@ -58,7 +62,9 @@ impl<'s> SuffixWidth<'s> {
         cursor
     }
 
-    /// `str_width(&text[at..])`, amortized O(1) while `at` moves forward.
+    /// `str_width(&text[at..])`: amortized O(1) while `at` moves forward
+    /// and cuts land at atom boundaries; a cut inside a grapheme cluster
+    /// re-measures that cluster remainder (O(remaining cluster bytes)).
     pub(crate) fn remaining_from(&mut self, at: usize) -> usize {
         debug_assert!(self.text.is_char_boundary(at), "cut between chars");
         debug_assert!(at >= self.seen, "suffix offsets must advance");
@@ -95,7 +101,13 @@ impl<'s> SuffixWidth<'s> {
         let start = self.atom_start + self.atom_len;
         let tail = &self.text[start..];
         if tail.is_empty() {
-            // Walk ended: no current atom, nothing left to measure.
+            // Walk ended: no current atom, nothing left to measure. When
+            // the caller seeded the walk with the true `str_width(text)`,
+            // the settled tail must be exactly spent.
+            debug_assert_eq!(
+                self.after_width, 0,
+                "atom widths must sum to the seeded total width"
+            );
             self.atom_start = start;
             self.atom_len = 0;
             self.atom_width = 0;
@@ -158,6 +170,11 @@ mod tests {
             "\u{1b}[2m leading escape".to_owned(),
             "\u{1f469}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466} family then ascii aaaa"
                 .to_owned(),
+            // Mega-clusters cut many times mid-cluster: consecutive cuts
+            // inside ONE grapheme cluster re-measure its remainder per
+            // cut, and the answers must still equal str_width every time.
+            "カ".to_owned() + &"\u{ff9e}".repeat(256),
+            "\u{1f469}\u{200d}".repeat(128),
         ];
         for text in corpus {
             let total = str_width(&text);
