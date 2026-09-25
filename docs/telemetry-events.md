@@ -154,9 +154,9 @@ emitted and flushed before the TUI starts.
 | property | type | notes |
 |---|---|---|
 | `duration_ms` | number | onboarding-task creation → completion |
-| `outcome` | string | `success` (a fresh home answers the question and a standing-choice home completes silently — no error/abort path in either yet) |
-| `auth_category` | string | `none` (no auth step in the flow) |
-| `provider_category` | string | `unknown` |
+| `outcome` | string | `success` (the completion marker writes only on a completed flow; an aborted sign-in never completes) |
+| `auth_category` | string | the resolved startup model's credential source (TS `telemetryAuthCategory`): `api_key` / `oauth` / `mcp_static_token` for stored credentials, `runtime_api_key` / `environment` / `prime_cli` / `models_json` / `fallback` / `stale` for their sources, `none` when no model resolved |
+| `provider_category` | string | the resolved startup model's provider (TS `telemetryProviderCategory`), `unknown` when no model resolved |
 
 ### `daemon event`
 

@@ -73,6 +73,10 @@ pub struct ProviderRow {
     pub status: Option<AuthStatusIndicator>,
     /// The login flow the row runs.
     pub flow: AuthFlow,
+    /// Whether a usable credential exists (TS
+    /// `getProviderAuthStatus(id).configured`): the onboarding picker's
+    /// connected check, distinct from the display indicator.
+    pub configured: bool,
 }
 
 /// The outcome of one login/logout flow: the status row to show, the
@@ -133,6 +137,11 @@ impl std::fmt::Debug for ProviderAuthCommandsHandle {
 /// `PRIME_INFERENCE_PROVIDER_ID`: the row the panel-driven login
 /// serves).
 pub const PRIME_INFERENCE_PROVIDER_ID: &str = "prime-inference";
+/// The Prime Inference default model's id (pa-core's
+/// `PRIME_INFERENCE_DEFAULT_MODEL_ID` = TS `PRIME_INFERENCE_DEFAULT_MODEL_ID`):
+/// the model the onboarding flow applies after the sign-in when the home
+/// has no current model.
+pub const PRIME_INFERENCE_DEFAULT_MODEL_ID: &str = "z-ai/glm-5.3";
 
 /// The TS list geometry (`PREFERRED_VISIBLE_PROVIDERS`).
 const PREFERRED_VISIBLE_PROVIDERS: usize = 8;
@@ -490,6 +499,7 @@ mod tests {
             auth_type: AuthType::Oauth,
             status: None,
             flow: AuthFlow::TerminalFlow,
+            configured: false,
         }
     }
 
@@ -503,6 +513,7 @@ mod tests {
                 label: "configured".to_string(),
             }),
             flow: AuthFlow::ApiKeyPrompt,
+            configured: true,
         }
     }
 
@@ -513,6 +524,7 @@ mod tests {
             auth_type: AuthType::Oauth,
             status: None,
             flow: AuthFlow::TerminalFlow,
+            configured: false,
         }
     }
 

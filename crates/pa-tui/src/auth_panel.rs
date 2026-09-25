@@ -219,6 +219,7 @@ const BROWSER_DEFAULT_INSTRUCTIONS: &str = "Complete the sign-in in your browser
 
 /// The mounted panel: the flow's progress lines, the browser URL block,
 /// and the one active input (a paste prompt or the team picker).
+#[derive(Debug)]
 pub struct AuthPanel {
     /// TS the dialog's panel title: `Login to {provider}` / `Connect
     /// {service}`.
@@ -239,6 +240,7 @@ pub struct AuthPanel {
 }
 
 /// The panel's active input.
+#[derive(Debug)]
 enum PanelInput {
     /// No input mounted: the flow works between requests (its progress
     /// lines stay; Esc has nothing to cancel — the flow settles within
@@ -260,6 +262,7 @@ enum PanelInput {
 
 /// The mounted team picker (TS `PrimeTeamSelectorComponent`): the search
 /// field over the personal-first rows.
+#[derive(Debug)]
 struct PrimeTeamPicker {
     /// The team rows; the personal account rides first as its own row.
     teams: Vec<PrimeTeamOption>,

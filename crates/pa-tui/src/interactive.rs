@@ -201,11 +201,32 @@ pub trait OnboardingSink: Send + Sync {
     fn mark_onboarding_complete(&self) -> anyhow::Result<()>;
 }
 
+/// The model-readiness probe (TS `isOnboardingModelReady` over
+/// `getOnboardingState`): the composition root re-resolves the startup
+/// model chain, because the flow's own steps can change the answer (the
+/// Prime sign-in configures the startup model; TS re-checks readiness
+/// before the completion marker writes).
+pub type ModelReadiness = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// The first-run flow to run before the session screen (TS
-/// `runStartupOnboarding`, model-ready branch: splash + trace question).
+/// `runStartupOnboarding`): the model-ready branch asks the trace
+/// question on the immediate splash; a home with no usable model runs
+/// the full flow (TS `runOnboardingFlow`'s not-ready branch) — the
+/// welcome screen's login action, the Prime Inference sign-in through
+/// the inline auth panel, the default-model apply, the
+/// connect-more-providers picker, and the trace question.
 #[derive(Clone)]
 pub struct OnboardingTask {
     pub sink: std::sync::Arc<dyn OnboardingSink>,
+    /// The startup model's readiness (TS the flow-start branch).
+    pub model_ready: ModelReadiness,
+    /// The startup model itself (TS `getCurrentModel` at flow time):
+    /// the default model applies only without one.
+    pub current_model: Option<pa_types::ai::Model>,
+    /// The provider auth flows the full branch signs in through (the
+    /// composition root's `/login` surface); `None` leaves a
+    /// not-ready home without its sign-in step.
+    pub provider_auth: Option<crate::provider_auth::ProviderAuthCommandsHandle>,
 }
 
 impl std::fmt::Debug for OnboardingTask {
@@ -437,15 +458,117 @@ fn typed_keys(text: &str) -> Vec<KeyEvent> {
         .collect()
 }
 
-/// Drive the onboarding pane until the trace question settles. Returns
-/// `true` when the exit keys quit the app (TS `onExit` → shutdown).
+/// One onboarding flow's background task (the Prime login, a provider's
+/// key prompt): the phase drives the pane while it runs and takes the
+/// settled outcome from the handle.
+type OnboardingFlowTask = tokio::task::JoinHandle<crate::provider_auth::ProviderAuthOutcome>;
+
+/// The outcome of one onboarding pane drive: a screen decision, the exit
+/// keys, or the background flow settling while the pane waited.
+enum PaneOutcome {
+    Decision(crate::onboarding::OnboardingDecision),
+    Exit,
+    /// The flow settled; `Err` is a crashed task (the flow's outcome
+    /// reports the same error surface a failed login does).
+    Flow(Result<crate::provider_auth::ProviderAuthOutcome, tokio::task::JoinError>),
+}
+
+/// The pane drive's borrowed services: the input channel, the renderer,
+/// the force-quit guard, the mounted panels' keybindings, and the auth
+/// panel request channel (the same channel the run loop services once
+/// the pane ends).
+struct PaneDrive<'a> {
+    ui_rx: &'a mut mpsc::UnboundedReceiver<UiInput>,
+    renderer: &'a mut Renderer,
+    exit_guard: &'a ExitGuard,
+    keybindings: KeybindingsManager,
+    auth_panel_rx: &'a mut mpsc::UnboundedReceiver<crate::auth_panel::AuthPanelRequest>,
+}
+
+/// Draw the mounted onboarding screen and drive it until a key decides,
+/// the exit keys quit, or the optional background flow settles (TS the
+/// splash's render/wait loop). Each iteration draws first and waits
+/// after — a deciding key that is already queued still leaves the
+/// mounted frame captured — servicing keys, pastes, the auth-panel
+/// channel, and the animation tick (TS `ANIMATION_INTERVAL_MS`).
+async fn drive_onboarding_pane(
+    view: &mut AgentView,
+    drive: &mut PaneDrive<'_>,
+    mut screen: crate::onboarding::OnboardingScreen,
+    mut flow: Option<OnboardingFlowTask>,
+) -> Result<(crate::onboarding::OnboardingScreen, PaneOutcome)> {
+    loop {
+        // The pane owns the frame from the mount (TS renders the splash
+        // the moment it opens).
+        view.onboarding = Some(screen);
+        match drive.renderer {
+            Renderer::Terminal { .. } => {
+                if let Some(renderer) = drive.renderer.is_terminal_mut() {
+                    crate::app::draw(renderer, view)?;
+                }
+            }
+            Renderer::Headless { .. } => drive.renderer.render_headless_pane(view),
+        }
+        let Some(mut screen) = view.onboarding.take() else {
+            unreachable!("the pane mounts at the top of every iteration");
+        };
+        tokio::select! {
+            maybe_input = drive.ui_rx.recv() => {
+                if let Some(UiInput::Key(key)) = maybe_input {
+                    let Some(key_id) = crate::keys::key_event_to_id(&key) else {
+                        continue;
+                    };
+                    // The onboarding exit keys include Ctrl+C (`app.clear`):
+                    // report the handled press so the force-quit guard's
+                    // handled counter stays in sync with the reader's
+                    // observations.
+                    if key_id == "ctrl+c" {
+                        drive.exit_guard.note_ctrl_c_handled();
+                    }
+                    match screen.handle_key(&key_id, &drive.keybindings) {
+                        Some(decision) => {
+                            return Ok((screen, PaneOutcome::Decision(decision)));
+                        }
+                        None => {}
+                    }
+                } else if let Some(UiInput::Paste(text)) = maybe_input {
+                    screen.handle_paste(&text);
+                }
+            }
+            // The login flows drive the mounted dialog through the
+            // request channel (the run loop's channel arm equivalent for
+            // the pane-owned panel).
+            maybe_request = drive.auth_panel_rx.recv() => {
+                if let Some(request) = maybe_request {
+                    screen.apply_auth_request(request);
+                }
+            }
+            settled = async {
+                match flow.as_mut() {
+                    Some(task) => task.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                return Ok((screen, PaneOutcome::Flow(settled)));
+            }
+            // The field animates behind the flow panels until dismissal
+            // (TS ANIMATION_INTERVAL_MS).
+            _ = tokio::time::sleep(Duration::from_millis(120)) => {
+                screen.tick();
+            }
+        }
+    }
+}
+
+/// Drive the first-run onboarding flow before the session screen (TS
+/// `runStartupOnboarding` -> `runOnboardingFlow`). Returns `true` when
+/// the exit keys quit the app (TS `onExit` -> shutdown).
 async fn run_onboarding_phase(
     task: &OnboardingTask,
     session: &mut SessionUi,
     view: &mut AgentView,
-    ui_rx: &mut mpsc::UnboundedReceiver<UiInput>,
-    renderer: &mut Renderer,
-    exit_guard: &ExitGuard,
+    drive: &mut PaneDrive<'_>,
+    model_catalog: &[pa_types::ai::Model],
 ) -> Result<bool> {
     // One-shot: the startup gate read the marker once to mount this task,
     // but the agents-view flow re-runs the phase for every session it
@@ -466,77 +589,334 @@ async fn run_onboarding_phase(
         }
         return Ok(false);
     }
-    let mut screen = crate::onboarding::OnboardingScreen::new();
-    let keybindings = view.editor.keybindings().clone();
-    let mut exit_requested = false;
-    loop {
-        // The pane owns the frame from the mount (TS renders the splash the
-        // moment it opens), so each iteration draws first and waits for
-        // input after — a deciding key that is already queued still leaves
-        // the mounted frame captured.
-        view.onboarding = Some(screen.clone());
-        match renderer {
-            Renderer::Terminal { .. } => {
-                if let Some(renderer) = renderer.is_terminal_mut() {
-                    crate::app::draw(renderer, view)?;
+    if (task.model_ready)() {
+        // The model-ready branch (TS `runOnboardingFlow`'s ready case):
+        // the immediate splash mounts the trace question alone.
+        let screen = crate::onboarding::OnboardingScreen::new();
+        let (_screen, outcome) = drive_onboarding_pane(view, &mut drive, screen, None).await?;
+        match outcome {
+            PaneOutcome::Exit => return Ok(true),
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Selected(index)) => {
+                // `Share` opts in; `Not now` keeps traces off (TS
+                // finish(index === 0)). A cancel writes no answer at all,
+                // but the flow still completed. A write that fails
+                // surfaces as a warning row: the flow still settled this
+                // run, but an unpersisted marker re-mounts it next launch —
+                // the user must know, the run never dies over it.
+                if let Err(error) = task.sink.set_agent_traces_enabled(index == 0) {
+                    warn_onboarding_persist_failure(session, view, &error);
                 }
             }
-            Renderer::Headless { .. } => renderer.render_headless_pane(view),
+            // A cancel writes no answer; the flow still completed (TS
+            // finish(undefined)).
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Cancelled) => {}
+            // The question binds nothing else; a settled flow never ran.
+            PaneOutcome::Decision(
+                crate::onboarding::OnboardingDecision::Exit
+                | crate::onboarding::OnboardingDecision::Begin
+                | crate::onboarding::OnboardingDecision::Pick(_),
+            )
+            | PaneOutcome::Flow(_) => {
+                unreachable!("the question panel yields Selected or Cancelled only")
+            }
         }
-        view.onboarding = None;
-        tokio::select! {
-            maybe_input = ui_rx.recv() => {
-                if let Some(UiInput::Key(key)) = maybe_input {
-                    let Some(key_id) = crate::keys::key_event_to_id(&key) else {
-                        continue;
-                    };
-                    // The onboarding exit keys include Ctrl+C (`app.clear`):
-                    // report the handled press so the force-quit guard's
-                    // handled counter stays in sync with the reader's
-                    // observations.
-                    if key_id == "ctrl+c" {
-                        exit_guard.note_ctrl_c_handled();
-                    }
-                    match screen.handle_key(&key_id, &keybindings) {
-                        Some(crate::onboarding::OnboardingDecision::Selected(index)) => {
-                            // `Share` opts in; `Not now` keeps traces off
-                            // (TS finish(index === 0)). A cancel writes no
-                            // answer at all, but the flow still completed.
-                            // A write that fails surfaces as a warning row:
-                            // the flow still settled this run, but an
-                            // unpersisted marker re-mounts it next launch —
-                            // the user must know, the run never dies over it.
-                            if let Err(error) = task.sink.set_agent_traces_enabled(index == 0) {
-                                warn_onboarding_persist_failure(session, view, &error);
-                            }
-                            if let Err(error) = task.sink.mark_onboarding_complete() {
-                                warn_onboarding_persist_failure(session, view, &error);
-                            }
-                            break;
-                        }
-                        Some(crate::onboarding::OnboardingDecision::Cancelled) => {
-                            if let Err(error) = task.sink.mark_onboarding_complete() {
-                                warn_onboarding_persist_failure(session, view, &error);
-                            }
-                            break;
-                        }
-                        Some(crate::onboarding::OnboardingDecision::Exit) => {
-                            exit_requested = true;
-                            break;
-                        }
-                        None => {}
-                    }
-                }
-            }
-            // The field animates behind the flow panels until dismissal
-            // (TS ANIMATION_INTERVAL_MS).
-            _ = tokio::time::sleep(Duration::from_millis(120)) => {
-                screen.tick();
-            }
+        if let Err(error) = task.sink.mark_onboarding_complete() {
+            warn_onboarding_persist_failure(session, view, &error);
+        }
+        return Ok(false);
+    }
+
+    // The full flow (TS `runOnboardingFlow`'s not-ready branch): one
+    // sequence for every first launch. Signing in is instant when a
+    // Prime CLI token is already on disk, so users who arrive with
+    // credentials still reach the same account, provider and trace
+    // questions. A flow that aborts (a cancelled or failed sign-in,
+    // the exit keys) leaves the marker unset — the next launch retries.
+    let screen = crate::onboarding::OnboardingScreen::welcome();
+    let (mut screen, outcome) = drive_onboarding_pane(view, &mut drive, screen, None).await?;
+    // The welcome binds one key: Enter starts the flow (TS: cancel is
+    // deliberately unbound — signing in is the only way forward).
+    match outcome {
+        PaneOutcome::Exit => return Ok(true),
+        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Begin) => {}
+        PaneOutcome::Decision(
+            crate::onboarding::OnboardingDecision::Selected(_)
+            | crate::onboarding::OnboardingDecision::Cancelled
+            | crate::onboarding::OnboardingDecision::Pick(_),
+        )
+        | PaneOutcome::Flow(_) => {
+            unreachable!("the welcome screen yields Begin or Exit only")
         }
     }
-    if exit_requested {
-        return Ok(true);
+
+    // The Prime Inference sign-in (TS `runPrimeInferenceLogin`) through
+    // the inline auth panel, over the composition root's auth surface.
+    let Some(provider_auth) = task.provider_auth.clone() else {
+        // No auth surface means no sign-in: the flow aborts and the
+        // marker stays unset (the product always provides the surface).
+        return Ok(false);
+    };
+    let prime_row = provider_auth
+        .0
+        .login_options()
+        .await
+        .into_iter()
+        .find(|row| row.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID);
+    let Some(prime_row) = prime_row else {
+        // A composition root without the Prime row has no sign-in to run.
+        return Ok(false);
+    };
+    screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+        panel: crate::auth_panel::AuthPanel::new(format!("Login to {}", prime_row.name)),
+        heading: Some(crate::onboarding_flow::PRIME_LOGIN_HEADING.to_string()),
+    });
+    let prime_panel = session.auth_panel_handle();
+    let prime_row_for_flow = prime_row.clone();
+    let prime_auth = provider_auth.clone();
+    let prime_flow = tokio::spawn(async move {
+        prime_auth
+            .0
+            .login_on_panel(&prime_row_for_flow, prime_panel)
+            .await
+    });
+    let (mut screen, outcome) =
+        drive_onboarding_pane(view, &mut drive, screen, Some(prime_flow)).await?;
+    // The dialog consumes every key itself; only the flow settling or
+    // the exit keys can end the drive.
+    let login = match outcome {
+        PaneOutcome::Exit => return Ok(true),
+        PaneOutcome::Flow(result) => result.unwrap_or_else(|_| {
+            crate::provider_auth::ProviderAuthOutcome::Error(
+                "the Prime Inference login task failed".to_string(),
+            )
+        }),
+        PaneOutcome::Decision(_) => {
+            unreachable!("the login dialog yields no decisions")
+        }
+    };
+    match login {
+        // The status row lands behind the pane (the session transcript
+        // renders it once the flow dismisses).
+        crate::provider_auth::ProviderAuthOutcome::Status(message) => {
+            session.apply_auth_outcome(
+                crate::provider_auth::ProviderAuthOutcome::Status(message),
+                view,
+            );
+        }
+        // A failed or cancelled sign-in aborts the flow: the marker
+        // stays unset and the next launch retries (TS `authResult.status
+        // !== "success"`).
+        outcome => {
+            session.apply_auth_outcome(outcome, view);
+            return Ok(false);
+        }
+    }
+
+    // The default-model apply (TS `prepareForModelSelectionAfterLogin`):
+    // only a home with no current model picks the Prime default.
+    if task.current_model.is_none() {
+        let default_id = crate::provider_auth::PRIME_INFERENCE_DEFAULT_MODEL_ID;
+        let found = model_catalog.iter().any(|model| {
+            model.provider == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
+                && model.id == default_id
+        });
+        if found {
+            session
+                .apply_model_selection(
+                    crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID,
+                    default_id,
+                    view,
+                )
+                .await;
+        } else {
+            session.error_row(
+                "Prime Inference login succeeded, but the default GLM 5.3 model is unavailable.",
+                view,
+            );
+        }
+    }
+
+    // The connect-more-providers picker (TS `askOnboardingProviders`):
+    // the picker stays mounted between logins so several can connect in
+    // one pass, with fresh connected marks after each one.
+    loop {
+        let rows = provider_auth.0.login_options().await;
+        // One row per provider id (TS dedupes by id), never the Prime
+        // row the flow just signed in and never a service (`mcp:`
+        // integrations are services, not model providers).
+        let mut seen = std::collections::HashSet::new();
+        let options: Vec<crate::onboarding_flow::ProviderPickerOption> = rows
+            .iter()
+            .filter(|row| {
+                row.id != crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
+                    && !row.id.starts_with("mcp:")
+            })
+            .filter(|row| seen.insert(row.id.clone()))
+            .map(|row| crate::onboarding_flow::ProviderPickerOption {
+                id: row.id.clone(),
+                name: row.name.clone(),
+                connected: row.configured,
+            })
+            .collect();
+        // An empty provider list ends the step (TS `options.length === 0`).
+        if options.is_empty() {
+            break;
+        }
+        screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Providers(
+            crate::onboarding_flow::ProviderPicker::new(options),
+        ));
+        let (picked_screen, outcome) =
+            drive_onboarding_pane(view, &mut drive, screen, None).await?;
+        screen = picked_screen;
+        let pick = match outcome {
+            PaneOutcome::Exit => return Ok(true),
+            // Continue or Esc ends the step (TS settle(undefined) ->
+            // return).
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Pick(
+                crate::onboarding_flow::ProviderPick::Continue,
+            ))
+            | PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Pick(
+                crate::onboarding_flow::ProviderPick::Cancelled,
+            )) => break,
+            PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Pick(
+                crate::onboarding_flow::ProviderPick::Provider(id),
+            )) => id,
+            PaneOutcome::Decision(
+                crate::onboarding::OnboardingDecision::Exit
+                | crate::onboarding::OnboardingDecision::Selected(_)
+                | crate::onboarding::OnboardingDecision::Cancelled
+                | crate::onboarding::OnboardingDecision::Begin,
+            )
+            | PaneOutcome::Flow(_) => unreachable!("the picker yields Pick only"),
+        };
+        let row = rows
+            .iter()
+            .find(|row| row.id == pick)
+            .expect("the picked row came from the same options list");
+        // TS `loginProvider`: the row's flow — the panel-prompted key,
+        // the panel-driven flow, or the unported stub's error row.
+        match row.flow {
+            crate::provider_auth::AuthFlow::ApiKeyPrompt => {
+                screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+                    panel: crate::auth_panel::AuthPanel::new(format!("Login to {}", row.name)),
+                    heading: None,
+                });
+                let panel = session.auth_panel_handle();
+                let row = row.clone();
+                let prompt_auth = provider_auth.clone();
+                let prompt_flow = tokio::spawn(async move {
+                    // TS `showApiKeyLoginDialog`: the submitted key
+                    // stores through the composition root; a cancel is
+                    // silent.
+                    match panel
+                        .paste_prompt(
+                            crate::onboarding_flow::API_KEY_PROMPT,
+                            crate::auth_panel::PasteStyle::Visible,
+                        )
+                        .await
+                    {
+                        Some(api_key) => prompt_auth.0.login(&row, Some(&api_key)).await,
+                        None => crate::provider_auth::ProviderAuthOutcome::Cancelled,
+                    }
+                });
+                let (prompted_screen, outcome) =
+                    drive_onboarding_pane(view, &mut drive, screen, Some(prompt_flow)).await?;
+                screen = prompted_screen;
+                match outcome {
+                    PaneOutcome::Exit => return Ok(true),
+                    PaneOutcome::Flow(result) => {
+                        let outcome = result.unwrap_or_else(|_| {
+                            crate::provider_auth::ProviderAuthOutcome::Error(
+                                "the provider login task failed".to_string(),
+                            )
+                        });
+                        session.apply_auth_outcome(outcome, view);
+                    }
+                    PaneOutcome::Decision(_) => {
+                        unreachable!("the key prompt dialog yields no decisions")
+                    }
+                }
+            }
+            // An `mcp:` service row runs its panel-driven flow (the MCP
+            // device flow); the other terminal rows are the unported
+            // subscription stubs — the error row is the whole flow,
+            // exactly like the `/login` selector's path.
+            _ => {
+                if row.id.starts_with("mcp:") {
+                    screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Auth {
+                        panel: crate::auth_panel::AuthPanel::new(format!("Login to {}", row.name)),
+                        heading: None,
+                    });
+                    let panel = session.auth_panel_handle();
+                    let row = row.clone();
+                    let service_auth = provider_auth.clone();
+                    let provider_login =
+                        tokio::spawn(
+                            async move { service_auth.0.login_on_panel(&row, panel).await },
+                        );
+                    let (login_screen, outcome) =
+                        drive_onboarding_pane(view, &mut drive, screen, Some(provider_login))
+                            .await?;
+                    screen = login_screen;
+                    match outcome {
+                        PaneOutcome::Exit => return Ok(true),
+                        PaneOutcome::Flow(result) => {
+                            let outcome = result.unwrap_or_else(|_| {
+                                crate::provider_auth::ProviderAuthOutcome::Error(
+                                    "the provider login task failed".to_string(),
+                                )
+                            });
+                            session.apply_auth_outcome(outcome, view);
+                        }
+                        PaneOutcome::Decision(_) => {
+                            unreachable!("the login dialog yields no decisions")
+                        }
+                    }
+                } else {
+                    let outcome = provider_auth.0.login(row, None).await;
+                    session.apply_auth_outcome(outcome, view);
+                }
+            }
+        }
+        // The loop re-mounts a fresh picker with fresh connected marks.
+    }
+
+    // The trace question (TS `askOnboardingTraceOptIn`), the flow's last
+    // step — the merged question surface.
+    screen.mount_panel(crate::onboarding_flow::OnboardingPanel::Question(
+        crate::onboarding_choice::OnboardingChoice::new(
+            crate::onboarding::trace_question_options(),
+            None,
+            crate::onboarding::trace_question_config(),
+        ),
+    ));
+    let (_screen, outcome) = drive_onboarding_pane(view, &mut drive, screen, None).await?;
+    match outcome {
+        PaneOutcome::Exit => return Ok(true),
+        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Selected(index)) => {
+            // `Share` opts in; `Not now` keeps traces off. A cancel
+            // writes no answer, but the flow still completed.
+            if let Err(error) = task.sink.set_agent_traces_enabled(index == 0) {
+                warn_onboarding_persist_failure(session, view, &error);
+            }
+        }
+        PaneOutcome::Decision(crate::onboarding::OnboardingDecision::Cancelled) => {}
+        PaneOutcome::Decision(
+            crate::onboarding::OnboardingDecision::Exit
+            | crate::onboarding::OnboardingDecision::Begin
+            | crate::onboarding::OnboardingDecision::Pick(_),
+        )
+        | PaneOutcome::Flow(_) => {
+            unreachable!("the question panel yields Selected or Cancelled only")
+        }
+    }
+    // TS `runStartupOnboarding`: only a completed flow whose model is
+    // ready marks onboarding seen — a flow whose sign-in left the home
+    // without a usable model stays unset and retries next launch.
+    if (task.model_ready)() {
+        if let Err(error) = task.sink.mark_onboarding_complete() {
+            warn_onboarding_persist_failure(session, view, &error);
+        }
     }
     Ok(false)
 }
@@ -1001,18 +1381,26 @@ async fn run_interactive_surface(
     // switch) returns to the editor when its chat reopens.
     session.restore_prompt_stash_on_open(&mut view);
     // First-run onboarding owns the pane before the session screen (TS
-    // `runStartupOnboarding`, model-ready branch). The trace question is
-    // the opt-in moment for a fresh home; a home that already carries a
-    // standing choice completes silently, and the phase's own marker
-    // gate keeps it one-shot across the agents-view loop's sessions.
+    // `runStartupOnboarding`): a home whose startup model is ready sees
+    // the trace question alone, and a not-ready home runs the full
+    // sign-in flow. The trace question is the opt-in moment for a fresh
+    // home; a home that already carries a standing choice completes
+    // silently, and the phase's own marker gate keeps it one-shot across
+    // the agents-view loop's sessions.
     if let Some(task) = options.onboarding.clone() {
+        let mut drive = PaneDrive {
+            ui_rx: &mut ui_rx,
+            renderer: &mut renderer,
+            exit_guard: &exit_guard,
+            keybindings: view.editor.keybindings().clone(),
+            auth_panel_rx: &mut auth_panel_rx,
+        };
         let exit_requested = run_onboarding_phase(
             &task,
             &mut session,
             &mut view,
-            &mut ui_rx,
-            &mut renderer,
-            &exit_guard,
+            &mut drive,
+            &options.model_catalog,
         )
         .await?;
         if exit_requested {

@@ -1,21 +1,26 @@
 //! First-run onboarding surface (TS `PrimeOnboardingSplashComponent` +
 //! `OnboardingChoiceComponent`): the compact brand mark over its animated
-//! lab field, the welcome line, and the trace-sharing question in the same
-//! selection language as the pickers. [`OnboardingChoice`] is the reusable
-//! question panel (options with optional detail subtitles, a row-width
-//! override, a seeded cursor); the splash mounts one for the trace question
-//! and owns the pane until it is answered; the answer and the completion
-//! flag persist through [`crate::interactive::OnboardingSink`].
+//! lab field, the welcome line, and the flow panels the full first-run
+//! flow mounts inside the block (the login dialog, the connect-more
+//! providers picker, the trace question). [`OnboardingChoice`] is the
+//! reusable question panel (options with optional detail subtitles, a
+//! row-width override, a seeded cursor); the splash mounts one for the
+//! trace question and owns the pane until the flow completes; the
+//! answers and the completion flag persist through
+//! [`crate::interactive::OnboardingSink`].
 //!
-//! Fresh installs never mount this pane: trace sharing is on by default
-//! (the `run_onboarding_phase` skip in `crate::interactive`), so the
-//! splash appears only for a home that explicitly opted out before
-//! completing onboarding.
+//! The two first-run shapes both live here: a home whose startup model
+//! is ready skips to the question (the splash mounts it immediately, TS
+//! `immediate: true`), while a home with no usable model runs the full
+//! flow (TS `runOnboardingFlow`'s not-ready branch) — the welcome
+//! screen's description and login action, then the flow panels in
+//! [`crate::onboarding_flow`], one at a time.
 
 use crate::keybindings::KeybindingsManager;
 use crate::keys::KeyId;
+use crate::onboarding_choice::{OnboardingChoice, OnboardingChoiceOption, OnboardingChoiceOptions};
+use crate::onboarding_flow::{welcome_action_row, welcome_rows, OnboardingPanel};
 use crate::theme::{Theme, ThemeColor};
-use crate::width::str_width;
 use crate::{Line, Span};
 use ratatui::style::{Color, Modifier, Style};
 
@@ -28,7 +33,7 @@ const CHOICES: [&str; 2] = ["Share", "Not now"];
 
 /// The trace question's options (TS `askOnboardingTraceOptIn` mounts
 /// `[{ label: "Share" }, { label: "Not now" }]`).
-fn trace_question_options() -> Vec<OnboardingChoiceOption> {
+pub(crate) fn trace_question_options() -> Vec<OnboardingChoiceOption> {
     CHOICES
         .iter()
         .map(|label| OnboardingChoiceOption {
@@ -39,7 +44,7 @@ fn trace_question_options() -> Vec<OnboardingChoiceOption> {
 }
 
 /// The trace question's copy (TS `askOnboardingTraceOptIn`'s config).
-fn trace_question_config() -> OnboardingChoiceOptions {
+pub(crate) fn trace_question_config() -> OnboardingChoiceOptions {
     OnboardingChoiceOptions {
         prompt: Some(TRACE_OPT_IN_PROMPT.to_string()),
         description: Some(TRACE_OPT_IN_DESCRIPTION.to_string()),
@@ -62,11 +67,6 @@ const LOGO_WIDTH: usize = 22;
 /// The mark sits a little further right than the text column (TS
 /// `LOGO_INDENT`).
 const LOGO_INDENT: usize = 5;
-/// Selection-row metrics (TS `OnboardingChoiceComponent`).
-const MARKER_WIDTH: usize = 2;
-const MIN_ROW_WIDTH: usize = 30;
-const ROW_TRAILING: usize = 6;
-const DESCRIPTION_WIDTH: usize = 50;
 /// How far a selected row lifts off the canvas (TS `HIGHLIGHT_LIFT`).
 const HIGHLIGHT_LIFT: f64 = 0.08;
 
@@ -94,33 +94,68 @@ pub enum OnboardingDecision {
     Cancelled,
     /// Exit keys while onboarding owns the pane: quit the app.
     Exit,
+    /// Enter on the welcome screen's login action (TS the splash's
+    /// `onSelect`): the full flow starts.
+    Begin,
+    /// The connect-more-providers picker's answer (TS `onSelect` /
+    /// `onContinue` / `onCancel`).
+    Pick(crate::onboarding_flow::ProviderPick),
 }
 
-/// The onboarding pane state: the animation frame and the mounted question.
-#[derive(Debug, Clone)]
+/// The onboarding pane state: the animation frame, the started flag (TS
+/// `flowStarted` — the welcome text and action never return once a flow
+/// owns the block), and the mounted flow panel.
+#[derive(Debug)]
 pub struct OnboardingScreen {
     frame: u64,
-    /// The trace-sharing question the splash hosts (TS mounts one
-    /// `OnboardingChoiceComponent` inside the splash).
-    trace_question: OnboardingChoice,
+    flow_started: bool,
+    /// The mounted flow panel (TS `setPanel`'s top: the flow never nests
+    /// its panels, so one slot covers the sequence).
+    panel: Option<OnboardingPanel>,
 }
 
 impl Default for OnboardingScreen {
     fn default() -> Self {
         Self {
             frame: 0,
-            trace_question: OnboardingChoice::new(
+            flow_started: true,
+            panel: Some(OnboardingPanel::Question(OnboardingChoice::new(
                 trace_question_options(),
                 None,
                 trace_question_config(),
-            ),
+            ))),
         }
     }
 }
 
 impl OnboardingScreen {
+    /// The model-ready branch's splash (TS `immediate: true`): the trace
+    /// question mounts directly under the brand mark.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The full flow's splash (TS the plain `showOnboardingSplash`): the
+    /// welcome text and the single login action, until Enter starts the
+    /// flow.
+    pub fn welcome() -> Self {
+        Self {
+            frame: 0,
+            flow_started: false,
+            panel: None,
+        }
+    }
+
+    /// TS `setPanel`: mount one flow panel — the flow has started from
+    /// here on, and the welcome text never comes back.
+    pub fn mount_panel(&mut self, panel: OnboardingPanel) {
+        self.flow_started = true;
+        self.panel = Some(panel);
+    }
+
+    /// TS `setPanel(undefined)`: pop the mounted panel.
+    pub fn unmount_panel(&mut self) {
+        self.panel = None;
     }
 
     /// One animation step (TS `ANIMATION_INTERVAL_MS` tick).
@@ -128,8 +163,8 @@ impl OnboardingScreen {
         self.frame = self.frame.wrapping_add(1);
     }
 
-    /// Handle one key id (TS splash/choice `handleInput`). `None` keeps the
-    /// pane waiting.
+    /// Handle one key id (TS splash + mounted panel `handleInput`). `None`
+    /// keeps the pane waiting.
     pub fn handle_key(
         &mut self,
         key: &KeyId,
@@ -140,34 +175,82 @@ impl OnboardingScreen {
         if kb.matches(key, "app.clear") || kb.matches(key, "app.exit") {
             return Some(OnboardingDecision::Exit);
         }
-        if kb.matches(key, "tui.select.cancel") {
-            return Some(OnboardingDecision::Cancelled);
+        if let Some(panel) = self.panel.as_mut() {
+            return panel.handle_key(key, kb);
         }
-        if kb.matches(key, "tui.select.up") {
-            self.trace_question.move_selection(-1);
-            return None;
-        }
-        if kb.matches(key, "tui.select.down") {
-            self.trace_question.move_selection(1);
-            return None;
-        }
-        if kb.matches(key, "tui.select.confirm") {
-            return Some(OnboardingDecision::Selected(self.trace_question.selected()));
+        // The welcome screen binds one key: Enter starts the flow (TS:
+        // cancel is deliberately unbound — signing in is the only way
+        // forward).
+        if !self.flow_started && kb.matches(key, "tui.select.confirm") {
+            return Some(OnboardingDecision::Begin);
         }
         None
     }
 
-    /// The full pane frame (TS `PrimeOnboardingSplashComponent.render` in
-    /// immediate mode with the question panel mounted).
-    pub fn render(&self, theme: &Theme, width: usize, height: usize) -> Vec<Line> {
+    /// One paste payload (TS the mounted input's paste): the login dialog's
+    /// field or the picker's search.
+    pub fn handle_paste(&mut self, text: &str) {
+        if let Some(panel) = self.panel.as_mut() {
+            panel.handle_paste(text);
+        }
+    }
+
+    /// Fold one auth-panel request into the mounted login dialog (the
+    /// onboarding phase's channel arm — the same folding the run loop's
+    /// `apply_auth_panel_request` does for the session view): the render
+    /// requests mount into the panel, and a request with no mounted
+    /// dialog cancels its flow (the dropped oneshot reply, the same
+    /// contract a closed terminal input had). The settled requests never
+    /// arrive here: the onboarding flows settle through their own spawned
+    /// futures, so past-the-dialog requests are a no-op.
+    pub fn apply_auth_request(&mut self, request: crate::auth_panel::AuthPanelRequest) {
+        let Some(OnboardingPanel::Auth { panel, .. }) = self.panel.as_mut() else {
+            return;
+        };
+        use crate::auth_panel::AuthPanelRequest;
+        match request {
+            AuthPanelRequest::Progress { message } => panel.push_progress(message),
+            AuthPanelRequest::AuthUrl { url, instructions } => {
+                panel.show_auth_url(url, instructions)
+            }
+            AuthPanelRequest::PastePrompt {
+                prompt,
+                style,
+                reply,
+            } => panel.mount_paste(prompt, style, reply),
+            AuthPanelRequest::SelectTeam {
+                teams,
+                current,
+                reply,
+            } => panel.mount_teams(teams, current, reply),
+            AuthPanelRequest::ProviderSettled { .. }
+            | AuthPanelRequest::McpSettled { .. }
+            | AuthPanelRequest::TracesSettled { .. } => {}
+        }
+    }
+
+    /// The full pane frame (TS `PrimeOnboardingSplashComponent.render`).
+    pub fn render(&mut self, theme: &Theme, width: usize, height: usize) -> Vec<Line> {
         let width = width.max(1);
         let mut lines: Vec<Line> = vec![Vec::new()];
         lines.extend(self.mark_rows(theme, width));
         lines.push(Vec::new());
         lines.push(self.heading_line(theme));
-        // The question panel indents its own content by one column (TS:
-        // panelLeft = contentLeft - 1; contentLeft = PADDING_X = 1).
-        lines.extend(self.trace_question.render(theme, width));
+        // The welcome text and action render only before the flow starts;
+        // once a panel owns the block, its rows mount directly under the
+        // heading (TS: the panel brings its own leading padding, and it
+        // indents its own content by one column — panelLeft =
+        // contentLeft - 1; contentLeft = PADDING_X = 1).
+        match self.panel.as_mut() {
+            None if !self.flow_started => {
+                lines.extend(welcome_rows(theme, width));
+                lines.push(welcome_action_row(theme, width));
+            }
+            // A started flow with no mounted panel keeps one blank row in
+            // the gap (TS `if (!this.getActivePanel())`).
+            None => lines.push(Vec::new()),
+            Some(panel) => lines.extend(panel.render(theme, width)),
+        }
         while lines.len() < height {
             lines.push(Vec::new());
         }
@@ -175,9 +258,26 @@ impl OnboardingScreen {
         lines
     }
 
+    /// The block's heading (TS `renderHeadingLine`): the mounted panel
+    /// that names itself replaces the brand line.
+    fn heading_line(&self, theme: &Theme) -> Line {
+        let heading = self.panel.as_ref().and_then(|panel| panel.heading());
+        if let Some(heading) = heading {
+            let mut row: Line = vec![Span::styled(" ".to_string(), Style::default())];
+            row.push(Span::styled(
+                heading.to_string(),
+                theme
+                    .fg_style(ThemeColor::Text)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            return row;
+        }
+        self.brand_line(theme)
+    }
+
     /// "Welcome to **PRIME** *Agent*" (TS `renderBrandLine`), one column in
     /// from the pane edge.
-    fn heading_line(&self, theme: &Theme) -> Line {
+    fn brand_line(&self, theme: &Theme) -> Line {
         let text = theme.fg_style(ThemeColor::Text);
         let mut row: Line = vec![Span::styled(" ".to_string(), Style::default())];
         row.push(Span::styled("Welcome to ".to_string(), text));
@@ -299,179 +399,6 @@ impl OnboardingScreen {
     }
 }
 
-/// One choice row (TS `OnboardingChoiceOption`): a label with an optional
-/// identifier shown as its dim subtitle.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OnboardingChoiceOption {
-    /// The row label.
-    pub label: String,
-    /// Identifier rendered as `  @detail` after the label — dimmer than the
-    /// label, and counted toward the label-width calc (TS `detail`).
-    pub detail: Option<String>,
-}
-
-/// The choice panel's copy and layout (TS `OnboardingChoiceOptions`): the
-/// question text around the rows and the row-width override.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct OnboardingChoiceOptions {
-    /// The question line above the options (TS `prompt`).
-    pub prompt: Option<String>,
-    /// Muted sentence under the prompt, before the options (TS
-    /// `description`), wrapped at 50 columns.
-    pub description: Option<String>,
-    /// Grey footnote under the list, e.g. how to change the answer later
-    /// (TS `note`).
-    pub note: Option<String>,
-    /// Row-width override (TS `rowWidth`); absent sizes the rows from the
-    /// labels, always clamped to the panel width.
-    pub row_width: Option<usize>,
-}
-
-/// A question in the onboarding block (TS `OnboardingChoiceComponent`): the
-/// prompt, a list of options in the same selection language as the
-/// first-run actions, and an optional grey footnote. The host mounts one
-/// per question and drives the cursor with the selection keys.
-#[derive(Debug, Clone)]
-pub struct OnboardingChoice {
-    options: Vec<OnboardingChoiceOption>,
-    selected: usize,
-    config: OnboardingChoiceOptions,
-}
-
-impl OnboardingChoice {
-    /// TS constructor: the cursor seeds at `selected_index` (TS
-    /// `selectedIndex`), clamped into the option list.
-    pub fn new(
-        options: Vec<OnboardingChoiceOption>,
-        selected_seed: Option<usize>,
-        config: OnboardingChoiceOptions,
-    ) -> Self {
-        let last = options.len().saturating_sub(1);
-        Self {
-            selected: selected_seed.unwrap_or(0).min(last),
-            options,
-            config,
-        }
-    }
-
-    /// The row the cursor sits on.
-    pub fn selected(&self) -> usize {
-        self.selected
-    }
-
-    /// Move the cursor `delta` rows (TS `move`): no wrap; `false` when the
-    /// move would leave the list, so the caller skips the re-render.
-    pub fn move_selection(&mut self, delta: isize) -> bool {
-        // The checked sum keeps a huge delta an out-of-range move (TS
-        // `next < 0 || next >= options.length`) instead of an overflow.
-        let Some(next) = self.selected.checked_add_signed(delta) else {
-            return false;
-        };
-        if next >= self.options.len() {
-            return false;
-        }
-        self.selected = next;
-        true
-    }
-
-    /// The panel block (TS `OnboardingChoiceComponent.render`): the prompt,
-    /// the wrapped description, the option rows (the selected one washed),
-    /// and the change-anytime note, each indented one column.
-    pub fn render(&self, theme: &Theme, width: usize) -> Vec<Line> {
-        let safe_width = width.max(1);
-        let mut lines: Vec<Line> = vec![Vec::new()];
-        if let Some(prompt) = &self.config.prompt {
-            lines.push(vec![Span::styled(
-                format!(" {prompt}"),
-                theme.fg_style(ThemeColor::Text),
-            )]);
-            lines.push(Vec::new());
-        }
-        if let Some(description) = &self.config.description {
-            let wrap = DESCRIPTION_WIDTH.min(safe_width.saturating_sub(2)).max(1);
-            for row in wrap_words(description, wrap) {
-                lines.push(vec![Span::styled(
-                    format!(" {row}"),
-                    theme.fg_style(ThemeColor::Muted),
-                )]);
-            }
-            lines.push(Vec::new());
-        }
-        lines.extend(self.option_rows(theme, safe_width));
-        if let Some(note) = &self.config.note {
-            lines.push(Vec::new());
-            lines.push(vec![Span::styled(
-                format!(" {note}"),
-                theme.fg_style(ThemeColor::Dim),
-            )]);
-        }
-        lines
-    }
-
-    /// The option rows (TS `render`'s row loop): marker + label + the dim
-    /// `  @detail` subtitle, padded to the row width so the wash forms a
-    /// band; the selected row lifts off the canvas with a bold label.
-    fn option_rows(&self, theme: &Theme, safe_width: usize) -> Vec<Line> {
-        let label_width = self
-            .options
-            .iter()
-            .map(|option| match &option.detail {
-                // TS joins label and detail with two spaces for the width
-                // calc; the rendered subtitle adds the `@` on top.
-                Some(detail) => str_width(&option.label) + 2 + str_width(detail),
-                None => str_width(&option.label),
-            })
-            .max()
-            .unwrap_or(0);
-        // TS clamps the row to the panel width: a narrow pane shortens the
-        // highlight instead of running past the edge.
-        let row_width = self
-            .config
-            .row_width
-            .unwrap_or((MARKER_WIDTH + label_width + ROW_TRAILING).max(MIN_ROW_WIDTH))
-            .min(safe_width)
-            .max(1);
-        let wash = highlight_wash(theme);
-        let mut rows: Vec<Line> = Vec::with_capacity(self.options.len());
-        for (index, option) in self.options.iter().enumerate() {
-            let selected = index == self.selected;
-            let name = format!("{}{}", if selected { "> " } else { "  " }, option.label);
-            let detail = match &option.detail {
-                Some(detail) => format!("  @{detail}"),
-                None => String::new(),
-            };
-            let pad = " ".repeat(row_width.saturating_sub(str_width(&name) + str_width(&detail)));
-            let mut row: Line = vec![Span::styled(" ".to_string(), Style::default())];
-            if selected {
-                // The selected row lifts off the canvas (TS
-                // `onboardingHighlightBackground`): a bold name over the
-                // washed background, the dim detail and padding inside
-                // the wash.
-                let mut washed_name = Span::styled(
-                    name,
-                    theme
-                        .fg_style(ThemeColor::Text)
-                        .add_modifier(Modifier::BOLD),
-                );
-                washed_name.style = washed_name.style.bg(wash);
-                row.push(washed_name);
-                let mut washed_tail =
-                    Span::styled(format!("{detail}{pad}"), theme.fg_style(ThemeColor::Dim));
-                washed_tail.style = washed_tail.style.bg(wash);
-                row.push(washed_tail);
-            } else {
-                row.push(Span::styled(name, theme.fg_style(ThemeColor::Muted)));
-                row.push(Span::styled(
-                    format!("{detail}{pad}"),
-                    theme.fg_style(ThemeColor::Dim),
-                ));
-            }
-            rows.push(row);
-        }
-        rows
-    }
-}
-
 /// Overwrite one cell when the new priority is at least the current one
 /// (TS `put`).
 fn put(
@@ -569,7 +496,7 @@ pub(crate) fn highlight_wash(theme: &Theme) -> Color {
 }
 
 /// Greedy word wrap at `width` columns.
-fn wrap_words(text: &str, width: usize) -> Vec<String> {
+pub(crate) fn wrap_words(text: &str, width: usize) -> Vec<String> {
     let mut rows = Vec::new();
     let mut row = String::new();
     for word in text.split(' ') {
@@ -687,126 +614,5 @@ mod tests {
             ColorMode::TrueColor,
         );
         assert_eq!(highlight_wash(&theme), Color::Rgb(235, 235, 235));
-    }
-
-    #[test]
-    fn detail_renders_as_a_dim_subtitle_and_counts_toward_the_row_width() {
-        let theme = Theme::builtin("prime", ColorMode::TrueColor);
-        let wash = highlight_wash(&theme);
-        let choice = OnboardingChoice::new(
-            vec![
-                option("Personal account", None),
-                option("Prime", Some("prime-intellect")),
-            ],
-            Some(1),
-            choice_config(None),
-        );
-        let lines = choice.render(&theme, 80);
-        // blank, prompt, blank, then the two option rows.
-        assert_eq!(lines.len(), 5);
-        let unselected = &lines[3];
-        // Label width = max("Personal account" = 16, "Prime  prime-intellect"
-        // = 19) → row width max(30, 2 + 19 + 6) = 30.
-        assert_eq!(
-            unselected[1],
-            Span::styled("  Personal account", theme.fg_style(ThemeColor::Muted))
-        );
-        assert_eq!(
-            unselected[2],
-            Span::styled(
-                " ".repeat(30 - "  Personal account".len()),
-                theme.fg_style(ThemeColor::Dim)
-            )
-        );
-        let selected = &lines[4];
-        // The subtitle reads as a dimmer identifier after the name, and the
-        // wash covers the detail and the padding inside the band.
-        assert_eq!(
-            selected[1],
-            Span::styled(
-                "> Prime",
-                theme
-                    .fg_style(ThemeColor::Text)
-                    .add_modifier(Modifier::BOLD)
-                    .bg(wash)
-            )
-        );
-        assert_eq!(
-            selected[2],
-            Span::styled(
-                format!("  @prime-intellect{}", " ".repeat(30 - 7 - 18)),
-                theme.fg_style(ThemeColor::Dim).bg(wash)
-            )
-        );
-    }
-
-    #[test]
-    fn row_width_overrides_and_clamps_to_the_pane() {
-        let theme = Theme::builtin("prime", ColorMode::TrueColor);
-        // An explicit override under the pane sizes the wash band exactly.
-        let choice =
-            OnboardingChoice::new(vec![option("Share", None)], None, choice_config(Some(20)));
-        let lines = choice.render(&theme, 80);
-        assert_eq!(lines[3][2].content, " ".repeat(20 - "  Share".len()));
-        // An override past the pane clamps to the pane.
-        let choice =
-            OnboardingChoice::new(vec![option("Share", None)], None, choice_config(Some(100)));
-        let lines = choice.render(&theme, 50);
-        assert_eq!(lines[3][2].content, " ".repeat(50 - "  Share".len()));
-        // Without an override the labels size the band, still clamped:
-        // "Continue with the current setup" (31 columns) →
-        // max(30, 2 + 31 + 6) = 39.
-        let choice = OnboardingChoice::new(
-            vec![option("Continue with the current setup", None)],
-            None,
-            choice_config(None),
-        );
-        let lines = choice.render(&theme, 80);
-        assert_eq!(
-            lines[3][2].content,
-            " ".repeat(39 - "  Continue with the current setup".len())
-        );
-        let lines = choice.render(&theme, 35);
-        assert_eq!(
-            lines[3][2].content,
-            " ".repeat(35 - "  Continue with the current setup".len())
-        );
-    }
-
-    #[test]
-    fn selected_seed_clamps_into_the_options() {
-        let options = || vec![option("a", None), option("b", None), option("c", None)];
-        assert_eq!(
-            OnboardingChoice::new(options(), Some(2), Default::default()).selected(),
-            2
-        );
-        assert_eq!(
-            OnboardingChoice::new(options(), Some(99), Default::default()).selected(),
-            2
-        );
-        assert_eq!(
-            OnboardingChoice::new(options(), None, Default::default()).selected(),
-            0
-        );
-        assert_eq!(
-            OnboardingChoice::new(vec![], Some(3), Default::default()).selected(),
-            0
-        );
-    }
-
-    #[test]
-    fn cursor_moves_without_wrapping() {
-        let mut choice = OnboardingChoice::new(
-            vec![option("a", None), option("b", None)],
-            None,
-            Default::default(),
-        );
-        assert!(choice.move_selection(1));
-        assert!(!choice.move_selection(1));
-        assert!(choice.move_selection(-1));
-        assert!(!choice.move_selection(-1));
-        // Extreme deltas stay out-of-range moves, never overflow panics.
-        assert!(!choice.move_selection(isize::MAX));
-        assert!(!choice.move_selection(isize::MIN));
     }
 }

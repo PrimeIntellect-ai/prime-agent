@@ -317,6 +317,7 @@ impl ProviderAuth {
                     auth_type: AuthType::Oauth,
                     status: status_indicator(credential.as_ref(), &status, AuthType::Oauth),
                     flow: AuthFlow::TerminalFlow,
+                    configured: status.configured,
                 });
             }
 
@@ -356,6 +357,7 @@ impl ProviderAuth {
                     name: display_name(&provider_id),
                     auth_type: AuthType::ApiKey,
                     flow,
+                    configured: status.configured,
                 });
             }
 
@@ -421,6 +423,9 @@ impl ProviderAuth {
                     label: "configured".to_string(),
                 }),
                 flow: AuthFlow::TerminalFlow,
+                // The stored-credential rows exist because the credential
+                // is there (TS `getProviderAuthStatus(id).configured`).
+                configured: true,
             });
         }
         rows.sort_by(|a, b| a.name.cmp(&b.name));
@@ -720,6 +725,7 @@ mod tests {
             auth_type: AuthType::ApiKey,
             status: None,
             flow: AuthFlow::ApiKeyPrompt,
+            configured: false,
         };
         match auth.login(&row, Some("sk-test")).await {
             ProviderAuthOutcome::Status(message) => {

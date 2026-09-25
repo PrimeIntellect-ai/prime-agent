@@ -364,6 +364,7 @@ impl ScriptedProviderAuth {
                 label: "unconfigured".to_string(),
             }),
             flow: AuthFlow::ApiKeyPrompt,
+            configured,
         }
     }
 
@@ -379,6 +380,7 @@ impl ScriptedProviderAuth {
                 label: "configured".to_string(),
             }),
             flow: AuthFlow::TerminalFlow,
+            configured: true,
         }
     }
 }
@@ -409,6 +411,7 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
                     }),
                     id,
                     flow: AuthFlow::ApiKeyPrompt,
+                    configured: true,
                 })
                 .collect()
         })

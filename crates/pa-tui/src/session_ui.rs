@@ -3644,6 +3644,13 @@ impl SessionUi {
         Ok(())
     }
 
+    /// The auth panel's request channel (TS the login dialog's surface
+    /// seam): the onboarding phase drives its flows against the same
+    /// channel the run loop services after the pane ends.
+    pub(crate) fn auth_panel_handle(&self) -> crate::auth_panel::AuthPanelHandle {
+        crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone())
+    }
+
     /// Enter on a panel-driven login row (the MCP OAuth logins, the Prime
     /// Inference login): mount the inline auth panel (TS `showAuthPanel`
     /// mounts the login dialog as the flow starts) and spawn the flow
@@ -3691,7 +3698,7 @@ impl SessionUi {
 
     /// One flow outcome (TS `completeProviderAuthentication`'s status vs
     /// the flow's error row).
-    fn apply_auth_outcome(
+    pub(crate) fn apply_auth_outcome(
         &mut self,
         outcome: crate::provider_auth::ProviderAuthOutcome,
         view: &mut AgentView,
@@ -6959,7 +6966,7 @@ impl SessionUi {
     /// session's settings default follow — then the client refreshes its
     /// model label and records the `Model: <id>` status row. A failure
     /// surfaces as the error note instead.
-    async fn apply_model_selection(
+    pub(crate) async fn apply_model_selection(
         &mut self,
         provider: &str,
         model_id: &str,

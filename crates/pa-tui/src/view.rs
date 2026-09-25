@@ -1229,7 +1229,7 @@ impl AgentView {
     fn render_frame_inner(&mut self, width: usize, height: usize) -> Vec<Line> {
         // The onboarding splash covers the pane (TS `showOverlay` 100%):
         // no top bar, transcript, or prompt dock behind it.
-        if let Some(screen) = &self.onboarding {
+        if let Some(screen) = self.onboarding.as_mut() {
             let frame = screen.render(&self.theme, width, height);
             self.frame_rows = frame.len();
             return frame;

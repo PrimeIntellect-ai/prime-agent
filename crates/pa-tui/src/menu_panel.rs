@@ -323,6 +323,46 @@ fn render_input_field(
     line
 }
 
+/// The prompt-less field row (TS `MenuSearchInput`'s inline + plain +
+/// hidePrompt call: `" "` + the field, no `> ` prompt — the onboarding
+/// picker marks selection with its own caret): one full-width line for
+/// surfaces that own their selection language.
+pub(crate) fn search_field_plain_row(
+    theme: &Theme,
+    width: usize,
+    value: &str,
+    cursor: usize,
+    focused: bool,
+    placeholder: &str,
+) -> Line {
+    let input_width = width.saturating_sub(2).max(1);
+    let mut line: Line = vec![Span::raw(" ")];
+    if value.is_empty() {
+        // TS puts the caret on the first placeholder character, so the
+        // field keeps the same left edge as the text above it.
+        let mut characters = placeholder.chars();
+        match characters.next() {
+            Some(first) if focused => {
+                line.push(Span::styled(
+                    first.to_string(),
+                    ratatui::style::Style::default()
+                        .add_modifier(ratatui::style::Modifier::REVERSED),
+                ));
+                line.push(theme.fg_span(ThemeColor::Dim, characters.as_str()));
+            }
+            _ => line.push(theme.fg_span(ThemeColor::Dim, placeholder)),
+        }
+    } else {
+        line.extend(input_render(theme, input_width, value, cursor, focused));
+    }
+    let mut line = truncate_line(&line, width, "");
+    let used = crate::width::spans_width(&line);
+    if used < width {
+        line.push(Span::raw(" ".repeat(width - used)));
+    }
+    line
+}
+
 /// One input render (TS `Input.render`): prompt, the visible slice with the
 /// caret (a reversed cell) at the cursor, and trailing padding.
 fn input_render(theme: &Theme, width: usize, value: &str, cursor: usize, focused: bool) -> Line {

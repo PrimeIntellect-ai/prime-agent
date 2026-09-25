@@ -90,6 +90,7 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
                 label: "configured".to_string(),
             }),
             flow: AuthFlow::TerminalFlow,
+            configured: true,
         };
         Box::pin(async move { vec![row] })
     }
