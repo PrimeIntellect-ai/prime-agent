@@ -850,10 +850,10 @@ mod tests {
         assert!(text.contains("Pursuing goal (12m 05s)"));
     }
 
-    /// The dock's subagents segment is the label plus the live running
-    /// count (the operator's `◆ subagents [green:● x running]` sketch):
-    /// the count is the running count, never the descendant total, and
-    /// no category breakdown rides the row.
+    /// The dock's subagents segment is one consolidated item (the
+    /// operator's `◆ x subagents` form): the count is the running
+    /// count, never the descendant total, and no category breakdown
+    /// rides the row.
     #[test]
     fn prompt_bar_subagent_segment_is_the_running_count_only() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -870,13 +870,10 @@ mod tests {
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
-        assert_eq!(
-            text,
-            " ◆ subagents · ● 2 running  ·  ◷ 0 heartbeats  ·  ▸ 0 shells"
-        );
+        assert_eq!(text, " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
         assert!(!text.contains("idle"), "no category breakdown: {text}");
         assert!(!text.contains("7"), "the total never renders: {text}");
-        // A single running descendant keeps the same cluster shape.
+        // A single running descendant keeps the same shape.
         let dock = ActivityDock {
             subagents_running: 1,
             subagents_total: 1,
@@ -887,10 +884,7 @@ mod tests {
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
-        assert_eq!(
-            text,
-            " ◆ subagents · ● 1 running  ·  ◷ 0 heartbeats  ·  ▸ 0 shells"
-        );
+        assert_eq!(text, " ◆ 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
     }
 
     /// The `/speed` footer row (TS `FooterComponent::render`): one dim row

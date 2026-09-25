@@ -840,6 +840,7 @@ struct Columns {
     command: usize,
     duration: usize,
     pid: usize,
+    status: usize,
 }
 
 impl Columns {
@@ -869,7 +870,7 @@ impl Columns {
             .unwrap_or(0);
         // The fixed cells: the indent, the three two-column gaps, and
         // the duration, pid, and status columns.
-        let fixed = 2 + 2 + 2 + 2 + 2 + duration_content + pid + status;
+        let fixed = 2 + 2 + 2 + 2 + duration_content + pid + status;
         // The command column carries the full remaining width (the
         // operator's width-distribution ruling, 2026-09-25): the fixed
         // fact columns hug their content, the command prose column
@@ -880,6 +881,7 @@ impl Columns {
             command,
             duration: duration_content,
             pid,
+            status,
         }
     }
 
@@ -892,7 +894,7 @@ impl Columns {
         row.push(Span::raw("  "));
         row.push(theme.fg_span(ThemeColor::Dim, plain_cell("PID", self.pid)));
         row.push(Span::raw("  "));
-        row.push(theme.fg_span(ThemeColor::Dim, "Status".to_string()));
+        row.push(theme.fg_span(ThemeColor::Dim, plain_cell("Status", self.status)));
         truncate_line(&row, width, "")
     }
 
@@ -940,7 +942,10 @@ impl Columns {
         );
         row.push(Span::raw("  "));
         let (dot, _) = status_dot(&activity.status);
-        row.push(theme.fg_span(status_color, format!("{dot} {}", activity.status)));
+        row.push(theme.fg_span(
+            status_color,
+            plain_cell(&format!("{dot} {}", activity.status), self.status),
+        ));
         fill_row(theme, row, selected, width)
     }
 }
