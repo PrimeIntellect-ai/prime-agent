@@ -260,6 +260,10 @@ impl AgentSessionEngine {
         }) {
             return OverflowAttempt::Cancelled;
         }
+        pa_core::session_engine::compaction_trace::trace(
+            "auto.overflow_start_emitted",
+            serde_json::Value::Null,
+        );
         // TS `_runAutoCompaction` assigns `_autoCompactionAbortController`
         // for the overflow run too: an `abort_compaction` command lands in
         // the shared slot and cancels the in-flight summarizer.
@@ -338,6 +342,10 @@ impl AgentSessionEngine {
                 if !emit(EngineEvent::Compaction { entry, event }) {
                     return OverflowAttempt::Cancelled;
                 }
+                pa_core::session_engine::compaction_trace::trace(
+                    "auto.overflow_end_emitted",
+                    serde_json::Value::Null,
+                );
                 // The compaction rebuild re-adds the error turn from the
                 // kept tail: drop it again so the retried request is free
                 // of it (TS will-retry branch).

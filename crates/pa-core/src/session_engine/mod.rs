@@ -15,6 +15,7 @@ pub mod branch_summarization;
 pub mod compact_session;
 pub mod compaction;
 pub mod compaction_exec;
+pub mod compaction_trace;
 pub mod compaction_utils;
 pub mod engine;
 pub mod goal_boundary;
@@ -428,7 +429,14 @@ impl AgentSession {
         // TS `_performCompaction` captures `this._harnessDigest()` at the
         // commit: relevance terms from the live (pre-compaction) context,
         // harness state read fresh from disk when the snapshot renders.
+        compaction_trace::trace(
+            "compact.enter",
+            serde_json::json!({
+                "customInstructions": custom_instructions.is_some(),
+            }),
+        );
         let digest_inputs = self.harness_digest_inputs().await;
+        compaction_trace::trace("compact.digest_captured", serde_json::Value::Null);
         let mut outcome = {
             let mut session = self.session.lock().await;
             crate::session_engine::compact_session::execute_compaction(
@@ -446,6 +454,7 @@ impl AgentSession {
             .await?
         };
         if matches!(outcome, CompactOutcome::Skipped(_)) {
+            compaction_trace::trace("compact.skipped", serde_json::Value::Null);
             return Ok(outcome);
         }
         // Rebuild the loop context from the post-compaction session.
@@ -460,7 +469,12 @@ impl AgentSession {
                 serde_json::from_value::<AgentMessage>(value).ok()
             })
             .collect();
+        let rebuilt_message_count = loop_messages.len();
         self.agent.set_messages(loop_messages).await;
+        compaction_trace::trace(
+            "compact.rebuilt_context",
+            serde_json::json!({ "messages": rebuilt_message_count }),
+        );
         // TS `_performCompaction` ends with
         // `_syncKernelStateAfterCompaction()`: a kernel that survived the
         // compaction gets its persistence notice — a durable
@@ -476,9 +490,16 @@ impl AgentSession {
             }
             None => None,
         };
+        let notice_landed = kernel_state.is_some();
         if let CompactOutcome::Ran(run) = &mut outcome {
             run.ipython_state = kernel_state;
         }
+        compaction_trace::trace(
+            "compact.returned",
+            serde_json::json!({
+                "notice": notice_landed,
+            }),
+        );
         Ok(outcome)
     }
 

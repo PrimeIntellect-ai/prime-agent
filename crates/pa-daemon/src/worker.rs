@@ -326,9 +326,9 @@ pub(crate) struct QueuedItem {
     pub(crate) message: String,
     /// The labeled queue-strip row (TS `payload.preview`): the queue
     /// snapshot serves it instead of `message` when the delivery carries
-    /// one (TS `queuedAgentMessagePreview` returns
-    /// `payload.preview ?? payload.text`). The active-action label and the
-    /// turn's prompt text stay `message` (TS `compactRlmText(payload.text)`).
+    /// one, and the active-action label reads it too (TS #2063
+    /// `queuedAgentMessagePreview` returns `payload.preview ??
+    /// payload.text`); the turn's prompt text stays `message`.
     pub(crate) preview: Option<String>,
     /// An injected custom row that replaces this turn's user message (the
     /// RLM child terminal notices ride the follow-up lane this way).
@@ -486,9 +486,13 @@ pub(crate) struct SessionCore {
     /// The queue projection's active action (TS `getSessionActionSnapshot`
     /// reads the store's first active action): the runner sets the phase
     /// transitions of a queue-visible delivery (`preparing` at pickup,
-    /// `committing` before the turn dispatch, `running` at the turn's
-    /// `agent_start`) and clears it once the delivered turn settles. The
-    /// label rides the snapshot (TS `compactRlmText(active.payload.text)`).
+    /// `committing` at the turn's first row — the prompt becomes visible
+    /// in the conversation then, TS's commit fence — `running` at the
+    /// turn's first assistant frame) and clears it once the delivered
+    /// turn settles. The `preparing` projection is what a client renders
+    /// as the queued strip's "Starting" row (TS #2063). The label rides
+    /// the snapshot (TS #2063 `compactRlmText(queuedAgentMessagePreview(
+    /// active))`: the delivery's labeled preview, else the message text).
     pub(crate) active_action: Option<crate::types::SessionActionActive>,
 }
 
@@ -4801,6 +4805,59 @@ fn restore_queue_snapshot(
 /// level: sequence + meta under the core lock, then one broadcast (the
 /// free-standing form of `Worker::emit_worker_event`, shared with the
 /// goal admission sink).
+/// Record one durable custom row of the background compact-trigger
+/// review and broadcast its `message_start`/`message_end` pair (the TS
+/// `_emit` for rows the session appends outside a turn): the same shape
+/// `Worker::emit_custom_row` persists for the `/refine` command's rows.
+///
+/// `review_session_id` fences the row against the session moves a branch
+/// navigation or replacement makes while the review's model call was in
+/// flight (the round's branch-version check already drops its harness
+/// edits; this drops the ROWS): the worker's live store answers with a
+/// different session id — the review resolved against the abandoned
+/// conversation, so its rows never persist or broadcast into the
+/// moved-to session. Returns whether the row landed.
+fn emit_refinement_row(
+    core: &Arc<Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+    review_session_id: &str,
+    message: Value,
+) -> bool {
+    {
+        let mut core = core.lock().unwrap();
+        let Some(store) = core.store.as_mut() else {
+            return false;
+        };
+        if store.session_id() != review_session_id {
+            pa_core::session_engine::compaction_trace::trace(
+                "autorefine.rows_dropped_session_moved",
+                serde_json::Value::Null,
+            );
+            return false;
+        }
+        let _ = store.persist_entry(
+            "custom_message",
+            json!({
+                "customType": message.get("customType").cloned().unwrap_or(Value::Null),
+                "content": message.get("content").cloned().unwrap_or(Value::Null),
+                "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
+                "details": message.get("details").cloned().unwrap_or(Value::Null),
+            }),
+        );
+    }
+    emit_worker_event_with(
+        core,
+        events,
+        json!({ "type": "message_start", "message": message }),
+    );
+    emit_worker_event_with(
+        core,
+        events,
+        json!({ "type": "message_end", "message": message }),
+    );
+    true
+}
+
 pub(crate) fn emit_worker_event_with(
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,
@@ -5184,38 +5241,38 @@ impl TurnRunner {
                 // message for the whole turn (dogfood P0: the steered
                 // message sends but still shows in the queue) and a browse
                 // edit addressed at the stale row is rejected as changed.
-                // A queue-visible delivery carries the active action through
-                // its TS phase transitions (`selected`/`preparing` projects
-                // first, then the `committing` transition before the turn
-                // dispatch, `running` once the turn's `agent_start` lands,
-                // cleared at the settle); an invisible item (an idle
-                // session's direct prompt admission, injected goal and
-                // autonomous continuations) projects the plain pickup like
-                // TS's `queueVisible` filter.
-                // The batch's active action is the first queue-visible row
-                // (TS `visibleSessionActionProjection(activeActions())[0]`):
-                // an all-invisible batch (injected continuations) projects
-                // nothing, like TS's `queueVisible` filter.
+                // A queue-visible delivery carries the active action
+                // through its TS phase transitions: `preparing` projects
+                // here at pickup, then `committing` at the turn's first
+                // row (the moment the prompt becomes visible in the
+                // conversation — TS's commit fence) and `running` at the
+                // turn's first assistant frame, both emitted by the
+                // runner's event path, cleared at the settle. The
+                // `preparing` projection is what a client renders as the
+                // queued strip's "Starting" row (TS #2063): the prompt
+                // left its lane, and until the turn's rows land the strip
+                // is the only place it is visible. An invisible item (an
+                // idle session's direct prompt admission, injected goal
+                // and autonomous continuations) projects the plain pickup
+                // like TS's `queueVisible` filter, so an all-invisible
+                // batch sets no active action at all.
+                // The active label is the delivery's labeled preview when
+                // it carries one (TS #2063 `queuedAgentMessagePreview`:
+                // `payload.preview ?? payload.text`) — an agent-message
+                // delivery shows its "Agent message received: ..." row,
+                // not the raw envelope.
                 let visible_index = items.iter().position(|item| item.queue_visible);
                 let anchor = visible_index.map(|index| &items[index]);
-                let queue_visible = anchor.is_some();
                 {
                     let mut core = self.core.lock().unwrap();
                     if let Some(anchor) = anchor {
                         core.active_action = Some(crate::types::SessionActionActive {
                             kind: "turn".to_string(),
                             phase: "preparing".to_string(),
-                            label: Some(compact_action_label(&anchor.message)),
+                            label: Some(compact_action_label(
+                                anchor.preview.as_deref().unwrap_or(&anchor.message),
+                            )),
                         });
-                    }
-                    let snapshot = self.snapshot_from(&core);
-                    drop(core);
-                    let _ = self.emit_action_update(&snapshot);
-                }
-                if queue_visible {
-                    let mut core = self.core.lock().unwrap();
-                    if let Some(active) = core.active_action.as_mut() {
-                        active.phase = "committing".to_string();
                     }
                     let snapshot = self.snapshot_from(&core);
                     drop(core);
@@ -5256,19 +5313,6 @@ impl TurnRunner {
             self.prompt_admissions.commit(admission_id);
         }
         self.emit_turn_event(json!({ "type": "agent_start" }));
-        // The active action's `running` phase lands right after the turn's
-        // `agent_start` (TS marks the action running once the primary
-        // message starts the run): a queue-visible delivery projects it,
-        // and every later queue snapshot mid-turn carries it too.
-        if items.iter().any(|item| item.queue_visible) {
-            let mut core = self.core.lock().unwrap();
-            if let Some(active) = core.active_action.as_mut() {
-                active.phase = "running".to_string();
-            }
-            let snapshot = self.snapshot_from(&core);
-            drop(core);
-            let _ = self.emit_action_update(&snapshot);
-        }
         self.emit_turn_event(json!({ "type": "turn_start" }));
 
         let prompt_index = {
@@ -5321,6 +5365,18 @@ impl TurnRunner {
         let events = self.events.clone();
         let turn_coalescer = Arc::clone(&coalescer);
         let agent_dir = crate::paths::agent_dir().unwrap_or_default();
+        // The settle tail's background compact-trigger servicing owns its
+        // own engine clone (the turn closure below moves the shadowing
+        // clone), and fences its rows on the session identity it serviced
+        // (a branch move or replacement swaps the store mid-review).
+        let review_engine = std::sync::Arc::clone(&engine);
+        let review_session_id = {
+            let core = self.core.lock().unwrap();
+            core.store
+                .as_ref()
+                .map(|store| store.session_id().to_string())
+                .unwrap_or_default()
+        };
         // The turn's settled outcome reaches the waiting prompt only
         // after the runner flipped the session back to idle (TS
         // `promptAndWait` resolves after the full settle): the blocking
@@ -5361,6 +5417,22 @@ impl TurnRunner {
             // that end without a model turn (session commands, pre-model
             // failures).
             let mut engine_turn_ended = false;
+            // TS #2063: whether this run's active action already flipped
+            // to `committing`/`running` — each flip rides the first event
+            // that marks the moment (the turn's first row commits it, the
+            // first assistant frame runs it), so the queue's `preparing`
+            // projection spans the real pickup -> rows-land window a
+            // client renders as the strip's "Starting" row.
+            let mut active_committed = false;
+            let mut active_running = false;
+            // Restored next-turn rows ride this delivery as PREFIX rows
+            // (before the accepted prompt): they render in the
+            // conversation, but they are not the prompt's rows-land moment
+            // — the "Starting" row must survive them and drop at the
+            // accepted row (the bots' commit-fence finding). The flip
+            // closure reads the flag while the prefix loop writes it, so
+            // it is a Cell (the runner is single-threaded here).
+            let emitting_prefix_rows = std::cell::Cell::new(false);
             // The last error of the active retry episode (the
             // `auto_retry_start` errorMessage): the episode's durable
             // outcome row names it on success too — the final event
@@ -5442,6 +5514,12 @@ impl TurnRunner {
                 } = event
                 {
                     if !entry.is_null() {
+                        let repin_started = std::time::Instant::now();
+                        let durable_entries = core
+                            .store
+                            .as_ref()
+                            .and_then(|store| store.branch().len().checked_sub(1))
+                            .unwrap_or(0);
                         if let Some(id) = core.store.as_ref().and_then(|store| {
                             store.durable_first_kept_entry_id(keep_recent_tokens(
                                 &core.cwd, &agent_dir,
@@ -5454,6 +5532,13 @@ impl TurnRunner {
                                 result.insert("firstKeptEntryId".to_string(), json!(id));
                             }
                         }
+                        pa_core::session_engine::compaction_trace::trace(
+                            "emit.compaction_repin",
+                            serde_json::json!({
+                                "durableEntries": durable_entries,
+                                "micros": repin_started.elapsed().as_micros(),
+                            }),
+                        );
                     }
                 }
                 match &event {
@@ -5500,7 +5585,14 @@ impl TurnRunner {
                         // A skipped compaction carries a null entry (the
                         // skip shape): publish the event, never persist it.
                         if let Some(store) = core.store.as_mut().filter(|_| !entry.is_null()) {
+                            let persist_started = std::time::Instant::now();
                             let _ = store.persist_entry("compaction", entry.clone());
+                            pa_core::session_engine::compaction_trace::trace(
+                                "emit.compaction_persist",
+                                serde_json::json!({
+                                    "micros": persist_started.elapsed().as_micros(),
+                                }),
+                            );
                         }
                     }
                     // The durable mirror of a goal-state change (TS
@@ -5521,12 +5613,49 @@ impl TurnRunner {
                     }
                     _ => {}
                 }
+                // TS #2063: the active action's `committing`/`running`
+                // transitions ride the events that mark the moments — the
+                // turn's first row commits it (the prompt becomes visible
+                // in the conversation exactly then, the boundary TS's
+                // strip drops its "Starting" row at: the commit fence),
+                // the first assistant frame runs it.
+                let mut action_frame: Option<SessionActionSnapshot> = None;
+                if !emitting_prefix_rows.get()
+                    && !active_committed
+                    && matches!(
+                        event,
+                        EngineEvent::UserMessage(_) | EngineEvent::CustomMessage(_)
+                    )
+                {
+                    active_committed = true;
+                    if let Some(active) = core.active_action.as_mut() {
+                        active.phase = "committing".to_string();
+                    }
+                    action_frame = Some(session_snapshot(&core));
+                } else if !active_running
+                    && matches!(
+                        event,
+                        EngineEvent::AssistantUpdate { .. } | EngineEvent::AssistantMessage(_)
+                    )
+                {
+                    active_running = true;
+                    if let Some(active) = core.active_action.as_mut() {
+                        active.phase = "running".to_string();
+                    }
+                    action_frame = Some(session_snapshot(&core));
+                }
                 let done_result = match &event {
                     EngineEvent::Done(result) => {
                         // The turn boundary releases RLM child prompt tasks
                         // waiting on it (the parent's continuation request
                         // is in flight before any child's first turn).
                         engine.on_turn_done();
+                        pa_core::session_engine::compaction_trace::trace(
+                            "turn.done_emitted",
+                            serde_json::json!({
+                                "ok": matches!(result, Ok(())),
+                            }),
+                        );
                         Some(match result {
                             Ok(()) => TurnSettle::Completed,
                             Err(error) => TurnSettle::Failed(error.clone()),
@@ -5542,7 +5671,7 @@ impl TurnRunner {
                 };
                 // One event may map to several wire frames (a custom row
                 // is a message_start + message_end pair).
-                let frames: Vec<Value> = match event {
+                let mut frames: Vec<Value> = match event {
                     EngineEvent::UserMessage(message) => {
                         // TS emits the accepted user message as a
                         // message_start + message_end pair (the row is
@@ -5736,6 +5865,20 @@ impl TurnRunner {
                         ]
                     }
                 };
+                // The phase flip's queue-update frame rides the same batch
+                // (after the row frames it follows, so a client sees the
+                // prompt land and then the strip drop its "Starting" row):
+                // an unchanged projection stays silent, like every queue
+                // emit (TS `_emitQueueUpdate`).
+                if let Some(snapshot) = action_frame {
+                    if core.last_action_snapshot.as_ref() != Some(&snapshot) {
+                        core.last_action_snapshot = Some(snapshot.clone());
+                        frames.push(json!({
+                            "type": "session_action_update",
+                            "actions": snapshot,
+                        }));
+                    }
+                }
                 // Verification seam: dump the emitted session events for
                 // harness debugging (PA_DAEMON_EVENT_LOG=<path>).
                 if let Ok(path) = std::env::var("PA_DAEMON_EVENT_LOG") {
@@ -5836,16 +5979,20 @@ impl TurnRunner {
             };
             // Restored next-turn rows ride this delivery (TS
             // `prefixMessages`): emitted before the accepted prompt, the
-            // same durable-row path as in-turn custom rows.
+            // same durable-row path as in-turn custom rows. They are not
+            // the delivery's rows-land moment, so the committing flip
+            // waits for the accepted row behind them.
             let parked = {
                 let mut core = core.lock().unwrap();
                 std::mem::take(&mut core.pending_next_turn)
             };
+            emitting_prefix_rows.set(!parked.is_empty());
             for row in parked {
                 if !emit(EngineEvent::CustomMessage(row)) {
                     break;
                 }
             }
+            emitting_prefix_rows.set(false);
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
         });
         let _ = turn.await;
@@ -5908,6 +6055,80 @@ impl TurnRunner {
             for done in items_done {
                 let _ = done.send(result.clone());
             }
+        }
+        // The compact-trigger review a compaction armed this run services
+        // off the settle (TS `_scheduleAutoRefineAfterCompaction` ->
+        // `setTimeout(0)` background `_maybeAutoRefine("compact")`): the
+        // turn settled and the waiting prompts resolved, so the review's
+        // model call runs as a background round and the queued next
+        // prompt's admission never waits on it. The round's own gates
+        // (the armed trigger, queued work) keep the trigger armed for the
+        // next settle when work is queued mid-review.
+        {
+            let engine = review_engine;
+            let core = Arc::clone(&self.core);
+            let events = self.events.clone();
+            let review_session_id = review_session_id.clone();
+            tokio::spawn(async move {
+                // The pending pre-check and the round both take the
+                // engine's session mutex (`blocking_lock`): they run on
+                // the blocking pool, never on this async task — a
+                // `blocking_lock` from the runtime thread deadlocks the
+                // settle when the mutex is contended.
+                let refined = tokio::task::spawn_blocking(move || {
+                    pa_core::session_engine::compaction_trace::trace(
+                        "autorefine.review_started",
+                        serde_json::Value::Null,
+                    );
+                    let outcome = engine.consume_compact_auto_refine();
+                    pa_core::session_engine::compaction_trace::trace(
+                        "autorefine.review_done",
+                        serde_json::json!({ "ran": outcome.is_ok() }),
+                    );
+                    outcome
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    Err(anyhow::anyhow!("auto-refinement task failed: {error}"))
+                });
+                match refined {
+                    Ok(Some(result)) => {
+                        // TS `refine()` appends the TUI outcome row and
+                        // the model-facing notice (when edits applied) as
+                        // durable rows: persist both to the session file
+                        // and broadcast their message pairs like the
+                        // `/refine` command — each row fenced on the
+                        // session identity the review serviced (a branch
+                        // move or replacement swaps the store mid-review;
+                        // the row never lands on the moved-to session).
+                        let outcome_row =
+                            pa_core::session_engine::refine::create_refinement_outcome_message(
+                                &result,
+                            );
+                        if let Ok(value) = serde_json::to_value(
+                            pa_types::session::AgentMessage::Custom(outcome_row),
+                        ) {
+                            emit_refinement_row(&core, &events, &review_session_id, value);
+                        }
+                        if result.applied_edits.iter().any(|edit| edit.applied) {
+                            let notice =
+                                pa_core::session_engine::refine::create_refinement_notice_message(
+                                    &result,
+                                    pa_core::session_engine::refine::RefinementSource::Auto,
+                                );
+                            if let Ok(value) = serde_json::to_value(
+                                pa_types::session::AgentMessage::Custom(notice),
+                            ) {
+                                emit_refinement_row(&core, &events, &review_session_id, value);
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
+                    }
+                }
+            });
         }
     }
 
