@@ -63,6 +63,8 @@ export interface AgentSessionMessageAgentSummary extends AgentSessionMessageEndp
 	cwd: string;
 	isStreaming: boolean;
 	unfinishedActionCount: number;
+	/** MagicDNS hostname when this peer runs on a remote daemon (tailnet mesh). */
+	remoteHost?: string;
 	parentActiveSessionId?: string;
 	rlmChildId?: string;
 	sessionDir?: string;
@@ -95,6 +97,8 @@ export interface AgentFamilyCatalogEntry {
 	/** Persisted transcript facts; known only for entries read from disk. */
 	messageCount?: number;
 	firstMessage?: string;
+	/** MagicDNS hostname when this entry runs on a remote daemon (tailnet mesh). */
+	remoteHost?: string;
 }
 
 export interface AgentFamilyMember {
@@ -212,14 +216,17 @@ export function assertAgentSessionNameAvailable(
 	catalog: readonly AgentFamilyCatalogEntry[],
 	input: AgentSessionNameAvailabilityInput,
 ): void {
+	// Session names are unique per daemon, not per tailnet: a remote mesh row can
+	// never make a local name look taken.
+	const localCatalog = catalog.filter((entry) => entry.remoteHost === undefined);
 	const freedSessionIds = input.ignoreSessionIds?.length ? new Set(input.ignoreSessionIds) : undefined;
-	const conflict = catalog.some(
+	const conflict = localCatalog.some(
 		(entry) =>
 			entry.id !== input.ignoreSessionId &&
 			!freedSessionIds?.has(entry.id) &&
 			entry.name === input.name &&
 			entry.depth === input.depth &&
-			sameAgentSessionNameParent(entry, input, catalog),
+			sameAgentSessionNameParent(entry, input, localCatalog),
 	);
 	if (conflict) {
 		throw new Error(formatAgentSessionNameUnavailable(input.name, input.depth));

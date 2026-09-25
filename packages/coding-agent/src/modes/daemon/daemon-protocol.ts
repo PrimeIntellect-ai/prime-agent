@@ -53,6 +53,11 @@ import type { SessionSummary } from "./daemon-session-list.js";
  */
 
 export const DAEMON_PROTOCOL_NAME = "prime-agent.daemon";
+/**
+ * Worker-side request budget for `list_agent_peers`. The supervisor's mesh
+ * refresh for that command must answer well inside this window.
+ */
+export const AGENT_PEER_LIST_REQUEST_TIMEOUT_MS = 5_000;
 export const DAEMON_PROTOCOL_VERSION = 7;
 export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 9 publishes persisted RLM spawn depth on passive session rows.
@@ -404,6 +409,8 @@ export type DaemonCommand =
 			cwd?: string;
 			sessionDir?: string;
 			includeClientOwned?: boolean;
+			/** View opt-in: merge cached tailnet mesh rows into `sessions`. */
+			includeRemoteMesh?: boolean;
 	  }
 	| DaemonSavedSessionListCommand
 	| { id?: string; type: "list_agent_peers"; workerToken: string }

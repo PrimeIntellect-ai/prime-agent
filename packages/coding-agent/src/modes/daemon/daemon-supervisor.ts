@@ -16,6 +16,7 @@ import {
 } from "../../config.js";
 import {
 	type AgentFamilyCatalogEntry,
+	type AgentFamilyRelationship,
 	type AgentSessionMessageAgentSummary,
 	assertAgentFamilyReach,
 	assertAgentSessionNameAvailable,
@@ -75,7 +76,12 @@ import {
 } from "./agent-roster.js";
 import { CommandRecoveryJournal, createCommandIdempotencyKey } from "./command-recovery-journal.js";
 import { CompactAssistantStreamReconstructor, isCompactAssistantDelta } from "./compact-session-stream.js";
-import { DAEMON_CATALOG_ROLE_ENV, DaemonCatalogClient } from "./daemon-catalog-process.js";
+import {
+	DAEMON_CATALOG_AMBIGUOUS_SELECTOR_PREFIX,
+	DAEMON_CATALOG_ROLE_ENV,
+	DaemonCatalogClient,
+	isDaemonCatalogSessionMiss,
+} from "./daemon-catalog-process.js";
 import {
 	DaemonSessionRecoveringError,
 	deserializeDaemonError,
@@ -84,6 +90,7 @@ import {
 	UPDATE_RESTART_PREPARING_MESSAGE,
 } from "./daemon-errors.js";
 import {
+	AGENT_PEER_LIST_REQUEST_TIMEOUT_MS,
 	collectDaemonClientEnv,
 	createDaemonEventMeta,
 	DAEMON_COMMAND_COMPATIBILITY,
@@ -166,6 +173,15 @@ import {
 } from "./daemon-worker-protocol.js";
 import { MutationDrainLatch } from "./mutation-drain-latch.js";
 import {
+	agentMeshIdentity,
+	assertRemoteAgentFamilyReach,
+	type RemoteAgentMeshSource,
+	RemoteAgentMeshState,
+	type RemoteAgentMessageTarget,
+	type RemoteAgentMessageTransport,
+	remoteAgentFamilyRelationship,
+} from "./remote-mesh.js";
+import {
 	createRlmLedgerRegistrySeedSource,
 	type RlmLedgerEdge,
 	RlmSpawnLedger,
@@ -226,6 +242,18 @@ const UPDATE_RESTART_WORKER_REQUEST_TIMEOUT_MS = 90_000;
 // an abandoned prepare leaves the daemon permanently fenced with workers stopped.
 const UPDATE_RESTART_PREPARE_DEADLINE_MS = 100_000;
 const WORKER_RETRY_DELAYS_MS = [250, 1000, 5000] as const;
+// A cold mesh scan pays bounded connect timeouts for every offline peer; `list`
+// waits no longer than this for it and serves last-known rows instead.
+const REMOTE_MESH_LIST_REFRESH_WAIT_MS = 5_000;
+// The send_message fallback shares the bounded refresh on a tighter budget: the
+// sender is waiting on an error path, so discovery must not hold it for `list`'s span.
+const REMOTE_MESH_MESSAGE_REFRESH_WAIT_MS = 2_000;
+// `list_agent_peers` answers a worker request bounded by
+// AGENT_PEER_LIST_REQUEST_TIMEOUT_MS, and a cold mesh scan pays bounded connect
+// timeouts for every offline peer: the refresh takes half that budget and
+// serves last-known rows, so the local siblings and the response fit in the
+// rest instead of racing the worker's timeout to a silent empty peer list.
+const REMOTE_MESH_PEERS_REFRESH_WAIT_MS = Math.floor(AGENT_PEER_LIST_REQUEST_TIMEOUT_MS / 2);
 /**
  * Upper bound on relay payloads deferred per client and session while a
  * snapshot stream is active. Deferral spans one stream (seconds), so overflow
@@ -438,6 +466,12 @@ interface DaemonSupervisorOptions {
 	socketPath?: string;
 	defaultSessionConfig: AgentSessionRuntimeConfig;
 	descriptorDir?: string;
+	/** Tailnet remote-agent mesh. Without a discovery source the supervisor serves a local roster. */
+	remoteAgentMesh?: {
+		source?: RemoteAgentMeshSource;
+		transport?: RemoteAgentMessageTransport;
+		refreshTtlMs?: number;
+	};
 }
 
 interface PersistedSupervisorConfig {
@@ -786,6 +820,8 @@ export class DaemonSupervisor {
 	private readonly catalog: DaemonCatalogClient;
 	private readonly settingsManager: SettingsManager;
 	private rosterStore?: AgentRoster;
+	/** Last tailnet mesh snapshot; undefined when no mesh source is configured. */
+	private readonly remoteAgentMeshState?: RemoteAgentMeshState;
 	private readonly pendingRosterChanged = new Set<string>();
 	private readonly pendingRosterRemoved = new Set<string>();
 	/** Ids declared to subscribers: gates removals to once and keeps owned-only row ids private. */
@@ -841,6 +877,15 @@ export class DaemonSupervisor {
 		this.snapshotCacheRoot = join(this.descriptorDir, "snapshot-cache", this.generation);
 		this.catalog = new DaemonCatalogClient((message) => this.log(message));
 		this.settingsManager = SettingsManager.create(process.cwd(), this.defaultSessionConfig.agentDir ?? agentDir);
+		this.remoteAgentMeshState = options.remoteAgentMesh
+			? new RemoteAgentMeshState({
+					source: options.remoteAgentMesh.source,
+					transport: options.remoteAgentMesh.transport,
+					refreshTtlMs: options.remoteAgentMesh.refreshTtlMs,
+					onRosterChange: (changed, removed) => this.onRemoteMeshRosterChange(changed, removed),
+					onScanError: (error) => this.log(`Remote mesh scan failed: ${String(error)}`),
+				})
+			: undefined;
 	}
 
 	async start(): Promise<void> {
@@ -2281,9 +2326,13 @@ export class DaemonSupervisor {
 				return undefined;
 			case "list":
 				return this.handleList(client, command);
-			case "roster_subscribe":
+			case "roster_subscribe": {
+				// The snapshot answers from the mesh cache; a scan started now lands
+				// as an ordinary roster push, so subscribe never blocks on tailnet peers.
+				void this.remoteAgentMeshState?.refreshIfStale().catch(() => undefined);
 				client.rosterSubscribed = true;
 				return success(command.id, command.type, { roster: this.rosterEntriesForClient() });
+			}
 			case "roster_unsubscribe":
 				client.rosterSubscribed = false;
 				client.rosterResyncPending = false;
@@ -2293,18 +2342,22 @@ export class DaemonSupervisor {
 					(worker) => worker.descriptor.authenticationToken === command.workerToken,
 				);
 				if (!requester) throw new Error("Worker authentication failed");
-				const peers = [...this.workers.values()]
-					.filter(
-						(worker) =>
-							worker !== requester &&
-							this.isLiveWorker(worker) &&
-							worker.descriptor.lifecycle === "ready" &&
-							worker.client !== undefined,
-					)
-					.flatMap((worker) => {
-						const root = this.roster().byActiveSessionId(worker.descriptor.rootActiveSessionId);
-						return root ? [this.agentPeerSummary(sessionSummaryFromRosterEntry(root))] : [];
-					});
+				const peers = [
+					...[...this.workers.values()]
+						.filter(
+							(worker) =>
+								worker !== requester &&
+								this.isLiveWorker(worker) &&
+								worker.descriptor.lifecycle === "ready" &&
+								worker.client !== undefined,
+						)
+						.flatMap((worker) => {
+							const root = this.roster().byActiveSessionId(worker.descriptor.rootActiveSessionId);
+							return root ? [this.agentPeerSummary(sessionSummaryFromRosterEntry(root))] : [];
+						}),
+					// Depth-0 tailnet peers join the sibling lists of local depth-0 agents.
+					...(await this.remotePeerSummaries()),
+				];
 				return success(command.id, command.type, { peers });
 			}
 			case "get_direct_worker_transport": {
@@ -2897,6 +2950,19 @@ export class DaemonSupervisor {
 				target = await this.findWorkerForClient(client, command.targetActiveSessionId);
 			} catch (error) {
 				if (!(error instanceof Error) || !error.message.startsWith("Unknown active session:")) throw error;
+				// Live local workers missed: a depth-0 tailnet sibling may match
+				// instead, so warm the mesh before consulting it. Local rows keep
+				// precedence everywhere — live workers above, the saved-local wake
+				// below — and a remote name match only delivers after the catalog
+				// reports a confirmed local miss (never on a catalog outage, which
+				// fails closed); otherwise a tailnet sibling that shares a name
+				// would intercept a message that resumes the saved local session.
+				// Session names are unique per daemon, not per tailnet: two remote
+				// daemons can each own a "worker", but two remote matches only turn
+				// ambiguous once the saved-local lookup has missed as well.
+				await this.refreshRemoteMesh(REMOTE_MESH_MESSAGE_REFRESH_WAIT_MS);
+				const remoteMatches = this.remoteAgentMeshState?.findMessageTargets(command.targetActiveSessionId) ?? [];
+				const remoteTarget = remoteMatches[0];
 				const cwd = source?.summary.cwd ?? this.defaultSessionConfig.cwd ?? process.cwd();
 				let sessionPath: string;
 				try {
@@ -2908,8 +2974,24 @@ export class DaemonSupervisor {
 				} catch (catalogError) {
 					// Preserve selector ambiguity so a2a senders can distinguish it from
 					// the original unknown-active-session lookup failure.
-					if (catalogError instanceof Error && catalogError.message.startsWith("Ambiguous session selector")) {
+					if (
+						catalogError instanceof Error &&
+						catalogError.message.startsWith(DAEMON_CATALOG_AMBIGUOUS_SELECTOR_PREFIX)
+					) {
 						throw catalogError;
+					}
+					// Only a confirmed catalog miss reaches the mesh: an outage
+					// (disconnected or dead catalog) must fail closed rather than
+					// hand message contents to a same-named remote agent.
+					if (!isDaemonCatalogSessionMiss(catalogError)) throw catalogError;
+					// The catalog missed as well: only now may remote siblings claim
+					// the message — a single one delivers, two stay ambiguous exactly
+					// like the local path.
+					if (remoteMatches.length > 1) {
+						throw new Error(`Ambiguous active session: ${command.targetActiveSessionId}`);
+					}
+					if (remoteTarget) {
+						return this.deliverRemoteAgentMessage(client, command, source?.summary, remoteTarget);
 					}
 					throw error;
 				}
@@ -3026,6 +3108,55 @@ export class DaemonSupervisor {
 		}
 	}
 
+	/**
+	 * Deliver an agent message to a remote daemon through the mesh transport.
+	 * Reach is asserted from catalog facts exactly like local delivery: a
+	 * depth-0 remote session is a sibling of depth-0 locals and nothing else.
+	 */
+	private async deliverRemoteAgentMessage(
+		client: DaemonSocketClient,
+		command: Extract<DaemonCommand, { type: "send_message" }>,
+		sourceSummary: SessionSummary | undefined,
+		remoteTarget: RemoteAgentMessageTarget,
+	): Promise<DaemonResponse> {
+		const mesh = this.remoteAgentMeshState;
+		if (!mesh) throw new Error("Remote agent messaging is not available on this daemon");
+		let relationship: AgentFamilyRelationship | undefined;
+		if (sourceSummary) {
+			if (command.agentOrigin === true) {
+				assertRemoteAgentFamilyReach(this.familyCatalogEntry(sourceSummary), remoteTarget);
+			}
+			relationship = remoteAgentFamilyRelationship(this.familyCatalogEntry(sourceSummary), remoteTarget);
+			// A peer publishes its own session ids, so an id names the sender only inside
+			// one host: a copied session on the peer is a sibling, not this session.
+			const targetActiveSessionId = remoteTarget.activeSessionId;
+			if (
+				targetActiveSessionId !== undefined &&
+				agentMeshIdentity(sourceSummary.remoteHost, sourceSummary.activeSessionId ?? sourceSummary.id) ===
+					agentMeshIdentity(remoteTarget.host.tailnetHost, targetActiveSessionId)
+			) {
+				throw new Error("Agent messaging cannot target the sending session");
+			}
+		}
+		const receipt = await mesh.sendAgentMessage({
+			target: remoteTarget,
+			message: command.message,
+			...(sourceSummary
+				? {
+						sender: {
+							activeSessionId: sourceSummary.activeSessionId ?? sourceSummary.id,
+							sessionId: sourceSummary.sessionId,
+							...(sourceSummary.sessionName ? { sessionName: sourceSummary.sessionName } : {}),
+							runtimeKind: sourceSummary.runtimeKind ?? "top-level",
+							clientId: client.id,
+						},
+					}
+				: {}),
+			...(relationship ? { fromRelationship: relationship } : {}),
+		});
+		return success(command.id, command.type, receipt);
+	}
+
 	private async handleList(
 		client: DaemonSocketClient,
 		command: Extract<DaemonCommand, { type: "list" }>,
@@ -3048,6 +3179,15 @@ export class DaemonSupervisor {
 			if (command.includeClientOwned === true && this.isWorkerAccessibleToClient(client, worker)) {
 				active.push(summary);
 			}
+		}
+		// Remote rows are a view opt-in. `sessions` stays a local-residency response by
+		// default: stale-daemon replacement and update-restart recovery read it and must
+		// never mistake a tailnet peer for a local session. An opting-in caller still
+		// drives the mesh's on-demand refresh, and remote rows carry no sessionFile, so
+		// they never collide with the file-based merge paths below.
+		if (command.includeRemoteMesh === true) {
+			await this.refreshRemoteMesh();
+			active.push(...(this.remoteAgentMeshState?.sessionSummaries() ?? []));
 		}
 		const data = {
 			sessions: active,
@@ -4622,6 +4762,40 @@ export class DaemonSupervisor {
 		return this.rosterStore;
 	}
 
+	/** Mesh rows publish through the same roster-change machinery as worker rows. */
+	private onRemoteMeshRosterChange(changed: readonly string[], removed: readonly string[]): void {
+		for (const agentId of removed) {
+			this.pendingRosterChanged.delete(agentId);
+			this.pendingRosterRemoved.add(agentId);
+		}
+		for (const agentId of changed) {
+			this.pendingRosterRemoved.delete(agentId);
+			this.pendingRosterChanged.add(agentId);
+		}
+		this.scheduleRosterPush();
+	}
+
+	/** A roster id may name a local worker row or a remote mesh row. */
+	private rosterEntryById(agentId: string): AgentRosterEntry | undefined {
+		return this.roster().get(agentId) ?? this.remoteAgentMeshState?.entryById(agentId);
+	}
+
+	/** Bounded on-demand mesh refresh; see RemoteAgentMeshState.refreshAwaiting. */
+	private async refreshRemoteMesh(waitMs: number = REMOTE_MESH_LIST_REFRESH_WAIT_MS): Promise<void> {
+		const mesh = this.remoteAgentMeshState;
+		if (!mesh?.enabled()) return;
+		await mesh.refreshAwaiting(waitMs);
+	}
+
+	/**
+	 * Fresh depth-0 peer rows: `list_agent_peers` refreshes the mesh itself on a
+	 * budget that fits the worker's 5s request timeout.
+	 */
+	private async remotePeerSummaries(): Promise<AgentSessionMessageAgentSummary[]> {
+		await this.refreshRemoteMesh(REMOTE_MESH_PEERS_REFRESH_WAIT_MS);
+		return this.remoteAgentMeshState?.peerSummaries() ?? [];
+	}
+
 	private onRosterMutation(mutation: AgentRosterMutation): void {
 		if (mutation.type === "delete") {
 			this.pendingRosterChanged.delete(mutation.agentId);
@@ -4651,7 +4825,7 @@ export class DaemonSupervisor {
 			this.publishedRosterJson.delete(agentId);
 		}
 		for (const agentId of this.pendingRosterChanged) {
-			const entry = this.roster().get(agentId);
+			const entry = this.rosterEntryById(agentId);
 			if (!entry) continue;
 			if (this.isRosterEntryVisibleToClients(entry)) {
 				const json = JSON.stringify(entry);
@@ -4682,7 +4856,11 @@ export class DaemonSupervisor {
 	}
 
 	private rosterEntriesForClient(): AgentRosterEntry[] {
-		const entries = [...this.roster().values()].filter((entry) => this.isRosterEntryVisibleToClients(entry));
+		const entries = [
+			...[...this.roster().values()].filter((entry) => this.isRosterEntryVisibleToClients(entry)),
+			// Remote mesh rows have no worker, so visibility is unconditional.
+			...(this.remoteAgentMeshState?.entriesForClients() ?? []),
+		];
 		for (const entry of entries) this.publishedRosterIds.add(entry.agentId);
 		return entries;
 	}

@@ -1,0 +1,3 @@
+- Added remote tailnet-mesh sessions to the agents view and `prime-agent list`: depth-0 sessions from tailnet peer daemons render alongside local ones, labeled `on <tailnet-host>`, and switch to an `offline` status when their peer drops from a scan.
+- Added remote sibling routing: `agent_message.send` resolves a sibling name against remote mesh sessions and routes delivery through the mesh transport seam (cross-machine delivery lands with the stacked mesh transport PR).
+- Added a `host` column to the `prime-agent list` table whenever a remote mesh session is present; purely local tables keep their exact prior layout.

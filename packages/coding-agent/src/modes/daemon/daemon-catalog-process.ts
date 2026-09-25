@@ -21,6 +21,15 @@ import { spawnHidden } from "../../utils/child-process.js";
 export const DAEMON_CATALOG_ROLE_ENV = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
 const DAEMON_CATALOG_START_TIMEOUT_MS = 30_000;
 
+/** Confirmed local catalog miss; every other resolve failure is an operational outage. */
+export const DAEMON_CATALOG_SESSION_MISS_PREFIX = "No session found matching";
+/** A selector matched more than one saved session; callers must forward it unchanged. */
+export const DAEMON_CATALOG_AMBIGUOUS_SELECTOR_PREFIX = "Ambiguous session selector";
+
+export function isDaemonCatalogSessionMiss(error: unknown): boolean {
+	return error instanceof Error && error.message.startsWith(DAEMON_CATALOG_SESSION_MISS_PREFIX);
+}
+
 export function isDaemonCatalogSourcePath(modulePath: string, packageDir: string): boolean {
 	return modulePath.startsWith(`${join(packageDir, "src")}${sep}`);
 }
@@ -93,7 +102,7 @@ export function resolveCatalogSessionMatch(
 ): SessionInfo | undefined {
 	const matches = sessions.filter((session) => session.id.startsWith(selector) || session.name === selector);
 	if (matches.length > 1) {
-		throw new Error(`Ambiguous session selector "${selector}"`);
+		throw new Error(`${DAEMON_CATALOG_AMBIGUOUS_SELECTOR_PREFIX} "${selector}"`);
 	}
 	return matches[0];
 }
@@ -198,7 +207,7 @@ async function handleCatalogRequest(request: CatalogRequest): Promise<void> {
 					});
 					return;
 				}
-				throw new Error(`No session found matching '${request.selector}'`);
+				throw new Error(`${DAEMON_CATALOG_SESSION_MISS_PREFIX} '${request.selector}'`);
 			}
 			case "rename":
 				appendSessionInfoToExistingFile(request.sessionPath, request.name.trim());

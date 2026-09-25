@@ -84,13 +84,19 @@ export interface SessionSummary {
 	/** Completion verdict for an idle session; absent while working or unjudged. */
 	taskState?: AgentTaskState;
 	rosterStatus?: AgentRosterStatus;
-	statusLabel?: "queued" | "recovering" | "failed";
+	statusLabel?: "queued" | "recovering" | "failed" | "offline";
 	/** Set while the owning worker has been silent past the staleness threshold. */
 	lastHeardFromAt?: string;
 	/** Resident session-host process state, populated by the global supervisor. */
 	workerState?: "starting" | "ready" | "recovering" | "stopping" | "failed";
 	/** Diagnostic process identity; clients must not use this as a stable session identifier. */
 	workerPid?: number;
+	/** MagicDNS hostname of the remote daemon owning this session (tailnet mesh); local rows leave it unset. */
+	remoteHost?: string;
+	/** True when the owning remote daemon was unreachable at the last mesh scan. */
+	remoteOffline?: boolean;
+	/** Display-only model identity for remote mesh rows; `model` stays unset for them. */
+	remoteModel?: { provider: string; modelId: string };
 }
 
 /**

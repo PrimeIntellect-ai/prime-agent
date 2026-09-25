@@ -325,7 +325,7 @@ describe("daemon command", () => {
 		daemonClientMock.behavior.sessions = sessions;
 		await expect(handleDaemonCommand(["daemon", "--socket", "/tmp/prime-agent.sock", ...argv])).resolves.toBe(true);
 
-		expect(daemonClientMock.instances[0]?.requests).toEqual([{ type: "list", all }]);
+		expect(daemonClientMock.instances[0]?.requests).toEqual([{ type: "list", all, includeRemoteMesh: true }]);
 		const logged = String(vi.mocked(console.log).mock.calls[0]?.[0]);
 		if (json) {
 			expect(JSON.parse(logged)).toEqual({ sessions });

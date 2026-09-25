@@ -10,7 +10,7 @@ import {
 import { readSessionInfo, SessionManager } from "../src/core/session-manager.js";
 import { DaemonCatalogClient } from "../src/modes/daemon/daemon-catalog-process.js";
 import { DaemonClient } from "../src/modes/daemon/daemon-client.js";
-import { success } from "../src/modes/daemon/daemon-protocol.js";
+import { AGENT_PEER_LIST_REQUEST_TIMEOUT_MS, success } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor } from "../src/modes/daemon/daemon-supervisor.js";
 import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
@@ -841,5 +841,119 @@ describe("daemon supervisor passive subagent topology", () => {
 			supervisor.workers.clear();
 			await supervisor.cleanupSupervisorResources();
 		}
+	});
+});
+
+describe("daemon supervisor remote mesh routing", () => {
+	// Mesh stub: every read needs a preceding refreshAwaiting, so a cold-cache supervisor refreshes first.
+	function meshStub(deliveries: unknown[]) {
+		let refreshed = false;
+		const waits: Array<number | undefined> = [];
+		const consume = () => {
+			const ready = refreshed;
+			refreshed = false;
+			return ready;
+		};
+		const targets = [
+			{
+				host: { tailnetHost: "peer.tailnet.ts.net", online: true, daemon: true, sessions: [] },
+				sessionId: "r-s",
+				activeSessionId: "r-a",
+				summary: { rlmDepth: 0, rosterStatus: "idle" },
+			},
+		];
+		return {
+			enabled: () => true,
+			waits,
+			targets,
+			refreshAwaiting: async (waitMs?: number) => {
+				waits.push(waitMs);
+				refreshed = true;
+			},
+			findMessageTargets: () => (consume() ? targets : []),
+			peerSummaries: () => (consume() ? [{ sessionName: "remote-agent" }] : []),
+			sessionSummaries: () => (consume() ? [{ id: "r", remoteHost: "milk.tailnet.ts.net" }] : []),
+			sendAgentMessage: async (delivery: { message: string }) => {
+				deliveries.push(delivery);
+				return { id: "r", target: {}, message: delivery.message, deliveryStatus: "delivered" };
+			},
+		};
+	}
+
+	it("resolves cold-cache peers and remote sends with saved-local precedence", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "prime-supervisor-remote-mesh-"));
+		tempDirs.push(directory);
+		const deliveries: unknown[] = [];
+		const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+			defaultSessionConfig: { agentDir: directory, cwd: directory },
+			descriptorDir: join(directory, "workers"),
+		}) as unknown as SupervisorInternals & {
+			catalog: { resolve: (...a: string[]) => Promise<string> };
+			createOrReuseWorker: (c: string, m: object) => Promise<WorkerFixture>;
+			remoteAgentMeshState?: unknown;
+		};
+		const mesh = meshStub(deliveries);
+		supervisor.remoteAgentMeshState = mesh;
+		const resident = worker("local", [summary({ id: "l", sessionId: "l-s", rlmDepth: 0 })]);
+		supervisor.workers.set("local", resident);
+		seedSupervisorRoster(supervisor, resident);
+		const client = { id: "sender", attachedActiveSessionIds: new Set<string>() };
+		const token = resident.descriptor.authenticationToken;
+		const send = (message: string, agentOrigin?: boolean) => ({
+			type: "send_message",
+			targetActiveSessionId: "remote-agent",
+			fromActiveSessionId: "l",
+			agentOrigin,
+			message,
+		});
+
+		const peers = (await supervisor.handleCommand(client, { type: "list_agent_peers", workerToken: token })) as {
+			data: { peers: { sessionName?: string }[] };
+		};
+		expect(peers.data.peers.map((peer) => peer.sessionName)).toContain("remote-agent");
+		expect(mesh.waits[0]).toBeLessThan(AGENT_PEER_LIST_REQUEST_TIMEOUT_MS);
+
+		// Local residency is the default: only a view caller opts the mesh rows in.
+		const listHosts = async (command: { type: "list"; includeRemoteMesh?: boolean }) =>
+			(
+				(await supervisor.handleCommand(client, command)) as { data: { sessions: { remoteHost?: string }[] } }
+			).data.sessions.map((row) => row.remoteHost);
+		expect(await listHosts({ type: "list" })).not.toContain("milk.tailnet.ts.net");
+		expect(await listHosts({ type: "list", includeRemoteMesh: true })).toContain("milk.tailnet.ts.net");
+		// A catalog outage is not a miss: fail closed rather than deliver to the name match.
+		supervisor.catalog.resolve = vi.fn().mockRejectedValue(new Error("Daemon catalog is not connected"));
+		await expect(supervisor.handleCommand(client, send("outage"))).rejects.toThrow("Daemon catalog is not connected");
+
+		// A confirmed catalog miss is what lets the remote sibling claim the send.
+		supervisor.catalog.resolve = vi.fn().mockRejectedValue(new Error("No session found matching 'remote-agent'"));
+		await supervisor.handleCommand(client, send("hi tailnet", true));
+		expect(deliveries[0]).toMatchObject({ message: "hi tailnet", fromRelationship: "sibling" });
+
+		mesh.targets.push({ ...mesh.targets[0], sessionId: "r-s2", activeSessionId: "r-a2" });
+		await expect(supervisor.handleCommand(client, send("hi both"))).rejects.toThrow("Ambiguous active session");
+
+		const saved = summary({ id: "s", sessionId: "s", sessionName: "remote-agent", sessionFile: "/s.jsonl" });
+		const woken = worker("woken", [saved]);
+		woken.client.requestWorker.mockResolvedValue({ success: true, data: { deliveryStatus: "delivered" } });
+		supervisor.catalog.resolve = vi.fn(async () => "/s.jsonl");
+		supervisor.createOrReuseWorker = vi.fn(async () => {
+			seedSupervisorRoster(supervisor, woken);
+			return woken;
+		});
+		await supervisor.handleCommand(client, send("wake the saved local"));
+		expect(vi.mocked(supervisor.createOrReuseWorker).mock.calls[0]?.[1]).toMatchObject({ sessionPath: "/s.jsonl" });
+		expect(deliveries).toHaveLength(1);
+
+		// A peer that reuses the sender's ids is another daemon's session, not the sender.
+		supervisor.catalog.resolve = vi.fn().mockRejectedValue(new Error("No session found matching 'remote-agent'"));
+		mesh.targets.splice(1);
+		mesh.targets[0]!.activeSessionId = "l";
+		await supervisor.handleCommand(client, send("hi twin", true));
+		expect(deliveries.at(-1)).toMatchObject({ message: "hi twin", fromRelationship: "sibling" });
+
+		// A reused session id is the reach check's identity too: still a sibling.
+		mesh.targets[0]!.sessionId = "l-s";
+		await supervisor.handleCommand(client, send("hi same session", true));
+		expect(deliveries.at(-1)).toMatchObject({ message: "hi same session", fromRelationship: "sibling" });
 	});
 });

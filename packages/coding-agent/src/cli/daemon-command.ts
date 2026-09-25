@@ -751,7 +751,8 @@ async function canConnectToDaemon(socketPath: string, timeoutMs: number): Promis
 
 async function runList(client: DaemonClient, args: string[], json: boolean): Promise<void> {
 	const { all } = parseListArgs(args);
-	const response = await client.request({ type: "list", all });
+	// The table renders a host column, so the view opt-in is the right default here.
+	const response = await client.request({ type: "list", all, includeRemoteMesh: true });
 	const data = requireSuccess(response);
 	if (json) {
 		printJson(data);
@@ -787,7 +788,7 @@ function parseListArgs(args: string[]): { all: boolean } {
 // The same list RPC as `prime-agent list`, rendered as a one-line-per-agent table.
 async function runSessions(client: DaemonClient, args: string[], json: boolean): Promise<void> {
 	const { all } = parseSessionsArgs(args);
-	const response = await client.request({ type: "list", all });
+	const response = await client.request({ type: "list", all, includeRemoteMesh: true });
 	const data = requireSuccess(response);
 	if (json) {
 		printJson(data);

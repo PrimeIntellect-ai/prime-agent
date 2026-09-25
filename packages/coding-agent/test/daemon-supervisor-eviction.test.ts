@@ -474,7 +474,7 @@ describe("daemon supervisor whole-tree eviction", () => {
 		supervisor.workers.set("source", source);
 		seedSupervisorRoster(supervisor, source);
 		supervisor.catalog.resolve = vi.fn(async () => {
-			throw new Error("Unknown saved session: missing-target");
+			throw new Error("No session found matching 'missing-target'");
 		});
 		const client = { id: "sender", attachedActiveSessionIds: new Set<string>() };
 

@@ -48,7 +48,7 @@ export interface WorkerRosterEntry {
 
 export interface AgentRosterEntry extends WorkerRosterEntry {
 	status: AgentRosterStatus;
-	statusLabel?: "queued" | "recovering" | "failed";
+	statusLabel?: "queued" | "recovering" | "failed" | "offline";
 	lastHeardFromAt?: string;
 	workerId?: string;
 }
@@ -177,7 +177,9 @@ export function sessionActivityDetail(summary: SessionSummary, options: SessionA
 		return "replied";
 	}
 	if (summary.activity === "working") {
-		return "classifying";
+		// Local rows in this state are mid-classification; a remote mesh row only
+		// publishes coarse activity, so "working" is the honest word there.
+		return summary.remoteHost !== undefined ? "working" : "classifying";
 	}
 	if (summary.taskState === "error") {
 		return "error";

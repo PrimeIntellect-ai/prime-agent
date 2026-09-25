@@ -21,7 +21,11 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.js";
-import { AGENT_FAMILY_REACH_ERROR, type AgentSessionMessageController } from "../src/core/agent-messages.js";
+import {
+	AGENT_FAMILY_REACH_ERROR,
+	type AgentSessionMessageAgentSummary,
+	type AgentSessionMessageController,
+} from "../src/core/agent-messages.js";
 import type { AgentObserveController } from "../src/core/agent-observe.js";
 import type { CreateAgentSessionRuntimeFactory } from "../src/core/agent-session-runtime.js";
 import { installAgentTraceUpload } from "../src/core/agent-traces.js";
@@ -910,6 +914,111 @@ describe("daemon mode helpers", () => {
 		).resolves.toMatchObject({ target: { activeSessionId: familyHelper.state.activeSessionId } });
 		expect(familyHelper.acceptAgentMessagePrompt).toHaveBeenCalledOnce();
 		expect(unrelatedHelper.acceptAgentMessagePrompt).not.toHaveBeenCalled();
+	});
+
+	it("keeps a saved local name when a tailnet peer reuses its ids", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-remote-name-"));
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const saved = SessionManager.create(tempDir, sessionDir);
+			saved.newSession();
+			saved.appendSessionInfo("scout");
+			const [savedInfo] = await SessionManager.listAll(undefined, sessionDir);
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
+				createRuntime: vi.fn(),
+			});
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				listSupervisorAgentPeers(): Promise<AgentSessionMessageAgentSummary[]>;
+				createAgentMessageController(getCurrentState: () => ActiveSessionState): AgentSessionMessageController;
+			};
+			const current = makeAgentFamilyState("local", "local").state;
+			internals.sessions.set(current.activeSessionId, current);
+			// A peer publishes its own ids: this row copies the saved local session's ids.
+			internals.listSupervisorAgentPeers = async () => [
+				{
+					activeSessionId: savedInfo!.id,
+					sessionId: savedInfo!.id,
+					sessionName: "scout",
+					runtimeKind: "top-level",
+					cwd: tempDir,
+					isStreaming: false,
+					unfinishedActionCount: 0,
+					remoteHost: "peer.tailnet.ts.net",
+				},
+			];
+
+			await expect(
+				internals
+					.createAgentMessageController(() => current)
+					.assertSessionNameAvailable?.({ name: "scout", depth: 0 }),
+			).rejects.toThrow('Agent name "scout" is unavailable');
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps a live sibling row when a saved root and a tailnet copy share its ids", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-live-sibling-"));
+		try {
+			const sessionDir = join(tempDir, "sessions");
+			const saved = SessionManager.create(tempDir, sessionDir);
+			saved.newSession();
+			saved.appendSessionInfo("sibling");
+			const [savedInfo] = await SessionManager.listAll(undefined, sessionDir);
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir },
+				createRuntime: vi.fn(),
+			});
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				listSupervisorAgentPeers(): Promise<AgentSessionMessageAgentSummary[]>;
+				createAgentMessageController(getCurrentState: () => ActiveSessionState): AgentSessionMessageController;
+			};
+			const current = makeAgentFamilyState("local", "local").state;
+			internals.sessions.set(current.activeSessionId, current);
+			// The saved root on disk and a tailnet peer both reuse the live sibling's ids.
+			internals.listSupervisorAgentPeers = async () => [
+				{
+					activeSessionId: "worker-sibling",
+					sessionId: savedInfo!.id,
+					sessionName: "sibling",
+					runtimeKind: "top-level",
+					cwd: tempDir,
+					isStreaming: false,
+					unfinishedActionCount: 0,
+					sessionPath: savedInfo!.path,
+					status: "running",
+				},
+				{
+					activeSessionId: savedInfo!.id,
+					sessionId: savedInfo!.id,
+					sessionName: "sibling",
+					runtimeKind: "top-level",
+					cwd: tempDir,
+					isStreaming: false,
+					unfinishedActionCount: 0,
+					remoteHost: "peer.tailnet.ts.net",
+					status: "idle",
+				},
+			];
+
+			const family = await internals.createAgentMessageController(() => current).family?.();
+			const siblings = family?.filter(
+				(member) => member.relationship === "sibling" && member.entry.name === "sibling",
+			);
+			// The live row keeps the address the messaging layer sends to and its live endpoint.
+			expect(siblings).toHaveLength(1);
+			expect(siblings?.[0]?.entry).toMatchObject({
+				id: savedInfo!.id,
+				status: "running",
+				activeSessionId: "worker-sibling",
+			});
+			expect(siblings?.[0]?.entry).not.toHaveProperty("remoteHost");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 
 	it("rejects agent messages when direct delivery preflight fails", async () => {

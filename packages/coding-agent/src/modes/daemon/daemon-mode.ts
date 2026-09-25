@@ -154,6 +154,7 @@ import {
 } from "./daemon-errors.js";
 import { bindActiveSessionState } from "./daemon-extension-binding.js";
 import {
+	AGENT_PEER_LIST_REQUEST_TIMEOUT_MS,
 	collectDaemonLaunchEnv,
 	createDaemonEventMeta,
 	createDaemonReplayInfo,
@@ -5921,12 +5922,14 @@ export class AgentDaemon {
 		try {
 			const response = await link.request(
 				{ type: "list_agent_peers", workerToken: this.options.worker.authenticationToken },
-				5000,
+				AGENT_PEER_LIST_REQUEST_TIMEOUT_MS,
 			);
 			if (!response.success) throw deserializeDaemonError(response);
 			// SAFETY: The authenticated supervisor constructs the peer response.
 			return (response.data as { peers: AgentSessionMessageAgentSummary[] }).peers;
-		} catch {
+		} catch (error) {
+			// A timeout or failed sibling listing must be visible, not a silent empty list.
+			this.log(`list_agent_peers failed: ${error instanceof Error ? error.message : String(error)}`);
 			return [];
 		}
 	}
@@ -6006,7 +6009,10 @@ export class AgentDaemon {
 					messageCount: info.messageCount,
 				}),
 			);
-		const byId = new Map<string, AgentFamilyCatalogEntry>(savedRoots.map((entry) => [entry.id, entry]));
+		// Rows key bare session ids, and a tailnet peer publishes its own ids: tailnet rows
+		// merge first so a local row always wins its own id, and a same-id tailnet row can
+		// never hide a saved local name from session-name validation.
+		const byId = new Map<string, AgentFamilyCatalogEntry>();
 		// `remote` peers live in another worker: their active id stays routable, while a
 		// local summary's stand-in id for a passive child does not.
 		const addAgent = (agent: AgentSessionMessageAgentSummary, remote = false) => {
@@ -6030,10 +6036,15 @@ export class AgentDaemon {
 				...(agent.sessionPath ? { sessionPath: canonicalSessionPath(agent.sessionPath) } : {}),
 				...(agent.rlmChildId ? { rlmChildId: agent.rlmChildId } : {}),
 				...(remote ? { activeSessionId: agent.activeSessionId } : {}),
+				...(agent.remoteHost ? { remoteHost: agent.remoteHost } : {}),
 				cwd: agent.cwd,
 			});
 		};
-		for (const peer of remotePeers) addAgent(peer, true);
+		for (const peer of remotePeers) if (peer.remoteHost !== undefined) addAgent(peer, true);
+		for (const entry of savedRoots) byId.set(entry.id, entry);
+		// A hostless peer is a live sibling in another worker of this daemon, so it merges
+		// after saved roots: its own on-disk row never replaces its live row.
+		for (const peer of remotePeers) if (peer.remoteHost === undefined) addAgent(peer, true);
 		for (const agent of localAgents) addAgent(agent);
 		for (const state of this.sessions.values()) {
 			const entry = byId.get(state.runtime.session.sessionId);
