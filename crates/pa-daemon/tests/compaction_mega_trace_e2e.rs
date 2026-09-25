@@ -143,8 +143,8 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
     requests.lock().expect("mock lock").push(body);
     // The crossing turn is the LAST turn request (the seed plus the
     // fattening turns before it), not the nth request overall: the
-    // daemon's status-line recaps (and, after a compaction, the
-    // compact-trigger auto-refine review) make their own model requests
+    // compact-trigger auto-refine review (after a compaction) makes
+    // its own model requests
     // mid-run, and counting them would shift which request lands on the
     // scripted index — a race that flipped the threshold arm between
     // runs. Turn requests are identified by the agent's harness system
@@ -455,8 +455,8 @@ fn mega_session_threshold_compaction_phase_measurement() {
     // The compaction's summarizer call really reached the provider
     // (past the seeded turns and the crossing turn): count the
     // summarizer requests by their system prompt, not the raw total —
-    // the status-line recaps and the compact-trigger review round make
-    // their own model calls, so the raw total no longer proves a
+    // the compact-trigger review round makes
+    // its own model calls, so the raw total no longer proves a
     // compaction ran.
     let summarizer_requests = {
         let bodies = mock.requests.lock().expect("mock lock");

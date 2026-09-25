@@ -56,8 +56,6 @@ pub struct UnifiedRecord {
     pub saved: Option<Value>,
     /// The supervisor's classification of the roster entry.
     pub status: Option<AgentRosterStatus>,
-    /// `queued` / `recovering` / `failed` (set only for exceptional states).
-    pub status_label: Option<String>,
     /// The stable UI key (first alias).
     pub identity: String,
     /// Every key this record is reachable by (selection survival).
@@ -187,7 +185,6 @@ pub fn reconcile_unified_sessions(roster: &[Value], saved: &[Value]) -> Vec<Unif
             .get("status")
             .and_then(Value::as_str)
             .and_then(parse_status);
-        let status_label = get_str(entry, "statusLabel").map(str::to_string);
         let aliases = daemon_aliases(&summary);
         let Some(identity) = aliases.first().cloned() else {
             continue;
@@ -202,7 +199,6 @@ pub fn reconcile_unified_sessions(roster: &[Value], saved: &[Value]) -> Vec<Unif
             daemon: Some(summary),
             saved: None,
             status,
-            status_label,
             identity,
             aliases,
             section,
@@ -244,7 +240,6 @@ pub fn reconcile_unified_sessions(roster: &[Value], saved: &[Value]) -> Vec<Unif
             daemon: None,
             saved: Some(row.clone()),
             status: None,
-            status_label: None,
             identity,
             aliases,
             section: Section::Inactive,
@@ -576,7 +571,6 @@ pub struct RowLayout {
     pub legend: String,
     pub name_width: usize,
     pub model_width: usize,
-    pub activity_width: usize,
     pub details: HashMap<String, String>,
 }
 
@@ -640,7 +634,6 @@ pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: us
         .max(12);
     let model_width = desired_model.min(32).min(available.saturating_sub(12));
     let name_width = (available.saturating_sub(model_width)).min(28);
-    let activity_width = available.saturating_sub(model_width + name_width + 2);
     let detail_line = |cost: &str, age: &str| {
         format!(
             "{}  {}",
@@ -652,9 +645,6 @@ pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: us
         table_cell("Session", name_width),
         table_cell("Model", model_width),
     ];
-    if activity_width > 0 {
-        headings.push(table_cell("Activity", activity_width));
-    }
     headings.push(detail_line("Cost", "Age"));
     let details = rows
         .iter()
@@ -669,7 +659,6 @@ pub fn build_layout(rows: &[crate::agents_view_forest::AgentsViewRow], width: us
         legend: table_cell(&headings.join("  "), width),
         name_width,
         model_width,
-        activity_width,
         details,
     }
 }
@@ -862,10 +851,6 @@ mod tests {
         assert_eq!(rows[0].section, Section::Running);
         assert_eq!(rows[1].section, Section::Idle);
         assert_eq!(rows[2].section, Section::Inactive);
-        // TS renderRow: no `lastHeardFromAt`/`statusLabel` on the summary
-        // means no activity text, even for an archived saved session.
-        assert_eq!(rows[2].status_label, "");
-        assert_eq!(rows[2].activity, "");
         assert_eq!(rows[2].model, "-");
     }
 
