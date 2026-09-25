@@ -77,6 +77,14 @@ pub struct PromptInput {
     /// Unique only when the caller needs cancellable pre-ownership admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub admission_id: Option<String>,
+    /// One-shot capability ONLY the daemon's own RLM children delivery
+    /// mints (`child_status_notices`, same worker process as the queue
+    /// admission): the parent worker accepts a reserved child-status
+    /// custom row exclusively with a live mint. Never a client field —
+    /// a caller-supplied value can never name a live mint, so the
+    /// reserved-kind intake rejects it all the same.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rlm_notice_nonce: Option<String>,
 }
 
 /// Client commands, tagged by `type`. Every variant also carries `id` (when

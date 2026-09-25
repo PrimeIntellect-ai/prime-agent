@@ -35,78 +35,6 @@ fn get_str<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
-/// The activity-side status label (TS `getSessionStatusLabel`, the fields
-/// the Rust summaries carry).
-pub(crate) fn session_status_label(summary: &Value) -> String {
-    if let Some(label) = get_str(summary, "statusLabel") {
-        return label.to_string();
-    }
-    if summary
-        .get("lastHeardFromAt")
-        .is_some_and(|value| !value.is_null())
-    {
-        return format!(
-            "last heard {}",
-            relative_age(get_str(summary, "lastHeardFromAt"), now_ms())
-        );
-    }
-    // A non-ready worker cannot report fresh runtime flags; its state is the row's story.
-    if let Some(state) = get_str(summary, "workerState") {
-        if state != "ready" {
-            return state.to_string();
-        }
-    }
-    if summary.get("isCompacting") == Some(&Value::Bool(true)) {
-        return "compacting".to_string();
-    }
-    if summary.get("isStreaming") == Some(&Value::Bool(true)) {
-        let running_tools = summary.get("isRunningTools") == Some(&Value::Bool(true));
-        return if running_tools {
-            "running tools".to_string()
-        } else {
-            "thinking".to_string()
-        };
-    }
-    if summary.get("isRunningTools") == Some(&Value::Bool(true)) {
-        return "running tools".to_string();
-    }
-    if summary.get("isBashRunning") == Some(&Value::Bool(true)) {
-        return "running bash".to_string();
-    }
-    if let Some(active) = summary
-        .get("sessionActions")
-        .and_then(|actions| actions.get("active"))
-        .filter(|active| !active.is_null())
-    {
-        if let Some(label) = active.get("label").and_then(Value::as_str) {
-            return label.to_string();
-        }
-        if let Some(kind) = active.get("kind").and_then(Value::as_str) {
-            return kind.replace('_', " ");
-        }
-    }
-    let queued = summary
-        .get("sessionActions")
-        .and_then(|actions| actions.get("queuedCount"))
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    if queued > 0 {
-        return format!("{queued} queued");
-    }
-    if get_str(summary, "lifecycle") == Some("archived") {
-        return "archived".to_string();
-    }
-    if summary.get("hasActiveHeartbeat") == Some(&Value::Bool(true)) {
-        return "heartbeat active".to_string();
-    }
-    if get_str(summary, "runtimeKind") == Some("subagent")
-        && summary.get("repliedSinceTask") == Some(&Value::Bool(true))
-    {
-        return "replied".to_string();
-    }
-    String::new()
-}
-
 /// The model column text: the bare model id plus `:level` when a thinking
 /// level is active ("off" reads as noise and stays bare).
 pub(crate) fn session_model(summary: &Value) -> String {
@@ -176,10 +104,7 @@ pub struct AgentsViewRow {
     /// their parent's).
     pub summary: Value,
     pub title: String,
-    pub status_label: String,
     pub model: String,
-    /// The row's own activity text (the status label).
-    pub activity: String,
     /// Own usage cost plus every descendant's (TS `recursiveCost`).
     pub cost: f64,
     pub age: String,
@@ -658,9 +583,7 @@ struct BaseRow {
     identity: String,
     summary: Value,
     title: String,
-    status_label: String,
     model: String,
-    activity: String,
     age: String,
     own_cost: f64,
     recursive_cost: f64,
@@ -730,16 +653,6 @@ pub fn build_rows(
         } else {
             RowKind::Agent
         };
-        // TS renderRow: the status label shows only when the summary
-        // carries `lastHeardFromAt` (live subagent contact) or its own
-        // `statusLabel`; roster rows with neither render no activity.
-        let has_status_source = summary.get("lastHeardFromAt").is_some_and(|v| !v.is_null())
-            || summary.get("statusLabel").is_some_and(|v| !v.is_null());
-        let status = if has_status_source {
-            session_status_label(&summary)
-        } else {
-            String::new()
-        };
         let age = relative_age(
             if summary
                 .get("activeSessionId")
@@ -766,9 +679,7 @@ pub fn build_rows(
             search_score: record.search_score,
             identity: record.identity.clone(),
             title: session_title(&summary),
-            status_label: status.clone(),
             model,
-            activity: status,
             age,
             own_cost: summary
                 .get("usage")
@@ -1248,9 +1159,7 @@ fn agents_row(row: &BaseRow, depth: usize, parent_identity: Option<&str>) -> Age
         parent_identity: parent_identity.map(str::to_string),
         summary: row.summary.clone(),
         title: row.title.clone(),
-        status_label: row.status_label.clone(),
         model: row.model.clone(),
-        activity: row.activity.clone(),
         cost: row.recursive_cost,
         age: row.age.clone(),
         depth,
@@ -1365,9 +1274,7 @@ fn summary_row(
         parent_identity: Some(parent.identity.clone()),
         summary: parent.summary.clone(),
         title,
-        status_label: String::new(),
         model: String::new(),
-        activity: String::new(),
         cost: 0.0,
         age: parent.age.clone(),
         depth,
