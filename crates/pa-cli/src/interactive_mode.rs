@@ -1944,7 +1944,7 @@ mod tests {
             dir.path().join("d.sock"),
             std::sync::Arc::default(),
         )
-            .expect("the interactive launch forks instead of refusing");
+        .expect("the interactive launch forks instead of refusing");
 
         let SessionSelection::Resume(fork) = &tui.session else {
             panic!(
