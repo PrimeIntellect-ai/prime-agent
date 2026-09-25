@@ -840,31 +840,49 @@ async fn run_interactive_surface(
         route == SessionOpenRoute::AgentsView,
         crate::update_restart_wait::DAEMON_UPDATE_RESTART_OPEN_WAIT_MS,
         crate::update_restart_wait::DAEMON_UPDATE_RESTART_OPEN_RETRY_MS,
-        || async {
-            let (client, events) = match first_connection.take() {
-                Some(first) => first,
-                None => DaemonClient::connect(&options.socket_path)
-                    .await
-                    .with_context(|| "the interactive UI could not attach to the daemon")?,
-            };
-            let session = SessionUi::open(
-                client,
-                &options,
-                notes_tx.clone(),
-                compaction_abort_tx.clone(),
-                share_tx.clone(),
-                reload_tx.clone(),
-                traces_upload_tx.clone(),
-                catalog_tx.clone(),
-                auth_panel_tx.clone(),
-                crate::session_ui::ActivityUpdates {
-                    heartbeats: heartbeats_tx.clone(),
-                    bash: bash_tx.clone(),
-                    commands: commands_tx.clone(),
-                },
-            )
-            .await?;
-            Ok((events, session))
+        || {
+            // The attempt future owns everything it touches (an `async
+            // move` over clones taken here): an `FnMut` closure's captures
+            // may not escape into the returned future, so the synchronous
+            // body moves the pieces out instead.
+            let first = first_connection.take();
+            let options = options.clone();
+            let notes_tx = notes_tx.clone();
+            let compaction_abort_tx = compaction_abort_tx.clone();
+            let share_tx = share_tx.clone();
+            let reload_tx = reload_tx.clone();
+            let traces_upload_tx = traces_upload_tx.clone();
+            let catalog_tx = catalog_tx.clone();
+            let auth_panel_tx = auth_panel_tx.clone();
+            let heartbeats_tx = heartbeats_tx.clone();
+            let bash_tx = bash_tx.clone();
+            let commands_tx = commands_tx.clone();
+            async move {
+                let (client, events) = match first {
+                    Some(first) => first,
+                    None => DaemonClient::connect(&options.socket_path)
+                        .await
+                        .with_context(|| "the interactive UI could not attach to the daemon")?,
+                };
+                let session = SessionUi::open(
+                    client,
+                    &options,
+                    notes_tx,
+                    compaction_abort_tx,
+                    share_tx,
+                    reload_tx,
+                    traces_upload_tx,
+                    catalog_tx,
+                    auth_panel_tx,
+                    crate::session_ui::ActivityUpdates {
+                        heartbeats: heartbeats_tx,
+                        bash: bash_tx,
+                        commands: commands_tx,
+                    },
+                )
+                .await?;
+                Ok((events, session))
+            }
         },
     )
     .await;

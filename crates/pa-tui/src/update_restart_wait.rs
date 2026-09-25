@@ -267,7 +267,7 @@ mod tests {
         let mut attempts = 0;
         let error = wait_through_update_restart(true, 5_000, 1, || {
             attempts += 1;
-            std::future::ready(Err(anyhow!("spawn EMFILE")))
+            std::future::ready(Err::<&'static str, anyhow::Error>(anyhow!("spawn EMFILE")))
         })
         .await
         .unwrap_err();
@@ -353,7 +353,7 @@ mod tests {
             } else {
                 anyhow!("File not found: /tmp/scope.jsonl")
             };
-            std::future::ready(Err(next))
+            std::future::ready(Err::<&'static str, anyhow::Error>(next))
         })
         .await
         .unwrap_err();
@@ -374,7 +374,7 @@ mod tests {
         let deadline_error = wait_through_update_restart(true, 60, 5, || async {
             attempts += 1;
             if attempts == 1 {
-                Err(preparing_rejection())
+                Err::<&'static str, anyhow::Error>(preparing_rejection())
             } else {
                 // An attempt that never settles (the in-flight create).
                 std::future::pending().await
@@ -402,7 +402,7 @@ mod tests {
         let mut attempts = 0;
         let error = wait_through_update_restart(true, 5_000, 1, || {
             attempts += 1;
-            std::future::ready(Err(preparing_rejection()))
+            std::future::ready(Err::<&'static str, anyhow::Error>(preparing_rejection()))
         })
         .await
         .unwrap_err();
