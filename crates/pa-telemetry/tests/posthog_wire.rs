@@ -1,4 +1,4 @@
-//! Wire-shape tests for the PostHog sink and flags client against a local
+//! Wire-shape tests for the `PostHog` sink and flags client against a local
 //! HTTP stub: batch endpoint path/body/headers, decide body, and the
 //! offline-safe drop policy.
 
@@ -19,7 +19,7 @@ struct StubRequest {
 }
 
 /// Serve `responses` (status, raw HTTP body) one per connection, capture each
-/// request, and stop. Returns (base_url, receiver).
+/// request, and stop. Returns (`base_url`, receiver).
 fn spawn_stub(responses: Vec<(u16, serde_json::Value)>) -> (String, mpsc::Receiver<StubRequest>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub");
     let addr = listener.local_addr().expect("stub addr");
