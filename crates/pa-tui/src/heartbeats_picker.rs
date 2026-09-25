@@ -1017,11 +1017,11 @@ pub fn human_schedule(expression: &str) -> String {
     let at = |h: u32, m: u32| format!("{h:02}:{m:02}");
     if dom == CronField::Any && dow == CronField::Any {
         return match (hour, minute) {
-            (CronField::Any, CronField::Any) | (CronField::Any, CronField::Step(1)) => {
+            (CronField::Any, CronField::Any | CronField::Step(1)) => {
                 "every minute".to_string()
             }
             (CronField::Any, CronField::Step(n)) => format!("every {n} minutes"),
-            (CronField::Step(1), CronField::Value(0)) | (CronField::Any, CronField::Value(0)) => {
+            (CronField::Step(1) | CronField::Any, CronField::Value(0)) => {
                 "hourly".to_string()
             }
             (CronField::Step(n), CronField::Value(0)) => format!("every {n} hours"),
