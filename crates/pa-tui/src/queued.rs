@@ -110,7 +110,10 @@ impl CondensedCounts {
         if last > 0 {
             parts[last] = format!("and {}", parts[last]);
         }
-        format!("{} queued", parts.join(", "))
+        // Two origins read "1 heartbeat and 1 other internal prompt" - the
+        // comma-list phrasing starts at three ("A, B, and C").
+        let list_separator = if parts.len() == 2 { " " } else { ", " };
+        format!("{} queued", parts.join(list_separator))
     }
 }
 
