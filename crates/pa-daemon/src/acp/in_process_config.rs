@@ -181,7 +181,6 @@ async fn apply_in_process_config(
             if model_value(&live.model.provider, &live.model.id) == value {
                 return Ok(refresh_in_process_config(session, config, mode).await);
             }
-            let current = mode.current_model().await;
             // Discover the available models (TS `getAvailableModels`): the
             // registry the composition resolved against. Discovery failures
             // are the handler's "try again later" invalid-params.
