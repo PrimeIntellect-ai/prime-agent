@@ -358,8 +358,8 @@ mod tests {
         );
         for i in 0..messages {
             use std::fmt::Write;
-            write!(content,
-                "{{\"type\":\"message\",\"id\":\"m{i}\",\"timestamp\":\"t\",\"message\":{{\"role\":\"user\",\"content\":\"msg {i}\",\"timestamp\":{i}}}}}\n"
+            writeln!(content,
+                "{{\"type\":\"message\",\"id\":\"m{i}\",\"timestamp\":\"t\",\"message\":{{\"role\":\"user\",\"content\":\"msg {i}\",\"timestamp\":{i}}}}}"
             ).expect("write to String");
         }
         fs::write(path, content).unwrap();

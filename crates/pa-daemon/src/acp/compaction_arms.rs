@@ -885,7 +885,6 @@ mod tests {
                 .lock()
                 .await
                 .get_entries()
-                .clone()
         }
     }
 

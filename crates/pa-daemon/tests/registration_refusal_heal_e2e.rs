@@ -414,7 +414,10 @@ fn a_descriptorless_leftover_dies_and_its_session_resumes() {
         .map(|entry| entry.path())
         .find(|path| {
             let name = path.file_name().map(|name| name.to_string_lossy().to_string());
-            matches!(&name, Some(name) if name.ends_with(".json") && !name.ends_with(".recovery.jsonl"))
+            matches!(&name, Some(name) if std::path::Path::new(name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+                && !name.ends_with(".recovery.jsonl"))
         })
         .expect("the worker's descriptor is on disk");
     std::fs::remove_file(&descriptor).expect("destroy the descriptor");
