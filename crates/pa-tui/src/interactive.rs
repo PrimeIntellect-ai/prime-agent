@@ -2182,16 +2182,15 @@ async fn run_interactive_surface(
         // otherwise the loop parks until the next due idle work - the
         // 2 s bash-activity refresh, or a toast's expiry when one
         // dismisses sooner (the pre-gate prune below repaints it away).
-        let idle_tick_deadline = if view.editor.has_pending_autocomplete()
-            || session.selection_auto_scroll_active()
-        {
-            Instant::now() + Duration::from_millis(50)
-        } else {
-            let bash_deadline = last_bash_refresh + Duration::from_secs(2);
-            view.toasts
-                .next_expiry()
-                .map_or(bash_deadline, |expiry| bash_deadline.min(expiry))
-        };
+        let idle_tick_deadline =
+            if view.editor.has_pending_autocomplete() || session.selection_auto_scroll_active() {
+                Instant::now() + Duration::from_millis(50)
+            } else {
+                let bash_deadline = last_bash_refresh + Duration::from_secs(2);
+                view.toasts
+                    .next_expiry()
+                    .map_or(bash_deadline, |expiry| bash_deadline.min(expiry))
+            };
         tokio::select! {
             maybe_event = async {
                 // A closed channel's recv() resolves None instantly and
