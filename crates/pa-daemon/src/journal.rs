@@ -319,6 +319,8 @@ fn parse_worker_records(path: &Path) -> Result<HashMap<String, WorkerRecoveryRec
 pub struct WorkerQueueItemRecord {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<crate::worker::QueuePriority>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_message: Option<Value>,
@@ -635,6 +637,7 @@ fn parse_snapshot_lane(value: Option<&Value>) -> Vec<WorkerQueueItemRecord> {
                 .filter_map(|entry| match entry {
                     Value::String(message) => Some(WorkerQueueItemRecord {
                         message: message.clone(),
+                        priority: None,
                         preview: None,
                         custom_message: None,
                         queue_key: None,

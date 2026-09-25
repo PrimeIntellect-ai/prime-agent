@@ -199,9 +199,42 @@ impl TurnSettle {
     }
 }
 
+/// Priority is applied only at admission. Existing lane positions (including user
+/// moves and restored snapshots) remain authoritative until another item arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuePriority {
+    Human,
+    Pinned,
+    #[serde(other)]
+    Background,
+}
+
+impl QueuePriority {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Background => 0,
+            Self::Human => 1,
+            Self::Pinned => 2,
+        }
+    }
+}
+
+/// TS `ActionStore` priority insertion: walk back only across a lower-priority
+/// suffix. Never re-sort a lane: explicit moves and restored order can cross
+/// priority boundaries, and equal-priority arrivals remain FIFO.
+pub(crate) fn enqueue_priority(lane: &mut VecDeque<QueuedItem>, item: QueuedItem) {
+    let mut index = lane.len();
+    while index > 0 && lane[index - 1].priority.rank() < item.priority.rank() {
+        index -= 1;
+    }
+    lane.insert(index, item);
+}
+
 #[derive(Debug)]
 pub(crate) struct QueuedItem {
     pub(crate) message: String,
+    pub(crate) priority: QueuePriority,
     /// The labeled queue-strip row (TS `payload.preview`): the queue
     /// snapshot serves it instead of `message` when the delivery carries
     /// one, and the active-action label reads it too (TS #2063
@@ -2612,7 +2645,14 @@ impl Worker {
                     }
                 }
             };
+            // This RPC command is human-origin only for a plain user row.
+            // Caller-supplied custom rows never gain human priority.
             let item = QueuedItem {
+                priority: if custom_message.is_some() {
+                    QueuePriority::Background
+                } else {
+                    QueuePriority::Human
+                },
                 preview: None,
                 message: message.to_string(),
                 custom_message,
@@ -2630,8 +2670,8 @@ impl Worker {
                 forced_batch: false,
             };
             match lane {
-                Lane::Steering => core.steering.push_back(item),
-                Lane::FollowUp => core.follow_up.push_back(item),
+                Lane::Steering => enqueue_priority(&mut core.steering, item),
+                Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
             }
             let snapshot = self.snapshot_locked(&core);
             (snapshot, queued_behind_work)
@@ -2698,11 +2738,12 @@ impl Worker {
         }
         let mut core = self.core.lock().unwrap();
         let images = parse_prompt_images(payload);
-        match lane {
-            Lane::Steering => &mut core.steering,
-            Lane::FollowUp => &mut core.follow_up,
-        }
-        .push_back(QueuedItem {
+        let item = QueuedItem {
+            priority: if custom_message.is_some() {
+                QueuePriority::Background
+            } else {
+                QueuePriority::Human
+            },
             preview: None,
             message: message.to_string(),
             custom_message,
@@ -2714,7 +2755,11 @@ impl Worker {
             queue_visible: true,
             policy: TurnPolicy::Queued,
             forced_batch: false,
-        });
+        };
+        match lane {
+            Lane::Steering => enqueue_priority(&mut core.steering, item),
+            Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
+        }
         let snapshot = self.snapshot_locked(&core);
         drop(core);
         // The queue-write checkpoint (busy=true): an undelivered lane is
@@ -2872,11 +2917,8 @@ impl Worker {
                         timestamp: crate::util::now_ms(),
                     },
                 );
-            match lane {
-                Lane::Steering => &mut core.steering,
-                Lane::FollowUp => &mut core.follow_up,
-            }
-            .push_back(QueuedItem {
+            let item = QueuedItem {
+                priority: QueuePriority::Background,
                 // The labeled queue-strip row (TS `queuedAgentMessagePreview`:
                 // an agent-session-message custom row previews as
                 // "Agent message received: <details.message>").
@@ -2896,7 +2938,11 @@ impl Worker {
                 queue_visible: true,
                 policy: TurnPolicy::Injected,
                 forced_batch: false,
-            });
+            };
+            match lane {
+                Lane::Steering => enqueue_priority(&mut core.steering, item),
+                Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
+            }
             let snapshot = self.snapshot_locked(&core);
             (id, queued, snapshot, target)
         };
@@ -3612,6 +3658,7 @@ impl Worker {
                         {
                             let mut core = self.core.lock().unwrap();
                             core.follow_up.push_back(QueuedItem {
+                                priority: QueuePriority::Background,
                                 preview: None,
                                 message: continuation.request.message,
                                 custom_message: continuation.request.custom_message,
@@ -4463,6 +4510,7 @@ pub(crate) fn queue_lanes(core: &SessionCore) -> QueueLanes {
         lane.iter()
             .map(|item| crate::journal::WorkerQueueItemRecord {
                 message: item.message.clone(),
+                priority: Some(item.priority),
                 preview: item.preview.clone(),
                 custom_message: item.custom_message.clone(),
                 queue_key: item.queue_key.clone(),
@@ -4564,6 +4612,13 @@ fn restore_queue_snapshot(
                 QueuedItem {
                     preview: record.preview,
                     message: record.message,
+                    priority: record.priority.unwrap_or_else(|| {
+                        if record.custom_message.is_some() {
+                            QueuePriority::Background
+                        } else {
+                            QueuePriority::Human
+                        }
+                    }),
                     custom_message: record.custom_message,
                     agent_message: None,
                     queue_key: record.queue_key,
@@ -4695,6 +4750,7 @@ pub(crate) fn admit_autonomous_follow_up(
     {
         let mut core = core.lock().unwrap();
         core.follow_up.push_back(QueuedItem {
+            priority: QueuePriority::Background,
             preview: None,
             message: text,
             custom_message: None,
@@ -4753,6 +4809,7 @@ pub(crate) fn admit_goal_follow_up(
     {
         let mut core = core.lock().unwrap();
         let item = QueuedItem {
+            priority: QueuePriority::Background,
             preview: None,
             message: follow_up.request.message,
             custom_message: follow_up.request.custom_message,
@@ -4766,8 +4823,8 @@ pub(crate) fn admit_goal_follow_up(
             forced_batch: false,
         };
         match lane {
-            Lane::Steering => core.steering.push_back(item),
-            Lane::FollowUp => core.follow_up.push_back(item),
+            Lane::Steering => enqueue_priority(&mut core.steering, item),
+            Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
         }
     }
     // The admission checkpoint (busy=true, TS's queue strings by lane):
@@ -4835,6 +4892,7 @@ pub(crate) fn admit_bash_completion_notice(
     };
     {
         core_guard.steering.push_back(QueuedItem {
+            priority: QueuePriority::Background,
             // TS `previewLabel` (`injectedMessagePreviewLabel` ->
             // `ASYNC_BASH_COMPLETION_PREVIEW_LABEL`): the queue strip
             // reads `Background command finished: <content>` (the TUI's
@@ -6353,6 +6411,7 @@ mod update_snapshot_tests {
         {
             let mut core = worker.core.lock().unwrap();
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Background,
                 message: "[heartbeat: every 10m run#0]\n\nnudge the mission".to_string(),
                 preview: Some(
                     "Heartbeat prompt: [heartbeat: every 10m run#0]\n\nnudge the mission"
@@ -6369,6 +6428,7 @@ mod update_snapshot_tests {
                 forced_batch: false,
             });
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Human,
                 message: "plain queued prompt".to_string(),
                 preview: None,
                 custom_message: None,
@@ -6464,6 +6524,7 @@ mod update_snapshot_tests {
 
     fn queued_user_item(message: &str) -> QueuedItem {
         QueuedItem {
+            priority: QueuePriority::Human,
             message: message.to_string(),
             preview: None,
             custom_message: None,
@@ -6495,6 +6556,7 @@ mod update_snapshot_tests {
             let mut core = worker.core.lock().unwrap();
             core.steering.push_back(queued_user_item("turn right"));
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Background,
                 message: notice_text.clone(),
                 custom_message: Some(child_status_notice_wire("terminal")),
                 ..queued_user_item(&notice_text)
@@ -6502,6 +6564,7 @@ mod update_snapshot_tests {
             // A user-typed row with the exact notice text: unflagged.
             core.steering.push_back(queued_user_item(&notice_text));
             core.follow_up.push_back(QueuedItem {
+                priority: QueuePriority::Background,
                 message: failure_text.clone(),
                 custom_message: Some(child_status_notice_wire("failure")),
                 ..queued_user_item(&failure_text)
@@ -6539,7 +6602,10 @@ mod update_snapshot_tests {
     /// process, and the parked row carries the typed provenance. The
     /// exact spoofs are answered loudly instead — the same command
     /// without a mint, and a replay of the consumed mint — while the
-    /// same-text user row still parks as a plain row.
+    /// same-text user row still parks as a plain row. That user row is
+    /// human class while the minted notice is background, so admission
+    /// priority parks the user row ahead of the notice; the rider names
+    /// only the notice's lane slot, whichever position it holds.
     #[tokio::test]
     async fn a_follow_up_notice_parks_with_typed_provenance() {
         let (worker, _) = snapshot_after_create().await;
@@ -6599,8 +6665,8 @@ mod update_snapshot_tests {
         );
         assert_eq!(
             snapshot.rlm_child_status.follow_up,
-            vec![0],
-            "only the minted notice row flags; the same-text user row does not"
+            vec![1],
+            "only the minted notice row flags: the same-text human row parks ahead of it"
         );
     }
 
@@ -6741,6 +6807,7 @@ mod update_snapshot_tests {
             "target-session",
             &QueueLanes {
                 steering: vec![crate::journal::WorkerQueueItemRecord {
+                    priority: Some(QueuePriority::Background),
                     message: content,
                     preview: None,
                     custom_message: Some(child_status_notice_wire("terminal")),
@@ -7008,6 +7075,7 @@ mod agent_message_tests {
             let mut core = worker.core.lock().unwrap();
             for _ in 0..DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION {
                 core.follow_up.push_back(QueuedItem {
+                    priority: QueuePriority::Human,
                     preview: None,
                     message: "occupied".to_string(),
                     custom_message: None,
@@ -7135,6 +7203,23 @@ mod prompt_image_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn priority_test_item(message: &str, policy: TurnPolicy) -> QueuedItem {
+        QueuedItem {
+            message: message.to_string(),
+            priority: QueuePriority::Human,
+            preview: None,
+            custom_message: None,
+            agent_message: None,
+            queue_key: None,
+            admission_id: None,
+            images: Vec::new(),
+            done: None,
+            queue_visible: true,
+            policy,
+            forced_batch: false,
+        }
+    }
 
     /// The delivery's relationship label is edge-derived: a subagent
     /// sender whose durable parent edge points at this session is a
@@ -7940,6 +8025,7 @@ mod tests {
             let mut core = worker.core.lock().unwrap();
             core.queued_input_suspended = true;
             core.follow_up.push_back(QueuedItem {
+                priority: QueuePriority::Human,
                 preview: None,
                 message: "parked queued work".to_string(),
                 custom_message: None,
@@ -8953,6 +9039,296 @@ mod tests {
     }
 
     #[test]
+    fn queue_priority_interleaves_lanes_fifo_and_preserves_explicit_order() {
+        let mut core = SessionCore::test_core(None, "/tmp".to_string());
+        core.steering_mode = "one-at-a-time".to_string();
+        core.follow_up_mode = "one-at-a-time".to_string();
+        let add = |core: &mut SessionCore, lane: Lane, text: &str, priority| {
+            let mut item = priority_test_item(text, TurnPolicy::Queued);
+            item.priority = priority;
+            match lane {
+                Lane::Steering => enqueue_priority(&mut core.steering, item),
+                Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
+            }
+        };
+        add(
+            &mut core,
+            Lane::FollowUp,
+            "machine follow 1",
+            QueuePriority::Background,
+        );
+        add(
+            &mut core,
+            Lane::Steering,
+            "machine steer 1",
+            QueuePriority::Background,
+        );
+        add(
+            &mut core,
+            Lane::FollowUp,
+            "human follow 1",
+            QueuePriority::Human,
+        );
+        add(
+            &mut core,
+            Lane::Steering,
+            "human steer 1",
+            QueuePriority::Human,
+        );
+        add(
+            &mut core,
+            Lane::Steering,
+            "machine steer 2",
+            QueuePriority::Background,
+        );
+        add(
+            &mut core,
+            Lane::FollowUp,
+            "human follow 2",
+            QueuePriority::Human,
+        );
+        add(
+            &mut core,
+            Lane::Steering,
+            "human steer 2",
+            QueuePriority::Human,
+        );
+        assert_eq!(
+            session_snapshot(&core).steering,
+            [
+                "human steer 1",
+                "human steer 2",
+                "machine steer 1",
+                "machine steer 2"
+            ]
+        );
+        assert_eq!(
+            session_snapshot(&core).follow_ups,
+            ["human follow 1", "human follow 2", "machine follow 1"]
+        );
+        core.steering.swap(0, 2); // explicit user reorder crosses priority boundary
+        add(
+            &mut core,
+            Lane::Steering,
+            "human steer 3",
+            QueuePriority::Human,
+        );
+        assert_eq!(
+            session_snapshot(&core).steering,
+            [
+                "machine steer 1",
+                "human steer 2",
+                "human steer 1",
+                "human steer 3",
+                "machine steer 2"
+            ]
+        );
+        assert_eq!(
+            gather_delivery_batch(&mut core, Lane::Steering)[0].message,
+            "machine steer 1"
+        );
+        assert_eq!(
+            gather_delivery_batch(&mut core, Lane::Steering)[0].message,
+            "human steer 2"
+        );
+        core.steering.clear();
+        assert_eq!(
+            gather_delivery_batch(&mut core, Lane::FollowUp)[0].message,
+            "human follow 1"
+        );
+    }
+
+    #[test]
+    fn queue_priority_drains_four_tiers_and_pinned_front() {
+        let mut core = SessionCore::test_core(None, "/tmp".to_string());
+        core.steering_mode = "one-at-a-time".to_string();
+        core.follow_up_mode = "one-at-a-time".to_string();
+        for (lane, text, priority) in [
+            (Lane::FollowUp, "machine follow", QueuePriority::Background),
+            (Lane::Steering, "machine steer", QueuePriority::Background),
+            (Lane::FollowUp, "human follow", QueuePriority::Human),
+            (Lane::Steering, "human steer", QueuePriority::Human),
+            (Lane::FollowUp, "pinned follow", QueuePriority::Pinned),
+        ] {
+            let mut item = priority_test_item(text, TurnPolicy::Queued);
+            item.priority = priority;
+            match lane {
+                Lane::Steering => enqueue_priority(&mut core.steering, item),
+                Lane::FollowUp => enqueue_priority(&mut core.follow_up, item),
+            }
+        }
+        let mut delivered = Vec::new();
+        while !core.steering.is_empty() || !core.follow_up.is_empty() {
+            let lane = if core.steering.is_empty() {
+                Lane::FollowUp
+            } else {
+                Lane::Steering
+            };
+            delivered.push(gather_delivery_batch(&mut core, lane).remove(0).message);
+        }
+        assert_eq!(
+            delivered,
+            [
+                "human steer",
+                "machine steer",
+                "pinned follow",
+                "human follow",
+                "machine follow"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_custom_rows_do_not_gain_human_queue_priority() {
+        let worker = created_dispatch_worker().await;
+        let pause = worker.dispatch("acquire_session_input_pause", &json!({
+            "activeSessionId": "suspension-session", "leaseKey": "source-test", "clientId": "test"
+        })).await;
+        assert!(pause.success, "pause failed: {pause:?}");
+        let custom = |content: &str| {
+            json!({
+                "role": "custom", "customType": "user", "content": content
+            })
+        };
+        for (command, message, row) in [
+            (
+                "steer",
+                "machine via steer",
+                Some(custom("machine via steer")),
+            ),
+            (
+                "prompt",
+                "machine via prompt",
+                Some(custom("machine via prompt")),
+            ),
+            ("steer", "human via steer", None),
+            ("prompt", "human via prompt", None),
+        ] {
+            let mut payload =
+                json!({ "activeSessionId": "suspension-session", "message": message });
+            if let Some(row) = row {
+                payload["customMessage"] = row;
+            }
+            let admitted = worker.dispatch(command, &payload).await;
+            assert!(admitted.success, "{command}: {admitted:?}");
+        }
+        let core = worker.core.lock().unwrap();
+        assert_eq!(
+            session_snapshot(&core).steering,
+            [
+                "human via steer",
+                "human via prompt",
+                "machine via steer",
+                "machine via prompt"
+            ]
+        );
+        assert_eq!(
+            core.steering
+                .iter()
+                .map(|item| item.priority)
+                .collect::<Vec<_>>(),
+            [
+                QueuePriority::Human,
+                QueuePriority::Human,
+                QueuePriority::Background,
+                QueuePriority::Background,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn waiting_rpc_prompt_overtakes_background_steer_and_settles() {
+        let worker = created_dispatch_worker().await;
+        let pause = worker.dispatch("acquire_session_input_pause", &json!({
+            "activeSessionId": "suspension-session", "leaseKey": "priority-test", "clientId": "test"
+        })).await;
+        assert!(pause.success, "pause failed: {pause:?}");
+        {
+            let mut core = worker.core.lock().unwrap();
+            core.busy = true; // a prompt admitted behind work is queue-visible
+            let mut background = priority_test_item("machine steer", TurnPolicy::Injected);
+            background.priority = QueuePriority::Background;
+            enqueue_priority(&mut core.steering, background);
+        }
+        let waiting_worker = std::sync::Arc::clone(&worker);
+        let waiting = tokio::spawn(async move {
+            waiting_worker
+                .dispatch(
+                    "prompt_and_wait",
+                    &json!({
+                        "activeSessionId": "suspension-session",
+                        "message": "human steer",
+                        "streamingBehavior": "steer",
+                    }),
+                )
+                .await
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if worker.core.lock().unwrap().steering.len() == 2 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waiting prompt was not queued"
+            );
+            tokio::task::yield_now().await;
+        }
+        {
+            let core = worker.core.lock().unwrap();
+            assert_eq!(
+                session_snapshot(&core).steering,
+                ["human steer", "machine steer"]
+            );
+        }
+        let released = worker.dispatch("release_session_input_pause", &json!({
+            "activeSessionId": "suspension-session", "pauseId": pause.data.as_ref().unwrap()["pauseId"],
+            "clientId": "test"
+        })).await;
+        assert!(released.success, "release failed: {released:?}");
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("prompt_and_wait did not settle")
+            .expect("dispatch task panicked");
+        assert!(settled.success, "waiting prompt failed: {settled:?}");
+    }
+
+    #[test]
+    fn legacy_queue_record_priority_defaults_by_row_and_keeps_order() {
+        let dir = std::env::temp_dir().join(format!("pa-worker-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("priority-recovery.jsonl");
+        let mut journal = WorkerRecoveryJournal::open(&path).unwrap();
+        let machine: crate::journal::WorkerQueueItemRecord = serde_json::from_value(json!({
+            "message": "machine", "custom_message": {"role": "custom", "customType": "notice"}
+        }))
+        .unwrap();
+        let human: crate::journal::WorkerQueueItemRecord = serde_json::from_value(json!({
+            "message": "human"
+        }))
+        .unwrap();
+        let future: crate::journal::WorkerQueueItemRecord = serde_json::from_value(json!({
+            "message": "future machine", "priority": "new_tier"
+        }))
+        .unwrap();
+        journal
+            .record_queue_snapshot("legacy", &[machine, human, future], &[])
+            .unwrap();
+        let reopened = WorkerRecoveryJournal::open(&path).unwrap();
+        let (lane, _) = restore_queue_snapshot(&reopened, "legacy");
+        assert_eq!(
+            lane.iter()
+                .map(|item| item.message.as_str())
+                .collect::<Vec<_>>(),
+            ["machine", "human", "future machine"]
+        );
+        assert_eq!(lane[0].priority, QueuePriority::Background);
+        assert_eq!(lane[1].priority, QueuePriority::Human);
+        assert_eq!(lane[2].priority, QueuePriority::Background);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn queue_snapshot_round_trips_through_the_recovery_journal() {
         let dir = std::env::temp_dir().join(format!("pa-worker-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -8969,6 +9345,7 @@ mod tests {
         );
         let heartbeat = crate::journal::WorkerQueueItemRecord {
             message: content.to_string(),
+            priority: Some(QueuePriority::Background),
             preview: Some(labeled_preview),
             custom_message: Some(json!({
                 "role": "custom",
@@ -8983,6 +9360,7 @@ mod tests {
         };
         let plain = crate::journal::WorkerQueueItemRecord {
             message: "follow-me".to_string(),
+            priority: Some(QueuePriority::Human),
             preview: None,
             custom_message: None,
             queue_key: None,
@@ -9001,12 +9379,14 @@ mod tests {
         let (steering, follow_up) = restore_queue_snapshot(&reloaded, "session-a");
         assert_eq!(steering.len(), 1);
         assert_eq!(steering[0].message, heartbeat.message);
+        assert_eq!(steering[0].priority, QueuePriority::Background);
         assert_eq!(steering[0].preview, heartbeat.preview);
         assert_eq!(steering[0].custom_message, heartbeat.custom_message);
         assert_eq!(steering[0].queue_key, heartbeat.queue_key);
         assert!(steering[0].queue_visible);
         assert_eq!(follow_up.len(), 1);
         assert_eq!(follow_up[0].message, "follow-me");
+        assert_eq!(follow_up[0].priority, QueuePriority::Human);
         // Compaction (triggered by an all-idle record) keeps the snapshot
         // with its full rows.
         let mut compacting = WorkerRecoveryJournal::open(&journal_path).unwrap();
@@ -9056,6 +9436,7 @@ mod tests {
         {
             let mut core = worker.core.lock().unwrap();
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Human,
                 preview: None,
                 message: "steer one".to_string(),
                 custom_message: None,
@@ -9069,6 +9450,7 @@ mod tests {
                 forced_batch: false,
             });
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Background,
                 preview: None,
                 message: "agent message row".to_string(),
                 custom_message: None,
@@ -9082,6 +9464,7 @@ mod tests {
                 forced_batch: false,
             });
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Background,
                 preview: None,
                 message: "injected custom row".to_string(),
                 custom_message: Some(json!({ "role": "custom", "customType": "x" })),
@@ -9095,6 +9478,7 @@ mod tests {
                 forced_batch: false,
             });
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Human,
                 preview: None,
                 message: "steer two".to_string(),
                 custom_message: None,
@@ -9377,6 +9761,7 @@ mod turn_stream_tests {
             let mut core = runner.core.lock().unwrap();
             core.queued_input_suspended = true;
             core.steering.push_back(QueuedItem {
+                priority: QueuePriority::Human,
                 preview: None,
                 message: "parked steer".to_string(),
                 custom_message: None,
@@ -9436,6 +9821,7 @@ mod turn_stream_tests {
     /// A queued plain-prompt item for the pump tests.
     fn queued_prompt(message: &str, policy: TurnPolicy) -> QueuedItem {
         QueuedItem {
+            priority: QueuePriority::Human,
             preview: None,
             message: message.to_string(),
             custom_message: None,
@@ -10192,6 +10578,7 @@ mod turn_stream_tests {
                 .run_turn(
                     engine,
                     vec![QueuedItem {
+                        priority: QueuePriority::Human,
                         preview: None,
                         message: "burst".to_string(),
                         custom_message: None,
@@ -10346,6 +10733,7 @@ mod turn_stream_tests {
             .run_turn(
                 engine,
                 vec![QueuedItem {
+                    priority: QueuePriority::Human,
                     preview: None,
                     message: "run the tool".to_string(),
                     custom_message: None,
@@ -10431,6 +10819,7 @@ mod turn_stream_tests {
             .run_turn(
                 engine,
                 vec![QueuedItem {
+                    priority: QueuePriority::Human,
                     preview: None,
                     message: "burst".to_string(),
                     custom_message: None,
@@ -10468,6 +10857,7 @@ mod turn_stream_tests {
             .run_turn(
                 engine,
                 vec![QueuedItem {
+                    priority: QueuePriority::Background,
                     preview: None,
                     message: "[child-exited: no-reply child:lane]".to_string(),
                     custom_message: Some(custom_message),
