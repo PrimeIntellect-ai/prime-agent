@@ -147,9 +147,9 @@ pub fn requires_tool_call_id(model_id: &str) -> bool {
 
 fn get_gemini_major_version(model_id: &str) -> Option<u64> {
     let lower = model_id.to_lowercase();
-    let stripped = lower
-        .strip_prefix("gemini")
-        .map_or(lower.as_str(), |rest| rest.strip_prefix("-live").unwrap_or(rest));
+    let stripped = lower.strip_prefix("gemini").map_or(lower.as_str(), |rest| {
+        rest.strip_prefix("-live").unwrap_or(rest)
+    });
     let digits = stripped.strip_prefix('-')?;
     let major: String = digits.chars().take_while(char::is_ascii_digit).collect();
     major.parse().ok()
