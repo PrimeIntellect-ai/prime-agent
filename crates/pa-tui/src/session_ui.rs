@@ -8554,7 +8554,25 @@ impl SessionUi {
                 view.compaction = Some(CompactionState {
                     reason: CompactionReason::parse(&reason),
                     custom_instructions,
+                    // A fresh run starts with an empty live summary:
+                    // the deltas of THIS run accumulate from here (a
+                    // replayed `compaction_start` after a re-attach
+                    // drops the previous run's partial text too).
+                    summary: String::new(),
                 });
+            }
+            TurnUpdate::CompactionSummaryDelta { delta } => {
+                // One streamed chunk of the summary the compaction
+                // model is generating: append onto the live loader's
+                // state (the expanded view renders the accumulated
+                // text under the loader, nested like the expanded
+                // summary row that settles it). A delta without a live
+                // loader (a late attach mid-run, a stale frame after
+                // `compaction_end`) drops — the settling end still
+                // carries the full summary.
+                if let Some(compaction) = view.compaction.as_mut() {
+                    compaction.summary.push_str(&delta);
+                }
             }
             TurnUpdate::CompactionEnd {
                 reason,
