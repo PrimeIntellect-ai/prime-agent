@@ -1266,7 +1266,9 @@ mod tests {
                 follow_up: vec![1],
             },
         };
-        let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        // Width 120 so the four-origin row reads untruncated (the row
+        // text is 88 chars; at 80 the strip's ellipsis cut it).
+        let rows = render_queue(&theme(), &queue, "alt+up", 120);
         // spacer + the one human preview (the follow-up lane's "edit
         // this") + the condensed row + the hint.
         assert_eq!(rows.len(), 4);
