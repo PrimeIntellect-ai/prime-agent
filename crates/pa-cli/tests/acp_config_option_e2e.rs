@@ -47,6 +47,10 @@ impl AcpChild {
         command
             .args(args)
             .env("HOME", home.path())
+            // The CLI's agent dir (`PRIME_AGENT_CODING_AGENT_DIR`) is where
+            // the registry reads models.json from; the runtime env name
+            // rides along for the kernel-side paths.
+            .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
             .env("PRIME_AGENT_AGENT_DIR", &agent_dir)
             .env("PRIME_AGENT_FAUX_SCRIPT", script.to_string());
         for (key, value) in extra_env {
@@ -401,6 +405,7 @@ fn acp_daemon_attached_config_option_pickers() {
             socket.to_str().unwrap(),
         ])
         .env("HOME", home.path())
+        .env("PRIME_AGENT_CODING_AGENT_DIR", home.path().join("agent"))
         .env("PRIME_AGENT_AGENT_DIR", home.path().join("agent"))
         .env("PRIME_AGENT_ACP_DAEMON_SCRIPT", &script_path)
         .env(
