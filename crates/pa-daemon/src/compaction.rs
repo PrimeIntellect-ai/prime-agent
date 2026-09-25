@@ -113,6 +113,16 @@ impl CompactionManager {
             let mut core = self.core.lock().unwrap();
             core.compacting = false;
         }
+        // Every settle-waiting flag clear must wake the waits parked on
+        // it: `await_session_work_settled` and the replacement teardown
+        // register their `idle_notify` permit BEFORE checking the flags,
+        // so a clear without a `notify_waiters` parks them forever. A
+        // shutdown arriving mid-compaction (the refused-registration
+        // self-heal's graceful close aborts the live run) would
+        // otherwise never observe the cleared `compacting` and the
+        // worker stays alive as the invisible lease-holder this PR
+        // exists to retire.
+        idle_notify.notify_waiters();
         if let CompactionOutcome::Compacted { run } = &outcome {
             pa_core::session_engine::compaction_trace::trace(
                 "manual.compact_returned",
