@@ -1935,7 +1935,7 @@ mod tests {
             .as_object()
             .unwrap()
             .keys()
-            .map(|k| k.as_str())
+            .map(String::as_str)
             .collect();
         assert_eq!(keys, vec!["message", "extra"]);
         // Absent `parentId` stays None; missing required fields fail.

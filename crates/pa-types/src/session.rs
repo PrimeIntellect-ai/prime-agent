@@ -573,12 +573,12 @@ fn message_entry_fast(value: &Value) -> Option<FileEntry> {
 /// [`EntryBase`] from the entry map: the envelope fields plus the catch-all
 /// of every key the entry payload does not claim.
 fn message_entry_base(map: &JsonMap) -> Option<EntryBase> {
+    // `id` carries no `#[serde(default)]`; an absent or non-string id
+    // (or an explicit null) defers to the mirror instead of guessing the
+    // derived Option semantics.
     let id = match map.get("id") {
-        // `id` carries no `#[serde(default)]`; its absence defers to the
-        // mirror instead of guessing the derived Option semantics.
-        None | Some(Value::Null) => return None,
         Some(Value::String(id)) => Some(id.clone()),
-        Some(_) => return None,
+        _ => return None,
     };
     let parent_id = catch_all_string(map.get("parentId"))?;
     let timestamp = catch_all_string(map.get("timestamp"))?;
@@ -963,7 +963,9 @@ mod tests {
         match KnownFileEntry::deserialize(value) {
             Ok(entry) => Some(FileEntry::from(entry)),
             Err(_) => match value {
-                Value::Object(rest) => Some(FileEntry::Unknown { rest }),
+                Value::Object(rest) => Some(FileEntry::Unknown {
+                    rest: rest.clone(),
+                }),
                 _ => None,
             },
         }
