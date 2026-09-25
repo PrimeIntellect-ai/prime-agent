@@ -291,11 +291,11 @@ impl AgentSession {
             outcome
         };
         match outcome {
-            Ok(AutoRefineRound::Declined) => Ok(None),
             Ok(AutoRefineRound::Ran(result)) => Ok(Some(result)),
-            // Unreachable: the deferred outcome is consumed in the block
-            // above.
-            Ok(AutoRefineRound::Deferred(_)) => Ok(None),
+            // The declined round is silent; a deferred round is consumed
+            // in the block above (the arm exists for match
+            // exhaustiveness and mirrors its `Ok(None)`).
+            Ok(AutoRefineRound::Declined) | Ok(AutoRefineRound::Deferred(_)) => Ok(None),
             Err(error) => Err(error),
         }
     }
