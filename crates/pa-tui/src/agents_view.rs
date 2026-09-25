@@ -1031,15 +1031,16 @@ impl AgentsViewMode {
     /// One landed stop-or-delete outcome: the status line reports it,
     /// and a deleted saved row leaves the catalog immediately (the live
     /// roster push covers the other arms; saved rows have no push).
-    fn delete_result(&mut self, message: String) {
-        let deleted_saved = message.starts_with("Deleted session ");
-        self.status = Some(message.clone());
-        if deleted_saved {
+    fn delete_result(&mut self, message: String, deleted_saved_path: Option<String>) {
+        self.status = Some(message);
+        // A deleted saved row leaves the catalog by its own path (the
+        // key the daemon deleted), never by the display name.
+        if let Some(path) = deleted_saved_path {
             self.saved.retain(|saved| {
                 saved
                     .get("path")
                     .and_then(Value::as_str)
-                    .map(|path| !message.contains(path))
+                    .map(|saved_path| saved_path != path)
                     .unwrap_or(true)
             });
             self.rebuild_rows();
