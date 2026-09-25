@@ -1682,8 +1682,8 @@ async fn tui_login_and_logout_run_the_provider_flows() {
             .expect("interactive run");
     let rendered = rendered_frames(&outcome);
     assert!(
-        rendered.contains("Providers"),
-        "the selector panel renders:\n{rendered}"
+        rendered.contains("Search providers"),
+        "the login menu's search bar renders (the picker grammar, no title):\n{rendered}"
     );
     assert!(
         rendered.contains("OpenAI · api key"),
