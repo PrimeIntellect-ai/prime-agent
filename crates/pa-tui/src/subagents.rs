@@ -32,11 +32,16 @@ impl SessionIdentity {
 }
 
 /// Live descendant counts of one session's subtree (TS
-/// `SubagentSummaryCounts`).
+/// `SubagentSummaryCounts`), with the operator's 2026-09-25 running
+/// split: `running_direct` counts the immediately-running children,
+/// `running_nested` the further running descendants below them (their
+/// sum is the recursive `running` total).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SubagentCounts {
     pub total: usize,
     pub running: usize,
+    pub running_direct: usize,
+    pub running_nested: usize,
     pub idle: usize,
     pub inactive: usize,
 }
@@ -80,12 +85,15 @@ pub(crate) fn summary_identity_keys(summary: &Value) -> Vec<String> {
 }
 
 /// Every row whose summary descends from `parent`, breadth-first over the
-/// parent linkage (TS `collectSubagentDescendantSummaries`): child rows
-/// link through their parent keys, and each linked row extends the walk
-/// with its own identity keys so deeper descendants stay reachable. The
-/// caller supplies the row summaries; a row's family position never
-/// depends on which surface renders it.
-pub fn descendant_positions(summaries: &[&Value], parent: &SessionIdentity) -> Vec<usize> {
+/// parent linkage, with each row's depth below `parent` (TS
+/// `collectSubagentDescendantSummaries`): child rows link through their
+/// parent keys, and each linked row extends the walk with its own
+/// identity keys so deeper descendants stay reachable. The depth pairs
+/// the direct/nested running counts (depth 1 = a direct child).
+pub fn descendant_positions_with_depth(
+    summaries: &[&Value],
+    parent: &SessionIdentity,
+) -> Vec<(usize, usize)> {
     let mut by_parent_key: std::collections::HashMap<String, Vec<usize>> =
         std::collections::HashMap::new();
     for (position, summary) in summaries.iter().enumerate() {
@@ -96,29 +104,43 @@ pub fn descendant_positions(summaries: &[&Value], parent: &SessionIdentity) -> V
             by_parent_key.entry(key).or_default().push(position);
         }
     }
-    let mut queue: Vec<String> = Vec::new();
+    let mut queue: Vec<(String, usize)> = Vec::new();
     if let Some(id) = &parent.active_session_id {
-        queue.push(format!("active:{id}"));
+        queue.push((format!("active:{id}"), 0));
     }
     if let Some(id) = &parent.session_id {
-        queue.push(format!("session:{id}"));
+        queue.push((format!("session:{id}"), 0));
     }
     if let Some(path) = &parent.session_file {
-        queue.push(format!("file:{path}"));
+        queue.push((format!("file:{path}"), 0));
     }
-    let mut positions: Vec<usize> = Vec::new();
+    let mut positions: Vec<(usize, usize)> = Vec::new();
     let mut linked: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut index = 0;
     while index < queue.len() {
-        for position in by_parent_key.get(&queue[index]).into_iter().flatten() {
+        let (key, owner_depth) = &queue[index];
+        for position in by_parent_key.get(key).into_iter().flatten() {
             if linked.insert(*position) {
-                positions.push(*position);
-                queue.extend(summary_identity_keys(summaries[*position]));
+                positions.push((*position, owner_depth + 1));
+                queue.extend(
+                    summary_identity_keys(summaries[*position])
+                        .into_iter()
+                        .zip(std::iter::repeat(owner_depth + 1)),
+                );
             }
         }
         index += 1;
     }
     positions
+}
+
+/// The descendant positions of `parent`, depth-free (the flat consumers:
+/// row and entry collection).
+pub fn descendant_positions(summaries: &[&Value], parent: &SessionIdentity) -> Vec<usize> {
+    descendant_positions_with_depth(summaries, parent)
+        .into_iter()
+        .map(|(position, _)| position)
+        .collect()
 }
 
 /// The summaries that descend from `parent`.
@@ -129,13 +151,17 @@ pub fn descendant_rows<'a>(summaries: &[&'a Value], parent: &SessionIdentity) ->
         .collect()
 }
 
-/// The roster entries that descend from `parent`.
+/// The roster entries that descend from `parent`, with each entry's
+/// depth below it (1 = a direct child).
 ///
 /// # Panics
 ///
 /// Cannot panic: the `expect` re-reads the same `"summary"` key the
 /// filter kept, so it always resolves on the collected entries.
-pub fn descendant_entries<'a>(roster: &'a [Value], parent: &SessionIdentity) -> Vec<&'a Value> {
+pub fn descendant_entries_with_depth<'a>(
+    roster: &'a [Value],
+    parent: &SessionIdentity,
+) -> Vec<(&'a Value, usize)> {
     let with_summaries: Vec<&'a Value> = roster
         .iter()
         .filter(|entry| entry.get("summary").is_some())
@@ -144,9 +170,17 @@ pub fn descendant_entries<'a>(roster: &'a [Value], parent: &SessionIdentity) -> 
         .iter()
         .map(|entry| entry.get("summary").expect("filtered"))
         .collect();
-    descendant_positions(&summaries, parent)
+    descendant_positions_with_depth(&summaries, parent)
         .into_iter()
-        .map(|position| with_summaries[position])
+        .map(|(position, depth)| (with_summaries[position], depth))
+        .collect()
+}
+
+/// The roster entries that descend from `parent`.
+pub fn descendant_entries<'a>(roster: &'a [Value], parent: &SessionIdentity) -> Vec<&'a Value> {
+    descendant_entries_with_depth(roster, parent)
+        .into_iter()
+        .map(|(entry, _)| entry)
         .collect()
 }
 
@@ -174,13 +208,22 @@ pub fn entry_status(entry: &Value) -> AgentRosterStatus {
 
 /// Count the live subagent descendants of one session (TS
 /// `countRosterSubagentStatuses`: rows of any lifecycle count on the live
-/// roster; callers that mix saved catalog rows filter their input).
+/// roster; callers that mix saved catalog rows filter their input). The
+/// running split rides the descendant depths: depth 1 counts direct,
+/// deeper counts nested (the operator's `direct, nested` pair).
 pub fn count_descendants(roster: &[Value], parent: &SessionIdentity) -> SubagentCounts {
     let mut counts = SubagentCounts::default();
-    for entry in descendant_entries(roster, parent) {
+    for (entry, depth) in descendant_entries_with_depth(roster, parent) {
         counts.total += 1;
         match entry_status(entry) {
-            AgentRosterStatus::Running => counts.running += 1,
+            AgentRosterStatus::Running => {
+                counts.running += 1;
+                if depth == 1 {
+                    counts.running_direct += 1;
+                } else {
+                    counts.running_nested += 1;
+                }
+            }
             AgentRosterStatus::Idle => counts.idle += 1,
             AgentRosterStatus::Inactive => counts.inactive += 1,
         }
@@ -247,8 +290,44 @@ mod tests {
         );
         assert_eq!(counts.total, 3);
         assert_eq!(counts.running, 1);
+        assert_eq!(counts.running_direct, 1);
+        assert_eq!(counts.running_nested, 0);
         assert_eq!(counts.idle, 1);
         assert_eq!(counts.inactive, 1);
+    }
+
+    /// The operator's `direct, nested` running pair: the one directly
+    /// running child counts direct, the two running grandchildren below
+    /// it count nested, and their sum stays the recursive running total.
+    #[test]
+    fn running_split_counts_direct_and_nested() {
+        let mut roster = vec![
+            entry("parent", parent_summary("p1"), "idle"),
+            entry("c1", child_summary("c1", "p1", "subagent"), "running"),
+            entry("c2", child_summary("c2", "p1", "subagent"), "idle"),
+        ];
+        for name in ["gc1", "gc2"] {
+            let grandchild = child_summary(name, "c1", "subagent");
+            roster.push(entry(name, grandchild, "running"));
+        }
+        let counts = count_descendants(
+            &roster,
+            &SessionIdentity::new(
+                Some("p1-live".to_string()),
+                Some("p1".to_string()),
+                Some("/sessions/p1.jsonl".to_string()),
+            ),
+        );
+        assert_eq!(counts.total, 4);
+        assert_eq!(counts.running, 3);
+        assert_eq!(counts.running_direct, 1);
+        assert_eq!(counts.running_nested, 2);
+        // The pair never double counts: 1 direct + 2 nested = 3 running,
+        // the recursive total.
+        assert_eq!(
+            counts.running,
+            counts.running_direct + counts.running_nested
+        );
     }
 
     #[test]

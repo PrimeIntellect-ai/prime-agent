@@ -1,10 +1,22 @@
 //! The agents-view subagent forest: how unified records nest into the
 //! session list's rows. One pass computes the record hierarchy (parent
 //! linkage, rollups), then row building emits top-level agents with their
-//! `N subagents` summary rows and, when a parent is expanded, its nested
+//! subagent summary lines and, when a line is expanded, its nested
 //! children. Selection resolution and ancestry walks over that row tree
 //! live here too. Pure functions on the wire forms (roster summaries and
 //! saved-catalog rows); the view module owns input and painting.
+//!
+//! Operator directive (2026-09-25, deliberate TS divergence): a parent
+//! with running descendants carries TWO summary lines. The running line
+//! titles `"{direct}, {nested} running"` (direct = immediately running
+//! children, nested = further running descendants below them) and expands
+//! to ONLY running rows — flattened through non-running ancestors so a
+//! `0, N running` line still reveals its nested workers. The inactive
+//! line titles `"{n} inactive subagent(s)"` and expands to the
+//! not-running children, so historical agents stay discoverable without
+//! contaminating the running expansion. TS `createSubagentSummaryRow`
+//! instead titles one `"{n} subagents running"` / `"{n} subagents"` line
+//! that expands to every child.
 
 use std::collections::{HashMap, HashSet};
 
@@ -187,10 +199,27 @@ pub struct AgentsViewRow {
 pub enum RowKind {
     /// A top-level agent row.
     Agent,
-    /// The `N subagents` toggle row under an agent (TS `subagent-summary`).
+    /// The running/inactive summary lines under an agent (TS
+    /// `subagent-summary`, split by the operator's 2026-09-25
+    /// directive).
     SubagentSummary,
     /// A nested child row inside an expanded list (TS `subagent`).
     Subagent,
+}
+
+/// The running line's identity prefix (TS `subagent-summary` keeps the
+/// `subagents:` prefix, so a carried selection restores onto it).
+pub(crate) const SUMMARY_ROW_PREFIX: &str = "subagents:";
+/// The inactive line's identity prefix (the operator's historical
+/// agents' separate line).
+pub(crate) const INACTIVE_SUMMARY_ROW_PREFIX: &str = "subagents-inactive:";
+
+/// Whether a row identity is one of a parent's summary lines (the
+/// running or the inactive line): such identities pin selection
+/// fallbacks to summary rows, which reuse their parent's session key,
+/// and the inactive prefix drives the toggle's expansion-set dispatch.
+pub(crate) fn is_summary_row_identity(identity: &str) -> bool {
+    identity.starts_with(SUMMARY_ROW_PREFIX) || identity.starts_with(INACTIVE_SUMMARY_ROW_PREFIX)
 }
 
 impl AgentsViewRow {
@@ -637,6 +666,10 @@ struct BaseRow {
     recursive_cost: f64,
     descendant_count: usize,
     running_subagent_count: usize,
+    /// Direct children currently roster-running: the `direct` number of
+    /// the running line's `"{direct}, {nested} running"` title (the
+    /// nested number is the recursive running count minus this).
+    direct_running: usize,
     /// The descendant-tree model multiset (the summary row's model mix):
     /// a real model string (never the `-` placeholder) -> its count. The
     /// collapsed summary row otherwise hides every subagent's model — and
@@ -646,16 +679,19 @@ struct BaseRow {
     search_score: Option<f64>,
 }
 
-/// Build the session-list rows (TS `buildAgentsViewRows`): top-level
-/// agents, each with its `N subagents` summary row, and the nested child
-/// rows of every expanded parent. `expanded` holds the parent row
-/// identities whose lists are open; `rollups` carries the unfiltered
-/// hierarchy totals; a scope excludes its root and lifts its direct
-/// children to top-level rows.
+/// Build the session-list rows (TS `buildAgentsViewRows`, plus the
+/// operator's two-line subagent summary): top-level agents, each with its
+/// running line (`d, n running`, expands to the running rows only) and,
+/// when non-running children exist, its inactive line (`N inactive
+/// subagents`, expands to them). `expanded_running` and
+/// `expanded_inactive` hold the parent row identities whose lines are
+/// open; `rollups` carries the unfiltered hierarchy totals; a scope
+/// excludes its root and lifts its direct children to top-level rows.
 pub fn build_rows(
     records: &[UnifiedRecord],
     scope: Option<&AgentsViewScope>,
-    expanded: &HashSet<String>,
+    expanded_running: &HashSet<String>,
+    expanded_inactive: &HashSet<String>,
     rollups: &HashMap<String, Rollup>,
     anchor: Option<&str>,
 ) -> Vec<AgentsViewRow> {
@@ -742,6 +778,7 @@ pub fn build_rows(
             recursive_cost: rollup.cost,
             descendant_count: rollup.descendant_count,
             running_subagent_count: 0,
+            direct_running: 0,
             descendant_models: std::collections::BTreeMap::new(),
             summary,
             record: position,
@@ -811,6 +848,7 @@ pub fn build_rows(
     }
     for index in tally_order.iter().rev() {
         let mut running = 0;
+        let mut direct_running = 0;
         let mut descendants = 0;
         let mut descendants_cost = 0.0;
         // The descendant model multiset rolls up in the same walk (the
@@ -820,6 +858,9 @@ pub fn build_rows(
         let mut models: std::collections::BTreeMap<String, usize> =
             std::collections::BTreeMap::new();
         for child in children_by_parent.get(index).into_iter().flatten() {
+            if base[*child].section == Section::Running {
+                direct_running += 1;
+            }
             running += (base[*child].section == Section::Running) as usize
                 + base[*child].running_subagent_count;
             descendants += 1 + base[*child].descendant_count;
@@ -833,6 +874,7 @@ pub fn build_rows(
         }
         base[*index].descendant_models = models;
         base[*index].running_subagent_count = running;
+        base[*index].direct_running = direct_running;
         // Rollups follow the unfiltered hierarchy; the per-pass walk is the
         // fallback when the caller passed none (TS `rollup ?? descendants`).
         if !rollups.contains_key(&base[*index].identity) {
@@ -873,15 +915,29 @@ pub fn build_rows(
         .filter(|index| Some(base[*index].record) != scope_root.as_ref().map(|(root, _)| *root))
         .collect();
     visible_roots.sort_by(|a, b| compare_base(&base[*a], &base[*b], anchor));
+    let (exposed_running, exposed_inactive) = scan_flatten_exposed(
+        &base,
+        &children_by_parent,
+        expanded_running,
+        expanded_inactive,
+    );
     let forest = RowForest {
         base: &base,
         children_by_parent: &children_by_parent,
-        expanded,
+        expanded_running,
+        expanded_inactive,
         anchor,
     };
     let mut rows: Vec<AgentsViewRow> = Vec::new();
     for root in visible_roots {
-        forest.emit(root, 0, None, &mut rows);
+        forest.emit(
+            root,
+            0,
+            None,
+            &exposed_running,
+            &exposed_inactive,
+            &mut rows,
+        );
     }
     rows
 }
@@ -890,18 +946,28 @@ pub fn build_rows(
 struct RowForest<'a> {
     base: &'a [BaseRow],
     children_by_parent: &'a HashMap<usize, Vec<usize>>,
-    expanded: &'a HashSet<String>,
+    expanded_running: &'a HashSet<String>,
+    expanded_inactive: &'a HashSet<String>,
     anchor: Option<&'a str>,
 }
 
 impl RowForest<'_> {
-    /// Emit one row, then its summary row, then its expanded children
-    /// (TS `emit`): depth and parent identity come from the walk.
+    /// Emit one row, then its summary lines, then their expanded children
+    /// (TS `emit`, plus the operator's running/inactive split): depth and
+    /// parent identity come from the walk. Each line expands to its own
+    /// status only — the running line to the running rows (flattened
+    /// through non-running children so nested workers stay reachable),
+    /// the inactive line to the not-running rows (flattened the mirror
+    /// way through running children) — and a line whose content an
+    /// ancestor's flatten already exposes does not render, so every
+    /// agent keeps exactly one visible row however many lines are open.
     fn emit(
         &self,
         index: usize,
         depth: usize,
         parent_identity: Option<&str>,
+        exposed_running: &HashSet<String>,
+        exposed_inactive: &HashSet<String>,
         rows: &mut Vec<AgentsViewRow>,
     ) {
         let row = &self.base[index];
@@ -912,17 +978,241 @@ impl RowForest<'_> {
         if children.is_empty() {
             return;
         }
-        let is_expanded = self.expanded.contains(&row.identity);
-        rows.push(subagent_summary_row(row, depth + 1, is_expanded));
-        if !is_expanded {
-            return;
-        }
         let mut sorted = children.clone();
         sorted.sort_by(|a, b| compare_base(&self.base[*a], &self.base[*b], self.anchor));
-        for child in sorted {
-            self.emit(child, depth + 1, Some(&row.identity), rows);
+        let (running_kids, other_kids): (Vec<usize>, Vec<usize>) = sorted
+            .iter()
+            .copied()
+            .partition(|child| self.base[*child].section == Section::Running);
+        if row.running_subagent_count > 0 && !exposed_running.contains(&row.identity) {
+            let is_expanded = self.expanded_running.contains(&row.identity);
+            rows.push(running_summary_row(row, depth + 1, is_expanded));
+            if is_expanded {
+                for child in &running_kids {
+                    self.emit(
+                        *child,
+                        depth + 1,
+                        Some(&row.identity),
+                        exposed_running,
+                        exposed_inactive,
+                        rows,
+                    );
+                }
+                for child in &other_kids {
+                    if self.base[*child].running_subagent_count > 0 {
+                        self.emit_running_descendants(
+                            *child,
+                            depth + 1,
+                            Some(&row.identity),
+                            exposed_running,
+                            exposed_inactive,
+                            rows,
+                        );
+                    }
+                }
+            }
+        }
+        let inactive = row
+            .descendant_count
+            .saturating_sub(row.running_subagent_count);
+        if inactive > 0 && !exposed_inactive.contains(&row.identity) {
+            let is_expanded = self.expanded_inactive.contains(&row.identity);
+            rows.push(inactive_summary_row(row, depth + 1, is_expanded));
+            if is_expanded {
+                for child in &other_kids {
+                    self.emit(
+                        *child,
+                        depth + 1,
+                        Some(&row.identity),
+                        exposed_running,
+                        exposed_inactive,
+                        rows,
+                    );
+                }
+                for child in &running_kids {
+                    let child_inactive = self.base[*child]
+                        .descendant_count
+                        .saturating_sub(self.base[*child].running_subagent_count);
+                    if child_inactive > 0 {
+                        self.emit_inactive_descendants(
+                            *child,
+                            depth + 1,
+                            Some(&row.identity),
+                            exposed_running,
+                            exposed_inactive,
+                            rows,
+                        );
+                    }
+                }
+            }
         }
     }
+
+    /// Emit the running descendants of a non-running ancestor the
+    /// running path flattens through (the `0, N running` case): the
+    /// ancestor itself stays hidden, its running children render at
+    /// their true depth, and deeper non-running ancestors recurse the
+    /// same way. The ancestor is already in the pass's exposed set (the
+    /// `scan_flatten_exposed` pre-pass recorded it).
+    fn emit_running_descendants(
+        &self,
+        index: usize,
+        depth: usize,
+        visible_parent: Option<&str>,
+        exposed_running: &HashSet<String>,
+        exposed_inactive: &HashSet<String>,
+        rows: &mut Vec<AgentsViewRow>,
+    ) {
+        let mut sorted = self
+            .children_by_parent
+            .get(&index)
+            .cloned()
+            .unwrap_or_default();
+        sorted.sort_by(|a, b| compare_base(&self.base[*a], &self.base[*b], self.anchor));
+        for child in sorted {
+            if self.base[child].section == Section::Running {
+                self.emit(
+                    child,
+                    depth + 1,
+                    visible_parent,
+                    exposed_running,
+                    exposed_inactive,
+                    rows,
+                );
+            } else if self.base[child].running_subagent_count > 0 {
+                self.emit_running_descendants(
+                    child,
+                    depth + 1,
+                    visible_parent,
+                    exposed_running,
+                    exposed_inactive,
+                    rows,
+                );
+            }
+        }
+    }
+
+    /// Emit the not-running descendants of a running ancestor the
+    /// inactive path flattens through (the inactive line's mirror of
+    /// `emit_running_descendants`): the ancestor stays hidden, its
+    /// not-running children render at their true depth, and deeper
+    /// running ancestors recurse the same way. The ancestor is already
+    /// in the pass's exposed set (the `scan_flatten_exposed`
+    /// pre-pass recorded it).
+    fn emit_inactive_descendants(
+        &self,
+        index: usize,
+        depth: usize,
+        visible_parent: Option<&str>,
+        exposed_running: &HashSet<String>,
+        exposed_inactive: &HashSet<String>,
+        rows: &mut Vec<AgentsViewRow>,
+    ) {
+        let mut sorted = self
+            .children_by_parent
+            .get(&index)
+            .cloned()
+            .unwrap_or_default();
+        sorted.sort_by(|a, b| compare_base(&self.base[*a], &self.base[*b], self.anchor));
+        for child in sorted {
+            let child_inactive = self.base[child]
+                .descendant_count
+                .saturating_sub(self.base[child].running_subagent_count);
+            if self.base[child].section != Section::Running {
+                self.emit(
+                    child,
+                    depth + 1,
+                    visible_parent,
+                    exposed_running,
+                    exposed_inactive,
+                    rows,
+                );
+            } else if child_inactive > 0 {
+                self.emit_inactive_descendants(
+                    child,
+                    depth + 1,
+                    visible_parent,
+                    exposed_running,
+                    exposed_inactive,
+                    rows,
+                );
+            }
+        }
+    }
+}
+
+/// Pre-compute the flatten-exposed ancestors for one pass, so the emit
+/// walk's order never decides a line's visibility: an expanded running
+/// line flattens through its non-running children (recursively), an
+/// expanded inactive line through its running children, and the walk
+/// below records every skipped ancestor. The emit's own flatten walks
+/// mirror this scan exactly, so a skipped ancestor's opposite-status
+/// line stays suppressed wherever it renders — one visible row per
+/// agent when both lines are open.
+fn scan_flatten_exposed(
+    base: &[BaseRow],
+    children_by_parent: &HashMap<usize, Vec<usize>>,
+    expanded_running: &HashSet<String>,
+    expanded_inactive: &HashSet<String>,
+) -> (HashSet<String>, HashSet<String>) {
+    let mut exposed_running: HashSet<String> = HashSet::new();
+    let mut exposed_inactive: HashSet<String> = HashSet::new();
+    /// The running-path scan: record the skipped non-running ancestor,
+    /// then recurse through its non-running children that own running
+    /// descendants (running children render in full — their own lines
+    /// ride the suppression sets).
+    fn scan_running(
+        base: &[BaseRow],
+        children_by_parent: &HashMap<usize, Vec<usize>>,
+        index: usize,
+        exposed_running: &mut HashSet<String>,
+    ) {
+        exposed_running.insert(base[index].identity.clone());
+        for child in children_by_parent.get(&index).into_iter().flatten() {
+            if base[*child].section != Section::Running && base[*child].running_subagent_count > 0 {
+                scan_running(base, children_by_parent, *child, exposed_running);
+            }
+        }
+    }
+    /// The inactive-path scan: the running-ancestor mirror.
+    fn scan_inactive(
+        base: &[BaseRow],
+        children_by_parent: &HashMap<usize, Vec<usize>>,
+        index: usize,
+        exposed_inactive: &mut HashSet<String>,
+    ) {
+        exposed_inactive.insert(base[index].identity.clone());
+        for child in children_by_parent.get(&index).into_iter().flatten() {
+            let child_inactive = base[*child]
+                .descendant_count
+                .saturating_sub(base[*child].running_subagent_count);
+            if base[*child].section == Section::Running && child_inactive > 0 {
+                scan_inactive(base, children_by_parent, *child, exposed_inactive);
+            }
+        }
+    }
+    for index in 0..base.len() {
+        if expanded_running.contains(&base[index].identity) {
+            for child in children_by_parent.get(&index).into_iter().flatten() {
+                if base[*child].section != Section::Running
+                    && base[*child].running_subagent_count > 0
+                {
+                    scan_running(base, children_by_parent, *child, &mut exposed_running);
+                }
+            }
+        }
+        if expanded_inactive.contains(&base[index].identity) {
+            for child in children_by_parent.get(&index).into_iter().flatten() {
+                let child_inactive = base[*child]
+                    .descendant_count
+                    .saturating_sub(base[*child].running_subagent_count);
+                if base[*child].section == Section::Running && child_inactive > 0 {
+                    scan_inactive(base, children_by_parent, *child, &mut exposed_inactive);
+                }
+            }
+        }
+    }
+    (exposed_running, exposed_inactive)
 }
 
 /// One session row's rendered fields (the display-side slice the layout
@@ -971,41 +1261,84 @@ fn model_mix(models: &std::collections::BTreeMap<String, usize>) -> String {
         .join(", ")
 }
 
-/// The `N subagents` summary row under one agent (TS
-/// `createSubagentSummaryRow`, with the deliberate divergence that the
-/// count aggregates the whole descendant tree rather than the
-/// direct-children list): the running label counts the recursively
-/// running rows, and finished subagents stay reachable through the row
-/// even when nothing is running anymore. The collapsed row is the one
-/// place the subagent tree's model mix surfaces — expanded
-/// children already render their own Model column.
-fn subagent_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsViewRow {
-    let total = parent.descendant_count;
-    let running = parent.running_subagent_count;
-    let mut title = if running > 0 {
-        format!(
-            "{running} {} running",
-            if running == 1 {
-                "subagent"
-            } else {
-                "subagents"
-            }
-        )
-    } else {
-        format!(
-            "{total} {}",
-            if total == 1 { "subagent" } else { "subagents" }
-        )
-    };
+/// The running line under one agent (the operator's 2026-09-25
+/// directive, a deliberate TS divergence: TS `createSubagentSummaryRow`
+/// titles one `"{n} subagents running"` line that expands to every
+/// child). The title reads `"{direct}, {nested} running"` — `direct` =
+/// immediately running children, `nested` = further running descendants
+/// below them — and the expansion renders only running rows, flattened
+/// through non-running ancestors. The collapsed line is the one place the
+/// subagent tree's model mix surfaces while work runs — expanded children
+/// render their own Model column.
+fn running_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsViewRow {
+    let direct = parent.direct_running;
+    let nested = parent.running_subagent_count.saturating_sub(direct);
+    let mut title = format!("{direct}, {nested} running");
     let mix = model_mix(&parent.descendant_models);
     if !mix.is_empty() {
         title.push_str(" \u{b7} ");
         title.push_str(&mix);
     }
+    summary_row(
+        parent,
+        depth,
+        expanded,
+        title,
+        SUMMARY_ROW_PREFIX,
+        parent.running_subagent_count,
+    )
+}
+
+/// The inactive line under one agent (the operator's 2026-09-25
+/// directive): the explicit home for every not-running descendant — the
+/// historical agents stay discoverable here without contaminating the
+/// running line's expansion. The count aggregates the whole descendant
+/// tree's not-running rows (the summary count's deliberate divergence),
+/// the expansion lists the not-running children, and the model mix rides
+/// this line when no running line renders above it.
+fn inactive_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> AgentsViewRow {
+    let inactive = parent
+        .descendant_count
+        .saturating_sub(parent.running_subagent_count);
+    let mut title = format!(
+        "{inactive} inactive {}",
+        if inactive == 1 {
+            "subagent"
+        } else {
+            "subagents"
+        }
+    );
+    if parent.running_subagent_count == 0 {
+        let mix = model_mix(&parent.descendant_models);
+        if !mix.is_empty() {
+            title.push_str(" \u{b7} ");
+            title.push_str(&mix);
+        }
+    }
+    summary_row(
+        parent,
+        depth,
+        expanded,
+        title,
+        INACTIVE_SUMMARY_ROW_PREFIX,
+        0,
+    )
+}
+
+/// One summary line's row: both lines reuse their parent's summary so
+/// the open action and selection keys resolve the parent.
+fn summary_row(
+    parent: &BaseRow,
+    depth: usize,
+    expanded: bool,
+    title: String,
+    identity_prefix: &str,
+    running_subagent_count: usize,
+) -> AgentsViewRow {
     AgentsViewRow {
         kind: RowKind::SubagentSummary,
         section: parent.section,
-        identity: format!("subagents:{}", parent.identity),
+        identity: format!("{identity_prefix}{}", parent.identity),
         parent_identity: Some(parent.identity.clone()),
         summary: parent.summary.clone(),
         title,
@@ -1016,7 +1349,7 @@ fn subagent_summary_row(parent: &BaseRow, depth: usize, expanded: bool) -> Agent
         age: parent.age.clone(),
         depth,
         descendant_count: 0,
-        running_subagent_count: running,
+        running_subagent_count,
         expanded,
     }
 }
@@ -1147,9 +1480,9 @@ pub fn ancestor_session_ids(rows: &[AgentsViewRow], parent_identity: Option<&str
 /// Resolve the selection after a rebuild (TS
 /// `resolveAgentsViewSelectionState`): the row identity wins, then the
 /// active session id, then the session id; an unresolvable anchor keeps
-/// the bounded current index, else the first selectable row. A
-/// `subagents:` identity pins the fallbacks to summary rows, which reuse
-/// their parent's session key.
+/// the bounded current index, else the first selectable row. A summary
+/// line identity (running or inactive) pins the fallbacks to summary
+/// rows, which reuse their parent's session key.
 pub fn resolve_selection(
     rows: &[AgentsViewRow],
     current: usize,
@@ -1166,7 +1499,7 @@ pub fn resolve_selection(
     if rows.is_empty() {
         return 0;
     }
-    let selected_summary_row = identity.is_some_and(|id| id.starts_with("subagents:"));
+    let selected_summary_row = identity.is_some_and(is_summary_row_identity);
     let preserves_kind =
         |row: &AgentsViewRow| !selected_summary_row || row.kind == RowKind::SubagentSummary;
     if let Some(identity) = identity {
@@ -1253,15 +1586,38 @@ mod tests {
         })
     }
 
+    /// Rows for a roster with the running lines of `expanded_running`
+    /// and the inactive lines of `expanded_inactive` open.
+    fn rows_for_lists(
+        roster: &[serde_json::Value],
+        scope: Option<&AgentsViewScope>,
+        expanded_running: &[&str],
+        expanded_inactive: &[&str],
+    ) -> Vec<AgentsViewRow> {
+        let records = reconcile_unified_sessions(roster, &[]);
+        let rollups = compute_rollups(&records);
+        let expanded_running: HashSet<String> =
+            expanded_running.iter().map(ToString::to_string).collect();
+        let expanded_inactive: HashSet<String> =
+            expanded_inactive.iter().map(ToString::to_string).collect();
+        build_rows(
+            &records,
+            scope,
+            &expanded_running,
+            &expanded_inactive,
+            &rollups,
+            None,
+        )
+    }
+
+    /// Rows for a roster with both lines of every `expanded` parent open
+    /// (the drill-in reveal's state).
     fn rows_for(
         roster: &[serde_json::Value],
         scope: Option<&AgentsViewScope>,
         expanded: &[&str],
     ) -> Vec<AgentsViewRow> {
-        let records = reconcile_unified_sessions(roster, &[]);
-        let rollups = compute_rollups(&records);
-        let expanded: HashSet<String> = expanded.iter().map(ToString::to_string).collect();
-        build_rows(&records, scope, &expanded, &rollups, None)
+        rows_for_lists(roster, scope, expanded, expanded)
     }
 
     /// An opened child session nests under its parent: the live
@@ -1296,9 +1652,10 @@ mod tests {
             "the opened child rides the parent's aggregate: {rows:?}"
         );
         assert!(
-            rows.iter()
-                .any(|row| row.kind == RowKind::SubagentSummary && row.title == "1 subagent"),
-            "the parent's summary row labels the aggregate: {rows:?}"
+            rows.iter().any(|row| {
+                row.kind == RowKind::SubagentSummary && row.title == "1 inactive subagent"
+            }),
+            "the parent's inactive line labels the aggregate: {rows:?}"
         );
         let rows = rows_for(&roster, None, &["file:/x/parent.jsonl"]);
         let child = rows
@@ -1386,14 +1743,16 @@ mod tests {
         assert_eq!(rows[1].kind, RowKind::SubagentSummary);
         assert_eq!(rows[1].identity, "subagents:file:/x/p.jsonl");
         assert_eq!(rows[1].parent_identity.as_deref(), Some("file:/x/p.jsonl"));
-        assert_eq!(rows[1].title, "1 subagent running");
+        assert_eq!(rows[1].title, "1, 0 running");
         assert!(!rows[1].expanded);
         assert_eq!(rows[0].descendant_count, 1);
         assert_eq!(rows[0].running_subagent_count, 1);
-        // Expanded: the child nests under the summary row at depth 1.
+        // Expanded: the running child nests under the running line at
+        // depth 1 (the operator's only-running expansion; the parent has
+        // no inactive child, so no inactive line renders).
         let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[1].title, "1 subagent running");
+        assert_eq!(rows[1].title, "1, 0 running");
         assert!(rows[1].expanded);
         assert_eq!(rows[2].kind, RowKind::Subagent);
         assert_eq!(rows[2].depth, 1);
@@ -1411,16 +1770,22 @@ mod tests {
             roster_entry("gc", "running", grandchild),
         ];
         // Collapsed: the parent's descendant count carries the whole
-        // subtree (TS rollups span the unfiltered hierarchy).
+        // subtree (TS rollups span the unfiltered hierarchy). The running
+        // line reads `0, 1 running` (no direct running child, one nested
+        // worker) and the inactive line counts the one idle child.
         let rows = rows_for(&roster, None, &[]);
         assert_eq!(rows[0].descendant_count, 2);
         assert_eq!(rows[0].running_subagent_count, 1);
-        assert_eq!(rows[1].title, "1 subagent running");
-        // Expanding the parent reveals the child and ITS summary row; the
-        // grandchild stays hidden until its own parent expands. The one
-        // running grandchild drives the summary title (TS counts live
-        // running descendants).
-        let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
+        assert_eq!(rows[1].kind, RowKind::SubagentSummary);
+        assert_eq!(rows[1].title, "0, 1 running");
+        assert_eq!(rows[2].kind, RowKind::SubagentSummary);
+        assert_eq!(rows[2].title, "1 inactive subagent");
+        assert_eq!(rows[2].identity, "subagents-inactive:file:/x/p.jsonl");
+        // The inactive line's expansion lists the not-running children;
+        // the child's own running line follows under it, collapsed. The
+        // parent's running line renders collapsed above (its nested
+        // worker is reachable through the flatten once it opens).
+        let rows = rows_for_lists(&roster, None, &[], &["file:/x/p.jsonl"]);
         assert_eq!(
             rows.iter()
                 .map(|row| (row.kind, row.depth))
@@ -1428,12 +1793,15 @@ mod tests {
             vec![
                 (RowKind::Agent, 0),
                 (RowKind::SubagentSummary, 1),
+                (RowKind::SubagentSummary, 1),
                 (RowKind::Subagent, 1),
                 (RowKind::SubagentSummary, 2),
             ]
         );
-        assert_eq!(rows[1].title, "1 subagent running");
-        // Expanding both levels reveals the grandchild at depth 2.
+        assert_eq!(rows[4].title, "1, 0 running");
+        // Expanding the child's running line reveals the grandchild at
+        // depth 2 (the parent's running line renders collapsed above its
+        // own inactive line: both lines exist whenever both statuses do).
         let child_identity = rows
             .iter()
             .find(|row| row.title == "worker one")
@@ -1441,11 +1809,31 @@ mod tests {
             .identity
             .clone();
         let child_identity_str = child_identity.as_str().to_string();
-        let rows = rows_for(&roster, None, &["file:/x/p.jsonl", &child_identity_str]);
-        assert_eq!(rows.len(), 5);
-        assert_eq!(rows[4].kind, RowKind::Subagent);
-        assert_eq!(rows[4].depth, 2);
-        assert_eq!(rows[4].title, "grandchild");
+        let rows = rows_for_lists(&roster, None, &[&child_identity_str], &["file:/x/p.jsonl"]);
+        assert_eq!(rows.len(), 6);
+        assert_eq!(rows[5].kind, RowKind::Subagent);
+        assert_eq!(rows[5].depth, 2);
+        assert_eq!(rows[5].title, "grandchild");
+        // The running line's expansion flattens through the idle child:
+        // the running grandchild renders at its true depth (2) under the
+        // nearest visible ancestor, without the idle parent's row, and
+        // the collapsed inactive line stays beneath for the historical
+        // agents.
+        let rows = rows_for_lists(&roster, None, &["file:/x/p.jsonl"], &[]);
+        assert_eq!(
+            rows.iter()
+                .map(|row| (row.kind, row.depth))
+                .collect::<Vec<_>>(),
+            vec![
+                (RowKind::Agent, 0),
+                (RowKind::SubagentSummary, 1),
+                (RowKind::Subagent, 2),
+                (RowKind::SubagentSummary, 1),
+            ]
+        );
+        assert_eq!(rows[2].title, "grandchild");
+        assert_eq!(rows[2].parent_identity.as_deref(), Some("file:/x/p.jsonl"));
+        assert_eq!(rows[3].title, "1 inactive subagent");
     }
 
     /// The collapsed summary row carries the subagent tree's model mix
@@ -1480,22 +1868,22 @@ mod tests {
             .expect("summary row");
         assert_eq!(
             summary.title,
-            "4 subagents \u{b7} claude-opus-4-6\u{d7}2, glm-5.3-fast\u{d7}2"
+            "4 inactive subagents \u{b7} claude-opus-4-6\u{d7}2, glm-5.3-fast\u{d7}2"
         );
-        // The child's own summary row counts only its subtree.
-        let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
+        // The child's own inactive line counts only its subtree.
+        let rows = rows_for_lists(&roster, None, &[], &["file:/x/p.jsonl"]);
         let nested = rows
             .iter()
             .find(|row| row.kind == RowKind::SubagentSummary && row.depth == 2)
             .expect("nested summary row");
-        assert_eq!(nested.title, "1 subagent \u{b7} claude-opus-4-6");
+        assert_eq!(nested.title, "1 inactive subagent \u{b7} claude-opus-4-6");
         // A child without model identity stays out of the mix.
         let roster = vec![
             roster_entry("p", "idle", parent_summary("p")),
             roster_entry("c", "idle", child_summary("c", "p", "worker one")),
         ];
         let rows = rows_for(&roster, None, &[]);
-        assert_eq!(rows[1].title, "1 subagent");
+        assert_eq!(rows[1].title, "1 inactive subagent");
         // A FOUR-level chain folds at every depth: the great-grandchild's
         // model reaches the root's mix (the tally walk's dynamic bound —
         // a fixed `0..len` range would strand the great-grandchild out of
@@ -1521,7 +1909,7 @@ mod tests {
         // grandchild (opus) and the great-grandchild (sol) only.
         assert_eq!(
             summary.title,
-            "3 subagents \u{b7} claude-opus-4-6, gpt-5.6-sol"
+            "3 inactive subagents \u{b7} claude-opus-4-6, gpt-5.6-sol"
         );
         assert_eq!(rows[0].descendant_count, 3);
     }
@@ -1535,18 +1923,20 @@ mod tests {
             roster_entry("c", "idle", child_summary("c", "p", "worker one")),
             roster_entry("gc", "idle", grandchild),
         ];
-        // The `N subagents` row under a parent aggregates every
+        // The inactive line under a parent aggregates every not-running
         // descendant of the subtree, not just its direct children: one
-        // child that itself runs a grandchild reads `2 subagents`.
+        // child that itself has a grandchild reads `2 inactive
+        // subagents`.
         let rows = rows_for(&roster, None, &[]);
-        assert_eq!(rows[1].title, "2 subagents");
-        // The child's own summary row keeps the same walk: one grandchild.
-        let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
+        assert_eq!(rows[1].title, "2 inactive subagents");
+        // The child's own inactive line keeps the same walk: one
+        // grandchild.
+        let rows = rows_for_lists(&roster, None, &[], &["file:/x/p.jsonl"]);
         let child_summary_row = rows
             .iter()
             .find(|row| row.kind == RowKind::SubagentSummary && row.depth == 2)
             .expect("child summary row");
-        assert_eq!(child_summary_row.title, "1 subagent");
+        assert_eq!(child_summary_row.title, "1 inactive subagent");
     }
 
     #[test]
@@ -1558,10 +1948,157 @@ mod tests {
             roster_entry("c", "running", child_summary("c", "p", "worker one")),
             roster_entry("gc", "running", grandchild),
         ];
-        // A busy subtree runs at any depth: the running label counts the
-        // child and its grandchild (TS parity for the running branch).
+        // A busy subtree runs at any depth: the running line's
+        // `direct, nested` pair counts the child as direct and the
+        // grandchild as nested (`1, 1 running` = two running rows).
         let rows = rows_for(&roster, None, &[]);
-        assert_eq!(rows[1].title, "2 subagents running");
+        assert_eq!(rows[1].title, "1, 1 running");
+        assert_eq!(rows.len(), 2, "every descendant runs, so no inactive line");
+    }
+
+    /// The operator's 2026-09-25 directive (Kevin): the running line
+    /// expands to ONLY running children — a parent with six running and
+    /// forty inactive children must add exactly six rows, not
+    /// forty-six — while the inactive line keeps the historical agents
+    /// discoverable behind their own collapsed line.
+    #[test]
+    fn running_line_expands_to_running_children_only() {
+        let mut roster = vec![roster_entry("p", "idle", parent_summary("p"))];
+        for n in 1..=6 {
+            roster.push(roster_entry(
+                &format!("r{n}"),
+                "running",
+                child_summary(&format!("r{n}"), "p", &format!("runner {n}")),
+            ));
+        }
+        for n in 1..=40 {
+            roster.push(roster_entry(
+                &format!("i{n}"),
+                "inactive",
+                child_summary(&format!("i{n}"), "p", &format!("old worker {n}")),
+            ));
+        }
+        // Collapsed: the running line (6 direct, 0 nested) and the
+        // inactive line (40 not-running descendants), both closed.
+        let rows = rows_for(&roster, None, &[]);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].kind, RowKind::SubagentSummary);
+        assert_eq!(rows[1].title, "6, 0 running");
+        assert!(!rows[1].expanded);
+        assert_eq!(rows[2].kind, RowKind::SubagentSummary);
+        assert_eq!(rows[2].title, "40 inactive subagents");
+        assert!(!rows[2].expanded);
+        // Enter on the running line adds exactly the six runners.
+        let rows = rows_for_lists(&roster, None, &["file:/x/p.jsonl"], &[]);
+        // The parent, the open running line, the six runners, and the
+        // collapsed inactive line behind them.
+        assert_eq!(rows.len(), 9);
+        assert!(rows[1].expanded);
+        assert_eq!(rows[8].title, "40 inactive subagents");
+        assert!(
+            rows[2..8]
+                .iter()
+                .all(|row| row.kind == RowKind::Subagent && row.section == Section::Running),
+            "the running expansion carries running rows only: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.title.contains("old worker")),
+            "the historical agents never flood the running expansion"
+        );
+        // The inactive line expands to the not-running children; the
+        // runners stay out.
+        let rows = rows_for_lists(&roster, None, &[], &["file:/x/p.jsonl"]);
+        assert_eq!(rows.len(), 43);
+        assert!(rows.iter().any(|row| row.title == "old worker 40"));
+        assert!(
+            !rows.iter().any(|row| row.title.contains("runner")),
+            "the inactive expansion carries the historical rows only"
+        );
+    }
+
+    /// Both lines expanded on a mixed tree: every agent renders exactly
+    /// once. A running grandchild under an idle child renders flattened
+    /// on the running path, and the idle child's own running line stays
+    /// suppressed on the inactive path (one visible representation per
+    /// agent — the operator's no-duplicates safeguard).
+    #[test]
+    fn both_lines_expanded_render_each_agent_once() {
+        let mut grandchild = child_summary("gc", "c", "grandkid");
+        grandchild["rlmChildId"] = json!("child-gc");
+        let roster = vec![
+            roster_entry("p", "idle", parent_summary("p")),
+            roster_entry("c", "running", child_summary("c", "p", "worker one")),
+            roster_entry("c2", "idle", child_summary("c2", "p", "worker two")),
+            roster_entry("gc", "running", grandchild),
+        ];
+        let rows = rows_for(&roster, None, &["file:/x/p.jsonl"]);
+        // p's running line expands to worker one (direct) and flattens
+        // through the idle worker two to the running grandkid; p's
+        // inactive line expands to worker two, whose own running line is
+        // suppressed (its grandkid already renders on the running path).
+        let mut seen: HashSet<String> = HashSet::new();
+        for row in &rows {
+            assert!(
+                seen.insert(row.identity.clone()),
+                "the row {row:?} renders more than once"
+            );
+        }
+        assert!(
+            rows.iter().any(|row| row.title == "grandkid"),
+            "the running grandchild renders through the flatten: {rows:?}"
+        );
+        let worker_two = rows
+            .iter()
+            .find(|row| row.title == "worker two")
+            .expect("the idle child renders on the inactive path");
+        // The idle child's running line must not render: its one running
+        // descendant already renders on the parent's running path.
+        assert!(
+            !rows.iter().any(|row| {
+                row.kind == RowKind::SubagentSummary
+                    && row.parent_identity.as_deref() == Some(worker_two.identity.as_str())
+                    && row.title == "1, 0 running"
+            }),
+            "the flatten-exposed ancestor's running line stays suppressed: {rows:?}"
+        );
+        // Collapsing the running line re-renders the child's own running
+        // line (the only remaining path to the grandkid).
+        let rows = rows_for_lists(&roster, None, &[], &["file:/x/p.jsonl"]);
+        let child_line = rows
+            .iter()
+            .find(|row| row.kind == RowKind::SubagentSummary && row.title == "1, 0 running")
+            .expect("the idle child's running line renders when no flatten exposes it");
+        assert_eq!(
+            child_line.parent_identity.as_deref(),
+            Some(worker_two.identity.as_str())
+        );
+    }
+
+    /// Summary-line identities pin the selection's fallbacks to summary
+    /// rows for BOTH lines (the running line keeps TS's `subagents:`
+    /// prefix; the inactive line appends `-inactive`).
+    #[test]
+    fn selection_pins_both_summary_line_identities() {
+        let roster = vec![
+            roster_entry("p", "idle", parent_summary("p")),
+            roster_entry("c", "running", child_summary("c", "p", "worker one")),
+            roster_entry("i", "idle", child_summary("i", "p", "old worker")),
+        ];
+        let collapsed = rows_for(&roster, None, &[]);
+        let key = SelectionKey {
+            session_id: Some("p".to_string()),
+            active_session_id: Some("p-live".to_string()),
+        };
+        let index = resolve_selection(&collapsed, 0, Some("subagents:file:/x/p.jsonl"), Some(&key));
+        assert_eq!(collapsed[index].kind, RowKind::SubagentSummary);
+        let index = resolve_selection(
+            &collapsed,
+            0,
+            Some("subagents-inactive:file:/x/p.jsonl"),
+            Some(&key),
+        );
+        assert_eq!(collapsed[index].kind, RowKind::SubagentSummary);
+        assert_eq!(collapsed[index].title, "1 inactive subagent");
     }
 
     #[test]
@@ -1619,13 +2156,27 @@ mod tests {
         ];
         let records = reconcile_unified_sessions(&[], &saved);
         let rollups = compute_rollups(&records);
-        let rows = build_rows(&records, None, &Default::default(), &rollups, None);
+        let rows = build_rows(
+            &records,
+            None,
+            &Default::default(),
+            &Default::default(),
+            &rollups,
+            None,
+        );
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].kind, RowKind::Agent);
         assert_eq!(rows[0].title, "root agent");
-        assert_eq!(rows[1].title, "1 subagent");
+        assert_eq!(rows[1].title, "1 inactive subagent");
         let expanded: HashSet<String> = [rows[0].identity.clone()].into_iter().collect();
-        let rows = build_rows(&records, None, &expanded, &rollups, None);
+        let rows = build_rows(
+            &records,
+            None,
+            &Default::default(),
+            &expanded,
+            &rollups,
+            None,
+        );
         assert_eq!(rows[2].title, "saved child");
         assert_eq!(rows[2].kind, RowKind::Subagent);
     }
