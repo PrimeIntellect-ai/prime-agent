@@ -5567,9 +5567,10 @@ impl SessionUi {
 
     /// Open the inline `/mcp` connections view over the daemon's
     /// `get_mcp_connections` roster, its filter prefilled with `search`
-    /// (the Tab-intercepted partial). The request carries the kernel's
-    /// tool listing (it opens each connected generic server, bounded), so
-    /// it gets the wider deadline.
+    /// (the Tab-intercepted partial). The daemon answers from local state
+    /// (the roster and the resolved catalog views, no kernel round-trip),
+    /// so the open is as instant as the TS picker's and the ordinary
+    /// request deadline applies.
     /// `command` names the entry the user ran (`/mcp` or `/plugins`), so a
     /// failed roster load reports the command that failed.
     async fn open_mcp_view(
@@ -5580,7 +5581,7 @@ impl SessionUi {
     ) -> Result<()> {
         let data = match self
             .bounded_request(
-                Duration::from_millis(UI_REQUEST_TIMEOUT_MS * 4),
+                Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
                 DaemonCommand::GetMcpConnections {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
