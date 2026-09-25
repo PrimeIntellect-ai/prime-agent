@@ -5444,6 +5444,12 @@ impl TurnRunner {
             // client renders as the strip's "Starting" row.
             let mut active_committed = false;
             let mut active_running = false;
+            // Restored next-turn rows ride this delivery as PREFIX rows
+            // (before the accepted prompt): they render in the
+            // conversation, but they are not the prompt's rows-land moment
+            // — the "Starting" row must survive them and drop at the
+            // accepted row (the bots' commit-fence finding).
+            let mut emitting_prefix_rows = false;
             // The last error of the active retry episode (the
             // `auto_retry_start` errorMessage): the episode's durable
             // outcome row names it on success too — the final event
@@ -5617,7 +5623,8 @@ impl TurnRunner {
                 // projection spanned nothing and the picked-up prompt was
                 // visible nowhere until the turn's rows landed.
                 let mut action_frame: Option<SessionActionSnapshot> = None;
-                if !active_committed
+                if !emitting_prefix_rows
+                    && !active_committed
                     && matches!(
                         event,
                         EngineEvent::UserMessage(_) | EngineEvent::CustomMessage(_)
@@ -5974,16 +5981,20 @@ impl TurnRunner {
             };
             // Restored next-turn rows ride this delivery (TS
             // `prefixMessages`): emitted before the accepted prompt, the
-            // same durable-row path as in-turn custom rows.
+            // same durable-row path as in-turn custom rows. They are not
+            // the delivery's rows-land moment, so the committing flip
+            // waits for the accepted row behind them.
             let parked = {
                 let mut core = core.lock().unwrap();
                 std::mem::take(&mut core.pending_next_turn)
             };
+            emitting_prefix_rows = !parked.is_empty();
             for row in parked {
                 if !emit(EngineEvent::CustomMessage(row)) {
                     break;
                 }
             }
+            emitting_prefix_rows = false;
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
         });
         let _ = turn.await;

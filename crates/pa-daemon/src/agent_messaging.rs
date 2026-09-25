@@ -889,14 +889,23 @@ fn summaries_from_roster(
                 .get("attachedClients")
                 .and_then(Value::as_u64)
                 .unwrap_or_default() as usize;
-            // TS #2493 `classifyAgentStatus`: every roster row is a
-            // resident session, so the family status is the busy verdict
+            // TS #2493 `classifyAgentStatus`: residency is the row's LIVE
+            // `activeSessionId` — the `all: true` roster also carries
+            // passivated ledger children (the stop strips the live id and
+            // keys the durable session under `id`), which are INACTIVE
+            // family members (TS `resident: !!summary.activeSessionId`),
+            // never live quiet sessions.
+            let has_live_session = session
+                .get("activeSessionId")
+                .and_then(Value::as_str)
+                .is_some();
+            // A resident session's family status is the busy verdict
             // (`activity === "working" || isSessionActive`) split into
             // `running`/`idle` — never the mixed `inactive` a quiet row
-            // used to map to. `Inactive` stays reserved for family members
-            // with no live session, which the live-roster path never
-            // returns.
-            let status = if session.get("activity").and_then(Value::as_str) == Some("working")
+            // used to map to.
+            let status = if !has_live_session {
+                AgentFamilyStatus::Inactive
+            } else if session.get("activity").and_then(Value::as_str) == Some("working")
                 || is_session_active
             {
                 AgentFamilyStatus::Running
@@ -936,7 +945,7 @@ fn summaries_from_roster(
                 relationship,
                 runtime_kind: Some(runtime_kind),
                 status,
-                activity: Some(activity),
+                activity: has_live_session.then_some(activity),
                 is_current,
                 is_streaming,
                 is_compacting,
@@ -1592,9 +1601,19 @@ mod controller_tests {
                 "isSessionActive": false, "isRunningTools": false, "attachedClients": 0,
                 "parentActiveSessionId": "me000", "parentSessionId": "sess-me",
             }),
+            // A passivated ledger child (the stop strips the live
+            // `activeSessionId` and keys the durable session under `id`):
+            // an INACTIVE family member, never a live quiet session, and
+            // no activity axis (TS `resident: !!summary.activeSessionId`).
+            json!({
+                "id": "ch333", "sessionId": "sess-ch3", "runtimeKind": "subagent",
+                "activity": "idle", "isStreaming": false, "isCompacting": false,
+                "isSessionActive": false, "isRunningTools": false, "attachedClients": 0,
+                "parentActiveSessionId": "me000", "parentSessionId": "sess-me",
+            }),
         ];
         let summaries = summaries_from_roster(sessions, &identity, &[]);
-        assert_eq!(summaries.len(), 4, "{summaries:?}");
+        assert_eq!(summaries.len(), 5, "{summaries:?}");
         let row = |id: &str| {
             summaries
                 .iter()
@@ -1612,6 +1631,14 @@ mod controller_tests {
         );
         assert_eq!(row("ch222").status, AgentFamilyStatus::Idle);
         assert_eq!(row("ch222").activity, Some(AgentObserveActivity::Idle));
+        // The passivated child: inactive, with no activity axis at all
+        // (TS marks the field absent for members with no live session).
+        let passivated = summaries
+            .iter()
+            .find(|s| s.session_id == "sess-ch3")
+            .expect("the passivated child stays an addressable family row");
+        assert_eq!(passivated.status, AgentFamilyStatus::Inactive);
+        assert_eq!(passivated.activity, None);
     }
 
     #[test]
