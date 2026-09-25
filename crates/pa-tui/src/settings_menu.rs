@@ -582,7 +582,7 @@ impl SettingsMenu {
             lines.push(crate::menu_panel::menu_row(
                 theme,
                 width,
-                vec![crate::Span::raw(row.label.clone())],
+                vec![crate::Span::raw(row.label)],
                 &[crate::menu_panel::MenuSegment::muted(&row.current)],
                 selected,
             ));
