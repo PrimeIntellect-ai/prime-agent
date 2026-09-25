@@ -346,16 +346,30 @@ impl SettingsManager {
             .unwrap_or(true)
     }
 
-    /// `agentTraces.enabled`: unset means ON. Sharing stays on until the
-    /// user opts out (`/traces`), and the value persists only then, like
-    /// the compaction default — so a fresh install never sees the opt-in
-    /// question. (TS defaults this setting off and asks on first run.)
+    /// `agentTraces.enabled`: unset means OFF — trace sharing is
+    /// opt-in, exactly the TS default. The first-run onboarding question
+    /// is the opt-in moment; `/traces` stays the change path, and the
+    /// value persists only when a choice is made.
     pub fn get_agent_traces_enabled(&self) -> bool {
         self.merged
             .agent_traces
             .as_ref()
             .and_then(|traces| traces.enabled)
-            .unwrap_or(true)
+            .unwrap_or(false)
+    }
+
+    /// Whether a trace-sharing choice was ever written: the
+    /// `agentTraces.enabled` key present in the merged settings. A
+    /// provisioned or copied-config home carries one, and the first-run
+    /// flow never asks such a home the trace question — the standing
+    /// choice stands and the flow completes silently. Only a fresh home
+    /// (no choice written) is asked, once.
+    pub fn agent_traces_choice_written(&self) -> bool {
+        self.merged
+            .agent_traces
+            .as_ref()
+            .and_then(|traces| traces.enabled)
+            .is_some()
     }
 
     pub fn set_agent_traces_enabled(&mut self, enabled: bool) -> Result<()> {
@@ -966,16 +980,35 @@ mod tests {
     }
 
     #[test]
-    fn agent_traces_default_on_and_persist_the_opt_out() {
-        // Unset means ON: the default is the configuration, so nothing
-        // is written for a fresh home. An explicit opt-out writes the
+    fn agent_traces_default_off_and_persist_the_opt_in() {
+        // Unset means OFF (sharing is opt-in): the first-run onboarding
+        // question is the opt-in moment, and the answer writes the
         // global scope and survives a reload.
         let mut manager = SettingsManager::in_memory(Settings::default());
+        assert!(!manager.get_agent_traces_enabled());
+        manager.set_agent_traces_enabled(true).unwrap();
+        assert!(manager.get_agent_traces_enabled());
+        manager.reload().unwrap();
         assert!(manager.get_agent_traces_enabled());
         manager.set_agent_traces_enabled(false).unwrap();
         assert!(!manager.get_agent_traces_enabled());
+    }
+
+    #[test]
+    fn agent_traces_choice_written_marks_a_provisioned_home() {
+        // The choice-written predicate separates a fresh home (nothing
+        // written — the flow asks the question once) from a provisioned or
+        // copied-config home (any standing choice — the flow completes
+        // silently). Both answer values count: the predicate is about the
+        // choice being made, not its direction.
+        let mut manager = SettingsManager::in_memory(Settings::default());
+        assert!(!manager.agent_traces_choice_written());
+        manager.set_agent_traces_enabled(false).unwrap();
+        assert!(manager.agent_traces_choice_written());
         manager.reload().unwrap();
-        assert!(!manager.get_agent_traces_enabled());
+        assert!(manager.agent_traces_choice_written());
+        manager.set_agent_traces_enabled(true).unwrap();
+        assert!(manager.agent_traces_choice_written());
     }
 
     #[test]
