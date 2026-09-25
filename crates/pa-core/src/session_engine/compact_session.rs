@@ -1768,6 +1768,16 @@ mod tests {
     #[tokio::test]
     async fn rebuilt_live_context_prevents_repeat_auto_compaction_until_new_usage() {
         let registration = faux_registration();
+        registration.set_responses(vec![
+            pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+                "## Goal\nsummarized goal",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            )),
+            pa_ai::faux::FauxResponseStep::Message(pa_ai::faux::faux_assistant_text_message(
+                "## Turn Context\nsummarized prefix",
+                pa_ai::faux::FauxAssistantMessageOptions::default(),
+            )),
+        ]);
         let model = registration.get_model();
         let tmp = tempfile::tempdir().unwrap();
         let mut session = session_with_turns(tmp.path(), 3);
