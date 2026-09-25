@@ -860,13 +860,13 @@ impl Supervisor {
             // failed connect degrades to the dead-worker finalize below.
             resident.intentional_stop.store(true, Ordering::SeqCst);
             if self
-                .connect_worker(&resident, worker_connect_deadline())
+                .connect_worker(resident, worker_connect_deadline())
                 .await
                 .is_ok()
             {
                 let command = if kill_stop { "kill" } else { "shutdown" };
                 let _ = self
-                    .route_command(&resident, command, json!({}), ROUTE_TIMEOUT_MS)
+                    .route_command(resident, command, json!({}), ROUTE_TIMEOUT_MS)
                     .await;
             }
         }
@@ -875,7 +875,7 @@ impl Supervisor {
         if kill_stop {
             // The descriptor survives an unsettled finalize (a later boot
             // retries the archived-state belt); a settled stop deletes it.
-            let settled = self.finalize_worker_stop(&resident, None).await;
+            let settled = self.finalize_worker_stop(resident, None).await;
             if settled {
                 let _ = std::fs::remove_file(&resident.descriptor_path);
                 self.log_line(&format!(
@@ -900,9 +900,9 @@ impl Supervisor {
             // resident RLM child's preserved jobs must survive a parent's
             // stop-driven death.
             if resident.descriptor.lock().await.owner_client_id.is_some() {
-                self.finalize_owned_stop(&resident).await;
+                self.finalize_owned_stop(resident).await;
             }
-            self.retire_worker_after_stop(&resident).await;
+            self.retire_worker_after_stop(resident).await;
             self.log_line(&format!(
                 "finished the tombstoned per-session stop of session worker {}",
                 resident.worker_id
