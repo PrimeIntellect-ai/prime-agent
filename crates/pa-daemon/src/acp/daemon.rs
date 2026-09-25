@@ -329,9 +329,7 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
                             }
                             if matches!(
                                 event.get("type").and_then(Value::as_str),
-                                Some("agent_end")
-                                    | Some("auto_retry_start")
-                                    | Some("auto_retry_end")
+                                Some("agent_end" | "auto_retry_start" | "auto_retry_end")
                             ) {
                                 refresh = Some((
                                     Arc::clone(&current.config),

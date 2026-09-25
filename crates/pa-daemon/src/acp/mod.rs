@@ -721,8 +721,10 @@ async fn apply_in_process_model_switch(
     // TS `session.setModel` persists the default provider/model so the
     // next session starts on the switched model.
     {
-        let mut settings =
-            pa_core::settings::SettingsManager::create(mode.actual_cwd.as_path(), &mode.agent_dir);
+        let mut settings = pa_core::settings::SettingsManager::create(
+            mode.actual_cwd.as_path(),
+            mode.agent_dir.as_path(),
+        );
         let _ = settings.set_default_model_and_provider(model.provider.clone(), model.id.clone());
     }
     // The thinking level follows the switch (TS
@@ -734,8 +736,10 @@ async fn apply_in_process_model_switch(
     let requested = if previous.as_ref().is_some_and(|model| model.reasoning) {
         pa_core::session_engine::provider_adapter::model_thinking_level(current_level)
     } else {
-        let settings =
-            pa_core::settings::SettingsManager::create(mode.actual_cwd.as_path(), &mode.agent_dir);
+        let settings = pa_core::settings::SettingsManager::create(
+            mode.actual_cwd.as_path(),
+            mode.agent_dir.as_path(),
+        );
         settings
             .get_default_thinking_level()
             .map(pa_core::settings::ThinkingLevelSetting::model_level)
@@ -786,8 +790,10 @@ async fn apply_level_change(
             ConfigOptionError::Internal(format!("thinking level switch failed: {error:#}"))
         })?;
     if reasoning || level != pa_types::ai::ModelThinkingLevel::Off {
-        let mut settings =
-            pa_core::settings::SettingsManager::create(mode.actual_cwd.as_path(), &mode.agent_dir);
+        let mut settings = pa_core::settings::SettingsManager::create(
+            mode.actual_cwd.as_path(),
+            mode.agent_dir.as_path(),
+        );
         let _ = settings.set_default_thinking_level(
             pa_core::settings::ThinkingLevelSetting::from_model_level(level),
         );

@@ -283,7 +283,7 @@ mod tests {
             model("other", "m2", "M Two", false),
         ];
         let options = session_config_options(
-            Some(&current),
+            Some(current.clone()),
             "medium",
             &levels(&["off", "medium", "high"]),
             &models,
