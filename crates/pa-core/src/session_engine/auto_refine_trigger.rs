@@ -204,9 +204,19 @@ impl AgentSession {
             }
         };
         let outcome = if let Some(review) = retained_review.as_ref() {
-            self.run_approved_refine(review, model, api_key, global_harness_dir)
-                .await
-                .map(AutoRefineRound::Ran)
+            // The branch fence the fresh arm applies between the review
+            // and the apply: a branch move (or a replacement teardown's
+            // discard) since the retained round's start dropped this
+            // review — the refinement never starts (TS drops the pending
+            // review on the branch change, so its apply never runs on
+            // the moved-to session).
+            if !self.compact_auto_refine_branch_version_unchanged(branch_version) {
+                Ok(AutoRefineRound::Declined)
+            } else {
+                self.run_approved_refine(review, model, api_key, global_harness_dir)
+                    .await
+                    .map(AutoRefineRound::Ran)
+            }
         } else {
             // TS `_maybeAutoRefine`'s interactive compact arm: the review,
             // then the post-review active-agent gate
