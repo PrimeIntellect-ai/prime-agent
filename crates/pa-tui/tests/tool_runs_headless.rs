@@ -409,6 +409,10 @@ fn alt_t() -> KeyEvent {
     KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT)
 }
 
+fn ctrl_o() -> KeyEvent {
+    KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL)
+}
+
 fn enter() -> KeyEvent {
     KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
 }
@@ -442,7 +446,14 @@ fn run_plan(steps: Vec<HeadlessStep>) -> Vec<String> {
 
 #[test]
 fn replayed_runs_condense_with_the_received_message_in_place() {
-    let frames = run_plan(vec![HeadlessStep::WaitIdle { timeout_ms: 30_000 }]);
+    // The condensed blocks render at the collapsed overview level; a
+    // chat starts at the middle details level, so the plan cycles down
+    // (details -> all -> overview) before asserting the transcript.
+    let frames = run_plan(vec![
+        HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        HeadlessStep::Key(ctrl_o()),
+        HeadlessStep::Key(ctrl_o()),
+    ]);
     let all = frames.join("\n");
     // The five-card group after the received message condenses; the
     // three-card group before it stays card-for-card.
@@ -514,8 +525,12 @@ fn the_drill_in_opens_expands_and_walks_back_out() {
 
 #[test]
 fn live_runs_condense_and_short_runs_do_not() {
+    // Cycle the transcript to the collapsed overview level first: the
+    // condensed blocks render there, and the live turns stream onto it.
     let frames = run_plan(vec![
         HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        HeadlessStep::Key(ctrl_o()),
+        HeadlessStep::Key(ctrl_o()),
         HeadlessStep::Submit("live one".to_string()),
         HeadlessStep::WaitIdle { timeout_ms: 30_000 },
         HeadlessStep::Submit("keep it short".to_string()),
@@ -552,6 +567,10 @@ fn the_runs_pane_reconciles_across_a_live_turn() {
     // the key path walks the reconciled state out clean.
     let frames = run_plan(vec![
         HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        // The condensed block behind the pane renders at the collapsed
+        // overview level; cycle down from the startup details level.
+        HeadlessStep::Key(ctrl_o()),
+        HeadlessStep::Key(ctrl_o()),
         HeadlessStep::Key(alt_t()),
         HeadlessStep::Key(enter()),
         HeadlessStep::Submit("live one".to_string()),
