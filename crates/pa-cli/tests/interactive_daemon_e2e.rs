@@ -2082,7 +2082,7 @@ async fn tui_renders_and_fires_user_keybindings_from_settings() {
         rendered.contains("Expanded mode (Ctrl+Alt+X to collapse)"),
         "the override key cycled conversation detail:\n{rendered}"
     );
-    // The default key no longer fires the action: the cycle never wrapped
+    // The default key leaves the detail unchanged: the cycle never wraps
     // back to the collapsed overview mode.
     assert!(
         !rendered.contains("Collapsed mode (Ctrl+Alt+X to expand)"),

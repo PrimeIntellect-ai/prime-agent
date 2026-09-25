@@ -5533,10 +5533,7 @@ impl TurnRunner {
                 // turn's first row commits it (the prompt becomes visible
                 // in the conversation exactly then, the boundary TS's
                 // strip drops its "Starting" row at: the commit fence),
-                // the first assistant frame runs it. Before, both flips
-                // fired before the engine loop ran, so the `preparing`
-                // projection spanned nothing and the picked-up prompt was
-                // visible nowhere until the turn's rows landed.
+                // the first assistant frame runs it.
                 let mut action_frame: Option<SessionActionSnapshot> = None;
                 if !emitting_prefix_rows.get()
                     && !active_committed

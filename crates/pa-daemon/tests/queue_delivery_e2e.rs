@@ -741,10 +741,7 @@ fn multi_item_queue_delivers_every_item_in_lane_order() {
 /// turn's first row (the prompt becomes visible in the conversation, the
 /// boundary TS drops the Starting row at: the commit fence), `running`
 /// at the turn's first assistant frame — and the settle's projection
-/// carries no active action. Before, the committing/running flips fired
-/// before the engine loop ran, so `preparing` spanned nothing and the
-/// picked-up prompt was visible nowhere from its lane dropping until the
-/// turn's rows landed.
+/// carries no active action.
 #[test]
 fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
     let (_dir, mock, _supervisor, mut client, session_id) = setup("active-action-phases");
@@ -763,12 +760,17 @@ fn queue_delivery_projects_the_active_action_phases_around_the_turn() {
     wait_for_projection(&mut client, &[], &["follow C"], "parked lane");
     // Release: the busy turn settles and the follow-up's turn runs.
     mock.release_busy_turn();
-    let deadline = Instant::now() + Duration::from_mins(1);
-    while Instant::now() < deadline {
-        if mock.count() >= 2 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(200));
+    // Readiness wait for the follow-up's turn to reach the mock (the
+    // second request): the drain window is the poll interval, so the
+    // wait observes the request rather than sleeping blind.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while mock.count() < 2 {
+        client.drain_events(Duration::from_millis(200));
+        assert!(
+            Instant::now() < deadline,
+            "the follow-up's turn never reached the mock; requests: {:?}",
+            mock.request_log()
+        );
     }
     client.drain_events(Duration::from_secs(2));
     assert_eq!(

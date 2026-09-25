@@ -901,8 +901,8 @@ fn summaries_from_roster(
                 .is_some();
             // A resident session's family status is the busy verdict
             // (`activity === "working" || isSessionActive`) split into
-            // `running`/`idle` — never the mixed `inactive` a quiet row
-            // used to map to.
+            // `running`/`idle`; `inactive` names only rows with no
+            // resident session.
             let status = if !has_live_session {
                 AgentFamilyStatus::Inactive
             } else if session.get("activity").and_then(Value::as_str) == Some("working")
