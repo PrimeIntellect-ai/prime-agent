@@ -100,10 +100,9 @@ impl CodexTextVerbosity {
 /// ("on"/"off"/null); map them through the shared enum.
 fn reasoning_summary_value(summary: Option<ReasoningSummary>) -> &'static str {
     match summary {
-        Some(ReasoningSummary::Auto) => "auto",
+        Some(ReasoningSummary::Auto) | None => "auto",
         Some(ReasoningSummary::Detailed) => "detailed",
         Some(ReasoningSummary::Concise) => "concise",
-        None => "auto",
     }
 }
 
@@ -193,8 +192,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -258,8 +256,7 @@ async fn run_stream(
                         .base
                         .signal
                         .as_ref()
-                        .map(tokio_util::sync::CancellationToken::is_cancelled)
-                        .unwrap_or(false)
+                        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
                     {
                         return Err(ProviderError::Aborted);
                     }
@@ -270,8 +267,7 @@ async fn run_stream(
                         .base
                         .signal
                         .as_ref()
-                        .map(tokio_util::sync::CancellationToken::is_cancelled)
-                        .unwrap_or(false);
+                        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled);
                     // Only reset the chain while nothing was streamed yet:
                     // after the first event the retry would duplicate
                     // "start"/content events.
@@ -318,8 +314,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -364,8 +359,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -474,8 +468,7 @@ async fn run_websocket_attempt(
                 .base
                 .signal
                 .as_ref()
-                .map(tokio_util::sync::CancellationToken::is_cancelled)
-                .unwrap_or(false)
+                .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
             {
                 keep_connection = false;
             } else if use_cached_context && connection.cached && !output.response_id.is_none() {
@@ -719,32 +712,31 @@ pub fn stream_simple_openai_codex_responses(
         .and_then(|options| options.base.api_key.clone())
         .filter(|key| !key.is_empty())
         .or_else(|| get_env_api_key(&model.provider));
-    let api_key = match api_key {
-        Some(api_key) => api_key,
-        None => {
-            let (writer, reader) = create_assistant_message_event_stream();
-            let message = AssistantMessage {
-                content: Vec::new(),
-                api: model.api.clone(),
-                provider: model.provider.clone(),
-                model: model.id.clone(),
-                response_model: None,
-                response_id: None,
-                diagnostics: None,
-                usage: Usage::default(),
-                stop_reason: StopReason::Error,
-                stop_reason_raw: None,
-                error_message: Some(format!("No API key for provider: {}", model.provider)),
-                timestamp: now_ms(),
-                rest: Default::default(),
-            };
-            writer.push(AssistantMessageEvent::Error {
-                reason: crate::types::ErrorStopReason::Error,
-                error: message.clone(),
-            });
-            writer.end(Some(message));
-            return reader;
-        }
+    let api_key = if let Some(api_key) = api_key {
+        api_key
+    } else {
+        let (writer, reader) = create_assistant_message_event_stream();
+        let message = AssistantMessage {
+            content: Vec::new(),
+            api: model.api.clone(),
+            provider: model.provider.clone(),
+            model: model.id.clone(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: Usage::default(),
+            stop_reason: StopReason::Error,
+            stop_reason_raw: None,
+            error_message: Some(format!("No API key for provider: {}", model.provider)),
+            timestamp: now_ms(),
+            rest: Default::default(),
+        };
+        writer.push(AssistantMessageEvent::Error {
+            reason: crate::types::ErrorStopReason::Error,
+            error: message.clone(),
+        });
+        writer.end(Some(message));
+        return reader;
     };
 
     let base = build_base_options(model, options, Some(&api_key));

@@ -247,9 +247,7 @@ impl SessionManager {
         let id = base.id.clone().unwrap_or_default();
         let appended = self.append_entry(FileEntry::BranchSummary {
             payload: pa_types::session::BranchSummaryEntry {
-                from_id: branch_from_id
-                    .map(str::to_string)
-                    .unwrap_or_else(|| "root".to_string()),
+                from_id: branch_from_id.map_or_else(|| "root".to_string(), str::to_string),
                 summary: summary.to_string(),
                 details,
                 from_hook,

@@ -280,11 +280,10 @@ fn run_nested_agent_command(
         let suggestion = find_command_suggestion(subcommand, &children);
         return fail(
             format!("Unknown {parent} command: {subcommand}"),
-            Some(
-                suggestion
-                    .map(|s| format!("Did you mean \"{APP_NAME} {parent} {s}\"?"))
-                    .unwrap_or_else(|| format!("Run \"{APP_NAME} help {parent}\" for usage.")),
-            ),
+            Some(suggestion.map_or_else(
+                || format!("Run \"{APP_NAME} help {parent}\" for usage."),
+                |s| format!("Did you mean \"{APP_NAME} {parent} {s}\"?"),
+            )),
         );
     }
     if parent == "schedule" && !validate_schedule_args(args) {
@@ -534,11 +533,10 @@ fn run_package(args: &[String]) -> PublicCommandResult {
         let suggestion = find_command_suggestion(subcommand, &children);
         return fail(
             format!("Unknown package command: {subcommand}"),
-            Some(
-                suggestion
-                    .map(|s| format!("Did you mean \"{APP_NAME} package {s}\"?"))
-                    .unwrap_or_else(|| "Run \"prime-agent help package\" for usage.".to_string()),
-            ),
+            Some(suggestion.map_or_else(
+                || "Run \"prime-agent help package\" for usage.".to_string(),
+                |s| format!("Did you mean \"{APP_NAME} package {s}\"?"),
+            )),
         );
     }
     let rest = &args[1..];
@@ -806,13 +804,10 @@ fn rewrite_nested_command(
                 let suggestion = find_command_suggestion(candidate, &[subcommand]);
                 fail(
                     format!("Unknown {parent} command: {candidate}"),
-                    Some(
-                        suggestion
-                            .map(|s| format!("Did you mean \"{APP_NAME} {parent} {s}\"?"))
-                            .unwrap_or_else(|| {
-                                format!("Run \"{APP_NAME} help {parent}\" for usage.")
-                            }),
-                    ),
+                    Some(suggestion.map_or_else(
+                        || format!("Run \"{APP_NAME} help {parent}\" for usage."),
+                        |s| format!("Did you mean \"{APP_NAME} {parent} {s}\"?"),
+                    )),
                 )
             }
             None => fail(
@@ -821,9 +816,10 @@ fn rewrite_nested_command(
             ),
         };
     }
-    let usage = get_command_spec(&[parent, subcommand])
-        .map(|spec| format!("{APP_NAME} {}", spec.usage))
-        .unwrap_or_else(|| format!("{APP_NAME} {parent} {subcommand}"));
+    let usage = get_command_spec(&[parent, subcommand]).map_or_else(
+        || format!("{APP_NAME} {parent} {subcommand}"),
+        |spec| format!("{APP_NAME} {}", spec.usage),
+    );
     let Some((operands, options)) = split_operands_and_options(&args[1..]) else {
         return fail(format!("Usage: {usage}"), None);
     };
@@ -880,9 +876,7 @@ fn require_operand_count(
             fail(
                 format!(
                     "Usage: {APP_NAME} {}",
-                    get_command_spec(&[command])
-                        .map(|s| s.usage)
-                        .unwrap_or(command)
+                    get_command_spec(&[command]).map_or(command, |s| s.usage)
                 ),
                 None,
             );
@@ -897,9 +891,7 @@ fn require_operand_count(
     fail(
         format!(
             "Usage: {APP_NAME} {}",
-            get_command_spec(&[command])
-                .map(|s| s.usage)
-                .unwrap_or(command)
+            get_command_spec(&[command]).map_or(command, |s| s.usage)
         ),
         None,
     );

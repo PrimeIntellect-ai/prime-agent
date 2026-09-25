@@ -421,7 +421,7 @@ impl<W: Write> Write for HyperlinkWriter<W> {
                         .and_then(|p| p.parse::<u16>().ok());
                     match (row, col) {
                         (Some(row), Some(col)) => {
-                            self.pos = Some((row.saturating_sub(1), col.saturating_sub(1)))
+                            self.pos = Some((row.saturating_sub(1), col.saturating_sub(1)));
                         }
                         _ => self.pos = None,
                     }

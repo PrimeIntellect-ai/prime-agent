@@ -102,8 +102,7 @@ fn pipe_to(program: &str, args: &[&str], text: &str) -> bool {
     let wrote = child
         .stdin
         .take()
-        .map(|mut stdin| stdin.write_all(text.as_bytes()).is_ok())
-        .unwrap_or(false);
+        .is_some_and(|mut stdin| stdin.write_all(text.as_bytes()).is_ok());
     match child.wait() {
         Ok(status) => status.success() && wrote,
         Err(_) => false,
@@ -125,8 +124,7 @@ fn copy_on_linux(text: &str, env: &Env) -> bool {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
+            .is_ok_and(|status| status.success());
         if wl_copy_exists && pipe_to("wl-copy", &[], text) {
             return true;
         }

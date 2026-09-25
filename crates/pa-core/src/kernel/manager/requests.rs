@@ -254,15 +254,15 @@ impl ReplKernelManager {
                         Err(_) => Err(anyhow!("Kernel has been shut down")),
                     };
                     let early_settle = matches!(&settled, Ok(result) if result.result.status == ExecuteStatus::Aborted);
-                    if !early_settle {
+                    if early_settle {
+                        settled_result = Some(settled);
+                    } else {
                         // Surfacing a failed write outranks the settled cell.
                         if let Err(error) = (&mut send_task).await.unwrap_or_else(|e| Err(anyhow!("{e}"))) {
                             settled_result = Some(Err(error));
                         } else {
                             settled_result = Some(settled);
                         }
-                    } else {
-                        settled_result = Some(settled);
                     }
                     Ok(())
                 }

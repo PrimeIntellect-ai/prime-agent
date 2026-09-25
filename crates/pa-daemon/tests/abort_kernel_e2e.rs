@@ -19,11 +19,10 @@ use serde_json::{json, Value};
 /// ships the runtime sidecar. Skipped (with a note) on machines without a
 /// live install.
 fn kernel_python() -> Option<PathBuf> {
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -32,11 +31,10 @@ fn kernel_python() -> Option<PathBuf> {
 }
 
 fn release_dir() -> Option<PathBuf> {
-    let releases = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.local/share/prime-agent/releases"))
-            .unwrap_or_else(|_| "/home/ubuntu/.local/share/prime-agent/releases".to_string()),
-    );
+    let releases = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.local/share/prime-agent/releases".to_string(),
+        |home| format!("{home}/.local/share/prime-agent/releases"),
+    ));
     let Ok(entries) = std::fs::read_dir(&releases) else {
         eprintln!("no releases dir at {releases:?}; skipping live kernel test");
         return None;
@@ -163,7 +161,7 @@ impl Client {
             let mut line = String::new();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(

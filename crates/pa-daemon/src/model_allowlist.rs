@@ -37,33 +37,31 @@ pub(crate) fn load(cwd: &Path, agent_dir: &Path) -> DaemonAllowlist {
     {
         return DaemonAllowlist::Unreadable(error.message.clone());
     }
-    match settings.get_allowed_models() {
-        Some(patterns) => DaemonAllowlist::Allowed(patterns),
-        None => {
-            // A PRESENT-but-malformed `allowedModels` (the lenient load
-            // drops wrong-typed known fields to unset) fails closed: the
-            // restriction was requested, so an unreadable shape is never an
-            // unrestricted gate. Explicit `null` stays unset (TS parity).
-            // A syntactically valid NON-OBJECT root (`[]`, `"bad"`) is a
-            // corrupted document too: the guard fails closed rather than
-            // reading a policy out of a shapeless document.
-            let unreadable = settings.global_raw().and_then(|raw| {
-                if !raw.is_object() {
-                    return Some("the global settings document is not a JSON object".to_string());
-                }
-                let malformed = match raw.get("allowedModels") {
-                    None | Some(serde_json::Value::Null) => false,
-                    Some(value) => value
-                        .as_array()
-                        .is_none_or(|items| items.iter().any(|item| item.as_str().is_none())),
-                };
-                malformed
-                    .then(|| "allowedModels is present but is not an array of strings".to_string())
-            });
-            match unreadable {
-                Some(message) => DaemonAllowlist::Unreadable(message),
-                None => DaemonAllowlist::Unrestricted,
+    if let Some(patterns) = settings.get_allowed_models() {
+        DaemonAllowlist::Allowed(patterns)
+    } else {
+        // A PRESENT-but-malformed `allowedModels` (the lenient load
+        // drops wrong-typed known fields to unset) fails closed: the
+        // restriction was requested, so an unreadable shape is never an
+        // unrestricted gate. Explicit `null` stays unset (TS parity).
+        // A syntactically valid NON-OBJECT root (`[]`, `"bad"`) is a
+        // corrupted document too: the guard fails closed rather than
+        // reading a policy out of a shapeless document.
+        let unreadable = settings.global_raw().and_then(|raw| {
+            if !raw.is_object() {
+                return Some("the global settings document is not a JSON object".to_string());
             }
+            let malformed = match raw.get("allowedModels") {
+                None | Some(serde_json::Value::Null) => false,
+                Some(value) => value
+                    .as_array()
+                    .is_none_or(|items| items.iter().any(|item| item.as_str().is_none())),
+            };
+            malformed.then(|| "allowedModels is present but is not an array of strings".to_string())
+        });
+        match unreadable {
+            Some(message) => DaemonAllowlist::Unreadable(message),
+            None => DaemonAllowlist::Unrestricted,
         }
     }
 }

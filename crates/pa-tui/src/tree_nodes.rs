@@ -68,6 +68,22 @@ impl TreeNode {
 /// parent is missing) become roots; sibling order is by timestamp, oldest
 /// first (the TS `getTree` ordering).
 pub fn build_tree(flat: Vec<TreeNodeData>) -> Vec<TreeNode> {
+    fn build(
+        slots: &mut Vec<Option<TreeNode>>,
+        indices: &[usize],
+        child_indices: &[Vec<usize>],
+    ) -> Vec<TreeNode> {
+        indices
+            .iter()
+            .map(|index| {
+                let mut node = slots[*index].take().expect("node present");
+                node.children = build(slots, &child_indices[*index], child_indices);
+                node.children
+                    .sort_by(|a, b| a.timestamp().cmp(b.timestamp()));
+                node
+            })
+            .collect()
+    }
     let by_id: HashMap<String, usize> = flat
         .iter()
         .enumerate()
@@ -111,22 +127,6 @@ pub fn build_tree(flat: Vec<TreeNodeData>) -> Vec<TreeNode> {
                 == index
         })
         .collect();
-    fn build(
-        slots: &mut Vec<Option<TreeNode>>,
-        indices: &[usize],
-        child_indices: &[Vec<usize>],
-    ) -> Vec<TreeNode> {
-        indices
-            .iter()
-            .map(|index| {
-                let mut node = slots[*index].take().expect("node present");
-                node.children = build(slots, &child_indices[*index], child_indices);
-                node.children
-                    .sort_by(|a, b| a.timestamp().cmp(b.timestamp()));
-                node
-            })
-            .collect()
-    }
     build(&mut slots, &roots, &child_indices)
 }
 

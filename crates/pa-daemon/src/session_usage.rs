@@ -80,12 +80,11 @@ impl AssistantUsageById {
     }
 
     fn set(&mut self, id: &str, usage: Usage) {
-        match self.index.get(id) {
-            Some(at) => self.entries[*at].1 = usage,
-            None => {
-                self.index.insert(id.to_string(), self.entries.len());
-                self.entries.push((id.to_string(), usage));
-            }
+        if let Some(at) = self.index.get(id) {
+            self.entries[*at].1 = usage;
+        } else {
+            self.index.insert(id.to_string(), self.entries.len());
+            self.entries.push((id.to_string(), usage));
         }
     }
 }

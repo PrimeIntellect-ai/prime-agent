@@ -116,8 +116,7 @@ fn spawn_error(program: &str, error: &std::io::Error) -> String {
 
 fn signal_name(status: std::process::ExitStatus) -> String {
     crate::platform::process::termination_signal(&status)
-        .map(|signal| signal.to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+        .map_or_else(|| "unknown".to_string(), |signal| signal.to_string())
 }
 
 #[cfg(test)]
