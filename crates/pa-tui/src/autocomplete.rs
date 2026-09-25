@@ -495,7 +495,7 @@ impl PathCompletionProvider {
         // browse must not surface the cwd's dotfiles as completion
         // candidates (the operator's 2026-09-25 directive: the menu's
         // "useless stuff" starting with a `.claude` directory).
-        let anchor = raw_prefix.rsplit('/').next().unwrap_or(raw_prefix);
+        let anchor = raw_prefix.rsplit('/').next().unwrap_or_default();
         let dot_anchor = anchor.starts_with('.') && anchor != "." && anchor != "..";
         let Ok(entries) = std::fs::read_dir(&search_dir) else {
             return Vec::new();
