@@ -173,6 +173,11 @@ impl ModelCatalog {
     /// before this process's first request is still detected), and is
     /// never trusted over live auth afterwards. Consuming observation:
     /// every call records the current scope as the next comparison base.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the scope-observation mutex is poisoned (another thread
+    /// panicked while holding the lock).
     pub fn credentials_changed(&self, credentials: Option<&PrimeCredentials>) -> bool {
         let current = credentials
             .map(|credentials| self.prime_inference.scope_for(&credentials.as_inference()));
