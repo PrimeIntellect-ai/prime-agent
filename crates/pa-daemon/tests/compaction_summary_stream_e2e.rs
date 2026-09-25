@@ -46,7 +46,7 @@ impl Drop for Supervisor {
 /// reply; the compaction summarizer request streams the scripted summary
 /// in multiple content chunks (the live delta source). The per-request
 /// usage list makes the second turn's usage cross the compaction
-/// threshold (the f14-auto battery shape: 126_010 tokens against a
+/// threshold (the f14-auto battery shape: `126_010` tokens against a
 /// 500-token headroom).
 struct CompactionMock {
     requests: Arc<Mutex<Vec<Value>>>,
