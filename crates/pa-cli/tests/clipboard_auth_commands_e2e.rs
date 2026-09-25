@@ -700,6 +700,133 @@ async fn tui_copy_emits_the_ts_osc52_sequence() {
     );
 }
 
+/// Three consecutive `/copy` commands COALESCE into one toast (the count
+/// bump `(x3)`): every copy still registers (three OSC 52 emissions), but
+/// the frames never stack duplicate toast rows and no frame shows the
+/// label more than once — the toast is the compact ephemeral overlay, and
+/// once its TTL passes the acknowledgment is gone from the settled frame
+/// (never a durable transcript row).
+#[tokio::test]
+async fn tui_copy_toast_coalesces_consecutive_copies_and_auto_dismisses() {
+    use base64::Engine;
+    // No platform clipboard tools in the verifier: the copy chain falls to
+    // OSC 52 (the TS fallback when no tool copied).
+    for var in [
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "SSH_CONNECTION",
+        "SSH_CLIENT",
+        "MOSH_CONNECTION",
+    ] {
+        std::env::remove_var(var);
+    }
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+    let script = serde_json::json!({ "engine": "faux", "responses": [
+        { "text": "hello from scripted" },
+    ] });
+    let script_path = dir.path().join("script.json");
+    std::fs::write(&script_path, script.to_string()).expect("write script");
+    let session_id = create_session_via_daemon(
+        &supervisor.socket,
+        &script_path,
+        &script,
+        dir.path(),
+        &session_dir,
+    )
+    .await;
+    let options = command_options(
+        &supervisor.socket,
+        dir.path(),
+        &session_dir,
+        &script_path,
+        &session_id,
+        None,
+        None,
+        None,
+    );
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitMs(400),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+            // Three consecutive copies inside the toast's TTL.
+            pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
+            pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
+            pa_tui::interactive::HeadlessStep::Submit("/copy".to_string()),
+            // The coalesced count-bump toast renders (observed, not
+            // slept-for): the third copy's ack is the (x3) label.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Copied last agent message to clipboard (x3)".to_string(),
+                timeout_ms: 10_000,
+            },
+            // Past the toast's TTL: the overlay dismisses (the newest
+            // frame stops carrying the ack).
+            pa_tui::interactive::HeadlessStep::WaitGone {
+                needle: "Copied last agent message to clipboard".to_string(),
+                timeout_ms: 10_000,
+            },
+        ],
+        width: 120,
+        height: 36,
+    };
+    let outcome =
+        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
+            .await
+            .expect("interactive run");
+
+    // Verification seam: dump the captured frames for manual frame-diffing
+    // against the TS product (PA_TUI_DUMP_FRAMES=<dir>).
+    if let Ok(dir) = std::env::var("PA_TUI_DUMP_FRAMES") {
+        for (index, frame) in outcome.frames.iter().enumerate() {
+            let _ = std::fs::write(
+                std::path::Path::new(&dir).join(format!("frame-{index:03}.txt")),
+                frame,
+            );
+        }
+    }
+    let label = "Copied last agent message to clipboard";
+    // Every copy registered: the headless OSC 52 sink is one buffer for
+    // the whole run, so the exact TS sequence appears three times
+    // concatenated - one emission per copy.
+    let encoded = base64::engine::general_purpose::STANDARD.encode("hello from scripted");
+    let emission = format!("\x1b]52;c;{encoded}\x07");
+    let joined = outcome.clipboard_emissions.join("");
+    assert_eq!(
+        joined,
+        emission.repeat(3),
+        "every copy ran the OSC 52 chain"
+    );
+    // The coalesced toast acknowledges the count: three consecutive copies
+    // read as one "(x3)" toast, never stacked duplicate rows (the plan's
+    // WaitRender observed the label land; the run's frames confirm).
+    let coalesced_label = format!("{label} (x3)");
+    assert!(
+        outcome
+            .frames
+            .iter()
+            .any(|frame| frame.contains(&coalesced_label)),
+        "the coalesced count-bump toast renders"
+    );
+    for (index, frame) in outcome.frames.iter().enumerate() {
+        let rows = frame.lines().filter(|row| row.contains(label)).count();
+        assert!(
+            rows <= 1,
+            "frame {index} shows the copy toast at most once, got {rows}"
+        );
+    }
+    // The toast is ephemeral: past its TTL the settled frame no longer
+    // carries the acknowledgment (a durable status row would persist).
+    let last = outcome.frames.last().expect("the settled frame");
+    assert!(
+        !last.contains(label),
+        "the expired toast auto-dismisses:\n{last}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // /login Prime Inference: the inline team picker
 // ---------------------------------------------------------------------------
