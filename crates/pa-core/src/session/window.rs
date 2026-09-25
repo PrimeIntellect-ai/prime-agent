@@ -142,8 +142,9 @@ pub struct WindowStats {
     pub cost: f64,
     /// The discarded prefix's `compaction` / `branch_summary` spend (the
     /// summarizer's own bill): the full-session total reads it; the
-    /// active TS stats never do. Defaults on caches written before the
-    /// field existed.
+    /// active TS stats never do. Snapshot version 5 is the first format
+    /// that carries it: a v4 sidecar deserializes it as zero and would
+    /// undercount, so the version bump retires those caches.
     #[serde(default)]
     pub summarization_cost: f64,
 }

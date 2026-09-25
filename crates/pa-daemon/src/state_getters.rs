@@ -116,7 +116,8 @@ impl Worker {
                     let all_entries = store.entries();
                     let (own_usage, total_usage) =
                         compute_own_and_total_usage(&branch, all_entries);
-                    let own_usage_by_model = compute_own_usage_by_model(&branch, all_entries);
+                    let own_usage_by_model =
+                        compute_own_usage_by_model(&branch, all_entries, &own_usage);
                     (own_usage, total_usage, own_usage_by_model)
                 }
                 None => (empty_usage(), empty_usage(), None),
@@ -459,14 +460,20 @@ pub(crate) fn compute_own_and_total_usage(
 /// `model_change` timeline (the summarizer runs on the session's current
 /// model). Child-usage attributions subtract from the target row's model
 /// bucket exactly like [`compute_own_and_total_usage`] subtracts from
-/// `ownUsage`, so the buckets sum to the node's own usage. `None` when any
-/// usage-carrying row resolves to no model (a foreign file without
-/// `model_change` rows or model-tagged assistants): a partial breakdown
-/// would not add up to the displayed totals, so the caller omits the
-/// field and the display degrades to the plain TS totals.
+/// `ownUsage`, so the buckets sum to the node's own usage — and the sum
+/// is verified against the caller's `own_usage` before the breakdown is
+/// served. `None` when any usage-carrying row resolves to no model (a
+/// foreign file without `model_change` rows or model-tagged assistants),
+/// or when the buckets cannot reconcile: an attribution larger than its
+/// target row's bucket clamps inside that bucket while the plain fold
+/// subtracts the same amount from the combined pool, so the buckets
+/// would overstate the node. A partial breakdown would not add up to the
+/// displayed totals, so the caller omits the field and the display
+/// degrades to the plain TS totals.
 pub(crate) fn compute_own_usage_by_model(
     branch: &[&crate::session_store::SessionEntry],
     all_entries: &[crate::session_store::SessionEntry],
+    own_usage: &Value,
 ) -> Option<Vec<Value>> {
     // The buckets in first-seen order: JSON arrays keep the fold order,
     // so the display renders the model the session started on first.
@@ -571,6 +578,31 @@ pub(crate) fn compute_own_usage_by_model(
             continue;
         };
         subtract_usage(&mut buckets[at], child_usage);
+    }
+    // Reconciliation: the buckets must sum to the node's own usage. The
+    // per-bucket attribution subtraction clamps inside the target row's
+    // bucket while the plain fold subtracts from the combined pool, so
+    // an attribution larger than its target row's spend (or one whose
+    // target row carries no usage) leaves the buckets overstating the
+    // node. Omit the breakdown then — the unresolved-model contract: a
+    // breakdown that cannot add up is worse than none. Token fields
+    // compare exactly; the cost fields allow the last-ulp drift of two
+    // differently ordered float sums.
+    let mut summed = empty_usage();
+    for bucket in &buckets {
+        add_usage(&mut summed, bucket);
+    }
+    for field in ["input", "output", "cacheRead", "cacheWrite", "totalTokens"] {
+        if summed[field] != own_usage[field] {
+            return None;
+        }
+    }
+    for field in ["input", "output", "cacheRead", "cacheWrite", "total"] {
+        let summed_cost = summed["cost"][field].as_f64().unwrap_or_default();
+        let own_cost = own_usage["cost"][field].as_f64().unwrap_or_default();
+        if (summed_cost - own_cost).abs() > 1e-9 * (1.0 + summed_cost.max(own_cost)) {
+            return None;
+        }
     }
     Some(
         order
@@ -940,6 +972,129 @@ mod tests {
             buckets[1]["ownUsage"]["cost"]["total"].as_f64(),
             Some(0.7 + 0.0775)
         );
+    }
+
+    /// The buckets reconcile or the breakdown is omitted: a child
+    /// attribution whose `totalTokens` exceed its target row's bucket
+    /// (the captured-fixture shape — the child's token deltas do not
+    /// ride the row's aggregate) clamps inside that bucket, while the
+    /// plain own-usage fold subtracts the same amount from the combined
+    /// pool where the other model's spend absorbs it. The buckets would
+    /// sum past `ownUsage`, so `ownUsageByModel` is omitted and the
+    /// display degrades to the plain totals instead of overstating the
+    /// node (the Macroscope attribution-clamp round).
+    #[tokio::test]
+    async fn get_context_tree_omits_the_breakdown_when_an_attribution_exceeds_its_bucket() {
+        let root = std::env::temp_dir().join(format!("pa-worker-bmx-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let session_file = root.join("clamped.jsonl");
+        let usage = |input: u64, output: u64, total: u64| {
+            json!({
+                "input": input, "output": output, "cacheRead": 0, "cacheWrite": 0,
+                "totalTokens": total,
+                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
+            })
+        };
+        let lines = [
+            json!({"type": "session", "version": 3, "id": "clamped-0001", "timestamp": "2026-09-25T00:00:00.000Z", "cwd": "/tmp"}),
+            json!({"type": "model_change", "id": "m0", "parentId": null, "timestamp": "2026-09-25T00:00:00.100Z", "provider": "openai", "modelId": "gpt-5.6-sol"}),
+            json!({"type": "message", "id": "e1", "parentId": "m0", "timestamp": "2026-09-25T00:00:01.000Z", "message": {"role": "user", "content": "audit the mix"}}),
+            json!({"type": "message", "id": "e2", "parentId": "e1", "timestamp": "2026-09-25T00:00:02.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "on it"}], "provider": "openai", "model": "gpt-5.6-sol", "stopReason": "stop", "usage": usage(1_000, 100, 1_100)}}),
+            json!({"type": "model_change", "id": "m1", "parentId": "e2", "timestamp": "2026-09-25T00:00:03.000Z", "provider": "anthropic", "modelId": "claude-opus-4-6"}),
+            json!({"type": "message", "id": "e3", "parentId": "m1", "timestamp": "2026-09-25T00:00:04.000Z", "message": {"role": "user", "content": "big opus turn"}}),
+            json!({"type": "message", "id": "e4", "parentId": "e3", "timestamp": "2026-09-25T00:00:05.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}], "provider": "anthropic", "model": "claude-opus-4-6", "stopReason": "stop", "usage": usage(100_000, 2_000, 102_000)}}),
+            // The child's input/output ride the cumulative aggregate; the
+            // totalTokens do not (the row keeps its own 1_100).
+            json!({"type": "child_usage_attributed", "id": "a1", "parentId": "e4", "timestamp": "2026-09-25T00:00:06.000Z", "targetId": "e2",
+                "childUsage": usage(3_000, 300, 9_000),
+                "aggregateUsage": usage(4_000, 400, 1_100),
+                "origin": "spawn_task"}),
+        ];
+        let content = lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&session_file, content).unwrap();
+        let worker = created_worker_at(&root, &session_file).await;
+        let response = worker
+            .dispatch(
+                "get_context_tree",
+                &json!({ "activeSessionId": "getter-session" }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let tree = response.data.expect("data");
+        // The plain fold subtracts the 9_000 tokens from the combined
+        // pool: 1_100 + 102_000 - 9_000. The input and output fields
+        // reconcile exactly (the attribution rides the aggregate), so a
+        // mismatch here would mean the reconciliation itself drifted.
+        assert_eq!(tree["ownUsage"]["input"], json!(101_000));
+        assert_eq!(tree["ownUsage"]["output"], json!(2_100));
+        assert_eq!(tree["ownUsage"]["totalTokens"], json!(94_100));
+        // The sol bucket clamps at zero while the opus bucket keeps its
+        // 102_000: the buckets would sum to 102_000 and overstate the
+        // node's 94_100, so the breakdown is omitted.
+        assert!(
+            tree["ownUsageByModel"].is_null(),
+            "the clamped breakdown must not be served: {}",
+            tree["ownUsageByModel"]
+        );
+    }
+
+    /// The control for the omission rule: an attribution that fits its
+    /// target row's bucket reconciles (the buckets sum to `ownUsage`
+    /// exactly) and the breakdown stays served.
+    #[tokio::test]
+    async fn get_context_tree_keeps_the_breakdown_when_an_attribution_fits_its_bucket() {
+        let root = std::env::temp_dir().join(format!("pa-worker-bmf-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let session_file = root.join("fits.jsonl");
+        let usage = |input: u64, output: u64, total: u64| {
+            json!({
+                "input": input, "output": output, "cacheRead": 0, "cacheWrite": 0,
+                "totalTokens": total,
+                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0},
+            })
+        };
+        let lines = [
+            json!({"type": "session", "version": 3, "id": "fits-0001", "timestamp": "2026-09-25T00:00:00.000Z", "cwd": "/tmp"}),
+            json!({"type": "model_change", "id": "m0", "parentId": null, "timestamp": "2026-09-25T00:00:00.100Z", "provider": "openai", "modelId": "gpt-5.6-sol"}),
+            json!({"type": "message", "id": "e1", "parentId": "m0", "timestamp": "2026-09-25T00:00:01.000Z", "message": {"role": "user", "content": "audit the mix"}}),
+            json!({"type": "message", "id": "e2", "parentId": "e1", "timestamp": "2026-09-25T00:00:02.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "on it"}], "provider": "openai", "model": "gpt-5.6-sol", "stopReason": "stop", "usage": usage(1_000, 100, 1_100)}}),
+            json!({"type": "model_change", "id": "m1", "parentId": "e2", "timestamp": "2026-09-25T00:00:03.000Z", "provider": "anthropic", "modelId": "claude-opus-4-6"}),
+            json!({"type": "message", "id": "e3", "parentId": "m1", "timestamp": "2026-09-25T00:00:04.000Z", "message": {"role": "user", "content": "big opus turn"}}),
+            json!({"type": "message", "id": "e4", "parentId": "e3", "timestamp": "2026-09-25T00:00:05.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}], "provider": "anthropic", "model": "claude-opus-4-6", "stopReason": "stop", "usage": usage(100_000, 2_000, 102_000)}}),
+            json!({"type": "child_usage_attributed", "id": "a1", "parentId": "e4", "timestamp": "2026-09-25T00:00:06.000Z", "targetId": "e2",
+                "childUsage": usage(3_000, 300, 500),
+                "aggregateUsage": usage(4_000, 400, 1_100),
+                "origin": "spawn_task"}),
+        ];
+        let content = lines
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&session_file, content).unwrap();
+        let worker = created_worker_at(&root, &session_file).await;
+        let response = worker
+            .dispatch(
+                "get_context_tree",
+                &json!({ "activeSessionId": "getter-session" }),
+            )
+            .await;
+        assert!(response.success, "failed: {response:?}");
+        let tree = response.data.expect("data");
+        assert_eq!(tree["ownUsage"]["totalTokens"], json!(102_600));
+        let buckets = tree["ownUsageByModel"]
+            .as_array()
+            .expect("the fitting breakdown is served");
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0]["id"], json!("gpt-5.6-sol"));
+        assert_eq!(buckets[0]["ownUsage"]["input"], json!(1_000));
+        assert_eq!(buckets[0]["ownUsage"]["totalTokens"], json!(600));
+        assert_eq!(buckets[1]["id"], json!("claude-opus-4-6"));
+        assert_eq!(buckets[1]["ownUsage"]["totalTokens"], json!(102_000));
     }
 
     /// `get_context_tree` surfaces the persisted child sessions under the

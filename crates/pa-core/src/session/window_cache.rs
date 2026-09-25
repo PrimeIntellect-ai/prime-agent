@@ -49,9 +49,12 @@ impl Generation {
             && *self == Self::of(&std::fs::metadata(path)?))
     }
 }
-/// The snapshot format version. 4: the older-path stats fold child usage
-/// attributions (v3 sidecars carry pre-fold totals and must not serve).
-pub(super) const SNAPSHOT_VERSION: u32 = 4;
+/// The snapshot format version. 5: `WindowStats` gained
+/// `summarization_cost` (v4 sidecars deserialize it as zero and
+/// undercount the discarded prefix's summarizer bill — they must not
+/// serve). 4: the older-path stats fold child usage attributions (v3
+/// sidecars carry pre-fold totals and must not serve).
+pub(super) const SNAPSHOT_VERSION: u32 = 5;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(super) struct Snapshot {

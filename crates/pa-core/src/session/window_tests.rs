@@ -197,6 +197,40 @@ fn unleased_append_invalidates_without_certification() {
 }
 
 #[test]
+fn pre_summarization_cost_sidecar_must_not_serve() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("stale-format.jsonl");
+    std::fs::write(&path, fixture()).unwrap();
+    let cold = WindowedSessionStore::open(&path).unwrap().unwrap();
+    assert!(!cold.read_stats().cache_hit);
+    // Degrade the sidecar to the v4 shape: the version that predates
+    // `summarization_cost`. Such a snapshot deserializes the missing
+    // field as zero, so serving it would undercount the discarded
+    // prefix's summarizer bill until the file's generation changed; the
+    // version bump retires it and the store rebuilds from the file.
+    let sidecar = path.with_extension("window-cache.json");
+    let mut snapshot: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&sidecar).unwrap()).unwrap();
+    snapshot["version"] = json!(4);
+    snapshot["stats"]
+        .as_object_mut()
+        .unwrap()
+        .remove("summarization_cost");
+    std::fs::write(&sidecar, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+    super::super::window_cache::evict_live_snapshot(&path);
+    let stale = WindowedSessionStore::open(&path).unwrap().unwrap();
+    assert!(
+        !stale.read_stats().cache_hit,
+        "a v4 snapshot must not serve"
+    );
+    // The rebuilt store carries the same accounting as the cold walk.
+    assert_eq!(
+        serde_json::to_value(stale.context().messages).unwrap(),
+        serde_json::to_value(cold.context().messages).unwrap()
+    );
+}
+
+#[test]
 fn cached_accounting_preserves_subtotal_bits() {
     let stats = WindowStats {
         cost: f64::from_bits(0x4077_f98b_7a3a_c6b1),
