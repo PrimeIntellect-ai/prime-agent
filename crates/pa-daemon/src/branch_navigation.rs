@@ -17,6 +17,17 @@ use crate::session_tree;
 use crate::worker::{SessionCore, Worker};
 use pa_agent::abort::AbortController;
 
+/// One completed abandoned-branch summary to persist: the text, its usage
+/// block, its file-operation details, and the model the summary call
+/// served on (TS #2411's auxiliary routing — `None` keeps the timeline
+/// attribution).
+type PendingBranchSummary = (
+    String,
+    Option<Value>,
+    Option<Value>,
+    Option<(String, String)>,
+);
+
 pub(crate) struct TreeNavigation {
     engine: Arc<dyn SessionEngine>,
     core: Arc<Mutex<SessionCore>>,
@@ -184,12 +195,7 @@ impl TreeNavigation {
 
         // The abandoned-branch summary (TS `generateBranchSummary` over
         // `collectEntriesForBranchSummary`).
-        let mut summary: Option<(
-            String,
-            Option<Value>,
-            Option<Value>,
-            Option<(String, String)>,
-        )> = None;
+        let mut summary: Option<PendingBranchSummary> = None;
         let replace_instructions =
             payload.get("replaceInstructions").and_then(Value::as_bool) == Some(true);
         if summarize {
