@@ -1176,9 +1176,12 @@ mod tests {
                 "content_index": 0,
                 "delta": text,
             }),
+            // No `output_index` on the done item (the recorded-turn shape):
+            // the processor retires the slot keyed by the done event's own
+            // index before reading it back, so a done event carrying one
+            // would skip the item's text-signature capture.
             json!({
                 "type": "response.output_item.done",
-                "output_index": 0,
                 "item": { "type": "message", "id": message_id, "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": text }] },
             }),
             json!({
