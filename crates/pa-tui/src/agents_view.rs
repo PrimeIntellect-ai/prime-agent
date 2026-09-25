@@ -917,6 +917,31 @@ impl AgentsViewMode {
                 .map(|_| ()),
             RowKind::Subagent => row.summary.get("rlmChildId").map(Value::as_str).map(|_| ()),
         }?;
+        // A child arm only when its dispatch can resolve: the parent
+        // session (the summary's parentActiveSessionId, or the parent
+        // row's live session) must exist, or the second press would be a
+        // confirmed no-op.
+        if row.kind == RowKind::Subagent || row.summary.get("rlmChildId").is_some() {
+            if !row
+                .summary
+                .get("parentActiveSessionId")
+                .is_some_and(Value::is_string)
+            {
+                let parent_session = row
+                    .parent_identity
+                    .as_deref()
+                    .and_then(|identity| self.rows.iter().find(|row| row.identity == identity))
+                    .and_then(|parent| {
+                        parent
+                            .summary
+                            .get("activeSessionId")
+                            .and_then(Value::as_str)
+                    });
+                if parent_session.is_none() {
+                    return None;
+                }
+            }
+        }
         Some(PendingDelete {
             identity: row.identity.clone(),
             stop,
@@ -3131,6 +3156,47 @@ mod tests {
                 .is_some_and(|pending| !pending.stop),
             "the re-arm carries the current word: {:?}",
             mode.pending_delete
+        );
+    }
+
+    /// A deleted saved row leaves the catalog by its own path: the
+    /// removal keys on the session PATH (the daemon's key), never the
+    /// display name — the old message-contains check would leave the
+    /// row in the Inactive list while the status said Deleted.
+    #[test]
+    fn a_deleted_saved_row_leaves_the_catalog_by_path() {
+        let mut mode = mode_with_anchor(None, Vec::new());
+        mode.saved = vec![
+            saved_catalog_row("/x/gone.jsonl", "gone-1", "a deleted session"),
+            saved_catalog_row("/x/stays.jsonl", "stays-1", "a surviving session"),
+        ];
+        mode.rebuild_rows();
+        mode.delete_result(
+            "Deleted session a deleted session".to_string(),
+            Some("/x/gone.jsonl".to_string()),
+        );
+        assert!(
+            !mode
+                .saved
+                .iter()
+                .any(|saved| saved.get("path") == Some(&serde_json::json!("/x/gone.jsonl"))),
+            "the deleted path leaves the catalog"
+        );
+        assert!(
+            mode.saved
+                .iter()
+                .any(|saved| saved.get("path") == Some(&serde_json::json!("/x/stays.jsonl"))),
+            "the other rows stay"
+        );
+        // The name-matching trap: a path that never appears in any
+        // display name still matches by its own key.
+        mode.delete_result(
+            "Deleted session Some Other Name".to_string(),
+            Some("/x/stays.jsonl".to_string()),
+        );
+        assert!(
+            mode.saved.is_empty(),
+            "the path removes regardless of the name"
         );
     }
 
