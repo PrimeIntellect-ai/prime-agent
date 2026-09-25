@@ -8683,10 +8683,12 @@ impl SessionUi {
             TurnUpdate::QueueUpdated {
                 steering,
                 follow_ups,
+                starting,
             } => {
                 view.queued = crate::queued::QueuedMessages {
                     steering,
                     follow_ups,
+                    starting,
                 };
                 // A queue change under an active browse reconciles the
                 // selection (TS `refreshQueueSelectionAt`): the cursor

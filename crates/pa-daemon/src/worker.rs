@@ -326,9 +326,9 @@ pub(crate) struct QueuedItem {
     pub(crate) message: String,
     /// The labeled queue-strip row (TS `payload.preview`): the queue
     /// snapshot serves it instead of `message` when the delivery carries
-    /// one (TS `queuedAgentMessagePreview` returns
-    /// `payload.preview ?? payload.text`). The active-action label and the
-    /// turn's prompt text stay `message` (TS `compactRlmText(payload.text)`).
+    /// one, and the active-action label reads it too (TS #2063
+    /// `queuedAgentMessagePreview` returns `payload.preview ??
+    /// payload.text`); the turn's prompt text stays `message`.
     pub(crate) preview: Option<String>,
     /// An injected custom row that replaces this turn's user message (the
     /// RLM child terminal notices ride the follow-up lane this way).
@@ -486,9 +486,13 @@ pub(crate) struct SessionCore {
     /// The queue projection's active action (TS `getSessionActionSnapshot`
     /// reads the store's first active action): the runner sets the phase
     /// transitions of a queue-visible delivery (`preparing` at pickup,
-    /// `committing` before the turn dispatch, `running` at the turn's
-    /// `agent_start`) and clears it once the delivered turn settles. The
-    /// label rides the snapshot (TS `compactRlmText(active.payload.text)`).
+    /// `committing` at the turn's first row — the prompt becomes visible
+    /// in the conversation then, TS's commit fence — `running` at the
+    /// turn's first assistant frame) and clears it once the delivered
+    /// turn settles. The `preparing` projection is what a client renders
+    /// as the queued strip's "Starting" row (TS #2063). The label rides
+    /// the snapshot (TS #2063 `compactRlmText(queuedAgentMessagePreview(
+    /// active))`: the delivery's labeled preview, else the message text).
     pub(crate) active_action: Option<crate::types::SessionActionActive>,
 }
 
@@ -5237,38 +5241,38 @@ impl TurnRunner {
                 // message for the whole turn (dogfood P0: the steered
                 // message sends but still shows in the queue) and a browse
                 // edit addressed at the stale row is rejected as changed.
-                // A queue-visible delivery carries the active action through
-                // its TS phase transitions (`selected`/`preparing` projects
-                // first, then the `committing` transition before the turn
-                // dispatch, `running` once the turn's `agent_start` lands,
-                // cleared at the settle); an invisible item (an idle
-                // session's direct prompt admission, injected goal and
-                // autonomous continuations) projects the plain pickup like
-                // TS's `queueVisible` filter.
-                // The batch's active action is the first queue-visible row
-                // (TS `visibleSessionActionProjection(activeActions())[0]`):
-                // an all-invisible batch (injected continuations) projects
-                // nothing, like TS's `queueVisible` filter.
+                // A queue-visible delivery carries the active action
+                // through its TS phase transitions: `preparing` projects
+                // here at pickup, then `committing` at the turn's first
+                // row (the moment the prompt becomes visible in the
+                // conversation — TS's commit fence) and `running` at the
+                // turn's first assistant frame, both emitted by the
+                // runner's event path, cleared at the settle. The
+                // `preparing` projection is what a client renders as the
+                // queued strip's "Starting" row (TS #2063): the prompt
+                // left its lane, and until the turn's rows land the strip
+                // is the only place it is visible. An invisible item (an
+                // idle session's direct prompt admission, injected goal
+                // and autonomous continuations) projects the plain pickup
+                // like TS's `queueVisible` filter, so an all-invisible
+                // batch sets no active action at all.
+                // The active label is the delivery's labeled preview when
+                // it carries one (TS #2063 `queuedAgentMessagePreview`:
+                // `payload.preview ?? payload.text`) — an agent-message
+                // delivery shows its "Agent message received: ..." row,
+                // not the raw envelope.
                 let visible_index = items.iter().position(|item| item.queue_visible);
                 let anchor = visible_index.map(|index| &items[index]);
-                let queue_visible = anchor.is_some();
                 {
                     let mut core = self.core.lock().unwrap();
                     if let Some(anchor) = anchor {
                         core.active_action = Some(crate::types::SessionActionActive {
                             kind: "turn".to_string(),
                             phase: "preparing".to_string(),
-                            label: Some(compact_action_label(&anchor.message)),
+                            label: Some(compact_action_label(
+                                anchor.preview.as_deref().unwrap_or(&anchor.message),
+                            )),
                         });
-                    }
-                    let snapshot = self.snapshot_from(&core);
-                    drop(core);
-                    let _ = self.emit_action_update(&snapshot);
-                }
-                if queue_visible {
-                    let mut core = self.core.lock().unwrap();
-                    if let Some(active) = core.active_action.as_mut() {
-                        active.phase = "committing".to_string();
                     }
                     let snapshot = self.snapshot_from(&core);
                     drop(core);
@@ -5309,19 +5313,6 @@ impl TurnRunner {
             self.prompt_admissions.commit(admission_id);
         }
         self.emit_turn_event(json!({ "type": "agent_start" }));
-        // The active action's `running` phase lands right after the turn's
-        // `agent_start` (TS marks the action running once the primary
-        // message starts the run): a queue-visible delivery projects it,
-        // and every later queue snapshot mid-turn carries it too.
-        if items.iter().any(|item| item.queue_visible) {
-            let mut core = self.core.lock().unwrap();
-            if let Some(active) = core.active_action.as_mut() {
-                active.phase = "running".to_string();
-            }
-            let snapshot = self.snapshot_from(&core);
-            drop(core);
-            let _ = self.emit_action_update(&snapshot);
-        }
         self.emit_turn_event(json!({ "type": "turn_start" }));
 
         let prompt_index = {
@@ -5426,6 +5417,22 @@ impl TurnRunner {
             // that end without a model turn (session commands, pre-model
             // failures).
             let mut engine_turn_ended = false;
+            // TS #2063: whether this run's active action already flipped
+            // to `committing`/`running` — each flip rides the first event
+            // that marks the moment (the turn's first row commits it, the
+            // first assistant frame runs it), so the queue's `preparing`
+            // projection spans the real pickup -> rows-land window a
+            // client renders as the strip's "Starting" row.
+            let mut active_committed = false;
+            let mut active_running = false;
+            // Restored next-turn rows ride this delivery as PREFIX rows
+            // (before the accepted prompt): they render in the
+            // conversation, but they are not the prompt's rows-land moment
+            // — the "Starting" row must survive them and drop at the
+            // accepted row (the bots' commit-fence finding). The flip
+            // closure reads the flag while the prefix loop writes it, so
+            // it is a Cell (the runner is single-threaded here).
+            let emitting_prefix_rows = std::cell::Cell::new(false);
             // The last error of the active retry episode (the
             // `auto_retry_start` errorMessage): the episode's durable
             // outcome row names it on success too — the final event
@@ -5606,6 +5613,37 @@ impl TurnRunner {
                     }
                     _ => {}
                 }
+                // TS #2063: the active action's `committing`/`running`
+                // transitions ride the events that mark the moments — the
+                // turn's first row commits it (the prompt becomes visible
+                // in the conversation exactly then, the boundary TS's
+                // strip drops its "Starting" row at: the commit fence),
+                // the first assistant frame runs it.
+                let mut action_frame: Option<SessionActionSnapshot> = None;
+                if !emitting_prefix_rows.get()
+                    && !active_committed
+                    && matches!(
+                        event,
+                        EngineEvent::UserMessage(_) | EngineEvent::CustomMessage(_)
+                    )
+                {
+                    active_committed = true;
+                    if let Some(active) = core.active_action.as_mut() {
+                        active.phase = "committing".to_string();
+                    }
+                    action_frame = Some(session_snapshot(&core));
+                } else if !active_running
+                    && matches!(
+                        event,
+                        EngineEvent::AssistantUpdate { .. } | EngineEvent::AssistantMessage(_)
+                    )
+                {
+                    active_running = true;
+                    if let Some(active) = core.active_action.as_mut() {
+                        active.phase = "running".to_string();
+                    }
+                    action_frame = Some(session_snapshot(&core));
+                }
                 let done_result = match &event {
                     EngineEvent::Done(result) => {
                         // The turn boundary releases RLM child prompt tasks
@@ -5633,7 +5671,7 @@ impl TurnRunner {
                 };
                 // One event may map to several wire frames (a custom row
                 // is a message_start + message_end pair).
-                let frames: Vec<Value> = match event {
+                let mut frames: Vec<Value> = match event {
                     EngineEvent::UserMessage(message) => {
                         // TS emits the accepted user message as a
                         // message_start + message_end pair (the row is
@@ -5827,6 +5865,20 @@ impl TurnRunner {
                         ]
                     }
                 };
+                // The phase flip's queue-update frame rides the same batch
+                // (after the row frames it follows, so a client sees the
+                // prompt land and then the strip drop its "Starting" row):
+                // an unchanged projection stays silent, like every queue
+                // emit (TS `_emitQueueUpdate`).
+                if let Some(snapshot) = action_frame {
+                    if core.last_action_snapshot.as_ref() != Some(&snapshot) {
+                        core.last_action_snapshot = Some(snapshot.clone());
+                        frames.push(json!({
+                            "type": "session_action_update",
+                            "actions": snapshot,
+                        }));
+                    }
+                }
                 // Verification seam: dump the emitted session events for
                 // harness debugging (PA_DAEMON_EVENT_LOG=<path>).
                 if let Ok(path) = std::env::var("PA_DAEMON_EVENT_LOG") {
@@ -5927,16 +5979,20 @@ impl TurnRunner {
             };
             // Restored next-turn rows ride this delivery (TS
             // `prefixMessages`): emitted before the accepted prompt, the
-            // same durable-row path as in-turn custom rows.
+            // same durable-row path as in-turn custom rows. They are not
+            // the delivery's rows-land moment, so the committing flip
+            // waits for the accepted row behind them.
             let parked = {
                 let mut core = core.lock().unwrap();
                 std::mem::take(&mut core.pending_next_turn)
             };
+            emitting_prefix_rows.set(!parked.is_empty());
             for row in parked {
                 if !emit(EngineEvent::CustomMessage(row)) {
                     break;
                 }
             }
+            emitting_prefix_rows.set(false);
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
         });
         let _ = turn.await;
