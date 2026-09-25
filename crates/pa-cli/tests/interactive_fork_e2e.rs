@@ -164,6 +164,9 @@ fn graceful_shutdown(socket: &Path) -> Option<u32> {
     None
 }
 
+// The Supervisor holds the Child so its Drop owns the protocol shutdown,
+// the kill, and the wait (teardown runs even on panic); the lint wants the
+// reap inline instead.
 #[allow(clippy::zombie_processes)]
 fn spawn_supervisor(socket: &Path, agent_dir: &Path, session_dir: &Path) -> Supervisor {
     let mut command = Command::new(env!("CARGO_BIN_EXE_prime-agent"));
