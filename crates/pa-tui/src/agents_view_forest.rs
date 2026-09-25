@@ -2002,6 +2002,63 @@ mod tests {
         );
     }
 
+    /// A stale `expanded_inactive` entry for a row the running path
+    /// reaches stays inert (the exposure scan mirrors emit's gate): the
+    /// nested runner's collapsed inactive line still renders inside the
+    /// running view — removing the scan's running-path skip marks that
+    /// line suppressed and strands it (Macroscope round 3; Cursor's
+    /// regression ask).
+    #[test]
+    fn a_stale_inactive_entry_on_a_running_path_row_stays_inert() {
+        let roster = vec![
+            roster_entry("p", "idle", parent_summary("p")),
+            roster_entry("c", "running", child_summary("c", "p", "worker one")),
+            roster_entry("cc", "running", child_summary("cc", "c", "worker two")),
+            roster_entry("gi", "idle", child_summary("gi", "cc", "the straggler")),
+        ];
+        let rows = rows_for_lists(&roster, None, &["file:/x/p.jsonl"], &[]);
+        let worker_one = rows
+            .iter()
+            .find(|row| row.title == "worker one")
+            .expect("the running child renders on the running path")
+            .identity
+            .clone();
+        // The stale mix: the running child's inactive line is open in the
+        // set while the child sits inside the parent's running expansion
+        // (emit gates it shut there; the scan ignores the entry instead
+        // of marking the nested runner's inactive line suppressed).
+        let rows = rows_for_lists(
+            &roster,
+            None,
+            &["file:/x/p.jsonl", worker_one.as_str()],
+            &[worker_one.as_str()],
+        );
+        let worker_two = rows
+            .iter()
+            .find(|row| row.title == "worker two")
+            .expect("the nested running child renders")
+            .identity
+            .clone();
+        assert!(
+            rows.iter().any(|row| {
+                row.kind == RowKind::SubagentSummary
+                    && row.parent_identity.as_deref() == Some(worker_two.as_str())
+            }),
+            "the nested runner's collapsed inactive line still renders: {rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.title == "the straggler"),
+            "the inactive grandchild never renders on the running path: {rows:?}"
+        );
+        // The parent's inactive line is the one path that reaches the
+        // straggler — the stale entry never strands it.
+        let rows = rows_for_lists(&roster, None, &[], &["file:/x/p.jsonl"]);
+        assert!(
+            rows.iter().any(|row| row.title == "the straggler"),
+            "the parent's inactive line reaches the straggler: {rows:?}"
+        );
+    }
+
     /// Both lines expanded on a mixed tree: every agent renders exactly
     /// once. A running grandchild under an idle child renders flattened
     /// on the running path, and the idle child's own running line stays
