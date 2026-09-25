@@ -7057,9 +7057,6 @@ export class InteractiveMode {
 					if (isExpandable(component)) {
 						component.setExpanded(this.toolOutputExpanded);
 					}
-					if (hasEditDiffsExpansion(component)) {
-						component.setEditDiffsExpanded(this.editDiffsExpanded);
-					}
 					if (isSessionSlashCommandMessage(message) && this.chatContainer.children.length > 0) {
 						this.chatContainer.addChild(new Spacer(1));
 					}

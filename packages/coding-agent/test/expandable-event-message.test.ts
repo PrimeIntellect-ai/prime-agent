@@ -22,8 +22,9 @@ describe("expandable event message gutter", () => {
 		const component = new CompactionSummaryMessageComponent(message);
 		const collapsed = component.render(30);
 		component.setExpanded(true);
-		expect(component.render(60)[0]).toContain(theme.fg("refinementHeader", "◆ Context compacted"));
-		expect(component.render(60)[0]).toContain(theme.fg("dim", " · Compacted from 480 tokens"));
+		const header = component.render(60)[0];
+		expect(header).toContain(theme.fg("refinementHeader", "◆ Context compacted"));
+		expect(header).toContain(theme.fg("dim", " · Compacted from 480 tokens"));
 		const rows = component.render(30);
 		const body = rows.findIndex((line) => stripAnsi(line).includes("╰─"));
 		const gutter = ` ${theme.fg("dim", "╰─ ")}`;
