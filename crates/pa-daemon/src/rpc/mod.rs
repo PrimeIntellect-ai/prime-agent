@@ -70,8 +70,8 @@ impl LineWriter {
         let pending = Arc::new(AtomicUsize::new(0));
         let task_pending = Arc::clone(&pending);
         tokio::spawn(async move {
-            let mut stdout = tokio::io::stdout();
             use tokio::io::AsyncWriteExt;
+            let mut stdout = tokio::io::stdout();
             while let Some(frame) = rx.recv().await {
                 if let Ok(mut line) = serde_json::to_string(&frame) {
                     line.push('\n');
@@ -170,7 +170,7 @@ fn spawn_signal_handlers(session: Arc<RpcSession>, writer: LineWriter) {
         }
     });
     let hangup_session = Arc::clone(&session);
-    let hangup_writer = writer.clone();
+    let hangup_writer = writer;
     tokio::spawn(async move {
         if let Ok(mut stream) = signal(SignalKind::hangup()) {
             stream.recv().await;

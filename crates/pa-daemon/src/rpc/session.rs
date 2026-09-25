@@ -195,6 +195,11 @@ impl RpcSession {
 
     /// Whole-session replacement with the lease already held by the
     /// caller (`replacement_lease` / `replace` acquire it).
+    ///
+    /// # Errors
+    ///
+    /// Returns the factory's assembly error when the replacement engine
+    /// cannot be built (the live session stays serving).
     pub async fn replace_locked(&self, request: RpcEngineRequest) -> Result<(), String> {
         let factory = self
             .factory

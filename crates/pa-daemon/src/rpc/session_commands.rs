@@ -28,6 +28,11 @@ const AGENT_MESSAGING_REQUIRES_DAEMON: &str = "Agent messaging requires daemon m
 const BASH_BACKEND_GAP: &str = "Bash execution requires the session bash executor, which is not linked into the in-process RPC transport yet; the daemon-attached RPC transport serves it";
 
 /// Handle one session-level command.
+///
+/// # Errors
+///
+/// Returns the TS in-process error text for the daemon-mode surfaces and
+/// the session-level handlers' own errors.
 pub async fn handle(
     state: &Arc<RpcState>,
     name: &str,
@@ -70,10 +75,10 @@ pub async fn handle(
             Err(format!("Unknown active session: {id}"))
         }
         // TS `stopObservation` of a session this connection never
-        // observed: a no-op success.
-        "unobserve" => Ok(ResponseData::Absent),
+        // observed: a no-op success; `abort_bash` aborts nothing
+        // in-process (no bash slot exists) and answers the same.
+        "unobserve" | "abort_bash" => Ok(ResponseData::Absent),
         "bash" => Err(BASH_BACKEND_GAP.to_string()),
-        "abort_bash" => Ok(ResponseData::Absent),
         unknown => Err(format!("Unknown command: {unknown}")),
     }
 }
@@ -213,27 +218,25 @@ async fn fork_at(
         drop(handle);
         let store = crate::session_store::SessionFile::open(&session_file)
             .map_err(|error| format!("{error:#}"))?;
-        match target_leaf.as_deref() {
-            Some(leaf) => store
+        if let Some(leaf) = target_leaf.as_deref() {
+            store
                 .create_branched_file(leaf, &session_dir)
                 .map_err(|error| format!("{error:#}"))?
                 .path
-                .clone(),
-            None => {
-                // Fork at the root: a fresh session under the source.
-                let mut forked = crate::session_store::SessionFile::create(
-                    &source_cwd,
-                    session_file.to_str(),
-                    0,
-                );
-                let file =
-                    session_dir.join(crate::session_store::session_file_name(forked.session_id()));
-                forked.set_path(file);
-                if forked.rewrite().is_err() {
-                    return Err("Failed to create forked session".to_string());
-                }
-                forked.path.clone()
+        } else {
+            // Fork at the root: a fresh session under the source.
+            let mut forked = crate::session_store::SessionFile::create(
+                &source_cwd,
+                session_file.to_str(),
+                0,
+            );
+            let file =
+                session_dir.join(crate::session_store::session_file_name(forked.session_id()));
+            forked.set_path(file);
+            if forked.rewrite().is_err() {
+                return Err("Failed to create forked session".to_string());
             }
+            forked.path
         }
     };
     state
@@ -519,13 +522,10 @@ async fn get_session_stats(state: &Arc<RpcState>) -> Result<ResponseData, String
                 calculate_context_tokens(&usage)
                     + messages[anchor_index + 1..]
                         .iter()
-                        .map(|message| estimate_tokens(message))
+                        .map(estimate_tokens)
                         .sum::<u64>()
             }
-            None => messages
-                .iter()
-                .map(|message| estimate_tokens(message))
-                .sum(),
+            None => messages.iter().map(estimate_tokens).sum(),
         };
         stats["contextUsage"] = json!({
             "tokens": tokens,

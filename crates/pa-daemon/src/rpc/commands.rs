@@ -238,7 +238,7 @@ async fn get_state(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     );
     object.insert(
         "goal".to_string(),
-        serde_json::to_value(&*engine.goal_driver.lock().await.state()).unwrap_or(Value::Null),
+        serde_json::to_value(engine.goal_driver.lock().await.state()).unwrap_or(Value::Null),
     );
     Ok(ResponseData::Present(Value::Object(object)))
 }
@@ -354,26 +354,23 @@ async fn compact(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData,
 /// `compaction_end {type, reason, result?, aborted, willRetry,
 /// customInstructions?}`.
 pub fn compaction_frame(kind: &str, instructions: Option<&str>, result: Option<&Value>) -> Value {
-    match kind {
-        "compaction_start" => {
-            let mut frame = json!({ "type": kind, "reason": "requested" });
-            if let Some(instructions) = instructions {
-                frame["customInstructions"] = json!(instructions);
-            }
-            frame
+    if kind == "compaction_start" {
+        let mut frame = json!({ "type": kind, "reason": "requested" });
+        if let Some(instructions) = instructions {
+            frame["customInstructions"] = json!(instructions);
         }
-        _ => {
-            let mut frame = json!({ "type": kind, "reason": "requested" });
-            if let Some(result) = result {
-                frame["result"] = result.clone();
-            }
-            frame["aborted"] = json!(false);
-            frame["willRetry"] = json!(false);
-            if let Some(instructions) = instructions {
-                frame["customInstructions"] = json!(instructions);
-            }
-            frame
+        frame
+    } else {
+        let mut frame = json!({ "type": kind, "reason": "requested" });
+        if let Some(result) = result {
+            frame["result"] = result.clone();
         }
+        frame["aborted"] = json!(false);
+        frame["willRetry"] = json!(false);
+        if let Some(instructions) = instructions {
+            frame["customInstructions"] = json!(instructions);
+        }
+        frame
     }
 }
 

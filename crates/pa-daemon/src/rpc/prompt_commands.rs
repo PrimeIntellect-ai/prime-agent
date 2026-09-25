@@ -29,6 +29,11 @@ fn command_streaming_behavior(payload: &Value) -> Option<StreamingBehavior> {
 /// source: "rpc"})`): admission-level success — the turn's events follow
 /// on the ordered stream. Session commands execute like the ACP prompt
 /// path (the pa-core executor persists the durable rows).
+///
+/// # Errors
+///
+/// Returns the admission error (a missing message, a refused turn) and
+/// the admitted session command's own error.
 pub async fn prompt(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, String> {
     let message = payload
         .get("message")
@@ -126,6 +131,10 @@ async fn run_session_command(
 
 /// `steer` / `follow_up` (TS `connection.steer/followUp(message, images)`):
 /// queue onto the agent lane regardless of the busy state.
+///
+/// # Errors
+///
+/// Returns the missing-message error when the command carries no text.
 pub async fn steer_or_follow_up(
     state: &Arc<RpcState>,
     payload: &Value,

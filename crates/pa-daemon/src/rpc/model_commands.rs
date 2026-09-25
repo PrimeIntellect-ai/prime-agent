@@ -93,8 +93,8 @@ async fn apply_model_selection(
                 pa_core::session_engine::provider_adapter::map_thinking_level(clamped),
             )
             .await;
-        handle.model = model.clone();
-        handle.api_key = resolved.api_key.clone();
+        handle.model.clone_from(model);
+        handle.api_key.clone_from(&resolved.api_key);
         // The turn-boundary model facts follow the switch: `model.info`
         // and the context window the usage estimate reads must report
         // the model the session NOW runs, not the assembly-time one.
