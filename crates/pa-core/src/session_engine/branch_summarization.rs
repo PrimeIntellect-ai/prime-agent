@@ -257,6 +257,11 @@ pub struct GenerateBranchSummaryOptions<'a> {
     pub replace_instructions: bool,
     /// Tokens reserved for prompt + response (TS default 16384).
     pub reserve_tokens: u64,
+    /// The auxiliary-model routing context (TS #2411): when present, the
+    /// summary call resolves its model through the `auxiliaryModel`
+    /// setting with a context-window fit check, falling back to the
+    /// session model. `None` keeps the session model.
+    pub auxiliary: Option<&'a super::auxiliary_model::AuxiliaryModelContext>,
 }
 
 /// The TS default reserve budget (`reserveTokens`).
@@ -264,6 +269,56 @@ pub const DEFAULT_BRANCH_RESERVE_TOKENS: u64 = 16_384;
 
 /// The summarizer call cap (TS `maxTokens: 2048`).
 const BRANCH_SUMMARY_MAX_TOKENS: u64 = 2048;
+
+/// Estimate the context window the branch-summary request needs (TS
+/// #2411's `estimateBranchSummaryRequestTokens`), using the same
+/// entry-slicing budget and prompt builder as the wire call, so the
+/// estimate cannot drift from the request. `context_window` is the window
+/// of the model the session would run the summary on (the fallback): a
+/// resolved auxiliary model must hold two things — the request body
+/// (`generate_branch_summary` builds: the system prompt, the serialized
+/// branch inside its `<conversation>` wrapper, and the completion
+/// budget) and the reserve the branch call subtracts from its window —
+/// the larger of the two decides whether the model fits. A branch that
+/// slices to nothing issues no wire request, but a window at or below the
+/// reserve would slice with a non-positive budget that
+/// [`prepare_branch_entries`] treats as unlimited, so the empty-slice
+/// shape still requires a window above the reserve.
+pub fn estimate_branch_summary_request_tokens(
+    entries: &[FileEntry],
+    context_window: u64,
+    reserve_tokens: u64,
+    custom_instructions: Option<&str>,
+    replace_instructions: bool,
+) -> u64 {
+    // Mirrors `generate_branch_summary`: the same budget decides which
+    // entries fit.
+    let window = if context_window > 0 {
+        context_window
+    } else {
+        128_000
+    };
+    let token_budget = window.saturating_sub(reserve_tokens);
+    let (request, _) = build_branch_summary_request(
+        entries,
+        token_budget,
+        custom_instructions,
+        replace_instructions,
+    );
+    if request.is_empty() {
+        return reserve_tokens.saturating_add(1);
+    }
+    let system_prompt_tokens = (super::compaction_utils::SUMMARIZATION_SYSTEM_PROMPT
+        .chars()
+        .count() as u64)
+        .div_ceil(4);
+    let prompt_tokens = super::compact_session::summarizer_request_tokens(&request);
+    // The completion budget and the input-slice reserve are separate
+    // draws on the same window, so the larger of the two decides whether
+    // the model fits.
+    (system_prompt_tokens + prompt_tokens + BRANCH_SUMMARY_MAX_TOKENS)
+        .max(prompt_tokens.saturating_add(reserve_tokens))
+}
 
 /// Generate the abandoned-branch summary (TS `generateBranchSummary`):
 /// prepare the entries under the context budget, run the summarizer with
@@ -279,7 +334,58 @@ pub async fn generate_branch_summary(
         custom_instructions,
         replace_instructions,
         reserve_tokens,
+        auxiliary,
     } = options;
+    // TS #2411 (`_resolveAuxiliaryModel`): the branch summary fires at a
+    // tree-navigation context boundary and runs with its own prompt
+    // prefix, so on the session model it re-reads the whole branch at
+    // peak price — route it to the configured auxiliary model when it is
+    // set, usable, and its known window fits the request; fall back to the
+    // session model otherwise (the pre-#2411 behavior). The fit check
+    // estimates the request the SESSION model would issue (its window
+    // sizes the slice); the routed model then re-slices with its own
+    // window, exactly like TS.
+    // The resolution reads settings/models/auth (and a `!command` secret
+    // key resolves a subprocess when configured), so it runs on the
+    // blocking pool, never the async executor.
+    let (routed_model, api_key, summary_headers) = match auxiliary {
+        Some(context) => {
+            let required = estimate_branch_summary_request_tokens(
+                entries,
+                model.context_window,
+                reserve_tokens,
+                custom_instructions,
+                replace_instructions,
+            );
+            let join = {
+                let context = context.clone();
+                let session_model = model.clone();
+                let session_api_key = api_key.clone();
+                tokio::task::spawn_blocking(move || {
+                    super::auxiliary_model::resolve_auxiliary_model(
+                        &context,
+                        "branch summary",
+                        &session_model,
+                        session_api_key,
+                        Some(required),
+                    )
+                })
+            };
+            // A JoinError (the closure panicked) degrades to the session
+            // fallback; the resolver itself never panics — every unusable
+            // selector resolves to the fallback with the warning.
+            let routed =
+                join.await
+                    .unwrap_or_else(|_| super::auxiliary_model::ResolvedAuxiliaryModel {
+                        model: model.clone(),
+                        api_key: api_key.clone(),
+                        headers: None,
+                    });
+            (routed.model, routed.api_key, routed.headers)
+        }
+        None => (model.clone(), api_key.clone(), None),
+    };
+    let model = &routed_model;
     let context_window = if model.context_window > 0 {
         model.context_window
     } else {
@@ -325,6 +431,7 @@ pub async fn generate_branch_summary(
         pa_ai::types::SimpleStreamOptions::from_base(pa_ai::types::StreamOptions {
             max_tokens: Some(BRANCH_SUMMARY_MAX_TOKENS),
             api_key,
+            headers: summary_headers.map(|headers| headers.into_iter().collect()),
             ..Default::default()
         });
     let response = match pa_ai::complete_simple(model, &context, Some(stream_options)).await {
@@ -514,6 +621,7 @@ mod tests {
                 custom_instructions: Some("focus on x"),
                 replace_instructions: false,
                 reserve_tokens: DEFAULT_BRANCH_RESERVE_TOKENS,
+                auxiliary: None,
             },
         )
         .await;
@@ -547,11 +655,129 @@ mod tests {
                 custom_instructions: None,
                 replace_instructions: false,
                 reserve_tokens: DEFAULT_BRANCH_RESERVE_TOKENS,
+                auxiliary: None,
             },
         )
         .await;
         assert_eq!(result.summary.as_deref(), Some("No content to summarize"));
         assert!(!result.aborted);
         assert!(result.error.is_none());
+    }
+
+    /// The routing context present with a selector equal to the session
+    /// model keeps the session model: the summary call serves on the
+    /// session model (the faux factory records the model). A selector that
+    /// resolves to no model falls back the same way (TS #2411's
+    /// `_resolveAuxiliaryModel` fallback arms).
+    #[tokio::test]
+    async fn branch_summary_auxiliary_selector_falls_back_to_the_session_model() {
+        static FAUX_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        for selector in ["faux/faux-1", "testaux/missing-model"] {
+            let registration = {
+                let _guard = FAUX_LOCK
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                pa_ai::faux::register_faux_provider(Default::default())
+            };
+            let model = registration.get_model();
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::write(
+                tmp.path().join("settings.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "auxiliaryModel": selector,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let aux = super::super::auxiliary_model::AuxiliaryModelContext {
+                cwd: tmp.path().to_path_buf(),
+                agent_dir: tmp.path().to_path_buf(),
+            };
+            let seen_models: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+            let recorder = seen_models.clone();
+            registration.set_responses(vec![pa_ai::faux::FauxResponseStep::Factory(
+                std::sync::Arc::new(
+                    move |_context: &pa_types::ai::Context,
+                          _options: Option<&pa_ai::types::StreamOptions>,
+                          _call: u64,
+                          model: &pa_types::ai::Model| {
+                        recorder.lock().unwrap().push(model.id.clone());
+                        Ok(pa_ai::faux::faux_assistant_text_message(
+                            "## Goal\nexplore the tree",
+                            pa_ai::faux::FauxAssistantMessageOptions::default(),
+                        ))
+                    },
+                ),
+            )]);
+            let entries = vec![entry("e0", None, user("explore the widget"))];
+            let result = generate_branch_summary(
+                &entries,
+                GenerateBranchSummaryOptions {
+                    model: &model,
+                    api_key: None,
+                    custom_instructions: None,
+                    replace_instructions: false,
+                    reserve_tokens: DEFAULT_BRANCH_RESERVE_TOKENS,
+                    auxiliary: Some(&aux),
+                },
+            )
+            .await;
+            assert!(result.error.is_none(), "error: {:?}", result.error);
+            assert!(result.summary.is_some());
+            assert_eq!(seen_models.lock().unwrap().as_slice(), ["faux-1"]);
+            registration.unregister();
+        }
+    }
+
+    /// The window estimate mirrors `generate_branch_summary`'s slicing and
+    /// prompt exactly (TS #2411's `estimateBranchSummaryRequestTokens`).
+    #[test]
+    fn branch_window_estimate_shapes() {
+        // An entry too large for the window's slice budget: no wire request
+        // is issued, but the estimate still requires a window above the
+        // reserve (a window at or below it would slice with a non-positive
+        // budget that `prepare_branch_entries` treats as unlimited).
+        let big = vec![entry("e0", None, user(&"x".repeat(100_000)))];
+        assert_eq!(
+            estimate_branch_summary_request_tokens(
+                &big,
+                20_000,
+                DEFAULT_BRANCH_RESERVE_TOKENS,
+                None,
+                false
+            ),
+            DEFAULT_BRANCH_RESERVE_TOKENS + 1
+        );
+        // A fitting branch estimates the request body (system prompt +
+        // serialized branch + completion budget) and the reserve draw; the
+        // larger of the two wins, so a bigger reserve grows the estimate.
+        let entries = vec![entry("e0", None, user("explore the widget"))];
+        let big_reserve = estimate_branch_summary_request_tokens(
+            &entries,
+            200_000,
+            DEFAULT_BRANCH_RESERVE_TOKENS,
+            Some("focus on x"),
+            false,
+        );
+        let small_reserve = estimate_branch_summary_request_tokens(
+            &entries,
+            200_000,
+            100,
+            Some("focus on x"),
+            false,
+        );
+        assert!(big_reserve > small_reserve);
+        // A window that slices entries away shrinks the request the model
+        // must hold, so the estimate shrinks with it.
+        let wide = vec![
+            entry("e0", None, user(&"y".repeat(400_000))),
+            entry("e1", Some("e0"), user(&"y".repeat(400_000))),
+            entry("e2", Some("e1"), user(&"y".repeat(400_000))),
+        ];
+        let big_window =
+            estimate_branch_summary_request_tokens(&wide, 200_000, 16_384, None, false);
+        let small_window =
+            estimate_branch_summary_request_tokens(&wide, 100_000, 16_384, None, false);
+        assert!(big_window > small_window);
     }
 }
