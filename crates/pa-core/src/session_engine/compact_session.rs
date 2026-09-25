@@ -506,8 +506,7 @@ pub async fn execute_compaction(
             "summaryBytes": history_slice.summary.len()
                 + turn_prefix_slice
                     .as_ref()
-                    .map(|slice| slice.summary.len())
-                    .unwrap_or(0),
+                    .map_or(0, |slice| slice.summary.len()),
         }),
     );
 

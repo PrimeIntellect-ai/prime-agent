@@ -33,8 +33,7 @@ fn sink() -> &'static Sink {
             .create(true)
             .append(true)
             .open(&path)
-            .map(|file| Sink::File(std::sync::Mutex::new(file)))
-            .unwrap_or(Sink::Off),
+            .map_or(Sink::Off, |file| Sink::File(std::sync::Mutex::new(file))),
     })
 }
 
