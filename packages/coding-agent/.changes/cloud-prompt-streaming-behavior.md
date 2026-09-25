@@ -1,0 +1,1 @@
+- Fixed steering messages and follow-ups submitted mid-turn on cloud sessions vanishing into a plain queued prompt; they now translate to the guest steer and follow-up commands like the local path.

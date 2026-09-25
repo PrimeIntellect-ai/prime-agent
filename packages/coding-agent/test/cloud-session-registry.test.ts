@@ -1359,6 +1359,44 @@ describe("CloudSessionRegistry command translation (v2 attachment)", () => {
 			);
 			expect(followed.success).toBe(true);
 
+			// A prompt with streamingBehavior is how the TUI submits mid-turn
+			// steers and follow-ups; the translation must reach the guest as
+			// the matching steer/follow_up command, never as a queued prompt.
+			queueFauxResponse(root, "answer for streamed steer");
+			queueFauxResponse(root, "answer for streamed follow up");
+			const steeredPrompt = await harness.registry.handleSessionCommand(
+				{
+					type: "prompt",
+					activeSessionId: record.activeSessionId!,
+					message: "streamed steer this",
+					streamingBehavior: "steer",
+					queueIfBusy: true,
+				},
+				target,
+			);
+			expect(steeredPrompt.success).toBe(true);
+			const streamedFollowUp = await harness.registry.handleSessionCommand(
+				{
+					type: "prompt",
+					activeSessionId: record.activeSessionId!,
+					message: "streamed follow that",
+					streamingBehavior: "followUp",
+					queueIfBusy: true,
+				},
+				target,
+			);
+			expect(streamedFollowUp.success).toBe(true);
+			await waitFor(() =>
+				parseSessionEntries(readFileSync(record.shadowSessionFile!, "utf8")).some((entry) => {
+					if (entry.type !== "message" || entry.message?.role !== "user") return false;
+					const text = JSON.stringify(entry);
+					return text.includes("streamed steer this") || text.includes("streamed follow that");
+				}),
+			);
+			const submits = transportSentKinds(harness.transport);
+			expect(submits.filter((kind) => kind === "steer")).toHaveLength(2);
+			expect(submits.filter((kind) => kind === "follow_up")).toHaveLength(2);
+
 			// Model and thinking-level changes fail honestly on unknown prime
 			// models instead of silently falling back; non-prime providers
 			// stub to the local broker, where an unknown model fails at
@@ -1693,6 +1731,14 @@ function supervisorForRegistry(registry: CloudSessionRegistry, summary: Record<s
 	properties.log = () => undefined;
 	properties.clients = new Set([makeDaemonClient()]);
 	return supervisor;
+}
+
+/** Every request kind the supervisor side submitted to the guest, in order. */
+function transportSentKinds(transport: RecordingTunnelTransport): string[] {
+	return transport.sentFrames
+		.map((frame) => JSON.parse(frame) as { type?: string; request?: { kind?: string } })
+		.filter((frame) => frame.type === "submit")
+		.map((frame) => frame.request!.kind!);
 }
 
 /** Every open_session request the supervisor side submitted to the guest. */

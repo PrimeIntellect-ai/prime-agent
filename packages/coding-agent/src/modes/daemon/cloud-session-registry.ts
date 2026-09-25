@@ -2214,6 +2214,30 @@ export class CloudSessionRegistry {
 				return failure(command.id, command.type, "Prompt admission was cancelled");
 			}
 			await this.requireConnected(session, "prompt");
+			// The TUI submits mid-turn steers and follow-ups as prompt commands
+			// with a streamingBehavior; the local worker honors it, and the
+			// guest protocol has dedicated steer/follow_up commands - map
+			// them instead of queueing a plain prompt (which would surface as a
+			// fresh turn instead of steering into the running one).
+			const steerKind =
+				command.streamingBehavior === "steer"
+					? "steer"
+					: command.streamingBehavior === "followUp"
+						? "follow_up"
+						: undefined;
+			if (steerKind !== undefined) {
+				const steerOutcome = await this.submitResident(session, `${steerKind}_${command.id ?? randomUUID()}`, {
+					kind: steerKind,
+					text: command.message,
+				});
+				if (admission?.isCancelled()) {
+					return failure(command.id, command.type, "Prompt admission was cancelled");
+				}
+				if (steerOutcome.state === "acknowledged") {
+					admission?.markOwned();
+				}
+				return undefined;
+			}
 			const outcome = await this.submitResident(session, `prompt_${command.id ?? randomUUID()}`, {
 				kind: "prompt",
 				text: command.message,
