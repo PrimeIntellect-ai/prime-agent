@@ -177,7 +177,7 @@ export function sessionActivityDetail(summary: SessionSummary, options: SessionA
 		return "replied";
 	}
 	if (summary.activity === "working") {
-		return "classifying";
+		return "working";
 	}
 	if (summary.taskState === "error") {
 		return "error";

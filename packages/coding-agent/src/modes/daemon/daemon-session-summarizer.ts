@@ -203,11 +203,6 @@ export async function generateAgentStatus(params: GenerateAgentStatusParams): Pr
 	}
 }
 
-function isSessionWorking(state: ActiveSessionState): boolean {
-	const session = state.runtime.session;
-	return session.isSessionActive;
-}
-
 // Recap prefix for a turn that errored; the transcript's own error text follows
 // it so the persisted verdict reports the real last event, never invented work.
 const ERROR_RECAP_PREFIX = "Model request failed";
@@ -346,7 +341,7 @@ export class DaemonSessionSummarizer {
 			return;
 		}
 		const messageCount = messages.length;
-		const isWorking = isSessionWorking(state);
+		const isWorking = session.isSessionActive;
 		const previous = state.summaryState;
 		// Idle sessions with a current verdict need no refresh — except a
 		// transcript whose terminal turn errored (owesErrorVerdict below) —
@@ -423,9 +418,8 @@ export class DaemonSessionSummarizer {
 					lastFailureAt: Date.now(),
 				});
 			}
-			// A failed classification on an idle session would spin at "working"
-			// forever (the activity axis holds unjudged idle sessions there), so
-			// settle it to needs_input.
+			// A failed classification on an idle session settles to needs_input so it
+			// carries a current verdict.
 			const result =
 				generated ??
 				(!isWorking && (owesIdleVerdict || owesSummary)
@@ -439,7 +433,7 @@ export class DaemonSessionSummarizer {
 			if (
 				controller.signal.aborted ||
 				state.runtime.session !== session ||
-				isSessionWorking(state) !== isWorking ||
+				session.isSessionActive !== isWorking ||
 				session.messages.length !== messageCount
 			) {
 				return;
@@ -503,8 +497,8 @@ export class DaemonSessionSummarizer {
 		status: AgentStatus,
 		{ isWorking, previous, persist }: { isWorking: boolean; previous: AgentStatus | undefined; persist: boolean },
 	): void {
-		// An idle settle refreshes the verdict's currency, which drives the roster's
-		// activity axis: it must publish even when the verdict text is unchanged.
+		// An idle settle refreshes the verdict's currency, which gates the published
+		// taskState: it must publish even when the verdict text is unchanged.
 		const changed =
 			previous?.summary !== status.summary ||
 			previous?.taskState !== status.taskState ||

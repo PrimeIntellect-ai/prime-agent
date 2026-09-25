@@ -1,0 +1,1 @@
+- Fixed old sessions showing as running in the agents view as soon as you open them, even though nothing is running: a session now counts as running only while it is doing work, not while its status summary is out of date.
