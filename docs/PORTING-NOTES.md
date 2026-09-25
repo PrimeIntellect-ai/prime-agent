@@ -1727,3 +1727,68 @@ retry re-arm, TS `rearmSavedSearchFetch`), and the e2e
 kill the supervisor, lose the descriptor, boot the new daemon, open the
 session — it must open) plus `pa-tui/tests/agents_view_saved_catalog_failure.rs`
 (the failure settles the anchor and the view stays openable).
+
+# The abort keeps a queued follow-up flowing (lane abort-queued-followup, 2026-09-25)
+
+Operator bug report (2026-09-25, the reported shape): "while agent turn
+is running, queue a follow-up (NO steers), Ctrl+C abort current turn ->
+follow-up remains visibly queued forever; steers auto-send on abort
+today."
+
+- **Root cause**: the `abort_and_send_queued` funnel (TS
+  `abortAndSendQueued`, schema 29, the Ctrl+C interrupt's wire command)
+  armed the forced steering batch, ran `requestAbort()` (which parks the
+  queue behind `queued_input_suspended` — TS `_sessionInputPumpSuspended`
+  — and cancels only queue-INVISIBLE admissions), then resumed the
+  pump ONLY when steering had armed. With a follow-up-only queue nothing
+  armed, the resume never fired, and the parked follow-up sat behind
+  the suspension's drain gate with no resume site on the interrupt's
+  own path: the queue strip kept showing it while a plain prompt was
+  rejected with "Cannot admit a session action while queued session
+  input is suspended."
+- **The fix — the deliberate divergence** (operator ruling 2026-09-25):
+  the funnel now resumes whenever the abort leaves queue-visible work
+  in either lane, so the abort ENDS the current turn cleanly and then
+  the queue keeps flowing: the armed plain-user steers co-deliver in
+  enqueue order as ONE batched turn (next-turn guidance), then the
+  OLDEST queued follow-up starts the next turn right after the aborted
+  turn settles; later follow-ups stay queued and drain one turn per
+  completed turn (the follow-up lane's `one-at-a-time` default). The
+  abort's acknowledgment still answers the command immediately — the
+  resumed pump, not the funnel, owns the delivery at the settled
+  boundary, so the ack never races dispatch. TS main parks the
+  follow-up-only arm exactly as the port did (`queuedSteering.length ===
+  0 || !canResume` -> `requestAbort()` only, un-wedged by the next
+  submit's `resumeIfIdle` admission); the divergence is deliberate and
+  documented in `docs/FEATURE_PARITY.md`'s interrupt bullet.
+- **Unchanged invariants**: the bare `abort` command and
+  `abort_and_clear_queue` still park the queue behind the suspension
+  (the API abort is a stop; the queue stays until a resume site —
+  `resume_queue`, a steer/follow-up admission, a queue mutation, or a
+  streamingBehavior prompt — fires); `abort_and_send_queued` still
+  runs abort-only when the abort leaves nothing queued or a held
+  admission pause / pending shutdown parks the scheduler (TS
+  `canResume`); `requestAbort`'s cancel sweep still resolves only the
+  queue-invisible admissions ("Prompt aborted before delivery.") and
+  never touches a queue-visible row; the recovery journal is untouched
+  (the suspension is process-local — a replaced worker revives with the
+  lanes restored and drains them); no message drops, duplicates, or
+  reorders — the turn runner pops each item exactly once, steering lane
+  before follow-up lane, each lane FIFO.
+- Verifiers (deterministic faux-engine dispatch tests in
+  `crates/pa-daemon/src/worker.rs`):
+  `abort_and_send_queued_with_only_follow_ups_starts_the_oldest`
+  (follow-up-only: the suspension clears at the abort, the oldest
+  follow-up's turn starts only after the aborted turn's aborted row
+  settles, the second stays queued while the first runs, both deliver
+  exactly once in enqueue order, one `agent_start` per follow-up turn,
+  the lane fully drains) and
+  `abort_and_send_queued_acks_before_the_follow_up_delivery`
+  (everything downstream held: the abort ack still answers inside a
+  bound, the follow-up starts promptly behind it, and a second bare
+  `abort` ends ITS turn cleanly — no duplicate row, the emptied queue
+  parks like the plain abort). The armed-arm orderings were already
+  pinned by `abort_and_send_queued_delivers_the_parked_queue_at_the_boundary`
+  and `abort_and_send_queued_delivers_the_steering_batch_then_the_follow_ups`;
+  `abort_and_send_queued_with_an_empty_queue_is_a_plain_abort` keeps
+  the abort-only park.
