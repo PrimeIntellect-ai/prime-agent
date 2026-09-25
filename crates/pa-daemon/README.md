@@ -134,7 +134,14 @@ notices' lane indices, derived per item from the injected custom row (the
 so journal recovery re-derives it, the lane strings stay the TS
 `queuedAgentMessagePreview` projection verbatim, and the condensed queue
 strip folds exactly these rows (a user-typed lookalike never flags); the
-rider serializes only when a notice is parked.
+rider serializes only when a notice is parked. The reserved kinds are
+daemon provenance, never client data (`child_status_notices.rs`): the
+prompt/steer/follow-up parse and the `restore_actions` validation answer a
+caller-supplied custom row claiming one loudly — it never parks, never
+folds — and the daemon's own notice injection rides the follow-up route
+with a one-shot capability minted in the worker process (the wire's
+optional `rlmNoticeNonce`), so the queue's classification only ever sees
+daemon-authentic rows.
 Prompt attachments: the `prompt`/`steer`/`follow_up` wire `images` array
 (base64 payload + mime type) rides the queue item into the session engine
 as multimodal user content (images on a queued prompt do not survive a

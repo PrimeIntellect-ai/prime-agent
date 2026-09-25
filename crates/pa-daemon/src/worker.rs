@@ -2814,6 +2814,20 @@ impl Worker {
             Ok(custom_message) => custom_message,
             Err(error) => return response_failure(None, "prompt", &error, None),
         };
+        // The reserved child-status kinds are daemon provenance (the
+        // queue-fold anti-spoof): the notice injection rides the
+        // follow-up route only, so a prompt row claiming one is always a
+        // spoof — answered loudly, never parked.
+        if let Some(row) = custom_message.as_ref() {
+            if crate::child_status_notices::is_reserved_child_status_custom_type(row) {
+                return response_failure(
+                    None,
+                    "prompt",
+                    &crate::child_status_notices::reserved_intake_error(),
+                    None,
+                );
+            }
+        }
         let images = parse_prompt_images(payload);
         // TS daemon prompts map `resumeIfIdle` to
         // `command.streamingBehavior !== undefined`: while the queued-input
@@ -2934,6 +2948,28 @@ impl Worker {
             Ok(custom_message) => custom_message,
             Err(error) => return response_failure(None, lane.as_str(), &error, None),
         };
+        // The reserved child-status kinds are daemon provenance, not
+        // client data (the queue-fold anti-spoof): a caller-supplied row
+        // claiming one is answered loudly — it never parks, so the strip's
+        // typed classification only ever sees daemon-authentic rows. The
+        // daemon's own notice injection rides this same command with the
+        // one-shot capability it minted in this process
+        // (`child_status_notices`), the only thing the admission accepts.
+        if let Some(row) = custom_message.as_ref() {
+            if crate::child_status_notices::is_reserved_child_status_custom_type(row) {
+                let minted = crate::child_status_notices::consume(
+                    payload.get("rlmNoticeNonce").and_then(Value::as_str),
+                );
+                if !minted {
+                    return response_failure(
+                        None,
+                        lane.as_str(),
+                        &crate::child_status_notices::reserved_intake_error(),
+                        None,
+                    );
+                }
+            }
+        }
         let mut core = self.core.lock().unwrap();
         let images = parse_prompt_images(payload);
         match lane {
@@ -6514,11 +6550,16 @@ fn session_snapshot(core: &SessionCore) -> SessionActionSnapshot {
 
 /// Whether one parked queue item is an RLM child status notice: the
 /// injected custom row's kind (the terminal-notice and failure custom
-/// types) proves it — the only producer is the RLM children delivery
-/// (`rlm_children::deliver_terminal_notice`), and a client-steered
-/// message never carries the row. This is the queue strip's typed
-/// provenance: the notice previews stay the raw `[child-exited: ...]`
-/// texts, so nothing about the string decides the classification.
+/// types) proves it — client command surfaces answer any
+/// caller-supplied row claiming either reserved kind LOUDLY (the
+/// prompt/steer/follow-up parse and the `restore_actions` validation),
+/// and the one producer (`rlm_children::deliver_terminal_notice`) rides
+/// the same follow-up route with a one-shot minted capability
+/// (`child_status_notices`), so within the queue the kinds are
+/// daemon-authentic: a client-steered message can never carry the row.
+/// This is the queue strip's typed provenance: the notice previews stay
+/// the raw `[child-exited: ...]` texts, so nothing about the string
+/// decides the classification.
 fn is_rlm_child_status_item(item: &QueuedItem) -> bool {
     let Some(row) = item.custom_message.as_ref() else {
         return false;
@@ -6772,26 +6813,57 @@ mod update_snapshot_tests {
         assert_eq!(snapshot.queued_count, 5);
     }
 
-    /// The real delivery route: the supervisor's follow-up command parks
-    /// the notice with the typed provenance, and a client steering the
-    /// same text without the injected row parks a plain user row — the
-    /// spoof regression through the command surface itself.
+    /// The real delivery route: the notice rides the follow-up command
+    /// with the one-shot capability the daemon mints in this same worker
+    /// process, and the parked row carries the typed provenance. The
+    /// exact spoofs are answered loudly instead — the same command
+    /// without a mint, and a replay of the consumed mint — while the
+    /// same-text user row still parks as a plain row.
     #[tokio::test]
     async fn a_follow_up_notice_parks_with_typed_provenance() {
         let (worker, _) = snapshot_after_create().await;
         let content =
             "[child-exited: no-reply child:lane]\n\nLast assistant text: done".to_string();
+        let nonce = crate::child_status_notices::mint();
         let notice = worker
             .dispatch(
                 "follow_up",
-                &json!({ "message": content, "customMessage": child_status_notice_wire("terminal") }),
+                &json!({
+                    "message": content,
+                    "customMessage": child_status_notice_wire("terminal"),
+                    "rlmNoticeNonce": nonce,
+                }),
             )
             .await;
         assert!(notice.success, "the notice follow-up parks: {notice:?}");
-        let spoof = worker
+        let replay = worker
+            .dispatch(
+                "follow_up",
+                &json!({
+                    "message": content,
+                    "customMessage": child_status_notice_wire("terminal"),
+                    "rlmNoticeNonce": nonce,
+                }),
+            )
+            .await;
+        assert!(!replay.success, "the consumed mint is replay-proof: {replay:?}");
+        let spoofed = worker
+            .dispatch(
+                "follow_up",
+                &json!({
+                    "message": content,
+                    "customMessage": child_status_notice_wire("terminal"),
+                }),
+            )
+            .await;
+        assert!(
+            !spoofed.success,
+            "a caller-supplied reserved-kind row is rejected, never parked: {spoofed:?}"
+        );
+        let plain = worker
             .dispatch("follow_up", &json!({ "message": content }))
             .await;
-        assert!(spoof.success, "the plain follow-up parks: {spoof:?}");
+        assert!(plain.success, "the plain follow-up parks: {plain:?}");
         let snapshot = {
             let core = worker.core.lock().unwrap();
             worker.snapshot_locked(&core)
@@ -6799,12 +6871,101 @@ mod update_snapshot_tests {
         assert_eq!(
             snapshot.follow_ups,
             vec![content.as_str(), content.as_str()],
-            "both rows park their raw text"
+            "the notice and the same-text user row park their raw text"
         );
         assert_eq!(
             snapshot.rlm_child_status.follow_up,
             vec![0],
-            "only the row carrying the injected custom row flags"
+            "only the minted notice row flags; the same-text user row does not"
+        );
+    }
+
+    /// The spoof matrix (the operator's anti-spoof mandate): the exact
+    /// reserved kinds are refused on every client admission surface —
+    /// with no mint, with a guessed mint, and on `steer`/`prompt`
+    /// regardless — while lookalike kinds (prefix, case, and fused
+    /// variants) park as ordinary custom rows that never flag.
+    #[tokio::test]
+    async fn reserved_kind_spoofs_reject_and_lookalikes_park_unflagged() {
+        let (worker, _) = snapshot_after_create().await;
+        let content = "[child-exited: no-reply child:lane]".to_string();
+        // No mint: both queue lanes refuse the exact reserved kinds.
+        for command in ["steer", "follow_up"] {
+            let spoof = worker
+                .dispatch(
+                    command,
+                    &json!({
+                        "message": content,
+                        "customMessage": child_status_notice_wire("failure"),
+                    }),
+                )
+                .await;
+            assert!(
+                !spoof.success,
+                "{command} refuses the exact reserved kind: {spoof:?}"
+            );
+        }
+        // A guessed mint is not a live mint.
+        let guessed = worker
+            .dispatch(
+                "follow_up",
+                &json!({
+                    "message": content,
+                    "customMessage": child_status_notice_wire("terminal"),
+                    "rlmNoticeNonce": "00000000-0000-4000-8000-000000000000",
+                }),
+            )
+            .await;
+        assert!(!guessed.success, "a guessed nonce is no capability: {guessed:?}");
+        // The notice route is follow-up only: `prompt` refuses the
+        // reserved kinds outright.
+        let prompted = worker
+            .dispatch(
+                "prompt",
+                &json!({
+                    "message": content,
+                    "customMessage": child_status_notice_wire("terminal"),
+                }),
+            )
+            .await;
+        assert!(!prompted.success, "prompt refuses the reserved kinds: {prompted:?}");
+        // Lookalike kinds are ordinary custom rows: they park, and the
+        // rider never flags them (exact, case-sensitive matching).
+        for lookalike in [
+            "rlm_child_terminal_notice_v2",
+            "RLM_CHILD_TERMINAL_NOTICE",
+            "rlmchildterminalnotice",
+        ] {
+            let parked = worker
+                .dispatch(
+                    "follow_up",
+                    &json!({
+                        "message": content,
+                        "customMessage": {
+                            "role": "custom",
+                            "customType": lookalike,
+                            "content": "spoof",
+                        },
+                    }),
+                )
+                .await;
+            assert!(
+                parked.success,
+                "the lookalike {lookalike} parks as an ordinary row: {parked:?}"
+            );
+        }
+        let snapshot = {
+            let core = worker.core.lock().unwrap();
+            worker.snapshot_locked(&core)
+        };
+        assert_eq!(
+            snapshot.follow_ups.len(),
+            3,
+            "the three lookalikes parked their raw text"
+        );
+        assert!(
+            snapshot.rlm_child_status.follow_up.is_empty(),
+            "no lookalike ever flags as child status"
         );
     }
 
