@@ -5448,8 +5448,10 @@ impl TurnRunner {
             // (before the accepted prompt): they render in the
             // conversation, but they are not the prompt's rows-land moment
             // — the "Starting" row must survive them and drop at the
-            // accepted row (the bots' commit-fence finding).
-            let mut emitting_prefix_rows = false;
+            // accepted row (the bots' commit-fence finding). The flip
+            // closure reads the flag while the prefix loop writes it, so
+            // it is a Cell (the runner is single-threaded here).
+            let emitting_prefix_rows = std::cell::Cell::new(false);
             // The last error of the active retry episode (the
             // `auto_retry_start` errorMessage): the episode's durable
             // outcome row names it on success too — the final event
@@ -5623,7 +5625,7 @@ impl TurnRunner {
                 // projection spanned nothing and the picked-up prompt was
                 // visible nowhere until the turn's rows landed.
                 let mut action_frame: Option<SessionActionSnapshot> = None;
-                if !emitting_prefix_rows
+                if !emitting_prefix_rows.get()
                     && !active_committed
                     && matches!(
                         event,
@@ -5988,13 +5990,13 @@ impl TurnRunner {
                 let mut core = core.lock().unwrap();
                 std::mem::take(&mut core.pending_next_turn)
             };
-            emitting_prefix_rows = !parked.is_empty();
+            emitting_prefix_rows.set(!parked.is_empty());
             for row in parked {
                 if !emit(EngineEvent::CustomMessage(row)) {
                     break;
                 }
             }
-            emitting_prefix_rows = false;
+            emitting_prefix_rows.set(false);
             engine.run_prompt(prompt_index, request, &aborted_probe, &mut emit);
         });
         let _ = turn.await;
