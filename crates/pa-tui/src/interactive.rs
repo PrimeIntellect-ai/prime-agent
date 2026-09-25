@@ -2173,6 +2173,25 @@ async fn run_interactive_surface(
         }
 
         let was_active = session.turn_active;
+        // The idle tick's next wakeup, computed here so the select's arm
+        // captures only a Copy deadline: the headless harness spawns this
+        // whole surface, so a select future must not hold view/session
+        // borrows (Editor's autocomplete provider is Send but not Sync).
+        // While a parked autocomplete request or an armed selection
+        // auto-scroll needs the 50 ms cadence, the deadline is 50 ms out;
+        // otherwise the loop parks until the next due idle work - the
+        // 2 s bash-activity refresh, or a toast's expiry when one
+        // dismisses sooner (the pre-gate prune below repaints it away).
+        let idle_tick_deadline = if view.editor.has_pending_autocomplete()
+            || session.selection_auto_scroll_active()
+        {
+            Instant::now() + Duration::from_millis(50)
+        } else {
+            let bash_deadline = last_bash_refresh + Duration::from_secs(2);
+            view.toasts
+                .next_expiry()
+                .map_or(bash_deadline, |expiry| bash_deadline.min(expiry))
+        };
         tokio::select! {
             maybe_event = async {
                 // A closed channel's recv() resolves None instantly and
@@ -2699,30 +2718,11 @@ async fn run_interactive_surface(
                 }
             }
             _ = async {
-                // The idle tick runs only while idle work is pending: a
-                // parked autocomplete request (TS resolves suggestions
-                // asynchronously after the keystroke batch) or an armed
-                // selection auto-scroll (TS's 150 ms hold + 50 ms
-                // interval timer) need the 50 ms cadence. With nothing
-                // pending the loop parks on its real event sources and
-                // wakes only at the bash-activity refresh deadline
+                // Wake at the precomputed idle deadline: a fully idle
+                // session parks on its real event sources and wakes only
+                // for the 2 s bash-activity refresh or a toast's expiry
                 // instead of 20x/s.
-                if view.editor.has_pending_autocomplete()
-                    || session.selection_auto_scroll_active()
-                {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                } else {
-                    // With nothing pending, park until the next due idle
-                    // work: the 2 s bash-activity refresh deadline, or a
-                    // toast's expiry when one dismisses sooner (the
-                    // pre-gate prune below repaints it away).
-                    let deadline = last_bash_refresh + Duration::from_secs(2);
-                    let deadline = view
-                        .toasts
-                        .next_expiry()
-                        .map_or(deadline, |expiry| deadline.min(expiry));
-                    tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
-                }
+                tokio::time::sleep_until(tokio::time::Instant::from_std(idle_tick_deadline)).await;
             } => {
                 // The input stream went quiet for a tick: parked editor
                 // autocomplete requests materialize now, so a typed
