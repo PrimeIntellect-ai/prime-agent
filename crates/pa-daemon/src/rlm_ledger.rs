@@ -1327,8 +1327,10 @@ const LEGACY_REGISTRY_HEADER_READ_MAX_BYTES: usize = 64 * 1024;
 /// family's total transcript bytes (a deep tree of large parents re-read
 /// every parent transcript per `list_saved_sessions`).
 fn legacy_registry_path(session_file: &Path) -> Option<PathBuf> {
-    let line =
-        crate::session_store::read_first_line_bounded(session_file, LEGACY_REGISTRY_HEADER_READ_MAX_BYTES)?;
+    let line = crate::session_store::read_first_line_bounded(
+        session_file,
+        LEGACY_REGISTRY_HEADER_READ_MAX_BYTES,
+    )?;
     let text = std::str::from_utf8(&line).ok()?;
     let header: Value = serde_json::from_str(text.trim()).ok()?;
     let header_id = header.get("id")?.as_str()?;
