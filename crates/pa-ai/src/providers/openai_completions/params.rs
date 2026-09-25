@@ -441,7 +441,7 @@ mod tests {
 
         // Toggle-declared route (the glm-4.7 shape): the reasoning object
         // only, with the declared on and off arms.
-        let mut toggle_model = effort_model.clone();
+        let mut toggle_model = effort_model;
         toggle_model.compat = Some(crate::types::ModelCompat::from_kind(
             crate::types::CompatKind::OpenAiCompletions(Box::new(
                 crate::types::OpenAiCompletionsCompat {
