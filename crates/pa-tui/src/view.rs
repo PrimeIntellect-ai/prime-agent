@@ -801,9 +801,6 @@ impl AgentView {
                 ));
                 rows
             }
-            ChatEntry::SlashCommandResult { content } => {
-                crate::chat_slash::render_slash_command_result(content, &self.theme, width)
-            }
             ChatEntry::CompactionSummary {
                 summary,
                 tokens_before,
@@ -2582,7 +2579,7 @@ mod tests {
         let mut view = view_with(vec![agent_message_row(), shell_completion_row()]);
         view.detail = Detail::All;
         let text = transcript_text(&mut view, 80);
-        assert!(text.contains("Agent message received \u{b7} from child lane"));
+        assert!(text.contains("Agent message received \u{b7} \u{2190} child lane"));
         assert!(text.contains("\u{2570}\u{2500} hi"));
         assert!(text.contains("Background shell command finished"));
         assert!(text.contains("[bash-done]"));
