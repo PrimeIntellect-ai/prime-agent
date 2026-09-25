@@ -82,15 +82,13 @@ fn kill_worker(pid: &u32) {
 }
 
 fn process_alive(pid: u32) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .map(|stat| {
-            let rest = stat
-                .rsplit_once(')')
-                .map(|(_, rest)| rest)
-                .unwrap_or_default();
-            !rest.starts_with('Z')
-        })
-        .unwrap_or(false)
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        let rest = stat
+            .rsplit_once(')')
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        !rest.starts_with('Z')
+    })
 }
 
 fn child_pids_of(ppid: u32) -> Vec<u32> {

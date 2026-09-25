@@ -90,7 +90,7 @@ async fn execute_tool_calls_sequential(
     let mut messages: Vec<ToolResultMessage> = Vec::new();
 
     for tool_call in tool_calls {
-        if signal.map(AbortSignal::is_aborted).unwrap_or(false) {
+        if signal.is_some_and(AbortSignal::is_aborted) {
             break;
         }
 
@@ -135,7 +135,7 @@ async fn execute_tool_calls_sequential(
         messages.push(tool_result_message);
         finalized_calls.push(finalized);
 
-        if signal.map(AbortSignal::is_aborted).unwrap_or(false) {
+        if signal.is_some_and(AbortSignal::is_aborted) {
             break;
         }
     }

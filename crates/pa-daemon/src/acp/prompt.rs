@@ -356,7 +356,6 @@ async fn run_prompt_turn(
                     break;
                 }
                 mode.engine.session.agent().wait_for_idle().await;
-                continue;
             }
             goal_continuation::GoalFollowUp::None => {
                 match session.autonomous_follow_up(&final_message).await {
@@ -617,26 +616,22 @@ async fn settle_turn(
     // The completion update carries the autonomous accounting while a run
     // is enabled (the stop status when the driver stopped the run, the live
     // snapshot otherwise).
-    let autonomous_status = match &autonomous_stop {
-        Some((_, status)) => Some((**status).clone()),
-        None => {
-            let status = session.autonomous_status().await;
-            status.enabled.then_some(status)
-        }
+    let autonomous_status = if let Some((_, status)) = &autonomous_stop {
+        Some((**status).clone())
+    } else {
+        let status = session.autonomous_status().await;
+        status.enabled.then_some(status)
     };
     let autonomous_meta = autonomous_status.as_ref().map(autonomous_meta);
     // The remaining continuation slots the quiescence observation reports:
     // the configured budget minus what the run consumed (zero when no
     // autonomous run is active).
-    let remaining_continuations = autonomous_status
-        .as_ref()
-        .map(|status| {
-            status
-                .limits
-                .max_continuations
-                .saturating_sub(status.continuations_used)
-        })
-        .unwrap_or(0);
+    let remaining_continuations = autonomous_status.as_ref().map_or(0, |status| {
+        status
+            .limits
+            .max_continuations
+            .saturating_sub(status.continuations_used)
+    });
     if session::publish_completion_envelope(
         session,
         turn_id,

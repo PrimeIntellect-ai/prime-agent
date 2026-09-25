@@ -169,15 +169,13 @@ pub fn restore_session(
 
 /// Rename with a copy+delete fallback (rename fails across filesystems).
 fn move_file(source: &Path, destination: &Path) -> Result<()> {
-    match fs::rename(source, destination) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            fs::copy(source, destination).with_context(|| {
-                format!("copy {} -> {}", source.display(), destination.display())
-            })?;
-            fs::remove_file(source).with_context(|| format!("remove {}", source.display()))?;
-            Ok(())
-        }
+    if let Ok(()) = fs::rename(source, destination) {
+        Ok(())
+    } else {
+        fs::copy(source, destination)
+            .with_context(|| format!("copy {} -> {}", source.display(), destination.display()))?;
+        fs::remove_file(source).with_context(|| format!("remove {}", source.display()))?;
+        Ok(())
     }
 }
 

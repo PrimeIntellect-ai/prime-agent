@@ -51,11 +51,10 @@ fn kernel_python() -> Option<PathBuf> {
         );
         return Some(explicit);
     }
-    let candidate = PathBuf::from(
-        std::env::var("HOME")
-            .map(|home| format!("{home}/.prime/agent/kernel-venv/bin/python"))
-            .unwrap_or_else(|_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string()),
-    );
+    let candidate = PathBuf::from(std::env::var("HOME").map_or_else(
+        |_| "/home/ubuntu/.prime/agent/kernel-venv/bin/python".to_string(),
+        |home| format!("{home}/.prime/agent/kernel-venv/bin/python"),
+    ));
     if candidate.exists() {
         return Some(candidate);
     }
@@ -238,7 +237,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -345,6 +344,7 @@ fn create_session(client: &mut Client, id: &str, dir: &Path, agent_dir: &Path) -
 
 #[test]
 fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart() {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
     let Some(kernel_python) = kernel_python() else {
         return;
     };
@@ -353,7 +353,6 @@ fn a_detached_bash_completion_wakes_the_idle_session_across_a_supervisor_restart
     let agent_dir = dir.join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
     let socket = dir.join("daemon.sock");
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
     let url = spawn_mock(&NEXT);
     std::fs::write(
         agent_dir.join("models.json"),
@@ -708,7 +707,7 @@ fn a_boot_fires_the_adopted_worker_due_job_and_never_resurrects_the_killed_sibli
 }
 
 fn session_rows_containing(session_file: &Path, needle: &str) -> usize {
-    std::fs::read_to_string(session_file)
-        .map(|content| content.lines().filter(|line| line.contains(needle)).count())
-        .unwrap_or(0)
+    std::fs::read_to_string(session_file).map_or(0, |content| {
+        content.lines().filter(|line| line.contains(needle)).count()
+    })
 }

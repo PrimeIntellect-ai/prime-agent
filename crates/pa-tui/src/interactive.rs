@@ -1543,109 +1543,61 @@ async fn run_interactive_surface(
                 }
                 events.recv().await
             } => {
-                match maybe_event {
-                    Some(event) => {
+                                if let Some(event) = maybe_event {
+                    session.apply_client_event(event, &mut view);
+                    // Batch the rest of the queued frames before this
+                    // iteration's render: a stream burst applies as one
+                    // transcript pass instead of one full re-layout per
+                    // frame (a replay-scale ingest renders once per
+                    // batch, not once per row).
+                    while let Ok(event) = events.try_recv() {
                         session.apply_client_event(event, &mut view);
-                        // Batch the rest of the queued frames before this
-                        // iteration's render: a stream burst applies as one
-                        // transcript pass instead of one full re-layout per
-                        // frame (a replay-scale ingest renders once per
-                        // batch, not once per row).
-                        while let Ok(event) = events.try_recv() {
-                            session.apply_client_event(event, &mut view);
-                        }
-                        // A succeeded compaction rebuilt the durable
-                        // transcript: replace the view's chat with it, and
-                        // refresh the tray usage the same way a settled
-                        // turn does (TS refreshes after "a turn or
-                        // compaction completes" — post-compaction usage is
-                        // unknown until the next assistant response).
-                        if session.transcript_stale {
-                            session.rebuild_transcript(&mut view).await;
-                            session.refresh_stats().await;
-                            session.rebuild_tray(&mut view);
-                        }
-                        // A settled turn refreshes the tray's context usage.
-                        if was_active && !session.turn_active {
-                            session.refresh_stats().await;
-                            session.rebuild_tray(&mut view);
-                        }
-                        // A `session_binding` supersede notice: the session
-                        // lives under a new active id, so re-attach to it -
-                        // event routing follows the attach, and the
-                        // transcript rebuilds from the snapshot (silent, no
-                        // banner). A failed re-attach changes nothing: the
-                        // new attach never landed, so the pane keeps its
-                        // current id and subscription (the old one detaches
-                        // only after a new attach succeeds); the next
-                        // supersede notice or the submit-path retry
-                        // re-attaches once a worker can serve the session.
-                        if let Some(current) = session.pending_rebind.take() {
-                            match session.attach_session(&current).await {
-                                Ok(()) => session.rebuild_view(
-                                    &mut view,
-                                    crate::session_ui::RebuildKind::Rebind,
-                                ),
-                                Err(error) => session.note(
-                                    &format!("session rebind failed: {error:#}"),
-                                    &mut view,
-                                ),
-                            }
-                        }
-                        // An update close frame arms the reconnect driver
-                        // immediately: the doomed connection's reader task is
-                        // gone, but the client struct retains an event
-                        // sender, so the channel itself never closes - the
-                        // frame, not the EOF, is the trigger (spec §10.2).
-                        if reconnect.is_none() {
-                            if let Some(update) = session.reconnect.take() {
-                                session.note(
-                                    &format!(
-                                        "the daemon is restarting for an update (about {}s) — reconnecting…",
-                                        update.est_seconds.max(1)
-                                    ),
-                                    &mut view,
-                                );
-                                reconnect = Some(ReconnectLoop::start(&update));
-                                session.dirty = true;
-                            }
-                        }
-                        // A dead direct worker link arms the session
-                        // re-attach driver (TS `connection_status:
-                        // "reconnecting"`): the warning row rides the chat
-                        // while the driver retries the attach.
-                        if session_reconnect.is_none() {
-                            if let Some(lost) = session.transport_lost.take() {
-                                // A supervisor loss retained while the direct
-                                // link lived: the supervisor client is dead,
-                                // so the session-plane retry loop could never
-                                // restore it — the full reconnect driver
-                                // replaces the client and reattaches.
-                                if supervisor_lost && reconnect.is_none() {
-                                    session.note_as(
-                                        "the daemon connection closed — reconnecting…",
-                                        crate::chat::StatusKind::Warning,
-                                        &mut view,
-                                    );
-                                    reconnect = Some(ReconnectLoop::start_lost());
-                                    supervisor_lost = false;
-                                } else {
-                                    session.note_as(
-                                        "Daemon connection lost; reconnecting…",
-                                        crate::chat::StatusKind::Warning,
-                                        &mut view,
-                                    );
-                                    session_reconnect = Some(SessionReconnect::start(&lost));
-                                }
-                                session.dirty = true;
-                            }
+                    }
+                    // A succeeded compaction rebuilt the durable
+                    // transcript: replace the view's chat with it, and
+                    // refresh the tray usage the same way a settled
+                    // turn does (TS refreshes after "a turn or
+                    // compaction completes" — post-compaction usage is
+                    // unknown until the next assistant response).
+                    if session.transcript_stale {
+                        session.rebuild_transcript(&mut view).await;
+                        session.refresh_stats().await;
+                        session.rebuild_tray(&mut view);
+                    }
+                    // A settled turn refreshes the tray's context usage.
+                    if was_active && !session.turn_active {
+                        session.refresh_stats().await;
+                        session.rebuild_tray(&mut view);
+                    }
+                    // A `session_binding` supersede notice: the session
+                    // lives under a new active id, so re-attach to it -
+                    // event routing follows the attach, and the
+                    // transcript rebuilds from the snapshot (silent, no
+                    // banner). A failed re-attach changes nothing: the
+                    // new attach never landed, so the pane keeps its
+                    // current id and subscription (the old one detaches
+                    // only after a new attach succeeds); the next
+                    // supersede notice or the submit-path retry
+                    // re-attaches once a worker can serve the session.
+                    if let Some(current) = session.pending_rebind.take() {
+                        match session.attach_session(&current).await {
+                            Ok(()) => session.rebuild_view(
+                                &mut view,
+                                crate::session_ui::RebuildKind::Rebind,
+                            ),
+                            Err(error) => session.note(
+                                &format!("session rebind failed: {error:#}"),
+                                &mut view,
+                            ),
                         }
                     }
-                    None => {
-                        events_closed = true;
+                    // An update close frame arms the reconnect driver
+                    // immediately: the doomed connection's reader task is
+                    // gone, but the client struct retains an event
+                    // sender, so the channel itself never closes - the
+                    // frame, not the EOF, is the trigger (spec §10.2).
+                    if reconnect.is_none() {
                         if let Some(update) = session.reconnect.take() {
-                            // §10: an update restart closed the daemon; the
-                            // UI stays mounted and reconnects.
                             session.note(
                                 &format!(
                                     "the daemon is restarting for an update (about {}s) — reconnecting…",
@@ -1655,25 +1607,70 @@ async fn run_interactive_surface(
                             );
                             reconnect = Some(ReconnectLoop::start(&update));
                             session.dirty = true;
-                        } else if reconnect.is_some() {
-                            // Already reconnecting: the dead channel's
-                            // terminal None frames are expected.
-                        } else {
-                            // An unexpected connection loss (no update in
-                            // flight) is a daemon hiccup, not a session
-                            // end: the pane keeps its transcript and
-                            // retries with the same bounded window and
-                            // backoff as the update restart. The user
-                            // can leave at any point; the window expires
-                            // into the honest exit note.
-                            session.note_as(
-                                "the daemon connection closed — reconnecting…",
-                                crate::chat::StatusKind::Warning,
-                                &mut view,
-                            );
-                            reconnect = Some(ReconnectLoop::start_lost());
+                        }
+                    }
+                    // A dead direct worker link arms the session
+                    // re-attach driver (TS `connection_status:
+                    // "reconnecting"`): the warning row rides the chat
+                    // while the driver retries the attach.
+                    if session_reconnect.is_none() {
+                        if let Some(lost) = session.transport_lost.take() {
+                            // A supervisor loss retained while the direct
+                            // link lived: the supervisor client is dead,
+                            // so the session-plane retry loop could never
+                            // restore it — the full reconnect driver
+                            // replaces the client and reattaches.
+                            if supervisor_lost && reconnect.is_none() {
+                                session.note_as(
+                                    "the daemon connection closed — reconnecting…",
+                                    crate::chat::StatusKind::Warning,
+                                    &mut view,
+                                );
+                                reconnect = Some(ReconnectLoop::start_lost());
+                                supervisor_lost = false;
+                            } else {
+                                session.note_as(
+                                    "Daemon connection lost; reconnecting…",
+                                    crate::chat::StatusKind::Warning,
+                                    &mut view,
+                                );
+                                session_reconnect = Some(SessionReconnect::start(&lost));
+                            }
                             session.dirty = true;
                         }
+                    }
+                } else {
+                    events_closed = true;
+                    if let Some(update) = session.reconnect.take() {
+                        // §10: an update restart closed the daemon; the
+                        // UI stays mounted and reconnects.
+                        session.note(
+                            &format!(
+                                "the daemon is restarting for an update (about {}s) — reconnecting…",
+                                update.est_seconds.max(1)
+                            ),
+                            &mut view,
+                        );
+                        reconnect = Some(ReconnectLoop::start(&update));
+                        session.dirty = true;
+                    } else if reconnect.is_some() {
+                        // Already reconnecting: the dead channel's
+                        // terminal None frames are expected.
+                    } else {
+                        // An unexpected connection loss (no update in
+                        // flight) is a daemon hiccup, not a session
+                        // end: the pane keeps its transcript and
+                        // retries with the same bounded window and
+                        // backoff as the update restart. The user
+                        // can leave at any point; the window expires
+                        // into the honest exit note.
+                        session.note_as(
+                            "the daemon connection closed — reconnecting…",
+                            crate::chat::StatusKind::Warning,
+                            &mut view,
+                        );
+                        reconnect = Some(ReconnectLoop::start_lost());
+                        session.dirty = true;
                     }
                 }
             }
@@ -2078,7 +2075,7 @@ async fn run_interactive_surface(
             _frame = async {
                 match render_deadline {
                     Some(deadline) => {
-                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await
+                        tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
                     }
                     None => std::future::pending::<()>().await,
                 }
@@ -2162,9 +2159,8 @@ async fn run_interactive_surface(
         // burning a render now.
         if session.dirty {
             if let Some(renderer) = renderer.is_terminal_mut() {
-                let interval_elapsed = last_render_at
-                    .map(|at| at.elapsed() >= MIN_RENDER_INTERVAL)
-                    .unwrap_or(true);
+                let interval_elapsed =
+                    last_render_at.is_none_or(|at| at.elapsed() >= MIN_RENDER_INTERVAL);
                 if interval_elapsed {
                     crate::app::draw(renderer, &mut view)?;
                     session.dirty = false;
@@ -2444,10 +2440,10 @@ impl Renderer {
                     // boundary: same contract as the terminal's own mouse
                     // events below — consumed unless tracking is active.
                     crate::input::ReaderInput::Mouse(report) => {
-                        if !crate::mouse_tracking::active() {
-                            true
-                        } else {
+                        if crate::mouse_tracking::active() {
                             ui_tx.send(UiInput::Mouse(report)).is_ok()
+                        } else {
+                            true
                         }
                     }
                     crate::input::ReaderInput::Event(event) => match event {
@@ -2678,6 +2674,7 @@ impl Renderer {
     /// writes into the user's scrollback, so it can be disabled without a
     /// release if it misbehaves.
     fn flush_to_main_screen(&mut self, view: &mut AgentView) -> Result<()> {
+        use std::io::Write;
         // Only the terminal renderer owns a real screen to flush;
         // headless verification keeps its plain pipes.
         if !matches!(self, Renderer::Terminal { .. }) {
@@ -2689,7 +2686,6 @@ impl Renderer {
         }
         let (width, height) = terminal::size()?;
         let plan = view.take_flush_plan(width as usize, height as usize);
-        use std::io::Write;
         let mut out = std::io::stdout();
         let mut buffer = String::new();
         match plan {

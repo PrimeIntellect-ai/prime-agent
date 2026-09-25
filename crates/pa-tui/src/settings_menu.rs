@@ -403,8 +403,7 @@ impl SettingsMenu {
         let next = values
             .iter()
             .position(|value| value == current)
-            .map(|index| (index + 1) % values.len())
-            .unwrap_or(0);
+            .map_or(0, |index| (index + 1) % values.len());
         let value = values[next].clone();
         row.current.clone_from(&value);
         SettingsMenuAction::Change { id: row.id, value }
@@ -496,8 +495,9 @@ impl SettingsMenu {
         match &sub.kind {
             SettingsSubmenu::Theme { themes } => themes
                 .get(sub.selected)
-                .map(|name| SettingsMenuAction::PreviewTheme { name: name.clone() })
-                .unwrap_or(SettingsMenuAction::None),
+                .map_or(SettingsMenuAction::None, |name| {
+                    SettingsMenuAction::PreviewTheme { name: name.clone() }
+                }),
             _ => SettingsMenuAction::None,
         }
     }

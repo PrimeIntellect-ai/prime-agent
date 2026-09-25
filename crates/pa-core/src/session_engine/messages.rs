@@ -93,8 +93,7 @@ impl CompactionOutcomeKind {
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 /// The resolved-line text of a retry episode that recovered: the last
@@ -251,7 +250,9 @@ fn bash_output_to_text(
     full_output_path: Option<&str>,
 ) -> String {
     let mut text = String::new();
-    if !output.is_empty() {
+    if output.is_empty() {
+        text.push_str("(no output)");
+    } else {
         let longest = output
             .match_indices('`')
             .fold(0usize, |longest, (index, _)| {
@@ -268,8 +269,6 @@ fn bash_output_to_text(
         text.push_str(output);
         text.push('\n');
         text.push_str(&fence);
-    } else {
-        text.push_str("(no output)");
     }
     if cancelled {
         text.push_str("\n\n(command cancelled)");

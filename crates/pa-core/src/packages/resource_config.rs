@@ -278,8 +278,10 @@ fn toggle_package_resource(
         entry
             .get("source")
             .and_then(serde_json::Value::as_str)
-            .map(|entry_source| entry_source == source)
-            .unwrap_or_else(|| entry.as_str() == Some(source.as_str()))
+            .map_or_else(
+                || entry.as_str() == Some(source.as_str()),
+                |entry_source| entry_source == source,
+            )
     });
     let Some(index) = index else {
         return Ok(String::new());
@@ -305,8 +307,7 @@ fn toggle_package_resource(
         .filter(|value| {
             value
                 .as_str()
-                .map(|entry| strip_pattern_marker(entry) != pattern)
-                .unwrap_or(true)
+                .is_none_or(|entry| strip_pattern_marker(entry) != pattern)
         })
         .collect();
     let written = if enabled {
@@ -440,7 +441,7 @@ mod tests {
                 .find(|kind| {
                     let is_skill = **kind == ResourceType::Skills;
                     is_skill == item.path.to_string_lossy().contains("skill")
-                        || (!is_skill && item.path.extension().map(|e| e == "ts").unwrap_or(false))
+                        || (!is_skill && item.path.extension().is_some_and(|e| e == "ts"))
                 })
                 .copied()
                 .unwrap_or(ResourceType::Skills)

@@ -189,8 +189,7 @@ fn build_params(model: &Model, context: &Context, options: &GoogleOptions) -> Va
     if context
         .tools
         .as_ref()
-        .map(|tools| !tools.is_empty())
-        .unwrap_or(false)
+        .is_some_and(|tools| !tools.is_empty())
     {
         if let Some(tool_choice) = options.tool_choice {
             body.insert(
@@ -226,8 +225,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }
@@ -361,8 +359,7 @@ async fn run_stream(
         .base
         .signal
         .as_ref()
-        .map(tokio_util::sync::CancellationToken::is_cancelled)
-        .unwrap_or(false)
+        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
     {
         return Err(ProviderError::Aborted);
     }

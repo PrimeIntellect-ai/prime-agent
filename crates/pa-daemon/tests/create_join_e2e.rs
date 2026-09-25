@@ -282,15 +282,14 @@ fn concurrent_creates_join_the_first_create() {
     assert_eq!(shutdown["success"], true, "shutdown failed: {shutdown}");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        match worker.child.try_wait().expect("worker wait") {
-            Some(_) => break,
-            None => {
-                assert!(
-                    Instant::now() < deadline,
-                    "worker did not exit after shutdown"
-                );
-                std::thread::sleep(Duration::from_millis(20));
-            }
+        if worker.child.try_wait().expect("worker wait").is_some() {
+            break;
+        } else {
+            assert!(
+                Instant::now() < deadline,
+                "worker did not exit after shutdown"
+            );
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 

@@ -38,21 +38,18 @@ impl SessionTree {
             let Some(_id) = entry.id() else {
                 continue;
             };
-            match entry {
-                FileEntry::Label { payload, .. } => {
-                    // Last label wins; an undefined label clears the name.
-                    tree.labels
-                        .insert(payload.target_id.clone(), payload.label.clone());
-                    let timestamp = entry.timestamp();
-                    if !timestamp.is_empty() {
-                        tree.label_timestamps
-                            .insert(payload.target_id.clone(), timestamp.to_string());
-                    }
+            if let FileEntry::Label { payload, .. } = entry {
+                // Last label wins; an undefined label clears the name.
+                tree.labels
+                    .insert(payload.target_id.clone(), payload.label.clone());
+                let timestamp = entry.timestamp();
+                if !timestamp.is_empty() {
+                    tree.label_timestamps
+                        .insert(payload.target_id.clone(), timestamp.to_string());
                 }
-                _ => {
-                    let parent = entry.parent_id().map(str::to_string);
-                    tree.children.entry(parent).or_default().push(index);
-                }
+            } else {
+                let parent = entry.parent_id().map(str::to_string);
+                tree.children.entry(parent).or_default().push(index);
             }
         }
         tree

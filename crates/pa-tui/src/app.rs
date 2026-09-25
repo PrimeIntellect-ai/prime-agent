@@ -136,7 +136,6 @@ fn run_app_surface(
                 Event::Paste(text) => {
                     view.editor.handle_paste(&text);
                 }
-                Event::Resize(_, _) => {}
                 _ => {}
             }
         }
@@ -234,10 +233,11 @@ pub fn dispatch_events(editor: &mut Editor, on_submit: &mut dyn FnMut(&str)) {
                 editor.add_to_history(&text);
                 on_submit(&text);
             }
-            EditorEvent::Changed(_) | EditorEvent::AutocompleteToggled(_) => {}
             // This minimal harness owns no terminal clipboard channel;
             // the full session UI (session_ui.rs) performs the copy.
-            EditorEvent::ClipboardWrite(_) => {}
+            EditorEvent::Changed(_)
+            | EditorEvent::AutocompleteToggled(_)
+            | EditorEvent::ClipboardWrite(_) => {}
         }
     }
 }
@@ -316,11 +316,11 @@ fn emit_zone_markers(
     emissions: &[(usize, crate::osc133::RowMarkers)],
     cursor: Option<(usize, usize)>,
 ) -> Result<()> {
+    use crossterm::cursor::MoveTo;
+    use std::io::Write;
     if emissions.is_empty() {
         return Ok(());
     }
-    use crossterm::cursor::MoveTo;
-    use std::io::Write;
     let mut out = stdout();
     for (row, markers) in emissions {
         crossterm::queue!(out, MoveTo(0, *row as u16))?;
