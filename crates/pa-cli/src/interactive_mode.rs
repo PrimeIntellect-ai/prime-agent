@@ -1793,9 +1793,28 @@ mod tests {
             "unexpected error: {error:#}"
         );
 
-        // A headerless source file.
+        // A source file with only an unreadable row: the loader finalizes
+        // it to zero entries (the pa-core `forkFrom` contract).
+        let torn = session_dir.join("torn.jsonl");
+        std::fs::write(&torn, "{\"type\":\"message\"}\n").expect("write torn file");
+        let error =
+            fork_startup_selection(torn.to_str().expect("utf8 path"), &cwd, Some(&session_dir))
+                .expect_err("a source with no readable rows cannot fork");
+        assert!(
+            error
+                .to_string()
+                .contains("Cannot fork: source session file is empty or invalid: "),
+            "unexpected error: {error:#}"
+        );
+
+        // A parseable but headerless source file: the row loads, only the
+        // header is missing.
         let headerless = session_dir.join("headerless.jsonl");
-        std::fs::write(&headerless, "{\"type\":\"message\"}\n").expect("write headerless file");
+        std::fs::write(
+            &headerless,
+            "{\"type\":\"notamodeledentry\",\"note\":\"kept verbatim\"}\n",
+        )
+        .expect("write headerless file");
         let error = fork_startup_selection(
             headerless.to_str().expect("utf8 path"),
             &cwd,
