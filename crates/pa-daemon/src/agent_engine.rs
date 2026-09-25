@@ -4302,9 +4302,7 @@ impl AgentSessionEngine {
             ProviderParkDecision::None {
                 reason: NoParkReason::NoReset,
             } => {
-                let Some(park) = existing.filter(|park| park.resume_at_ms <= now_ms) else {
-                    return None;
-                };
+                let park = existing.filter(|park| park.resume_at_ms <= now_ms)?;
                 // The wake fired but its probe could not re-park (no
                 // reported reset): re-arm one short probe, bounded so a
                 // park that can never wake ends instead of parking
@@ -4314,9 +4312,7 @@ impl AgentSessionEngine {
             ProviderParkDecision::None {
                 reason: NoParkReason::Disabled | NoParkReason::ParkBudget,
             } => {
-                let Some(park) = existing.filter(|park| park.resume_at_ms <= now_ms) else {
-                    return None;
-                };
+                let park = existing.filter(|park| park.resume_at_ms <= now_ms)?;
                 // A stale park whose episode ended here: its wake
                 // already fired, so nothing else would resume it (TS
                 // abort arm's stale-park clear).
