@@ -921,7 +921,7 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         cursor_col: usize,
     ) -> bool {
         get_slash_command_context(lines, cursor_line, cursor_col)
-            .map_or(true, |context| context.kind != SlashKind::Name)
+            .is_none_or(|context| context.kind != SlashKind::Name)
     }
 }
 

@@ -1700,7 +1700,7 @@ async fn run_interactive_surface(
         if session.dirty {
             if let Some(renderer) = renderer.is_terminal_mut() {
                 let interval_elapsed =
-                    last_render_at.map_or(true, |at| at.elapsed() >= MIN_RENDER_INTERVAL);
+                    last_render_at.is_none_or(|at| at.elapsed() >= MIN_RENDER_INTERVAL);
                 if interval_elapsed {
                     crate::app::draw(renderer, &mut view)?;
                     session.dirty = false;

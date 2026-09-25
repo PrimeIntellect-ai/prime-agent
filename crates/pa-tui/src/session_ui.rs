@@ -666,7 +666,7 @@ impl SessionUi {
             fullscreen_enabled: options
                 .client_settings
                 .as_ref()
-                .map_or(true, |settings| settings.fullscreen()),
+                .is_none_or(|settings| settings.fullscreen()),
             service_tier: None,
             speed_display_enabled: false,
             speed_stats: None,

@@ -412,7 +412,7 @@ impl TreeList {
                     .data
                     .entry
                     .id()
-                    .map_or(true, |id| !skip.contains(id))
+                    .is_none_or(|id| !skip.contains(id))
             });
         }
         self.recalculate_visual_structure();
