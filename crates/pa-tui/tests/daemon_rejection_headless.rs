@@ -805,9 +805,10 @@ fn an_agents_view_open_waits_through_the_update_restart_window() {
     let run = run_agents_view_plan_with_selection(
         vec![
             // The wait's retry cadence is 500ms: let the retry land before
-            // the agents-back key exits the run.
+            // the agents-back key (the default `left` on an empty editor)
+            // exits the run.
             HeadlessStep::WaitMs(1500),
-            HeadlessStep::Key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+            HeadlessStep::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
         ],
         SessionSelection::Resume(std::path::PathBuf::from("/tmp/sess-1.jsonl")),
         |supervisor| {
