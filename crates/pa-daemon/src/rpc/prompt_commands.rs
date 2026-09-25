@@ -94,23 +94,10 @@ async fn run_session_command(
             global_harness_dir: state.agent_dir.clone(),
             autonomous: &mut autonomous,
         };
-        match execute_session_command(&engine, &mut params, command).await {
-            Ok(execution) => execution,
-            Err(error) => {
-                // The failed compact still settles its in-flight flag and
-                // publishes the end frame (TS writes `compaction_end`
-                // around every completed attempt): a client keyed on the
-                // end frame never observes a stuck `isCompacting`.
-                if is_compact {
-                    state.compacting.store(false, Ordering::SeqCst);
-                    state
-                        .session
-                        .write_connection_output(compaction_frame("compaction_end", None, None))
-                        .await;
-                }
-                return Err(format!("{error:#}"));
-            }
-        }
+        // The executor never errors out of the call: failures ride the
+        // execution (`execution.error`), the durable rows, and the
+        // session events — the handler surfaces them below.
+        execute_session_command(&engine, &mut params, command).await
     };
     if is_compact {
         state.compacting.store(false, Ordering::SeqCst);

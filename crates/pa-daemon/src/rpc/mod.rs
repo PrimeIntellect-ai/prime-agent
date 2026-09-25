@@ -23,6 +23,7 @@ pub mod model_commands;
 pub mod prompt_commands;
 pub mod protocol;
 pub mod session;
+pub mod session_commands;
 
 use std::io::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -147,7 +148,7 @@ pub async fn run_rpc_mode(options: RpcOptions) -> anyhow::Result<i32> {
         pump_suspended: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     spawn_signal_handlers(Arc::clone(&session), writer.clone());
-    serve_stdin(state).await
+    Ok(serve_stdin(state).await)
 }
 
 /// SIGTERM exits 143, SIGHUP 129 (unix; the TS mode handles exactly this

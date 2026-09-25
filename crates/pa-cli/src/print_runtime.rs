@@ -274,8 +274,7 @@ fn rpc_engine_factory(
                     // process already hosts (a second writer over a
                     // persisted history), and hold its runtime lease for
                     // the opened session.
-                    let lease =
-                        session_open_guard(options.daemon_socket.as_deref(), session_path)?;
+                    let lease = session_open_guard(options.daemon_socket.as_deref(), session_path)?;
                     // A failed open drops the lease (its guard releases
                     // with the value), so the refusal/parse errors never
                     // leave an orphaned hold behind.

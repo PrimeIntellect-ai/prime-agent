@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use pa_core::session_engine::provider_adapter::json_round_trip;
+use pa_core::session_engine::provider_adapter::{json_round_trip, ProviderTarget};
 use pa_types::ai::{Model, ModelThinkingLevel};
 
 use super::commands::RpcState;
@@ -28,7 +28,7 @@ fn registry(state: &RpcState) -> pa_core::models::ModelRegistry {
 /// catalog, swap the live provider target and the agent model, clamp the
 /// thinking level, record the durable `model_change` row, and persist the
 /// settings default.
-async fn set_model(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, String> {
+pub(crate) async fn set_model(state: &Arc<RpcState>, payload: &Value) -> Result<ResponseData, String> {
     let provider = payload
         .get("provider")
         .and_then(Value::as_str)
@@ -108,7 +108,7 @@ async fn apply_model_selection(
 /// `cycle_model` (TS `session.cycleModel`, forward only on this wire):
 /// cycle within the available catalog; fewer than two candidates answer
 /// `null` like TS.
-async fn cycle_model(state: &Arc<RpcState>) -> Result<ResponseData, String> {
+pub(crate) async fn cycle_model(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     let mut registry = registry(state);
     let available: Vec<Model> = registry.get_available().into_iter().cloned().collect();
     if available.len() <= 1 {
@@ -145,7 +145,7 @@ async fn cycle_model(state: &Arc<RpcState>) -> Result<ResponseData, String> {
 
 /// `get_available_models` (TS `refreshAvailableModels`): the refreshed
 /// available catalog.
-async fn get_available_models(state: &Arc<RpcState>) -> Result<ResponseData, String> {
+pub(crate) async fn get_available_models(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     let mut registry = registry(state);
     let models = registry.refresh_available_models().await;
     Ok(ResponseData::Present(json!({ "models": models })))
@@ -157,7 +157,7 @@ const THINKING_LEVELS: &[&str] = &["off", "minimal", "low", "medium", "high", "x
 /// `set_thinking_level` (TS `session.setThinkingLevel`): clamp to what
 /// the model supports, record the durable row on a change, and persist
 /// the settings default.
-async fn set_thinking_level(
+pub(crate) async fn set_thinking_level(
     state: &Arc<RpcState>,
     payload: &Value,
 ) -> Result<ResponseData, String> {
@@ -223,7 +223,7 @@ async fn apply_thinking_level(
 
 /// `cycle_thinking_level` (TS `session.cycleThinkingLevel`): cycle the
 /// supported levels; a model without reasoning answers `null`.
-async fn cycle_thinking_level(state: &Arc<RpcState>) -> Result<ResponseData, String> {
+pub(crate) async fn cycle_thinking_level(state: &Arc<RpcState>) -> Result<ResponseData, String> {
     let handle = state.session.handle().await;
     let model = handle.model.clone();
     let agent = handle.engine.session.agent();
@@ -234,23 +234,23 @@ async fn cycle_thinking_level(state: &Arc<RpcState>) -> Result<ResponseData, Str
     if levels.is_empty() {
         return Ok(ResponseData::Present(Value::Null));
     }
-    let current = serde_json::to_value(agent.state().await.thinking_level).unwrap_or(json!("off"));
-    let current = current.as_str().unwrap_or("off").to_string();
+    // The agent's live level, mapped onto the model's level domain (the
+    // supported list lives there); the cycle steps within it.
+    let current = pa_core::session_engine::provider_adapter::model_thinking_level(
+        agent.state().await.thinking_level,
+    );
     drop(handle);
     let next = match levels.iter().position(|level| *level == current) {
-        Some(index) => &levels[(index + 1) % levels.len()],
-        None => &levels[0],
+        Some(index) => levels[(index + 1) % levels.len()],
+        None => levels[0],
     };
-    let Some(parsed) = pa_ai::models::thinking_level_from_str(next) else {
-        return Ok(ResponseData::Present(Value::Null));
-    };
-    apply_thinking_level(state, parsed).await?;
-    Ok(ResponseData::Present(json!({ "level": next })))
+    apply_thinking_level(state, next).await?;
+    Ok(ResponseData::Present(json!({ "level": next.wire_name() })))
 }
 
 /// `set_steering_mode` / `set_follow_up_mode` (TS
 /// `session.setSteeringMode`/`setFollowUpMode`).
-async fn set_queue_mode(
+pub(crate) async fn set_queue_mode(
     state: &Arc<RpcState>,
     payload: &Value,
     name: &str,

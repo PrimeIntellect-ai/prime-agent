@@ -52,7 +52,7 @@ impl RpcState {
         let changed = {
             let mut last = self.last_goal.lock().await;
             if *last == goal {
-                false;
+                false
             } else {
                 *last = goal.clone();
                 true
@@ -247,7 +247,7 @@ async fn get_state(state: &Arc<RpcState>) -> Result<ResponseData, String> {
 /// queued batch, the total, and the running turn as the active action.
 fn session_actions_snapshot(
     agent: &pa_agent::agent::Agent,
-    state: &pa_agent::types::AgentStateSnapshot,
+    state: &pa_agent::agent::AgentStateSnapshot,
 ) -> Value {
     let steering = agent.steering_previews();
     let follow_ups = agent.follow_up_previews();
