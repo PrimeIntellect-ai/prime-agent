@@ -56,8 +56,12 @@ struct MockSupervisor {
     /// window's scripted sequence): `None` accepts, `Some((message,
     /// error_info))` refuses with the message and the typed info. An
     /// empty queue falls through to `reject_create` (then accept).
-    create_answers: Vec<Option<(String, Option<Value>)>>,
+    create_answers: Vec<CreateAnswer>,
 }
+
+/// One scripted create answer: `None` accepts, `Some((message,
+/// error_info))` refuses with the message and the typed info.
+type CreateAnswer = Option<(String, Option<Value>)>;
 
 /// The answers every connection thread serves concurrently: the recorded
 /// request logs, the scripted create-answer queue, and the read-only
@@ -66,7 +70,7 @@ struct MockSupervisor {
 struct SharedAnswers {
     prompt_requests: Arc<Mutex<Vec<Value>>>,
     create_requests: Arc<Mutex<Vec<Value>>>,
-    create_answers: Mutex<Vec<Option<(String, Option<Value>)>>>,
+    create_answers: Mutex<Vec<CreateAnswer>>,
     reject_prompt_index: Option<usize>,
     hold_turn_ms: u64,
     close_on_prompt: bool,
