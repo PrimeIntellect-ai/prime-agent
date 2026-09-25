@@ -441,6 +441,32 @@ class SecretEchoGuardTest(unittest.IsolatedAsyncioTestCase):
             self._refused("cat ~/.ssh/id_rsa")
         self.assertEqual(second.getvalue(), "")
 
+    async def test_glued_grep_pattern_refused(self):
+        # `--regexp=VAL` and `-eVAL` carry the pattern in the flag, so every
+        # word after them is a file grep opens instead of the pipe. With
+        # `/dev/stdin` that file is the dump itself, and the pattern this scan
+        # never read decides what prints, so the stand-in dump below shows the
+        # leak the glued spellings are refused for.
+        self._refuse_all([
+            "env | grep --regexp=. /dev/stdin",
+            "env | grep --regex=. /dev/stdin",
+            "env | grep --regexp=. /dev/fd/0",
+            "env | grep -e. /dev/stdin",
+            "env | grep -Fe. /dev/stdin",
+            "env | grep --regexp=SAFE_VAR",
+            "env | grep -eSAFE_VAR",
+        ])
+        stand_in = "printf 'A=1\\nSECRETLINE=PATH\\nB=3\\n'"
+        wide = "A=1\nSECRETLINE=PATH\nB=3"
+        await self._expect_output([
+            (f"{stand_in} | grep --regexp=. /dev/stdin", wide),
+            (f"{stand_in} | grep -e. /dev/stdin", wide),
+        ])
+        # A spaced value is still the one word this test reads as the pattern,
+        # so the documented filtered read keeps its verdict.
+        for allowed in ("env | grep -e SAFE_VAR", "env | grep --regexp SAFE_VAR"):
+            self.assertIsNone(bash_module._secret_echo_violation(allowed))
+
     async def test_numeric_grep_context_flag_refused(self):
         # The stand-in dump below shows the widening the refusal rests on.
         self._refuse_all(["env | grep -2 SAFE_VAR", "env 2>&1 | grep -2 PATH", "env | grep --context=2 SAFE_VAR"])

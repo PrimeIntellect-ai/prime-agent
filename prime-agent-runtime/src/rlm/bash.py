@@ -1221,6 +1221,16 @@ _GREP_UNBOUNDED_FLAG_LETTERS = "vfABCz"
 _GREP_MAX_COUNT_LETTER = "m"
 _GREP_MAX_COUNT_LONG_FLAG = "--max-count"
 
+# The flag that supplies the pattern itself. Grep reads a glued value as that
+# pattern (`--regexp=.` and `-e.` both grep for every line), so the pattern is
+# not a word this scan read and every word after it is a FILE operand instead:
+# `grep --regexp=. /dev/stdin` prints the whole piped dump, because `/dev/stdin`
+# is that dump and `.` matches every line of it. A spaced value (`-e PATH`) stays
+# the single word the bounded-filter test already reads as the pattern, so only
+# the glued spellings are unreadable here.
+_GREP_PATTERN_LETTER = "e"
+_GREP_PATTERN_LONG_FLAG = "--regexp"
+
 # Long grep flags with the same problem: inversion, patterns from a file, and
 # context lines around every match. They are spelled in full because grep
 # accepts any unambiguous prefix of an option name, so a `--` word is refused
@@ -1937,16 +1947,21 @@ def _cluster_flag_effect(cluster: str) -> str:
 
     `wide` means the cluster is unbounded or widens matches, `value` means it
     ends with an `m` whose argument is the next word (`-m 1`), and `ok` means
-    it is a bounded flag. `-v`/`-f`/`-A`/`-B`/`-C` widen, and a digit is the
-    `-NUM` context form (`-2` is `--context=2`, read the same way inside a
-    cluster: `-10i`, `-i2`, `-F2`). The exception is a digit run directly
-    after an `m`: that run is the argument of `-m`/`--max-count`, so it is
-    consumed before the digit test -- unless it is all zeros, which prints the
+    it is a bounded flag. `-v`/`-f`/`-A`/`-B`/`-C` widen, and so does an `e`
+    with a glued value (`-e.`, `-ePATH`, `-Fe.`), whose pattern this scan never
+    read. A digit is the `-NUM` context form (`-2` is `--context=2`, read the
+    same way inside a cluster: `-10i`, `-i2`, `-F2`). The exception is a digit
+    run directly after an `m`: that run is the argument of `-m`/`--max-count`,
+    so it is consumed before the digit test -- unless it is all zeros, which prints the
     whole dump. A digit anywhere else stays unbounded (`-1m`).
     """
     index = 0
     while index < len(cluster):
         char = cluster[index]
+        if char == _GREP_PATTERN_LETTER and index + 1 < len(cluster):
+            # A glued pattern value leaves grep's pattern unread, and the word
+            # that remains is a file operand rather than the filter.
+            return "wide"
         if char == _GREP_MAX_COUNT_LETTER:
             digits = index + 1
             while cluster[digits : digits + 1].isdigit():
@@ -1999,12 +2014,14 @@ def _is_bounded_grep_filter(words: list[str]) -> bool:
     match with context lines (`-2` is `--context=2`, and grep reads
     a digit in a cluster the same way: `-10i`, `-i2`, `-F2`), a long flag is
     matched from any unambiguous prefix of its name (`--cont=2`,
-    `--after-c=2`), and a pattern with regex metacharacters can match every
-    line (`grep .`); a string-only scan cannot prove anything narrower about
-    those shapes, so they stay refused. A lone `--` ends the options the way
-    it does for grep, so a short-flag spelling after it is an operand rather
-    than a flag (`grep -- -v` is a fixed-string filter, `grep -- -v KEY` is a
-    pattern and a file). A digit run directly after an `m` is
+    `--after-c=2`), a pattern glued to the flag that supplies it (`--regexp=.`,
+    `-e.`) because the pattern is then not a word this test read and the words
+    that follow are files it reads instead of the pipe, and a pattern with
+    regex metacharacters can match every line (`grep .`); a string-only scan
+    cannot prove anything narrower about those shapes, so they stay refused. A
+    lone `--` ends the options the way it does for grep, so a short-flag
+    spelling after it is an operand rather than a flag (`grep -- -v` is a
+    fixed-string filter, `grep -- -v KEY` is a pattern and a file). A digit run directly after an `m` is
     that flag's own bound rather than context (`-m1`, `-F -m1`, `-im1` and the
     spaced `-m 1` all print one line), so it stays a bounded filter, unless the
     count is zero, which prints the whole dump here (`-m0`).
@@ -2032,6 +2049,11 @@ def _is_bounded_grep_filter(words: list[str]) -> bool:
             # The rest is a long flag, and grep matches it from any
             # unambiguous prefix of its name.
             if any(flag.startswith(name) for flag in _GREP_UNBOUNDED_LONG_FLAGS):
+                return False
+            if separator and _GREP_PATTERN_LONG_FLAG.startswith(name):
+                # A glued `--regexp=.` is a pattern this scan never read (grep
+                # takes any unambiguous prefix of the long name), so the word
+                # left over is a file operand grep reads instead of the pipe.
                 return False
             if name == _GREP_MAX_COUNT_LONG_FLAG or (
                 separator and _GREP_MAX_COUNT_LONG_FLAG.startswith(name)
