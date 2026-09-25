@@ -100,6 +100,13 @@ impl SupervisorLink {
 
     /// Send one request over an independent connection. Once a command is
     /// written it is never retried; only a failed write can reconnect once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the connect fails, the deadline passes
+    /// before the response lands (a link timeout), or the command write
+    /// or response read fails (a failed write reconnects once, then
+    /// errors).
     pub async fn request(&self, command: Value, timeout: Duration) -> Result<DaemonResponse> {
         // Include connect and the supervisor hello in the caller's deadline:
         // a socket that accepts but never greets must not stall this request.
@@ -143,6 +150,12 @@ impl SupervisorLink {
     }
 
     /// Send a request and require a successful response; returns its data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the underlying request fails, or the
+    /// response reports failure (its error text, or "request failed"
+    /// when it carries none).
     pub async fn request_success(&self, command: Value, timeout: Duration) -> Result<Value> {
         let response = self.request(command, timeout).await?;
         if !response.success {

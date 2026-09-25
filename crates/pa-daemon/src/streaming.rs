@@ -6,7 +6,7 @@
 //! of deltas per second, so the turn's emit path parks those frames in a
 //! single-slot coalescer instead of broadcasting every one: a flusher task
 //! emits at most one parked update per interval, while every other frame
-//! (message_start, message_end, tool events, turn_end) flushes the parked
+//! (`message_start`, `message_end`, tool events, `turn_end`) flushes the parked
 //! update first and then goes out immediately, so wire order and
 //! event-sequence order stay identical to uncoalesced streaming.
 //!

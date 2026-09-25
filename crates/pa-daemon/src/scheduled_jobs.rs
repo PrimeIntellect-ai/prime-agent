@@ -10,7 +10,7 @@
 //! process, like TS daemon-mode (`options.worker ?
 //! AgentCronJobStore.forSessionArtifacts() : ...`); sessions register
 //! their artifact partition when they bind (create and every
-//! replacement flow - new_session / switch_session / import_jsonl /
+//! replacement flow - `new_session` / `switch_session` / `import_jsonl` /
 //! fork) and jobs rebind with them.
 //!
 //! Delivery: a due job is claimed by the store and fired through the

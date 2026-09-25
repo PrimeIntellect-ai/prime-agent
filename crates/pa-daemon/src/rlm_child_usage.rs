@@ -263,7 +263,7 @@ mod tests {
     }
 
     /// The usage fold itself: rows accumulate per origin across the walk
-    /// (two spawn_task completions sum their fields, TS
+    /// (two `spawn_task` completions sum their fields, TS
     /// `addAssistantUsage`).
     #[test]
     fn batches_sum_across_completions_of_one_origin() {

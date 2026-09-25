@@ -14,12 +14,23 @@ pub const CONFIG_DIR_NAME: &str = ".prime/agent";
 /// error, not a degraded `/tmp` default: the daemon owns durable state and
 /// must refuse to start rather than write it outside the user profile
 /// (TS `getAgentDir` throws when `os.homedir()` fails).
+///
+/// # Errors
+///
+/// Returns an error when the home directory cannot be resolved (unset
+/// `HOME` on Unix, unset `USERPROFILE` on Windows).
 pub fn home_dir() -> Result<PathBuf> {
     pa_types::platform::home_dir()
         .ok_or_else(|| anyhow!("home directory not found: set HOME (or USERPROFILE on Windows)"))
 }
 
 /// Expand a leading `~`/`~/` against [`home_dir`]; other paths pass through.
+///
+/// # Errors
+///
+/// Returns an error when expanding `~`/`~/` needs the home directory and
+/// [`home_dir`] cannot resolve it; every other path passes through
+/// unchanged.
 pub fn expand_tilde(path: &str) -> Result<PathBuf> {
     if let Some(rest) = path.strip_prefix("~/") {
         Ok(home_dir()?.join(rest))
@@ -30,6 +41,14 @@ pub fn expand_tilde(path: &str) -> Result<PathBuf> {
     }
 }
 
+/// The agent state root: the `PRIME_AGENT_CODING_AGENT_DIR` override
+/// when set (tilde expanded), else `.prime/agent` under the home
+/// directory.
+///
+/// # Errors
+///
+/// Returns an error when the override cannot be tilde-expanded, or when the
+/// fallback needs the home directory and [`home_dir`] cannot resolve it.
 pub fn agent_dir() -> Result<PathBuf> {
     match std::env::var_os(AGENT_DIR_ENV) {
         Some(dir) if !dir.is_empty() => expand_tilde(&dir.to_string_lossy()),
@@ -37,6 +56,12 @@ pub fn agent_dir() -> Result<PathBuf> {
     }
 }
 
+/// The sessions root: the `PRIME_AGENT_SESSION_DIR` override when set
+/// (tilde expanded), else `<agent-dir>/sessions`.
+///
+/// # Errors
+///
+/// Returns an error when the override cannot be tilde-expanded.
 pub fn sessions_dir(agent_dir: &Path) -> Result<PathBuf> {
     match std::env::var_os(SESSION_DIR_ENV) {
         Some(dir) if !dir.is_empty() => expand_tilde(&dir.to_string_lossy()),
@@ -48,6 +73,13 @@ pub fn logs_dir(agent_dir: &Path) -> PathBuf {
     agent_dir.join("logs")
 }
 
+/// Create the directory (and any missing parents), then restrict its
+/// permissions to the current user.
+///
+/// # Errors
+///
+/// Returns an error when directory creation fails; the permission
+/// restriction is best effort and never fails the call.
 pub fn ensure_dir(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path)?;
     let _ = pa_core::platform::perms::restrict_dir(path);

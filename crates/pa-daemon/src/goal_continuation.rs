@@ -44,6 +44,11 @@ impl AgentSessionEngine {
     /// children registry. The worker calls this once after the engine is
     /// built; the hook holds a weak engine reference so the registry never
     /// pins the engine.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an internal mutex is poisoned (the input probe,
+    /// admission sink, or queue purge lock).
     pub fn set_goal_admission(
         self: &Arc<Self>,
         probe: crate::engine::SessionInputProbe,
