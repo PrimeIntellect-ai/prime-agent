@@ -74,8 +74,6 @@ pub enum ChatEntry {
     /// A durable session-command echo row (`session_slash_command`):
     /// the command as typed, laid out like a user message.
     SlashCommand { text: String },
-    /// A durable session-command outcome row (`session_slash_command_result`).
-    SlashCommandResult { content: String },
     /// The compaction summary row (TS `CompactionSummaryMessageComponent`):
     /// `◆ Context compacted` with the summary below.
     CompactionSummary {

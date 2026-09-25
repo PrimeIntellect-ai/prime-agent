@@ -1,185 +1,315 @@
 #!/usr/bin/env python3
-"""`/mcp` visual-parity verifier: frame-diff the Rust inline connections
-view against the installed TS prime-agent binary in tmux.
+"""The `/mcp` view's parity harness (TS `ServiceCatalogPickerComponent`).
 
-Both sides are driven like a user: tmux launches the binary, `/mcp` is
-typed at the editor, and the rendered pane is captured with escape
-sequences after the view settles. The frames are normalized (ANSI
-stripped, trailing whitespace trimmed) and diffed. The TS binary's view
-(TS `handleMcpCommand` -> the configuration menu's MCP Connections tab)
-lists the auth-registry connections; the Rust view lists the daemon
-roster (the built-in catalog plus user-declared servers) with the
-connection status and tool listing. Divergences are classified:
+Drives the REAL TS component (from the read-only TS checkout, through its
+own tsx) and the REAL Rust view (the `mcp_view_parity_frames` example)
+over identical fixtures, key sequences, and geometry, then diffs the
+rendered frames line-for-line — the search field, the rows with their
+trailing status, the scroll counter, the one fixed detail line, and the
+hint.
 
-- structural (panel, search field, row markers, key hint) must match;
-- roster content may differ where the products differ (the TS tab shows
-  the auth-registry providers — including the Serper api-key entry —
-  while the Rust roster is the MCP catalog plus settings servers);
-- the Rust detail block (status wording, tool count/tool lines) is the
-  lane's sanctioned extension over the TS status row.
+Run the TS side on the box (tsx only; no Rust toolchain needed):
 
-The report goes to stdout plus --out; exit code is non-zero when a
-structural line differs.
+    python3 scripts/mcp_view_parity.py --side ts --out /tmp/mcp/ts.json
+
+Run the Rust side where the checkout is built (the gate sandbox):
+
+    python3 scripts/mcp_view_parity.py --side rust \
+        --rust-dir /work/repo --out /tmp/mcp/rust.json
+
+Diff the two frame sets:
+
+    python3 scripts/mcp_view_parity.py --diff /tmp/mcp/ts.json /tmp/mcp/rust.json
+
+The fixture is the four-card catalog the `pa-tui` unit tests use (a
+connected user stdio server, a connected catalog service with a
+record-carried tool count, a connectable OAuth service, and a pasteable
+token service) plus the empty catalog; the scenarios cover the open
+frame, navigation, the pasteable selection, a search query, and the two
+empty states.
 """
 
+from __future__ import annotations
+
 import argparse
-import os
+import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
-import time
+from pathlib import Path
 
-SESSION_TS = "mcp-parity-ts"
-SESSION_RS = "mcp-parity-rs"
-WIDTH, HEIGHT = 110, 32
-SETTLE_SECONDS = 6.0
+WIDTH = 110
+VIEWPORT_ROWS = 19
 
-TS_BINARY = "prime-agent"
+# Canonical key ids -> the raw pi-tui key sequences the TS components take
+# (the Rust side receives the canonical ids).
+TS_KEY = {
+    "down": "\x1b[B",
+    "up": "\x1b[A",
+    "enter": "\r",
+    "escape": "\x1b",
+}
+
+ANSI = re.compile(
+    r"\x1b\[[0-9;?]*[a-zA-Z]"
+    r"|\x1b[\]_^X][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b."
+)
+
+CARDS = [
+    {
+        "serviceId": "fixture-echo",
+        "label": "fixture-echo",
+        "connectionStatus": "connected",
+        "connectable": False,
+        "usesOAuth": False,
+        "source": "user",
+        "connectionIds": ["fixture-echo"],
+        "pasteToken": False,
+        "aliases": [],
+    },
+    {
+        "serviceId": "notion",
+        "label": "Notion",
+        "connectionStatus": "connected",
+        "connectable": False,
+        "usesOAuth": True,
+        "source": "catalog",
+        "connectionIds": ["notion"],
+        "pasteToken": False,
+        "aliases": [],
+        "description": "Notion workflows.",
+        "toolCount": 12,
+    },
+    {
+        "serviceId": "linear",
+        "label": "Linear",
+        "connectionStatus": "not_connected",
+        "connectable": True,
+        "usesOAuth": True,
+        "source": "catalog",
+        "connectionIds": [],
+        "pasteToken": False,
+        "aliases": ["linear-app"],
+        "description": "Search and update Linear issues.",
+    },
+    {
+        "serviceId": "github",
+        "label": "GitHub",
+        "connectionStatus": "setup_required",
+        "connectable": False,
+        "usesOAuth": False,
+        "source": "catalog",
+        "connectionIds": [],
+        "pasteToken": True,
+        "aliases": [],
+        "description": "Inspect repositories.",
+        "setupHint": "paste a GitHub personal access token",
+    },
+]
+
+BIG_CARDS = [
+    {
+        "serviceId": f"service-{index}",
+        "label": f"Service {index}",
+        "connectionStatus": "not_connected",
+        "connectable": True,
+        "usesOAuth": True,
+        "source": "catalog",
+        "connectionIds": [],
+        "pasteToken": False,
+        "aliases": [],
+        "description": "A catalog service.",
+    }
+    for index in range(69)
+]
+
+SCENARIOS = [
+    ("open", CARDS, []),
+    ("navigate", CARDS, ["down", "down"]),
+    ("pasteable", CARDS, ["down", "down", "down"]),
+    ("search", CARDS, list("github")),
+    ("nomatch", CARDS, list("zzz")),
+    ("empty", [], []),
+    ("window", BIG_CARDS, ["down"] * 10),
+]
+
+ENTRY = """
+import { readFileSync } from "node:fs";
+import { ServiceCatalogPickerComponent } from {component_path};
+import { initTheme } from {theme_path};
+
+initTheme("prime");
+
+const fixturePath = process.argv[2];
+const viewportRows = Number(process.argv[3]);
+const width = Number(process.argv[4]);
+const keys = process.argv[5]
+    ? process.argv[5].split(" ").filter((key) => key && key !== "-")
+    : [];
+const views = JSON.parse(readFileSync(fixturePath, "utf8"));
+const picker = new ServiceCatalogPickerComponent(
+    views,
+    () => {},
+    () => {},
+    { getRows: () => viewportRows },
+);
+picker.focused = true;
+for (const key of keys) picker.handleInput(key);
+for (const line of picker.render(width)) console.log(line);
+"""
 
 
-def tmux(*args, check=True):
+def normalize(raw_lines: list[str]) -> list[str]:
+    """One plain-text trimmed line per rendered row (the diff shape)."""
+    return [ANSI.sub("", line).rstrip() for line in raw_lines]
+
+
+def run(command: list[str], cwd: Path | None = None, env: dict | None = None) -> list[str]:
     result = subprocess.run(
-        ["tmux", *args], capture_output=True, text=True, check=False
+        command,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
     )
-    if check and result.returncode != 0:
-        raise RuntimeError(f"tmux {' '.join(args)} failed: {result.stderr}")
-    return result.stdout
+    return result.stdout.splitlines()
 
 
-def ansi_stripped(text: str) -> str:
-    text = re.sub(r"\x1b\][^\x07]*(\x07|\x1b\\)", "", text)
-    text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", text)
-    text = re.sub(r"\x1b[()][0-9A-B]", "", text)
-    return text
+def ts_key(key: str) -> str:
+    return TS_KEY.get(key, key)
 
 
-def capture(session: str) -> str:
-    raw = tmux("capture-pane", "-t", session, "-p", "-e")
-    lines = [ansi_stripped(line).rstrip() for line in raw.splitlines()]
-    # Drop trailing blank rows (tmux pads the pane).
-    while lines and not lines[-1]:
-        lines.pop()
-    return "\n".join(lines)
+def ts_side(out: Path, ts_checkout: Path) -> None:
+    tsx = ts_checkout / "node_modules" / ".bin" / "tsx"
+    if not tsx.exists():
+        sys.exit(f"no tsx in the checkout: {tsx}")
+    scratch = Path(tempfile.mkdtemp(prefix="mcp-parity-ts-"))
+    home = scratch / "home"
+    home.mkdir()
+    try:
+        entry = scratch / "entry.mts"
+        component_path = json.dumps(
+            str(
+                ts_checkout
+                / "packages/coding-agent/src/modes/interactive/components/service-catalog-picker.ts"
+            )
+        )
+        theme_path = json.dumps(
+            str(
+                ts_checkout
+                / "packages/coding-agent/src/modes/interactive/theme/theme.ts"
+            )
+        )
+        entry.write_text(
+            ENTRY.replace("{component_path}", component_path).replace(
+                "{theme_path}", theme_path
+            )
+        )
+        frames: dict[str, list[str]] = {}
+        for name, cards, keys in SCENARIOS:
+            fixture = scratch / f"{name}.json"
+            fixture.write_text(json.dumps(cards))
+            raw = run(
+                [
+                    str(tsx),
+                    str(entry),
+                    str(fixture),
+                    str(VIEWPORT_ROWS),
+                    str(WIDTH),
+                    " ".join(ts_key(key) for key in keys) or "-",
+                ],
+                cwd=scratch,
+                env={
+                    **dict(__import__("os").environ),
+                    "HOME": str(home),
+                },
+            )
+            frames[name] = normalize(raw)
+        out.write_text(json.dumps(frames, indent=2))
+        print(f"TS frames written to {out}")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
-def run_ts(out_dir: str) -> str:
-    tmux("kill-session", "-t", SESSION_TS, check=False)
-    tmux("new-session", "-d", "-s", SESSION_TS, "-x", str(WIDTH), "-y", str(HEIGHT))
-    time.sleep(0.5)
-    tmux("send-keys", "-t", SESSION_TS, TS_BINARY, "Enter")
-    time.sleep(6)
-    tmux("send-keys", "-t", SESSION_TS, "/mcp", "Enter")
-    time.sleep(SETTLE_SECONDS)
-    frame = capture(SESSION_TS)
-    tmux("kill-session", "-t", SESSION_TS, check=False)
-    with open(os.path.join(out_dir, "ts_frame.txt"), "w") as handle:
-        handle.write(frame + "\n")
-    return frame
+def rust_side(out: Path, rust_dir: Path) -> None:
+    frames: dict[str, list[str]] = {}
+    with tempfile.TemporaryDirectory(prefix="mcp-parity-rust-") as tmp:
+        scratch = Path(tmp)
+        for name, cards, keys in SCENARIOS:
+            fixture = scratch / f"{name}.json"
+            fixture.write_text(json.dumps({"connections": [], "services": cards}))
+            raw = run(
+                [
+                    "cargo",
+                    "run",
+                    "-q",
+                    "-p",
+                    "pa-tui",
+                    "--example",
+                    "mcp_view_parity_frames",
+                    "--",
+                    str(fixture),
+                    str(VIEWPORT_ROWS),
+                    str(WIDTH),
+                    " ".join(keys) or "-",
+                ],
+                cwd=rust_dir,
+            )
+            frames[name] = normalize(raw)
+    out.write_text(json.dumps(frames, indent=2))
+    print(f"Rust frames written to {out}")
 
 
-def run_rust(binary: str, out_dir: str) -> str:
-    agent_dir = os.path.join(out_dir, "agent")
-    os.makedirs(agent_dir, exist_ok=True)
-    # A hermetic agent dir: only the built-in catalog (linear, notion) in
-    # the roster, mirroring the TS tab's built-in rows.
-    tmux("kill-session", "-t", SESSION_RS, check=False)
-    tmux("new-session", "-d", "-s", SESSION_RS, "-x", str(WIDTH), "-y", str(HEIGHT))
-    time.sleep(0.5)
-    script = (
-        f"PRIME_AGENT_CODING_AGENT_DIR={agent_dir} PI_OFFLINE=1 "
-        f"PRIME_AGENT_KERNEL_VENV={os.path.join(out_dir, 'kernel-venv')} "
-        f"{binary}"
-    )
-    tmux("send-keys", "-t", SESSION_RS, script, "Enter")
-    time.sleep(8)
-    tmux("send-keys", "-t", SESSION_RS, "/mcp", "Enter")
-    time.sleep(SETTLE_SECONDS + 4)
-    frame = capture(SESSION_RS)
-    tmux("kill-session", "-t", SESSION_RS, check=False)
-    with open(os.path.join(out_dir, "rust_frame.txt"), "w") as handle:
-        handle.write(frame + "\n")
-    return frame
-
-
-def frame_rows(frame: str, panel_marker: str):
-    """The view's rows: from the first marker row to the hint row."""
-    rows = frame.splitlines()
-    start = next((i for i, row in enumerate(rows) if panel_marker in row), None)
-    if start is None:
-        return []
-    end = len(rows)
-    for i in range(start, len(rows)):
-        if "close" in rows[i] and ("select" in rows[i] or "navigate" in rows[i]):
-            end = i + 1
-            break
-    return rows[start:end]
-
-
-def structural(row: str) -> str:
-    """One row reduced to its structural cells: the border rules, the
-    search field, and the hint; connection rows collapse to their marker
-    (the roster content is product-specific and diffed separately)."""
-    if set(row.strip()) in ({"─"}, {"-", "─"}):
-        return "BORDER"
-    if "Search MCP connections" in row:
-        return "SEARCH-FIELD"
-    if "select" in row and "close" in row:
-        return "HINT"
-    if row.startswith("›") or (row.startswith("  ") and "·" in row):
-        return "ROW"
-    if row.startswith(" ("):
-        return "SCROLL"
-    return "OTHER"
+def diff_sides(ts_path: Path, rust_path: Path) -> int:
+    ts_frames = json.loads(Path(ts_path).read_text())
+    rust_frames = json.loads(Path(rust_path).read_text())
+    failures = 0
+    for name, _cards, _keys in SCENARIOS:
+        ts_lines = ts_frames.get(name, [])
+        rust_lines = rust_frames.get(name, [])
+        if ts_lines == rust_lines:
+            print(f"PASS {name}")
+            continue
+        failures += 1
+        print(f"FAIL {name}")
+        for index in range(max(len(ts_lines), len(rust_lines))):
+            ts_line = ts_lines[index] if index < len(ts_lines) else "<missing>"
+            rust_line = rust_lines[index] if index < len(rust_lines) else "<missing>"
+            if ts_line != rust_line:
+                print(f"  line {index}:")
+                print(f"    ts:   {ts_line!r}")
+                print(f"    rust: {rust_line!r}")
+    if failures:
+        print(f"{failures}/{len(SCENARIOS)} scenarios differ")
+        return 1
+    print(f"all {len(SCENARIOS)} scenarios byte-identical")
+    return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--rust-binary", help="path to the Rust prime-agent binary")
-    parser.add_argument("--out-dir", required=True, help="directory for the captured frames and report")
-    parser.add_argument("--side", choices=["both", "ts", "rust"], default="both",
-                        help="capture one side only (frames land in --out-dir; run again on the other box for the diff)")
+    parser.add_argument("--side", choices=["ts", "rust"])
+    parser.add_argument("--diff", nargs=2, metavar=("TS", "RUST"))
+    parser.add_argument("--out", type=Path, default=Path("/tmp/mcp-parity.json"))
+    parser.add_argument("--ts-checkout", type=Path, default=Path("/home/ubuntu/prime-agent"))
+    parser.add_argument("--rust-dir", type=Path, default=Path("."))
     args = parser.parse_args()
-    os.makedirs(args.out_dir, exist_ok=True)
-
-    if args.side in ("both", "ts"):
-        run_ts(args.out_dir)
-    if args.side in ("both", "rust"):
-        if not args.rust_binary:
-            parser.error("--rust-binary is required for the rust side")
-        run_rust(args.rust_binary, args.out_dir)
-    if args.side in ("ts", "rust"):
-        print(f"captured the {args.side} side to {args.out_dir}")
-        return 0
-
-    with open(os.path.join(args.out_dir, "ts_frame.txt")) as handle:
-        ts_frame = handle.read()
-    with open(os.path.join(args.out_dir, "rust_frame.txt")) as handle:
-        rust_frame = handle.read()
-
-    ts_rows = frame_rows(ts_frame, "Search MCP connections")
-    rust_rows = frame_rows(rust_frame, "Search MCP connections")
-
-    report = []
-    report.append(f"TS rows in view: {len(ts_rows)}; Rust rows in view: {len(rust_rows)}")
-    ts_structure = [structural(row) for row in ts_rows]
-    rust_structure = [structural(row) for row in rust_rows]
-    if ts_structure == rust_structure:
-        report.append("STRUCTURE: identical (border, search field, rows, hint)")
+    if args.diff:
+        return diff_sides(args.diff[0], args.diff[1])
+    if not args.side:
+        parser.error("one of --side or --diff is required")
+    # The advertised one-liners write under /tmp/mcp: create the output
+    # directory so a fresh checkout's first run does not fail on it.
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    if args.side == "ts":
+        ts_side(args.out, args.ts_checkout)
     else:
-        report.append("STRUCTURE: DIFFERS")
-        report.append(f"  ts:   {ts_structure}")
-        report.append(f"  rust: {rust_structure}")
-    report.append("TS view rows:")
-    report.extend(f"  | {row}" for row in ts_rows)
-    report.append("Rust view rows:")
-    report.extend(f"  | {row}" for row in rust_rows)
-
-    text = "\n".join(report)
-    print(text)
-    with open(os.path.join(args.out_dir, "report.txt"), "w") as handle:
-        handle.write(text + "\n")
-    return 0 if ts_structure == rust_structure else 1
+        rust_side(args.out, args.rust_dir)
+    return 0
 
 
 if __name__ == "__main__":
