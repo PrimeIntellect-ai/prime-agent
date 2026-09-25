@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use pa_core::auth::{AuthCredential, AuthSource, AuthStatus};
 use pa_core::models::ModelRegistry;
 use pa_tui::provider_auth::{
-    AuthCategory, AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
+    AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
     ProviderAuthFuture, ProviderAuthOutcome, ProviderRow, ProviderRowsFuture,
 };
 
@@ -208,58 +208,6 @@ impl ProviderAuth {
         pa_core::auth::AuthStorage::create(&self.agent_dir)
     }
 
-    /// The MCP manager over the same settings + builtin catalog the
-    /// `/mcp` flows use (`TerminalMcpAuth::manager`).
-    fn mcp_manager(&self) -> pa_core::mcp::McpManager {
-        let cwd = self.cwd.clone();
-        let agent_dir = self.agent_dir.clone();
-        let catalog_cwd = self.cwd.clone();
-        let catalog_agent_dir = self.agent_dir.clone();
-        pa_core::mcp::McpManager::new(pa_core::mcp::McpManagerOptions {
-            auth_storage: self.auth_storage_with_oauth(),
-            get_user_servers: Box::new(move || {
-                let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
-                Some(
-                    settings
-                        .settings()
-                        .mcp_servers
-                        .clone()
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|(server, config)| {
-                            serde_json::from_value::<pa_core::mcp::McpServerConfig>(config)
-                                .ok()
-                                .map(|parsed| (server, parsed))
-                        })
-                        .collect(),
-                )
-            }),
-            begin_login: None,
-            agent_dir: Some(self.agent_dir.clone()),
-            get_catalog_sources: Some(Box::new({
-                let cwd = catalog_cwd;
-                let agent_dir = catalog_agent_dir;
-                move || {
-                    let settings = pa_core::settings::SettingsManager::create(&cwd, &agent_dir);
-                    settings
-                        .settings()
-                        .mcp_catalog_sources
-                        .clone()
-                        .unwrap_or_default()
-                }
-            })),
-            remote_source: None,
-            probe_override: None,
-        })
-    }
-
-    fn auth_storage_with_oauth(&self) -> pa_core::auth::AuthStorage {
-        pa_core::auth::AuthStorage::create_with_oauth(
-            &self.agent_dir,
-            std::sync::Arc::new(pa_core::mcp::McpOAuth::new()),
-        )
-    }
-
     /// The stored credential + auth status of one provider id.
     fn credential_status(&self, provider_id: &str) -> (Option<AuthCredential>, AuthStatus) {
         let auth = self.auth_storage();
@@ -367,7 +315,6 @@ impl ProviderAuth {
                     id: id.to_string(),
                     name: name.to_string(),
                     auth_type: AuthType::Oauth,
-                    category: AuthCategory::Provider,
                     status: status_indicator(credential.as_ref(), &status, AuthType::Oauth),
                     flow: AuthFlow::TerminalFlow,
                 });
@@ -408,7 +355,6 @@ impl ProviderAuth {
                     id: provider_id.clone(),
                     name: display_name(&provider_id),
                     auth_type: AuthType::ApiKey,
-                    category: AuthCategory::Provider,
                     flow,
                 });
             }
@@ -470,11 +416,6 @@ impl ProviderAuth {
                 id: provider_id,
                 name,
                 auth_type,
-                category: if is_serper || is_mcp {
-                    AuthCategory::Service
-                } else {
-                    AuthCategory::Provider
-                },
                 status: Some(AuthStatusIndicator {
                     style: AuthStatusStyle::Success,
                     label: "configured".to_string(),
@@ -756,11 +697,6 @@ mod tests {
         // The operator's 2026-09-24 directive: /login is providers only —
         // the service rows (MCP OAuth integrations, the web search
         // credential) never appear; the /mcp view owns MCP logins.
-        assert!(
-            rows.iter()
-                .all(|row| row.category == AuthCategory::Provider),
-            "no service rows ride the login list: {rows:?}"
-        );
         assert!(!rows.iter().any(|row| row.id == "serper"));
         assert!(!rows.iter().any(|row| row.id.starts_with("mcp:")));
         // Prime Inference sorts first among the api-key rows (TS rule).
@@ -782,7 +718,6 @@ mod tests {
             id: "openai".to_string(),
             name: "OpenAI".to_string(),
             auth_type: AuthType::ApiKey,
-            category: AuthCategory::Provider,
             status: None,
             flow: AuthFlow::ApiKeyPrompt,
         };

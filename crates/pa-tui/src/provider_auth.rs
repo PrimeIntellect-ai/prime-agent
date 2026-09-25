@@ -33,17 +33,6 @@ impl AuthType {
     }
 }
 
-/// The credential surface a provider row belongs to (TS `category`):
-/// model providers, or services (MCP integrations, web search). The
-/// login selector renders providers only (the operator's 2026-09-24
-/// split: /mcp owns the services' logins); logout lists every stored
-/// credential regardless.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthCategory {
-    Provider,
-    Service,
-}
-
 /// How the login runs: the TUI prompts for the key in the panel, or the
 /// composition root runs the provider's flow against the inline auth
 /// panel (TS splits the same way: `showApiKeyLoginDialog` vs the
@@ -79,7 +68,6 @@ pub struct ProviderRow {
     pub id: String,
     pub name: String,
     pub auth_type: AuthType,
-    pub category: AuthCategory,
     /// The row's status indicator; `None` hides the trailing meta (TS's
     /// unconfigured non-stale inline case).
     pub status: Option<AuthStatusIndicator>,
@@ -500,7 +488,6 @@ mod tests {
             id: "anthropic".to_string(),
             name: "Anthropic".to_string(),
             auth_type: AuthType::Oauth,
-            category: AuthCategory::Provider,
             status: None,
             flow: AuthFlow::TerminalFlow,
         }
@@ -511,7 +498,6 @@ mod tests {
             id: "openai".to_string(),
             name: "OpenAI".to_string(),
             auth_type: AuthType::ApiKey,
-            category: AuthCategory::Provider,
             status: Some(AuthStatusIndicator {
                 style: AuthStatusStyle::Success,
                 label: "configured".to_string(),
@@ -525,27 +511,37 @@ mod tests {
             id: "mcp:linear".to_string(),
             name: "Linear".to_string(),
             auth_type: AuthType::Oauth,
-            category: AuthCategory::Service,
             status: None,
             flow: AuthFlow::TerminalFlow,
         }
     }
 
     /// The selector has no tab machinery (the operator's 2026-09-24
-    /// directive: /login for providers, /mcp for MCP — never a switcher):
-    /// left/right always edit the filter, and every row the hook supplies
-    /// renders in the one flat list.
+    /// directive: /login for providers, /mcp for MCP — never a switcher).
+    /// The exact case the old tab arm hijacked — an EMPTY search with
+    /// left/right — now does nothing to the query and switches nothing;
+    /// with text in the filter the keys still edit it.
     #[test]
     fn left_and_right_always_edit_the_search() {
         let mut selector =
             ProviderAuthSelector::new(AuthSelectorKind::Login, vec![anthropic(), linear()]);
+        // Empty search: the old arm's exact gate. Left and right are
+        // inert over an empty filter (nothing to move), and the row set
+        // never changes shape — no second surface can appear.
+        assert_eq!(selector.search.value(), "");
+        selector.handle_key("right", &kb());
+        selector.handle_key("left", &kb());
+        assert_eq!(selector.search.value(), "", "the empty filter stays empty");
+        assert_eq!(
+            selector.filtered.len(),
+            2,
+            "every row stays in the one list"
+        );
+        // With text: the keys move the filter caret (the search input's
+        // own semantics), never a category.
         selector.handle_key("l", &kb());
         selector.handle_key("right", &kb());
         assert_eq!(selector.search.value(), "l");
-        // The rows stay one flat list, whatever their category field
-        // carries (the login hook supplies providers only; logout lists
-        // every stored credential).
-        assert_eq!(selector.providers.len(), 2);
     }
 
     #[test]
