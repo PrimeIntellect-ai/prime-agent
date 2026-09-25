@@ -238,8 +238,8 @@ mod tests {
         toasts.push("Copied to clipboard");
         toasts.age_by(TOAST_TTL / 2);
         assert_eq!(
-            toasts.active(now()).as_slice(),
-            ["Copied to clipboard (x4)"],
+            toasts.active(now()),
+            vec!["Copied to clipboard (x4)"],
             "the refresh keeps the coalesced toast alive"
         );
     }
@@ -253,8 +253,8 @@ mod tests {
         toasts.age_by(TOAST_TTL + Duration::from_millis(1));
         toasts.push("Copied to clipboard");
         assert_eq!(
-            toasts.active(now()).as_slice(),
-            ["Copied to clipboard"],
+            toasts.active(now()),
+            vec!["Copied to clipboard"],
             "the fresh toast carries no count bump"
         );
     }
@@ -269,8 +269,8 @@ mod tests {
         toasts.push("Copied selection to clipboard");
         let labels = toasts.active(now());
         assert_eq!(
-            labels.as_slice(),
-            [
+            labels,
+            vec![
                 "Copied last agent message to clipboard",
                 "Copied selection to clipboard",
             ],
@@ -278,8 +278,8 @@ mod tests {
         );
         toasts.push("Copied last agent message to clipboard");
         assert_eq!(
-            toasts.active(now()).as_slice(),
-            [
+            toasts.active(now()),
+            vec![
                 "Copied selection to clipboard",
                 "Copied last agent message to clipboard (x2)",
             ],
