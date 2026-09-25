@@ -1683,7 +1683,7 @@ mod tests {
         assert_eq!(usage["cacheRead"], json!(18560));
         assert_eq!(usage["cacheWrite"], json!(0));
         assert_eq!(usage["totalTokens"], json!(23032));
-        assert_eq!(usage["cost"]["total"].as_f64(), Some(0.0089957));
+        assert_eq!(usage["cost"]["total"].as_f64(), Some(0.008_995_7));
     }
 
     #[test]

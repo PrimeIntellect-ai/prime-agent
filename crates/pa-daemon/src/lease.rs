@@ -109,7 +109,7 @@ fn lease_directory(agent_dir: &Path, session_path: &Path) -> PathBuf {
 fn leases_enabled() -> bool {
     matches!(
         std::env::var(SESSION_LEASES_ENABLED_ENV).as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
+        Ok("1" | "true" | "yes")
     )
 }
 
@@ -187,7 +187,7 @@ fn reclaim_retry_delay_ms(
         return None;
     }
     let transient = error.kind() == std::io::ErrorKind::PermissionDenied
-        || matches!(error.raw_os_error(), Some(32) | Some(33));
+        || matches!(error.raw_os_error(), Some(32 | 33));
     transient.then(|| 10 * u64::from(attempt))
 }
 

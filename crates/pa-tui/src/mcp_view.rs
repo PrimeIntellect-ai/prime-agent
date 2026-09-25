@@ -374,11 +374,14 @@ fn service_search_score(service: &McpServiceRow, token: &str) -> Option<u32> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum McpViewAction {
     /// Enter on a connectable connection/service: run its login flow (the
-    /// caller resolves the auth hook; TS `authenticate`).
-    Select(String),
+    /// caller resolves the auth hook; TS `authenticate`). `label` is the
+    /// connection's display name (the inline auth panel's title reads
+    /// "Login to {label}").
+    Select { server: String, label: String },
     /// Enter on a pasteable token service with no installed account: open
-    /// the paste flow (TS `actionText` "paste token").
-    Paste(String),
+    /// the paste flow (TS `actionText` "paste token"). `label` is the
+    /// service's display name (the panel's title reads "Connect {label}").
+    Paste { server: String, label: String },
     /// Esc, Ctrl+C, or back: close without selecting.
     Cancel,
     /// Navigation or search editing only.
@@ -416,6 +419,14 @@ impl ViewRow {
         match self {
             ViewRow::Service(service) => service.service_id.as_str(),
             ViewRow::Connection(connection) => connection.server.as_str(),
+        }
+    }
+
+    /// The row's display name (the inline auth panel's title source).
+    fn label(&self) -> &str {
+        match self {
+            ViewRow::Service(service) => service.label.as_str(),
+            ViewRow::Connection(connection) => connection.label.as_str(),
         }
     }
 
@@ -542,8 +553,14 @@ impl McpView {
                 .get(self.selected)
                 .and_then(|index| self.rows.get(*index));
             return match selected_row {
-                Some(row) if row.wants_paste() => McpViewAction::Paste(row.target().to_string()),
-                Some(row) => McpViewAction::Select(row.target().to_string()),
+                Some(row) if row.wants_paste() => McpViewAction::Paste {
+                    server: row.target().to_string(),
+                    label: row.label().to_string(),
+                },
+                Some(row) => McpViewAction::Select {
+                    server: row.target().to_string(),
+                    label: row.label().to_string(),
+                },
                 None => McpViewAction::None,
             };
         }
@@ -1061,7 +1078,7 @@ mod tests {
                     "usesOAuth": true, "source": "catalog",
                     "connectionIds": ["notion"], "pasteToken": false,
                     "description": "Notion workflows.", "toolCount": 12,
-                    "verifiedAt": 1790000000
+                    "verifiedAt": 1_790_000_000
                 },
                 {
                     "serviceId": "linear", "label": "Linear",
@@ -1147,12 +1164,18 @@ mod tests {
         let mut view = McpView::from_response(&data, 19);
         assert_eq!(
             view.handle_key("enter", &kb()),
-            McpViewAction::Paste("github".to_string())
+            McpViewAction::Paste {
+                server: "github".to_string(),
+                label: "GitHub".to_string()
+            }
         );
         view.handle_key("down", &kb());
         assert_eq!(
             view.handle_key("enter", &kb()),
-            McpViewAction::Select("linear".to_string())
+            McpViewAction::Select {
+                server: "linear".to_string(),
+                label: "Linear".to_string()
+            }
         );
     }
 
@@ -1260,12 +1283,18 @@ mod tests {
         let mut view = McpView::from_response(&roster_response(), 19);
         assert_eq!(
             view.handle_key("enter", &kb()),
-            McpViewAction::Select("fixture-echo".to_string())
+            McpViewAction::Select {
+                server: "fixture-echo".to_string(),
+                label: "fixture-echo".to_string()
+            }
         );
         view.handle_key("down", &kb());
         assert_eq!(
             view.handle_key("enter", &kb()),
-            McpViewAction::Select("linear".to_string())
+            McpViewAction::Select {
+                server: "linear".to_string(),
+                label: "Linear".to_string()
+            }
         );
         assert_eq!(view.handle_key("escape", &kb()), McpViewAction::Cancel);
         assert_eq!(view.handle_key("ctrl+c", &kb()), McpViewAction::Cancel);
@@ -1289,7 +1318,10 @@ mod tests {
         // Enter applies the surviving match.
         assert_eq!(
             view.handle_key("enter", &kb()),
-            McpViewAction::Select("linear".to_string())
+            McpViewAction::Select {
+                server: "linear".to_string(),
+                label: "Linear".to_string()
+            }
         );
         // A query with no matches renders the no-match row.
         view.handle_key("backspace", &kb());

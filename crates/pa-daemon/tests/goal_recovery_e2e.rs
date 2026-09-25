@@ -97,7 +97,7 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(300);
+        let deadline = Instant::now() + Duration::from_mins(5);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -134,7 +134,7 @@ impl Client {
 
     /// The response for `id`, collecting every session event on the way.
     fn request(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_secs(300);
+        let deadline = Instant::now() + Duration::from_mins(5);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -444,7 +444,7 @@ fn killed_mid_goal_worker_rehydrates_the_goal_with_counts() {
     // Early attempts may race the respawn backoff, so the prompt retries
     // until the new worker serves it. The goal was paused before the
     // kill, so the recovery runs against a quiet driver.
-    let deadline = Instant::now() + Duration::from_secs(180);
+    let deadline = Instant::now() + Duration::from_mins(3);
     let recovered = loop {
         assert!(Instant::now() < deadline, "the session never recovered");
         harness.client.send_command(

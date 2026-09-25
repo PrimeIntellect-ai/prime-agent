@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Minimum staleness threshold, like proper-lockfile's floor.
-const MIN_STALE: Duration = Duration::from_millis(2000);
+const MIN_STALE: Duration = Duration::from_secs(2);
 
 /// The mtime bump proper-lockfile's precision probe writes: the next whole
 /// second plus 5ms, so a millisecond-precision filesystem records a time

@@ -202,7 +202,7 @@ fn streaming_fold_matches_legacy_across_large_file_and_appends() {
         append_rows(
             &path,
             &[
-                json!({"type":"message","id":format!("m{index}"),"timestamp":"2026-09-23T00:00:00.000Z","message":{"role": if index % 2 == 0 { "user" } else { "assistant" },"content":text,"timestamp":1790110000000u64,"provider":"p","model":"a"}}),
+                json!({"type":"message","id":format!("m{index}"),"timestamp":"2026-09-23T00:00:00.000Z","message":{"role": if index % 2 == 0 { "user" } else { "assistant" },"content":text,"timestamp":1_790_110_000_000_u64,"provider":"p","model":"a"}}),
             ],
         );
         if index == 500 {
@@ -230,7 +230,7 @@ fn streaming_fold_matches_legacy_across_large_file_and_appends() {
         &path,
         &[
             json!({"type":"session_info","id":"n2","timestamp":"2026-09-23T00:00:00.000Z","name":"renamed"}),
-            json!({"type":"message","id":"m-last","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"assistant","content":"last","timestamp":1790190000000u64,"provider":"tail","model":"tail-model"}}),
+            json!({"type":"message","id":"m-last","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"assistant","content":"last","timestamp":1_790_190_000_000_u64,"provider":"tail","model":"tail-model"}}),
         ],
     );
     assert_fold_matches(&path);
@@ -246,7 +246,7 @@ fn cache_rejects_replacement_and_same_length_in_place_rewrite() {
     let header =
         json!({"type":"session","id":"s","timestamp":"2026-09-23T00:00:00.000Z","cwd":"/test"});
     let row = |name: &str| json!({"type":"session_info","id":"n","timestamp":"2026-09-23T00:00:00.000Z","name":name});
-    let stamp = json!({"type":"message","id":"m","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"start","timestamp":1790110000000u64}});
+    let stamp = json!({"type":"message","id":"m","timestamp":"2026-09-23T00:00:00.000Z","message":{"role":"user","content":"start","timestamp":1_790_110_000_000_u64}});
     append_rows(&path, &[header.clone(), row("alpha"), stamp.clone()]);
     assert_fold_matches(&path);
     let _first = read_session_info(&path).unwrap();

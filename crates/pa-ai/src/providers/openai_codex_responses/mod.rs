@@ -396,7 +396,7 @@ async fn run_websocket_attempt(
 
     let use_cached_context = matches!(
         options.base.transport,
-        Some(Transport::WebsocketCached) | Some(Transport::Auto) | None
+        Some(Transport::WebsocketCached | Transport::Auto) | None
     );
     // ChatGPT Codex Responses rejects `store: true` ("Store must be set to
     // false"). WebSocket continuation still works via connection-scoped

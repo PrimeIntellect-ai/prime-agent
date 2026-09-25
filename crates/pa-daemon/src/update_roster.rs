@@ -565,7 +565,7 @@ mod tests {
                 {"id": "j1", "status": "active", "sessionId": "p1", "activeSessionId": "active-p1",
                  "sessionFile": "/tmp/sessions/p1.jsonl", "cwd": "/w", "prompt": "check",
                  "label": "watch", "deliveryMode": "follow_up",
-                 "schedule": {"kind": "interval", "expression": "", "intervalMs": 300000},
+                 "schedule": {"kind": "interval", "expression": "", "intervalMs": 300_000},
                  "createdAt": "t", "updatedAt": "t", "nextRunAt": "2026-10-01T12:05:00.000Z"},
                 {"id": "j2", "status": "cancelled", "sessionId": "p1", "activeSessionId": "active-p1",
                  "sessionFile": "/tmp/sessions/p1.jsonl", "cwd": "/w", "prompt": "x",

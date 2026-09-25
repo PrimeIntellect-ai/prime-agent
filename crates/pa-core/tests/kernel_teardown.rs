@@ -69,7 +69,7 @@ fn process_alive(pid: i32) -> bool {
 /// synchronous, but the kernel may be mid-boot when its owner drops, so the
 /// settle budget covers the boot finishing first).
 async fn await_process_gone(pid: i32) {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while process_alive(pid) {
         assert!(
             Instant::now() < deadline,
@@ -253,7 +253,7 @@ async fn session_engine_drop_kills_the_prewarmed_kernel_process() {
     .expect("create the prewarmed session");
 
     // The prewarm boot is background: wait for the kernel child to appear.
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         let kernels = own_kernel_processes();
         if let Some(pid) = kernels.first() {
@@ -329,7 +329,7 @@ async fn engine_dispose_kernel_kills_the_prewarmed_kernel_process() {
     .await
     .expect("create the prewarmed session");
 
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     loop {
         if let Some(pid) = own_kernel_processes().first() {
             let pid = *pid;

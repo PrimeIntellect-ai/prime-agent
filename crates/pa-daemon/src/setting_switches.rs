@@ -657,7 +657,7 @@ mod tests {
                 json!({
                     "id": format!("mock-{index}"), "name": format!("Mock {index}"),
                     "api": "openai-completions", "baseUrl": "http://127.0.0.1:9/v1",
-                    "contextWindow": 128000, "maxTokens": 4096,
+                    "contextWindow": 128_000, "maxTokens": 4096,
                 })
             })
             .collect();

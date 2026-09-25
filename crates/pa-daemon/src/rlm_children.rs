@@ -2490,7 +2490,7 @@ mod usage_emit_tests {
         assert_eq!(origin, pa_types::session::ChildUsageOrigin::SpawnTask);
         assert_eq!(usage.input, 50_208);
         assert_eq!(usage.output, 2_929);
-        assert!((usage.cost.total.as_f64() - 0.0089957).abs() < 1e-9);
+        assert!((usage.cost.total.as_f64() - 0.008_995_7).abs() < 1e-9);
         let consumed = record.lock().await.attributed_rows;
         assert!(consumed > 0);
 

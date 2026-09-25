@@ -61,7 +61,7 @@ fn classify_kind(kind: io::ErrorKind, raw_os_error: Option<i32>) -> RenameFailur
     // ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION (libuv EBUSY) stay
     // raw in std; everything else access-related decodes to
     // PermissionDenied.
-    if matches!(raw_os_error, Some(32) | Some(33)) {
+    if matches!(raw_os_error, Some(32 | 33)) {
         return RenameFailure::Busy;
     }
     if kind == io::ErrorKind::PermissionDenied {

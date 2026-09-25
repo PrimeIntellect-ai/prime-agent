@@ -234,7 +234,7 @@ async fn continue_recent_view_preselects_the_candidate_and_renders_the_notice() 
         &[("second turn", "second reply")],
     );
     // The newest file strictly newer (same-mtime granularity guard).
-    let future = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+    let future = std::time::SystemTime::now() + std::time::Duration::from_mins(1);
     let handle = std::fs::File::options()
         .append(true)
         .open(&candidate_path)
