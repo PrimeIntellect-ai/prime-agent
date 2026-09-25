@@ -1055,6 +1055,7 @@ mod tests {
             queue_key: None,
             prefix_messages: None,
             admission_id: None,
+            rlm_notice_nonce: None,
         }
     }
 
