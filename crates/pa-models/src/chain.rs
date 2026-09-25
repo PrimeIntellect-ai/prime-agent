@@ -547,7 +547,7 @@ mod tests {
     }
 
     /// A restarted process seeds its first credential-scope observation
-    /// from the stored disk snapshot: the same account stays PickerOpen
+    /// from the stored disk snapshot: the same account stays `PickerOpen`
     /// (gated, no forced refresh), a changed account — a login or logout
     /// that happened while the process was down — is detected and forced.
     #[test]
