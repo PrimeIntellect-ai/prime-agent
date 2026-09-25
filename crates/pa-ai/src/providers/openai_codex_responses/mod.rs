@@ -1274,7 +1274,6 @@ mod tests {
             let serve = async move {
                 for (connection_number, connection_scripts) in scripts.into_iter().enumerate() {
                     let (mut socket, _) = listener.accept().await.expect("mock accept");
-                    eprintln!("[mock] accepted connection {connection_number}");
                     let mut head = Vec::new();
                     let mut byte = [0u8; 1];
                     while !head.ends_with(b"\r\n\r\n") {
@@ -1313,25 +1312,19 @@ mod tests {
                         // completes) and anything after the scripted
                         // requests holds without a response.
                         let Some((opcode, payload)) = read_client_frame(&mut socket).await? else {
-                            eprintln!("[mock] connection {connection_number} EOF");
                             break;
                         };
                         if opcode == 8 {
-                            eprintln!("[mock] connection {connection_number} close, replying");
                             socket.write_all(&[0x88, 0x02, 0x03, 0xE8]).await?;
                             break;
                         }
                         request_number += 1;
                         let body: Value = serde_json::from_slice(&payload).expect("request json");
-                        eprintln!("[mock] connection {connection_number} request {request_number}");
                         sent_bodies_handle.lock().expect("bodies").push(body);
                         if let Some(script) = connection_scripts.get(request_number - 1) {
                             for event in script {
                                 write_server_frame(&mut socket, event).await?;
                             }
-                            eprintln!(
-                                "[mock] connection {connection_number} request {request_number} answered"
-                            );
                             // A script that ends in an error closes the
                             // connection (the real server ends the request
                             // with the error; the client's read loop needs
@@ -1343,14 +1336,8 @@ mod tests {
                                 == Some("error");
                             if ends_in_error {
                                 socket.write_all(&[0x88, 0x02, 0x03, 0xE8]).await?;
-                                eprintln!(
-                                    "[mock] connection {connection_number} request {request_number} closed after error"
-                                );
                             }
                         } else {
-                            eprintln!(
-                                "[mock] connection {connection_number} request {request_number} NOT scripted (holding)"
-                            );
                         }
                     }
                 }
@@ -1475,48 +1462,18 @@ mod tests {
             stream_openai_codex_responses(&model, &codex_test_context("Say hello"), Some(&options))
                 .result()
                 .await;
-        eprintln!(
-            "[test] turn 1 settled: stop={:?} text={:?} response_id={:?}",
-            first.stop_reason,
-            codex_message_text(&first),
-            first.response_id
-        );
         assert_eq!(
             codex_message_text(&first).as_deref(),
             Some("Hello"),
             "the first turn completes and anchors the chain"
         );
         assert_eq!(first.response_id.as_deref(), Some("resp_1"));
-        {
-            use crate::providers::openai_codex_responses::session::session_state;
-            let state = session_state().lock().expect("state");
-            let entry = state.connections.get(&session_id);
-            let summary = entry.map(|entry| {
-                (
-                    entry.busy,
-                    entry.connection_id,
-                    entry.continuation.as_ref().map(|continuation| {
-                        (
-                            continuation.connection_id,
-                            continuation.last_response_id.clone(),
-                            continuation.last_response_items.clone(),
-                            continuation.last_request_body.clone(),
-                        )
-                    }),
-                )
-            });
-            eprintln!("[test] cached entry: {summary:?}");
-            drop(state);
-        }
-
         let second_stream = stream_openai_codex_responses(
             &model,
             &codex_followup_context(&first, "Now finish"),
             Some(&options),
         );
-        eprintln!("[test] turn 2 streaming");
         let events = second_stream.collect().await;
-        eprintln!("[test] turn 2 collected {} events", events.len());
         let second = events
             .iter()
             .rev()
@@ -1543,7 +1500,6 @@ mod tests {
         ));
 
         let bodies = server.sent_bodies.lock().expect("bodies").clone();
-        eprintln!("[test] captured bodies: {bodies:?}");
         assert_eq!(bodies.len(), 3, "two requests + one retry: {bodies:?}");
         assert_eq!(
             bodies[1].get("previous_response_id"),
@@ -1597,10 +1553,6 @@ mod tests {
         )
         .result()
         .await;
-        eprintln!(
-            "[test] turn 2 settled: stop={:?} error={:?} response_id={:?}",
-            second.stop_reason, second.error_message, second.response_id
-        );
         assert_eq!(second.stop_reason, StopReason::Error);
         assert_eq!(
             second.error_message.as_deref(),
