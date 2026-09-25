@@ -210,12 +210,12 @@ impl AgentSession {
             // review — the refinement never starts (TS drops the pending
             // review on the branch change, so its apply never runs on
             // the moved-to session).
-            if !self.compact_auto_refine_branch_version_unchanged(branch_version) {
-                Ok(AutoRefineRound::Declined)
-            } else {
+            if self.compact_auto_refine_branch_version_unchanged(branch_version) {
                 self.run_approved_refine(review, model, api_key, global_harness_dir)
                     .await
                     .map(AutoRefineRound::Ran)
+            } else {
+                Ok(AutoRefineRound::Declined)
             }
         } else {
             // TS `_maybeAutoRefine`'s interactive compact arm: the review,
