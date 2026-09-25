@@ -685,6 +685,18 @@ mod tests {
                 "Ctrl+Home doc start",
             ),
             (
+                KeyCode::Home,
+                KeyModifiers::SUPER,
+                "super+home",
+                "Cmd+Home doc start",
+            ),
+            (
+                KeyCode::End,
+                KeyModifiers::SUPER,
+                "super+end",
+                "Cmd+End doc end",
+            ),
+            (
                 KeyCode::Down,
                 KeyModifiers::SUPER | KeyModifiers::SHIFT,
                 "shift+super+down",
@@ -708,6 +720,15 @@ mod tests {
         assert!(kb.matches("super+right", "tui.editor.cursorLineEnd"));
         assert!(kb.matches("super+up", "tui.editor.cursorDocStart"));
         assert!(kb.matches("super+down", "tui.editor.cursorDocEnd"));
+        assert!(kb.matches("super+home", "tui.editor.cursorDocStart"));
+        assert!(kb.matches("super+end", "tui.editor.cursorDocEnd"));
+        // The list-edge jumps (the agents view handles the ids; home/end
+        // stay line motion in the editor scope).
+        assert!(kb.matches("home", "tui.select.top"));
+        assert!(kb.matches("ctrl+home", "tui.select.top"));
+        assert!(kb.matches("end", "tui.select.bottom"));
+        assert!(kb.matches("super+down", "tui.select.bottom"));
+        assert!(kb.matches("home", "tui.editor.cursorLineStart"));
         assert!(kb.matches("ctrl+up", "tui.editor.cursorParagraphUp"));
         assert!(kb.matches("ctrl+down", "tui.editor.cursorParagraphDown"));
         assert!(kb.matches("shift+super+down", "tui.editor.selectDocEnd"));

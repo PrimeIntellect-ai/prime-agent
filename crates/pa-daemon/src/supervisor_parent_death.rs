@@ -145,7 +145,20 @@ impl Supervisor {
             .await
         {
             Ok(response) if response.success => {
-                self.stop_worker(child).await;
+                // The kill is already routed, so the child dies regardless
+                // of the tombstone's durability: its exit must read as
+                // intentional BEFORE the cleanup path runs, or a failed
+                // tombstone persist would leave the exit classified as a
+                // crash - the monitor would relaunch the orphan.
+                child
+                    .intentional_stop
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                if let Err(error) = self.stop_worker(child).await {
+                    self.log_line(&format!(
+                        "parent-death stop of RLM child worker {} failed: {error:#}; the routed kill owns the rest",
+                        child.worker_id
+                    ));
+                }
                 true
             }
             Ok(response) => {
