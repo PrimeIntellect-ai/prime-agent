@@ -136,6 +136,19 @@ impl ContextTreeCache {
                 .and_then(Value::as_str)
                 .is_some_and(|id| invalidated.contains(id))
         };
+        // A live row's cached body: the live-node entry first, then the
+        // persisted row with the same id — a child that went live AFTER the
+        // walk's roster snapshot often already carries real usage in
+        // `persisted`, and the fresh live identity overlays that body
+        // instead of the empty fallback.
+        let mut persisted_by_id: HashMap<String, Value> = HashMap::new();
+        if let Some(walk) = cached.as_ref() {
+            for node in &walk.persisted {
+                if let Some(id) = node.get("id").and_then(Value::as_str) {
+                    persisted_by_id.insert(id.to_string(), node.clone());
+                }
+            }
+        }
         let mut children = Vec::with_capacity(
             snapshots.len() + cached.as_ref().map_or(0, |walk| walk.persisted.len()),
         );
@@ -155,6 +168,7 @@ impl ContextTreeCache {
                 .as_ref()
                 .and_then(|walk| walk.live_nodes.get(id))
                 .cloned()
+                .or_else(|| persisted_by_id.get(id).cloned())
                 .unwrap_or_else(|| {
                     json!({
                         "ownUsage": empty_usage(),
@@ -639,6 +653,22 @@ mod tests {
         assert!(
             live_nodes.is_empty(),
             "the deleted child must not be republished"
+        );
+    }
+
+    /// A child that went live AFTER the walk's roster snapshot (it sits in
+    /// `persisted` with real usage) carries that body under its fresh live
+    /// identity — not the empty fallback.
+    #[test]
+    fn a_newly_live_child_rides_its_cached_persisted_usage() {
+        let cache = cache_with_walk("session-a", &[], &["sub-late"]);
+        let children = cache.serve_children(Some("session-a"), &[snapshot("sub-late", "working")]);
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0]["id"], json!("sub-late"));
+        assert_eq!(children[0]["status"], json!("working"));
+        assert!(
+            !children[0]["label"].as_str().unwrap_or_default().is_empty(),
+            "the persisted row's identity/body served the live row: {children:?}"
         );
     }
 
