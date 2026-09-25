@@ -11,6 +11,9 @@ mod env;
 mod session_core;
 
 pub(crate) use config::WorkerConfig;
+// KillCloseReason is read only by the commands module (via `use super::*`); the facade
+// itself does not reference it directly, so allow the unused-import lint deliberately.
+#[allow(unused_imports)]
 use env::KillCloseReason;
 mod commands;
 
