@@ -6,7 +6,9 @@ pub use private_auth::{
     read_private_prime_authorization_cache, write_private_prime_authorization_cache,
     PrivatePrimeAuthorizationCache, PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS,
 };
-pub use registry::{ModelRegistry, ProviderRequestConfig, ResolvedRequestAuth};
+pub use registry::{
+    ModelRegistry, ProviderRequestConfig, ResolvedRequestAuth, SetModelSelectionError,
+};
 
 pub use catalog_chain::{
     catalog_for, install_catalog, prime_credentials_for_dir, spawn_hourly_refresh, startup_refresh,

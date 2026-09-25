@@ -717,6 +717,13 @@ async fn run_agents_view_flow(
         session_options.session = selection;
         session_options.session_rlm_depth = view.opened_rlm_depth;
         session_options.session_has_children = view.opened_has_children;
+        // The opened session's own directory rides the options: the
+        // session run anchors its cwd (and the file-completion base) on
+        // the attached session's directory, not the launch directory the
+        // view opened from (TS `getCurrentCwd`).
+        if let Some(cwd) = view.opened_cwd {
+            session_options.cwd = cwd;
+        }
         let outcome =
             pa_tui::interactive::run_interactive(session_options, UiMode::Terminal).await?;
         if !outcome.session_id.is_empty() {

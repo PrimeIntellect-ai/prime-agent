@@ -912,16 +912,25 @@ async fn run_onboarding_phase(
         // The status row lands behind the pane (the session transcript
         // renders it once the flow dismisses).
         crate::provider_auth::ProviderAuthOutcome::Status(message) => {
-            session.apply_auth_outcome(
-                crate::provider_auth::ProviderAuthOutcome::Status(message),
-                view,
-            );
+            session
+                .apply_auth_outcome(
+                    crate::provider_auth::ProviderAuthOutcome::Status(message),
+                    crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID,
+                    view,
+                )
+                .await;
         }
         // A failed or cancelled sign-in aborts the flow: the marker
         // stays unset and the next launch retries (TS `authResult.status
         // !== "success"`).
         outcome => {
-            session.apply_auth_outcome(outcome, view);
+            session
+                .apply_auth_outcome(
+                    outcome,
+                    crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID,
+                    view,
+                )
+                .await;
             return Ok(false);
         }
     }
@@ -1050,7 +1059,7 @@ async fn run_onboarding_phase(
                                 "the provider login task failed".to_string(),
                             )
                         });
-                        session.apply_auth_outcome(outcome, view);
+                        session.apply_auth_outcome(outcome, &row.id, view).await;
                     }
                     PaneOutcome::Decision(_) => {
                         unreachable!("the key prompt dialog yields no decisions")
@@ -1093,7 +1102,7 @@ async fn run_onboarding_phase(
                                     "the provider login task failed".to_string(),
                                 )
                             });
-                            session.apply_auth_outcome(outcome, view);
+                            session.apply_auth_outcome(outcome, &row.id, view).await;
                         }
                         PaneOutcome::Decision(_) => {
                             unreachable!("the login dialog yields no decisions")
@@ -1101,7 +1110,7 @@ async fn run_onboarding_phase(
                     }
                 } else {
                     let outcome = provider_auth.0.login(row, None).await;
-                    session.apply_auth_outcome(outcome, view);
+                    session.apply_auth_outcome(outcome, &row.id, view).await;
                 }
             }
         }
@@ -1464,6 +1473,15 @@ async fn run_interactive_surface(
     let theme = crate::app::load_theme(&options.theme);
     let mut view = AgentView::new(theme);
     view.code_block_indent = options.code_block_indent.clone();
+    // The file-completion provider browses the SESSION cwd (TS
+    // `createBaseAutocompleteProvider` anchors on `this.getCurrentCwd()`),
+    // not the process cwd: the editor constructor's `env::current_dir()`
+    // default only matches when the launch directory is the session cwd —
+    // the attach flows pass the session's own cwd, and the completion
+    // menu must browse the directory the user sees.
+    view.editor.set_autocomplete_provider(Box::new(
+        crate::autocomplete::CombinedAutocompleteProvider::from_registry(options.cwd.clone()),
+    ));
     // The effective bindings (user `keybindings.json` merged over the TS
     // defaults) drive the editor, the pickers, and every hint the view
     // renders (TS `KeybindingsManager.create()` + `setKeybindings`).
