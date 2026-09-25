@@ -508,11 +508,10 @@ impl AuthPanel {
             lines.push(vec![
                 theme.fg_span(ThemeColor::Accent, format!("  {linked}"))
             ]);
-            let instructions = self
-                .auth_instructions
-                .clone()
-                .map(|text| scrub_controls(&text))
-                .unwrap_or_else(|| BROWSER_DEFAULT_INSTRUCTIONS.to_string());
+            let instructions = self.auth_instructions.clone().map_or_else(
+                || BROWSER_DEFAULT_INSTRUCTIONS.to_string(),
+                |text| scrub_controls(&text),
+            );
             lines.push(vec![
                 theme.fg_span(ThemeColor::Text, format!("  {instructions}"))
             ]);
@@ -665,11 +664,10 @@ impl PrimeTeamPicker {
         // The team fields are provider-supplied: the same control
         // character hygiene every daemon-supplied row carries.
         let name = scrub_controls(&team.name);
-        let role = team
-            .role
-            .as_deref()
-            .map(|role| scrub_controls(role).to_lowercase())
-            .unwrap_or_else(|| "member".to_string());
+        let role = team.role.as_deref().map_or_else(
+            || "member".to_string(),
+            |role| scrub_controls(role).to_lowercase(),
+        );
         let detail = match &team.slug {
             Some(slug) => format!("slug: {}, role: {role}", scrub_controls(slug)),
             None => format!("role: {role}"),

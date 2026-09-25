@@ -160,7 +160,6 @@ fn to_chat_messages(messages: &[Message], supports_images: bool) -> Vec<Value> {
                         "role": "user",
                         "content": sanitize_surrogates(text),
                     }));
-                    continue;
                 }
                 crate::types::UserMessageContent::Blocks(blocks) => {
                     let had_images = blocks.iter().any(|item| {
@@ -205,7 +204,6 @@ fn to_chat_messages(messages: &[Message], supports_images: bool) -> Vec<Value> {
                             "content": "(image omitted: model does not support images)",
                         }));
                     }
-                    continue;
                 }
             },
             Message::Assistant(assistant) => {
@@ -257,7 +255,6 @@ fn to_chat_messages(messages: &[Message], supports_images: bool) -> Vec<Value> {
                     }
                     result.push(Value::Object(assistant_message));
                 }
-                continue;
             }
             Message::ToolResult(tool_result) => {
                 let text_result = tool_result

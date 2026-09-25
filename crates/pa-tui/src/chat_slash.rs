@@ -1,12 +1,14 @@
-//! Slash-command chat rows: the durable echo and result rows session commands
-//! append (custom types `session_slash_command` /
-//! `session_slash_command_result`). Both share the user-message block
-//! geometry — `Box(2,1)` on the `userMessageBg` surface — with the echo's
-//! `/name` token in `accent` and `@path` / `--flag` argument tokens in
-//! `success` / `mdLink` (prompt-highlight token styling).
+//! Slash-command chat rows: the durable echo row session commands append
+//! (custom type `session_slash_command`): the command as typed, in the
+//! user-message block geometry — `Box(2,1)` on the `userMessageBg` surface
+//! — with the `/name` token in `accent` and `@path` / `--flag` argument
+//! tokens in `success` / `mdLink` (prompt-highlight token styling). The
+//! outcome rows (`session_slash_command_result`) render in the status-row
+//! class instead (the operator's 2026-09-25 ruling: command output is
+//! system output, never user text).
 
 use crate::theme::{Theme, ThemeBg};
-use crate::width::{str_width, wrap_text};
+use crate::width::str_width;
 use crate::{Line, Span};
 use ratatui::style::Style;
 
@@ -31,27 +33,6 @@ fn block_row(spans: Line, bg: Style, width: usize) -> Line {
     let used: usize = row.iter().map(|s| str_width(&s.content)).sum();
     row.push(Span::styled(" ".repeat(width.saturating_sub(used)), bg));
     row
-}
-
-/// The block layout: blank surface row, content rows, blank surface row.
-fn wrap_block(
-    text: &str,
-    theme: &Theme,
-    width: usize,
-    style_row: impl Fn(&str) -> Line,
-) -> Vec<Line> {
-    let bg = theme.bg_style(ThemeBg::UserMessageBg);
-    let mut rows = vec![vec![Span::styled(" ".repeat(width), bg)]];
-    let wrapped = wrap_text(text, content_width(width));
-    if wrapped.is_empty() {
-        rows.push(block_row(Vec::new(), bg, width));
-    }
-    for line in wrapped {
-        let plain: String = line.iter().map(|s| s.content.as_str()).collect();
-        rows.push(block_row(style_row(&plain), bg, width));
-    }
-    rows.push(vec![Span::styled(" ".repeat(width), bg)]);
-    rows
 }
 
 /// The command echo row: the full typed command, laid out like a user
@@ -138,18 +119,6 @@ pub(crate) fn slash_command_row_count(text: &str, theme: &Theme, width: usize) -
         .max(1)
 }
 
-/// The result row: plain content, default foreground on the block surface.
-pub fn render_slash_command_result(content: &str, theme: &Theme, width: usize) -> Vec<Line> {
-    let style_row = |row: &str| -> Line {
-        if row.is_empty() {
-            Vec::new()
-        } else {
-            vec![Span::raw(row.to_string())]
-        }
-    };
-    wrap_block(content, theme, width, style_row)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,14 +159,6 @@ mod tests {
         assert_eq!(text.len(), 4);
         assert!(text[1].starts_with("  /goal make the verifier"));
         assert!(text[2].starts_with("  pass everywhere"));
-    }
-
-    #[test]
-    fn result_row_renders_content() {
-        let rows = render_slash_command_result("Goal active: ship it", &theme(), 40);
-        let text = plain(&rows);
-        assert_eq!(text.len(), 3);
-        assert!(text[1].contains("Goal active: ship it"));
     }
 
     fn spans_of(row: &Line) -> Vec<(String, Style)> {

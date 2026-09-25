@@ -271,53 +271,39 @@ impl TreeNavigation {
                 );
             };
             let mut summary_entry = None;
-            match summary {
-                Some((summary, usage, details)) => {
-                    match store.append_branch_summary(
-                        new_leaf.as_deref(),
-                        &summary,
-                        details,
-                        None,
-                        usage,
-                    ) {
-                        Ok(summary_id) => {
-                            if let Some(label) = &label {
-                                if let Err(error) =
-                                    store.append_label_change(&summary_id, Some(label))
-                                {
-                                    return response_failure(
-                                        None,
-                                        "navigate_tree",
-                                        &error.to_string(),
-                                        None,
-                                    );
-                                }
+            if let Some((summary, usage, details)) = summary {
+                match store.append_branch_summary(
+                    new_leaf.as_deref(),
+                    &summary,
+                    details,
+                    None,
+                    usage,
+                ) {
+                    Ok(summary_id) => {
+                        if let Some(label) = &label {
+                            if let Err(error) = store.append_label_change(&summary_id, Some(label))
+                            {
+                                return response_failure(
+                                    None,
+                                    "navigate_tree",
+                                    &error.to_string(),
+                                    None,
+                                );
                             }
-                            summary_entry = store.entry(&summary_id).map(session_tree::entry_json);
                         }
-                        Err(error) => {
-                            return response_failure(
-                                None,
-                                "navigate_tree",
-                                &error.to_string(),
-                                None,
-                            )
-                        }
+                        summary_entry = store.entry(&summary_id).map(session_tree::entry_json);
+                    }
+                    Err(error) => {
+                        return response_failure(None, "navigate_tree", &error.to_string(), None)
                     }
                 }
-                None => {
-                    if let Err(error) = store.branch_to(new_leaf.as_deref()) {
+            } else {
+                if let Err(error) = store.branch_to(new_leaf.as_deref()) {
+                    return response_failure(None, "navigate_tree", &error.to_string(), None);
+                }
+                if let Some(label) = &label {
+                    if let Err(error) = store.append_label_change(target_id, Some(label)) {
                         return response_failure(None, "navigate_tree", &error.to_string(), None);
-                    }
-                    if let Some(label) = &label {
-                        if let Err(error) = store.append_label_change(target_id, Some(label)) {
-                            return response_failure(
-                                None,
-                                "navigate_tree",
-                                &error.to_string(),
-                                None,
-                            );
-                        }
                     }
                 }
             }
@@ -388,19 +374,18 @@ impl TreeNavigation {
                     None,
                 ));
             };
-            let (target_leaf, selected_text) = match position {
-                Some("at") => (Some(entry_id.to_string()), None),
-                _ => {
-                    let Some(text) = session_tree::user_entry_text(target) else {
-                        return Err(response_failure(
-                            None,
-                            "fork",
-                            "Invalid entry ID for forking",
-                            None,
-                        ));
-                    };
-                    (target.parent_id.clone(), Some(text))
-                }
+            let (target_leaf, selected_text) = if let Some("at") = position {
+                (Some(entry_id.to_string()), None)
+            } else {
+                let Some(text) = session_tree::user_entry_text(target) else {
+                    return Err(response_failure(
+                        None,
+                        "fork",
+                        "Invalid entry ID for forking",
+                        None,
+                    ));
+                };
+                (target.parent_id.clone(), Some(text))
             };
             (target_leaf, selected_text, store.clone(), core.cwd.clone())
         };

@@ -41,9 +41,6 @@ impl AgentView {
                 usize::from(spacing)
                     + crate::chat_slash::slash_command_row_count(text, &self.theme, width)
             }
-            ChatEntry::SlashCommandResult { content } => {
-                2 + crate::width::wrapped_text_count(content, width.saturating_sub(4).max(1))
-            }
             ChatEntry::AgentMessage(row) => {
                 crate::custom_message::geometry::agent_message_row_count(
                     row,
@@ -163,6 +160,7 @@ mod tests {
 
     #[test]
     fn supported_entry_geometry_matches_rendering() {
+        use crate::custom_message::*;
         let mut view = AgentView::new(Theme::builtin("prime", ColorMode::TrueColor));
         for text in [
             "",
@@ -179,9 +177,6 @@ mod tests {
             });
             view.push_entry(ChatEntry::User { text: text.into() });
             view.push_entry(ChatEntry::SlashCommand { text: text.into() });
-            view.push_entry(ChatEntry::SlashCommandResult {
-                content: text.into(),
-            });
             for error in [
                 None,
                 Some("Traceback error\n  context\nValueError: failed".to_string()),
@@ -198,7 +193,6 @@ mod tests {
                 })));
             }
         }
-        use crate::custom_message::*;
         view.push_entry(ChatEntry::AgentMessage(Box::new(AgentMessageRow {
             direction: AgentMessageDirection::Received,
             participant: "from child".into(),

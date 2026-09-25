@@ -45,8 +45,7 @@ pub fn acquire(
                 .rest
                 .get("status_path")
                 .and_then(serde_json::Value::as_str)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| default_status_path(&socket_dir));
+                .map_or_else(|| default_status_path(&socket_dir), PathBuf::from);
             return Ok(AcquireOutcome::Join {
                 status_path: join_path,
             });
@@ -62,8 +61,7 @@ pub fn acquire(
             .rest
             .get("status_path")
             .and_then(serde_json::Value::as_str)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| default_status_path(&socket_dir));
+            .map_or_else(|| default_status_path(&socket_dir), PathBuf::from);
         return Ok(AcquireOutcome::Join {
             status_path: join_path,
         });

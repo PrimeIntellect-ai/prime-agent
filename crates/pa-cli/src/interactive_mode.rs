@@ -560,9 +560,9 @@ pub fn run_interactive_mode(options: &RunOptions) -> Result<i32> {
             || (options.agents_view_requested && tui_options.onboarding.is_none())
             || continue_view.is_some();
         if agents_view {
-            let (anchor, notice) = continue_view
-                .map(|view| (Some(view.session_id), Some(view.notice)))
-                .unwrap_or((None, None));
+            let (anchor, notice) = continue_view.map_or((None, None), |view| {
+                (Some(view.session_id), Some(view.notice))
+            });
             run_agents_view_flow(tui_options, anchor, notice).await
         } else {
             let outcome =
@@ -651,6 +651,12 @@ async fn run_agents_view_flow(
             // bindings as the session it opened from (TS
             // `AgentsViewMode.keybindings`).
             keybindings: base.keybindings.clone(),
+            // TS `AgentsViewMode` constructs its TUI with the live
+            // `settingsManager.getShowHardwareCursor()` (default false).
+            show_hardware_cursor: base
+                .client_settings
+                .as_ref()
+                .is_some_and(|settings| settings.show_hardware_cursor()),
         };
         let view_run = pa_tui::agents_view::run_agents_view(
             view_options,
@@ -1087,17 +1093,14 @@ async fn shutdown_stale_daemon(
             rest: Default::default(),
         })
         .await;
-    let busy = sessions
-        .map(|data| {
-            data.get("sessions")
-                .and_then(serde_json::Value::as_array)
-                .map(|rows| {
-                    rows.iter()
-                        .any(|row| row.get("isSessionActive") == Some(&serde_json::json!(true)))
-                })
-                .unwrap_or(true)
-        })
-        .unwrap_or(true);
+    let busy = sessions.map_or(true, |data| {
+        data.get("sessions")
+            .and_then(serde_json::Value::as_array)
+            .is_none_or(|rows| {
+                rows.iter()
+                    .any(|row| row.get("isSessionActive") == Some(&serde_json::json!(true)))
+            })
+    });
     client.close();
     if busy {
         return Err(anyhow!(

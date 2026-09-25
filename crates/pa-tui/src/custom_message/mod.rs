@@ -238,7 +238,9 @@ fn generic_panel_entry(custom_type: &str, message: &Value) -> ChatEntry {
     }))
 }
 
-/// The session-command echo/result rows (the original decode, unchanged).
+/// The session-command echo/result rows: the echo decodes to the
+/// user-block slash row (the typed command IS user input); the result
+/// row decodes to the status-row class with the severity's tone.
 fn slash_row_entries(
     message: &Value,
     custom_type: &str,
@@ -273,8 +275,19 @@ fn slash_row_entries(
             text: content.to_string(),
         }]
     } else {
-        vec![ChatEntry::SlashCommandResult {
-            content: content.to_string(),
+        // The outcome row is system output, never user text (the
+        // operator's 2026-09-25 bug report: the user-message box read as
+        // the "no active goal" reply being a user prompt): it renders in
+        // the status-row class, the severity driving the tone like the
+        // compaction and retry outcome rows.
+        let kind = match details.get("severity").and_then(Value::as_str) {
+            Some("error") => StatusKind::Error,
+            Some("warning") => StatusKind::Warning,
+            _ => StatusKind::Info,
+        };
+        vec![ChatEntry::Status {
+            text: content.to_string(),
+            kind,
         }]
     }
 }
@@ -282,10 +295,7 @@ fn slash_row_entries(
 /// TS `isCompactionOutcomeMessage` envelope: content string + a known
 /// reason/outcome pair; anything else is the malformed notice.
 fn compaction_outcome_entry(message: &Value, details: &Value) -> ChatEntry {
-    let valid = message
-        .get("content")
-        .map(Value::is_string)
-        .unwrap_or(false)
+    let valid = message.get("content").is_some_and(Value::is_string)
         && matches!(
             details.get("reason").and_then(Value::as_str),
             Some("threshold" | "overflow" | "requested")

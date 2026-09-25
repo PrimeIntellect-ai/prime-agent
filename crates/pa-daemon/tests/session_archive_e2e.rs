@@ -176,7 +176,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -283,11 +283,10 @@ fn log_mentions(agent_dir: &Path, needle: &str) -> bool {
     let Ok(entries) = std::fs::read_dir(agent_dir.join("logs")) else {
         return false;
     };
-    entries.flatten().map(|entry| entry.path()).any(|path| {
-        std::fs::read_to_string(&path)
-            .map(|content| content.contains(needle))
-            .unwrap_or(false)
-    })
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .any(|path| std::fs::read_to_string(&path).is_ok_and(|content| content.contains(needle)))
 }
 
 #[test]

@@ -314,8 +314,7 @@ impl Supervisor {
                 let session_file = edge.child.clone();
                 let cwd =
                     crate::session_store::read_session_info(std::path::Path::new(&session_file))
-                        .map(|info| info.cwd)
-                        .unwrap_or_else(|| "/".to_string());
+                        .map_or_else(|| "/".to_string(), |info| info.cwd);
                 Some(self.launch_ledger_child_wake(&session_file, cwd).await)
             }
             _ => Some(WakeOutcome::Failed(format!(

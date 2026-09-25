@@ -158,14 +158,11 @@ impl<'a> DiffEngine<'a> {
         let mut old_pos = 0usize;
         for idx in component_indices {
             let component = self.components[idx];
-            if !component.removed {
+            if component.removed {
                 let slice: Vec<String> =
-                    self.new_tokens[new_pos..(new_pos + component.count)].to_vec();
+                    self.old_tokens[old_pos..(old_pos + component.count)].to_vec();
                 let value = slice.join("");
-                new_pos += component.count;
-                if !component.added {
-                    old_pos += component.count;
-                }
+                old_pos += component.count;
                 parts.push(DiffPart {
                     value,
                     added: component.added,
@@ -174,9 +171,12 @@ impl<'a> DiffEngine<'a> {
                 });
             } else {
                 let slice: Vec<String> =
-                    self.old_tokens[old_pos..(old_pos + component.count)].to_vec();
+                    self.new_tokens[new_pos..(new_pos + component.count)].to_vec();
                 let value = slice.join("");
-                old_pos += component.count;
+                new_pos += component.count;
+                if !component.added {
+                    old_pos += component.count;
+                }
                 parts.push(DiffPart {
                     value,
                     added: component.added,

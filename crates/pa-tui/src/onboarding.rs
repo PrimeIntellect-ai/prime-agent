@@ -459,11 +459,10 @@ pub(crate) fn highlight_wash(theme: &Theme) -> Color {
     // TS: `onDark = !text || isLightColor(text)` — undefined (empty theme
     // value) or a light colour both mean light text over a dark canvas.
     let on_dark = match text {
-        None | Some(Color::Reset) => true,
         Some(Color::Rgb(r, g, b)) => {
             0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b) > 128.0
         }
-        Some(_) => true,
+        None | Some(Color::Reset | _) => true,
     };
     let lift = if on_dark {
         (255u16, 255, 255)
