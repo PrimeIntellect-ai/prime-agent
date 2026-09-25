@@ -1161,12 +1161,24 @@ mod tests {
             json!({ "type": "response.created", "response": { "id": response_id } }),
             json!({
                 "type": "response.output_item.added",
+                "output_index": 0,
                 "item": { "type": "message", "id": message_id, "role": "assistant", "status": "in_progress", "content": [] },
             }),
-            json!({ "type": "response.content_part.added", "part": { "type": "output_text", "text": "" } }),
-            json!({ "type": "response.output_text.delta", "delta": text }),
+            json!({
+                "type": "response.content_part.added",
+                "output_index": 0,
+                "content_index": 0,
+                "part": { "type": "output_text", "text": "" },
+            }),
+            json!({
+                "type": "response.output_text.delta",
+                "output_index": 0,
+                "content_index": 0,
+                "delta": text,
+            }),
             json!({
                 "type": "response.output_item.done",
+                "output_index": 0,
                 "item": { "type": "message", "id": message_id, "role": "assistant", "status": "completed", "content": [{ "type": "output_text", "text": text }] },
             }),
             json!({
@@ -1257,8 +1269,9 @@ mod tests {
         let sent_bodies_handle = std::sync::Arc::clone(&sent_bodies);
         tokio::spawn(async move {
             let serve = async move {
-                for connection_scripts in scripts {
+                for (connection_number, connection_scripts) in scripts.into_iter().enumerate() {
                     let (mut socket, _) = listener.accept().await.expect("mock accept");
+                    eprintln!("[mock] accepted connection {connection_number}");
                     let mut head = Vec::new();
                     let mut byte = [0u8; 1];
                     while !head.ends_with(b"\r\n\r\n") {
@@ -1289,26 +1302,37 @@ mod tests {
                         )
                         .await
                         .expect("mock write");
-                    for script in connection_scripts {
-                        // Read one request frame (a close or EOF ends the
-                        // server).
+                    let mut request_number = 0usize;
+                    loop {
+                        // One frame per iteration: requests answer their
+                        // script in order; a close frame ends the connection
+                        // (answered, so the client's close handshake
+                        // completes) and anything after the scripted
+                        // requests holds without a response.
                         let Some((opcode, payload)) = read_client_frame(&mut socket).await? else {
-                            return Ok(());
+                            eprintln!("[mock] connection {connection_number} EOF");
+                            break;
                         };
                         if opcode == 8 {
-                            return Ok(());
-                        }
-                        let body: Value = serde_json::from_slice(&payload).expect("request json");
-                        sent_bodies_handle.lock().expect("bodies").push(body);
-                        for event in script {
-                            write_server_frame(&mut socket, &event).await?;
-                        }
-                    }
-                    // Hold the connection open (a cached client reuses it)
-                    // until the client closes it.
-                    while let Some((opcode, _)) = read_client_frame(&mut socket).await? {
-                        if opcode == 8 {
+                            eprintln!("[mock] connection {connection_number} close, replying");
+                            socket.write_all(&[0x88, 0x02, 0x03, 0xE8]).await?;
                             break;
+                        }
+                        request_number += 1;
+                        let body: Value = serde_json::from_slice(&payload).expect("request json");
+                        eprintln!("[mock] connection {connection_number} request {request_number}");
+                        sent_bodies_handle.lock().expect("bodies").push(body);
+                        if let Some(script) = connection_scripts.get(request_number - 1) {
+                            for event in script {
+                                write_server_frame(&mut socket, event).await?;
+                            }
+                            eprintln!(
+                                "[mock] connection {connection_number} request {request_number} answered"
+                            );
+                        } else {
+                            eprintln!(
+                                "[mock] connection {connection_number} request {request_number} NOT scripted (holding)"
+                            );
                         }
                     }
                 }
@@ -1410,6 +1434,12 @@ mod tests {
             stream_openai_codex_responses(&model, &codex_test_context("Say hello"), Some(&options))
                 .result()
                 .await;
+        eprintln!(
+            "[test] turn 1 settled: stop={:?} text={:?} response_id={:?}",
+            first.stop_reason,
+            codex_message_text(&first),
+            first.response_id
+        );
         assert_eq!(
             codex_message_text(&first).as_deref(),
             Some("Hello"),
@@ -1422,7 +1452,9 @@ mod tests {
             &codex_test_context("Now finish"),
             Some(&options),
         );
+        eprintln!("[test] turn 2 streaming");
         let events = second_stream.collect().await;
+        eprintln!("[test] turn 2 collected {} events", events.len());
         let second = events
             .iter()
             .rev()
@@ -1502,6 +1534,10 @@ mod tests {
         )
         .result()
         .await;
+        eprintln!(
+            "[test] turn 2 settled: stop={:?} error={:?} response_id={:?}",
+            second.stop_reason, second.error_message, second.response_id
+        );
         assert_eq!(second.stop_reason, StopReason::Error);
         assert_eq!(
             second.error_message.as_deref(),
