@@ -412,7 +412,10 @@ fn spawn_delete_dispatch(
             {
                 Some(session_path.clone())
             }
-            _ => None,
+            DeleteAction::DeleteSavedSession { .. }
+            | DeleteAction::StopSubagent { .. }
+            | DeleteAction::DeleteSubagent { .. }
+            | DeleteAction::StopAgent { .. } => None,
         };
         let _ = ui_tx.send(UiInput::DeleteResult {
             message: outcome,
@@ -1058,7 +1061,7 @@ impl AgentsViewMode {
         match row.kind {
             RowKind::SubagentSummary => None,
             RowKind::Subagent => None,
-            _ => {
+            RowKind::Agent => {
                 if let Some(active_session_id) = active_session_id {
                     Some(DeleteAction::StopAgent {
                         active_session_id,
