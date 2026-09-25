@@ -580,6 +580,15 @@ pub(crate) struct SessionUi {
 /// Why one transcript rebuild runs (TS: a session rebind renders through
 /// `renderCurrentSessionState`, a same-session resync through
 /// `renderResyncedSession` — the bash slot survives only the resync).
+/// The reattach outcome for `reattach_after_update`: the budget expiry
+/// (a queued attach waiting out a slow restore, §10.4) is a RETRY
+/// outcome — the reconnect driver schedules its next attempt; only a
+/// true attach error is an `Err`.
+pub(crate) enum ReattachOutcome {
+    Attached,
+    AttachBudgetExceeded,
+}
+
 pub(crate) enum RebuildKind {
     /// A new session took the view's place (`/new`, `/switch`, startup):
     /// the previous session's held cards die with its transcript.
@@ -782,11 +791,23 @@ impl SessionUi {
     /// `update_resume.complete` is surfaced as a banner line). The
     /// transcript rebuilds from the attach snapshot - the same machinery
     /// `/switch` uses - and the resumed-work banner lands after it.
+    ///
+    /// `lost` marks the unexpected-loss recovery path (not an update
+    /// restart): no update banner is painted — the caller's single
+    /// recovery row is the note.
     pub(crate) async fn reattach_after_update(
         &mut self,
         client: DaemonClient,
         view: &mut AgentView,
-    ) -> Result<()> {
+        lost: bool,
+    ) -> Result<ReattachOutcome> {
+        // One reattach attempt's budget (§10.4: a queued attach can
+        // legitimately wait out a slow restore — the budget's expiry is a
+        // RETRY outcome, never a fatal one). The bound lives INSIDE this
+        // function — a caller-side timeout would cancel this future
+        // mid-attach and skip the failure-path `close()` below, leaking
+        // the half-installed client's supervisor connection and reader.
+        const REATTACH_BUDGET: Duration = Duration::from_secs(30);
         let hello_resume = client
             .hello()
             .get("updateResume")
@@ -801,29 +822,57 @@ impl SessionUi {
         self.client = client;
         let durable = self.session_id.clone();
         if durable.is_empty() {
+            // A failed reattach must not leave the half-installed client
+            // (its supervisor connection and reader task) running for the
+            // process's lifetime: close it, and the reconnect driver
+            // installs a fresh one on its next attempt.
+            self.client.hard_close();
             anyhow::bail!("the session's durable id is unknown; cannot reattach");
         }
-        self.attach_session(&durable)
-            .await
-            .with_context(|| format!("reattaching session {durable} after the update"))?;
+        let attach = tokio::time::timeout(REATTACH_BUDGET, self.attach_session(&durable)).await;
+        match attach {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                // A failed reattach must not leave the half-installed
+                // client (its supervisor connection and reader task)
+                // running: dispose it outright (the writer drops, the
+                // socket shuts down, the reader EOFs), and the reconnect
+                // driver installs a fresh one on its next attempt.
+                self.client.hard_close();
+                return Err(
+                    error.context(format!("reattaching session {durable} after the update"))
+                );
+            }
+            Err(_) => {
+                // A wedged attach outlived the budget (§10.4: a queued
+                // attach can legitimately wait out a slow restore): same
+                // disposal, but the expiry is a RETRY outcome — the
+                // driver's next attempt owns the recovery, never a fatal
+                // exit.
+                self.client.hard_close();
+                return Ok(ReattachOutcome::AttachBudgetExceeded);
+            }
+        }
         // Flush the attach snapshot BEFORE the banner lands: `rebuild_view`
         // replaces the transcript from the snapshot, so the banner must come
         // after it to survive the rebuild (§10.5's visible end state).
         self.rebuild_view(view, RebuildKind::Resync);
-        match complete {
-            Some(false) => view.push_entry(crate::chat::ChatEntry::Status {
-                text: "Reconnected — the daemon is finishing its restore; queued work resumes when the session comes up.".to_string(),
-                kind: crate::chat::StatusKind::Info,
-            }),
-            _ => view.push_entry(crate::chat::ChatEntry::Status {
-                text: format!(
-                    "Reconnected to Prime Agent (update {update_id}) — your session and queued work resumed."
-                ),
-                kind: crate::chat::StatusKind::Info,
-            }),
+        if !lost {
+            match complete {
+                Some(false) => view.push_entry(crate::chat::ChatEntry::Status {
+                    text: "Reconnected — the daemon is finishing its restore; queued work resumes when the session comes up.".to_string(),
+                    kind: crate::chat::StatusKind::Info,
+                }),
+                _ => view.push_entry(crate::chat::ChatEntry::Status {
+                    text: format!(
+                        "Reconnected to Prime Agent (update {update_id}) — your session and queued work resumed."
+                    ),
+                    kind: crate::chat::StatusKind::Info,
+                }),
+            }
         }
         self.dirty = true;
-        Ok(())
+        Ok(ReattachOutcome::Attached)
     }
 
     /// Detach the current session and attach `id`, rebuilding the transcript
@@ -2346,14 +2395,52 @@ impl SessionUi {
                             continue;
                         }
                     }
-                    if crate::daemon_client::is_daemon_rejection(&error) {
+                    if crate::daemon_client::is_daemon_timeout(&error) {
+                        // Sent but unanswered: the submission was on the
+                        // wire, so the turn may already be admitted and
+                        // running — restoring the draft would invite a
+                        // duplicate submission. The error row names the
+                        // uncertainty; the transcript's live turn (or the
+                        // next daemon answer) settles the truth.
+                        self.error_row(
+                            &format!(
+                                "{rendered} — the request was sent; the turn may still be in flight"
+                            ),
+                            view,
+                        );
+                        return Ok(());
+                    }
+                    // A DIRECT-link transport failure happened after the
+                    // frame was queued (`request_direct` sent it, the link
+                    // died answering): the daemon may have admitted the
+                    // turn — restoring the draft would invite a duplicate
+                    // submission, so the draft stays consumed (the timeout
+                    // arm's contract).
+                    let direct_sent = crate::daemon_client::is_daemon_unreachable(&error)
+                        && rendered
+                            .to_lowercase()
+                            .contains("session connection closed");
+                    if direct_sent {
+                        self.error_row(
+                            &format!(
+                                "{rendered} — the request may have been sent; the turn may still start"
+                            ),
+                            view,
+                        );
+                        return Ok(());
+                    }
+                    if crate::daemon_client::is_daemon_rejection(&error)
+                        || crate::daemon_client::is_daemon_unreachable(&error)
+                    {
                         // TS `onSubmit`'s prompt catch: the daemon answered
                         // with a refusal for THIS request (admission, queue
                         // capacity, a superseded session the rebind could
-                        // not recover, ...) — the connection is healthy, so
-                        // the `⚠ Error` row surfaces the refusal and the
-                        // draft returns to the editor; a refused prompt
-                        // never exits the UI.
+                        // not recover), or the connection refused the send
+                        // (nothing reached the daemon) — the `⚠ Error` row
+                        // surfaces it and the draft returns to the editor
+                        // (the submission never landed); a failed prompt
+                        // never exits the UI (the reconnect driver owns
+                        // the connection's recovery).
                         self.error_row(&rendered, view);
                         view.editor.set_text(text);
                         return Ok(());
