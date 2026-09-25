@@ -844,8 +844,9 @@ mod tests {
         let rows = crate::agents_view_forest::build_rows(
             &records,
             None,
-            &HashSet::default(),
-            &HashMap::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashMap::default(),
             None,
         );
         assert_eq!(rows[0].section, Section::Running);
@@ -1041,8 +1042,9 @@ mod tests {
         let rows = crate::agents_view_forest::build_rows(
             &records,
             None,
-            &HashSet::default(),
-            &HashMap::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashMap::default(),
             None,
         );
         let layout = build_layout(&rows, 120);
@@ -1090,8 +1092,9 @@ mod tests {
         let rows = crate::agents_view_forest::build_rows(
             &records,
             None,
-            &HashSet::default(),
-            &HashMap::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashSet::default(),
+            &std::collections::HashMap::default(),
             None,
         );
         let age = rows

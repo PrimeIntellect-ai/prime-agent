@@ -1332,15 +1332,18 @@ mod tests {
             (pa_core::goals::GOAL_STATE_CUSTOM_TYPE.to_string(), 1),
             "the mint's slot bump immediately precedes the compaction"
         );
+        // The live CompactionSummary prevents a second threshold check from
+        // writing a spurious skipped `compaction_outcome` before this turn.
         assert_eq!(
-            marks[compaction + 1].0,
-            "compaction_outcome",
-            "the compaction's durable outcome row follows the entry"
-        );
-        assert_eq!(
-            marks[compaction + 2],
+            marks[compaction + 1],
             (pa_core::goals::GOAL_CONTEXT_CUSTOM_TYPE.to_string(), 1),
             "the held context row follows the compaction as the next turn"
+        );
+        assert!(
+            marks[compaction + 1..]
+                .iter()
+                .all(|(kind, _)| kind != "compaction_outcome"),
+            "no repeat compaction outcome follows the live summary boundary"
         );
         // The stream: the crossing turn's usage bump, the mint's bump, the
         // held follow-up queue frame, the drain's phase frames (the held

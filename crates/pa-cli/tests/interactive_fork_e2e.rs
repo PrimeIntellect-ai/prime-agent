@@ -368,6 +368,13 @@ async fn interactive_fork_launch_copies_and_the_daemon_opens_the_fork() {
     let cwd = dir.path().join("project");
     std::fs::create_dir_all(&session_dir).expect("sessions dir");
     std::fs::create_dir_all(&cwd).expect("project dir");
+    // The home has onboarding behind it: a completed first run is the
+    // only thing that skips the flow (the marker alone gates it — a
+    // fork user has one), and the launch must open the fork, not the
+    // welcome.
+    pa_core::settings::SettingsManager::create(&cwd, &agent_dir)
+        .set_onboarding_shown(true)
+        .expect("onboarding flag");
     let socket = dir.path().join("daemon.sock");
     let supervisor = spawn_supervisor(&socket, &agent_dir, &session_dir);
 

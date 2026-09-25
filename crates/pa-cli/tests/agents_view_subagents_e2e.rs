@@ -255,13 +255,13 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
             .expect("agents view run")
             .outcome;
 
-    // Collapsed: the parent row and its `2 subagents` summary row — the
-    // label aggregates the whole descendant tree (the child and the
-    // grandchild under it), with both reachable only through the summary
-    // row.
+    // Collapsed: the parent row and its `2 inactive subagents` line —
+    // the label aggregates the whole not-running descendant tree (the
+    // child and the grandchild under it), with both reachable only
+    // through the line.
     let collapsed = first_frame_of(&view.frames, "orchestrator chat");
     assert!(
-        collapsed.contains("\u{25b8} 2 subagents"),
+        collapsed.contains("\u{25b8} 2 inactive subagents"),
         "the collapsed parent shows its tree-aggregated summary row:\n{collapsed}"
     );
     assert!(
@@ -274,7 +274,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // row keeps the grandchild hidden until the child expands too.
     let expanded = first_frame_of(&view.frames, "worker alpha");
     assert!(
-        expanded.contains("\u{25be} 2 subagents"),
+        expanded.contains("\u{25be} 2 inactive subagents"),
         "the expanded summary row keeps the tree aggregate and flips its marker:\n{expanded}"
     );
     assert!(
@@ -404,7 +404,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     // mount frame predates the saved rows and their summary markers).
     let returned = first_frame_of(&back.frames, "orchestrator chat");
     assert!(
-        returned.contains("\u{25b8} 2 subagents"),
+        returned.contains("\u{25b8} 2 inactive subagents"),
         "the opened child rides the parent's aggregate (a top-level flip would leave the grandchild alone behind the summary):\n{returned}"
     );
     assert!(
@@ -413,7 +413,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
     );
     let expanded = frame_of(&back.frames, "worker alpha");
     assert!(
-        expanded.contains("\u{25be} 2 subagents"),
+        expanded.contains("\u{25be} 2 inactive subagents"),
         "the expanded parent tree carries the live child:\n{expanded}"
     );
     assert!(
@@ -421,7 +421,7 @@ async fn panel_expand_drill_in_and_back_re_expands_the_tree() {
         "the grandchild stays hidden until the resumed child expands:\n{expanded}"
     );
     assert!(
-        expanded.contains("\u{25b8} 1 subagent"),
+        expanded.contains("\u{25b8} 1 inactive subagent"),
         "the resumed child's own subtree stays behind its collapsed summary row:\n{expanded}"
     );
     assert!(

@@ -98,11 +98,15 @@ pub enum ActivityGroup {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActivityDock {
-    /// The count of actively-running descendants right now (the whole
-    /// tree — subagents of subagents count): the dock's rendered
-    /// `x subagents` count. Idle and dead registry rows never count —
-    /// they render in the scoped agents view.
-    pub subagents_running: usize,
+    /// The directly-running children right now (the `direct` number of
+    /// the dock's rendered `direct, nested subagents` pair; the
+    /// operator's 2026-09-25 split).
+    pub subagents_running_direct: usize,
+    /// The further running descendants below them (subagents of
+    /// subagents): the `nested` number of the rendered pair. Idle and
+    /// dead registry rows never count — they render in the scoped
+    /// agents view.
+    pub subagents_running_nested: usize,
     /// Every descendant, finished ones included: this keeps the dock
     /// mounted and its Subagents group selectable while any subagent
     /// history remains browsable (the rendered count stays live-only).
@@ -586,10 +590,14 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
         ]
     };
     // The live-only number: the count of actively-running subagents
-    // right now. Idle and finished descendants stay out of the
-    // indicator; they render in the scoped agents view. The count rides
-    // the label itself (the operator's `◆ x subagents` consolidation)
-    // in the dock's running color.
+    // right now, split into the directly-running children and the
+    // running descendants nested below them (the operator's
+    // 2026-09-25 `direct, nested` pair — `◆ 1, 7 subagents` = one
+    // running child plus seven running descendants under it). Idle and
+    // finished descendants stay out of the indicator; they render in
+    // the scoped agents view. The pair rides the label itself (the
+    // operator's `◆ x subagents` consolidation) in the dock's running
+    // color; a quiet roster keeps the plain zero readout.
     let running_color = |count: usize| {
         if count > 0 {
             ThemeColor::Success
@@ -597,9 +605,17 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
             ThemeColor::Muted
         }
     };
+    let running = dock.subagents_running_direct + dock.subagents_running_nested;
     let subagents = vec![theme.fg_span(
-        running_color(dock.subagents_running),
-        format!("◆ {} subagents", dock.subagents_running),
+        running_color(running),
+        if running > 0 {
+            format!(
+                "◆ {}, {} subagents",
+                dock.subagents_running_direct, dock.subagents_running_nested
+            )
+        } else {
+            "◆ 0 subagents".to_string()
+        },
     )];
     let mut heartbeats = vec![theme.fg_span(
         running_color(dock.heartbeats),
@@ -698,7 +714,8 @@ mod tests {
     fn activity_dock_frames_one_row_with_running_paused_and_goal_counts() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
         let dock = ActivityDock {
-            subagents_running: 2,
+            subagents_running_direct: 1,
+            subagents_running_nested: 1,
             heartbeats: 3,
             heartbeats_paused: 1,
             bash_running: 1,
@@ -722,7 +739,7 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             text,
-            " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  Pursuing goal (0s)"
+            " ◆ 1, 1 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  Pursuing goal (0s)"
         );
         // The color-coding (the operator's 2026-09-24 directive): every
         // above-zero count segment and the active goal render green.
@@ -732,7 +749,7 @@ mod tests {
                 .iter()
                 .any(|span| span.content.contains(text) && span.style.fg == color)
         };
-        assert!(colored("◆ 2 subagents", success));
+        assert!(colored("◆ 1, 1 subagents", success));
         assert!(colored("◷ 3 heartbeats", success));
         assert!(colored("▸ 1 shell", success));
         assert!(colored("Pursuing goal", success));
@@ -812,7 +829,8 @@ mod tests {
         // the width: the ellipsis reserves its own column, so the row
         // never renders past the terminal frame (the bot-round fix).
         let dock = ActivityDock {
-            subagents_running: 3,
+            subagents_running_direct: 1,
+            subagents_running_nested: 2,
             heartbeats: 4,
             heartbeats_paused: 2,
             bash_running: 2,
@@ -851,17 +869,19 @@ mod tests {
     }
 
     /// The dock's subagents segment is one consolidated item (the
-    /// operator's `◆ x subagents` form): the count is the running
-    /// count, never the descendant total, and no category breakdown
-    /// rides the row.
+    /// operator's `◆ x subagents` form, with the 2026-09-25 running
+    /// split): the counts are the running pair (direct, then nested),
+    /// never the descendant total, and no category breakdown rides the
+    /// row.
     #[test]
     fn prompt_bar_subagent_segment_is_the_running_count_only() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
-        // Two running among seven descendants: the readout is the
-        // running count, not the descendant total and not a category
-        // breakdown.
+        // Two running among seven descendants (one direct child plus one
+        // nested worker): the readout is the running pair, not the
+        // descendant total and not a category breakdown.
         let dock = ActivityDock {
-            subagents_running: 2,
+            subagents_running_direct: 1,
+            subagents_running_nested: 1,
             subagents_total: 7,
             ..ActivityDock::default()
         };
@@ -870,12 +890,13 @@ mod tests {
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
-        assert_eq!(text, " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
+        assert_eq!(text, " ◆ 1, 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
         assert!(!text.contains("idle"), "no category breakdown: {text}");
         assert!(!text.contains('7'), "the total never renders: {text}");
         // A single running descendant keeps the same shape.
         let dock = ActivityDock {
-            subagents_running: 1,
+            subagents_running_direct: 0,
+            subagents_running_nested: 1,
             subagents_total: 1,
             ..ActivityDock::default()
         };
@@ -884,7 +905,19 @@ mod tests {
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
-        assert_eq!(text, " ◆ 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
+        assert_eq!(text, " ◆ 0, 1 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
+        // A quiet roster (history but nothing running) keeps the plain
+        // zero readout — the pair only renders while work runs.
+        let dock = ActivityDock {
+            subagents_total: 5,
+            ..ActivityDock::default()
+        };
+        let frame = render_activity_dock(&dock, &theme, 80).unwrap();
+        let text = frame[1]
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert_eq!(text, " ◆ 0 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
     }
 
     /// The `/speed` footer row (TS `FooterComponent::render`): one dim row
