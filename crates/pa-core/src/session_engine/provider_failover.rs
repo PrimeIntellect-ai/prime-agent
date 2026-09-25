@@ -132,6 +132,12 @@ pub fn failover_retry_delay(
 /// `"provider/model-id"`. Success after a switch restores the primary and
 /// reports it; every provider exhausting its budget surfaces the final
 /// failure like the single-provider loop does.
+///
+/// # Errors
+///
+/// Returns the final attempt's error when every candidate provider exhausts
+/// its retry budget, or the `emit`/`switch`/`restore` callbacks' errors as
+/// they surface.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn_with_provider_failover<A, AF, E, EF, W, WF, S, SF, R, RF>(
     quick_policy: &ProviderRetryPolicy,

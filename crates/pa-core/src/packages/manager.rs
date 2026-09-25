@@ -141,6 +141,10 @@ impl PackageManager {
     }
 
     /// Reload both settings scopes from storage (resolve reads live settings).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the settings storage cannot be reloaded.
     pub fn reload_settings(&mut self) -> Result<()> {
         self.settings.reload()
     }
@@ -231,6 +235,11 @@ impl PackageManager {
     }
 
     /// Install a source and add it to settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the installation fails; settings are only
+    /// updated when it succeeds.
     pub fn install_and_persist(&mut self, source: &str, scope: UserOrProject) -> Result<()> {
         self.install(source, scope)?;
         self.add_source_to_settings(source, scope);
@@ -238,6 +247,11 @@ impl PackageManager {
     }
 
     /// Install a source into its scope-appropriate location.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the npm or git install fails, or when a local
+    /// source path does not exist.
     pub fn install(&mut self, source: &str, scope: UserOrProject) -> Result<()> {
         let parsed = parse_source(source);
         self.with_progress(
@@ -263,6 +277,11 @@ impl PackageManager {
     }
 
     /// Remove a source's installed files.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the npm uninstall or git removal fails. Local
+    /// sources have no installed files and always succeed.
     pub fn remove(&mut self, source: &str, scope: UserOrProject) -> Result<()> {
         let parsed = parse_source(source);
         self.with_progress(
@@ -286,6 +305,11 @@ impl PackageManager {
 
     /// Remove a source and drop it from settings; false when the source was
     /// not configured (the CLI reports "No matching package found").
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the removal fails; settings are only updated
+    /// when it succeeds.
     pub fn remove_and_persist(&mut self, source: &str, scope: UserOrProject) -> Result<bool> {
         self.remove(source, scope)?;
         Ok(self.remove_source_from_settings(source, scope))

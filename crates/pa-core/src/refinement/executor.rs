@@ -188,6 +188,12 @@ fn conversation_text(messages: &[AgentMessage], cap: usize) -> String {
 /// Produce a refinement proposal (rollback, or the LLM pass) without mutating
 /// any harness state. Callers re-read the harness file before applying because
 /// the LLM call can take many seconds.
+///
+/// # Errors
+///
+/// Returns an error when a requested rollback id is not in the refinement
+/// history, the LLM call fails, or its reply cannot be parsed into a
+/// proposal.
 pub async fn plan_refinement(
     messages: &[AgentMessage],
     state: &HarnessState,
@@ -332,6 +338,11 @@ fn parse_auto_refine_review(text: &str) -> anyhow::Result<AutoRefineReview> {
 }
 
 /// The automatic /refine review gate.
+///
+/// # Errors
+///
+/// Returns an error when the review request cannot be built, the LLM call
+/// fails, or its reply cannot be parsed into a review.
 pub async fn review_auto_refine(
     messages: &[AgentMessage],
     state: &HarnessState,

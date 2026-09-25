@@ -126,13 +126,13 @@ impl UsageTotals {
 
 struct ActiveRun {
     started_at: u64,
-    /// AgentEnd fired but the run is not finalized yet: the post-run
+    /// `AgentEnd` fired but the run is not finalized yet: the post-run
     /// compaction drain still counts into it (TS keeps the run open until
     /// the turn action deactivates; the Rust analog defers to the next
-    /// AgentStart or session end).
+    /// `AgentStart` or session end).
     ended: bool,
-    /// Wall time of AgentEnd: the run's duration freezes here (TS finalizes
-    /// at turn-action deactivation, a few ms after AgentEnd; deferring the
+    /// Wall time of `AgentEnd`: the run's duration freezes here (TS finalizes
+    /// at turn-action deactivation, a few ms after `AgentEnd`; deferring the
     /// finalize must not stretch the duration across the idle gap).
     ended_at: Option<u64>,
     first_turn_started_at: Option<u64>,
@@ -160,6 +160,15 @@ pub struct SkillCounts {
 /// Install the telemetry subscriber on an agent and emit `agent started`.
 /// The subscriber consumes every [`AgentEvent`]; the state it builds is
 /// reachable through the returned handle for session-end finalization.
+///
+/// # Errors
+///
+/// The current implementation never returns `Err`; the installed telemetry
+/// is always handed back in `Ok`.
+///
+/// # Panics
+///
+/// Panics if the telemetry state mutex is poisoned.
 pub async fn install_session_telemetry(
     agent: &Arc<pa_agent::agent::Agent>,
     wiring: &TelemetryWiring,
@@ -225,6 +234,10 @@ impl SessionTelemetry {
     /// `compaction_end` handling). Counts toward the active run when one
     /// exists, exactly like the TS subscriber — compactions outside a run
     /// never inflate session totals.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the telemetry state mutex is poisoned.
     pub fn note_compaction(&self) {
         let mut state = self.state.lock().expect("telemetry state poisoned");
         if let Some(run) = state.active_run.as_mut() {
@@ -234,6 +247,10 @@ impl SessionTelemetry {
 
     /// An auto-retry started (feed from the auto-retry seam; TS
     /// `auto_retry_start` handling). Only counts inside an active run.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the telemetry state mutex is poisoned.
     pub fn note_auto_retry(&self) {
         let mut state = self.state.lock().expect("telemetry state poisoned");
         if let Some(run) = state.active_run.as_mut() {
@@ -244,6 +261,10 @@ impl SessionTelemetry {
     /// A provider-failover switch happened (the failed turn re-routed to
     /// another configured provider serving the same model). Only counts
     /// inside an active run.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the telemetry state mutex is poisoned.
     pub fn note_provider_failover(&self) {
         let mut state = self.state.lock().expect("telemetry state poisoned");
         if let Some(run) = state.active_run.as_mut() {
@@ -255,6 +276,14 @@ impl SessionTelemetry {
     /// The host calls this at session close (TUI exit, worker shutdown,
     /// kill); the `ended` flag makes a second close path a no-op, matching
     /// the TS single `registerDisposeCallback` firing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the telemetry client's flush error, if any.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the telemetry state mutex is poisoned.
     pub async fn end(&self) -> anyhow::Result<()> {
         if self.ended.swap(true, std::sync::atomic::Ordering::SeqCst) {
             return Ok(());
@@ -297,6 +326,10 @@ impl SessionTelemetry {
 
     /// `session archived` (schema v1): the session reached the archive state
     /// (daemon `kill`). Lifetime in ms; emitted before `end()` on that path.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the telemetry state mutex is poisoned.
     pub fn note_archived(&self) {
         let mut properties = self.session_properties();
         {
@@ -593,7 +626,7 @@ pub fn track_deleted_child_usage_captured(client: &TelemetryClient, source: &str
 
 /// Track a daemon model-allowlist refusal (`model refused`, schema v1):
 /// a daemon model resolution (the `set_model` command, an RLM
-/// spawn/create_session resolution, or the worker's startup model chain)
+/// spawn/`create_session` resolution, or the worker's startup model chain)
 /// refused a model outside the settings `allowedModels` allowlist.
 /// Categories and surface only — never the refused selector, pattern
 /// content, or session payload (the `daemon event` catalog-refresh rule:
@@ -693,7 +726,7 @@ pub fn track_worker_children_closed(client: &TelemetryClient, count: usize) {
 }
 
 /// Build the product telemetry client from settings (opt-in already
-/// resolved by the caller): PostHog sink when endpoint+key are configured
+/// resolved by the caller): `PostHog` sink when endpoint+key are configured
 /// (env `PRIME_AGENT_TELEMETRY_ENDPOINT`/`_API_KEY` override settings
 /// `telemetry.posthog.*`), the no-op sink when they are not (the operator
 /// supplies values at deploy time), plus the local JSONL transparency
@@ -1168,7 +1201,7 @@ mod tests {
     }
 
     /// TS "waits for post-run compaction before finalizing run metrics":
-    /// a compaction drained after AgentEnd still counts into that run.
+    /// a compaction drained after `AgentEnd` still counts into that run.
     #[tokio::test]
     async fn post_run_compaction_counts_into_the_open_run() {
         let fixture = fixture();
@@ -1410,7 +1443,7 @@ mod tests {
         assert!((events[0]["cost"].as_f64().unwrap() - 0.008_995_7).abs() < 1e-9);
     }
 
-    /// `build_client`: settings-provided PostHog endpoint + the local mirror.
+    /// `build_client`: settings-provided `PostHog` endpoint + the local mirror.
     #[tokio::test]
     async fn build_client_resolves_settings_posthog_and_mirror() {
         let dir = tempfile::tempdir().unwrap();

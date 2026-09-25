@@ -96,6 +96,11 @@ fn parse_json_candidate(candidate: &str) -> Result<serde_json::Value, String> {
 
 /// Extract the proposal JSON from a reply: direct, fenced, or brace-sliced
 /// out of prose (with truncation diagnosed against the original text).
+///
+/// # Errors
+///
+/// Returns a human-readable error string when the reply contains no JSON
+/// object, the candidate JSON is invalid, or the reply looks truncated.
 pub fn extract_json_object(text: &str) -> Result<serde_json::Value, String> {
     let trimmed = text.trim();
     if trimmed.starts_with('{') && trimmed.ends_with('}') {
@@ -155,6 +160,12 @@ pub fn normalize_refinement_proposal(value: serde_json::Value) -> RefinementProp
     }
 }
 
+/// Parse and normalize a refinement proposal from a model reply.
+///
+/// # Errors
+///
+/// Returns a human-readable error string when the reply's JSON cannot be
+/// extracted or its top level is not an object.
 pub fn parse_proposal(text: &str) -> Result<RefinementProposal, String> {
     let value = extract_json_object(text)?;
     if !value.is_object() {
@@ -263,6 +274,12 @@ pub struct ApplyOptions {
 }
 
 /// Apply a proposal to the state (mutating entries and recording the event).
+///
+/// # Panics
+///
+/// The internal unwraps cannot fire: an edit without an action is rejected
+/// by validation first, and the empty state pre-populates every per-kind
+/// entry map.
 pub fn apply_refinement_proposal(
     state: &mut HarnessState,
     proposal: &RefinementProposal,
@@ -507,6 +524,11 @@ fn refinement_input_token_bound(text: &str) -> u64 {
 
 /// Fit the refinement request into the model context: trim conversation from
 /// the front (binary search) and clamp output tokens.
+///
+/// # Errors
+///
+/// Returns an error when even the trimmed prompt leaves no room for output
+/// tokens in the model's context window.
 pub fn refinement_request(
     model: &pa_types::ai::Model,
     system_prompt: &str,

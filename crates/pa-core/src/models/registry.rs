@@ -1,4 +1,4 @@
-//! ModelRegistry: composes built-in, custom (models.json), and Prime Inference
+//! `ModelRegistry`: composes built-in, custom (models.json), and Prime Inference
 //! catalogs; resolves request auth per provider/model. Port of model-registry.ts.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -54,7 +54,7 @@ pub struct ModelRegistry {
     authorized_private_models: Vec<Model>,
     authorized_team_id: Option<String>,
     /// The process-shared live catalog chain (`catalog_chain::catalog_for`):
-    /// resolve() sources built-ins from it.
+    /// `resolve()` sources built-ins from it.
     catalog: std::sync::Arc<pa_models::ModelCatalog>,
 }
 

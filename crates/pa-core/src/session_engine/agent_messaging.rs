@@ -165,10 +165,22 @@ pub fn is_agent_session_message_id(id: Option<&str>) -> bool {
 }
 
 /// Normalize and validate an outgoing message body.
+///
+/// # Errors
+///
+/// Returns an error when the message is empty after trimming or longer
+/// than the default message limit.
 pub fn normalize_agent_session_message(message: &str) -> anyhow::Result<String> {
     normalize_agent_session_message_limited(message, DEFAULT_AGENT_MESSAGE_MAX_CHARS)
 }
 
+/// Normalize and validate an outgoing message body with an explicit
+/// character limit.
+///
+/// # Errors
+///
+/// Returns an error when the message is empty after trimming or longer
+/// than `max_chars`.
 pub fn normalize_agent_session_message_limited(
     message: &str,
     max_chars: usize,
@@ -187,6 +199,12 @@ pub fn normalize_agent_session_message_limited(
 }
 
 /// Reject broadcast targets: only direct messaging is supported.
+/// Normalize a direct-messaging target and reject broadcast wildcards.
+///
+/// # Errors
+///
+/// Returns an error when the target is empty after trimming or names the
+/// broadcast wildcard.
 pub fn assert_direct_agent_message_target(target: &str) -> anyhow::Result<String> {
     let normalized = target.trim();
     if normalized.is_empty() {
@@ -202,6 +220,11 @@ pub fn assert_direct_agent_message_target(target: &str) -> anyhow::Result<String
 }
 
 /// Guard the target session's pending-work capacity.
+///
+/// # Errors
+///
+/// Returns an error when the target's unfinished action count has reached
+/// the pending-work limit.
 pub fn assert_agent_message_queue_capacity(
     unfinished_action_count: usize,
     max_pending: usize,
@@ -581,11 +604,19 @@ pub trait AgentObserveController: Send + Sync {
 }
 
 /// Clamp an observe limit (default 8, range 1..=50).
+///
+/// # Errors
+///
+/// Returns an error when the limit falls outside 1..=50.
 pub fn normalize_observe_limit(limit: Option<u64>) -> anyhow::Result<usize> {
     clamp_integer(limit.unwrap_or(8), 1, 50, "agent_observe limit")
 }
 
 /// Clamp an observe preview width (default 800, range 80..=2000).
+///
+/// # Errors
+///
+/// Returns an error when the width falls outside 80..=2000.
 pub fn normalize_observe_max_chars(max_chars: Option<u64>) -> anyhow::Result<usize> {
     clamp_integer(
         max_chars.unwrap_or(800),

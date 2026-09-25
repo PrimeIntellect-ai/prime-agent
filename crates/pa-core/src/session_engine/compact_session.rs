@@ -169,7 +169,7 @@ fn context_tokens(entries: &[FileEntry], leaf_id: Option<&str>) -> u64 {
     estimate_context_tokens(&context.messages).tokens
 }
 
-/// Session AgentMessage -> LLM Message (post convertToLlm).
+/// Session `AgentMessage` -> LLM Message (post `convertToLlm`).
 fn to_llm_messages(messages: &[AgentMessage]) -> Vec<Message> {
     convert_to_llm(messages)
         .into_iter()
@@ -254,6 +254,11 @@ pub struct CompactionPreparation {
 /// (TS `prepareCompaction`): a branch that already ends in a compaction has
 /// nothing new to summarize, and a branch with no summarizable history has
 /// no compaction to run.
+///
+/// # Errors
+///
+/// Returns the TS `CompactionSkippedError` case as `Err`: the branch
+/// already ends in a compaction, or it carries no summarizable history.
 pub fn prepare_compaction(
     entries: &[FileEntry],
     keep_recent_tokens: u64,
@@ -319,6 +324,12 @@ pub fn prepare_compaction(
 
 /// Run compaction over the session: summarize the pre-cut prefix, persist the
 /// entry, and return the rebuilt post-compaction context messages.
+///
+/// # Errors
+///
+/// Returns an error when the compaction preparation or the summarizer call
+/// fails, or when the compaction entry cannot be persisted. A skipped
+/// compaction is a normal `Ok` outcome carrying the skip message.
 pub async fn execute_compaction(
     session: &mut SessionManager,
     options: CompactOptions<'_>,

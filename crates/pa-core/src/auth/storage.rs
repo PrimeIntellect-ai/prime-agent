@@ -12,6 +12,11 @@ use super::types::AuthStorageData;
 /// Locked read/modify/write over the auth document. `update` returns
 /// `(result, next)`; `next: Some` writes it back atomically.
 pub trait AuthStorageBackend: Send + Sync {
+    /// # Errors
+    ///
+    /// Returns an error when the backend fails to read, update, or write the
+    /// auth document (lock acquisition, file I/O, or the `update` callback's
+    /// own failure).
     fn with_lock(
         &self,
         update: &mut dyn FnMut(Option<String>) -> Result<((), Option<String>)>,
@@ -125,6 +130,11 @@ impl AuthStorageBackend for InMemoryAuthStorageBackend {
 
 /// Parse an auth document; invalid JSON or a non-object root is a load error
 /// (the TS throws too).
+///
+/// # Errors
+///
+/// Returns an error when the content is not valid JSON or its root is not a
+/// JSON object. Empty content parses as the default, empty document.
 pub fn parse_storage_data(content: Option<&str>) -> Result<AuthStorageData> {
     let content = content.filter(|content| !content.is_empty());
     let Some(content) = content else {

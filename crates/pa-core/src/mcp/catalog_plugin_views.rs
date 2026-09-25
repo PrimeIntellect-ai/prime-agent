@@ -59,7 +59,7 @@ pub struct McpPluginView {
     pub category: Option<String>,
     pub publisher: Option<String>,
     pub docs_url: Option<String>,
-    /// Honest requirement or failure detail; non-empty for setup_required and
+    /// Honest requirement or failure detail; non-empty for `setup_required` and
     /// error states.
     pub setup_hint: Option<String>,
     /// True when the catalog entry itself has not been vetted.

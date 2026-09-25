@@ -34,7 +34,7 @@ pub struct ResolvedAuxiliaryModel {
 
 /// The fallback warning (TS `_resolveAuxiliaryModel`'s `console.warn`).
 /// The selector is logged, never the auth-stack error details: those can
-/// embed credential material (TS CodeQL `js/clear-text-logging`).
+/// embed credential material (TS `CodeQL` `js/clear-text-logging`).
 fn warn_fallback(selector: &str, purpose: &str) {
     eprintln!(
         "Warning: auxiliaryModel \"{selector}\" unusable for {purpose}; using the session model."

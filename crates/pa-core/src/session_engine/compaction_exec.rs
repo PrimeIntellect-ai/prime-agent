@@ -1,5 +1,5 @@
 //! The compaction executor: assemble and run the summarization request.
-//! Port of compact() in core/compaction/compaction.ts (summarizer call via
+//! Port of `compact()` in core/compaction/compaction.ts (summarizer call via
 //! pa-ai's completion facade).
 
 use super::compaction::{build_summarization_prompt, CutPointResult};
@@ -116,6 +116,11 @@ pub fn build_turn_prefix_request(messages: &[AgentMessage]) -> Vec<AgentMessage>
 /// `failure` labels the error-stop bail exactly like the TS throw sites:
 /// "Summarization failed" for the history call, "Turn prefix
 /// summarization failed" for the turn-prefix call.
+///
+/// # Errors
+///
+/// Returns an error when the summarizer wire call fails, or when its reply
+/// stops with an error (labeled with `failure`).
 pub async fn complete_summary_call(
     model: &pa_types::ai::Model,
     api_key: Option<String>,
@@ -269,6 +274,10 @@ pub struct CompactRequest<'a> {
 
 /// Run compaction over a conversation slice: summarize the dropped prefix,
 /// keeping from `first_kept_entry_id`. `summarize` performs the model call.
+///
+/// # Errors
+///
+/// Returns the `summarize` call's error when the summarization fails.
 pub async fn compact_with(
     request: CompactRequest<'_>,
     summarize: SummarizerFn,

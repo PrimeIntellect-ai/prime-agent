@@ -95,6 +95,12 @@ where
     }
 
     /// Send a request and await its reply, bounded by `timeout`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the sidecar is not running, the request line
+    /// cannot be encoded or written, the sidecar replies with an RPC error or
+    /// stops before replying, or the reply does not arrive before `timeout`.
     pub async fn request(
         self: &Arc<Self>,
         method: &str,
@@ -140,6 +146,11 @@ where
     }
 
     /// Send a notification (no reply expected).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the notification line cannot be encoded or
+    /// written to the sidecar.
     pub async fn notify(self: &Arc<Self>, method: &str, params: Value) -> Result<()> {
         let line = encode_line(
             &HostNotification {
@@ -247,6 +258,12 @@ where
     /// Pump the sidecar's stdout until EOF or a protocol violation. Returns
     /// only on death: `Err` carries the reason (EOF included). Process-
     /// lifecycle reactions to the return belong to the caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error carrying the reason for the death: the sidecar
+    /// closed the connection, reading its stdout failed, it violated the line
+    /// protocol, or it sent an unparsable line.
     pub async fn read_loop<R>(self: &Arc<Self>, reader: R) -> Result<()>
     where
         R: AsyncRead + Unpin,

@@ -25,6 +25,12 @@ pub struct McpLoginContext {
 
 impl McpLoginContext {
     /// Run the flow and persist the credential under `mcp:<server>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the OAuth login flow fails, when the auth
+    /// storage failed to load beforehand, or when saving the credential
+    /// fails.
     pub async fn run(self, ui: &dyn McpLoginUi, http: &dyn OAuthHttp) -> Result<AuthCredential> {
         let provider_id = format!("mcp:{}", self.server);
         let credential = mcp_login(http, &self.config, ui).await?;
@@ -61,6 +67,11 @@ impl McpManager {
     /// The execution context for one login: resolve the config, detach the
     /// auth store handle. Unknown and non-OAuth servers error with the TS
     /// wording (the kernel surfaces it to the model).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the server is not a known MCP integration or
+    /// does not use OAuth.
     pub fn login_context(&self, server: &str) -> Result<McpLoginContext> {
         let Some(config) = self.oauth_config(server) else {
             return Err(anyhow!("Unknown MCP integration: {server}"));
@@ -78,6 +89,11 @@ impl McpManager {
 /// `register_host_handlers` call, before the session starts). The wire is
 /// weak on the manager: a dropped manager fails the request instead of
 /// keeping the store alive.
+///
+/// # Panics
+///
+/// The wired login panics if the MCP manager mutex is poisoned (a previous
+/// login panicked while holding the lock).
 pub fn wire_begin_login(
     manager: &Arc<Mutex<McpManager>>,
     ui: Arc<dyn McpLoginUi>,
@@ -109,7 +125,7 @@ pub fn wire_begin_login(
 }
 
 /// The OAuth refresh implementation for `mcp:<server>` credentials: the
-/// AuthStorage expiry path asks the stored endpoint for a fresh token,
+/// `AuthStorage` expiry path asks the stored endpoint for a fresh token,
 /// honoring every binding the login established.
 pub struct McpOAuth {
     http: Arc<dyn OAuthHttp>,
@@ -136,7 +152,7 @@ impl McpOAuth {
 
 impl McpOAuth {
     /// Refresh one provider's credential off the async runtime (the
-    /// AuthStorage seam is synchronous by contract).
+    /// `AuthStorage` seam is synchronous by contract).
     fn refresh_blocking(
         &self,
         provider_id: &str,
@@ -353,7 +369,7 @@ mod tests {
         ])
     }
 
-    /// begin_login -> persisted endpoint-bound credentials -> is_authed
+    /// `begin_login` -> persisted endpoint-bound credentials -> `is_authed`
     /// -> the server unlocks in the prompt gating.
     #[tokio::test]
     async fn begin_login_persists_creds_and_unlocks_gating() {
@@ -431,7 +447,7 @@ mod tests {
         assert!(after.1.uses_oauth);
     }
 
-    /// The builtin linear integration: begin_login removes its skill
+    /// The builtin linear integration: `begin_login` removes its skill
     /// override; notion stays disabled.
     #[tokio::test]
     async fn begin_login_unlocks_builtin_skill_gating() {
@@ -541,8 +557,8 @@ mod tests {
         assert_eq!(error, "mcp.begin_login requires a server");
     }
 
-    /// Expired credentials refresh through the AuthStorage seam: the
-    /// stored endpoint answers a refresh_token grant, and the new
+    /// Expired credentials refresh through the `AuthStorage` seam: the
+    /// stored endpoint answers a `refresh_token` grant, and the new
     /// credential keeps every binding.
     #[tokio::test]
     async fn mcp_oauth_refreshes_expired_credentials() {
