@@ -32,7 +32,7 @@ either changes.
 - Workspace dependencies flow one way, from the composition root (`pa-cli`) toward lower crates. Flag cycles, reverse edges, or new edges that contradict the Crates table in AGENTS.md.
 - `pa-types` is the only shared vocabulary crate: flag domain types duplicated into or re-exported from higher crates.
 - A new dependency (workspace edge or third-party crate) is an architectural change: flag it unless the PR states why existing crates cannot host the functionality, commits the regenerated `Cargo.lock` in the same change, and keeps `make deny` clean.
-- Flag cross-crate `pub use`/re-exports that widen the public API surface. `pa-tui` renders from wire types and must not link the session engine; `pa-cli` wires crates and contains no business logic.
+- Flag cross-crate `pub use`/re-exports that widen the public API surface. `pa-tui` renders from wire types and must not link the session engine (its only workspace dependency is `pa-types`); `pa-cli` wires crates and contains no business logic.
 
 ## Change hygiene
 
@@ -44,7 +44,7 @@ either changes.
 
 - Add a regression test only when it captures meaningful behavior that fails before the fix; do not require one for trivial or documentation-only changes.
 - Reject incidental or duplicate coverage and copy/string snapshot assertions that merely restate labels or descriptions; assert text only when the text is the behavior.
-- A bug fix lands with a regression test that fails without the fix.
+- A bug fix that captures meaningful behavior lands with a regression test that fails without the fix (no test required for trivial or documentation-only fixes).
 - Tests must wait for observable readiness: flag fixed sleeps, polling loops, and retry-to-green wrappers used as readiness signals. A timeout may bound failure; it must not make the test pass.
 - Flag skipped or disabled tests without a reason stated at the test; flag tests that should use isolated ports and temporary paths but do not, and tests that leave shared state unrestored.
 
@@ -56,5 +56,5 @@ either changes.
 
 ## Generated files
 
-- Edit generated data via its generator, never by hand (`crates/pa-ai/src/models_generated.rs` comes from `scripts/generate-models.py`). Flag hand-edits to generated files: require regeneration instead.
+- Edit generated data via its generator, never by hand: the model catalog `crates/pa-ai/src/models.generated.json` comes from `crates/pa-ai/scripts/generate-models.py` (the `models_generated.rs` beside it is the handwritten loader, not the generated artifact). Flag hand-edits to generated files: require regeneration instead.
 - Generated files are exempt from the size guidance; the exemption's reason is that the file is generator-owned output.
