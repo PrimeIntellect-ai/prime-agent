@@ -3,11 +3,13 @@
 pub(crate) mod manager;
 pub(crate) mod prime_inference;
 pub(crate) mod prime_traces;
+pub(crate) mod provider_oauth;
 pub(crate) mod resolve_config_value;
 pub(crate) mod storage;
 pub(crate) mod types;
 
 pub use manager::{AuthApiKeyResult, AuthStorage, NoOAuth, OAuthIntegration};
+pub use provider_oauth::{ProviderOAuth, OPENAI_CODEX_PROVIDER_ID};
 pub use prime_inference::{
     check_prime_inference_access, default_prime_cli_config_path, fetch_prime_teams,
     read_prime_cli_config, resolve_prime_inference_auth_config, PrimeAccessError,

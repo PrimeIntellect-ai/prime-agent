@@ -719,6 +719,7 @@ impl SessionUi {
             traces: options.traces.clone(),
             provider_auth: options.provider_auth.clone(),
             auth_panel_notes,
+            auth_panel_cancel: None,
             pending_update: None,
             update_commands: options.update_commands.clone(),
             exit_requested: false,
@@ -3631,12 +3632,14 @@ impl SessionUi {
                     let auth = self.provider_auth.clone().expect("the selector was open");
                     if provider.id.starts_with("mcp:")
                         || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
+                        || provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID
                     {
                         self.start_provider_panel_login(&provider, auth, view);
                     } else {
-                        // The unported OAuth subscription stubs: the
-                        // error row is the whole flow (nothing drives
-                        // the panel).
+                        // The menu marks unported subscription rows
+                        // unavailable and Enter never selects them; a row
+                        // reaching here answers the silent cancel — no
+                        // after-selection error wall.
                         let outcome = auth.0.login(&provider, None).await;
                         self.apply_auth_outcome(outcome, view);
                     }
@@ -3654,11 +3657,14 @@ impl SessionUi {
     }
 
     /// Enter on a panel-driven login row (the MCP OAuth logins, the Prime
-    /// Inference login): mount the inline auth panel (TS `showAuthPanel`
-    /// mounts the login dialog as the flow starts) and spawn the flow
-    /// against it. The flow's requests fold into the panel through the
-    /// run loop's channel arm; the settled outcome lands the same way
-    /// (the flow never touches the terminal).
+    /// Inference login, the Codex Subscription login): mount the inline
+    /// auth panel (TS `showAuthPanel` mounts the login dialog as the
+    /// flow starts) and spawn the flow against it. The flow's requests
+    /// fold into the panel through the run loop's channel arm; the
+    /// settled outcome lands the same way (the flow never touches the
+    /// terminal). Flows that check the cooperative cancel (#2770: the
+    /// codex subscription login) arm its shared flag so Esc/ctrl+c on
+    /// the mounted panel ends the flow without writing credentials.
     fn start_provider_panel_login(
         &mut self,
         provider: &crate::provider_auth::ProviderRow,
@@ -3670,10 +3676,15 @@ impl SessionUi {
             provider.name
         )));
         let panel = crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone());
+        self.auth_panel_cancel = (provider.id == crate::provider_auth::OPENAI_CODEX_PROVIDER_ID)
+            .then(|| panel.cancel_flag());
         let provider = provider.clone();
         tokio::spawn(async move {
             let outcome = auth.0.login_on_panel(&provider, panel.clone()).await;
-            panel.send(crate::auth_panel::AuthPanelRequest::ProviderSettled { outcome });
+            panel.send(crate::auth_panel::AuthPanelRequest::ProviderSettled {
+                provider: provider.id.clone(),
+                outcome,
+            });
         });
     }
 
@@ -3690,9 +3701,20 @@ impl SessionUi {
         if id == "ctrl+c" {
             self.exit_guard.note_ctrl_c_handled();
         }
+        let kb = view.editor.keybindings();
         if let Some(panel) = view.auth_panel.as_mut() {
-            let kb = view.editor.keybindings();
             panel.handle_key(&id, kb);
+        }
+        // A cancel key on an armed panel flow ends it cooperatively
+        // (#2770): the flag marks the blocking body (no credential write
+        // after the exit), the panel unmounts, and the settled outcome
+        // is the silent cancel.
+        let cancel_key = id == "ctrl+c" || kb.matches(&id, "tui.select.cancel");
+        if cancel_key {
+            if let Some(cancel) = self.auth_panel_cancel.take() {
+                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                view.auth_panel = None;
+            }
         }
         self.dirty = true;
         Ok(())
@@ -3771,7 +3793,11 @@ impl SessionUi {
                     panel.mount_teams(teams, current, reply);
                 }
             }
-            AuthPanelRequest::ProviderSettled { outcome } => {
+            AuthPanelRequest::ProviderSettled {
+                provider: _,
+                outcome,
+            } => {
+                self.auth_panel_cancel = None;
                 view.auth_panel = None;
                 self.apply_auth_outcome(outcome, view);
             }

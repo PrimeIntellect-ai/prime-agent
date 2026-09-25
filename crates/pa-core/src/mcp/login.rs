@@ -573,6 +573,7 @@ mod tests {
                 refresh: Some("fixture-refresh".to_string()),
                 // Expired: resolution must refresh.
                 expires: 1,
+                account_id: None,
                 endpoint: Some("https://fixture.example/mcp".to_string()),
                 token_endpoint: Some("https://fixture.example/token".to_string()),
                 client_id: Some("fixture-client".to_string()),
@@ -627,6 +628,7 @@ mod tests {
                 access: "fixture-access".to_string(),
                 refresh: Some("fixture-refresh".to_string()),
                 expires: i64::MAX,
+                account_id: None,
                 endpoint: Some("https://fixture.example/mcp".to_string()),
                 token_endpoint: Some("https://fixture.example/token".to_string()),
                 client_id: Some("fixture-client".to_string()),

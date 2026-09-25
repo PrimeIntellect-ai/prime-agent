@@ -429,6 +429,7 @@ mod tests {
                 access: "linear-access".to_string(),
                 refresh: None,
                 expires: i64::MAX,
+                account_id: None,
                 endpoint: Some("https://mcp.linear.app/mcp".to_string()),
                 token_endpoint: None,
                 client_id: None,

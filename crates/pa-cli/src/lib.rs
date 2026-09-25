@@ -23,6 +23,7 @@ pub(crate) mod headless_autonomous;
 pub(crate) mod initial_message;
 pub(crate) mod interactive_mode;
 pub(crate) mod list_models;
+pub(crate) mod codex_subscription_login;
 pub(crate) mod mcp_command;
 pub(crate) mod mcp_login;
 pub(crate) mod mode;
