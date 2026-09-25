@@ -135,9 +135,46 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
     let body: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
     let index = requests.lock().expect("mock lock").len();
     requests.lock().expect("mock lock").push(body);
-    // The crossing turn is the last one (index FATTENING_TURNS + 1, after
-    // the seed turn): its usage crosses the seeded reserve.
-    let crossing = index == FATTENING_TURNS + 1;
+    // The crossing turn is the LAST turn request (the seed plus the
+    // fattening turns before it), not the nth request overall: the
+    // daemon's status-line recaps (and, after a compaction, the
+    // compact-trigger auto-refine review) make their own model requests
+    // mid-run, and counting them would shift which request lands on the
+    // scripted index — a race that flipped the threshold arm between
+    // runs. Turn requests are identified by the agent's harness system
+    // prompt; every other request is answered small usage and never
+    // consumes a turn index.
+    let is_turn_request = body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .is_some_and(|messages| {
+            messages
+                .first()
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_str)
+                .is_some_and(|content| content.starts_with("# prime-agent harness"))
+        });
+    let turn_index = {
+        let guard = requests.lock().expect("mock lock");
+        // The current request is already pushed: the prior turns are the
+        // turn requests before it.
+        guard[..index]
+            .iter()
+            .filter(|request| {
+                request
+                    .get("messages")
+                    .and_then(|m| m.as_array())
+                    .is_some_and(|messages| {
+                        messages
+                            .first()
+                            .and_then(|message| message.get("content"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|content| content.starts_with("# prime-agent harness"))
+                    })
+            })
+            .count()
+    };
+    let crossing = is_turn_request && turn_index == FATTENING_TURNS + 1;
     let usage = if crossing {
         crossing_usage()
     } else {
@@ -420,11 +457,33 @@ fn mega_session_threshold_compaction_phase_measurement() {
     );
 
     // The compaction's summarizer call really reached the provider
-    // (past the seeded turns and the crossing turn).
+    // (past the seeded turns and the crossing turn): count the
+    // summarizer requests by their system prompt, not the raw total —
+    // the status-line recaps and the compact-trigger review round make
+    // their own model calls, so the raw total no longer proves a
+    // compaction ran.
+    let summarizer_requests = {
+        let bodies = mock.requests.lock().expect("mock lock");
+        bodies
+            .iter()
+            .filter(|body| {
+                body.get("messages")
+                    .and_then(|m| m.as_array())
+                    .is_some_and(|messages| {
+                        messages
+                            .first()
+                            .and_then(|message| message.get("content"))
+                            .and_then(Value::as_str)
+                            .is_some_and(|content| {
+                                content.contains("context summarization assistant")
+                            })
+                    })
+            })
+            .count()
+    };
     assert!(
-        mock.request_count() > 1 + FATTENING_TURNS + 1,
-        "the compaction's summarizer request never arrived ({})",
-        mock.request_count()
+        summarizer_requests > 1,
+        "the compaction's summarizer request never arrived ({summarizer_requests})"
     );
 
     // The trace table.
