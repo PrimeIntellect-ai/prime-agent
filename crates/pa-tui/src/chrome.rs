@@ -73,10 +73,6 @@ pub struct ChromeState {
     pub service_tier: Option<String>,
     /// Startup warning (tmux keyboard setup), rendered as a status row.
     pub tmux_notice: Option<String>,
-    /// The tray's goal label (TS `getTrayGoalLabel`: `Pursuing goal (0s)`
-    /// while active, `Goal paused (0s)`, ...); `None` for idle/complete/error
-    /// goals. Joins the tray context label first, before the model.
-    pub goal_label: Option<String>,
     /// Tray override label (TS `getTrayOverrideLabel`): while the Ctrl+C
     /// exit hint is armed, it replaces the tray's location label.
     pub tray_override: Option<String>,
@@ -100,6 +96,9 @@ pub enum ActivityGroup {
     Subagents,
     Heartbeats,
     Bash,
+    /// The active goal: selectable while a goal is being pursued, opens
+    /// the read-only goal panel (the objective and its facts).
+    Goal,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -126,10 +125,12 @@ pub struct ActivityDock {
     /// keeps the dock (and so the bash view's history) reachable when no
     /// run is live; the rendered indicator count stays `bash_running`.
     pub bash_total: usize,
-    /// The active goal's token progress `(used, budget)`; `None` unless
-    /// the goal is actively being pursued (a completed or idle goal
-    /// carries no dock segment).
-    pub goal_tokens: Option<(u64, Option<u64>)>,
+    /// The active goal's dock label — `Pursuing goal (12m 05s)`-style,
+    /// the elapsed-time form (the operator's 2026-09-24 directive: the
+    /// row reads the time, the token budget lives inside the goal
+    /// panel); `None` unless the goal is actively being pursued (a
+    /// completed or idle goal carries no dock segment).
+    pub goal_label: Option<String>,
     pub selected: ActivityGroup,
     pub focused: bool,
 }
@@ -139,7 +140,7 @@ impl ActivityDock {
         self.subagents_total > 0
             || self.heartbeats > 0
             || self.bash_total > 0
-            || self.goal_tokens.is_some()
+            || self.goal_label.is_some()
     }
 }
 
@@ -431,9 +432,6 @@ pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
         }
     }
     let mut right: Line = Vec::new();
-    if let Some(goal) = &state.goal_label {
-        right.push(Span::styled(goal.clone(), dim));
-    }
     if let Some(model) = &state.model_id {
         let mut label = model.clone();
         if let Some(suffix) = &state.thinking_suffix {
@@ -487,8 +485,14 @@ pub fn render_tray(state: &ChromeState, theme: &Theme, width: usize) -> Line {
 fn truncate_spans_to_width(spans: &[crate::Span], width: usize) -> Vec<crate::Span> {
     let mut out: Vec<crate::Span> = Vec::new();
     let mut remaining = width;
-    for span in spans {
+    for (index, span) in spans.iter().enumerate() {
         if remaining == 0 {
+            // The frame filled on a span boundary: the later spans still
+            // exist, so the ellipsis must land (a silent drop would hide
+            // content the reader cannot know about).
+            if content_follows(spans, index) {
+                land_marker(&mut out, width);
+            }
             break;
         }
         let mut text = String::new();
@@ -502,37 +506,89 @@ fn truncate_spans_to_width(spans: &[crate::Span], width: usize) -> Vec<crate::Sp
             consumed += char_width;
         }
         if text.is_empty() {
+            // This span's first character cannot fit: nothing of it
+            // renders, and the ellipsis must still mark the cut.
+            if content_follows(spans, index) {
+                land_marker(&mut out, width);
+            }
             break;
         }
-        let mut truncated = false;
         if consumed < str_width(&span.content) {
-            // The span could not fit whole: the ellipsis replaces the first
-            // character that would not fit, and nothing after it renders.
+            // The span could not fit whole: the ellipsis borrows its
+            // column from the span's last kept character — a span that
+            // fills the edge exactly gives one character back (and at a
+            // one-column remainder the ellipsis renders alone), so the
+            // row always ends INSIDE the width.
+            let ellipsis = crate::width::char_width('\u{2026}');
+            while consumed + ellipsis > remaining {
+                match text.pop() {
+                    Some(dropped) => consumed -= crate::width::char_width(dropped),
+                    None => break,
+                }
+            }
             text.push('\u{2026}');
-            truncated = true;
+            let mut piece = span.clone();
+            piece.content = text;
+            out.push(piece);
+            break;
         }
         let mut piece = span.clone();
         piece.content = text;
         out.push(piece);
         remaining -= consumed;
-        if truncated {
-            break;
-        }
     }
     out
 }
 
+/// Whether any span from `index` (inclusive) still carries content — a
+/// cut there must leave a marker.
+fn content_follows(spans: &[crate::Span], index: usize) -> bool {
+    spans[index..].iter().any(|span| !span.content.is_empty())
+}
+
+/// Land the truncation marker on a row that filled the frame on a span
+/// boundary: the ellipsis borrows a column from the last kept character
+/// (however wide it was), and a row too narrow for any content keeps
+/// the marker alone when it fits at all.
+fn land_marker(out: &mut Vec<crate::Span>, width: usize) {
+    let ellipsis = crate::width::char_width('\u{2026}');
+    let row_width = |out: &Vec<crate::Span>| {
+        out.iter()
+            .map(|piece| crate::width::str_width(&piece.content))
+            .sum::<usize>()
+    };
+    while row_width(out) + ellipsis > width {
+        match out.last_mut() {
+            Some(piece) => {
+                if piece.content.pop().is_none() {
+                    out.pop();
+                }
+            }
+            None => break,
+        }
+    }
+    match out.last_mut() {
+        Some(piece) => piece.content.push('\u{2026}'),
+        None => {
+            if ellipsis <= width {
+                out.push(crate::Span::raw("\u{2026}"));
+            }
+        }
+    }
+}
+
 /// The framed activity dock: a muted separator rule above one row of
-/// three actionable groups and the active goal's token progress. The TS
-/// summary line wraps its content in an accent-colored box
-/// (`╭─ subagents ─╮`); the inline design language keeps the separation
-/// with the same muted `─` rule that frames the pickers' search fields,
-/// not an accent box.
+/// the actionable groups. The TS summary line wraps its content in an
+/// accent-colored box (`╭─ subagents ─╮`); the inline design language
+/// keeps the separation with the same muted `─` rule that frames the
+/// pickers' search fields, not an accent box.
 ///
-/// The subagents segment is the live running count, as `x subagents`;
-/// no category breakdown rides the prompt bar. Heartbeats trail
-/// `M paused` (the tray carries no heartbeat label; the dock owns the
-/// count).
+/// The row color-codes live activity (the operator's 2026-09-24
+/// directive): the subagents' running count rides a green `● x running`
+/// cluster, and every count-holding segment goes green while its count
+/// is above zero (heartbeats, shells, the active goal) and stays neutral
+/// at zero. The subagents segment renders the label only — the live
+/// running count moved into the green cluster, `#2705` semantics.
 pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) -> Option<Vec<Line>> {
     if !dock.visible() || width == 0 {
         return None;
@@ -549,17 +605,31 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
     };
     // The live-only number: the count of actively-running subagents
     // right now. Idle and finished descendants stay out of the
-    // indicator; they render in the scoped agents view.
-    let subagents = vec![theme.fg_span(
-        ThemeColor::Muted,
-        format!(
-            "◆ {} subagent{}",
-            dock.subagents_running,
-            if dock.subagents_running == 1 { "" } else { "s" }
-        ),
-    )];
+    // indicator; they render in the scoped agents view. The count
+    // renders in green beside the label (the operator's
+    // `◆ subagents [green:● x running]` sketch).
+    let subagents = {
+        let (dot, color) = if dock.subagents_running > 0 {
+            ("\u{25cf}", ThemeColor::Success)
+        } else {
+            ("\u{25cb}", ThemeColor::Dim)
+        };
+        let mut spans = vec![theme.fg_span(ThemeColor::Muted, "◆ subagents".to_string())];
+        spans.extend(cluster(
+            &format!("{dot} {} running", dock.subagents_running),
+            color,
+        ));
+        spans
+    };
+    let running_color = |count: usize| {
+        if count > 0 {
+            ThemeColor::Success
+        } else {
+            ThemeColor::Muted
+        }
+    };
     let mut heartbeats = vec![theme.fg_span(
-        ThemeColor::Muted,
+        running_color(dock.heartbeats),
         format!(
             "◷ {} heartbeat{}",
             dock.heartbeats,
@@ -572,9 +642,7 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
             ThemeColor::Warning,
         ));
     }
-    // Only live bash runs count in the dock's indicator (operator
-    // scoping); the bash view keeps the finished rows.
-    let groups = [
+    let mut groups = vec![
         (ActivityGroup::Subagents, subagents),
         (ActivityGroup::Heartbeats, heartbeats),
         // Only live bash runs count in the dock's indicator (operator
@@ -584,7 +652,7 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
         (
             ActivityGroup::Bash,
             vec![theme.fg_span(
-                ThemeColor::Muted,
+                running_color(dock.bash_running),
                 format!(
                     "▸ {} shell{}",
                     dock.bash_running,
@@ -593,6 +661,22 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
             )],
         ),
     ];
+    if let Some(goal) = &dock.goal_label {
+        // The goal row carries the dock's activity convention: an
+        // actively pursued goal reads green, and the paused and
+        // budget-limited states read amber (the paused heartbeat
+        // cluster's own warning color) — the dock is the goal's one
+        // chrome surface, so every live state stays visible.
+        let goal_color = if goal.starts_with("Pursuing goal") {
+            ThemeColor::Success
+        } else {
+            ThemeColor::Warning
+        };
+        groups.push((
+            ActivityGroup::Goal,
+            vec![theme.fg_span(goal_color, goal.clone())],
+        ));
+    }
     let mut line = vec![Span::raw(" ")];
     for (index, (group, spans)) in groups.iter().enumerate() {
         if index > 0 {
@@ -613,18 +697,6 @@ pub fn render_activity_dock(dock: &ActivityDock, theme: &Theme, width: usize) ->
                 line.push(span.clone());
             }
         }
-    }
-    if let Some((used, budget)) = &dock.goal_tokens {
-        line.push(theme.fg_span(ThemeColor::Dim, "  ·  "));
-        let goal = match budget {
-            Some(budget) => format!(
-                "goal {}/{}",
-                format_token_count(*used),
-                format_token_count(*budget)
-            ),
-            None => format!("goal {}", format_token_count(*used)),
-        };
-        line.push(theme.fg_span(ThemeColor::Dim, goal));
     }
     let frame = vec![
         vec![theme.fg_span(ThemeColor::BorderMuted, "─".repeat(width))],
@@ -658,10 +730,10 @@ mod tests {
             heartbeats_paused: 1,
             bash_running: 1,
             bash_total: 2,
-            goal_tokens: Some((18_000, Some(40_000))),
+            goal_label: Some("Pursuing goal (0s)".to_string()),
             ..ActivityDock::default()
         };
-        // The heartbeat cluster and the goal readout widen the row: the
+        // The heartbeat cluster and the goal label widen the row: the
         // fixture renders at 120 so the full line stays untruncated.
         let frame = render_activity_dock(&dock, &theme, 120).unwrap();
         assert_eq!(frame.len(), 2, "a muted separator rule plus the row");
@@ -677,10 +749,49 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             text,
-            " ◆ 2 subagents  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  goal 18k/40k"
+            " ◆ subagents · ● 2 running  ·  ◷ 3 heartbeats · ◐ 1 paused  ·  ▸ 1 shell  ·  Pursuing goal (0s)"
+        );
+        // The color-coding (the operator's 2026-09-24 directive): the
+        // running-count cluster, every above-zero count segment, and the
+        // active goal render green.
+        let success = theme.fg_style(ThemeColor::Success).fg;
+        let muted = theme.fg_style(ThemeColor::Muted).fg;
+        let colored = |text: &str, color| {
+            frame[1]
+                .iter()
+                .any(|span| span.content.contains(text) && span.style.fg == color)
+        };
+        assert!(colored("● 2 running", success));
+        assert!(colored("◷ 3 heartbeats", success));
+        assert!(colored("▸ 1 shell", success));
+        assert!(colored("Pursuing goal", success));
+        assert!(colored("◆ subagents", muted));
+        // A paused goal stays on the dock (the tray cluster is gone) in
+        // the warning color — every live goal state keeps a surface.
+        let dock = ActivityDock {
+            subagents_total: 1,
+            goal_label: Some("Goal paused (0s)".to_string()),
+            ..ActivityDock::default()
+        };
+        let frame = render_activity_dock(&dock, &theme, 100).unwrap();
+        let text = frame[1]
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        let warning = theme.fg_style(ThemeColor::Warning).fg;
+        assert!(
+            text.contains("Goal paused (0s)"),
+            "the paused row renders: {text}"
+        );
+        assert!(
+            frame[1]
+                .iter()
+                .any(|span| span.content.contains("Goal paused") && span.style.fg == warning),
+            "the paused goal reads amber"
         );
         // A running count of zero still renders: a long idle roster must
-        // read as quiet, not as uniformly busy.
+        // read as quiet, not as uniformly busy — and the count segments
+        // go neutral at zero.
         let dock = ActivityDock {
             subagents_total: 2,
             heartbeats: 1,
@@ -692,7 +803,10 @@ mod tests {
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
-        assert_eq!(text, " ◆ 0 subagents  ·  ◷ 1 heartbeat  ·  ▸ 0 shells");
+        assert_eq!(
+            text,
+            " ◆ subagents · ○ 0 running  ·  ◷ 1 heartbeat  ·  ▸ 0 shells"
+        );
         // A dead-only roster keeps the dock mounted and its Subagents
         // group selectable (finished subagents are browsable history):
         // the rendered count stays running-only and reads zero.
@@ -707,8 +821,12 @@ mod tests {
             .collect::<String>();
         assert_eq!(
             text,
-            " \u{25c6} 0 subagents  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells"
+            " \u{25c6} subagents \u{b7} \u{25cb} 0 running  \u{b7}  \u{25f7} 0 heartbeats  \u{b7}  \u{25b8} 0 shells"
         );
+        // The zero segments stay neutral, never green.
+        assert!(frame[1]
+            .iter()
+            .all(|span| span.style.fg != theme.fg_style(ThemeColor::Success).fg));
         // Finished-only bash rows keep the dock mounted (the bash view's
         // history stays reachable) while the indicator reads zero live
         // runs.
@@ -723,11 +841,52 @@ mod tests {
             .collect::<String>();
         assert!(text.contains("▸ 0 shells"));
         assert!(render_activity_dock(&ActivityDock::default(), &theme, 100).is_none());
+        // An overflowing row (every group plus the goal) truncates INSIDE
+        // the width: the ellipsis reserves its own column, so the row
+        // never renders past the terminal frame (the bot-round fix).
+        let dock = ActivityDock {
+            subagents_running: 3,
+            heartbeats: 4,
+            heartbeats_paused: 2,
+            bash_running: 2,
+            goal_label: Some("Pursuing goal (12m 05s)".to_string()),
+            ..ActivityDock::default()
+        };
+        for width in 20..=45 {
+            let frame = render_activity_dock(&dock, &theme, width).unwrap();
+            let row = &frame[1];
+            let used = crate::width::spans_width(row);
+            assert!(
+                used <= width,
+                "the truncated row stays inside {width}: {used}"
+            );
+            let text = row
+                .iter()
+                .map(|span| span.content.as_str())
+                .collect::<String>();
+            assert!(
+                text.ends_with('\u{2026}'),
+                "the truncation carries the ellipsis: {text:?}"
+            );
+        }
+        // A row that fits whole keeps every character — the ellipsis
+        // column is only borrowed when truncation actually happens.
+        let frame = render_activity_dock(&dock, &theme, 120).unwrap();
+        let text = frame[1]
+            .iter()
+            .map(|span| span.content.as_str())
+            .collect::<String>();
+        assert!(
+            !text.contains('\u{2026}'),
+            "the untruncated row keeps its characters: {text:?}"
+        );
+        assert!(text.contains("Pursuing goal (12m 05s)"));
     }
 
-    /// The prompt bar's subagent segment is the running count only:
-    /// the readout renders exactly `x subagents` with `x` the live
-    /// running count, and no category breakdown rides the row.
+    /// The dock's subagents segment is the label plus the live running
+    /// count (the operator's `◆ subagents [green:● x running]` sketch):
+    /// the count is the running count, never the descendant total, and
+    /// no category breakdown rides the row.
     #[test]
     fn prompt_bar_subagent_segment_is_the_running_count_only() {
         let theme = Theme::builtin("prime", ColorMode::TrueColor);
@@ -744,16 +903,13 @@ mod tests {
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
-        assert_eq!(text, " ◆ 2 subagents  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
-        assert!(!text.contains("running"), "no category breakdown: {text}");
-        assert!(!text.contains("idle"), "no category breakdown: {text}");
-        assert!(
-            !text.contains("●"),
-            "no status dot rides the segment: {text}"
+        assert_eq!(
+            text,
+            " ◆ subagents · ● 2 running  ·  ◷ 0 heartbeats  ·  ▸ 0 shells"
         );
-        // A single running descendant renders the singular form (the
-        // running row is one of the subtree's descendants, so the total
-        // mounts the dock).
+        assert!(!text.contains("idle"), "no category breakdown: {text}");
+        assert!(!text.contains("7"), "the total never renders: {text}");
+        // A single running descendant keeps the same cluster shape.
         let dock = ActivityDock {
             subagents_running: 1,
             subagents_total: 1,
@@ -764,7 +920,10 @@ mod tests {
             .iter()
             .map(|span| span.content.as_str())
             .collect::<String>();
-        assert_eq!(text, " ◆ 1 subagent  ·  ◷ 0 heartbeats  ·  ▸ 0 shells");
+        assert_eq!(
+            text,
+            " ◆ subagents · ● 1 running  ·  ◷ 0 heartbeats  ·  ▸ 0 shells"
+        );
     }
 
     /// The `/speed` footer row (TS `FooterComponent::render`): one dim row
@@ -882,29 +1041,11 @@ mod tests {
         }
     }
 
-    /// The tray's goal label joins the context label first (TS
-    /// `getTrayContextLabel`: `[goalLabel, ..., modelContextLabel]`).
-    #[test]
-    fn tray_goal_label_joins_the_context_label() {
-        let state = ChromeState {
-            show_manage: true,
-            model_id: Some("mock-1".to_string()),
-            context: Some(ContextUsage {
-                tokens: 190,
-                context_window: 128_000,
-            }),
-            goal_label: Some("Pursuing goal (0s)".to_string()),
-            ..Default::default()
-        };
-        let line = render_tray(&state, &theme(), 120);
-        let text = line.iter().map(|s| s.content.as_str()).collect::<String>();
-        assert!(text.contains("Pursuing goal (0s) \u{b7} mock-1 \u{b7} 190 (0%)"));
-        assert_eq!(str_width(&text), 120);
-    }
-
-    /// The tray carries no heartbeat label (TS `getTrayHeartbeatLabel` is
-    /// not ported): the activity dock below owns the counts, so the tray
-    /// joins goal straight to model.
+    /// The tray (the line below the prompt bar) never carries the goal
+    /// label (the operator's 2026-09-24 directive: "pursuing goal should
+    /// not show up in the line below prompt bar") — the goal lives in
+    /// the activity dock below, and the tray joins model straight to
+    /// context.
     #[test]
     fn tray_never_repeats_the_heartbeat_counts() {
         let state = ChromeState {
@@ -914,12 +1055,13 @@ mod tests {
                 tokens: 190,
                 context_window: 128_000,
             }),
-            goal_label: Some("Pursuing goal (0s)".to_string()),
             ..Default::default()
         };
         let line = render_tray(&state, &theme(), 120);
         let text = line.iter().map(|s| s.content.as_str()).collect::<String>();
-        assert!(text.contains("Pursuing goal (0s) \u{b7} mock-1 \u{b7} 190 (0%)"));
+        assert!(text.contains("mock-1 \u{b7} 190 (0%)"));
+        assert!(!text.contains("Pursuing goal"));
+        assert!(!text.contains("goal"));
         assert!(!text.contains("heartbeat"));
         assert!(!text.contains("Ctrl+R"));
         assert_eq!(str_width(&text), 120);
