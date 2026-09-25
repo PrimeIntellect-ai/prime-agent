@@ -60,8 +60,7 @@ fn pattern_matches_selector(pattern: &str, selector: &str) -> bool {
     let selector = selector.to_lowercase();
     let bare_id = selector
         .split_once('/')
-        .map(|(_, id)| id)
-        .unwrap_or(selector.as_str());
+        .map_or(selector.as_str(), |(_, id)| id);
     if !pattern.contains(['*', '?', '[']) {
         return pattern == selector || pattern == bare_id;
     }

@@ -271,7 +271,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -422,7 +422,7 @@ fn worker_issues_the_post_turn_status_line_request() {
         let mut line = String::new();
         match client.reader.read_line(&mut line) {
             Ok(0) => panic!("supervisor closed"),
-            Ok(_) if line.trim().is_empty() => continue,
+            Ok(_) if line.trim().is_empty() => {}
             Ok(_) => {
                 let event: Value = serde_json::from_str(line.trim()).expect("parse event");
                 if event["type"] == "session_status"
@@ -432,7 +432,7 @@ fn worker_issues_the_post_turn_status_line_request() {
                     recap_seen = true;
                 }
             }
-            Err(_) => continue,
+            Err(_) => {}
         }
     }
     assert!(recap_seen, "session_status with the recap never broadcast");

@@ -91,13 +91,12 @@ pub fn estimate_tokens(message: &AgentMessage) -> u64 {
                 match block {
                     pa_types::ai::AssistantContentBlock::Text(text) => total += chars(&text.text),
                     pa_types::ai::AssistantContentBlock::Thinking(thinking) => {
-                        total += chars(&thinking.thinking)
+                        total += chars(&thinking.thinking);
                     }
                     pa_types::ai::AssistantContentBlock::ToolCall(call) => {
                         total += chars(&call.name)
                             + serde_json::to_string(&call.arguments)
-                                .map(|json| json.chars().count() as u64)
-                                .unwrap_or(0);
+                                .map_or(0, |json| json.chars().count() as u64);
                     }
                 }
             }
@@ -271,34 +270,32 @@ pub fn threshold_compaction_due(
         _ => None,
     });
     let estimate = estimate_context_tokens(messages);
-    let context_tokens = match estimate.last_usage_index {
-        Some(index) => {
-            // The usage anchor must postdate the latest compaction.
-            if compaction_timestamp
-                .is_some_and(|timestamp| message_timestamp(&messages[index]) <= timestamp)
-            {
-                return false;
-            }
-            estimate.tokens
+    let context_tokens = if let Some(index) = estimate.last_usage_index {
+        // The usage anchor must postdate the latest compaction.
+        if compaction_timestamp
+            .is_some_and(|timestamp| message_timestamp(&messages[index]) <= timestamp)
+        {
+            return false;
         }
-        // TS fallback: no valid usage in the context — the last assistant
-        // message's raw usage decides; error turns never trigger.
-        None => {
-            let Some(AgentMessage::Assistant(assistant)) = messages
-                .iter()
-                .rev()
-                .find(|message| matches!(message, AgentMessage::Assistant(_)))
-            else {
-                return false;
-            };
-            if assistant.stop_reason == pa_types::ai::StopReason::Error {
-                return false;
-            }
-            if compaction_timestamp.is_some_and(|timestamp| assistant.timestamp <= timestamp) {
-                return false;
-            }
-            calculate_context_tokens(&assistant.usage)
+        estimate.tokens
+    }
+    // TS fallback: no valid usage in the context — the last assistant
+    // message's raw usage decides; error turns never trigger.
+    else {
+        let Some(AgentMessage::Assistant(assistant)) = messages
+            .iter()
+            .rev()
+            .find(|message| matches!(message, AgentMessage::Assistant(_)))
+        else {
+            return false;
+        };
+        if assistant.stop_reason == pa_types::ai::StopReason::Error {
+            return false;
         }
+        if compaction_timestamp.is_some_and(|timestamp| assistant.timestamp <= timestamp) {
+            return false;
+        }
+        calculate_context_tokens(&assistant.usage)
     };
     should_compact(context_tokens, context_window, max_output_tokens, settings)
 }
@@ -346,8 +343,9 @@ fn find_turn_start_index(
     for i in (start_index..=entry_index).rev() {
         let entry = &entries[i];
         match entry {
-            FileEntry::BranchSummary { .. } | FileEntry::CustomMessage { .. } => return Some(i),
-            FileEntry::Message {
+            FileEntry::BranchSummary { .. }
+            | FileEntry::CustomMessage { .. }
+            | FileEntry::Message {
                 message: AgentMessage::User(_) | AgentMessage::BashExecution(_),
                 ..
             } => return Some(i),

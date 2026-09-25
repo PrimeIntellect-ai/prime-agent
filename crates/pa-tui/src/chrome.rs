@@ -181,10 +181,10 @@ pub fn format_token_count(count: u64) -> String {
 /// The top-bar chat name for an unnamed session: the cwd basename
 /// (TS `path.basename(getCurrentCwd())`).
 pub fn display_name(cwd: &str) -> String {
-    std::path::Path::new(cwd)
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .unwrap_or_else(|| cwd.to_string())
+    std::path::Path::new(cwd).file_name().map_or_else(
+        || cwd.to_string(),
+        |name| name.to_string_lossy().to_string(),
+    )
 }
 
 /// The `~`-compressed cwd for the splash line (TS `formatSplashCwd`).

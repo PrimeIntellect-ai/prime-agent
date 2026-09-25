@@ -374,9 +374,7 @@ impl WorkerRecoveryJournal {
     /// prompt/queue lane. An unreadable journal proves nothing —
     /// uncertainty must not revive a session.
     pub fn read_interrupted(path: &Path) -> bool {
-        Self::read_latest(path)
-            .map(|records| records.iter().any(|record| record.busy))
-            .unwrap_or(false)
+        Self::read_latest(path).is_ok_and(|records| records.iter().any(|record| record.busy))
     }
 
     /// The newest `busy` record's `recorded_at`, when the journal proves

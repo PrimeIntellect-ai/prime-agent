@@ -67,20 +67,23 @@ impl AgentView {
     /// settled agent message per streaming delta, the dogfood CPU spin.
     pub(super) fn entry_cacheable(&self, entry: &ChatEntry) -> bool {
         match entry {
-            ChatEntry::Status { .. } | ChatEntry::User { .. } => true,
-            ChatEntry::SlashCommand { .. } | ChatEntry::SlashCommandResult { .. } => true,
-            ChatEntry::CompactionSummary { .. } => true,
-            ChatEntry::SkillInvocation(_) => true,
+            ChatEntry::Status { .. }
+            | ChatEntry::User { .. }
+            | ChatEntry::SlashCommand { .. }
+            | ChatEntry::CompactionSummary { .. }
+            | ChatEntry::SkillInvocation(_)
             // Spacing-driven rows (agent messages, shell completions, tool
             // cards) lean on the conversation-spacing scan over PRECEDING
             // entries; the scan result is stored with the cached rows, and
             // a preceding entry's mutation propagates through
             // `mark_entry_stale`, so the look-back stays correct without a
             // per-frame re-render.
-            ChatEntry::AgentMessage(_) | ChatEntry::ShellCompletion(_) => true,
-            ChatEntry::InjectedPrompt(_) | ChatEntry::RefinementOutcome(_) => true,
-            ChatEntry::CustomPanel(_) => true,
-            ChatEntry::ClientMarkdown { .. }
+            | ChatEntry::AgentMessage(_)
+            | ChatEntry::ShellCompletion(_)
+            | ChatEntry::InjectedPrompt(_)
+            | ChatEntry::RefinementOutcome(_)
+            | ChatEntry::CustomPanel(_)
+            | ChatEntry::ClientMarkdown { .. }
             | ChatEntry::ClientText { .. }
             | ChatEntry::ChangelogPanel { .. } => true,
             ChatEntry::Assistant(message) => !message.streaming,
@@ -139,7 +142,6 @@ impl AgentView {
             ChatEntry::BashExecution(card) => !card.suppress_leading_space,
             ChatEntry::Assistant(_) => preceded_by_tool_activity,
             ChatEntry::Status { .. }
-            | ChatEntry::SlashCommandResult { .. }
             | ChatEntry::InjectedPrompt(_)
             | ChatEntry::RefinementOutcome(_)
             | ChatEntry::CustomPanel(_)
@@ -278,8 +280,10 @@ impl AgentView {
                 .editor
                 .keybindings()
                 .first_key("app.clear")
-                .map(|key| crate::keybindings::format_key_text(&key))
-                .unwrap_or_else(|| "Ctrl+C".to_string());
+                .map_or_else(
+                    || "Ctrl+C".to_string(),
+                    |key| crate::keybindings::format_key_text(&key),
+                );
             tail.extend(crate::compaction_row::render_compaction_loader(
                 compaction,
                 self.pulse_frame,

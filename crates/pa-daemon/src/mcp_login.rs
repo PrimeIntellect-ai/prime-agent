@@ -217,6 +217,7 @@ mod tests {
     /// callback listener catches the simulated redirect).
     #[tokio::test]
     async fn worker_begin_login_persists_creds_and_unlocks_gating() -> Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let agent = tempfile::tempdir()?;
         let url_file = agent.path().join("auth-url.txt");
         let http = Arc::new(ScriptedHttp::fixture());
@@ -322,7 +323,6 @@ mod tests {
                 .to_string(),
         )
         .await?;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         stream
             .write_all(
                 format!("GET /callback?code=fixture-code&state={state} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")

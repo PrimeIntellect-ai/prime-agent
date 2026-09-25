@@ -45,7 +45,10 @@ impl SearchInput {
         self.cursor
     }
 
-    /// TS `setValue`: the cursor never moves past the new value.
+    /// TS `setValue`: the cursor never moves past the new value (the
+    /// caret-clamp behavior is pinned by
+    /// `set_value_keeps_the_cursor_inside_the_value`).
+    #[cfg(test)]
     pub(crate) fn set_value(&mut self, value: &str) {
         self.value = value.to_string();
         self.cursor = self.cursor.min(self.value.chars().count());
@@ -317,10 +320,10 @@ impl SearchInput {
     /// grapheme that ends at the cursor and a mid-cluster cursor
     /// classifies the partial cluster the same way TS does.
     fn move_word_backward(&mut self) {
+        use unicode_segmentation::UnicodeSegmentation;
         if self.cursor == 0 {
             return;
         }
-        use unicode_segmentation::UnicodeSegmentation;
         let before: String = self.chars()[..self.cursor].iter().collect();
         let mut graphemes: Vec<&str> = before.graphemes(true).collect();
         while graphemes.last().is_some_and(|g| g.chars().any(is_ws)) {

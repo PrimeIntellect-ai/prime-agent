@@ -147,8 +147,7 @@ pub fn get_slash_command_context(
     let token_start = before
         .iter()
         .rposition(|c| *c == ' ' || *c == '\t')
-        .map(|index| index + 1)
-        .unwrap_or(0);
+        .map_or(0, |index| index + 1);
     let prefix: String = before[token_start..].iter().collect();
     if !prefix.starts_with('/') || prefix.chars().skip(1).any(|c| c == '/') {
         return None;
@@ -252,8 +251,7 @@ fn extract_at_prefix(text: &[char]) -> Option<String> {
     let token_start = text
         .iter()
         .rposition(|c| is_path_delimiter(*c))
-        .map(|index| index + 1)
-        .unwrap_or(0);
+        .map_or(0, |index| index + 1);
     if text.get(token_start) == Some(&'@') {
         return Some(text[token_start..].iter().collect());
     }
@@ -963,8 +961,7 @@ impl AutocompleteProvider for CombinedAutocompleteProvider {
         cursor_col: usize,
     ) -> bool {
         get_slash_command_context(lines, cursor_line, cursor_col)
-            .map(|context| context.kind != SlashKind::Name)
-            .unwrap_or(true)
+            .is_none_or(|context| context.kind != SlashKind::Name)
     }
 }
 

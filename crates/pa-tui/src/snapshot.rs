@@ -161,18 +161,17 @@ fn order_messages_for_transcript(messages: &[Value]) -> Vec<&Value> {
         .filter(|(index, _)| *index != summary_index)
         .map(|(_, message)| message)
         .collect();
-    let boundary = match summary.get("retainedMessageCount").and_then(Value::as_u64) {
-        Some(retained) => (retained as usize).min(rest.len()),
-        None => {
-            let summary_timestamp = summary.get("timestamp").and_then(Value::as_f64);
-            let retained = rest
-                .iter()
-                .filter(|message| {
-                    message.get("timestamp").and_then(Value::as_f64) < summary_timestamp
-                })
-                .count();
-            retained.min(rest.len())
-        }
+    let boundary = if let Some(retained) =
+        summary.get("retainedMessageCount").and_then(Value::as_u64)
+    {
+        (retained as usize).min(rest.len())
+    } else {
+        let summary_timestamp = summary.get("timestamp").and_then(Value::as_f64);
+        let retained = rest
+            .iter()
+            .filter(|message| message.get("timestamp").and_then(Value::as_f64) < summary_timestamp)
+            .count();
+        retained.min(rest.len())
     };
     rest.insert(boundary, summary);
     rest
@@ -560,7 +559,6 @@ pub fn event_to_update(event: &Value) -> Option<TurnUpdate> {
                 Some("custom") if event_type == Some("message_start") => {
                     custom_row_update(&message)
                 }
-                Some("custom") => Some(TurnUpdate::StatusUpdate),
                 _ => Some(TurnUpdate::StatusUpdate),
             }
         }
@@ -2015,10 +2013,35 @@ mod tests {
                 },
             },
         });
+        // The outcome row decodes as a system status row, never a user
+        // block (the operator's 2026-09-25 ruling: command output is not
+        // user text).
         assert_eq!(
             event_to_update(&result),
-            Some(TurnUpdate::CustomRow(ChatEntry::SlashCommandResult {
-                content: "Goal active: ship it".to_string()
+            Some(TurnUpdate::CustomRow(ChatEntry::Status {
+                text: "Goal active: ship it".to_string(),
+                kind: StatusKind::Info
+            }))
+        );
+        // A failed command's outcome row carries the error tone.
+        let failed = json!({
+            "type": "message_start",
+            "message": {
+                "role": "custom",
+                "customType": "session_slash_command_result",
+                "content": "Command failed: boom",
+                "display": true,
+                "details": {
+                    "command": { "name": "goal", "args": "clear", "text": "/goal clear" },
+                    "success": false, "severity": "error",
+                },
+            },
+        });
+        assert_eq!(
+            event_to_update(&failed),
+            Some(TurnUpdate::CustomRow(ChatEntry::Status {
+                text: "Command failed: boom".to_string(),
+                kind: StatusKind::Error
             }))
         );
     }
@@ -2033,6 +2056,26 @@ mod tests {
             "display": false,
         });
         assert!(custom_message_entries(&hidden).is_empty());
+        // A displayed outcome row renders in the status-row class with
+        // the severity's tone (the operator's 2026-09-25 ruling: command
+        // output is system output, never user text).
+        let outcome = json!({
+            "role": "custom",
+            "customType": "session_slash_command_result",
+            "content": "Goal cleared.",
+            "display": true,
+            "details": {
+                "command": { "name": "goal", "args": "clear", "text": "/goal clear" },
+                "success": true, "severity": "info",
+            },
+        });
+        assert_eq!(
+            custom_message_entries(&outcome),
+            vec![ChatEntry::Status {
+                text: "Goal cleared.".to_string(),
+                kind: StatusKind::Info,
+            }]
+        );
         // Unknown displayed custom types render the generic box (the TS
         // live dispatch fallthrough; harness digests persist with
         // display=false and render nothing).

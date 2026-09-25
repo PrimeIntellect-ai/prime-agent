@@ -394,10 +394,9 @@ pub fn apply_refinement_proposal(
             source: "refine".to_string(),
             created_at: before
                 .as_ref()
-                .map(|entry| entry.created_at.clone())
-                .unwrap_or_else(now_iso),
+                .map_or_else(now_iso, |entry| entry.created_at.clone()),
             updated_at: now_iso(),
-            version: before.as_ref().map(|entry| entry.version + 1).unwrap_or(1),
+            version: before.as_ref().map_or(1, |entry| entry.version + 1),
         };
         records.insert(id.clone(), after.clone());
         proposal_modified_keys.insert(entry_key);

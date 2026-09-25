@@ -473,30 +473,27 @@ impl ModelRegistry {
             PRIVATE_MODEL_TIMEOUT_MS,
         )
         .await;
-        match fetched {
-            Ok(models) => {
-                self.authorized_private_ids = models.iter().map(|model| model.id.clone()).collect();
-                self.authorized_private_models.clone_from(&models);
-                self.authorized_team_id = Some(team_id);
-                self.load_models();
-                if let Some(cache_path) = self.models_json_path.clone() {
-                    write_private_prime_authorization_cache(
-                        &cache_path,
-                        &PrivatePrimeAuthorizationCache {
-                            fingerprint,
-                            models,
-                            refreshed_at: now_millis(),
-                        },
-                    );
-                }
+        if let Ok(models) = fetched {
+            self.authorized_private_ids = models.iter().map(|model| model.id.clone()).collect();
+            self.authorized_private_models.clone_from(&models);
+            self.authorized_team_id = Some(team_id);
+            self.load_models();
+            if let Some(cache_path) = self.models_json_path.clone() {
+                write_private_prime_authorization_cache(
+                    &cache_path,
+                    &PrivatePrimeAuthorizationCache {
+                        fingerprint,
+                        models,
+                        refreshed_at: now_millis(),
+                    },
+                );
             }
-            Err(_) => {
-                // Fetch failed: keep previous state for the same team.
-                self.authorized_private_ids = previous_ids;
-                self.authorized_private_models = previous_models;
-                self.authorized_team_id = previous_team;
-                self.load_models();
-            }
+        } else {
+            // Fetch failed: keep previous state for the same team.
+            self.authorized_private_ids = previous_ids;
+            self.authorized_private_models = previous_models;
+            self.authorized_team_id = previous_team;
+            self.load_models();
         }
     }
 
@@ -654,8 +651,7 @@ impl ModelRegistry {
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 #[cfg(test)]

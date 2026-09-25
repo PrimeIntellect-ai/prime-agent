@@ -827,12 +827,14 @@ pub(crate) mod tests {
         loop {
             match events.try_recv() {
                 Ok((ClientRouting::RosterSubscribers, payload)) => pushes.push(payload),
-                Ok(_) => continue,
-                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
+                Ok(_) => {}
+                Err(
+                    tokio::sync::broadcast::error::TryRecvError::Empty
+                    | tokio::sync::broadcast::error::TryRecvError::Closed,
+                ) => break,
                 Err(tokio::sync::broadcast::error::TryRecvError::Lagged(missed)) => {
                     panic!("roster push subscriber lagged by {missed}; drain per push");
                 }
-                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
             }
         }
         pushes

@@ -155,7 +155,7 @@ emitted and flushed before the TUI starts.
 | property | type | notes |
 |---|---|---|
 | `duration_ms` | number | onboarding-task creation → completion |
-| `outcome` | string | `success` (fresh homes complete the flow silently — trace sharing ships pre-configured; the retained opt-out question has no error/abort path yet) |
+| `outcome` | string | `success` (a fresh home answers the question and a standing-choice home completes silently — no error/abort path in either yet) |
 | `auth_category` | string | `none` (no auth step in the flow) |
 | `provider_category` | string | `unknown` |
 

@@ -304,23 +304,20 @@ impl Editor {
         while let Some(idx) = rest.find("[paste #") {
             result.push_str(&rest[..idx]);
             let candidate = &rest[idx..];
-            match parse_paste_marker(candidate) {
-                Some((id, len)) => {
-                    if let Some(content) = self.pastes.get(&id) {
-                        result.push_str(content);
-                    } else {
-                        // Well-formed but unregistered: keep it literal.
-                        result.push_str(&candidate[..len]);
-                    }
-                    rest = &candidate[len..];
+            if let Some((id, len)) = parse_paste_marker(candidate) {
+                if let Some(content) = self.pastes.get(&id) {
+                    result.push_str(content);
+                } else {
+                    // Well-formed but unregistered: keep it literal.
+                    result.push_str(&candidate[..len]);
                 }
+                rest = &candidate[len..];
+            } else {
                 // Malformed marker head: keep up to the next `]` (or the
                 // rest when none remains) so the scan still progresses.
-                None => {
-                    let skip = candidate.find(']').map_or(candidate.len(), |p| p + 1);
-                    result.push_str(&candidate[..skip]);
-                    rest = &candidate[skip..];
-                }
+                let skip = candidate.find(']').map_or(candidate.len(), |p| p + 1);
+                result.push_str(&candidate[..skip]);
+                rest = &candidate[skip..];
             }
         }
         result.push_str(rest);
@@ -365,8 +362,7 @@ impl Editor {
         self.lines
             .first()
             .and_then(|line| crate::bash_bang::bash_prompt_info(line))
-            .map(|(_, hidden)| hidden)
-            .unwrap_or(0)
+            .map_or(0, |(_, hidden)| hidden)
     }
 
     /// The cursor sits at the end of the last logical line (TS

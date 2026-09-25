@@ -30,7 +30,7 @@ use pa_tui::interactive::{
     run_interactive, InteractiveOptions, ModelSelection, SessionSelection, UiMode,
 };
 use pa_tui::provider_auth::{
-    AuthCategory, AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
+    AuthFlow, AuthStatusIndicator, AuthStatusStyle, AuthType, ProviderAuthCommands,
     ProviderAuthCommandsHandle, ProviderAuthOutcome, ProviderRow, ProviderRowsFuture,
     PRIME_INFERENCE_PROVIDER_ID,
 };
@@ -85,7 +85,6 @@ impl ProviderAuthCommands for ScriptedProviderAuth {
             id: PRIME_INFERENCE_PROVIDER_ID.to_string(),
             name: "Prime Inference".to_string(),
             auth_type: AuthType::ApiKey,
-            category: AuthCategory::Provider,
             status: Some(AuthStatusIndicator {
                 style: AuthStatusStyle::Success,
                 label: "configured".to_string(),

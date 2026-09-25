@@ -284,8 +284,7 @@ pub fn parse_heartbeat_command(input: &str) -> anyhow::Result<ParsedHeartbeatCom
     let text = input
         .strip_prefix("/heartbeat")
         .filter(|rest| rest.chars().next().is_none_or(char::is_whitespace))
-        .map(str::trim_start)
-        .unwrap_or_else(|| input.trim());
+        .map_or_else(|| input.trim(), str::trim_start);
     if text.is_empty() || text == "status" {
         return Ok(ParsedHeartbeatCommand::Status);
     }
@@ -513,8 +512,7 @@ fn consume_leading_every_schedule(text: &str) -> Option<(String, String)> {
                 let remainder = remainder
                     .strip_prefix("--")
                     .filter(|after| after.is_empty() || after.starts_with(char::is_whitespace))
-                    .map(str::trim)
-                    .unwrap_or(remainder)
+                    .map_or(remainder, str::trim)
                     .trim()
                     .to_string();
                 let interval = format!("{} {}", prefix.trim(), first_token);
@@ -805,10 +803,7 @@ fn parse_time_with_offset(time: &str) -> Option<(i64, i64)> {
         return None;
     }
     let hours: i64 = parts.first()?.parse().ok()?;
-    let minutes: i64 = parts
-        .get(1)
-        .map(|p| p.parse::<i64>().ok())
-        .unwrap_or(Some(0))?;
+    let minutes: i64 = parts.get(1).map_or(Some(0), |p| p.parse::<i64>().ok())?;
     let seconds_part = parts.get(2).copied().unwrap_or("0");
     let (seconds, millis) = match seconds_part.split_once('.') {
         Some((seconds, fraction)) => {
@@ -847,10 +842,7 @@ fn parse_offset(text: &str) -> Option<i64> {
     };
     let parts: Vec<&str> = rest.split(':').collect();
     let hours: i64 = parts.first()?.parse().ok()?;
-    let minutes: i64 = parts
-        .get(1)
-        .map(|p| p.parse::<i64>().ok())
-        .unwrap_or(Some(0))?;
+    let minutes: i64 = parts.get(1).map_or(Some(0), |p| p.parse::<i64>().ok())?;
     Some(sign * (hours * 60 + minutes) * 60_000)
 }
 

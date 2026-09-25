@@ -256,9 +256,7 @@ fn scan_socket_dir(_socket_dir: &Path) -> Vec<PathBuf> {
 #[cfg(unix)]
 fn is_socket_file(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
-    std::fs::symlink_metadata(path)
-        .map(|meta| meta.file_type().is_socket())
-        .unwrap_or(false)
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket())
 }
 
 /// One tracked worker from a supervisor descriptor (TS `TrackedWorker`).
@@ -282,11 +280,7 @@ pub(crate) fn find_all_tracked_workers(agent_dir: &Path) -> Vec<TrackedWorker> {
     };
     let mut workers = Vec::new();
     for directory in entries.flatten() {
-        if !directory
-            .file_type()
-            .map(|kind| kind.is_dir())
-            .unwrap_or(false)
-        {
+        if !directory.file_type().is_ok_and(|kind| kind.is_dir()) {
             continue;
         }
         let Ok(files) = std::fs::read_dir(directory.path()) else {
@@ -452,9 +446,8 @@ pub(crate) fn verify_hello_supervisor_pid(
     }
     match pa_types::platform::process::is_process_alive(pid) {
         Ok(true) => {}
-        Ok(false) => return None,
         // EPERM-equivalent: the process exists but is not ours to signal.
-        Err(_) => return None,
+        Ok(false) | Err(_) => return None,
     }
     if let Some(expected) = expected_process_start_id {
         if pa_types::platform::process::process_start_id(pid).as_deref() != Some(expected) {

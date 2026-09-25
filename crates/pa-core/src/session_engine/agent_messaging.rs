@@ -1176,22 +1176,6 @@ mod tests {
                 anyhow::bail!("no route")
             }
         }
-        let mut handlers = HostRequestHandlers::default();
-        register_agent_message_host_handlers(
-            std::sync::Arc::new(NoFamilyController),
-            &mut handlers,
-        );
-        let send = handlers.get("agent_message.send").unwrap().clone();
-        let broadcast = send_request(&send, json!({ "target": "all", "message": "hi" })).unwrap();
-        assert_eq!(broadcast["receipts"].as_array().map(Vec::len), Some(0));
-
-        // A role send against an empty family: no parent matches.
-        let no_parent =
-            send_request(&send, json!({ "message": "hi", "receiver_role": "parent" })).unwrap_err();
-        assert_eq!(no_parent.to_string(), "No parent matches the current agent");
-
-        // One-member family with a failing send: the receipt records the
-        // error instead of aborting the broadcast.
         struct LoneFamilyController;
         impl AgentMessageController for LoneFamilyController {
             async fn family(&self) -> anyhow::Result<Vec<AgentFamilyMember>> {
@@ -1209,6 +1193,22 @@ mod tests {
                 anyhow::bail!("peer unreachable")
             }
         }
+        let mut handlers = HostRequestHandlers::default();
+        register_agent_message_host_handlers(
+            std::sync::Arc::new(NoFamilyController),
+            &mut handlers,
+        );
+        let send = handlers.get("agent_message.send").unwrap().clone();
+        let broadcast = send_request(&send, json!({ "target": "all", "message": "hi" })).unwrap();
+        assert_eq!(broadcast["receipts"].as_array().map(Vec::len), Some(0));
+
+        // A role send against an empty family: no parent matches.
+        let no_parent =
+            send_request(&send, json!({ "message": "hi", "receiver_role": "parent" })).unwrap_err();
+        assert_eq!(no_parent.to_string(), "No parent matches the current agent");
+
+        // One-member family with a failing send: the receipt records the
+        // error instead of aborting the broadcast.
         let mut handlers = HostRequestHandlers::default();
         register_agent_message_host_handlers(
             std::sync::Arc::new(LoneFamilyController),

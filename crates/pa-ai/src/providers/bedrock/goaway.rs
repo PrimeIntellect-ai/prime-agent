@@ -104,8 +104,7 @@ impl GoAwayObserver {
     fn last_goaway_code(&self) -> Option<u32> {
         self.inner
             .lock()
-            .map(|tracker| tracker.last_goaway_code)
-            .unwrap_or(None)
+            .map_or(None, |tracker| tracker.last_goaway_code)
     }
 
     /// The mid-body failure detail behind an `h2` error, preferring a

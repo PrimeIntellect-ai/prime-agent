@@ -74,52 +74,46 @@ impl Worker {
     /// session's artifact tree (TS live runs + resident children +
     /// `loadContextTreeChildrenFromDisk`): idle, settled, and
     /// restart-orphaned subagents all appear, with their real usage and
-    /// recursive grandchildren. A live child's node is read from its
-    /// session file (the TS disk-fallback shape; the id, label, and status
+    /// recursive grandchildren. A live child's node carries its session
+    /// file's usage (the TS disk-fallback shape; the id, label, and status
     /// come from the live registry, the fresher sources for a running
     /// child), and ids tombstoned in the RLM ledger stay hidden at every
     /// depth of the walk. The disk walk and registry reads are blocking
-    /// I/O: they run on the blocking pool, never the runtime worker.
+    /// I/O owned by the background cache refresh
+    /// (`context_tree_cache`): they run on the blocking pool, never the
+    /// runtime worker, and never on this request path — the response
+    /// serves the cached walk with the fresh live identity overlaid
+    /// (usage and grandchildren lag the last completed refresh; a
+    /// running child's status and identity never lag).
     pub(crate) async fn handle_get_context_tree(&self) -> DaemonResponse {
         if let Err(response) = self.require_created("get_context_tree") {
             return response;
         }
-        let (branch, all_entries, label, context_usage, session_id, session_file) = {
+        // The root node is in-memory data: the usage totals and the
+        // context estimate walk the live store under the core lock
+        // borrow-based (no owned copy of the history), so the request
+        // answers from memory in bounded time even on a grown store. The
+        // artifact-tree walk is the cache's background refresh
+        // (`context_tree_cache`), never the request path.
+        let (label, context_usage, own_usage, total_usage, session_id) = {
             let core = self.core.lock().unwrap();
             let store = core.store.as_ref();
-            // Owned copies: the branch borrows the store, which the core
-            // lock guards, so the walk below runs after the lock drops.
-            let branch = store.map(|store| {
-                store
-                    .branch_bridged()
-                    .into_iter()
-                    .cloned()
-                    .collect::<Vec<_>>()
-            });
-            let all_entries = store.map(|store| store.entries().to_vec());
             let label = store
                 .and_then(|store| store.session_name().map(str::to_string))
                 .unwrap_or_else(|| "main agent".to_string());
             let context_usage = store.and_then(|store| {
                 crate::session_stats::store_context_usage(store, self.engine.model_context_window())
             });
-            // The artifact tree is keyed by the agent dir and the durable
-            // session id (`child_session_dir`'s own addressing), not by the
-            // session file's location.
             let session_id = store.map(|store| store.session_id().to_string());
-            let session_file = store.map(|store| store.path.clone());
-            (
-                branch,
-                all_entries,
-                label,
-                context_usage,
-                session_id,
-                session_file,
-            )
-        };
-        let (own_usage, total_usage) = match (&branch, &all_entries) {
-            (Some(branch), Some(entries)) => compute_own_and_total_usage(branch, entries),
-            _ => (empty_usage(), empty_usage()),
+            let (own_usage, total_usage) = match store {
+                Some(store) => {
+                    let branch = store.branch_bridged();
+                    let all_entries = store.entries();
+                    compute_own_and_total_usage(&branch, all_entries)
+                }
+                None => (empty_usage(), empty_usage()),
+            };
+            (label, context_usage, own_usage, total_usage, session_id)
         };
         let model = self.engine.model_metadata().and_then(|model| {
             Some(json!({
@@ -128,93 +122,15 @@ impl Worker {
             }))
         });
         let snapshots = self.engine.rlm_child_snapshots().await;
-        let agent_dir = self.config.agent_dir.clone();
-        // The blocking walk: registry + ledger + artifact-tree reads.
-        let walk = tokio::task::spawn_blocking(move || {
-            let registry = worker_model_registry(&agent_dir);
-            let artifacts_root = crate::context_tree_children::session_artifacts_dir(&agent_dir);
-            // User-deleted subagents stay hidden at every depth: the
-            // ledger's tombstones key by the deleted child's parent
-            // session file, so this session's deletions resolve into the
-            // root skip set and the record hands down for each recursion
-            // level to resolve its own (the TS in-memory guard is its
-            // restart-behavior; the ledger is the durable authority
-            // here). Unreadable ledgers degrade to no filtering, never
-            // a failed tree.
-            let mut skip_ids: std::collections::HashSet<String> = snapshots
-                .iter()
-                .filter_map(|child| child.get("id").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect();
-            let mut tombstones = crate::context_tree_children::TombstonedChildren::new();
-            let sessions_dir = agent_dir.join("sessions");
-            let ledger = crate::rlm_ledger::RlmSpawnLedger::new(&agent_dir, &sessions_dir, |_| {});
-            if let Ok(edges) = ledger.edges(true) {
-                for edge in edges {
-                    if edge.deleted.is_some() {
-                        tombstones
-                            .entry(crate::lease::canonical_session_path(std::path::Path::new(
-                                &edge.parent,
-                            )))
-                            .or_default()
-                            .insert(edge.child_id.clone());
-                    }
-                }
-            }
-            if let Some(session_file) = &session_file {
-                if let Some(deleted) =
-                    tombstones.get(&crate::lease::canonical_session_path(session_file))
-                {
-                    skip_ids.extend(deleted.iter().cloned());
-                }
-            }
-            let mut children: Vec<Value> = Vec::with_capacity(snapshots.len());
-            for child in &snapshots {
-                // TS: `run.session?.getContextTree() ?? loadContextTreeChildFromDisk(...)`
-                // — the node carries the child's real usage and its
-                // recursive grandchildren; the registry supplies the
-                // fresher identity.
-                let mut node = child
-                    .get("sessionDir")
-                    .and_then(Value::as_str)
-                    .and_then(|dir| {
-                        crate::context_tree_children::load_context_tree_child(
-                            &artifacts_root,
-                            std::path::Path::new(dir),
-                            &registry,
-                            &tombstones,
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        json!({
-                            "ownUsage": empty_usage(),
-                            "totalUsage": empty_usage(),
-                            "children": [],
-                        })
-                    });
-                node["id"] = child.get("id").cloned().unwrap_or(Value::Null);
-                node["label"] = child.get("label").cloned().unwrap_or(Value::Null);
-                node["status"] = child.get("status").cloned().unwrap_or(Value::Null);
-                children.push(node);
-            }
-            if let Some(session_id) = &session_id {
-                children.extend(crate::context_tree_children::load_context_tree_children(
-                    &artifacts_root,
-                    session_id,
-                    &registry,
-                    &skip_ids,
-                    &tombstones,
-                ));
-            }
-            children
-        });
-        let children = match walk.await {
-            Ok(children) => children,
-            Err(error) => {
-                eprintln!("context tree walk failed: {error:#}");
-                Vec::new()
-            }
-        };
+        // The children come from the cache instantly (fresh live-roster
+        // identity and status over the cached bodies; the background walk
+        // in `context_tree_cache` keeps them as fresh as its last
+        // refresh) — the walk itself never blocks this response.
+        let children = self
+            .context_tree
+            .serve_children(session_id.as_deref(), &snapshots);
+        // Re-arm the background refresh for the next read.
+        self.poke_context_tree_refresh();
         let mut tree = json!({
             "id": "root",
             "label": label,
@@ -230,6 +146,30 @@ impl Worker {
             tree["contextUsage"] = usage;
         }
         response_success(None, "get_context_tree", Some(tree))
+    }
+
+    /// Arm the background context-tree walk (`context_tree_cache`) for
+    /// this session: the walk inputs resolve against the worker's current
+    /// store (the durable session id for the artifact tree, the session
+    /// file for the ledger's tombstone record), so a replaced session
+    /// never walks the previous tree. Called by the `get_context_tree`
+    /// handler (re-arm on every read older than the TTL), and as the
+    /// warm at session open (create/attach), so the cache is usually
+    /// filled before the first read.
+    pub(crate) fn poke_context_tree_refresh(&self) {
+        let (session_id, session_file) = {
+            let core = self.core.lock().unwrap();
+            core.store
+                .as_ref()
+                .map(|store| (store.session_id().to_string(), store.path.clone()))
+                .unzip()
+        };
+        self.context_tree.poke_refresh(
+            self.engine.clone(),
+            self.config.agent_dir.clone(),
+            session_id,
+            session_file,
+        );
     }
 
     /// `get_commands` (TS `createAgentConnectionCommands`): extension
@@ -451,7 +391,7 @@ fn subtract_usage(total: &mut Value, usage: &Value) {
 /// cumulative across compactions: compaction shrinks the model-facing
 /// context, not what the session spent.
 pub(crate) fn compute_own_and_total_usage(
-    branch: &[crate::session_store::SessionEntry],
+    branch: &[&crate::session_store::SessionEntry],
     all_entries: &[crate::session_store::SessionEntry],
 ) -> (Value, Value) {
     let mut total = empty_usage();
@@ -829,20 +769,30 @@ mod tests {
             .unwrap();
 
         let worker = created_worker_at(&root, &session_file).await;
-        let response = worker
-            .dispatch(
-                "get_context_tree",
-                &json!({ "activeSessionId": "getter-session" }),
-            )
-            .await;
-        assert!(response.success, "failed: {response:?}");
-        let tree = response.data.expect("data");
-        assert_eq!(
-            tree["ownUsage"]["input"],
-            json!(30),
-            "the root usage counts"
-        );
-        let children = tree["children"].as_array().expect("children");
+        // The children come from the background cache refresh (the create
+        // warm armed it): a cold read serves the root from memory
+        // instantly, and the persisted tree fills when the walk lands.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let children = loop {
+            let response = worker
+                .dispatch(
+                    "get_context_tree",
+                    &json!({ "activeSessionId": "getter-session" }),
+                )
+                .await;
+            assert!(response.success, "failed: {response:?}");
+            let tree = response.data.expect("data");
+            assert_eq!(
+                tree["ownUsage"]["input"],
+                json!(30),
+                "the root usage counts"
+            );
+            let children = tree["children"].as_array().cloned().unwrap_or_default();
+            if children.len() == 1 || std::time::Instant::now() > deadline {
+                break children;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
         assert_eq!(
             children.len(),
             1,
@@ -903,7 +853,8 @@ mod tests {
             attribution_entry.clone(),
             attribution_entry.clone(),
         ];
-        let (own, total) = compute_own_and_total_usage(&entries, &entries);
+        let branch_refs: Vec<&crate::session_store::SessionEntry> = entries.iter().collect();
+        let (own, total) = compute_own_and_total_usage(&branch_refs, &entries);
         assert_eq!(total["input"], json!(100));
         assert_eq!(total["totalTokens"], json!(110));
         assert_eq!(own["input"], json!(20), "two attributions subtract twice");
@@ -917,7 +868,9 @@ mod tests {
             attribution_entry.clone(),
             attribution_entry,
         ];
-        let (own, _) = compute_own_and_total_usage(&entries_more, &entries_more);
+        let branch_refs_more: Vec<&crate::session_store::SessionEntry> =
+            entries_more.iter().collect();
+        let (own, _) = compute_own_and_total_usage(&branch_refs_more, &entries_more);
         assert_eq!(own["input"], json!(0));
         assert_eq!(own["cost"]["total"].as_f64(), Some(0.0));
     }

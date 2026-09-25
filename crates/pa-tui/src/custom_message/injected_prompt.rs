@@ -290,7 +290,7 @@ fn expanded_prompt_body(row: &InjectedPromptRow, detail: Detail) -> Option<&str>
 /// expression as `every <expression>` (a leading case-insensitive `every`
 /// plus whitespace stripped from the stored expression first).
 fn heartbeat_schedule(schedule: &Option<String>) -> String {
-    let trimmed = schedule.as_deref().map(str::trim).unwrap_or("");
+    let trimmed = schedule.as_deref().map_or("", str::trim);
     let compact = if trimmed.is_empty() {
         "prompt"
     } else if trimmed.get(..5).is_some_and(|prefix| {

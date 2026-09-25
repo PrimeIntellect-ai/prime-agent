@@ -63,7 +63,7 @@ pub(crate) async fn stream_assistant_response(
     match result {
         Ok(message) => Ok(message),
         Err(error) => {
-            if signal.map(AbortSignal::is_aborted).unwrap_or(false) && is_abort_error(&error) {
+            if signal.is_some_and(AbortSignal::is_aborted) && is_abort_error(&error) {
                 return Ok(finish_aborted_message!());
             }
             Err(error)
@@ -115,8 +115,7 @@ async fn stream_assistant_response_inner(
             config
                 .get_system_prompt
                 .as_ref()
-                .map(|hook| hook())
-                .unwrap_or_else(|| context.system_prompt.clone()),
+                .map_or_else(|| context.system_prompt.clone(), |hook| hook()),
         ),
         messages: llm_messages,
         tools: context
@@ -189,7 +188,7 @@ async fn stream_assistant_response_inner(
                 match race_with_abort(response.result(), signal).await {
                     Ok(result_message) => final_message = result_message,
                     Err(error) => {
-                        let aborted = signal.map(AbortSignal::is_aborted).unwrap_or(false);
+                        let aborted = signal.is_some_and(AbortSignal::is_aborted);
                         if !(aborted && is_abort_error(&error)) {
                             return Err(error);
                         }

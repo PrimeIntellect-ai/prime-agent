@@ -251,8 +251,7 @@ impl ConfigSelector {
     fn is_item(&self, filtered_index: usize) -> bool {
         self.filtered
             .get(filtered_index)
-            .map(|row_index| matches!(self.rows[*row_index], SelectorRow::Item { .. }))
-            .unwrap_or(false)
+            .is_some_and(|row_index| matches!(self.rows[*row_index], SelectorRow::Item { .. }))
     }
 
     /// Walk to the next/previous item row, skipping group headers (TS

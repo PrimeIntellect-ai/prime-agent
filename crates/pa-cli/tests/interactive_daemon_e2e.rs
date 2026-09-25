@@ -298,8 +298,14 @@ fn spawn_supervisor(dir: &Path) -> Supervisor {
         pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
         "15000",
     );
+    // A full workspace run around this suite (the battery) can starve a
+    // freshly-launched session worker's boot far past the 30s default
+    // connect budget; the generous override keeps the suite's session
+    // creates deterministic under that load (the supervisor passes its
+    // environment to the workers it spawns).
+    command.env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "90000");
     let child = command.spawn().expect("spawn prime-agent --mode daemon");
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < deadline {
         if socket.exists() {
             return Supervisor { child, socket };
@@ -515,9 +521,14 @@ struct FreshHomeOnboardingSink {
 }
 
 impl pa_tui::interactive::OnboardingSink for FreshHomeOnboardingSink {
-    fn agent_traces_enabled(&self) -> bool {
+    fn onboarding_shown(&self) -> bool {
         pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
-            .get_agent_traces_enabled()
+            .get_onboarding_shown()
+    }
+
+    fn agent_traces_choice_written(&self) -> bool {
+        pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
+            .agent_traces_choice_written()
     }
 
     fn set_agent_traces_enabled(&self, enabled: bool) -> anyhow::Result<()> {
@@ -531,14 +542,43 @@ impl pa_tui::interactive::OnboardingSink for FreshHomeOnboardingSink {
     }
 }
 
-/// A fresh install never sees the trace question (sharing is on by
-/// default; TS defaults off and asks). The onboarding completes silently:
-/// no trace dialog owns the pane, the submitted prompt goes straight to
-/// the session, and the persisted state reads back shown + enabled with
-/// the default standing unwritten (no `agentTraces` key — the default IS
-/// the configuration, like the compaction toggle).
+/// The product sink whose completion write always fails (the failed
+/// persistence path): reads stay real, the marker write errors.
+struct FailingMarkOnboardingSink {
+    cwd: PathBuf,
+    agent_dir: PathBuf,
+}
+
+impl pa_tui::interactive::OnboardingSink for FailingMarkOnboardingSink {
+    fn onboarding_shown(&self) -> bool {
+        pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
+            .get_onboarding_shown()
+    }
+
+    fn agent_traces_choice_written(&self) -> bool {
+        pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
+            .agent_traces_choice_written()
+    }
+
+    fn set_agent_traces_enabled(&self, _enabled: bool) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn mark_onboarding_complete(&self) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!("settings disk full"))
+    }
+}
+
+/// A fresh install asks the trace question exactly once, as the first-run
+/// onboarding step — the opt-in moment for trace sharing (sharing ships
+/// OFF, so `Share` opts in and `Not now` leaves it off; TS asks
+/// unconditionally with the same default). One Enter answers it: the
+/// answer and the completion flag persist together, and the released pane
+/// runs the submitted turn. The flag then gates the next launch's task
+/// mount (the `onboarding_gate_follows_settings_and_auth` unit) and the
+/// phase's own marker check, so the question never returns.
 #[tokio::test]
-async fn fresh_home_completes_onboarding_silently_without_the_trace_dialog() {
+async fn fresh_home_asks_the_trace_question_once_and_completes() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
@@ -556,100 +596,6 @@ async fn fresh_home_completes_onboarding_silently_without_the_trace_dialog() {
 
     // The task mounts exactly as the product's model-ready gate builds it;
     // the sink persists through the real settings manager.
-    let mut options = base_options(&supervisor, dir.path(), &session_dir);
-    options.onboarding = Some(pa_tui::interactive::OnboardingTask {
-        sink: std::sync::Arc::new(FreshHomeOnboardingSink {
-            cwd: dir.path().to_path_buf(),
-            agent_dir: agent_dir.clone(),
-        }),
-    });
-    let plan = pa_tui::interactive::HeadlessPlan {
-        steps: vec![
-            pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
-        ],
-        width: 100,
-        height: 30,
-    };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
-
-    // The session owned the pane from the first frame: the submission went
-    // to the editor and the scripted turn rendered. (With the old
-    // default-off flow, this submission was consumed by the trace dialog
-    // and the turn never ran.)
-    let rendered = outcome.frames.join("\n");
-    assert!(
-        rendered.contains("hello fresh home"),
-        "the session started directly and completed its first turn:\n{rendered}"
-    );
-    assert!(
-        !rendered.contains("Share agent traces"),
-        "the trace-sharing dialog never rendered:\n{rendered}"
-    );
-
-    // The flow completed silently: shown is set, sharing stays enabled,
-    // and nothing was written for it on a fresh home.
-    let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
-    assert!(
-        settings.get_onboarding_shown(),
-        "the silent flow marked onboarding shown"
-    );
-    assert!(
-        settings.get_agent_traces_enabled(),
-        "a fresh home shares traces (the pre-configured default)"
-    );
-    // Nothing was written for sharing on a fresh home: the storage
-    // serializes every unset key as null, so the assertion is on the
-    // value (an explicit opt-out would persist an object), not the key.
-    let persisted =
-        std::fs::read_to_string(agent_dir.join("settings.json")).expect("global settings file");
-    let document: serde_json::Value =
-        serde_json::from_str(&persisted).expect("global settings json");
-    let agent_traces = document
-        .get("agentTraces")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    assert_eq!(
-        agent_traces,
-        serde_json::Value::Null,
-        "the default stood without a written value:\n{persisted}"
-    );
-    drop(supervisor);
-}
-
-/// The retained question mounts for exactly one home: sharing explicitly
-/// opted out (a provisioned/copied config), onboarding never completed.
-/// `Share` is pre-selected, so one Enter answers it: the choice and the
-/// completion flag persist together, and the released pane runs the
-/// submitted turn. The flag then gates the next launch's task mount (the
-/// `onboarding_gate_follows_settings_and_auth` unit), so the question
-/// never returns.
-#[tokio::test]
-async fn retained_trace_dialog_answers_persists_and_releases_the_pane() {
-    let dir = tempfile::TempDir::new().expect("temp dir");
-    let agent_dir = dir.path().join("agent");
-    let session_dir = agent_dir.join("sessions");
-    std::fs::create_dir_all(&session_dir).expect("session dir");
-    // The provisioned opt-out home: copied config, no onboarding flag.
-    std::fs::write(
-        agent_dir.join("settings.json"),
-        r#"{ "agentTraces": { "enabled": false } }"#,
-    )
-    .expect("provisioned settings");
-    let supervisor = spawn_supervisor(dir.path());
-
-    let script = serde_json::json!({ "responses": [
-        { "text": "hello retained dialog", "delayMs": 20 },
-    ] });
-    std::fs::write(
-        dir.path().join("script.json"),
-        serde_json::to_string(&script).expect("script json"),
-    )
-    .expect("script.json");
-
     let mut options = base_options(&supervisor, dir.path(), &session_dir);
     options.onboarding = Some(pa_tui::interactive::OnboardingTask {
         sink: std::sync::Arc::new(FreshHomeOnboardingSink {
@@ -676,40 +622,42 @@ async fn retained_trace_dialog_answers_persists_and_releases_the_pane() {
             .await
             .expect("interactive run");
 
+    // The question owned the pane first, then released it to the session:
+    // the answer and the completion flag persisted together.
     let rendered = outcome.frames.join("\n");
     assert!(
-        rendered.contains("hello retained dialog"),
-        "the dialog released the pane and the first turn ran:\n{rendered}"
+        rendered.contains("Share agent traces"),
+        "the onboarding question rendered once for the fresh home:\n{rendered}"
     );
     assert!(
-        !rendered.contains("Share agent traces"),
-        "the question never owned a session frame:\n{rendered}"
+        rendered.contains("hello fresh home"),
+        "the answered dialog released the pane and the first turn ran:\n{rendered}"
     );
-
-    // The answer and the completion flag persisted together: a fresh manager
-    // (the next launch's view of the files) reads the pair, so the task
-    // never mounts again.
     let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+    assert!(
+        settings.get_onboarding_shown(),
+        "the answered flow marked onboarding shown"
+    );
     assert!(
         settings.get_agent_traces_enabled(),
         "the pre-selected Share answer persisted"
     );
-    assert!(
-        settings.get_onboarding_shown(),
-        "the completion flag persisted with the answer"
-    );
     drop(supervisor);
 }
 
-/// The other answer keeps the same contract: `Not now` (Down + Enter)
-/// persists the standing opt-out WITH the completion flag, so the question
-/// is answered once and never returns — `/traces` stays the change path.
+/// A provisioned home (sharing explicitly opted out, a copied config) never
+/// sees the trace question: the standing choice stands and the flow
+/// completes silently — the session screen owns the first frame, the
+/// submitted prompt runs directly, and only the completion flag is
+/// written. (TS #2368 asks such a home the question; the operator's
+/// existing-user ruling removes it for the rust port.)
 #[tokio::test]
-async fn retained_trace_dialog_keeps_the_opt_out_and_completes() {
+async fn provisioned_opt_out_home_completes_silently_without_the_question() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let agent_dir = dir.path().join("agent");
     let session_dir = agent_dir.join("sessions");
     std::fs::create_dir_all(&session_dir).expect("session dir");
+    // The provisioned opt-out home: copied config, no onboarding flag.
     std::fs::write(
         agent_dir.join("settings.json"),
         r#"{ "agentTraces": { "enabled": false } }"#,
@@ -718,7 +666,7 @@ async fn retained_trace_dialog_keeps_the_opt_out_and_completes() {
     let supervisor = spawn_supervisor(dir.path());
 
     let script = serde_json::json!({ "responses": [
-        { "text": "hello kept opt-out", "delayMs": 20 },
+        { "text": "hello provisioned home", "delayMs": 20 },
     ] });
     std::fs::write(
         dir.path().join("script.json"),
@@ -733,7 +681,154 @@ async fn retained_trace_dialog_keeps_the_opt_out_and_completes() {
             agent_dir: agent_dir.clone(),
         }),
     });
+    // No key step answers anything: the flow must complete before the
+    // plan's submission reaches the editor.
     let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        ],
+        width: 100,
+        height: 30,
+    };
+    let outcome =
+        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
+            .await
+            .expect("interactive run");
+
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains("hello provisioned home"),
+        "the session started directly and completed its first turn:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Share agent traces"),
+        "the question never owned a session frame:\n{rendered}"
+    );
+
+    // The silent completion persists only the flag: the standing opt-out
+    // survives untouched and a fresh manager reads the pair, so the gate
+    // never mounts the task again.
+    let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+    assert!(
+        !settings.get_agent_traces_enabled(),
+        "the standing opt-out survived the silent completion"
+    );
+    assert!(
+        settings.get_onboarding_shown(),
+        "the silent flow marked onboarding shown"
+    );
+    drop(supervisor);
+}
+
+/// A failed completion write surfaces a warning row and never kills the
+/// run: a provisioned home whose settings write fails still completes the
+/// flow for this run (the session stays usable), the warning names the
+/// failed persistence, and the unpersisted marker honestly re-mounts the
+/// flow next launch. The run never dies over a settings write.
+#[tokio::test]
+async fn a_failed_completion_write_surfaces_a_warning_and_never_kills_the_run() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    std::fs::write(
+        agent_dir.join("settings.json"),
+        r#"{ "agentTraces": { "enabled": false } }"#,
+    )
+    .expect("provisioned settings");
+    let supervisor = spawn_supervisor(dir.path());
+
+    let script = serde_json::json!({ "responses": [
+        { "text": "hello despite the write failure", "delayMs": 20 },
+    ] });
+    std::fs::write(
+        dir.path().join("script.json"),
+        serde_json::to_string(&script).expect("script json"),
+    )
+    .expect("script.json");
+
+    let mut options = base_options(&supervisor, dir.path(), &session_dir);
+    options.onboarding = Some(pa_tui::interactive::OnboardingTask {
+        sink: std::sync::Arc::new(FailingMarkOnboardingSink {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: agent_dir.clone(),
+        }),
+    });
+    let plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("hi".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        ],
+        width: 100,
+        height: 30,
+    };
+    let outcome =
+        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
+            .await
+            .expect("the run survives the failed write");
+
+    let rendered = outcome.frames.join("\n");
+    assert!(
+        rendered.contains("hello despite the write failure"),
+        "the session ran its first turn despite the failed write:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Share agent traces"),
+        "the standing choice never re-opened the question:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("could not be saved"),
+        "the failed persistence surfaced as a warning row:\n{rendered}"
+    );
+    // The marker honestly stayed unset: the next launch re-mounts the flow.
+    let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
+    assert!(
+        !settings.get_onboarding_shown(),
+        "the failed write left the marker unset"
+    );
+    drop(supervisor);
+}
+
+/// The re-show regression: the agents-view flow re-runs the onboarding
+/// phase for every session it opens with the SAME task (the task mounts
+/// once at startup, then rides the cloned options), so the phase gates on
+/// the persisted completion marker itself. A `Not now` answer completes
+/// the flow (opt-out + flag together), and a second session opened with
+/// the same task starts straight at the session screen — the question
+/// never returns, `/traces` stays the change path.
+#[tokio::test]
+async fn a_completed_flow_never_reopens_the_question_for_a_later_session() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let session_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&session_dir).expect("session dir");
+    let supervisor = spawn_supervisor(dir.path());
+
+    // One scripted response: the faux queue spans one session (each
+    // created session replays from the top), so both runs render the
+    // same turn text and the assertions stay per-run.
+    let script = serde_json::json!({ "responses": [
+        { "text": "hello each session", "delayMs": 20 },
+    ] });
+    std::fs::write(
+        dir.path().join("script.json"),
+        serde_json::to_string(&script).expect("script json"),
+    )
+    .expect("script.json");
+
+    // The SAME options (the same task object) back both session runs, the
+    // way `run_agents_view_flow` clones `base` into every session open.
+    let mut options = base_options(&supervisor, dir.path(), &session_dir);
+    options.onboarding = Some(pa_tui::interactive::OnboardingTask {
+        sink: std::sync::Arc::new(FreshHomeOnboardingSink {
+            cwd: dir.path().to_path_buf(),
+            agent_dir: agent_dir.clone(),
+        }),
+    });
+    // Down + Enter answers `Not now` (the answer that used to re-show the
+    // question on every later session open), then the turn runs.
+    let first_plan = pa_tui::interactive::HeadlessPlan {
         steps: vec![
             pa_tui::interactive::HeadlessStep::Key(crossterm::event::KeyEvent::new(
                 crossterm::event::KeyCode::Down,
@@ -749,24 +844,56 @@ async fn retained_trace_dialog_keeps_the_opt_out_and_completes() {
         width: 100,
         height: 30,
     };
-    let outcome =
-        pa_tui::interactive::run_interactive(options, pa_tui::interactive::UiMode::Headless(plan))
-            .await
-            .expect("interactive run");
-
-    let rendered = outcome.frames.join("\n");
+    let first = pa_tui::interactive::run_interactive(
+        options.clone(),
+        pa_tui::interactive::UiMode::Headless(first_plan),
+    )
+    .await
+    .expect("first interactive run");
+    let first_rendered = first.frames.join("\n");
     assert!(
-        rendered.contains("hello kept opt-out"),
-        "the dialog released the pane and the first turn ran:\n{rendered}"
+        first_rendered.contains("Share agent traces"),
+        "the fresh home was asked once:\n{first_rendered}"
+    );
+    assert!(
+        first_rendered.contains("hello each session"),
+        "the answered dialog released the pane and the first turn ran:\n{first_rendered}"
     );
     let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
     assert!(
         !settings.get_agent_traces_enabled(),
-        "the Not-now answer persisted (the standing opt-out)"
+        "the Not-now answer persisted (the opt-out)"
     );
     assert!(
         settings.get_onboarding_shown(),
         "the completion flag persisted with the answer"
+    );
+
+    // The second session with the same task: no key step answers anything,
+    // so the phase must exit before the submission reaches the editor —
+    // the persisted marker is the phase's own gate.
+    let second_plan = pa_tui::interactive::HeadlessPlan {
+        steps: vec![
+            pa_tui::interactive::HeadlessStep::Submit("again".to_string()),
+            pa_tui::interactive::HeadlessStep::WaitIdle { timeout_ms: 30_000 },
+        ],
+        width: 100,
+        height: 30,
+    };
+    let second = pa_tui::interactive::run_interactive(
+        options,
+        pa_tui::interactive::UiMode::Headless(second_plan),
+    )
+    .await
+    .expect("second interactive run");
+    let second_rendered = second.frames.join("\n");
+    assert!(
+        second_rendered.contains("hello each session"),
+        "the second session started directly and completed its turn:\n{second_rendered}"
+    );
+    assert!(
+        !second_rendered.contains("Share agent traces"),
+        "the completed flow never reopened the question:\n{second_rendered}"
     );
     drop(supervisor);
 }
@@ -2515,22 +2642,54 @@ async fn tui_side_question_pane_flow() {
             pa_tui::interactive::HeadlessStep::Submit(
                 "/btw what is the capital of France".to_string(),
             ),
-            // The side question runs outside the turn state; give the
-            // daemon run time to stream and settle.
-            pa_tui::interactive::HeadlessStep::WaitMs(3_000),
+            // The side question runs outside the turn state (the WaitIdle
+            // barrier cannot see it), and its answer is a daemon-driven
+            // stream: wait for the rendered condition (early exit) instead
+            // of a fixed wall-clock window.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Paris, obviously".to_string(),
+                timeout_ms: 30_000,
+            },
+            // The pane's run must SETTLE before the follow-up: TS's
+            // active-run guard drops a follow-up submitted while the run
+            // is still streaming (it keeps the draft and warns). The
+            // settled hint row ("reply to follow up") is the pane's own
+            // idle marker, so wait for it — never a fixed window.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "reply to follow up".to_string(),
+                timeout_ms: 30_000,
+            },
             pa_tui::interactive::HeadlessStep::SettleIdle,
             // The open pane captures a plain reply as a follow-up side
             // question (TS's side-conversation ladder).
             pa_tui::interactive::HeadlessStep::Submit("and its largest city".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitMs(3_000),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Second answer".to_string(),
+                timeout_ms: 30_000,
+            },
+            // Settle again: an Esc against a still-running pane would
+            // CANCEL the run instead of closing the pane (TS's two-stage
+            // escape), so the close step needs the pane idle too.
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "reply to follow up".to_string(),
+                timeout_ms: 30_000,
+            },
             pa_tui::interactive::HeadlessStep::SettleIdle,
             // A slash command inside the pane gets the TS notice turn.
             pa_tui::interactive::HeadlessStep::Submit("/model".to_string()),
-            pa_tui::interactive::HeadlessStep::WaitMs(500),
+            pa_tui::interactive::HeadlessStep::WaitRender {
+                needle: "Slash commands are not available in side conversations.".to_string(),
+                timeout_ms: 30_000,
+            },
             pa_tui::interactive::HeadlessStep::SettleIdle,
-            // Esc returns to the main thread.
+            // Esc returns to the main thread: the pane's hint row is the
+            // surface's own state, so wait for it to leave the newest
+            // frame.
             escape,
-            pa_tui::interactive::HeadlessStep::WaitMs(500),
+            pa_tui::interactive::HeadlessStep::WaitGone {
+                needle: "esc to return to session".to_string(),
+                timeout_ms: 10_000,
+            },
             pa_tui::interactive::HeadlessStep::SettleIdle,
         ],
         width: 120,
