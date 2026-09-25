@@ -533,7 +533,10 @@ async fn get_session_stats(state: &Arc<RpcState>) -> Result<ResponseData, String
         "assistantMessages": assistant_messages,
         "toolCalls": tool_calls,
         "toolResults": tool_results,
-        "totalMessages": messages.len(),
+        // TS `SessionStats.totalMessages` counts the role rows in
+        // `state.messages` (user + assistant); the port's in-context
+        // harness digest rides as a custom row and must not inflate it.
+        "totalMessages": user_messages + assistant_messages,
         "tokens": {
             "input": input,
             "output": output,

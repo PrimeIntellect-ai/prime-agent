@@ -35,7 +35,20 @@ struct RpcChild {
 
 impl RpcChild {
     fn spawn(args: &[&str], script: &Value) -> RpcChild {
+        Self::spawn_seeded(args, script, None)
+    }
+
+    /// Spawn with a seeded `models.json` (the registry catalog the
+    /// available/set-model surfaces compose: the faux provider needs its
+    /// provider entry + key to pass the registry's configured-auth gate,
+    /// the same shape the daemon harness seeds).
+    fn spawn_seeded(args: &[&str], script: &Value, models: Option<Value>) -> RpcChild {
         let home = tempfile::TempDir::new().unwrap();
+        if let Some(models) = models {
+            let agent_dir = home.path().join("agent");
+            std::fs::create_dir_all(&agent_dir).unwrap();
+            std::fs::write(agent_dir.join("models.json"), models.to_string()).unwrap();
+        }
         let bin = env!("CARGO_BIN_EXE_prime-agent");
         let mut child = Command::new(bin)
             .args(args)
@@ -237,8 +250,18 @@ fn rpc_prompt_streams_events_after_the_response() {
         "the prompt response precedes every turn event: {before:?}"
     );
     // The turn's frames arrive after the response, in the loop's order.
-    let start = client.wait_event("message_start", TIMEOUT);
-    assert_eq!(start["message"]["role"], "assistant");
+    // The first-turn harness digest rides ahead as its own custom row
+    // (the port's in-context digest), so the first `message_start` may
+    // be the digest row's: the reply's start is the first ASSISTANT
+    // one.
+    let deadline = Instant::now() + TIMEOUT;
+    let start = loop {
+        let frame = client.wait_event("message_start", TIMEOUT);
+        if frame["message"]["role"] == "assistant" {
+            break frame;
+        }
+        assert!(Instant::now() < deadline, "the assistant start never came");
+    };
     let end = client.wait_event("agent_end", TIMEOUT);
     assert!(
         end["messages"]
@@ -307,14 +330,21 @@ fn rpc_steer_and_follow_up_queue_then_abort() {
         ],
     });
     let mut client = RpcChild::spawn(&["--mode", "rpc", "--no-session"], &script);
+    // One-at-a-time steering (the settings default is "all": a steer
+    // mid-turn folds into the RUNNING request instead of queueing, so
+    // the queue projections this test observes need the deterministic
+    // mode first — TS `setSteeringMode("one-at-a-time")`).
+    let mode = client.request(&json!({ "type": "set_steering_mode", "mode": "one-at-a-time" }));
+    assert_eq!(mode["success"], true, "the mode is set: {mode}");
     let response = client.request(&json!({ "type": "prompt", "message": "go" }));
     assert_eq!(response["success"], true);
-    // The turn is busy (the delayed stream holds it open).
-    client.wait_event("message_start", TIMEOUT);
+    // Queue while the delayed turn is still open (admission returns
+    // before the turn settles; the delayMs keeps it running).
     let steer = client.request(&json!({ "type": "steer", "message": "steer this" }));
     assert_eq!(steer["success"], true, "steer queues: {steer}");
     let follow_up = client.request(&json!({ "type": "follow_up", "message": "fu this" }));
     assert_eq!(follow_up["success"], true);
+    client.wait_event("message_start", TIMEOUT);
     let state = client.request(&json!({ "type": "get_state" }));
     assert_eq!(state["data"]["isStreaming"], true);
     assert_eq!(state["data"]["sessionActions"]["queuedCount"], 2);
@@ -556,9 +586,28 @@ fn rpc_new_session_swaps_the_engine() {
 /// registration's model).
 #[test]
 fn rpc_get_available_models_lists_the_catalog() {
-    let mut client = RpcChild::spawn(
+    // The registry composes models.json: the faux provider needs its
+    // provider entry (api + key + model) to pass the configured-auth
+    // gate the available catalog filters on (the daemon harness seeds
+    // the same shape).
+    let mut client = RpcChild::spawn_seeded(
         &["--mode", "rpc", "--no-session"],
         &turn_script(json!(["unused"])),
+        Some(json!({
+            "providers": {
+                "faux": {
+                    "api": "faux",
+                    "baseUrl": "http://localhost:0",
+                    "apiKey": "sk-faux",
+                    "models": [{
+                        "id": "faux-1",
+                        "name": "Faux Model",
+                        "contextWindow": 100_000,
+                        "maxTokens": 4_096,
+                    }],
+                }
+            }
+        })),
     );
     let response = client.request(&json!({ "type": "get_available_models" }));
     assert_eq!(response["success"], true, "the response: {response}");
