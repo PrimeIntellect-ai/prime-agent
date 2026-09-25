@@ -51,7 +51,7 @@ fn release_dir() -> Option<PathBuf> {
         assert!(
             explicit.join("prime-agent-runtime").exists(),
             "PI_PACKAGE_DIR {} has no prime-agent-runtime",
-                explicit.display()
+            explicit.display()
         );
         return Some(explicit);
     }
@@ -60,7 +60,10 @@ fn release_dir() -> Option<PathBuf> {
         |home| format!("{home}/.local/share/prime-agent/releases"),
     ));
     let Ok(entries) = std::fs::read_dir(&releases) else {
-        eprintln!("no releases dir at {releases}; skipping live kernel test");
+        eprintln!(
+            "no releases dir at {}; skipping live kernel test",
+            releases.display()
+        );
         return None;
     };
     let mut candidates: Vec<PathBuf> = entries

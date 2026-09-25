@@ -61,7 +61,7 @@ fn release_dir() -> Option<PathBuf> {
         assert!(
             explicit.join("prime-agent-runtime").exists(),
             "PI_PACKAGE_DIR {} has no prime-agent-runtime",
-                explicit.display()
+            explicit.display()
         );
         return Some(explicit);
     }
@@ -70,7 +70,10 @@ fn release_dir() -> Option<PathBuf> {
         |home| format!("{home}/.local/share/prime-agent/releases"),
     ));
     let Ok(entries) = std::fs::read_dir(&releases) else {
-        eprintln!("no releases dir at {releases}; skipping live kernel test");
+        eprintln!(
+            "no releases dir at {}; skipping live kernel test",
+            releases.display()
+        );
         return None;
     };
     let mut candidates: Vec<PathBuf> = entries
@@ -81,7 +84,8 @@ fn release_dir() -> Option<PathBuf> {
     candidates.sort();
     let Some(latest) = candidates.pop() else {
         eprintln!(
-            "no release with prime-agent-runtime under {releases}; skipping live kernel test"
+            "no release with prime-agent-runtime under {}; skipping live kernel test",
+            releases.display()
         );
         return None;
     };
@@ -212,7 +216,7 @@ async fn turn_boundary_host_requests_round_trip_through_a_real_kernel() {
                     cache_read: 0,
                     cache_write: 0,
                     total_tokens: 120,
-                    cost: pa_types::ai::UsageCost::default(),
+                    cost: pa_agent::types::UsageCost::default(),
                 };
             }
         }
