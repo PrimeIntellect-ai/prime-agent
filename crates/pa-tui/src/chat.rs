@@ -8,6 +8,7 @@
 mod geometry;
 pub(crate) use geometry::{assistant_row_count, user_block_row_count};
 
+use crate::osc133::RowMarkers;
 use crate::snapshot::RetryStartReason;
 use crate::theme::{Theme, ThemeBg, ThemeColor};
 use crate::width::str_width;
@@ -28,6 +29,7 @@ pub enum Detail {
 impl Detail {
     /// The Ctrl+O cycle (TS `toggleToolOutputExpansion`): overview adds
     /// details, details adds the expanded output, all wraps to overview.
+    #[must_use]
     pub fn next(self) -> Self {
         match self {
             Detail::Overview => Detail::Details,
@@ -340,7 +342,7 @@ pub fn render_user_block(
     if rendered.is_empty() {
         let row = vec![
             Span::styled("  ".to_string(), bg),
-            Span::styled("".to_string(), body),
+            Span::styled(String::new(), body),
         ];
         rows.push(pad_to(row, width, bg));
     }
@@ -449,7 +451,7 @@ pub(crate) fn render_markdown_block(
     let rendered =
         crate::markdown::render_markdown_tagged(text.trim(), content_width, md, "", cache);
     let mut out = Vec::new();
-    for line in rendered.into_iter() {
+    for line in rendered {
         let mut row: Line = vec![Span::styled(" ".to_string(), Style::default())];
         row.extend(line);
         // TS pads every markdown row with unstyled spaces after the row's
@@ -475,7 +477,7 @@ fn render_thinking_block(
     let rendered =
         crate::markdown::render_markdown_tagged(text.trim(), content_width, &md, "dim", cache);
     let mut out = Vec::new();
-    for line in rendered.into_iter() {
+    for line in rendered {
         // The markdown margin sits outside the styled content (default fg).
         let mut row: Line = vec![Span::raw(" ")];
         row.extend(line);
@@ -715,7 +717,7 @@ mod tests {
                     continue;
                 }
             }
-            runs.push((span.content.to_string(), span.style));
+            runs.push((span.content.clone(), span.style));
         }
         runs
     }
@@ -805,7 +807,7 @@ mod tests {
         let rows = render_user_block("look \u{E000} at @file", &theme(), "  ", 60);
         let styled: Vec<(String, Style)> = rows[1]
             .iter()
-            .map(|s| (s.content.to_string(), s.style))
+            .map(|s| (s.content.clone(), s.style))
             .collect();
         assert!(
             styled
@@ -885,7 +887,7 @@ mod tests {
             false,
             &mut crate::markdown::MarkdownBlockCache::default(),
         );
-        assert_eq!(crate::osc133::row_markers(&rows[0]), Default::default());
+        assert_eq!(crate::osc133::row_markers(&rows[0]), RowMarkers::default());
     }
 
     #[test]

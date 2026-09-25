@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use pa_types::session::FileEntry;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// One wire flat node: the full entry plus its active label.
 #[derive(Debug, Clone, PartialEq)]
@@ -140,13 +140,13 @@ mod tests {
                 payload: pa_types::session::CustomEntry {
                     custom_type: "x".to_string(),
                     data: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
                 base: pa_types::session::EntryBase {
                     id: Some(id.to_string()),
                     parent_id: parent.map(str::to_string),
                     timestamp: Some(timestamp.to_string()),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             },
             label: None,

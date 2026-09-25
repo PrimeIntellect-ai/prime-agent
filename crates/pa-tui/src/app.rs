@@ -121,11 +121,12 @@ fn run_app_surface(
         let (_w, h) = crossterm::terminal::size()?;
         view.set_terminal_rows(h);
         draw(&mut terminal, &mut view)?;
-        if options.panic_after_frame {
-            // The verifier's panic driver: the unwind must cross the live
-            // surface's unwind guard, not the already-restored exit.
-            panic!("pa-tui-replay: --panic-exit reached");
-        }
+        // The verifier's panic driver: the unwind must cross the live
+        // surface's unwind guard, not the already-restored exit.
+        assert!(
+            !options.panic_after_frame,
+            "pa-tui-replay: --panic-exit reached"
+        );
 
         // Input.
         let timeout = Duration::from_millis(if stream_ended { 50 } else { 5 });

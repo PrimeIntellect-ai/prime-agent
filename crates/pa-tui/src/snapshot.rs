@@ -887,11 +887,7 @@ pub fn user_display_text(message: &Value) -> Option<String> {
 pub fn message_text(message: &Value) -> String {
     match message.get("content") {
         Some(Value::String(text)) => text.clone(),
-        Some(Value::Array(blocks)) => blocks
-            .iter()
-            .filter_map(block_text)
-            .collect::<Vec<_>>()
-            .join(""),
+        Some(Value::Array(blocks)) => blocks.iter().filter_map(block_text).collect::<String>(),
         _ => String::new(),
     }
 }

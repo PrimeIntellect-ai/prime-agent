@@ -248,7 +248,7 @@ fn drain_bounded(out: &mut Stdout, max: Duration) {
     let start = std::time::Instant::now();
     let mut last_input = start;
     while start.elapsed() < max && last_input.elapsed() < DRAIN_IDLE {
-        match crossterm::event::poll(DRAIN_IDLE.min(max - start.elapsed())) {
+        match crossterm::event::poll(DRAIN_IDLE.min(max.checked_sub(start.elapsed()).unwrap())) {
             Ok(true) => {
                 let _ = crossterm::event::read();
                 last_input = std::time::Instant::now();

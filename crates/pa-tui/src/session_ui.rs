@@ -3,12 +3,14 @@
 //! event application, and session switching. Rendering itself lives in the
 //! view crate modules; this module only decides what the view shows.
 
+use std::collections::{BTreeMap, HashSet};
+use std::fmt::Write;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
 use pa_types::daemon::DaemonCommand;
 use pa_types::slash_commands::{SlashCommandExecution, SlashCommandRegistry};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::bash_view::{BashView, BashViewAction};
 use crate::chat::{
@@ -697,7 +699,7 @@ impl SessionUi {
             traces_upload_notes,
             pending_traces_login: None,
             traces_login_run: None,
-            pasted_images: Default::default(),
+            pasted_images: BTreeMap::default(),
             next_image_marker_id: 1,
             pending_snapshot: None,
             pending_model: None,
@@ -711,8 +713,8 @@ impl SessionUi {
             streaming_index: None,
             working_tokens: LoaderTokenTracker::default(),
             turn_error_shown: false,
-            pending_tools: Default::default(),
-            aborted_tools: Default::default(),
+            pending_tools: HashSet::default(),
+            aborted_tools: HashSet::default(),
             last_assistant_text: None,
             osc_sink: crate::clipboard::OscSink::Stdout,
             pending_confirm: None,
@@ -909,7 +911,7 @@ impl SessionUi {
             recovery_config: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: Map::default(),
         };
         let direct_attached = self
             .client
@@ -969,7 +971,7 @@ impl SessionUi {
                     DaemonCommand::Detach {
                         id: None,
                         active_session_id: Some(previous),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                 )
                 .await;
@@ -1014,7 +1016,7 @@ impl SessionUi {
                 ChatEntry::Assistant(message) => {
                     message.blocks.iter().rev().find_map(|block| match block {
                         MessageBlock::Text(text) => Some(text.clone()),
-                        _ => None,
+                        MessageBlock::Thinking(_) => None,
                     })
                 }
                 _ => None,
@@ -1052,7 +1054,7 @@ impl SessionUi {
             .client
             .request(DaemonCommand::RosterSubscribe {
                 id: None,
-                rest: Default::default(),
+                rest: Map::default(),
             })
             .await;
         if let Ok(response) = snapshot {
@@ -1490,7 +1492,7 @@ impl SessionUi {
                 DaemonCommand::GetSessionStats {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await
@@ -1595,7 +1597,7 @@ impl SessionUi {
                 client.request_ok(DaemonCommand::Detach {
                     id: None,
                     active_session_id: Some(active_session_id),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 }),
             )
             .await;
@@ -1612,7 +1614,7 @@ impl SessionUi {
             self.client.request_ok(DaemonCommand::Detach {
                 id: None,
                 active_session_id: Some(self.active_session_id.clone()),
-                rest: Default::default(),
+                rest: Map::default(),
             }),
         )
         .await;
@@ -1628,7 +1630,7 @@ impl SessionUi {
             self.client.request_ok(DaemonCommand::GetSessionStats {
                 id: None,
                 active_session_id: self.active_session_id.clone(),
-                rest: Default::default(),
+                rest: Map::default(),
             }),
         )
         .await;
@@ -2072,7 +2074,7 @@ impl SessionUi {
                     side_question_id: id.clone(),
                     question: question.to_string(),
                     previous_turns,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await;
@@ -2124,7 +2126,7 @@ impl SessionUi {
                             id: None,
                             active_session_id,
                             side_question_id,
-                            rest: Default::default(),
+                            rest: Map::default(),
                         })
                         .await;
                 });
@@ -2308,7 +2310,7 @@ impl SessionUi {
             exclude_from_context: Some(excluded),
             transient: run_id.is_some().then_some(true),
             run_id: run_id.clone(),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         if let Err(error) = self
             .bounded_request(Duration::from_millis(UI_REQUEST_TIMEOUT_MS), request)
@@ -2386,7 +2388,7 @@ impl SessionUi {
                             prefix_messages: None,
                             admission_id: None,
                         },
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                 )
                 .await;
@@ -3091,7 +3093,7 @@ impl SessionUi {
                         DaemonCommand::GetSessionStats {
                             id: None,
                             active_session_id: self.active_session_id.clone(),
-                            rest: Default::default(),
+                            rest: Map::default(),
                         },
                     )
                     .await;
@@ -3127,7 +3129,7 @@ impl SessionUi {
                         DaemonCommand::GetContextTree {
                             id: None,
                             active_session_id: self.active_session_id.clone(),
-                            rest: Default::default(),
+                            rest: Map::default(),
                         },
                     )
                     .await;
@@ -3163,7 +3165,7 @@ impl SessionUi {
                         DaemonCommand::GetSystemPrompt {
                             id: None,
                             active_session_id: self.active_session_id.clone(),
-                            rest: Default::default(),
+                            rest: Map::default(),
                         },
                     )
                     .await;
@@ -3274,7 +3276,7 @@ impl SessionUi {
                             active_session_id: self.active_session_id.clone(),
                             name: name.to_string(),
                             worker_token: None,
-                            rest: Default::default(),
+                            rest: Map::default(),
                         },
                     )
                     .await
@@ -3486,7 +3488,7 @@ impl SessionUi {
                 active_session_id: self.active_session_id.clone(),
                 input_path: input_path.to_string(),
                 cwd_override: cwd_override.map(str::to_string),
-                rest: Default::default(),
+                rest: Map::default(),
             })
             .await?;
         if !response.success {
@@ -4230,7 +4232,7 @@ impl SessionUi {
                 DaemonCommand::GetLastAssistantText {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await?;
@@ -4387,7 +4389,7 @@ impl SessionUi {
                         id: None,
                         active_session_id: self.active_session_id.clone(),
                         enabled: value == "true",
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                     view,
                 )
@@ -4517,7 +4519,7 @@ impl SessionUi {
                         id: None,
                         active_session_id: self.active_session_id.clone(),
                         mode: serde_json::Value::String(value.to_string()),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                     view,
                 )
@@ -4534,7 +4536,7 @@ impl SessionUi {
                         id: None,
                         active_session_id: self.active_session_id.clone(),
                         mode: serde_json::Value::String(value.to_string()),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                     view,
                 )
@@ -4551,7 +4553,7 @@ impl SessionUi {
                         id: None,
                         active_session_id: self.active_session_id.clone(),
                         transport,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                     view,
                 )
@@ -4690,7 +4692,7 @@ impl SessionUi {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
                     service_tier: Some(tier),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await;
@@ -4729,7 +4731,7 @@ impl SessionUi {
                     DaemonCommand::GetRlmMaxDepthStatus {
                         id: None,
                         active_session_id: self.active_session_id.clone(),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     },
                 )
                 .await
@@ -4773,7 +4775,7 @@ impl SessionUi {
                     active_session_id: self.active_session_id.clone(),
                     max_depth,
                     global: Some(global),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await
@@ -4917,7 +4919,7 @@ impl SessionUi {
                 .request_ok(DaemonCommand::Reload {
                     id: None,
                     active_session_id,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 })
                 .await
                 .map(|_| ())
@@ -5018,14 +5020,14 @@ impl SessionUi {
                 id: None,
                 active_session_id: self.active_session_id.clone(),
                 output_path,
-                rest: Default::default(),
+                rest: Map::default(),
             }
         } else {
             DaemonCommand::ExportHtml {
                 id: None,
                 active_session_id: self.active_session_id.clone(),
                 output_path,
-                rest: Default::default(),
+                rest: Map::default(),
             }
         };
         match self
@@ -5073,7 +5075,7 @@ impl SessionUi {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
                     output_path: Some(tmp_file.to_string_lossy().into_owned()),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await;
@@ -5174,7 +5176,7 @@ impl SessionUi {
                 DaemonCommand::GetSessionTree {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await?;
@@ -5229,7 +5231,7 @@ impl SessionUi {
                     active_session_id: self.active_session_id.clone(),
                     entry_id: entry_id.clone(),
                     label: label.clone(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 };
                 match self
                     .bounded_request(Duration::from_millis(UI_REQUEST_TIMEOUT_MS), request)
@@ -5287,7 +5289,7 @@ impl SessionUi {
                     custom_instructions,
                     replace_instructions: None,
                     label: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await;
@@ -5330,7 +5332,7 @@ impl SessionUi {
                 DaemonCommand::GetUserMessagesForForking {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await?;
@@ -5404,7 +5406,7 @@ impl SessionUi {
                     active_session_id: self.active_session_id.clone(),
                     entry_id: entry_id.to_string(),
                     position,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await
@@ -5437,7 +5439,7 @@ impl SessionUi {
                 DaemonCommand::GetSessionTree {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await?;
@@ -5596,7 +5598,7 @@ impl SessionUi {
                 DaemonCommand::GetMcpConnections {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await
@@ -5758,7 +5760,7 @@ impl SessionUi {
                     cwd: None,
                     session_dir: None,
                     include_client_owned: None,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await?;
@@ -5790,10 +5792,11 @@ impl SessionUi {
                 .and_then(Value::as_str)
                 .unwrap_or("idle");
             let cwd = row.get("cwd").and_then(Value::as_str).unwrap_or_default();
-            lines.push_str(&format!(
+            let _ = write!(
+                lines,
                 "\n{current} {}. {name} ({id}) {activity} {cwd}",
                 index + 1
-            ));
+            );
         }
         lines.push_str("\nswitch with /switch <n|id>");
         self.note(&lines, view);
@@ -6197,7 +6200,7 @@ impl SessionUi {
                 .request_ok(DaemonCommand::ListKernelBash {
                     id: None,
                     active_session_id,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 })
                 .await
             {
@@ -6468,7 +6471,7 @@ impl SessionUi {
                     active_session_id: session.clone(),
                     activity_id,
                     lines: Some(lines),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 })
                 .await;
             match result {
@@ -6545,7 +6548,7 @@ impl SessionUi {
                             id: None,
                             active_session_id: session.clone(),
                             activity_id: id,
-                            rest: Default::default(),
+                            rest: Map::default(),
                         })
                         .await;
                     match result {
@@ -6631,7 +6634,7 @@ impl SessionUi {
             active_session_id,
             job_id,
             action: Value::String(action.as_wire().to_string()),
-            rest: Default::default(),
+            rest: Map::default(),
         };
         match self
             .bounded_request(Duration::from_millis(UI_REQUEST_TIMEOUT_MS), request)
@@ -6720,7 +6723,7 @@ impl SessionUi {
             let request = DaemonCommand::HeartbeatsList {
                 id: None,
                 active_session_id: None,
-                rest: Default::default(),
+                rest: Map::default(),
             };
             let fetched = tokio::time::timeout(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -6782,7 +6785,7 @@ impl SessionUi {
             let request = DaemonCommand::GetCommands {
                 id: None,
                 active_session_id,
-                rest: Default::default(),
+                rest: Map::default(),
             };
             let fetched = tokio::time::timeout(
                 Duration::from_millis(UI_REQUEST_TIMEOUT_MS),
@@ -6937,7 +6940,7 @@ impl SessionUi {
                 .request_ok(DaemonCommand::GetModelCatalog {
                     id: None,
                     active_session_id,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 })
                 .await
             else {
@@ -7048,7 +7051,7 @@ impl SessionUi {
                     active_session_id: self.active_session_id.clone(),
                     provider: provider.to_string(),
                     model_id: model_id.to_string(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await;
@@ -7084,7 +7087,7 @@ impl SessionUi {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
                     level: level.to_string(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await;
@@ -7111,7 +7114,7 @@ impl SessionUi {
                 DaemonCommand::GetState {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await
@@ -7146,7 +7149,7 @@ impl SessionUi {
                 DaemonCommand::GetState {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await;
@@ -7181,7 +7184,7 @@ impl SessionUi {
                     .request_ok(DaemonCommand::AbortAndSendQueued {
                         id: None,
                         active_session_id: active_session_id.clone(),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     })
                     .await
             } else {
@@ -7189,7 +7192,7 @@ impl SessionUi {
                     .request_ok(DaemonCommand::Abort {
                         id: None,
                         active_session_id: active_session_id.clone(),
-                        rest: Default::default(),
+                        rest: Map::default(),
                     })
                     .await
             };
@@ -7201,7 +7204,7 @@ impl SessionUi {
                     .request_ok(DaemonCommand::Abort {
                         id: None,
                         active_session_id,
-                        rest: Default::default(),
+                        rest: Map::default(),
                     })
                     .await;
             }
@@ -7232,7 +7235,7 @@ impl SessionUi {
                 .request_ok_via_supervisor(DaemonCommand::AbortCompaction {
                     id: None,
                     active_session_id: active_session_id.clone(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 })
                 .await;
             if let Err(error) = result {
@@ -7286,7 +7289,7 @@ impl SessionUi {
                 DaemonCommand::GetMessages {
                     id: None,
                     active_session_id: self.active_session_id.clone(),
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await
@@ -7699,7 +7702,7 @@ impl SessionUi {
                             id: None,
                             active_session_id,
                             side_question_id,
-                            rest: Default::default(),
+                            rest: Map::default(),
                         })
                         .await
                     {
@@ -8117,7 +8120,7 @@ impl SessionUi {
                     index: index as u64,
                     expected_text: expected_text.to_string(),
                     mutation,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 },
             )
             .await
@@ -8978,7 +8981,7 @@ impl SessionUi {
                 .request_ok(DaemonCommand::AbortBash {
                     id: None,
                     active_session_id,
-                    rest: Default::default(),
+                    rest: Map::default(),
                 })
                 .await
             {
@@ -9069,7 +9072,7 @@ impl SessionUi {
         }
         if let Some(text) = blocks.iter().rev().find_map(|block| match block {
             MessageBlock::Text(text) => Some(text.clone()),
-            _ => None,
+            MessageBlock::Thinking(_) => None,
         }) {
             self.last_assistant_text = Some(text);
         }
@@ -9420,7 +9423,7 @@ async fn create_session(
             lifecycle: None,
             env: None,
             launch_env: None,
-            rest: Default::default(),
+            rest: Map::default(),
         })
         .await
     {
@@ -9472,7 +9475,7 @@ async fn describe_session_open_failure(
             cwd: None,
             session_dir: None,
             include_client_owned: None,
-            rest: Default::default(),
+            rest: Map::default(),
         }),
     )
     .await

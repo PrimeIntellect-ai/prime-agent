@@ -4,6 +4,7 @@
 //! `keybindings.json` overrides show their keys in the guide.
 
 use crate::keybindings::{format_key_text, KeybindingsManager};
+use std::fmt::Write;
 
 /// TS `getAppKeyDisplay` / `getEditorKeyDisplay`: every effective key of
 /// the binding joined with `/`, each part formatted for display
@@ -76,7 +77,7 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
     let viewport_follow = key_display(kb, "tui.viewport.follow");
 
     let mut hotkeys = format!(
-        r#"
+        r"
 **Navigation**
 | Key | Action |
 |-----|--------|
@@ -121,32 +122,33 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
 | `{tab}` | Path completion / accept autocomplete |
 | `{clear_input}` | Clear input / cancel autocomplete |
 | `{clear}` | Interrupt current operation (first) / exit (second) |
-"#
+"
     );
     if !interrupt.is_empty() {
-        hotkeys.push_str(&format!(
-            "| `{interrupt}` | Interrupt current operation |\n"
-        ));
+        let _ = write!(hotkeys, "| `{interrupt}` | Interrupt current operation |\n");
     }
     if !shortcuts_key.is_empty() {
-        hotkeys.push_str(&format!("| `{shortcuts_key}` | Show quick shortcuts |\n"));
+        let _ = write!(hotkeys, "| `{shortcuts_key}` | Show quick shortcuts |\n");
     }
-    hotkeys.push_str(&format!(
-        r#"| `{exit}` | Exit (when editor is empty) |
+    let _ = write!(
+        hotkeys,
+        r"| `{exit}` | Exit (when editor is empty) |
 | `{select_model}` | Open model selector |
 | `{expand_tools}` | Cycle overview → thinking + diffs → all output |
-"#
-    ));
+"
+    );
     // The condensed runs pane has no fixed affordance when the user
     // disabled its binding (an empty key renders as a blank column, like
     // the interrupted row above).
     if !condensed_runs.is_empty() {
-        hotkeys.push_str(&format!(
+        let _ = write!(
+            hotkeys,
             "| `{condensed_runs}` | Browse condensed tool runs (Enter expand a run) |\n"
-        ));
+        );
     }
-    hotkeys.push_str(&format!(
-        r#"| `{focus_subagents}` | Focus activity (←/→ select group, Enter open) |
+    let _ = write!(
+        hotkeys,
+        r"| `{focus_subagents}` | Focus activity (←/→ select group, Enter open) |
 | `{external_editor}` | Edit message in external editor |
 | `{prompt_stash}` | Stash or restore draft prompt |
 | `{follow_up}` | Queue follow-up message |
@@ -164,8 +166,8 @@ pub fn hotkeys_guide(kb: &KeybindingsManager) -> String {
 | mouse wheel | Scroll transcript |
 | mouse drag | Select and copy text |
 | mouse click on link | Open link in browser |
-"#
-    ));
+"
+    );
     hotkeys
 }
 
@@ -189,7 +191,7 @@ pub fn shortcut_guide(kb: &KeybindingsManager) -> String {
         format!("`{shortcuts_key}` quick shortcuts · ")
     };
     format!(
-        r#"**Prompt**
+        r"**Prompt**
 `!` shell mode · `/` commands · `@` file paths
 `{tab}` complete paths · `{new_line}` new line
 `{clear_input}` interrupt · press twice to rewind or clear the prompt
@@ -201,7 +203,7 @@ pub fn shortcut_guide(kb: &KeybindingsManager) -> String {
 
 **Help**
 {shortcuts_prefix}`/hotkeys` full reference
-"#
+"
     )
 }
 

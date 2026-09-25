@@ -929,14 +929,14 @@ mod tests {
             rows,
             vec![
                 "Logs".to_string(),
-                "".to_string(),
+                String::new(),
                 format!("Directory: {}", logs.display()),
-                "".to_string(),
+                String::new(),
                 // 2048/1024 = 2.0 KB; the 1-byte file rounds to 0.0 KB;
                 // rows sort by name; dot-entries stay hidden.
                 "• a-second.log (0.0 KB)".to_string(),
                 "• client-errors.log (2.0 KB)".to_string(),
-                "".to_string(),
+                String::new(),
                 "Daemon crashes log to <socket>.log; agent-open failures log to client-errors.log."
                     .to_string(),
             ]
@@ -1163,13 +1163,13 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                "".to_string(),
+                String::new(),
                 "\u{2500}".repeat(20),
                 format!(" What's New{}", " ".repeat(9)),
-                "".to_string(),
-                "".to_string(),
+                String::new(),
+                String::new(),
                 format!(" Entry one.{}", " ".repeat(9)),
-                "".to_string(),
+                String::new(),
                 "\u{2500}".repeat(20),
             ]
         );

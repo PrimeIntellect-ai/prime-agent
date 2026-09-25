@@ -12,6 +12,7 @@ use crate::chrome::{
     conversation_detail_status, render_prompt_context, render_top_bar, render_tray, ChromeState,
 };
 use crate::editor::Editor;
+use crate::osc133::RowMarkers;
 use crate::prompt_highlight::{
     command_token, editor_chunk_highlights, editor_text_spans, find_arg_tokens, ArgTokenSpan,
 };
@@ -2082,7 +2083,7 @@ mod tests {
         let joined = frame.iter().map(text_of).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("prime agent v0.0.0"));
         assert!(joined.contains("Collapsed mode (Ctrl+O to expand)"));
-        assert!(joined.contains(">"));
+        assert!(joined.contains('>'));
     }
 
     #[test]
@@ -2259,7 +2260,7 @@ mod tests {
         // An unmarked row stays unmarked.
         let plain = vec![crate::Span::raw(" ".repeat(80))];
         let out = composite_follow_hint(&plain, " ctrl+shift+down to follow ", 80);
-        assert_eq!(crate::osc133::row_markers(&out), Default::default());
+        assert_eq!(crate::osc133::row_markers(&out), RowMarkers::default());
     }
 
     #[test]

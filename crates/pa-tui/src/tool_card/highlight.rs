@@ -493,12 +493,11 @@ fn tokenize(code: &str) -> Vec<(String, Scope)> {
                 if let Some(next) = header_mode(code, i, word_len, &mut plain, &mut tokens) {
                     i = next;
                     continue;
-                } else {
-                    flush_plain(&mut plain, &mut tokens);
-                    tokens.push((word.to_string(), Scope::Keyword));
-                    i += word_len;
-                    continue;
                 }
+                flush_plain(&mut plain, &mut tokens);
+                tokens.push((word.to_string(), Scope::Keyword));
+                i += word_len;
+                continue;
             }
             match scope {
                 Scope::Plain => plain.push_str(word),
@@ -527,11 +526,9 @@ fn header_mode(
     tokens: &mut Vec<(String, Scope)>,
 ) -> Option<usize> {
     let mut i = at + keyword_len;
-    let gap_start = i;
     while code[i..].starts_with(|c: char| c.is_whitespace()) && !code[i..].starts_with('\n') {
         i += 1;
     }
-    let _gap = gap_start;
     let name_len = code[i..]
         .char_indices()
         .take_while(|(_, c)| c.is_ascii_alphanumeric() || *c == '_')
