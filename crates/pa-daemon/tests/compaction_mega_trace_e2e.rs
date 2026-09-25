@@ -133,6 +133,17 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
         reader.read_exact(&mut body_bytes)?;
     }
     let body: Value = serde_json::from_slice(&body_bytes).unwrap_or(Value::Null);
+    // Classify before the request log takes the value.
+    let is_turn_request = body
+        .get("messages")
+        .and_then(|m| m.as_array())
+        .is_some_and(|messages| {
+            messages
+                .first()
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_str)
+                .is_some_and(|content| content.starts_with("# prime-agent harness"))
+        });
     let index = requests.lock().expect("mock lock").len();
     requests.lock().expect("mock lock").push(body);
     // The crossing turn is the LAST turn request (the seed plus the
@@ -144,16 +155,6 @@ fn serve(mut stream: TcpStream, requests: Arc<Mutex<Vec<Value>>>) -> std::io::Re
     // runs. Turn requests are identified by the agent's harness system
     // prompt; every other request is answered small usage and never
     // consumes a turn index.
-    let is_turn_request = body
-        .get("messages")
-        .and_then(|m| m.as_array())
-        .is_some_and(|messages| {
-            messages
-                .first()
-                .and_then(|message| message.get("content"))
-                .and_then(Value::as_str)
-                .is_some_and(|content| content.starts_with("# prime-agent harness"))
-        });
     let turn_index = {
         let guard = requests.lock().expect("mock lock");
         // The current request is already pushed: the prior turns are the
