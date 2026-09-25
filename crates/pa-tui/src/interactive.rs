@@ -685,6 +685,14 @@ struct ReconnectLoop {
     /// Whether this driver serves an unexpected loss (the expiry and
     /// failure notes name it, not an update restart).
     lost: bool,
+    /// Whether the loss followed an announced daemon shutdown (TS #2458
+    /// `reconnectAfterShutdown`): the recovery reports the restarted
+    /// daemon's version when it lands (TS
+    /// `formatDaemonReconnectBanner`) instead of the plain
+    /// reconnected note. The recovery itself never relaunches the daemon
+    /// (an explicit stop stays stopped) — the driver only dials the
+    /// same socket path.
+    shutdown: bool,
 }
 
 impl ReconnectLoop {
@@ -695,6 +703,7 @@ impl ReconnectLoop {
             next_attempt: tokio::time::Instant::now() + delay,
             delay,
             lost: false,
+            shutdown: false,
         }
     }
 
@@ -707,6 +716,21 @@ impl ReconnectLoop {
             next_attempt: tokio::time::Instant::now() + delay,
             delay,
             lost: true,
+            shutdown: false,
+        }
+    }
+
+    /// The announced-shutdown variant (TS #2458): loss semantics (same
+    /// window, same backoff, the honest expiry note), but the connected
+    /// banner reports the restarted daemon's version.
+    fn start_shutdown() -> Self {
+        let delay = Duration::from_secs(1);
+        ReconnectLoop {
+            deadline: tokio::time::Instant::now() + RECONNECT_WINDOW,
+            next_attempt: tokio::time::Instant::now() + delay,
+            delay,
+            lost: true,
+            shutdown: true,
         }
     }
 
@@ -716,6 +740,91 @@ impl ReconnectLoop {
         self.next_attempt = tokio::time::Instant::now() + self.delay;
         self
     }
+}
+
+/// One-line status for a recovered daemon connection (TS
+/// `formatDaemonReconnectBanner`, #2458): when the restarted daemon is
+/// NEWER than this window's binary, say so instead of pretending the
+/// window is updated — the user restarts the window to pick up the new
+/// version. An older or unorderable daemon version is reported without
+/// the advice (restarting this window would pick up nothing).
+struct DaemonReconnectBanner {
+    message: String,
+    kind: crate::chat::StatusKind,
+}
+
+fn format_daemon_reconnect_banner(
+    daemon_version: Option<&str>,
+    client_version: &str,
+) -> DaemonReconnectBanner {
+    let Some(daemon_version) = daemon_version.filter(|version| !version.is_empty()) else {
+        return DaemonReconnectBanner {
+            message: "Daemon reconnected".to_string(),
+            kind: crate::chat::StatusKind::Info,
+        };
+    };
+    if daemon_version == client_version {
+        return DaemonReconnectBanner {
+            message: format!("Daemon restarted (v{daemon_version}) - reconnected"),
+            kind: crate::chat::StatusKind::Info,
+        };
+    }
+    if daemon_version_is_newer(daemon_version, client_version) {
+        return DaemonReconnectBanner {
+            message: format!(
+                "Daemon restarted (v{daemon_version}), this window still runs v{client_version} - restart the window to pick up the update."
+            ),
+            kind: crate::chat::StatusKind::Warning,
+        };
+    }
+    DaemonReconnectBanner {
+        message: format!(
+            "Daemon restarted (v{daemon_version}), this window runs v{client_version}."
+        ),
+        kind: crate::chat::StatusKind::Info,
+    }
+}
+
+/// Numeric version-prefix comparison (TS `isDaemonVersionNewer`): the
+/// dot- and dash-separated numeric prefixes order the versions
+/// ("0.9.5-beta.7" orders by 0.9.5); the first segment that does not
+/// parse as a number ends the prefix. A numeric-equal release outranks
+/// the same version's prereleases ("1.2.3" > "1.2.3-beta.1"), so a
+/// daemon without a prerelease suffix outranks a client with one.
+fn daemon_version_is_newer(daemon_version: &str, client_version: &str) -> bool {
+    let daemon = parse_numeric_version_prefix(daemon_version);
+    let client = parse_numeric_version_prefix(client_version);
+    for index in 0..daemon.len().max(client.len()) {
+        let difference =
+            daemon.get(index).copied().unwrap_or(0.0) - client.get(index).copied().unwrap_or(0.0);
+        if difference != 0.0 {
+            return difference > 0.0;
+        }
+    }
+    !has_prerelease_suffix(daemon_version) && has_prerelease_suffix(client_version)
+}
+
+/// The leading numeric segments of a version string (TS
+/// `parseNumericVersionPrefix`). An unparseable segment ends the prefix
+/// (TS's `Number("")` quirks for malformed versions do not apply: a
+/// real `daemon_hello.appVersion` is a semver string).
+fn parse_numeric_version_prefix(value: &str) -> Vec<f64> {
+    let mut segments = Vec::new();
+    for segment in value.split(['.', '-']) {
+        let Some(parsed) = segment.parse::<f64>().ok() else {
+            break;
+        };
+        segments.push(parsed);
+    }
+    segments
+}
+
+/// Whether a version string continues past its numeric prefix with a
+/// prerelease suffix (TS `hasPrereleaseSuffix`).
+fn has_prerelease_suffix(version: &str) -> bool {
+    let segment_count = version.split(['.', '-']).count();
+    let prefix_length = parse_numeric_version_prefix(version).len();
+    prefix_length > 0 && prefix_length < segment_count
 }
 
 /// Run the interactive UI until the user exits (terminal) or the plan
@@ -1501,6 +1610,30 @@ async fn run_interactive_surface(
                                 session.dirty = true;
                             }
                         }
+                        // TS #2458 `reconnectAfterShutdown`: the daemon
+                        // announced its own shutdown (the `daemon_closing`
+                        // notice) and the relayed session close confirmed it
+                        // — the window reconnects through the daemon's
+                        // absence window instead of dying. The recovery
+                        // starts at the relay (the daemon's stop pass can
+                        // outlast the socket by seconds), and any
+                        // session-plane driver the direct link's death
+                        // armed stands down: it would ride the doomed
+                        // client while this driver replaces it. The state
+                        // is one-shot: a recovery already owning the pane
+                        // supersedes it.
+                        if session.daemon_shutdown_close.take().is_some() {
+                            session_reconnect = None;
+                            if reconnect.is_none() {
+                                session.note_as(
+                                    "Daemon connection lost; reconnecting…",
+                                    crate::chat::StatusKind::Warning,
+                                    &mut view,
+                                );
+                                reconnect = Some(ReconnectLoop::start_shutdown());
+                                session.dirty = true;
+                            }
+                        }
                         // A dead direct worker link arms the session
                         // re-attach driver (TS `connection_status:
                         // "reconnecting"`): the warning row rides the chat
@@ -1520,13 +1653,19 @@ async fn run_interactive_surface(
                                     );
                                     reconnect = Some(ReconnectLoop::start_lost());
                                     supervisor_lost = false;
-                                } else {
+                                } else if reconnect.is_none() {
                                     session.note_as(
                                         "Daemon connection lost; reconnecting…",
                                         crate::chat::StatusKind::Warning,
                                         &mut view,
                                     );
                                     session_reconnect = Some(SessionReconnect::start(&lost));
+                                } else {
+                                    // A full restart recovery (update or
+                                    // announced shutdown) already owns the
+                                    // pane: its fresh client reattaches, so
+                                    // the session-plane driver must not arm
+                                    // alongside it and race the restore.
                                 }
                                 session.dirty = true;
                             }
@@ -1762,6 +1901,10 @@ async fn run_interactive_surface(
                     Some(state) => state.lost,
                     None => continue,
                 };
+                let shutdown = match reconnect.as_ref() {
+                    Some(state) => state.shutdown,
+                    None => continue,
+                };
                 if expired {
                     if lost {
                         session.note(
@@ -1809,11 +1952,29 @@ async fn run_interactive_surface(
                                 session.reconnect = None;
                                 reconnect = None;
                                 if lost {
-                                    session.note_as(
-                                        "reconnected to the daemon",
-                                        crate::chat::StatusKind::Info,
-                                        &mut view,
-                                    );
+                                    if shutdown {
+                                        // TS #2458: the recovery followed an
+                                        // announced daemon shutdown, so the
+                                        // connected banner is version-honest
+                                        // — a restarted daemon NEWER than
+                                        // this window says so instead of
+                                        // pretending the window is updated.
+                                        let banner = format_daemon_reconnect_banner(
+                                            session
+                                                .client
+                                                .hello()
+                                                .get("appVersion")
+                                                .and_then(Value::as_str),
+                                            &options.version,
+                                        );
+                                        session.note_as(&banner.message, banner.kind, &mut view);
+                                    } else {
+                                        session.note_as(
+                                            "reconnected to the daemon",
+                                            crate::chat::StatusKind::Info,
+                                            &mut view,
+                                        );
+                                    }
                                 }
                                 session.dirty = true;
                             }
@@ -2807,6 +2968,67 @@ mod tests {
             session_has_children: false,
             client_settings: None,
         }
+    }
+
+    /// TS `interactive-update-relaunch.test.ts`
+    /// `formatDaemonReconnectBanner` maps daemon versions to the honest
+    /// banner: missing -> the plain reconnected status; a matching or older
+    /// daemon reports the version without advice; a NEWER daemon (including
+    /// a numeric-equal release over the client's prerelease) tells the
+    /// user to restart the window.
+    #[test]
+    fn daemon_reconnect_banner_maps_missing_matching_newer_and_older() {
+        let case = |daemon_version: Option<&str>, client_version: &str| {
+            let banner = format_daemon_reconnect_banner(daemon_version, client_version);
+            (banner.message, banner.kind)
+        };
+        let info = crate::chat::StatusKind::Info;
+        let warning = crate::chat::StatusKind::Warning;
+        assert_eq!(
+            case(None, "1.2.3"),
+            ("Daemon reconnected".to_string(), info)
+        );
+        // An empty hello version is the TS falsy case: same as missing.
+        assert_eq!(
+            case(Some(""), "1.2.3"),
+            ("Daemon reconnected".to_string(), info)
+        );
+        assert_eq!(
+            case(Some("1.2.3"), "1.2.3"),
+            ("Daemon restarted (v1.2.3) - reconnected".to_string(), info)
+        );
+        assert_eq!(
+            case(Some("2.0.0"), "1.2.3"),
+            (
+                "Daemon restarted (v2.0.0), this window still runs v1.2.3 - restart the window to pick up the update.".to_string(),
+                warning
+            )
+        );
+        // Semver orders a release ahead of its own prereleases: the
+        // numeric-equal daemon outranks the client's prerelease.
+        assert_eq!(
+            case(Some("1.2.3"), "1.2.3-beta.1"),
+            (
+                "Daemon restarted (v1.2.3), this window still runs v1.2.3-beta.1 - restart the window to pick up the update.".to_string(),
+                warning
+            )
+        );
+        assert_eq!(
+            case(Some("1.2.3-beta.1"), "1.2.3"),
+            (
+                "Daemon restarted (v1.2.3-beta.1), this window runs v1.2.3.".to_string(),
+                info
+            )
+        );
+        // The prefix comparison is numeric, not lexicographic: 0.10.0 is
+        // newer than 0.9.5.
+        assert_eq!(
+            case(Some("0.10.0"), "0.9.5"),
+            (
+                "Daemon restarted (v0.10.0), this window still runs v0.9.5 - restart the window to pick up the update.".to_string(),
+                warning
+            )
+        );
     }
 
     #[test]

@@ -505,6 +505,17 @@ pub(crate) struct SessionUi {
     /// The §10 reattach contract: set when a `daemon_closing` update frame
     /// arrived; the interactive loop drives the reconnect from it.
     pub(crate) reconnect: Option<crate::daemon_client::DaemonClosingUpdate>,
+    /// The reason a `daemon_closing` frame last announced (TS
+    /// `daemonClosingNotice`): the announcement itself is silent, and the
+    /// stored reason separates the relayed session close of a daemon
+    /// going down (reason "shutdown") from a bare session stop. A fresh
+    /// attach clears it (the connection is re-established).
+    pub(crate) daemon_closing_reason: Option<String>,
+    /// The daemon announced its own shutdown (the notice above) and the
+    /// relayed session close confirmed it (TS #2458
+    /// `daemonShutdownClose`): the interactive loop arms the reconnect
+    /// driver from it instead of waiting for the doomed socket to close.
+    pub(crate) daemon_shutdown_close: Option<String>,
     /// The session whose direct worker link just died; the interactive
     /// loop arms the re-attach driver from it (TS `connection_status:
     /// "reconnecting"`).
@@ -755,6 +766,8 @@ impl SessionUi {
             scroll_adoption_emitted: false,
             exit_reason: "daemon_closed",
             reconnect: None,
+            daemon_closing_reason: None,
+            daemon_shutdown_close: None,
             transport_lost: None,
             pending_rebind: None,
             reconnection_failed: None,
@@ -984,6 +997,11 @@ impl SessionUi {
             .and_then(Value::as_str)
             .filter(|file| !file.is_empty())
             .map(str::to_string);
+        // The connection is (re)established: a `daemon_closing` notice it
+        // carried is stale (TS clears `daemonClosingNotice` on restore), so
+        // a later session close can never read as the old daemon's
+        // shutdown.
+        self.daemon_closing_reason = None;
         // The subagent summary follows the fresh session's family: the old
         // roster belongs to the previous session, and the focus returns to
         // the editor (TS `resetSubagentSummary` on rebind).
@@ -8151,9 +8169,26 @@ impl SessionUi {
                 reason,
             } => {
                 if active_session_id == self.active_session_id {
+                    // TS #2458 `daemonShutdownClose`: the daemon announced
+                    // its own shutdown (`daemon_closing`) and this relayed
+                    // close is its stop pass — the daemon is going away,
+                    // not the session. The window recovers when the
+                    // daemon comes back (the reconnect state lands in the
+                    // loop); no "session closed" row renders. The notice,
+                    // not the close reason, separates this from a bare
+                    // session stop: an orderly shutdown's workers relay
+                    // "shutdown" (or "killed"), and a stop without the
+                    // notice keeps the row.
+                    let daemon_shutdown_close = self.daemon_closing_reason.as_deref()
+                        == Some("shutdown")
+                        && (reason == "shutdown" || reason == "killed");
                     self.turn_active = false;
                     view.working = None;
-                    self.note(&format!("session closed ({reason})"), view);
+                    if daemon_shutdown_close {
+                        self.daemon_shutdown_close = Some(reason);
+                    } else {
+                        self.note(&format!("session closed ({reason})"), view);
+                    }
                 }
             }
             DaemonClientEvent::DirectLinkLost { active_session_id } => {
@@ -8167,6 +8202,13 @@ impl SessionUi {
                 }
             }
             DaemonClientEvent::DaemonClosing { reason, update } => {
+                // TS `daemonClosingNotice`: the announcement itself is
+                // silent — the reconnect state lands when the close is
+                // observed (the relayed session close below, or the
+                // socket death). The stored reason separates a daemon
+                // going down ("shutdown") from a bare session stop when
+                // the relayed close arrives; a fresh attach clears it.
+                self.daemon_closing_reason = Some(reason);
                 match update {
                     Some(update) => {
                         // Spec §10: reattach is the default end state. The
@@ -8199,9 +8241,11 @@ impl SessionUi {
                         });
                         self.reconnect = Some(update);
                     }
-                    None => {
-                        self.note(&format!("the daemon is shutting down ({reason})"), view);
-                    }
+                    // The non-update close (`prime-agent shutdown`, a
+                    // daemon crash mid-close): no banner — the notice
+                    // above carries the reason, and the reconnect state
+                    // lands with the relayed close or the socket death.
+                    None => {}
                 }
             }
             // The roster push keeps the subagent summary counts live (TS
