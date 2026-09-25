@@ -48,7 +48,11 @@ impl Inner {
             let snapshot_suspect = lock(&self.guarded).pending_restore;
             self.kill_child_to_idle();
             if snapshot_suspect {
-                lock(&self.guarded).pending_restore = false;
+                // Same declared-culprit ruling as the repair-restore failure:
+                // the dispose flush should replace the suspect payload.
+                let mut g = lock(&self.guarded);
+                g.pending_restore = false;
+                g.restore_incomplete = false;
             }
             return;
         }
@@ -111,8 +115,11 @@ impl Inner {
             }
             self.append_diagnostic("protocol repair restore failed; discarding replacement kernel");
             self.kill_child_to_idle();
-            // The snapshot is the declared culprit; the lazy path must not retry it.
+            // The snapshot is the declared culprit; the lazy path must not
+            // retry it, and the dispose flush should replace the corrupt
+            // payload rather than preserve it.
             lock(&self.guarded).pending_restore = false;
+            lock(&self.guarded).restore_incomplete = false;
             return;
         }
 

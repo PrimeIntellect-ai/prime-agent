@@ -114,16 +114,40 @@ impl Inner {
                 }),
             )
             .await;
+        if !protocol_repair {
+            // Suppress the debounced auto-snapshot the following bootstrap
+            // schedules until the skip arm (installed after that bootstrap) or
+            // a user cell takes over. The awaited enqueue settled the restore
+            // itself, so the recorded count already includes it.
+            let mut g = lock(&self.guarded);
+            g.restore_boot_hold = Some(g.completed_executions);
+        }
         match result {
             Ok(r) if r.result.status == ExecuteStatus::Ok => {
-                lock(&self.guarded).pending_restore = false;
-                let Some(fields) = &r.done_fields else {
-                    self.append_diagnostic("state restore failed: no done fields");
-                    return None;
+                let failed = match &r.done_fields {
+                    Some(fields) => as_reason_array(fields, "failed"),
+                    None => {
+                        self.append_diagnostic("state restore failed: no done fields");
+                        {
+                            let mut g = lock(&self.guarded);
+                            g.pending_restore = false;
+                            g.restore_incomplete = true;
+                        }
+                        return None;
+                    }
                 };
+                // A partial restore (some names failed to revive) still
+                // leaves the on-disk payload the fuller copy: the dispose
+                // flush must not overwrite it either.
+                let incomplete = !failed.is_empty();
+                {
+                    let mut g = lock(&self.guarded);
+                    g.pending_restore = false;
+                    g.restore_incomplete = incomplete;
+                }
                 Some(RestoreResult {
-                    restored: as_string_array(fields, "restored"),
-                    failed: as_reason_array(fields, "failed"),
+                    restored: as_string_array(r.done_fields.as_ref().expect("checked"), "restored"),
+                    failed,
                     path: cfg.path,
                 })
             }
@@ -140,18 +164,33 @@ impl Inner {
                 // The namespace never got the saved state, so the on-disk
                 // payload must stay the fresher copy.
                 if !protocol_repair {
-                    lock(&self.guarded).pending_restore = true;
+                    let mut g = lock(&self.guarded);
+                    g.pending_restore = true;
+                    g.restore_incomplete = true;
                 }
                 None
             }
             Err(error) => {
                 self.append_diagnostic(&format!("state restore error: {error:#}"));
                 if !protocol_repair {
-                    lock(&self.guarded).pending_restore = true;
+                    let mut g = lock(&self.guarded);
+                    g.pending_restore = true;
+                    g.restore_incomplete = true;
                 }
                 None
             }
         }
+    }
+
+    /// The boot that follows a restore owns the debounced window: the restore
+    /// and its bootstrap settle without a user cell, and the skip arm lands
+    /// only after the bootstrap (production order). Suppress the debounce
+    /// until a third execution settles.
+    fn debounced_snapshot_boot_hold(&self) -> bool {
+        let g = lock(&self.guarded);
+        // The +1 is the bootstrap's own settle; any user cell is the +2.
+        g.restore_boot_hold
+            .is_some_and(|held| g.completed_executions <= held + 1)
     }
 
     /// Arm the one-shot post-restore snapshot skip: the bootstrap-scheduled
@@ -223,6 +262,9 @@ impl Inner {
                 if inner.consume_restored_snapshot_skip() {
                     return;
                 }
+                if inner.debounced_snapshot_boot_hold() {
+                    return;
+                }
                 inner
                     .capture_snapshot(Some(SNAPSHOT_EXECUTION_TIMEOUT_MS), false)
                     .await;
@@ -265,9 +307,11 @@ impl Inner {
         if self.options.snapshot.is_none() || !self.is_running_state() {
             return;
         }
-        // A kernel that never restored the saved namespace must not overwrite
-        // it: the on-disk snapshot is strictly fresher than this namespace.
-        if lock(&self.guarded).pending_restore {
+        // A kernel that never restored the saved namespace — or restored only
+        // part of it, or whose failed restore armed the reprovision retry —
+        // must not overwrite it: the on-disk snapshot is strictly fresher
+        // than this namespace.
+        if lock(&self.guarded).pending_restore || lock(&self.guarded).restore_incomplete {
             return;
         }
         // Block new external executions so none can splice ahead of the final

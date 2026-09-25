@@ -231,6 +231,17 @@ struct Guarded {
     /// Settled-execution counter: the post-restore skip arm and the debounced
     /// snapshot compare it to spot a real cell in between.
     completed_executions: u64,
+    /// A restore attempt failed outright or revived only part of the saved
+    /// namespace: the on-disk payload stays the fresher copy, so the dispose
+    /// flush must not overwrite it. Unlike `pending_restore`, the reprovision
+    /// retry does not clear it — only a fully-successful restore does.
+    restore_incomplete: bool,
+    /// The restore settle's execution count: the debounced auto-snapshot the
+    /// bootstrap schedules stays suppressed until a third execution (any user
+    /// cell) settles, so a zero/near-zero debounce cannot fire before the
+    /// post-restore skip arm is installed (production order: bootstrap, then
+    /// the arm).
+    restore_boot_hold: Option<u64>,
     /// Tri-state manifest stat of the last non-repair restore ATTEMPT:
     /// `None` = no attempt yet, `Some(None)` = manifest was missing at it.
     restored_manifest_stat: Option<Option<ManifestStat>>,
@@ -348,6 +359,8 @@ impl ReplKernelManager {
                 pending_rebootstrap: false,
                 pending_restore: false,
                 completed_executions: 0,
+                restore_incomplete: false,
+                restore_boot_hold: None,
                 restored_manifest_stat: None,
                 restored_namespace_skip: None,
                 pending_background_output: String::new(),

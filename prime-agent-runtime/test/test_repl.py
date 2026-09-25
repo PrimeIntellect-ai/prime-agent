@@ -791,6 +791,40 @@ class ReplTest(unittest.TestCase):
         self._snapshot_restore("ct", code, self.enterContext(tempfile.TemporaryDirectory()))
         self.assertEqual(one(self.repl.execute("ct4", "G = 2\n(callbacks[0](), handlers['read'](), pair[0]())"), "result")["text"], "(2, 2, 2)")
 
+    def test_restore_revives_functions_inside_sets_pr2471(self):
+        code = "G = 1\ndef reader():\n    return G\ncallbacks = {reader}\nfrozen = frozenset({reader})"
+        self._snapshot_restore("st", code, self.enterContext(tempfile.TemporaryDirectory()))
+        self.assertEqual(
+            one(
+                self.repl.execute("st4", "G = 2\n(next(iter(callbacks))(), next(iter(frozen))())"),
+                "result",
+            )["text"],
+            "(2, 2)",
+        )
+
+    def test_restore_rebuilt_partial_revives_function_attributes_pr2471(self):
+        code = (
+            "import functools\nG = 1\ndef helper():\n    return G\ndef apply(fn):\n    return fn()\n"
+            "wrapped = functools.partial(apply, helper)\nwrapped.callback = helper"
+        )
+        self._snapshot_restore("pc", code, self.enterContext(tempfile.TemporaryDirectory()))
+        self.assertEqual(one(self.repl.execute("pc4", "G = 2\nwrapped.callback()"), "result")["text"], "2")
+
+    def test_snapshot_skips_lone_surrogate_names_pr2478(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "kernel-state.dill")
+            manifest_path = os.path.join(tmp, "kernel-state.json")
+            # A lone surrogate cannot ride a source literal (compile rejects
+            # it); runtime-constructed keys are the reachable path.
+            self.repl.execute("sg1", "globals()[chr(0xD800)] = 1\nkeep = 2")
+            self.repl.send({"type": "snapshot", "id": "sg2", "path": path, "manifest_path": manifest_path})
+            done = one(self.repl.until_done("sg2"), "done")
+            self.assertEqual(done["status"], "ok")
+            self.assertEqual(done["saved"], ["keep"])
+            self.assertEqual(len(done["skipped"]), 1)
+            self.assertEqual(done["skipped"][0]["name"], "\ud800")
+            self.assertIn("UnicodeEncodeError", done["skipped"][0]["reason"])
+
     def test_snapshot_prune_oversized(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "kernel-state.dill")
@@ -2693,6 +2727,33 @@ class SnapshotPairConsistencyTest(unittest.TestCase):
             self.assertEqual(fh.read(len(_SNAPSHOT_MAGIC)), _SNAPSHOT_MAGIC)
             with self.assertRaises(Exception):
                 dill.load(fh)
+
+
+class ErrorEventCapTest(unittest.TestCase):
+    """The error event's traceback must fit one protocol frame in aggregate."""
+
+    def setUp(self):
+        sys.path.insert(0, SRC)
+        self.addCleanup(sys.path.remove, SRC)
+
+    def test_cap_traceback_lines_keeps_newest_under_the_aggregate_cap(self):
+        from rlm.repl import _RESULT_TEXT_CAP, _cap_traceback_lines
+
+        lines = [f"line-{i}: " + "x" * 900 for i in range(2_000)]
+        capped = _cap_traceback_lines(lines)
+        marker_overhead = len(capped[0])
+        self.assertLessEqual(
+            sum(len(line) for line in capped),
+            _RESULT_TEXT_CAP + marker_overhead + 900,
+            "the aggregate (plus the marker and the always-kept newest entry) fits the frame cap",
+        )
+        self.assertIn("truncated", capped[0])
+        self.assertEqual(capped[-1], lines[-1], "the newest entry names the raised exception")
+        self.assertEqual(
+            _cap_traceback_lines(lines[:10]),
+            lines[:10],
+            "an under-cap traceback passes through unchanged",
+        )
 
 
 class OwnerWatchdogTest(unittest.TestCase):

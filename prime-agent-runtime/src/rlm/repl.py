@@ -520,6 +520,34 @@ def _cap_text(text: str) -> str:
     return text
 
 
+def _cap_traceback_lines(lines: list[str]) -> list[str]:
+    """Bound the aggregate, not just each entry: an exception chain can carry
+    thousands of entries, and per-entry caps alone would still let one error
+    event exceed the host's protocol line limit. Keep the newest entries — the
+    outermost exception carries the actionable failure — and lead with a
+    truncation marker."""
+    total = sum(len(line) for line in lines)
+    if total <= _RESULT_TEXT_CAP:
+        return lines
+    kept: list[str] = []
+    remaining = _RESULT_TEXT_CAP
+    for line in reversed(lines):
+        if len(line) > remaining:
+            if not kept:
+                # Never drop the newest entry: it names the raised exception.
+                kept.append(line)
+            break
+        kept.append(line)
+        remaining -= len(line)
+    kept.reverse()
+    kept.insert(
+        0,
+        f"[... traceback truncated: kept the newest {len(kept)} of {len(lines)} entries "
+        f"to fit {_RESULT_TEXT_CAP} characters ...]\n",
+    )
+    return kept
+
+
 def _error_event(cell_id: str, exc: BaseException) -> dict[str, Any]:
     # No cell frame (e.g. SyntaxError): exception-only keeps filename, source, and caret.
     te = traceback.TracebackException.from_exception(exc)
@@ -534,7 +562,7 @@ def _error_event(cell_id: str, exc: BaseException) -> dict[str, Any]:
         "id": cell_id,
         "ename": type(exc).__name__,
         "evalue": _cap_text(_safe_str(exc)),
-        "traceback": [_cap_text(line) for line in lines],
+        "traceback": _cap_traceback_lines([_cap_text(line) for line in lines]),
     }
 
 
@@ -779,7 +807,14 @@ def _snapshot_state(
                         # A background thread deleted the name after the key listing.
                         skipped.append({"name": name, "reason": "deleted during snapshot"})
                         continue
-                    encoded = name.encode("utf-8")
+                    try:
+                        encoded = name.encode("utf-8")
+                    except UnicodeEncodeError as err:
+                        # A lone-surrogate name (e.g. "\ud800") cannot ride the
+                        # v2 record header; skip it like any other unserializable
+                        # name instead of failing the whole snapshot.
+                        skipped.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
+                        continue
                     # Record header: 4-byte name length + 8-byte blob length, plus the name itself.
                     budget = max_bytes - total - 12 - len(encoded)
                     # Prune mode measures at the full per-variable cap: only that cap decides
@@ -904,24 +939,41 @@ def _revive_with_live_globals(
         if not changed:
             return memo.setdefault(id(value), value)
         rebuilt_partial = functools.partial(rebuilt, *args, **keywords)
-        rebuilt_partial.__dict__.update(value.__dict__)
+        # Attributes can hold __main__ callables with frozen globals; revive
+        # them like function attributes below.
+        rebuilt_partial.__dict__.update({key: revive(attr) for key, attr in value.__dict__.items()})
         return memo.setdefault(id(value), rebuilt_partial)
     atoms = (int, float, str, bytes, bool, type(None))
     # dill loads __main__.__dict__ by reference, so a saved globals() IS the live ns: never walk it.
     if value is ns:
         return value
-    if isinstance(value, (list, dict)):
+    if isinstance(value, (list, dict, set)):
         # Memoized before recursing and revived in place: cycles and identity come for free.
         # Skipping atoms keeps the walk over million-element containers near dill.loads cost.
         memo[id(value)] = value
-        for key, item in enumerate(value) if isinstance(value, list) else value.items():
-            revived = item if type(item) in atoms else revive(item)
-            if revived is not item:
-                value[key] = revived
+        if isinstance(value, set):
+            # Iterate a snapshot: discard+add during iteration would skip members.
+            for item in list(value):
+                revived = item if type(item) in atoms else revive(item)
+                if revived is not item:
+                    value.discard(item)
+                    value.add(revived)
+        else:
+            for key, item in enumerate(value) if isinstance(value, list) else value.items():
+                revived = item if type(item) in atoms else revive(item)
+                if revived is not item:
+                    value[key] = revived
         return value
     if type(value) is tuple:
         items = tuple(item if type(item) in atoms else revive(item) for item in value)
         if all(new is old for new, old in zip(items, value)):
+            items = value
+        return memo.setdefault(id(value), items)
+    if type(value) is frozenset:
+        # Immutable: rebuild when any member revived (identity equality makes
+        # the comparison exact — a rebuilt function never equals the original).
+        items = frozenset(item if type(item) in atoms else revive(item) for item in value)
+        if items == value:
             items = value
         return memo.setdefault(id(value), items)
     if not isinstance(value, types.FunctionType) or value.__module__ != "__main__":

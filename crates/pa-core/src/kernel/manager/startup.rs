@@ -310,14 +310,22 @@ impl Inner {
                                 );
                                 continue;
                             }
-                            while let Some(rel) = buffered.iter().position(|&b| b == b'\n') {
-                                let line: Vec<u8> = buffered.drain(..=rel).collect();
+                            // Consume by offset and drain the prefix once per
+                            // read: per-frame drains would shift the tail each
+                            // iteration (quadratic copying for many short
+                            // frames in one chunk).
+                            let mut consumed = 0;
+                            while let Some(rel) =
+                                buffered[consumed..].iter().position(|&b| b == b'\n')
+                            {
+                                let end = consumed + rel;
                                 // An invalid-UTF-8 stream ends the reader, like
                                 // read_line's decode error did before.
-                                let Ok(trimmed) = std::str::from_utf8(&line[..line.len() - 1])
+                                let Ok(trimmed) = std::str::from_utf8(&buffered[consumed..end])
                                 else {
                                     return;
                                 };
+                                consumed = end + 1;
                                 if trimmed.trim().is_empty() {
                                     continue;
                                 }
@@ -332,6 +340,7 @@ impl Inner {
                                     }
                                 }
                             }
+                            buffered.drain(..consumed);
                         }
                     }
                 }
