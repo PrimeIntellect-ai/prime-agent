@@ -356,7 +356,7 @@ mod tests {
                 status: 200,
                 body: serde_json::json!({
                     "token": "copilot-access",
-                    "expires_at": 4_000_000_000,
+                    "expires_at": 4_000_000_000i64,
                 })
                 .to_string(),
             },

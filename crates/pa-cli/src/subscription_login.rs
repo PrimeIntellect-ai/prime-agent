@@ -70,13 +70,14 @@ impl OAuthLoginUi for PanelSubscriptionLoginUi {
     ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
         let panel = self.panel.clone();
         let message = prompt.message.clone();
+        let allow_empty = prompt.allow_empty;
         let message = match &prompt.placeholder {
             // TS `showPrompt` renders the placeholder as an example.
             Some(placeholder) => format!("{message} (e.g. {placeholder})"),
             None => message,
         };
         Box::pin(async move {
-            if prompt.allow_empty {
+            if allow_empty {
                 // TS `OAuthPrompt.allowEmpty`: a blank submit is a valid
                 // answer (the Copilot domain prompt's "blank for
                 // github.com").
