@@ -13,10 +13,12 @@
 //! the queue is empty, so delivered messages make it disappear.
 //!
 //! The condensation is a SANCTIONED DIVERGENCE from TS (operator request,
-//! Kevin 2026-09-24, queue-condensed-display): TS renders every internal
-//! prompt as its own preview row too; Rust renders one summed-count row -
-//! "x agent messages, heartbeats, and other internal prompts queued" -
-//! so the visual queue prioritizes human-inserted prompts. The classifier
+//! Kevin 2026-09-24, queue-condensed-display; per-origin counts refined
+//! 2026-09-25): TS renders every internal prompt as its own preview row
+//! too; Rust renders one counted row naming each origin with its own
+//! plural-correct count - "1 agent message, 1 heartbeat, and 1 other
+//! internal prompt queued" - so the visual queue prioritizes
+//! human-inserted prompts. The classifier
 //! is TS `isLabeledQueuedPreview` on the preview string (the wire carries
 //! no provenance), so a human-typed prompt that begins with one of the
 //! internal labels condenses too - it still delivers, and the browse
@@ -41,39 +43,109 @@ pub const FOLLOW_UP_LABEL: &str = "Follow-up";
 /// pump selected while it is still on its way into the conversation.
 pub const STARTING_LABEL: &str = "Starting";
 
-/// TS `HEARTBEAT_PROMPT_PREVIEW_LABEL` & co.: internal prompts that queue
-/// with their own visible label render as-is (no lane label prepended).
-const LABELED_PREVIEW_PREFIXES: [&str; 4] = [
-    "Heartbeat prompt: ",
-    "Goal context: ",
-    "Agent message received: ",
-    "Background command finished: ",
-];
-
-/// TS `isLabeledQueuedPreview`: the internal prompt labels never get the
-/// lane label prepended (they carry their own).
-fn is_labeled_queued_preview(message: &str) -> bool {
-    LABELED_PREVIEW_PREFIXES
-        .iter()
-        .any(|prefix| message.starts_with(prefix))
+/// The origin of a queued internal prompt, classified by its preview
+/// label (the wire carries no provenance - the label is the classifier):
+/// what the condensed row counts the prompt as.
+#[derive(Debug, Clone, Copy)]
+enum InternalPromptOrigin {
+    /// An `Agent message received: ` preview.
+    AgentMessage,
+    /// A `Heartbeat prompt: ` preview.
+    Heartbeat,
+    /// Every other internal prompt: `Goal context: ` and
+    /// `Background command finished: ` previews.
+    Other,
 }
 
-/// The summed count of the queued internal prompts across both lanes, or
+/// TS `HEARTBEAT_PROMPT_PREVIEW_LABEL` & co.: internal prompts that queue
+/// with their own visible label render as-is (no lane label prepended),
+/// each paired with the origin the condensed row counts it as.
+const LABELED_PREVIEW_PREFIXES: [(&str, InternalPromptOrigin); 4] = [
+    ("Heartbeat prompt: ", InternalPromptOrigin::Heartbeat),
+    ("Goal context: ", InternalPromptOrigin::Other),
+    (
+        "Agent message received: ",
+        InternalPromptOrigin::AgentMessage,
+    ),
+    ("Background command finished: ", InternalPromptOrigin::Other),
+];
+
+/// TS `isLabeledQueuedPreview`: the queued prompt's origin when it
+/// carries an internal label, `None` when it is human-typed.
+fn internal_prompt_origin(message: &str) -> Option<InternalPromptOrigin> {
+    LABELED_PREVIEW_PREFIXES
+        .iter()
+        .find(|(prefix, _)| message.starts_with(prefix))
+        .map(|(_, origin)| *origin)
+}
+
+/// The queued internal prompts' counts by origin across both lanes, or
 /// `None` when every queued message is human-typed.
-fn condensed_count(queue: &QueuedMessages) -> Option<usize> {
-    let count = queue
+#[derive(Debug, Default)]
+struct CondensedCounts {
+    agent_messages: usize,
+    heartbeats: usize,
+    other: usize,
+}
+
+impl CondensedCounts {
+    /// The counted row's text: each origin with queued prompts and its
+    /// count, plural-correct (only a count of one reads singular - a
+    /// listed `0` would read plural too), in the fixed agent-message,
+    /// heartbeat, other order, joined into one concise line. A
+    /// zero-count origin never lists.
+    fn row_text(&self) -> String {
+        let mut parts = [
+            (self.agent_messages, InternalPromptOrigin::AgentMessage),
+            (self.heartbeats, InternalPromptOrigin::Heartbeat),
+            (self.other, InternalPromptOrigin::Other),
+        ]
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, origin)| {
+            let name = match origin {
+                InternalPromptOrigin::AgentMessage => "agent message",
+                InternalPromptOrigin::Heartbeat => "heartbeat",
+                InternalPromptOrigin::Other => "other internal prompt",
+            };
+            let plural = if count == 1 { "" } else { "s" };
+            format!("{count} {name}{plural}")
+        })
+        .collect::<Vec<_>>();
+        let last = parts.len() - 1;
+        if last > 0 {
+            parts[last] = format!("and {}", parts[last]);
+        }
+        // Two origins read "1 heartbeat and 1 other internal prompt" - the
+        // comma-list phrasing starts at three ("A, B, and C").
+        let list_separator = if parts.len() == 2 { " " } else { ", " };
+        format!("{} queued", parts.join(list_separator))
+    }
+}
+
+/// Count every queued internal prompt by origin across both lanes, or
+/// `None` when every queued message is human-typed.
+fn condensed_counts(queue: &QueuedMessages) -> Option<CondensedCounts> {
+    let mut counts = CondensedCounts::default();
+    for origin in queue
         .steering
         .iter()
         .chain(queue.follow_ups.iter())
-        .filter(|message| is_labeled_queued_preview(message))
-        .count();
-    (count > 0).then_some(count)
+        .filter_map(|message| internal_prompt_origin(message))
+    {
+        match origin {
+            InternalPromptOrigin::AgentMessage => counts.agent_messages += 1,
+            InternalPromptOrigin::Heartbeat => counts.heartbeats += 1,
+            InternalPromptOrigin::Other => counts.other += 1,
+        }
+    }
+    (counts.agent_messages + counts.heartbeats + counts.other > 0).then_some(counts)
 }
 
 /// TS `formatQueuedMessagePreview`: the lane label plus the message, or
 /// the message itself when it carries an internal label.
 pub fn format_queued_message_preview(message: &str, label: &str) -> String {
-    if is_labeled_queued_preview(message) {
+    if internal_prompt_origin(message).is_some() {
         message.to_string()
     } else {
         format!("{label}: {message}")
@@ -169,19 +241,19 @@ pub fn render_queue(
     for message in queue
         .steering
         .iter()
-        .filter(|message| !is_labeled_queued_preview(message))
+        .filter(|message| internal_prompt_origin(message).is_none())
     {
         rows.push(preview_row(theme, STEERING_LABEL, message, width));
     }
     for message in queue
         .follow_ups
         .iter()
-        .filter(|message| !is_labeled_queued_preview(message))
+        .filter(|message| internal_prompt_origin(message).is_none())
     {
         rows.push(preview_row(theme, FOLLOW_UP_LABEL, message, width));
     }
-    if let Some(count) = condensed_count(queue) {
-        rows.push(condensed_row(theme, count, width));
+    if let Some(counts) = condensed_counts(queue) {
+        rows.push(condensed_row(theme, &counts, width));
     }
     if queue.is_empty() {
         // A starting row alone carries no parked messages to browse.
@@ -248,18 +320,14 @@ fn preview_row(theme: &Theme, label: &str, message: &str, width: usize) -> Line 
 }
 
 /// The condensed internal-prompt row (the sanctioned divergence, see the
-/// module docs): one dim line carrying the summed count of every queued
-/// internal prompt - agent messages, heartbeats, goal contexts, and
-/// background-command notices - instead of one preview row each, so the
-/// strip's per-message rows stay about the human prompts. Truncated and
-/// padded like a preview row.
-fn condensed_row(theme: &Theme, count: usize, width: usize) -> Line {
+/// module docs): one dim line carrying the queued internal prompts'
+/// counts by origin instead of one preview row each, so the strip's
+/// per-message rows stay about the human prompts. Truncated and padded
+/// like a preview row.
+fn condensed_row(theme: &Theme, counts: &CondensedCounts, width: usize) -> Line {
     let line: crate::Line = vec![
         crate::Span::raw(" ".repeat(width.min(1))),
-        crate::Span::styled(
-            format!("{count} agent messages, heartbeats, and other internal prompts queued"),
-            theme.fg_style(ThemeColor::Dim),
-        ),
+        crate::Span::styled(counts.row_text(), theme.fg_style(ThemeColor::Dim)),
     ];
     pad_line(truncate_line(&line, width.saturating_sub(1), "..."), width)
 }
@@ -640,8 +708,8 @@ mod tests {
         let text: String = rows[1].iter().map(|span| span.content.as_str()).collect();
         assert_eq!(
             text.trim(),
-            "3 agent messages, heartbeats, and other internal prompts queued",
-            "one line sums every queued internal prompt across both lanes"
+            "1 agent message, 1 heartbeat, and 1 other internal prompt queued",
+            "one line counts each origin across both lanes, each singular"
         );
         let joined = rows
             .iter()
@@ -691,8 +759,8 @@ mod tests {
         assert_eq!(texts[2].trim(), "Follow-up: then summarize");
         assert_eq!(
             texts[3].trim(),
-            "2 agent messages, heartbeats, and other internal prompts queued",
-            "the count sums the internal prompts only"
+            "1 heartbeat and 1 other internal prompt queued",
+            "the counts name the queued origins only - no agent message queued"
         );
         assert!(
             texts[4]
@@ -700,6 +768,43 @@ mod tests {
                 .starts_with("\u{2570}\u{2500} alt+up to browse"),
             "the hint stays the strip's last row"
         );
+    }
+
+    #[test]
+    fn condensed_row_counts_each_origin_with_correct_plurals() {
+        let queue = QueuedMessages {
+            steering: vec![
+                "Agent message received: one".to_string(),
+                "Agent message received: two".to_string(),
+                "Agent message received: three".to_string(),
+                "Heartbeat prompt: nudge".to_string(),
+                "Goal context: milestone".to_string(),
+                "Goal context: next".to_string(),
+            ],
+            follow_ups: vec!["Heartbeat prompt: again".to_string()],
+            starting: None,
+        };
+        let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        assert_eq!(rows.len(), 3);
+        let text: String = rows[1].iter().map(|span| span.content.as_str()).collect();
+        assert_eq!(
+            text.trim(),
+            "3 agent messages, 2 heartbeats, and 2 other internal prompts queued",
+            "each origin's count sums across both lanes and pluralizes"
+        );
+    }
+
+    #[test]
+    fn one_queued_agent_message_reads_singular() {
+        let queue = QueuedMessages {
+            steering: vec!["Agent message received: hi".to_string()],
+            follow_ups: Vec::new(),
+            starting: None,
+        };
+        let rows = render_queue(&theme(), &queue, "alt+up", 80);
+        assert_eq!(rows.len(), 3);
+        let text: String = rows[1].iter().map(|span| span.content.as_str()).collect();
+        assert_eq!(text.trim(), "1 agent message queued");
     }
 
     #[test]
