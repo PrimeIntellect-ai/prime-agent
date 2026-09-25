@@ -1,0 +1,1 @@
+- Fixed ChatGPT OAuth model discovery hiding GPT-6 Sol and Luna by advertising Codex CLI 0.157.0.
