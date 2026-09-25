@@ -69,8 +69,7 @@ impl UpdateTarget {
 
     fn includes_extensions(&self) -> bool {
         match self {
-            UpdateTarget::Extensions { .. } => true,
-            UpdateTarget::All => true,
+            UpdateTarget::Extensions { .. } | UpdateTarget::All => true,
             UpdateTarget::SelfOnly => false,
         }
     }
@@ -95,9 +94,8 @@ struct PackageCommandOptions {
 
 fn parse_package_command(args: &[String]) -> Option<PackageCommandOptions> {
     let command = match args.first().map(String::as_str) {
-        Some("uninstall") => Some(PackageCommand::Remove),
+        Some("uninstall" | "remove") => Some(PackageCommand::Remove),
         Some("install") => Some(PackageCommand::Install),
-        Some("remove") => Some(PackageCommand::Remove),
         Some("update") => Some(PackageCommand::Update),
         Some("list") => Some(PackageCommand::List),
         _ => None,

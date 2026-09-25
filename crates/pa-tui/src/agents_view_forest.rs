@@ -973,9 +973,9 @@ fn compare_base(a: &BaseRow, b: &BaseRow, anchor: Option<&str>) -> std::cmp::Ord
             .filter(|value| !value.is_empty())
     }
     let timestamp = |summary: &Value, field: &str| {
-        get_str(summary, field)
-            .map(|value| crate::agents_view_state::timestamp_ms(Some(value)))
-            .unwrap_or(0)
+        get_str(summary, field).map_or(0, |value| {
+            crate::agents_view_state::timestamp_ms(Some(value))
+        })
     };
     // Search hits rank relevance first: the score decides before
     // anything else, retained ancestors (unscored) sink below every hit,
@@ -1097,15 +1097,15 @@ pub fn resolve_selection(
     identity: Option<&str>,
     key: Option<&SelectionKey>,
 ) -> usize {
-    if rows.is_empty() {
-        return 0;
-    }
     fn find_selectable<F: Fn(&AgentsViewRow) -> bool>(
         rows: &[AgentsViewRow],
         predicate: F,
     ) -> Option<usize> {
         rows.iter()
             .position(|row| row.selectable() && predicate(row))
+    }
+    if rows.is_empty() {
+        return 0;
     }
     let selected_summary_row = identity.is_some_and(|id| id.starts_with("subagents:"));
     let preserves_kind =

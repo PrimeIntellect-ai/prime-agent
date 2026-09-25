@@ -10,6 +10,7 @@
 pub mod agent_messaging;
 pub mod auto_refine_trigger;
 pub mod auto_retry;
+pub mod auxiliary_model;
 pub mod branch_summarization;
 pub mod compact_session;
 pub mod compaction;
@@ -130,6 +131,12 @@ pub struct AgentSession {
     /// compaction path, `/compact` included); defaults until the engine
     /// wiring resolves them.
     compaction: compaction::CompactionSettings,
+    /// The auxiliary-model routing context (TS `_resolveAuxiliaryModel`'s
+    /// settings/registry access): compaction summaries resolve their model
+    /// through the `auxiliaryModel` setting, falling back to the session
+    /// model. `None` keeps every summarizer on the session model
+    /// (verification harnesses building the session directly).
+    auxiliary_model: Option<auxiliary_model::AuxiliaryModelContext>,
     /// Whether the session may run auto-refinement at all (TS
     /// `_autoRefineAllowedForSession`: depth 0 with a local harness state
     /// dir — the same gate that registers the `refine.*` host requests).
@@ -207,6 +214,7 @@ impl AgentSession {
             harness_digest,
             digest_pending: std::sync::atomic::AtomicBool::new(false),
             compaction: compaction::CompactionSettings::default(),
+            auxiliary_model: None,
             auto_refine_allowed: false,
             auto_refine: refine::AutoRefineGates::default(),
             compact_auto_refine: std::sync::Mutex::default(),
@@ -225,6 +233,15 @@ impl AgentSession {
     /// like the TS product instead of the defaults.
     pub fn set_compaction_settings(&mut self, settings: compaction::CompactionSettings) {
         self.compaction = settings;
+    }
+
+    /// Install the auxiliary-model routing context (TS #2411's
+    /// `_resolveAuxiliaryModel` settings/registry access); the engine
+    /// wiring calls this so compaction summaries resolve through the
+    /// `auxiliaryModel` setting. Without it every summarizer stays on the
+    /// session model.
+    pub fn set_auxiliary_model_context(&mut self, context: auxiliary_model::AuxiliaryModelContext) {
+        self.auxiliary_model = Some(context);
     }
 
     /// Install the skill inventory `/skill:<name>` submissions expand
@@ -407,6 +424,7 @@ impl AgentSession {
                     settings: self.compaction,
                     abort,
                     harness_digest: digest_inputs,
+                    auxiliary: self.auxiliary_model.as_ref(),
                 },
             )
             .await?
@@ -687,10 +705,9 @@ impl AgentSession {
                 let source = if busy {
                     match options.streaming_behavior {
                         Some(StreamingBehavior::Steer) => "steer",
-                        Some(StreamingBehavior::FollowUp) => "follow_up",
                         // The busy-without-behavior case errors below; the
                         // queued label is the honest fallback.
-                        None => "follow_up",
+                        Some(StreamingBehavior::FollowUp) | None => "follow_up",
                     }
                 } else {
                     "prompt"
@@ -956,8 +973,7 @@ pub(crate) fn session_message_to_loop(message: &SessionAgentMessage) -> Option<A
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0)
+        .map_or(0, |duration| duration.as_millis() as u64)
 }
 
 #[cfg(test)]
@@ -1188,8 +1204,9 @@ mod tests {
                 .iter()
                 .filter_map(|event| match event {
                     AgentEvent::TurnStart => Some("turn_start".to_string()),
-                    AgentEvent::MessageStart { message } => Some(message.role().to_string()),
-                    AgentEvent::MessageEnd { message } => Some(message.role().to_string()),
+                    AgentEvent::MessageStart { message } | AgentEvent::MessageEnd { message } => {
+                        Some(message.role().to_string())
+                    }
                     _ => None,
                 })
                 .collect();

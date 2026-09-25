@@ -190,10 +190,10 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                             None => {
                                 assistant_msg.insert(
                                     "content".into(),
-                                    if !assistant_text.is_empty() {
-                                        json!(format!("{reasoning_text}\n\n{assistant_text}"))
-                                    } else {
+                                    if assistant_text.is_empty() {
                                         json!(reasoning_text)
+                                    } else {
+                                        json!(format!("{reasoning_text}\n\n{assistant_text}"))
                                     },
                                 );
                             }
@@ -328,7 +328,9 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                 }
 
                 index = j;
-                if !image_blocks.is_empty() {
+                if image_blocks.is_empty() {
+                    last_role = Some("toolResult");
+                } else {
                     if compat.requires_assistant_after_tool_result {
                         params.push(json!({
                             "role": "assistant",
@@ -345,8 +347,6 @@ pub fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompa
                         "content": content,
                     }));
                     last_role = Some("user");
-                } else {
-                    last_role = Some("toolResult");
                 }
                 continue;
             }
@@ -407,7 +407,7 @@ pub(crate) fn parse_chunk_usage(
     cache_write_cost: Option<f64>,
 ) -> Usage {
     let get_u64 = |value: &Value| value.as_u64().unwrap_or(0);
-    let prompt_tokens = raw_usage.get("prompt_tokens").map(get_u64).unwrap_or(0);
+    let prompt_tokens = raw_usage.get("prompt_tokens").map_or(0, get_u64);
     let reported_cached_tokens = raw_usage
         .get("prompt_tokens_details")
         .and_then(|details| details.get("cached_tokens"))
@@ -417,8 +417,7 @@ pub(crate) fn parse_chunk_usage(
     let cache_write_tokens = raw_usage
         .get("prompt_tokens_details")
         .and_then(|details| details.get("cache_write_tokens"))
-        .map(get_u64)
-        .unwrap_or(0);
+        .map_or(0, get_u64);
 
     // Normalize to the provider-layer usage accounting semantics:
     // - cacheRead: hits from cache created by previous requests only
@@ -436,7 +435,7 @@ pub(crate) fn parse_chunk_usage(
         .saturating_sub(cache_read_tokens)
         .saturating_sub(cache_write_tokens);
     // OpenAI completion_tokens already includes reasoning_tokens.
-    let output_tokens = raw_usage.get("completion_tokens").map(get_u64).unwrap_or(0);
+    let output_tokens = raw_usage.get("completion_tokens").map_or(0, get_u64);
     let mut usage = Usage {
         input,
         output: output_tokens,

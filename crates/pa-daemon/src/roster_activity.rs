@@ -48,9 +48,6 @@ pub(crate) const ROSTER_SESSION_EVENT_TRIGGERS: &[&str] = &[
 /// `session_closed`/`session_replaced` payload tags, which the worker
 /// frames as session events).
 pub(crate) fn frame_triggers_roster_flush(frame: &OutboundFrame) -> bool {
-    if frame.outbound_type != "session_event" {
-        return false;
-    }
     #[derive(serde::Deserialize)]
     struct Envelope<'a> {
         #[serde(rename = "type", borrow)]
@@ -62,6 +59,9 @@ pub(crate) fn frame_triggers_roster_flush(frame: &OutboundFrame) -> bool {
     struct EventType<'a> {
         #[serde(rename = "type", borrow)]
         kind: &'a str,
+    }
+    if frame.outbound_type != "session_event" {
+        return false;
     }
     // The payload is parsed only for session-event frames, so a
     // non-trigger frame costs one discriminant check.

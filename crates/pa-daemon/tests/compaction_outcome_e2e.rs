@@ -290,7 +290,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -526,8 +526,7 @@ fn forced_failed_auto_compaction_records_the_durable_outcome_row() {
             path.extension()
                 .is_some_and(|extension| extension == "jsonl")
                 && std::fs::read_to_string(path)
-                    .map(|content| content.contains("compaction_outcome"))
-                    .unwrap_or(false)
+                    .is_ok_and(|content| content.contains("compaction_outcome"))
         })
         .expect("the durable outcome row in the session file");
     let persisted = std::fs::read_to_string(&session_file).expect("read session file");

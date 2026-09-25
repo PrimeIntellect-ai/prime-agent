@@ -107,8 +107,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 fn now_utc_parts() -> (String, String) {
     let seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |duration| duration.as_secs());
     let (year, month, day, hour, minute, second) = civil_from_unix(seconds);
     (
         format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z"),

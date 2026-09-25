@@ -260,22 +260,20 @@ impl Supervisor {
                 ));
                 None
             };
-            let list = match list {
-                Some(list) => list,
-                None => {
-                    let snapshot = resident.heartbeat_snapshot.lock().await;
-                    match snapshot.as_ref().filter(|snapshot| {
-                        snapshot.generation
-                            == resident
-                                .heartbeat_snapshot_generation
-                                .load(Ordering::Relaxed)
-                    }) {
-                        Some(snapshot) => snapshot.rows.clone(),
-                        None => {
-                            failed.get_or_insert(response);
-                            continue;
-                        }
-                    }
+            let list = if let Some(list) = list {
+                list
+            } else {
+                let snapshot = resident.heartbeat_snapshot.lock().await;
+                if let Some(snapshot) = snapshot.as_ref().filter(|snapshot| {
+                    snapshot.generation
+                        == resident
+                            .heartbeat_snapshot_generation
+                            .load(Ordering::Relaxed)
+                }) {
+                    snapshot.rows.clone()
+                } else {
+                    failed.get_or_insert(response);
+                    continue;
                 }
             };
             // The stored snapshot carries the generation captured before
@@ -571,11 +569,10 @@ impl Supervisor {
                 .as_ref()
                 .and_then(|data| data.get("jobs"))
                 .and_then(Value::as_array)
-                .map(|jobs| {
+                .is_some_and(|jobs| {
                     jobs.iter()
                         .any(|job| job.get("id").and_then(Value::as_str) == Some(job_id))
-                })
-                .unwrap_or(false);
+                });
             if !owns_job {
                 continue;
             }

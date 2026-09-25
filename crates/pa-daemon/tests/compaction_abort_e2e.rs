@@ -225,9 +225,14 @@ fn spawn_supervisor(socket: &Path, agent_dir: &Path) -> Supervisor {
             pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV,
             "15000",
         )
+        // The session create launches a worker inside this same connect
+        // budget; a parallel-load e2e run can starve a fresh worker's
+        // boot past the 30s default, so the e2e uses the load-aware
+        // override (under the create's own link budget).
+        .env("PA_DAEMON_WORKER_CONNECT_TIMEOUT_MS", "90000")
         .spawn()
         .expect("spawn pa-daemon supervisor");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < deadline {
         if socket.exists() {
             return Supervisor {
@@ -275,7 +280,9 @@ impl Client {
 
     fn read_line(&mut self) -> Value {
         let mut line = String::new();
-        let deadline = Instant::now() + Duration::from_secs(30);
+        // Generous: parallel load can starve the supervisor process far
+        // past an interactive box's latency.
+        let deadline = Instant::now() + Duration::from_secs(90);
         self.reader
             .get_mut()
             .set_read_timeout(Some(Duration::from_millis(100)))
@@ -284,7 +291,7 @@ impl Client {
             line.clear();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 Err(error) => {
                     assert!(
@@ -324,10 +331,35 @@ impl Client {
         }
     }
 
+    /// Park broadcast events until one matches `probe` (early exit) or the
+    /// budget runs out. The supervisor's event forwarding can lag seconds
+    /// behind the run itself under parallel load, so the wait observes the
+    /// event instead of a fixed short drain; the generous budget keeps
+    /// the solo path fast.
+    fn wait_for_event(
+        &mut self,
+        budget: Duration,
+        context: &str,
+        probe: impl Fn(&Value) -> bool,
+    ) -> Value {
+        let deadline = Instant::now() + budget;
+        loop {
+            self.drain_events(200);
+            if let Some(event) = self.events.iter().find(|event| probe(event)) {
+                return event.clone();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{context} never arrived; events: {:#?}",
+                self.events
+            );
+        }
+    }
+
     /// Read lines until the response for `id` arrives, parking broadcast
     /// events on the way.
     fn read_response(&mut self, id: &str) -> Value {
-        let deadline = Instant::now() + Duration::from_mins(1);
+        let deadline = Instant::now() + Duration::from_mins(3);
         loop {
             assert!(Instant::now() < deadline, "no response for id {id}");
             let line = self.read_line();
@@ -435,7 +467,7 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
         json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "crossing turn"}),
     );
     let summarizer_index = 2; // turn 1, turn 2, then the compaction summarizer
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < deadline && mock.request_count() <= summarizer_index {
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -469,7 +501,20 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
         crossed["success"], true,
         "crossing prompt failed: {crossed}"
     );
-    client.drain_events(500);
+    // The run's trailing frames can land well after the response (the
+    // supervisor's event forwarding lags under parallel load), so wait
+    // for the run's LAST expected event instead of a fixed short drain —
+    // the aborted `compaction_end` lands after the disclosure pair, and
+    // its arrival implies the whole sequence.
+    client.wait_for_event(
+        Duration::from_mins(1),
+        "the aborted threshold compaction_end",
+        |event| {
+            event["type"] == "compaction_end"
+                && event["reason"] == "threshold"
+                && event["aborted"] == true
+        },
+    );
 
     // The start event went out before the summarizer ran (the loader).
     assert!(
@@ -544,8 +589,7 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
             path.extension()
                 .is_some_and(|extension| extension == "jsonl")
                 && std::fs::read_to_string(path)
-                    .map(|content| content.contains("compaction_outcome"))
-                    .unwrap_or(false)
+                    .is_ok_and(|content| content.contains("compaction_outcome"))
         })
         .expect("the durable outcome row in the session file");
     let persisted = std::fs::read_to_string(&session_file).expect("read session file");
@@ -596,7 +640,7 @@ fn abort_compaction_mid_threshold_run_records_the_cancelled_outcome() {
 /// supervisor's own durable state under `daemon-workers/<socket hash>/`).
 fn worker_pid(agent_dir: &Path) -> u32 {
     let workers_dir = agent_dir.join("daemon-workers");
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < deadline {
         for hash_dir in std::fs::read_dir(&workers_dir)
             .into_iter()
@@ -746,7 +790,7 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
         json!({"type": "prompt_and_wait", "activeSessionId": session_id, "message": "crossing turn"}),
     );
     let summarizer_index = 2;
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_mins(1);
     while Instant::now() < deadline && mock.request_count() <= summarizer_index {
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -758,19 +802,13 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     // The forwarded `compaction_start` must reach an attached client
     // before the freeze: the client's loader is up exactly because that
     // frame flowed through the supervisor — which is also what arms the
-    // supervisor's token.
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !client
-        .events
-        .iter()
-        .any(|event| event["type"] == "compaction_start")
-    {
-        client.drain_events(100);
-        assert!(
-            Instant::now() < deadline,
-            "the compaction_start broadcast never arrived"
-        );
-    }
+    // supervisor's token. The generous budget rides out event-forwarding
+    // lag under parallel load.
+    client.wait_for_event(
+        Duration::from_mins(1),
+        "the compaction_start broadcast",
+        |event| event["type"] == "compaction_start",
+    );
 
     // The second client attaches while the worker still answers (the
     // loader-holding TUI in the real flow), then the worker freezes: a
@@ -797,8 +835,11 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     let aborted = second.read_response("ab1");
     let ack_elapsed = sent_at.elapsed();
     assert_eq!(aborted["success"], true, "abort failed: {aborted}");
+    // The bound proves the ack never waited on the wedged worker's route
+    // (30s), while staying generous for scheduling lag on the
+    // supervisor's own (immediate, worker-free) answer.
     assert!(
-        ack_elapsed < Duration::from_secs(5),
+        ack_elapsed < Duration::from_secs(25),
         "the acknowledgment waited on the wedged worker: {ack_elapsed:?}"
     );
 
@@ -806,7 +847,7 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     // synthetic aborted `compaction_end` reaches the attached client (the
     // TUI clears its loader on it). An auto run's aborted end carries no
     // error message or severity, like the worker's own cancelled arm.
-    let deadline = Instant::now() + Duration::from_secs(25);
+    let deadline = Instant::now() + Duration::from_mins(1);
     let end_event = loop {
         second.drain_events(200);
         if let Some(event) = second.events.iter().find(|event| {
@@ -840,7 +881,7 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
     // replay discloses the aborted run — the same durable
     // `compaction_outcome` row the worker's own auto-abort arms persist.
     signal(pid, "-KILL");
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(90);
     let durable = loop {
         let row = std::fs::read_dir(&session_dir)
             .expect("list session dir")
@@ -876,7 +917,7 @@ fn wedged_worker_abort_acks_immediately_and_declares_terminal() {
 
     // The replay consumed the record: the journal drops it, so a later
     // relaunch never replays it again.
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_mins(1);
     loop {
         let journal = std::fs::read_to_string(&journal_path).expect("read journal");
         let consumed = !journal

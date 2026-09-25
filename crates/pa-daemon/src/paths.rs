@@ -68,10 +68,10 @@ pub fn hash_key(input: &str, chars: usize) -> String {
 /// plus an 8-char hash of the normalized socket path.
 pub fn daemon_log_path(socket_path: &Path, agent_dir: &Path) -> PathBuf {
     let normalized = socket_path.to_string_lossy().to_string();
-    let base = socket_path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "daemon.sock".to_string());
+    let base = socket_path.file_name().map_or_else(
+        || "daemon.sock".to_string(),
+        |n| n.to_string_lossy().to_string(),
+    );
     logs_dir(agent_dir).join(format!("{base}.{}.log", hash_key(&normalized, 8)))
 }
 

@@ -410,16 +410,16 @@ impl WindowedSessionStore {
                 }
                 match entry.as_ref() {
                     Some(FileEntry::ThinkingLevelChange { payload, .. }) if thinking.is_none() => {
-                        thinking = Some(payload.thinking_level.clone())
+                        thinking = Some(payload.thinking_level.clone());
                     }
                     Some(FileEntry::ServiceTierChange { payload, .. }) if tier.is_none() => {
-                        tier = Some(payload.service_tier)
+                        tier = Some(payload.service_tier);
                     }
                     Some(FileEntry::ModelChange { payload, .. }) if model.is_none() => {
-                        model = Some((payload.provider.clone(), payload.model_id.clone()))
+                        model = Some((payload.provider.clone(), payload.model_id.clone()));
                     }
                     Some(FileEntry::Compaction { payload, .. }) if first_kept.is_none() => {
-                        first_kept = Some(payload.first_kept_entry_id.clone())
+                        first_kept = Some(payload.first_kept_entry_id.clone());
                     }
                     _ => {}
                 }

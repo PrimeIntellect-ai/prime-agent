@@ -437,7 +437,7 @@ fn marker_width(t: &str) -> usize {
     if t.starts_with("- ") || t.starts_with("* ") {
         2
     } else {
-        t.find(". ").map(|p| p + 2).unwrap_or(t.len())
+        t.find(". ").map_or(t.len(), |p| p + 2)
     }
 }
 

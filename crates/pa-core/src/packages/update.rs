@@ -102,9 +102,9 @@ impl PackageManager {
 
         for (source, scope) in sources {
             match parse_source(&source) {
-                ParsedSource::Local(_) => continue,
-                ParsedSource::Npm(parsed) if parsed.pinned => continue,
-                ParsedSource::Git(parsed) if parsed.pinned => continue,
+                ParsedSource::Local(_) => {}
+                ParsedSource::Npm(parsed) if parsed.pinned => {}
+                ParsedSource::Git(parsed) if parsed.pinned => {}
                 ParsedSource::Npm(parsed) => npm_candidates.push(NpmUpdateTarget {
                     source,
                     parsed,

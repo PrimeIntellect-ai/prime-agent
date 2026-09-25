@@ -55,9 +55,6 @@ pub fn repair_json(json: &str) -> String {
         if ch == '\\' {
             let next_char = chars.get(index + 1).copied();
             match next_char {
-                None => {
-                    repaired.push_str("\\\\");
-                }
                 Some('u') => {
                     let digits: String = chars[index + 2..(index + 6).min(chars.len())]
                         .iter()
@@ -77,7 +74,7 @@ pub fn repair_json(json: &str) -> String {
                     repaired.push(next);
                     index += 1;
                 }
-                Some(_) => {
+                None | Some(_) => {
                     repaired.push_str("\\\\");
                 }
             }
@@ -102,10 +99,10 @@ pub fn parse_json_with_repair(json: &str) -> Result<Value, serde_json::Error> {
         Ok(value) => Ok(value),
         Err(error) => {
             let repaired = repair_json(json);
-            if repaired != json {
-                serde_json::from_str::<Value>(&repaired)
-            } else {
+            if repaired == json {
                 Err(error)
+            } else {
+                serde_json::from_str::<Value>(&repaired)
             }
         }
     }
@@ -168,7 +165,6 @@ impl PartialParser {
 
     fn parse_value(&mut self) -> Result<Value, ParseError> {
         match self.peek() {
-            None => Err(ParseError::Invalid),
             Some('{') => self.parse_object(),
             Some('[') => self.parse_array(),
             Some('"') => self.parse_string().map(|(value, _)| Value::String(value)),
@@ -176,7 +172,7 @@ impl PartialParser {
             Some('f') => self.parse_literal("false", Value::Bool(false)),
             Some('n') => self.parse_literal("null", Value::Null),
             Some(ch) if ch == '-' || ch.is_ascii_digit() => self.parse_number(),
-            Some(_) => Err(ParseError::Invalid),
+            None | Some(_) => Err(ParseError::Invalid),
         }
     }
 

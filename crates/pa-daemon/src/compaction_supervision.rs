@@ -412,12 +412,11 @@ impl crate::supervisor::Supervisor {
         // running on the replacement.
         let resident = match self.registry.resolve(&selector).await {
             Ok(resident) => resident,
-            Err(_) => match self.binding_target(&selector).await {
-                Some(resident) => {
+            Err(_) => {
+                if let Some(resident) = self.binding_target(&selector).await {
                     self.rebind_connection(&selector, &resident, attached).await;
                     resident
-                }
-                None => {
+                } else {
                     let message = self
                         .restore_failure_for(&selector)
                         .unwrap_or_else(|| format!("Unknown active session: {selector}"));
@@ -433,7 +432,7 @@ impl crate::supervisor::Supervisor {
                         false,
                     );
                 }
-            },
+            }
         };
         // The supervisor-visible token takes the abort even when the
         // worker cannot answer; the best-effort forward below is what a
@@ -444,34 +443,31 @@ impl crate::supervisor::Supervisor {
         let supervisor = Arc::clone(self);
         let resident = Arc::clone(&resident);
         tokio::spawn(async move {
-            let epoch = match watch_epoch {
-                Some(epoch) => {
-                    // The armed path never gates on the forward: it runs
-                    // concurrently and the real `compaction_end` it may
-                    // produce clears the token through the reader hook.
-                    tokio::spawn(forward);
-                    epoch
+            let epoch = if let Some(epoch) = watch_epoch {
+                // The armed path never gates on the forward: it runs
+                // concurrently and the real `compaction_end` it may
+                // produce clears the token through the reader hook.
+                tokio::spawn(forward);
+                epoch
+            } else {
+                // No observed run. A worker that answers the forward is
+                // the TS silent no-op; one that does not (wedged, or a
+                // token lost to a supervisor restart) gets the fallback
+                // run, so the abort still resolves the client's loader.
+                // A real run that armed during the probe wait takes the
+                // abort instead of being stomped.
+                if matches!(forward.await, Some(Ok(_))) {
+                    return;
                 }
-                None => {
-                    // No observed run. A worker that answers the forward is
-                    // the TS silent no-op; one that does not (wedged, or a
-                    // token lost to a supervisor restart) gets the fallback
-                    // run, so the abort still resolves the client's loader.
-                    // A real run that armed during the probe wait takes the
-                    // abort instead of being stomped.
-                    if matches!(forward.await, Some(Ok(_))) {
-                        return;
-                    }
-                    let active_session_id = resident
-                        .descriptor
-                        .lock()
-                        .await
-                        .root_active_session_id
-                        .clone();
-                    match resident.compaction.arm_aborted_fallback(&active_session_id) {
-                        Some(epoch) => epoch,
-                        None => return,
-                    }
+                let active_session_id = resident
+                    .descriptor
+                    .lock()
+                    .await
+                    .root_active_session_id
+                    .clone();
+                match resident.compaction.arm_aborted_fallback(&active_session_id) {
+                    Some(epoch) => epoch,
+                    None => return,
                 }
             };
             supervisor
