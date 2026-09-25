@@ -9,7 +9,7 @@
 //! layer sees crossterm's parsed events, where some encodings fold to the
 //! same event; the mode-aware mappings follow TS where the kitty protocol
 //! flag disambiguates, and the irreducible folds are documented divergences
-//! (see `ctrl_char_id` and docs/FEATURE_PARITY.md, the term-enhanced-keys
+//! (see `ctrl_char_id` and `docs/FEATURE_PARITY.md`, the term-enhanced-keys
 //! rows).
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -565,7 +565,7 @@ mod tests {
     }
 
     /// Shift+tab keeps its TS id (`\x1b[Z` -> "shift+tab"; crossterm
-    /// calls it BackTab) even though no keybinding binds it.
+    /// calls it `BackTab`) even though no keybinding binds it.
     #[test]
     fn backtab_reports_shift_tab() {
         let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE);

@@ -1,11 +1,11 @@
 //! Mistral Conversations streaming provider.
 //! Port of `packages/ai/src/providers/mistral.ts`: `chat/completions` SSE
-//! streaming with camelCase-free snake_case wire keys (verified against the
+//! streaming with camelCase-free `snake_case` wire keys (verified against the
 //! `@mistralai/mistralai` SDK outbound schemas), thinking text-block
 //! accumulation, tool-call argument streaming, `x-affinity` KV-cache header,
 //! and usage accounting.
 //!
-//! Split across submodules mirroring the anthropic/openai_completions
+//! Split across submodules mirroring the `anthropic/openai_completions`
 //! layout: request options, headers, and the simple-stream entry live here,
 //! message/tool conversion and payload assembly in [`convert`], and the SSE
 //! streaming core in [`stream`].

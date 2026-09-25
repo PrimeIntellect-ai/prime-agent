@@ -31,7 +31,7 @@ struct GoAwayTracker {
     payload_remaining: usize,
     /// The current frame is a connection-level GOAWAY.
     tracking_goaway: bool,
-    /// First bytes of a GOAWAY payload (last_stream_id + error code prefix).
+    /// First bytes of a GOAWAY payload (`last_stream_id` + error code prefix).
     goaway_prefix: Vec<u8>,
     /// The last GOAWAY error code received from the peer.
     last_goaway_code: Option<u32>,

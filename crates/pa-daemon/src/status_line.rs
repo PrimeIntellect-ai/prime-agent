@@ -62,7 +62,7 @@ impl AgentTaskState {
         }
     }
 
-    /// The wire/persisted form (TS `session-manager` snake_case).
+    /// The wire/persisted form (TS `session-manager` `snake_case`).
     pub(crate) fn persisted(self) -> pa_types::session::AgentTaskState {
         match self {
             AgentTaskState::NeedsInput => pa_types::session::AgentTaskState::NeedsInput,
@@ -136,6 +136,11 @@ pub trait StatusSession: Send + Sync {
     fn status_next_sequence(&mut self) -> u64;
     /// Persist a settled verdict as an `agent_status` session entry (TS
     /// `sessionManager.appendAgentStatus`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the verdict record cannot be serialized or
+    /// persisted; a session without a store answers `Ok(())`.
     fn status_append_agent_status(&mut self, status: &PersistedAgentStatus) -> anyhow::Result<()>;
     /// The latest persisted verdict, if the session ever recorded one.
     fn status_latest_agent_status(&self) -> Option<PersistedAgentStatus>;
@@ -584,7 +589,7 @@ fn counting_artifact() -> Regex {
 }
 
 /// Take the content of the last `<recap>` and `<status>` tags; idle verdicts
-/// default to needs_input.
+/// default to `needs_input`.
 pub fn parse_agent_status(text: &str, is_working: bool) -> Option<GeneratedStatus> {
     // Normalize unicode angle-bracket lookalikes so a tag written with them
     // still parses.

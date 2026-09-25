@@ -12,7 +12,7 @@ use super::prime_inference::{is_private_prime_inference_model_id, PRIME_INFERENC
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const MIN_CATALOG_COVERAGE: f64 = 0.5;
 
-/// One parsed catalog entry (packages/ai PrimeInferenceCatalogEntry).
+/// One parsed catalog entry (packages/ai `PrimeInferenceCatalogEntry`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PrimeInferenceCatalogEntry {
@@ -57,6 +57,17 @@ fn string_array(value: &serde_json::Value) -> Option<Vec<String>> {
 }
 
 /// Parse the catalog payload; invalid entries drop out, duplicates fail.
+///
+/// # Errors
+///
+/// Returns a human-readable error string when the payload carries no model
+/// array, contains duplicate model ids, or parses to an empty catalog while
+/// `allow_empty` is false.
+///
+/// # Panics
+///
+/// The `context_window.unwrap()` runs only when the specs guard proved the
+/// field present, so the unwrap is unreachable.
 pub fn parse_prime_inference_model_catalog(
     payload: &serde_json::Value,
     allow_empty: bool,

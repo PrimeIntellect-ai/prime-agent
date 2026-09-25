@@ -180,6 +180,12 @@ fn resolve_unique_match(
 /// Resolve a `--resume` selector against the session directory, mirroring
 /// `resolveSessionPath`: path-like selectors pass through, then exact and
 /// partial matches are tried local-first, global second.
+///
+/// # Errors
+///
+/// Returns [`SessionSelectorError::Ambiguous`] when a match tier contains
+/// several sessions, and [`SessionSelectorError::NotFound`] when no session
+/// matches the selector.
 pub fn resolve_session_path(
     selector: &str,
     cwd: &Path,

@@ -39,7 +39,7 @@ type ReconnectConnect = tokio::sync::oneshot::Receiver<
     anyhow::Result<(DaemonClient, mpsc::UnboundedReceiver<DaemonClientEvent>)>,
 >;
 
-/// Cap on the exit-path telemetry flush: the PostHog sink alone allows up
+/// Cap on the exit-path telemetry flush: the `PostHog` sink alone allows up
 /// to 1.5s, so the exit event must be dropped rather than awaited past the
 /// exit-within-1s contract.
 const TELEMETRY_EXIT_TIMEOUT_MS: u64 = 500;
@@ -195,9 +195,18 @@ pub trait OnboardingSink: Send + Sync {
     /// only a fresh home (no choice written) is asked once.
     fn agent_traces_choice_written(&self) -> bool;
     /// Persist the trace-sharing answer (TS `setAgentTracesEnabled`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when persisting the choice to the settings store
+    /// fails.
     fn set_agent_traces_enabled(&self, enabled: bool) -> anyhow::Result<()>;
     /// Mark the onboarding flow completed (TS `markOnboardingShown` +
     /// `flush`); an aborted flow leaves the flag unset.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` when persisting the completion marker fails.
     fn mark_onboarding_complete(&self) -> anyhow::Result<()>;
 }
 
@@ -750,6 +759,13 @@ impl ReconnectLoop {
 /// idempotent, so a return after the tail already ran (the startup
 /// refusal path finishes the surface itself) only re-emits the two
 /// unconditional tail bytes.
+///
+/// # Errors
+///
+/// Returns `Err` when the interactive surface fails (the daemon
+/// connection, a transport error in a key handler, a draw failure, a
+/// suspend/resume failure); the restore runs first whenever this run
+/// owned or adopted the terminal.
 pub async fn run_interactive(
     options: InteractiveOptions,
     ui: UiMode,

@@ -62,6 +62,11 @@ pub struct ProviderTarget {
 /// target from a shared slot the host can swap live (`set_model`, provider
 /// failover). The slot is `None` only before the host sets the build-time
 /// target; the adapter never runs before that.
+///
+/// # Panics
+///
+/// Panics at stream time if the provider target lock is poisoned, or if the
+/// target slot was never set before the first stream.
 pub fn switchable_stream_fn(target: Arc<std::sync::RwLock<Option<ProviderTarget>>>) -> StreamFn {
     Arc::new(
         move |_requested: AgentModel, context: LlmContext, options: StreamRequestOptions| {
@@ -160,6 +165,11 @@ pub fn real_stream_fn(api_key: Option<String>, model: Model) -> StreamFn {
 
 /// Convert one pa-ai stream event into the pa-agent loop's event enum.
 /// Payloads cross the boundary by wire-shape (JSON) round-trip.
+///
+/// # Panics
+///
+/// Panics when an assistant message cannot round-trip across the two
+/// crates' wire shapes (a structural shape-mismatch bug).
 pub fn convert_stream_event(
     event: &pa_types::ai::AssistantMessageEvent,
 ) -> Option<pa_agent::stream::AssistantMessageEvent> {
@@ -272,10 +282,10 @@ fn consumer_pump(
     })
 }
 
-/// A ModelStream whose lifetime keeps the pa-ai pump task alive and owns
+/// A `ModelStream` whose lifetime keeps the pa-ai pump task alive and owns
 /// the fetch's cancellation token (the transport half of the turn-abort:
 /// the token cancels the in-flight request exactly where TS's fetch
-/// AbortSignal fires).
+/// `AbortSignal` fires).
 struct PumpedStream {
     _forwarder: tokio::task::JoinHandle<()>,
     stream: pa_agent::stream::AssistantMessageEventStream,

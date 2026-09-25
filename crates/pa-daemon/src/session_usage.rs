@@ -528,7 +528,7 @@ mod tests {
     }
 
     /// The map keeps first-insertion order so the cost sums stay
-    /// bit-identical to the TS `Map` fold (a HashMap would reorder them).
+    /// bit-identical to the TS `Map` fold (a `HashMap` would reorder them).
     #[test]
     fn cost_sums_follow_insertion_order() {
         let line = |id: &str, cost: f64| {

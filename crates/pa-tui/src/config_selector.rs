@@ -514,6 +514,13 @@ impl ConfigSelectorOptions {
 /// Every error return funnels through the one exit restore: an early `?`
 /// after the mount (a draw failure, a persist error in `on_toggle`) must
 /// not hand the shell a terminal still in TUI state.
+///
+/// # Errors
+///
+/// Returns `Err` when the selector surface fails to mount or run
+/// (raw-mode enable, the alternate-screen enter, enhanced-key enable,
+/// terminal creation, a draw, or an `on_toggle` persist error); the
+/// terminal is restored on every error path.
 pub fn run_config_selector(
     selector: ConfigSelector,
     options: ConfigSelectorOptions,

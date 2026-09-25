@@ -69,7 +69,7 @@ fn spawn_daemon(socket: &Path, agent_dir: &Path) -> Daemon {
     panic!("supervisor socket never appeared");
 }
 
-/// Minimal JSONL supervisor client (list / kill / get_last_assistant_text).
+/// Minimal JSONL supervisor client (list / kill / `get_last_assistant_text`).
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -456,7 +456,7 @@ async fn rlm_create_session_spawns_a_prompted_depth_zero_session() {
 }
 
 /// The recursion bound: a parent at its depth limit fails spawns with the
-/// TS error, and depth-0-only create_session refuses from deeper sessions.
+/// TS error, and depth-0-only `create_session` refuses from deeper sessions.
 #[tokio::test]
 async fn rlm_recursion_bound_is_enforced() {
     let dir = tempfile::TempDir::new().expect("temp dir");

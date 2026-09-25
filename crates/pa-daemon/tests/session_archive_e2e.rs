@@ -10,7 +10,7 @@
 //!    lifecycle stays reachable via its resume selector, TS parity) and
 //!    the woken worker runs the turn against the mock provider.
 //!
-//! Unix-only e2e (AF_UNIX sockets): compiles to nothing elsewhere, like the
+//! Unix-only e2e (`AF_UNIX` sockets): compiles to nothing elsewhere, like the
 //! other pa-daemon e2e verifiers.
 #![cfg(unix)]
 

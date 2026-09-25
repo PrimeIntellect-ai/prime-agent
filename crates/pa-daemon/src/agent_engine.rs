@@ -62,7 +62,7 @@ pub struct AgentEngineConfig {
     pub faux_script: Option<String>,
     /// Supervisor socket + own active session id for the worker's supervisor
     /// link. Present only inside a daemon worker; it enables the kernel's
-    /// agent_message/agent_observe host requests.
+    /// `agent_message/agent_observe` host requests.
     pub supervisor_link: Option<SupervisorLinkConfig>,
     /// Telemetry opt-out from the create command (Some(true) installs no
     /// telemetry; None/Some(false) resolve the configured sinks).
@@ -174,7 +174,7 @@ pub struct AgentSessionEngine {
     pub(crate) goal_runtime: std::sync::Mutex<Option<GoalRuntimeHandles>>,
     /// Whether this run's usage accounting crossed the goal's token budget
     /// (TS `_accountGoalUsageForAssistantMessage` returning `true` at the
-    /// message_end hook): the natural boundary mints the budget-limit
+    /// `message_end` hook): the natural boundary mints the budget-limit
     /// wrap-up steer and ends the run. Shared with the agent-loop
     /// subscription (a plain field cannot cross the 'static handler).
     pub(crate) goal_budget_crossed: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -392,6 +392,19 @@ pub struct AgentSessionEngine {
 }
 
 impl AgentSessionEngine {
+    /// Build the engine: the shared async runtime, the model selection
+    /// (create config, else the process env pair), the supervisor link, the
+    /// children registry, and the MCP store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the multi-thread runtime cannot be built.
+    ///
+    /// # Panics
+    ///
+    /// The MCP user-server and catalog-source closures built here panic
+    /// on a poisoned engine cwd lock (a holder panicked while holding
+    /// it).
     pub fn new(config: AgentEngineConfig) -> anyhow::Result<Self> {
         let runtime = crate::async_safe_runtime::AsyncSafeRuntime::new_multi_thread()?;
         let session_file = std::sync::Mutex::new(config.session_file.clone());
@@ -575,6 +588,11 @@ impl AgentSessionEngine {
     /// harnesses inject a scripted driver here; the product keeps the
     /// default shell-gate driver in the session cwd. Call before the
     /// first admitted turn.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the autonomous-driver lock is poisoned (a holder
+    /// panicked while holding it).
     pub fn set_autonomous_driver(
         &self,
         driver: std::sync::Arc<dyn pa_core::autonomous::AutonomousDriver>,
@@ -844,6 +862,12 @@ impl AgentSessionEngine {
     /// reused for a fresh create), and a stale settle callback must find
     /// no goal runtime to mint through — the owed slot itself survives
     /// the close in the durable state for a later resumed session.
+    ///
+    /// # Panics
+    ///
+    /// Panics when an internal mutex is poisoned (the goal runtime or the
+    /// autonomous boundary lock, after a holder panicked while holding
+    /// it).
     pub fn mark_session_closed(&self) {
         self.session_closed
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -869,6 +893,11 @@ impl AgentSessionEngine {
     }
 
     /// Session-scoped kernel shell activity; never builds a new session/kernel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no session kernel is running ("Kernel is
+    /// not running"), or when the kernel's own shell-activity call fails.
     pub async fn bash_activity(
         &self,
         action: &str,
@@ -2003,7 +2032,7 @@ impl SessionEngine for AgentSessionEngine {
     /// The `compact` command path (TS `compact()`'s background
     /// `_scheduleAutoRefine("compact")` on an idle session): the round
     /// runs right after the compaction answered, through the same gated
-    /// body the turn boundaries use (compact_autorefine.rs).
+    /// body the turn boundaries use (`compact_autorefine.rs`).
     fn consume_compact_auto_refine(
         &self,
     ) -> anyhow::Result<Option<pa_core::refinement::RefinementResult>> {
@@ -4615,8 +4644,8 @@ pub(crate) mod tests {
 
     pub(crate) use super::FAUX_TEST_LOCK;
 
-    /// The faux model's per-request output budget (maxTokens 16_384 under the
-    /// 32_000 request cap): threshold fixtures subtract it from the window
+    /// The faux model's per-request output budget (maxTokens `16_384` under the
+    /// `32_000` request cap): threshold fixtures subtract it from the window
     /// alongside the headroom (the combined input+output ceiling).
     const FAUX_REQUEST_BUDGET: u64 = 16_384;
 
@@ -6342,7 +6371,7 @@ pub(crate) mod tests {
     }
 
     /// The manual wire `compact` command (TS daemon-mode `compact`) feeds
-    /// the same seam: the compaction the CompactionManager runs counts
+    /// the same seam: the compaction the `CompactionManager` runs counts
     /// into the still-open run it interrupts.
     #[test]
     fn manual_wire_compaction_counts_into_the_run_telemetry() {
@@ -8085,7 +8114,7 @@ fn faux_model_from_script(script: &str) -> anyhow::Result<Model> {
 /// compaction flow's interrupt-and-settle wait, the `abort` command, kill,
 /// shutdown — cancels the in-flight fetch immediately instead of at the
 /// next streamed event. The turn settles on its aborted message with
-/// EMPTY_USAGE (TS `createAbortedAssistantMessage` with no partial), so the
+/// `EMPTY_USAGE` (TS `createAbortedAssistantMessage` with no partial), so the
 /// aborted turn's usage never reaches the goal accounting.
 #[test]
 fn abort_in_flight_turn_cancels_a_mid_provider_wait() {
@@ -8483,8 +8512,8 @@ fn retried_run_restarts_with_its_own_agent_frames() {
 /// The aborted turn's goal accounting (TS
 /// `_accountGoalUsageForAssistantMessage`'s aborted guard): an active
 /// goal's turn aborted mid-provider-wait settles on its aborted row —
-/// broadcast through the engine's stream as the message_start/
-/// message_end pair (the row's own start frame plus the settled row,
+/// broadcast through the engine's stream as the `message_start`/
+/// `message_end` pair (the row's own start frame plus the settled row,
 /// `createAbortedAssistantMessage`'s shape: empty content, the abort
 /// error, EMPTY usage) — and the row persists, yet the goal accounting
 /// skips it: the goal state the goal-start turn left is the state the

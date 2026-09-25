@@ -65,6 +65,11 @@ impl PhaseFailure {
 
 /// Run the FSM from the adopted status to a terminal state; the returned
 /// status is the terminal record (the caller prints the report).
+///
+/// # Errors
+/// Returns an error when no status record exists at `status_path`, when the
+/// recorded state is not `Staged` (only a staged update is adoptable), or
+/// when a status-record write fails.
 pub async fn run(options: &CoordinatorOptions) -> Result<UpdateStatus> {
     let Some(existing) = super::status::read_status(&options.status_path) else {
         anyhow::bail!(

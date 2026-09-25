@@ -693,7 +693,7 @@ mod tests {
 }
 
 /// Raw-socket WebSocket mocks for the transport tests: one connection, one
-/// scripted wire sequence per scenario (the provider_error probe drives the
+/// scripted wire sequence per scenario (the `provider_error` probe drives the
 /// TS binary through the same sequences; these pin the texts and the
 /// diagnostic error surface in-crate).
 #[cfg(test)]
@@ -1065,7 +1065,7 @@ mod ws_wire_tests {
 
     /// An invalid JSON frame is a non-transport protocol error (`isCodexNonTransportError`
     /// in the TS): it throws without the SSE fallback, surfacing the
-    /// `CodexProtocolError` name in the provider_stream_failure diagnostic.
+    /// `CodexProtocolError` name in the `provider_stream_failure` diagnostic.
     #[tokio::test]
     async fn invalid_json_is_non_transport_error() {
         let error = request_terminal_error(MockAction::InvalidJson).await;

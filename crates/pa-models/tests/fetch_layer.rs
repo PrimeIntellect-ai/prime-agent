@@ -1,5 +1,5 @@
 //! Fetch-layer verifiers over a scripted local HTTP server: timeout
-//! bounds, the 8 MiB cap (header AND streaming), redirect refusal, ETag
+//! bounds, the 8 MiB cap (header AND streaming), redirect refusal, `ETag`
 //! round-trip, and the 304 path.
 
 mod common;

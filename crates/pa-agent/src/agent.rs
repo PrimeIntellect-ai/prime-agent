@@ -793,14 +793,32 @@ impl Agent {
         self.inner.shared.lock().await.state.messages = messages;
     }
 
+    /// The steering queue's mode.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn steering_mode(&self) -> QueueMode {
         self.inner.steering_queue.lock().unwrap().mode
     }
 
+    /// Set the steering queue's mode.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn set_steering_mode(&self, mode: QueueMode) {
         self.inner.steering_queue.lock().unwrap().mode = mode;
     }
 
+    /// The follow-up queue's mode.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn follow_up_mode(&self) -> QueueMode {
         self.inner.follow_up_queue.lock().unwrap().mode
     }
@@ -809,16 +827,32 @@ impl Agent {
     /// `_installAgentContinuationHook`'s seam: the embedding that owns the
     /// goal/autonomous continuation policy wires it after the agent exists).
     /// `None` uninstalls the hook; the loop's natural stop returns.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `get_continuation_messages` mutex is poisoned (another
+    /// thread panicked while holding it).
     pub fn set_continuation_hook(&self, hook: Option<GetContinuationMessagesFn>) {
         *self.inner.get_continuation_messages.lock().unwrap() = hook;
     }
 
+    /// Set the follow-up queue's mode.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn set_follow_up_mode(&self, mode: QueueMode) {
         self.inner.follow_up_queue.lock().unwrap().mode = mode;
     }
 
     /// Queue a message batch to be injected after the current assistant turn
     /// finishes (TS `steer`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn steer(&self, message: impl Into<AgentMessageBatch>) {
         self.inner
             .steering_queue
@@ -829,6 +863,11 @@ impl Agent {
 
     /// Queue a message batch to run only after the agent would otherwise stop
     /// (TS `followUp`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn follow_up(&self, message: impl Into<AgentMessageBatch>) {
         self.inner
             .follow_up_queue
@@ -837,10 +876,22 @@ impl Agent {
             .enqueue(message.into());
     }
 
+    /// Clear the steering queue.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn clear_steering_queue(&self) {
         self.inner.steering_queue.lock().unwrap().clear();
     }
 
+    /// Clear the follow-up queue.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `follow_up_queue` mutex is poisoned (another thread
+    /// panicked while holding it).
     pub fn clear_follow_up_queue(&self) {
         self.inner.follow_up_queue.lock().unwrap().clear();
     }
@@ -851,6 +902,11 @@ impl Agent {
     }
 
     /// Remove queued messages matching a predicate (TS `removeQueuedMessages`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` or `follow_up_queue` mutex is poisoned
+    /// (another thread panicked while holding one of them).
     pub fn remove_queued_messages(
         &self,
         predicate: impl Fn(&AgentMessage) -> bool,
@@ -867,6 +923,12 @@ impl Agent {
         removed
     }
 
+    /// Whether any steering or follow-up messages are queued.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `steering_queue` or `follow_up_queue` mutex is poisoned
+    /// (another thread panicked while holding one of them).
     pub fn has_queued_messages(&self) -> bool {
         self.inner.steering_queue.lock().unwrap().has_items()
             || self.inner.follow_up_queue.lock().unwrap().has_items()
@@ -884,6 +946,11 @@ impl Agent {
     }
 
     /// Abort the active run (TS `abort`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `run` mutex is poisoned (another thread panicked while
+    /// holding it).
     pub fn abort(&self) {
         if let Some(run) = self.inner.run.lock().unwrap().as_ref() {
             run.controller.abort();
@@ -892,6 +959,11 @@ impl Agent {
 
     /// Resolve when the current run and all awaited event listeners have
     /// finished - after `agent_end` listeners settle (TS `waitForIdle`).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `run` mutex is poisoned (another thread panicked while
+    /// holding it).
     pub async fn wait_for_idle(&self) {
         let idle_rx = {
             let run = self.inner.run.lock().unwrap();
@@ -930,8 +1002,17 @@ impl Agent {
 
     /// Run the loop with a new prompt (TS `prompt`).
     ///
+    /// # Errors
+    ///
     /// Errors with the TS message when a run is already active; use `steer()`
-    /// or `follow_up()` to queue messages instead.
+    /// or `follow_up()` to queue messages instead. Otherwise the result of the
+    /// run started by this prompt is propagated, so it errors if that run
+    /// fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `run` mutex is poisoned (another thread panicked while
+    /// holding it).
     pub async fn prompt(&self, input: impl Into<AgentPromptInput>) -> anyhow::Result<()> {
         if self.inner.run.lock().unwrap().is_some() {
             anyhow::bail!(
@@ -946,6 +1027,18 @@ impl Agent {
     ///
     /// Returns typed [`AgentContinueError`] failures inside `anyhow::Error`;
     /// downcast with `error.downcast_ref::<AgentContinueError>()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AgentContinueError`] wrapped in `anyhow::Error`: code
+    /// `Busy` when a run is already active, or code `NothingToContinue` when
+    /// there is nothing to continue from. Errors from running queued messages
+    /// and the result of the continuation run are propagated as well.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `run` mutex is poisoned (another thread panicked while
+    /// holding it).
     pub async fn continue_run(&self) -> anyhow::Result<()> {
         if self.inner.run.lock().unwrap().is_some() {
             return Err(anyhow::Error::new(AgentContinueError::new(

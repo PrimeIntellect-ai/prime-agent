@@ -446,7 +446,7 @@ fn marker_width(t: &str) -> usize {
 /// `getLanguage(name)`, which lowercases and matches the grammar's
 /// registered names and aliases: python 10.7.3 registers `python` with
 /// aliases `py`, `gyp`, `ipython`. `lang` here is marked's whole trimmed
-/// info string, so ```python foo=1 stays uniform (hljs has no such
+/// info string, so ```` ```python foo=1 ```` stays uniform (hljs has no such
 /// language); only these exact spellings highlight.
 fn is_highlighted_lang(lang: &str) -> bool {
     matches!(

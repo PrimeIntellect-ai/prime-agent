@@ -2,7 +2,7 @@
 //! commands racing on the worker's own socket must join the first create
 //! instead of both initializing the session — duplicating creation-prefix
 //! rows and overwriting the initialized core state. The race window is the
-//! session-model restore's awaits (the spawn_blocking file scan), so the
+//! session-model restore's awaits (the `spawn_blocking` file scan), so the
 //! driver runs the real engine (no script) and pads the session file until
 //! the scan holds the first create open long enough for the second to land.
 //! The join keeps the session file at exactly one creation prefix and one
@@ -215,7 +215,7 @@ fn write_models_json(agent_dir: &Path) {
 
 /// The session file the two racing creates both open: it pins the battery
 /// model (the restore reads the pin) and carries filler messages so the
-/// spawn_blocking scan of `saved_model_from_session_file` holds the first
+/// `spawn_blocking` scan of `saved_model_from_session_file` holds the first
 /// create open long enough for the second create to land inside the
 /// window the created check guards.
 fn write_padded_session_file(dir: &Path) -> PathBuf {

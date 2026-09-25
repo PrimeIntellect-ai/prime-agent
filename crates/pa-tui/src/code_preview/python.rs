@@ -341,6 +341,12 @@ fn scan_python_string_literal(
 }
 
 /// Keep source-line positions while masking multiline-string continuations.
+///
+/// # Panics
+///
+/// Cannot panic for any valid `code`: the `expect` guards the scanner
+/// invariant that the loop only ever advances to a char start (whole
+/// chars, escapes, or quote delimiters).
 pub fn python_statement_lines(code: &str) -> Vec<String> {
     let mut lines: Vec<String> = code.split('\n').map(String::from).collect();
     let mut line = 0usize;

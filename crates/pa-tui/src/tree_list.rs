@@ -710,6 +710,11 @@ impl TreeList {
     }
 
     /// Handle one key id. Returns the action for the caller to run.
+    ///
+    /// # Panics
+    ///
+    /// Cannot panic: the `expect` runs only when the foldable check
+    /// already proved the selected id is `Some`.
     pub fn handle_key(&mut self, kb: &KeybindingsManager, id: &str) -> TreeListAction {
         let mut action = TreeListAction::None;
         if kb.matches(id, "tui.select.up") {

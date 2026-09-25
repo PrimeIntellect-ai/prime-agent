@@ -302,7 +302,7 @@ mod tests {
     }
 
     /// The worker-peer ticket arm authenticates by worker token and refuses
-    /// self-targeting with the TS send_message string.
+    /// self-targeting with the TS `send_message` string.
     #[tokio::test]
     async fn worker_peer_ticket_auth_and_self_target() {
         use crate::registry::ResidentWorker;

@@ -312,6 +312,11 @@ fn model_id_value(model: &Value) -> Option<String> {
 }
 
 /// Parse attach data out of a successful attach/create response payload.
+///
+/// # Errors
+///
+/// Returns `Err` when the payload does not decode into `AttachData`
+/// (an unrecognizable daemon attach result).
 pub fn attach_data_from_response(data: &Value) -> anyhow::Result<AttachData> {
     serde_json::from_value(data.clone()).map_err(|error| {
         anyhow::anyhow!("the daemon returned an unrecognizable attach result: {error}")

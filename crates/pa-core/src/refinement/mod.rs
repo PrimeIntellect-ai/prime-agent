@@ -15,7 +15,7 @@ pub const HARNESS_STATE_DIR_NAME: &str = "harness";
 /// Cross-session refinement history file name.
 pub const REFINEMENT_HISTORY_FILE_NAME: &str = "refinement_history.jsonl";
 
-/// Default overview limits (TS DEFAULT_OVERVIEW_* constants).
+/// Default overview limits (TS `DEFAULT_OVERVIEW_*` constants).
 pub const DEFAULT_OVERVIEW_ENTRY_LIMIT: usize = 3;
 pub const DEFAULT_OVERVIEW_REFINEMENT_LIMIT: usize = 10;
 pub const DEFAULT_OVERVIEW_CONTENT_LIMIT: usize = 140;
@@ -137,6 +137,11 @@ pub fn get_harness_state_path(harness_state_dir: &Path) -> PathBuf {
 
 /// Load harness state; a corrupt or unreadable file degrades to empty rather
 /// than throwing (prompt builds run on every turn).
+///
+/// # Panics
+///
+/// The `get_mut(kind).unwrap()` on the per-kind entry maps cannot panic:
+/// the empty state pre-populates every kind map.
 pub fn load_harness_state(harness_state_dir: &Path, scope: HarnessScope) -> HarnessState {
     let state_path = get_harness_state_path(harness_state_dir);
     let Ok(raw) = std::fs::read_to_string(&state_path) else {
@@ -187,6 +192,11 @@ pub fn load_harness_state(harness_state_dir: &Path, scope: HarnessScope) -> Harn
 }
 
 /// Merge global + local states: local ids conflict-prefixed with their scope.
+///
+/// # Panics
+///
+/// The `get_mut(kind).unwrap()` on the per-kind entry maps cannot panic:
+/// the empty state pre-populates every kind map.
 pub fn merge_harness_states(
     global_state: &HarnessState,
     local_state: Option<&HarnessState>,
@@ -232,6 +242,11 @@ pub fn merge_harness_states(
 }
 
 /// Atomically save harness state (0o600 for new files).
+///
+/// # Errors
+///
+/// Returns an error when the harness directory cannot be created, the state
+/// cannot be serialized, or the atomic write fails.
 pub fn save_harness_state(
     harness_state_dir: &Path,
     state: &HarnessState,
@@ -348,6 +363,12 @@ pub fn infer_refinement_result_scope(result: &RefinementResult) -> Option<Harnes
 }
 
 /// Append a refinement to the global history log (JSONL).
+///
+/// # Errors
+///
+/// Returns an error when the harness directory cannot be created, the
+/// refinement cannot be serialized, or the history file cannot be opened or
+/// appended to.
 pub fn append_global_refinement(
     harness_state_dir: &Path,
     result: &RefinementResult,

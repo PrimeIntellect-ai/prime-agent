@@ -170,12 +170,23 @@ pub struct ProviderOverride {
 }
 
 /// Parse the models.json document (comment/trailing-comma tolerant).
+///
+/// # Errors
+///
+/// Returns a human-readable error string when the document is not valid
+/// JSON after comment and trailing-comma stripping.
 pub fn parse_models_config(content: &str) -> Result<ModelsConfig, String> {
     let stripped = strip_json_comments(content);
     serde_json::from_str(&stripped).map_err(|error| format!("Invalid models.json: {error}"))
 }
 
 /// Port of `validateConfig`: semantic checks beyond the schema.
+///
+/// # Errors
+///
+/// Returns a human-readable error string when a custom provider lacks the
+/// required base URL, API key, or API kind, or defines a model with a
+/// missing id or a zero `contextWindow`/`maxTokens`.
 pub fn validate_config(
     config: &ModelsConfig,
     built_in_providers: &dyn Fn(&str) -> bool,

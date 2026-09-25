@@ -1452,8 +1452,8 @@ impl AgentView {
         rows
     }
 
-    /// The `/reload` box (TS `handleReloadCommand`): DynamicBorder, blank,
-    /// the muted message, blank, DynamicBorder — the editor container's
+    /// The `/reload` box (TS `handleReloadCommand`): `DynamicBorder`, blank,
+    /// the muted message, blank, `DynamicBorder` — the editor container's
     /// replacement while the reload runs.
     fn render_reload_box(&self, message: &str, width: usize) -> Vec<Line> {
         let border = self.theme.fg_style(ThemeColor::Border);

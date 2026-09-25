@@ -118,6 +118,10 @@ impl RlmChildUsageAttributions {
     /// Bind the telemetry handle the `rlm child usage attributed`
     /// adoption event reports through (the engine wiring installs it
     /// once the session telemetry is assembled; depth-0 sessions only).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the telemetry state mutex is poisoned.
     pub fn set_telemetry(&self, telemetry: std::sync::Arc<super::telemetry::SessionTelemetry>) {
         *self.telemetry.lock().expect("rlm usage telemetry lock") = Some(telemetry);
     }
@@ -131,6 +135,10 @@ impl RlmChildUsageAttributions {
     /// observation over: the spawn registers on the successor (the same
     /// file's last assistant row — the observation path is the
     /// successor's).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the forward or children state mutexes are poisoned.
     pub async fn register_spawn(&self, rlm_child_id: &str) {
         // The guard drops at its statement end (a std MutexGuard held
         // across the forwarded await is not Send), and the recursion is
@@ -169,6 +177,11 @@ impl RlmChildUsageAttributions {
     /// `child_usage_attributed` row each. A failed append is logged and
     /// dropped — TS swallows the same failure so attribution bookkeeping
     /// never breaks the observing path.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the forward, children, or telemetry state mutexes are
+    /// poisoned.
     pub async fn record_child_usage(&self, report: RlmChildUsageReport) {
         // A rebuild handed observation over: an in-flight emission (one
         // that cloned the sink before the swap) forwards here, and the
@@ -283,6 +296,11 @@ impl RlmChildUsageAttributions {
     /// drops the adopted registrations at the durable append (the same
     /// recoverable "no durable target" failure every unregistered report
     /// takes).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the forward, fallback, or children state mutexes are
+    /// poisoned.
     pub async fn adopt_registrations(self: &std::sync::Arc<Self>, retired: &std::sync::Arc<Self>) {
         // The handoff goes FIRST: from here on, a spawn or report
         // arriving on the retired producer forwards to the successor
@@ -376,7 +394,7 @@ impl RlmChildUsageAttributions {
 
     /// The retired side's frozen cumulative base for one target (a
     /// report racing the adoption's bases copy folds onto it instead of
-    /// the default — the bases copy's or_insert would keep a broken
+    /// the default — the bases copy's `or_insert` would keep a broken
     /// first aggregate forever). Read BEFORE our own bases lock: the
     /// lock order is the fallback's bases first, ours second, the same
     /// as [`Self::adopt_from_fallback`].
@@ -398,6 +416,10 @@ impl RlmChildUsageAttributions {
     /// `_rlmDurableParentUsage` entry lives with the assistant row). The
     /// retired side's copy is pruned too — a straggler report must not
     /// resurrect the registration through the fallback consult.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the children or fallback state mutexes are poisoned.
     pub async fn forget_child(&self, rlm_child_id: &str) {
         self.children
             .lock()
