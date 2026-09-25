@@ -782,6 +782,7 @@ mod tests {
                 "Goal context: next".to_string(),
             ],
             follow_ups: vec!["Heartbeat prompt: again".to_string()],
+            starting: None,
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         assert_eq!(rows.len(), 3);
@@ -798,6 +799,7 @@ mod tests {
         let queue = QueuedMessages {
             steering: vec!["Agent message received: hi".to_string()],
             follow_ups: Vec::new(),
+            starting: None,
         };
         let rows = render_queue(&theme(), &queue, "alt+up", 80);
         assert_eq!(rows.len(), 3);
