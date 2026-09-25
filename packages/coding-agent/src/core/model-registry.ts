@@ -23,7 +23,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { registerBuiltinMcpOAuthProviders } from "@earendil-works/pi-ai/mcp";
 import { getXaiSubscriptionModel, registerOAuthProvider, resetOAuthProviders } from "@earendil-works/pi-ai/oauth";
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, statSync } from "fs";
 import { dirname, join } from "path";
 import { type Static, type TProperties, Type } from "typebox";
 import type { Validator } from "typebox/compile";
@@ -433,6 +433,29 @@ interface PrivatePrimeAuthorizationCache {
 	refreshedAt: number;
 }
 
+/** Stat identity of the private-authorization cache file; equality means the cached parse is still current. */
+interface CatalogFileIdentity {
+	dev: number;
+	ino: number;
+	size: number;
+	mtimeMs: number;
+}
+
+function statCatalogFileIdentity(path: string): CatalogFileIdentity | undefined {
+	try {
+		const stats = statSync(path);
+		return { dev: stats.dev, ino: stats.ino, size: stats.size, mtimeMs: stats.mtimeMs };
+	} catch {
+		return undefined;
+	}
+}
+
+function isSameCatalogFileIdentity(left: CatalogFileIdentity, right: CatalogFileIdentity): boolean {
+	return (
+		left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeMs === right.mtimeMs
+	);
+}
+
 function privatePrimeAuthorizationFingerprint(apiKey: string, teamId: string): string {
 	// Use the bearer token as a MAC key, not a password to hash. Keep the scope stable for disk cache reuse.
 	return createHmac("sha256", apiKey)
@@ -470,6 +493,9 @@ export class ModelRegistry {
 	private catalogRefreshTimer?: ReturnType<typeof setInterval>;
 	private scheduledCatalogRefresh?: Promise<void>;
 	private loadError: string | undefined = undefined;
+	private privatePrimeAuthorizationCacheSnapshot:
+		| { identity: CatalogFileIdentity; cache: PrivatePrimeAuthorizationCache }
+		| undefined;
 
 	/** Re-register dynamic OAuth providers (e.g. user MCP servers) after refresh() resets the registry. */
 	private onOAuthProvidersReset?: () => void;
@@ -858,11 +884,17 @@ export class ModelRegistry {
 	 * This is a fast check that doesn't refresh OAuth tokens.
 	 */
 	getAvailable(): Model<Api>[] {
+		const authByProvider = new Map<string, boolean>();
 		return this.getAll().filter((model) => {
 			if (isPrivatePrimeInferenceModel(model) && !this.isAuthorizedPrivatePrimeInferenceModel(model)) {
 				return false;
 			}
-			return this.hasConfiguredAuth(model);
+			let configured = authByProvider.get(model.provider);
+			if (configured === undefined) {
+				configured = this.hasConfiguredAuth(model);
+				authByProvider.set(model.provider, configured);
+			}
+			return configured;
 		});
 	}
 
@@ -1136,6 +1168,24 @@ export class ModelRegistry {
 	private readPrivatePrimeAuthorizationCache(): PrivatePrimeAuthorizationCache | undefined {
 		const cachePath = this.privatePrimeAuthorizationCachePath();
 		if (!cachePath) return undefined;
+		const identity = statCatalogFileIdentity(cachePath);
+		const snapshot = this.privatePrimeAuthorizationCacheSnapshot;
+		if (identity && snapshot && isSameCatalogFileIdentity(snapshot.identity, identity)) {
+			return snapshot.cache;
+		}
+		const cache = this.parsePrivatePrimeAuthorizationCache(cachePath);
+		// A concurrent writer can replace the file during the read, and a failed read (EMFILE, malformed) must not be
+		// pinned: snapshot only a successful parse bracketed by one identity.
+		const after = statCatalogFileIdentity(cachePath);
+		if (cache && identity && after && isSameCatalogFileIdentity(identity, after)) {
+			this.privatePrimeAuthorizationCacheSnapshot = { identity: after, cache };
+		} else {
+			this.privatePrimeAuthorizationCacheSnapshot = undefined;
+		}
+		return cache;
+	}
+
+	private parsePrivatePrimeAuthorizationCache(cachePath: string): PrivatePrimeAuthorizationCache | undefined {
 		try {
 			const parsed = JSON.parse(readFileSync(cachePath, "utf8")) as {
 				fingerprint?: unknown;

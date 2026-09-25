@@ -1,0 +1,1 @@
+- Perf: model resolution no longer re-hashes unchanged auth sources or re-reads the private Prime Inference authorization cache while its file is unchanged, and checks provider auth once per provider instead of once per model.

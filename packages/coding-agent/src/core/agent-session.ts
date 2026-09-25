@@ -12530,9 +12530,15 @@ export class AgentSession {
 	}
 
 	private async _authenticatedRlmModels(): Promise<Model<Api>[]> {
+		const selectableByProvider = new Map<string, boolean>();
 		return (await this._modelRegistry.getExecutableModels()).filter((model) => {
-			const status = this._modelRegistry.getProviderAuthStatus(model.provider);
-			return status.source !== "stale" && status.label !== "expired";
+			let selectable = selectableByProvider.get(model.provider);
+			if (selectable === undefined) {
+				const status = this._modelRegistry.getProviderAuthStatus(model.provider);
+				selectable = status.source !== "stale" && status.label !== "expired";
+				selectableByProvider.set(model.provider, selectable);
+			}
+			return selectable;
 		});
 	}
 

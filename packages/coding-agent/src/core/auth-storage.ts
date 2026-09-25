@@ -108,6 +108,17 @@ type AuthSourceCandidate = {
 	resolveValueFingerprint?: () => string | undefined;
 };
 
+type AuthSourceCandidateMemo = {
+	key: string;
+	candidate: AuthSourceCandidate;
+};
+
+/**
+ * Memo key marker for values that must never be hashed: command-backed keys (the memo must never force
+ * the exec) and static MCP tokens.
+ */
+const AUTH_SOURCE_LAZY_VALUE_KEY = "value-lazy";
+
 type AuthApiKeyResult = {
 	apiKey?: string;
 	sourceToken?: AuthSourceToken;
@@ -290,6 +301,7 @@ export class AuthStorage {
 	private fallbackResolver?: (provider: string) => string | undefined;
 	private loadError: Error | null = null;
 	private errors: Error[] = [];
+	private authCandidateMemos: Map<string, AuthSourceCandidateMemo> = new Map();
 	private changeListeners = new Set<() => void>();
 
 	private constructor(
@@ -414,12 +426,29 @@ export class AuthStorage {
 		return `oauth:${apiKey}\0${credential.refresh}\0${credential.expires}`;
 	}
 
+	/** Reuse only skips the SHA-256 work: candidates are immutable and stale checks run against the memoized candidate. */
+	private reuseAuthSourceCandidate(
+		source: ActiveAuthStatusSource,
+		provider: string,
+		key: string,
+		build: () => AuthSourceCandidate,
+	): AuthSourceCandidate {
+		const memoKey = `${source}:${provider}`;
+		const memo = this.authCandidateMemos.get(memoKey);
+		if (memo?.key === key) {
+			return memo.candidate;
+		}
+		const candidate = build();
+		this.authCandidateMemos.set(memoKey, { key, candidate });
+		return candidate;
+	}
+
 	private getRuntimeAuthCandidate(provider: string): AuthSourceCandidate | undefined {
 		const apiKey = this.runtimeOverrides.get(provider);
 		if (!apiKey) {
 			return undefined;
 		}
-		return {
+		return this.reuseAuthSourceCandidate("runtime", provider, apiKey, () => ({
 			label: "--api-key",
 			...this.createAuthSourceCandidate({
 				configured: false,
@@ -427,7 +456,7 @@ export class AuthStorage {
 				identityMaterial: provider,
 				valueMaterial: apiKey,
 			}),
-		};
+		}));
 	}
 
 	private getStoredAuthCandidate(
@@ -444,19 +473,24 @@ export class AuthStorage {
 			isCommandApiKey && options?.resolvedCommandValue !== undefined
 				? `api_key:command:${credential.key}\0${options.resolvedCommandValue}`
 				: undefined;
-		return this.createAuthSourceCandidate({
-			configured: true,
-			source: "stored",
-			identityMaterial,
-			valueMaterial:
-				commandValueMaterial ??
-				(isCommandApiKey && !options?.resolveCommandValue
-					? undefined
-					: this.getStoredCredentialValueMaterial(provider, credential)),
-			resolveValueMaterial: isCommandApiKey
-				? () => this.getStoredCredentialValueMaterial(provider, credential)
-				: undefined,
-		});
+		const valueMaterial =
+			commandValueMaterial ??
+			(isCommandApiKey && !options?.resolveCommandValue
+				? undefined
+				: this.getStoredCredentialValueMaterial(provider, credential));
+		// Keyed by credential fields, never object identity, so the key changes exactly when the hashed material does.
+		const memoKey = `${identityMaterial}\0${valueMaterial ?? AUTH_SOURCE_LAZY_VALUE_KEY}`;
+		return this.reuseAuthSourceCandidate("stored", provider, memoKey, () =>
+			this.createAuthSourceCandidate({
+				configured: true,
+				source: "stored",
+				identityMaterial,
+				valueMaterial,
+				resolveValueMaterial: isCommandApiKey
+					? () => this.getStoredCredentialValueMaterial(provider, credential)
+					: undefined,
+			}),
+		);
 	}
 
 	private getEnvironmentAuthCandidate(provider: string): AuthSourceCandidate | undefined {
@@ -468,13 +502,16 @@ export class AuthStorage {
 		}
 		const label = envKey ?? "ambient credentials";
 		const identityMaterial = envKey ?? this.getAmbientEnvironmentIdentityMaterial(provider);
-		return this.createAuthSourceCandidate({
-			configured: false,
-			source: "environment",
-			label,
-			identityMaterial,
-			valueMaterial: `${identityMaterial}\0${apiKey}`,
-		});
+		// Env values are deliberately re-read per call; only fingerprinting of the unchanged material is memoized.
+		return this.reuseAuthSourceCandidate("environment", provider, `${identityMaterial}\0${apiKey}`, () =>
+			this.createAuthSourceCandidate({
+				configured: false,
+				source: "environment",
+				label,
+				identityMaterial,
+				valueMaterial: `${identityMaterial}\0${apiKey}`,
+			}),
+		);
 	}
 
 	private getAmbientEnvironmentIdentityMaterial(provider: string): string {
@@ -510,13 +547,15 @@ export class AuthStorage {
 		if (!apiKey) {
 			return undefined;
 		}
-		return this.createAuthSourceCandidate({
-			configured: false,
-			source: "fallback",
-			label: "custom provider config",
-			identityMaterial: provider,
-			valueMaterial: apiKey,
-		});
+		return this.reuseAuthSourceCandidate("fallback", provider, apiKey, () =>
+			this.createAuthSourceCandidate({
+				configured: false,
+				source: "fallback",
+				label: "custom provider config",
+				identityMaterial: provider,
+				valueMaterial: apiKey,
+			}),
+		);
 	}
 
 	private getAuthSourceCandidates(provider: string, options?: { includeFallback?: boolean }): AuthSourceCandidate[] {
