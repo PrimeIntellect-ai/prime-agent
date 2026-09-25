@@ -1189,6 +1189,15 @@ export function matchesKey(data: string, keyId: KeyId): boolean {
 	return false;
 }
 
+// macOS Option+<letter> without option-as-meta types a composed character instead of ESC+<letter>.
+const MACOS_OPTION_COMPOSED: Record<string, string> = { s: "ß" };
+
+export function matchesOptionComposedKey(data: string, keyId: KeyId): boolean {
+	const parsed = parseKeyId(keyId);
+	if (!parsed?.alt || parsed.ctrl || parsed.shift || parsed.super) return false;
+	return MACOS_OPTION_COMPOSED[parsed.key] === data;
+}
+
 /**
  * Parse input data and return the key identifier if recognized.
  *
