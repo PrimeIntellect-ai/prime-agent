@@ -68,13 +68,13 @@ missing_panics_doc = "warn"
 doc_markdown = "warn"
 
 # Shipping posture, pinned: thin LTO plus 4 codegen units for cross-crate
-# inlining in the hot render path. The release ships stripped: install bytes
-# are the product's on-disk contract (lane/hillclimb-binary-size), and no
-# runtime surface reads the binary's own symbols (.dynsym survives stripping,
-# so dynamic linking and the release GLIBC gate are unaffected; panic
-# backtraces lose symbol names and line numbers).
+# inlining in the hot render path. The release strips debug sections only:
+# install bytes shrink (lane/hillclimb-binary-size) while the static symbol
+# table — and with it function names in panic backtraces — stays. .dynsym
+# survives stripping, so dynamic linking and the release GLIBC baseline
+# gate are unaffected.
 [profile.release]
 lto = "thin"
 codegen-units = 4
 debug = "line-tables-only"
-strip = true
+strip = "debuginfo"
