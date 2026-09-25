@@ -148,12 +148,12 @@ mod tests {
     use std::time::{Duration, Instant};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    /// NOTE on ambient credentials: like the pa-core live-catalog verifiers,
-    /// these tests pin the Prime Inference scope through the temp agent
-    /// dir's auth.json — an ambient `PRIME_API_KEY` in the test process
-    /// would win over the stored credential (environment before stored,
-    /// by design) and change the resolved scope. The CI env is clean.
-    /// Nothing here leaves loopback.
+    // NOTE on ambient credentials: like the pa-core live-catalog verifiers,
+    // these tests pin the Prime Inference scope through the temp agent
+    // dir's auth.json — an ambient `PRIME_API_KEY` in the test process
+    // would win over the stored credential (environment before stored,
+    // by design) and change the resolved scope. The CI env is clean.
+    // Nothing here leaves loopback.
 
     /// One scripted answer: raw bytes, or a gate the test releases.
     enum Answer {
@@ -384,7 +384,7 @@ mod tests {
                         "apiKey": "sk-catalog-worker",
                         "models": [
                             {"id": "mock-1", "name": "Mock 1", "api": "openai-completions",
-                             "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128000,
+                             "baseUrl": "http://127.0.0.1:9/v1", "contextWindow": 128_000,
                              "maxTokens": 4096}
                         ]
                     }
@@ -521,7 +521,7 @@ mod tests {
             loop {
                 match events.recv().await {
                     Ok(frame) if frame.outbound_type == "model_catalog_changed" => return true,
-                    Ok(_) => continue,
+                    Ok(_) => {}
                     Err(_) => return false,
                 }
             }
@@ -542,7 +542,7 @@ mod tests {
                 .expect("model_catalog_changed never landed");
             match tokio::time::timeout(remaining, events.recv()).await {
                 Ok(Ok(frame)) if frame.outbound_type == "model_catalog_changed" => return,
-                Ok(Ok(_)) => continue,
+                Ok(Ok(_)) => {},
                 Ok(Err(error)) => panic!("event stream error: {error}"),
                 Err(_) => panic!("model_catalog_changed never landed"),
             }
