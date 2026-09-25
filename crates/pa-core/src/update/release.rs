@@ -264,7 +264,7 @@ mod tests {
     /// the endpoint's base URL plus a channel carrying what the client sent
     /// (the request head). No fixed ports: the listener binds `127.0.0.1:0`.
     async fn fake_release_endpoint(
-        status: &str,
+        status: &'static str,
         body: String,
     ) -> (String, tokio::sync::oneshot::Receiver<String>) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};

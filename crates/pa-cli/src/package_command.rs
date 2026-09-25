@@ -569,17 +569,20 @@ fn run_package_update(
         .get_update_channel()
         .map(crate::self_update::settings_channel_wire_name)
         .map(str::to_string);
-    if target.includes_self() {
-        if let Some(abort_code) = crate::self_update::confirm_nightly_switch(
+    let abort_code = if target.includes_self() {
+        crate::self_update::confirm_nightly_switch(
             options.force,
             options.channel,
             persisted_wire.as_deref(),
             stdin_is_terminal,
-        ) {
-            return PackageCommandOutcome {
-                exit_code: Some(abort_code),
-            };
-        }
+        )
+    } else {
+        None
+    };
+    if let Some(abort_code) = abort_code {
+        return PackageCommandOutcome {
+            exit_code: Some(abort_code),
+        };
     }
     if target.includes_extensions() {
         let update_source = match &target {
