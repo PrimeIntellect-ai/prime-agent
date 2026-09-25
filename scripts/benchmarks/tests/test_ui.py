@@ -276,6 +276,7 @@ class ProbeLogicTests(unittest.TestCase):
             patch("ui.expand_subagents"),
             patch("ui.wait_for_roster", return_value=0.1),
             patch("ui.write_fixtures"),
+            patch("ui.os.sync"),
             patch("ui.pwd.getpwnam", return_value=SimpleNamespace(pw_uid=123)),
             patch("ui.process_stats", side_effect=stats),
             patch("worker.environment", return_value={}),

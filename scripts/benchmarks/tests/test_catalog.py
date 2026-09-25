@@ -190,6 +190,7 @@ class CatalogTrialTests(unittest.TestCase):
                 patch("ui.wait_for_roster", return_value=0.1),
                 patch("ui.write_fixtures"),
                 patch("ui.write_catalog_fixtures", return_value=(cold, {"catalog-job-1"})),
+                patch("ui.os.sync"),
                 patch("ui.pwd.getpwnam", return_value=SimpleNamespace(pw_uid=123)),
                 patch("ui.process_stats", return_value=[ProcessMemory(pid=1, name="daemon", rss=100)]),
                 patch("worker.environment", return_value={}),
