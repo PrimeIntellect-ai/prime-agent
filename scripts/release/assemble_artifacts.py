@@ -74,6 +74,41 @@ STAGED_ENTRIES = [
     "mcp-services.bundled.json",
 ]
 
+# Shipped-content policy: what the installed tree carries beyond the binary.
+#
+# The runtime sidecar ships only what the kernel consumes. The venv
+# bootstrap installs it with `uv pip install <payload>/prime-agent-runtime`
+# (uv's pip interface builds the hatchling wheel, whose target packages
+# only `src/rlm`), and the venv cache identity hashes `src/rlm/*.py` +
+# `pyproject.toml` — so the pytest suite (`test/`) and the development
+# `uv.lock` (the pip interface never reads the project lockfile) are dead
+# weight in every installed tree, and dropping them changes neither the
+# built wheel nor the bootstrap-version identity. The cache names and
+# suffixes mirror package_release.py's EXCLUDED_* so a stale `.venv` or
+# `__pycache__` cannot ride the payload either.
+RUNTIME_EXCLUDED_NAMES = frozenset({
+    "test",
+    "uv.lock",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".mypy_cache",
+    ".git",
+    ".DS_Store",
+    "node_modules",
+})
+RUNTIME_EXCLUDED_SUFFIXES = (".pyc", ".egg-info")
+
+# The docs/ files that ship to end users: the quickstart install-rust.sh
+# prints the payload path for ("next steps"), the keybindings reference,
+# and the model-surface contract package_release.py's REQUIRED_FILES
+# pins. The rest of docs/ is porting/audit/CI material for repository
+# developers (~570KB at assembly time) and stays out of the installed
+# footprint; the docs payload entry itself always ships (the update
+# flow's RELEASE_ASSETS and the TS binaryAssets list require it).
+SHIPPED_DOC_ENTRIES = ("RUST_QUICKSTART.md", "keybindings.md", "MODEL-SURFACE.md")
+
 # Rust target triple -> TS release-platform alias (the v1 installer schema).
 TARGET_ALIASES = {
     "x86_64-unknown-linux-gnu": "linux-x64",
@@ -164,6 +199,41 @@ def validate_sha(sha: str) -> None:
         fail(f"invalid commit SHA {sha!r} (expected 40 hex chars)")
 
 
+def copy_runtime_tree(source: Path, target: Path) -> None:
+    """Copy the kernel sidecar, dropping the dev-only files
+    (RUNTIME_EXCLUDED_*): a plain-file, no-link tree like the rest of the
+    payload (symlinks still fail at pack time in `_deterministic_member`).
+    """
+
+    def ignore(directory, names):
+        return {
+            name for name in names
+            if name in RUNTIME_EXCLUDED_NAMES
+            or name.endswith(RUNTIME_EXCLUDED_SUFFIXES)
+        }
+
+    shutil.copytree(source, target, ignore=ignore)
+
+
+def copy_shipped_docs(source: Path, target: Path) -> None:
+    """Stage the user-facing docs subset (SHIPPED_DOC_ENTRIES).
+
+    The docs entry always ships, even when a tree carries none of the
+    curated files (synthetic fixtures stage an empty docs dir): the update
+    flow's RELEASE_ASSETS and the TS binaryAssets list require the entry.
+    A curated file missing from a real tree only logs a note — the release
+    gate for it is package_release.py's REQUIRED_FILES, which runs the
+    same policy on the local dry-run.
+    """
+    target.mkdir()
+    for name in SHIPPED_DOC_ENTRIES:
+        doc = source / name
+        if doc.is_file():
+            shutil.copy2(doc, target / name)
+        else:
+            print(f"note: {name} not found in {source}; the payload ships without it")
+
+
 def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | None) -> dict:
     """Copy the tarball payload into the staging dir; return per-entry facts.
 
@@ -171,6 +241,10 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
     releases); when set, a `package.json` manifest is staged beside the binary
     so `--version` reports it at runtime (the same exe-adjacent manifest the
     TS binaryAssets carry — the Rust binary resolves it from `current_exe()`).
+
+    The runtime and docs entries ship the curated content (see
+    RUNTIME_EXCLUDED_* and SHIPPED_DOC_ENTRIES); every other entry is a
+    verbatim copy.
     """
     binary = resolve_binary(args)
     runtime_dir = args.runtime_dir or (args.repo_root / "prime-agent-runtime")
@@ -193,7 +267,12 @@ def stage_tree(staging: Path, args: argparse.Namespace, stamped_version: str | N
         if not source.exists():
             fail(f"release payload entry {name!r} missing at {source}")
         if source.is_dir():
-            shutil.copytree(source, target_path)
+            if name == "prime-agent-runtime":
+                copy_runtime_tree(source, target_path)
+            elif name == "docs":
+                copy_shipped_docs(source, target_path)
+            else:
+                shutil.copytree(source, target_path)
         else:
             shutil.copy2(source, target_path)
     os.chmod(staging / "prime-agent", 0o755)
