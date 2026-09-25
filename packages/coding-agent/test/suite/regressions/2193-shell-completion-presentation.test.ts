@@ -143,6 +143,14 @@ describe("#2193 shell completion presentation", () => {
 			exitCode === 0 ? " ✓ Background shell command finished" : " ✗ Background shell command failed · exit 8",
 		);
 		expand([event]);
+		const rows = render([event])
+			.split("\n")
+			.map((row) => row.trimEnd());
+		expect(rows.slice(rows.findIndex((row) => row.startsWith(" ╰─ ")))).toEqual([
+			` ╰─ [bash-done pid:99 exit:${exitCode}]`,
+			"",
+			'    Command: "printf done"',
+		]);
 		for (const line of notice.content.split("\n").filter(Boolean)) expect(render([event])).toContain(line);
 		expect(launch.hasRunningBackgroundShell()).toBe(true);
 	});
