@@ -190,6 +190,14 @@ fn card_receipts(card: &ToolCallCard) -> Vec<(Option<&str>, bool)> {
         .collect()
 }
 
+/// One card's parseable receipt count (the condensing threshold's
+/// in-place change detector: a result mutation can move a run's
+/// qualification only through this count, so the run map rebuilds
+/// exactly when it changed).
+pub fn card_receipt_count(card: &ToolCallCard) -> usize {
+    card_receipts(card).len()
+}
+
 /// Count one entry's agent-message notices into `notices`, deduping
 /// receipt ids against `seen` (the same receipt echoed by two cells of
 /// one run counts once; an id-less parseable receipt is its own notice

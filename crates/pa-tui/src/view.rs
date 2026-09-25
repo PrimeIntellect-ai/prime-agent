@@ -65,6 +65,24 @@ impl Default for ShareLoader {
     }
 }
 
+/// The run-shape inputs one in-place mutation can move (the
+/// `prepare_entry_mutation`/`mark_entry_stale` pair's capture): an
+/// assistant flips its glue state (a boundary flip merges or splits
+/// runs); an ipython card's parseable receipt count is a condensing
+/// threshold input (a result landing receipts can qualify a short
+/// run); a card with no receipt-bearing potential moves only its own
+/// rows - the run map's shape never changes for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunShapeInputs {
+    /// The assistant's glue state before the mutation.
+    AssistantGlue(bool),
+    /// The card's parseable receipt count before the mutation.
+    Receipts(usize),
+    /// No run-shape input moves (a card without receipt potential, or
+    /// an entry type that never mutates in place).
+    None,
+}
+
 pub struct AgentView {
     pub theme: Theme,
     /// The chat markdown fenced-code indent (`markdown.codeBlockIndent`,
@@ -211,12 +229,12 @@ pub struct AgentView {
     /// The condensed tool runs' suffix capture for one in-place mutation
     /// (the `prepare_entry_mutation`/`mark_entry_stale` pair): the
     /// affected run's start index, the suffix's row count before the
-    /// mutation, and — for an assistant only — its pre-mutation glue
-    /// state. The block's row-count change folds into the sparse
-    /// window's tail bookkeeping through the run's owning index, except
-    /// an assistant mutation that keeps the glue boundary (a streaming
-    /// grow), which folds at the entry's own slot.
-    runs_prepare: Option<(usize, usize, Option<bool>)>,
+    /// mutation, and the mutation's run-shape inputs. The block's
+    /// row-count change folds into the sparse window's tail bookkeeping
+    /// through the run's owning index, except an assistant mutation
+    /// that keeps the glue boundary (a streaming grow), which folds at
+    /// the entry's own slot.
+    runs_prepare: Option<(usize, usize, RunShapeInputs)>,
     sparse_entries: std::collections::BTreeSet<usize>,
     /// The condensed tool runs (a purely render-time grouping, never
     /// stored): one slot per chat entry. Rebuilt from the earliest
@@ -701,10 +719,21 @@ impl AgentView {
                 // capture covers both sides; its pre-mutation glue
                 // state rides along - the stale pass folds a streaming
                 // grow that keeps the boundary at the entry's own
-                // slot (the earlier run's block never moved).
-                let was_glue = assistant.then(|| crate::tool_runs::is_run_glue(&self.chat[index]));
+                // slot (the earlier run's block never moved). A tool
+                // card's capture rides its receipt count: a result
+                // landing receipts can qualify a short run (the
+                // threshold counts them as items).
+                let inputs = match &self.chat[index] {
+                    ChatEntry::Assistant(_) => RunShapeInputs::AssistantGlue(
+                        crate::tool_runs::is_run_glue(&self.chat[index]),
+                    ),
+                    ChatEntry::Tool(card) => {
+                        RunShapeInputs::Receipts(crate::tool_runs::card_receipt_count(card))
+                    }
+                    _ => RunShapeInputs::None,
+                };
                 self.sparse_mutation = None;
-                self.runs_prepare = Some((start, before, was_glue));
+                self.runs_prepare = Some((start, before, inputs));
                 return;
             }
             let rows = self.count_entry_rows(index, self.layout_width);
@@ -724,43 +753,62 @@ impl AgentView {
     pub fn mark_entry_stale(&mut self, index: usize) {
         // A mutated assistant message can cross the run-glue boundary (a
         // streamed message gains text and its run splits; a rebuilt one
-        // loses it): rebuild the run map's affected suffix so the
-        // grouping always matches the entries it reads.
-        let rebuild = matches!(self.chat.get(index), Some(ChatEntry::Assistant(_)))
-            .then(|| self.member_start(index));
+        // loses it), and a tool result landing agent-message receipts
+        // moves the condensing threshold (the receipts are items):
+        // rebuild the run map's affected suffix so the grouping always
+        // matches the entries it reads.
+        let rebuild = match self.chat.get(index) {
+            Some(ChatEntry::Assistant(_)) => Some(self.member_start(index)),
+            Some(ChatEntry::Tool(card)) => {
+                let inputs = self.runs_prepare.as_ref().map(|capture| capture.2);
+                match inputs {
+                    Some(RunShapeInputs::Receipts(before))
+                        if crate::tool_runs::card_receipt_count(card) != before =>
+                    {
+                        Some(self.member_start(index))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
         if let Some(start) = rebuild {
             self.run_map.rebuild_from(&self.chat, start);
         }
         // The sparse-window fold: a glue-or-tool mutation folded its run's
         // whole suffix (the block's change included) through the run's
         // owning index; any other mutation folds its own rows.
-        if let Some((start, before, was_glue)) = self.runs_prepare.take() {
+        if let Some((start, before, inputs)) = self.runs_prepare.take() {
             if self.layout_width > 0 {
                 let after = self.suffix_rows(start, self.layout_width);
                 // An assistant that kept its glue state only grew its
                 // own rows (the streaming case): fold at the entry's
                 // own slot, exactly like every other self-contained
-                // mutation. A boundary flip (the merge/split) or a
-                // glue card's state change folds through the run's
+                // mutation. A boundary flip (the merge/split), a
+                // receipt change that crossed the threshold, or a
+                // member card's state change folds through the run's
                 // owning index - the block's shape moved there.
-                let fold = match was_glue {
-                    // An assistant that kept its glue state only grew
-                    // its own rows (the streaming case); a flip (the
-                    // merge/split) reshaped the block - the run's
-                    // owning index carries the whole change.
-                    Some(was) if crate::tool_runs::is_run_glue(&self.chat[index]) == was => index,
-                    Some(_) => start,
+                let fold = match inputs {
+                    RunShapeInputs::AssistantGlue(was)
+                        if crate::tool_runs::is_run_glue(&self.chat[index]) == was =>
+                    {
+                        index
+                    }
+                    RunShapeInputs::AssistantGlue(_) => start,
                     // A card inside a qualifying run moves the BLOCK's
                     // rows (they live at the run's start); a solo card
                     // (a short uncondensed sequence, or a standalone
                     // card) moves only its own rows - the fold lands
                     // there, never at the sequence's first card.
-                    None => match self.run_map.slot(index) {
-                        Some(
-                            crate::tool_runs::RunSlot::Start(_) | crate::tool_runs::RunSlot::Member,
-                        ) => start,
-                        _ => index,
-                    },
+                    RunShapeInputs::Receipts(_) | RunShapeInputs::None => {
+                        match self.run_map.slot(index) {
+                            Some(
+                                crate::tool_runs::RunSlot::Start(_)
+                                    | crate::tool_runs::RunSlot::Member,
+                            ) => start,
+                            _ => index,
+                        }
+                    }
                 };
                 self.sparse_tail_delta(after as isize - before as isize, fold);
             }
@@ -3371,6 +3419,54 @@ mod tests {
     }
 
     #[test]
+    fn a_landing_result_with_receipts_qualifies_the_short_run() {
+        // `tool_execution_end` replays a result whose sentAgentMessages
+        // carry two receipts: the one-card-plus-receipts run crosses
+        // the >=3 threshold the moment the result lands (prepare
+        // captured the pre-mutation receipt count, mark re-derives the
+        // map), and the block replaces the card's rows in overview.
+        let mut view = condensed_view(Vec::new());
+        view.push_entry(crate::chat::ChatEntry::User {
+            text: "go".to_string(),
+        });
+        let mut cell = settled_tool_card("cell0");
+        if let ChatEntry::Tool(card) = &mut cell {
+            card.name = "ipython".to_string();
+            card.args = serde_json::json!({"code": "print(1)"});
+        }
+        view.push_entry(cell);
+        let before = transcript_text(&mut view, 80);
+        assert!(
+            !before.contains("agent message"),
+            "one streamed cell without receipts stays solo: {before}"
+        );
+        let index = view.chat.len() - 1;
+        view.prepare_entry_mutation(index);
+        if let Some(ChatEntry::Tool(card)) = view.chat.get_mut(index) {
+            card.result = Some(ToolResultView {
+                content: vec![serde_json::json!({"type": "text", "text": "done"})],
+                details: serde_json::json!({
+                    "sentAgentMessages": [
+                        { "id": "m1", "message": "a", "deliveryStatus": "delivered", "receiverRole": "parent" },
+                        { "id": "m2", "message": "b", "deliveryStatus": "delivered", "receiverRole": "parent" }
+                    ]
+                }),
+                is_error: false,
+            });
+        }
+        view.mark_entry_stale(index);
+        let after = transcript_text(&mut view, 80);
+        assert!(
+            after.contains("1 tool call \u{b7} 2 agent messages"),
+            "the landed receipts qualify the run: {after}"
+        );
+        assert!(
+            after.contains("2 agent messages sent"),
+            "the breakdown carries the receipt class: {after}"
+        );
+    }
+
+    #[test]
     fn condensed_geometry_matches_the_render() {
         for calls in [3usize, 8] {
             let mut view = condensed_view(run_cards(calls));
@@ -3385,6 +3481,36 @@ mod tests {
                             "calls {calls} index {index} width {width} detail {detail:?}"
                         );
                     }
+                }
+            }
+        }
+        // A mixed run (a notice and a receipt-carrying cell) keeps the
+        // same count/render parity on every index.
+        let mut cell = settled_tool_card("mix0");
+        if let ChatEntry::Tool(card) = &mut cell {
+            card.name = "ipython".to_string();
+            card.args = serde_json::json!({"code": "print(1)"});
+            card.result = Some(ToolResultView {
+                content: vec![serde_json::json!({"type": "text", "text": "done"})],
+                details: serde_json::json!({
+                    "sentAgentMessages": [
+                        { "id": "m1", "message": "a", "deliveryStatus": "delivered", "receiverRole": "parent" }
+                    ]
+                }),
+                is_error: false,
+            });
+        }
+        let mut view = condensed_view(vec![agent_message_row(), thinking_only(), cell]);
+        for width in [0, 1, 10, 40, 80] {
+            for detail in [Detail::Overview, Detail::Details, Detail::All] {
+                view.detail = detail;
+                for index in 0..view.chat.len() {
+                    let entry = &view.chat[index];
+                    assert_eq!(
+                        view.count_entry_rows(index, width),
+                        view.render_entry(index, entry, width, false, false).len(),
+                        "mixed index {index} width {width} detail {detail:?}"
+                    );
                 }
             }
         }
