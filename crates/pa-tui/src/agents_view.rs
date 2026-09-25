@@ -1162,14 +1162,17 @@ impl AgentsViewMode {
             .as_deref()
             .filter(|_| budget >= 4)
             .map(|notice| self.render_notice(notice, width, budget));
-        let status_fallback = notice_panel
+        // Owned: the fallback's borrow of the notice must end before the
+        // mutable list render below.
+        let status_fallback: Option<String> = notice_panel
             .is_none()
             .then(|| {
                 self.notice
                     .as_deref()
                     .and_then(|notice| notice.lines().next())
             })
-            .flatten();
+            .flatten()
+            .map(str::to_string);
         let notice_height = notice_panel.as_ref().map_or(0, Vec::len);
         let list_rows = height.saturating_sub(lines.len() + 1 + notice_height);
         lines.extend(self.render_list(width, list_rows));
@@ -1179,7 +1182,7 @@ impl AgentsViewMode {
         while lines.len() < height.saturating_sub(1) {
             lines.push(vec![]);
         }
-        lines.push(self.render_hints(width, status_fallback));
+        lines.push(self.render_hints(width, status_fallback.as_deref()));
         while lines.len() > height {
             lines.pop();
         }
