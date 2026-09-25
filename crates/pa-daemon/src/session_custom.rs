@@ -157,7 +157,10 @@ impl Worker {
                         Some("pinned") => crate::worker::QueuePriority::Pinned,
                         Some("user") => crate::worker::QueuePriority::Human,
                         Some("background") => crate::worker::QueuePriority::Background,
-                        _ if payload.get("customMessage").is_some()
+                        Some(_) => crate::worker::QueuePriority::Background,
+                        None if payload
+                            .get("customMessage")
+                            .is_some_and(|message| !message.is_null())
                             || pa_core::session_engine::agent_messaging::is_agent_session_message_id(
                                 action.get("agentMessageId").and_then(Value::as_str),
                             )
@@ -191,7 +194,10 @@ impl Worker {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string(),
-                    custom_message: payload.get("customMessage").cloned(),
+                    custom_message: payload
+                        .get("customMessage")
+                        .filter(|message| !message.is_null())
+                        .cloned(),
                     agent_message: None,
                     // TS `restoreSessionActions` restores the action's
                     // queue key (`...(recovered.queueKey ? { queueKey:
@@ -661,6 +667,8 @@ mod tests {
             }
             row
         };
+        let mut null_custom = action("null-custom", "rpc", None, None, false);
+        null_custom["payload"]["customMessage"] = Value::Null;
         let restored = worker
             .dispatch(
                 "restore_actions",
@@ -674,6 +682,8 @@ mod tests {
                         action("agent-id-fallback", "rpc", None, Some("agentmsg_abc"), false),
                         action("internal-fallback", "internal", None, None, false),
                         action("synthetic-waiter", "rpc", None, Some("prompt-waiter-1"), false),
+                        action("unknown-priority", "rpc", Some("future_priority"), None, false),
+                        null_custom,
                     ] }
                 }),
             )
@@ -692,7 +702,9 @@ mod tests {
                 "custom-fallback",
                 "agent-id-fallback",
                 "internal-fallback",
-                "synthetic-waiter"
+                "synthetic-waiter",
+                "unknown-priority",
+                "null-custom"
             ]
         );
         assert_eq!(
@@ -706,6 +718,8 @@ mod tests {
                 crate::worker::QueuePriority::Background,
                 crate::worker::QueuePriority::Background,
                 crate::worker::QueuePriority::Background,
+                crate::worker::QueuePriority::Background,
+                crate::worker::QueuePriority::Human,
                 crate::worker::QueuePriority::Background,
                 crate::worker::QueuePriority::Human,
             ]
