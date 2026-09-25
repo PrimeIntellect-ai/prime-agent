@@ -141,7 +141,7 @@ pub struct ClassCount {
 /// The run's agent-message notice counts: one per received transcript
 /// row, plus the ipython cards' sent/queued receipts.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct RunNotices {
+struct RunNotices {
     /// The received transcript rows.
     pub received: usize,
     /// Delivered receipts.
@@ -414,7 +414,7 @@ pub fn class_text(summary: &RunSummary) -> String {
 
 /// The summary row: `<glyph> <counts> \u{b7} <wall-clock>`. The row
 /// leads with the one-column chat margin span.
-pub fn render_summary_row(summary: &RunSummary, frame: usize, theme: &Theme, width: usize) -> Line {
+fn render_summary_row(summary: &RunSummary, frame: usize, theme: &Theme, width: usize) -> Line {
     let muted = theme.fg_style(ThemeColor::Muted);
     let dim = theme.fg_style(ThemeColor::Dim);
     let (glyph, color) = status_glyph(summary, frame);
