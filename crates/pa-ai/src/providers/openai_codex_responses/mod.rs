@@ -1496,6 +1496,7 @@ mod tests {
         ));
 
         let bodies = server.sent_bodies.lock().expect("bodies").clone();
+        eprintln!("[test] captured bodies: {bodies:?}");
         assert_eq!(bodies.len(), 3, "two requests + one retry: {bodies:?}");
         assert_eq!(
             bodies[1].get("previous_response_id"),
