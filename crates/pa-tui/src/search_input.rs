@@ -45,7 +45,10 @@ impl SearchInput {
         self.cursor
     }
 
-    /// TS `setValue`: the cursor never moves past the new value.
+    /// TS `setValue`: the cursor never moves past the new value (the
+    /// caret-clamp behavior is pinned by
+    /// `set_value_keeps_the_cursor_inside_the_value`).
+    #[cfg(test)]
     pub(crate) fn set_value(&mut self, value: &str) {
         self.value = value.to_string();
         self.cursor = self.cursor.min(self.value.chars().count());

@@ -26,15 +26,20 @@ struct SettingsOnboardingSink {
     agent_dir: PathBuf,
     /// When the onboarding task was created: the `onboarding completed`
     /// duration measures sink creation to completion (the TUI starts the
-    /// flow right away; the flow is silent on fresh homes and only the
-    /// retained opt-out question shows the pane).
+    /// flow right away; a fresh home answers the question, a home with a
+    /// standing choice completes silently).
     created_at: std::time::Instant,
 }
 
 impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
-    fn agent_traces_enabled(&self) -> bool {
+    fn onboarding_shown(&self) -> bool {
         pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
-            .get_agent_traces_enabled()
+            .get_onboarding_shown()
+    }
+
+    fn agent_traces_choice_written(&self) -> bool {
+        pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir)
+            .agent_traces_choice_written()
     }
 
     fn set_agent_traces_enabled(&self, enabled: bool) -> Result<()> {
@@ -45,10 +50,10 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
     fn mark_onboarding_complete(&self) -> Result<()> {
         let mut settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
         settings.set_onboarding_shown(true)?;
-        // `onboarding completed` (schema v1): fresh homes complete the flow
-        // silently (sharing is pre-configured), so outcome is always success
-        // and no auth/provider step runs (auth_category `none`). Best-effort
-        // like all telemetry.
+        // `onboarding completed` (schema v1): a fresh home answers the
+        // question and a standing-choice home completes silently, so the
+        // outcome is always success and no auth/provider step runs
+        // (auth_category `none`). Best-effort like all telemetry.
         if !crate::mode::telemetry_disabled(&settings) {
             let client =
                 pa_core::session_engine::telemetry::build_client(&settings, &self.agent_dir);
@@ -68,10 +73,10 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
 
 /// TS `shouldRunOnboarding` + `isOnboardingModelReady`: first run is defined
 /// by the settings flag alone; the task mounts only when the startup model
-/// resolves and has configured auth (no login sequence). A fresh home
-/// ships trace sharing pre-configured, so the flow completes silently
-/// without any question; the trace question remains for a user who
-/// explicitly opted out before completing onboarding. The startup model
+/// resolves and has configured auth (no login sequence). The phase then
+/// asks the trace question once on a fresh home, while a home that already
+/// carries a trace choice (a provisioned or copied config) completes
+/// silently with the standing choice. The startup model
 /// follows the TS `findInitialModel` chain —
 /// explicit flags, the `--models` scope, the saved settings default, the
 /// featured default, the first available model — so a flagless launch with
@@ -1386,14 +1391,14 @@ mod tests {
         assert!(onboarding_task(&options).is_none());
     }
 
-    /// The product sink's persistence over the real settings files: the
-    /// retained-dialog home (sharing explicitly opted out, onboarding never
-    /// completed — the one home the question still mounts for) reads its
-    /// provisioned value through a fresh manager, the answer persists, and
-    /// the completion flag lands beside it. The next launch's gate reads
-    /// exactly this pair, so the question never re-mounts.
+    /// The product sink's persistence over the real settings files: a
+    /// provisioned home (sharing explicitly opted out, onboarding never
+    /// completed) reads its standing choice through a fresh manager and
+    /// the silent completion persists ONLY the flag — the choice stands
+    /// untouched, and the next launch's gate reads the flag and never
+    /// mounts the task again.
     #[test]
-    fn settings_sink_persists_the_retained_dialog_answers() {
+    fn settings_sink_completes_a_provisioned_home_without_touching_the_choice() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).expect("agent dir");
@@ -1413,28 +1418,31 @@ mod tests {
             created_at: std::time::Instant::now(),
         };
         assert!(
-            !sink.agent_traces_enabled(),
+            !sink.onboarding_shown(),
+            "the never-completed home reads its missing flag through a fresh manager"
+        );
+        assert!(
+            sink.agent_traces_choice_written(),
             "the provisioned opt-out reads through a fresh manager"
         );
-        sink.set_agent_traces_enabled(true).expect("answer Share");
-        sink.mark_onboarding_complete()
-            .expect("complete onboarding");
+        sink.mark_onboarding_complete().expect("silent completion");
 
-        // The next launch reads the pair through its own fresh manager: the
-        // gate never mounts the task again and the standing choice survives.
+        // The next launch reads through its own fresh manager: the gate
+        // never mounts the task again and the standing choice survives.
         let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
         assert!(settings.get_onboarding_shown(), "the flag persisted");
         assert!(
-            settings.get_agent_traces_enabled(),
-            "the Share answer persisted with the flag"
+            !settings.get_agent_traces_enabled(),
+            "the standing opt-out survived the silent completion"
         );
     }
 
-    /// A fresh home ships sharing pre-configured ON through the product sink
-    /// (the silent-completion branch's read): nothing is written for the
-    /// choice, and the silent completion persists only the flag.
+    /// A fresh home (no choice written) is the one home the question still
+    /// mounts for — the opt-in moment: the flow's `Share` answer persists
+    /// beside the completion flag, and both read back through the next
+    /// launch's fresh manager.
     #[test]
-    fn settings_sink_reads_the_fresh_home_default_and_completes_silently() {
+    fn settings_sink_persists_the_fresh_home_answer_with_the_flag() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let agent_dir = dir.path().join("agent");
         std::fs::create_dir_all(&agent_dir).expect("agent dir");
@@ -1449,30 +1457,25 @@ mod tests {
             created_at: std::time::Instant::now(),
         };
         assert!(
-            sink.agent_traces_enabled(),
-            "a fresh home shares traces (the pre-configured default, nothing written)"
+            !sink.onboarding_shown(),
+            "a fresh home has no completion flag yet"
         );
-        sink.mark_onboarding_complete().expect("silent completion");
+        assert!(
+            !sink.agent_traces_choice_written(),
+            "a fresh home carries no trace choice (sharing stays off until a choice is made)"
+        );
+        sink.set_agent_traces_enabled(true).expect("answer Share");
+        sink.mark_onboarding_complete()
+            .expect("complete onboarding");
 
         let settings = pa_core::settings::SettingsManager::create(dir.path(), &agent_dir);
         assert!(
             settings.get_onboarding_shown(),
-            "the silent flow marked onboarding shown"
+            "the flow marked onboarding shown"
         );
-        // The choice stayed unwritten (the default IS the configuration):
-        // the storage serializes unset keys as null, so the assertion is on
-        // the value, not the key's presence.
-        let persisted =
-            std::fs::read_to_string(agent_dir.join("settings.json")).expect("settings file");
-        let document: serde_json::Value = serde_json::from_str(&persisted).expect("settings json");
-        let agent_traces = document
-            .get("agentTraces")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        assert_eq!(
-            agent_traces,
-            serde_json::Value::Null,
-            "the default stood without a written value:\n{persisted}"
+        assert!(
+            settings.get_agent_traces_enabled(),
+            "the Share answer persisted with the flag"
         );
     }
 
