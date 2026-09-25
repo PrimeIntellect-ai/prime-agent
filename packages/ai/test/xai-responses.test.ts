@@ -2,10 +2,65 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getModel, getSupportedThinkingLevels } from "../src/models.js";
 import { streamSimpleOpenAIResponses } from "../src/providers/openai-responses.js";
-import type { Context } from "../src/types.js";
+import type { Api, Context, Model } from "../src/types.js";
 import { getXaiSubscriptionModel } from "../src/utils/oauth/xai.js";
 
-const model = getXaiSubscriptionModel(getModel("xai", "grok-4.5"))!;
+const xaiSubscriptionFixtureModels = {
+	"grok-4.3": {
+		id: "grok-4.3",
+		name: "Grok 4.3",
+		api: "openai-completions",
+		provider: "xai",
+		baseUrl: "https://api.x.ai/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 1.25, output: 2.5, cacheRead: 0.2, cacheWrite: 0 },
+		contextWindow: 1000000,
+		maxTokens: 30000,
+	},
+	"grok-4.5": {
+		id: "grok-4.5",
+		name: "Grok 4.5",
+		api: "openai-completions",
+		provider: "xai",
+		baseUrl: "https://api.x.ai/v1",
+		reasoning: true,
+		thinkingLevelMap: { off: null, minimal: null },
+		input: ["text", "image"],
+		cost: { input: 2, output: 6, cacheRead: 0.3, cacheWrite: 0 },
+		contextWindow: 500000,
+		maxTokens: 500000,
+	},
+	"grok-4.6": {
+		id: "grok-4.6",
+		name: "Grok 4.6",
+		api: "openai-completions",
+		provider: "xai",
+		baseUrl: "https://api.x.ai/v1",
+		reasoning: true,
+		thinkingLevelMap: { off: null, minimal: null, xhigh: "xhigh" },
+		input: ["text", "image"],
+		cost: { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 },
+		contextWindow: 500000,
+		maxTokens: 500000,
+	},
+} satisfies Record<string, Model<"openai-completions">>;
+
+const xaiModel = (id: keyof typeof xaiSubscriptionFixtureModels): Model<Api> => xaiSubscriptionFixtureModels[id];
+const xaiFixtureModel = (id: string): Model<Api> =>
+	(id in xaiSubscriptionFixtureModels ? xaiModel(id as keyof typeof xaiSubscriptionFixtureModels) : undefined) ?? {
+		id,
+		name: id,
+		api: "openai-completions",
+		provider: "xai",
+		baseUrl: "https://api.x.ai/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 1, output: 2, cacheRead: 0.2, cacheWrite: 0 },
+		contextWindow: 256000,
+		maxTokens: 256000,
+	};
+const model = getXaiSubscriptionModel(xaiModel("grok-4.5"))!;
 const reasoning = {
 	type: "reasoning",
 	id: "rs_grok",
@@ -92,11 +147,12 @@ describe("xAI subscription Responses", () => {
 			["grok-4.3", "low", "low"],
 			["grok-4.5", "xhigh", "high"],
 			["grok-4.6", "xhigh", "xhigh"],
+			["grok-4.7", "xhigh", "xhigh"],
 			["grok-4.20-0309-reasoning", "high", undefined],
 			["grok-4.20-0309-non-reasoning", "high", undefined],
 			["grok-build-0.1", "high", undefined],
 		] as const) {
-			const source = getModel("xai", id);
+			const source = getModel("xai", id) ?? xaiFixtureModel(id);
 			const adapted = getXaiSubscriptionModel(source)!;
 			expect(adapted).toMatchObject({ ...source, api: "openai-responses" });
 			const result = await streamSimpleOpenAIResponses(
@@ -112,13 +168,19 @@ describe("xAI subscription Responses", () => {
 			else expect(body).not.toHaveProperty("reasoning");
 			expect(body.include).toEqual(source.reasoning ? ["reasoning.encrypted_content"] : undefined);
 		}
-		expect(getSupportedThinkingLevels(getXaiSubscriptionModel(getModel("xai", "grok-4.6"))!)).toEqual([
+		expect(getSupportedThinkingLevels(getXaiSubscriptionModel(xaiModel("grok-4.6"))!)).toEqual([
 			"low",
 			"medium",
 			"high",
 			"xhigh",
 		]);
-		expect(getSupportedThinkingLevels(getXaiSubscriptionModel(getModel("xai", "grok-build-0.1"))!)).toEqual([]);
+		expect(getSupportedThinkingLevels(getXaiSubscriptionModel(xaiFixtureModel("grok-4.7"))!)).toEqual([
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+		]);
+		expect(getSupportedThinkingLevels(getXaiSubscriptionModel(xaiFixtureModel("grok-build-0.1"))!)).toEqual([]);
 	});
 
 	it("streams interleaved thinking/tool calls and replays a complete second turn", async () => {

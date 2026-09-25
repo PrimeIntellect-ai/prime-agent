@@ -1,4 +1,5 @@
-import { existsSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { closeSync, existsSync, writeFileSync } from "node:fs";
 import {
 	closeOwnedSessionWorkerOwnerWatch,
 	installOwnedSessionWorkerOwnerWatch,
@@ -39,6 +40,20 @@ if (process.env.PRIME_AGENT_INTERNAL_OWNED_WORKER === "1") {
 				}),
 			);
 		};
+		const writeRecoveryDescriptor = () => {
+			const recoveryPath = process.env.PRIME_AGENT_INTERNAL_OWNED_RECOVERY_DESCRIPTOR;
+			if (pidPath && recoveryPath) {
+				writeFileSync(
+					recoveryPath,
+					`${JSON.stringify({
+						version: 1,
+						sessionId: "fixture-session",
+						sessionFile: `${pidPath}.jsonl`,
+						cwd: process.cwd(),
+					})}\n`,
+				);
+			}
+		};
 		attachJsonlLineReader(process.stdin, (line) => {
 			const command = JSON.parse(line) as { id?: string; type: string; marker?: string };
 			if (process.env.PRIME_AGENT_TEST_EXIT_ZERO_ON_COMMAND === command.type) {
@@ -47,23 +62,31 @@ if (process.env.PRIME_AGENT_INTERNAL_OWNED_WORKER === "1") {
 			if (process.env.PRIME_AGENT_TEST_CRASH_ON_COMMAND === command.type) {
 				process.exit(1);
 			}
+			if (process.env.PRIME_AGENT_TEST_CLOSE_STDIN_ON_COMMAND === command.type) {
+				outputResponse(command);
+				writeRecoveryDescriptor();
+				// A descendant holding the worker's inherited stdout/stderr keeps
+				// the child's close event from firing after a kill: the frontend
+				// must reap the whole worker group. The timer leases its life.
+				spawn(process.execPath, ["-e", "setTimeout(() => process.exit(0), 60000)"], {
+					stdio: ["ignore", "inherit", "inherit"],
+				});
+				// Close fd 0 while the worker stays alive, then mark it deaf.
+				closeSync(0);
+				if (pidPath) {
+					writeFileSync(`${pidPath}.deaf`, "deaf\n");
+				}
+				// fd 0 going away drains this loop, so the worker would exit
+				// cleanly before the test buffers follow-ups against it. Hold
+				// the loop: the frontend's EPIPE kill is the only worker death.
+				// test-policy: allow wall-clock-timer -- holds the deaf worker's loop so the frontend EPIPE kill is the only death
+				setInterval(() => {}, 1000);
+				return;
+			}
 			if (command.type === "ack_result") {
 				if (process.env.PRIME_AGENT_TEST_CRASH_ON_ACK === "1" && pidPath && !existsSync(`${pidPath}.crashed`)) {
 					writeFileSync(`${pidPath}.crashed`, "crashed\n");
-					const recoveryPath = process.env.PRIME_AGENT_INTERNAL_OWNED_RECOVERY_DESCRIPTOR;
-					if (recoveryPath) {
-						writeFileSync(
-							recoveryPath,
-							`${JSON.stringify({
-								version: 1,
-								profile: "rpc",
-								sessionId: "fixture-session",
-								sessionFile: `${pidPath}.jsonl`,
-								cwd: process.cwd(),
-								updatedAt: new Date().toISOString(),
-							})}\n`,
-						);
-					}
+					writeRecoveryDescriptor();
 					process.exit(1);
 				}
 				return;

@@ -6,6 +6,7 @@ import { getModel } from "../src/models.js";
 import { type AnthropicOptions, streamAnthropic } from "../src/providers/anthropic.js";
 import { streamSimple } from "../src/stream.js";
 import type { Context, Model, SimpleStreamOptions, Tool } from "../src/types.js";
+import { getFixtureModel } from "./fixture-models.js";
 
 interface AnthropicThinkingPayload {
 	thinking?: { type: string; budget_tokens?: number; display?: string };
@@ -49,93 +50,117 @@ async function capturePayload(
 
 describe("Anthropic thinking disable payload", () => {
 	it("sends thinking.type=disabled for budget-based reasoning models when thinking is off", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-sonnet-4-5"));
+		const payload = await capturePayload(getFixtureModel<"anthropic-messages">("anthropic", "claude-sonnet-4-5")!);
 
 		expect(payload.thinking).toEqual({ type: "disabled" });
 		expect(payload.output_config).toBeUndefined();
 	});
 
 	it("sends thinking.type=disabled for adaptive reasoning models when thinking is off", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-opus-4-6"));
+		const payload = await capturePayload(getFixtureModel<"anthropic-messages">("anthropic", "claude-opus-4-6")!);
 
 		expect(payload.thinking).toEqual({ type: "disabled" });
 		expect(payload.output_config).toBeUndefined();
 	});
 
 	it("sends thinking.type=disabled for Claude Opus 4.7 when thinking is off", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-opus-4-7"));
+		const payload = await capturePayload(getFixtureModel<"anthropic-messages">("anthropic", "claude-opus-4-7")!);
 
 		expect(payload.thinking).toEqual({ type: "disabled" });
 		expect(payload.output_config).toBeUndefined();
 	});
 
 	it("uses adaptive thinking for Claude Opus 4.7 when reasoning is enabled", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-opus-4-7"), { reasoning: "high" });
+		const payload = await capturePayload(getFixtureModel<"anthropic-messages">("anthropic", "claude-opus-4-7")!, {
+			reasoning: "high",
+		});
 
 		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.output_config).toEqual({ effort: "high" });
 	});
 
 	it("maps xhigh reasoning to effort=xhigh for Claude Opus 4.7", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-opus-4-7"), { reasoning: "xhigh" });
+		const payload = await capturePayload(getFixtureModel<"anthropic-messages">("anthropic", "claude-opus-4-7")!, {
+			reasoning: "xhigh",
+		});
 
 		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.output_config).toEqual({ effort: "xhigh" });
 	});
 
 	it("maps max reasoning to effort=max for Claude Opus 4.7", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-opus-4-7"), { reasoning: "max" });
+		const payload = await capturePayload(getFixtureModel<"anthropic-messages">("anthropic", "claude-opus-4-7")!, {
+			reasoning: "max",
+		});
 
 		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.output_config).toEqual({ effort: "max" });
 	});
 
 	it("maps max reasoning to effort=max for Claude Opus 4.6 (no native xhigh)", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-opus-4-6"), { reasoning: "max" });
+		const payload = await capturePayload(getFixtureModel<"anthropic-messages">("anthropic", "claude-opus-4-6")!, {
+			reasoning: "max",
+		});
 
 		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.output_config).toEqual({ effort: "max" });
 	});
 
 	it("clamps xhigh reasoning to effort=max for Claude Opus 4.6 (no native xhigh)", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-opus-4-6"), { reasoning: "xhigh" });
+		const payload = await capturePayload(getFixtureModel<"anthropic-messages">("anthropic", "claude-opus-4-6")!, {
+			reasoning: "xhigh",
+		});
 
 		expect(payload.output_config).toEqual({ effort: "max" });
 	});
 
 	it("maps max reasoning to effort=max for Claude Sonnet 4.6 (no native xhigh)", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-sonnet-4-6"), { reasoning: "max" });
+		const payload = await capturePayload(getFixtureModel<"anthropic-messages">("anthropic", "claude-sonnet-4-6")!, {
+			reasoning: "max",
+		});
 
 		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.output_config).toEqual({ effort: "max" });
 	});
 
 	it("omits the thinking param for Claude Fable 5 when reasoning is off (explicit disabled is a 400)", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-fable-5"));
+		const payload = await capturePayload(getModel("anthropic", "claude-fable-5")!);
 
 		expect(payload.thinking).toBeUndefined();
 		expect(payload.output_config).toBeUndefined();
 	});
 
 	it("drops temperature for Claude Fable 5 (sampling params are rejected)", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-fable-5"), { temperature: 0.5 });
+		const payload = await capturePayload(getModel("anthropic", "claude-fable-5")!, { temperature: 0.5 });
 
 		expect(payload.temperature).toBeUndefined();
 		expect(payload.thinking).toBeUndefined();
 	});
 
 	it("uses adaptive thinking with effort=xhigh for Claude Fable 5", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-fable-5"), { reasoning: "xhigh" });
+		const payload = await capturePayload(getModel("anthropic", "claude-fable-5")!, { reasoning: "xhigh" });
 
 		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.output_config).toEqual({ effort: "xhigh" });
 	});
 
 	it("maps max reasoning to effort=max for Claude Fable 5", async () => {
-		const payload = await capturePayload(getModel("anthropic", "claude-fable-5"), { reasoning: "max" });
+		const payload = await capturePayload(getModel("anthropic", "claude-fable-5")!, { reasoning: "max" });
 
 		expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.output_config).toEqual({ effort: "max" });
+	});
+
+	// Opus 5.5 ships via the catalog and the snapshot's Opus 5 entry is an
+	// openai-completions variant: use the release id over an Anthropic surface.
+	it("omits thinking disabled and temperature for Claude Opus 5.5", async () => {
+		const base = getModel("anthropic", "claude-fable-5")!;
+		const opus55: Model<"anthropic-messages"> = { ...base, id: "claude-opus-5-5" };
+		const payload = await capturePayload(opus55, { temperature: 0.5 });
+		expect(payload.thinking).toBeUndefined();
+		expect(payload.temperature).toBeUndefined();
+		const adaptive = await capturePayload(opus55, { reasoning: "xhigh" });
+		expect(adaptive.output_config).toEqual({ effort: "xhigh" });
 	});
 });
 
@@ -191,10 +216,10 @@ const toolContext: Context = {
 };
 
 describe("Anthropic request wire contract", () => {
-	const testModel: Model<"anthropic-messages"> = {
-		...getModel("anthropic", "claude-opus-4-7"),
+	const testModel = {
+		...getFixtureModel<"anthropic-messages">("anthropic", "claude-opus-4-7")!,
 		provider: "test-anthropic",
-	};
+	} as Model<"anthropic-messages">;
 
 	it.each([
 		{
@@ -234,21 +259,35 @@ describe("Anthropic request wire contract", () => {
 			tools: [tool("todowrite"), tool("find"), tool("my_custom_tool")],
 		};
 
-		const oauth = await captureAnthropicRequest(getModel("anthropic", "claude-sonnet-4-6"), context, {
-			apiKey: "sk-ant-oat-fake-token",
-			cacheRetention: "none",
-		});
+		const oauth = await captureAnthropicRequest(
+			getFixtureModel<"anthropic-messages">("anthropic", "claude-sonnet-4-6")!,
+			context,
+			{
+				apiKey: "sk-ant-oat-fake-token",
+				cacheRetention: "none",
+			},
+		);
 		expect(toolsOf(oauth.body).map((entry) => entry.name)).toEqual(["TodoWrite", "find", "my_custom_tool"]);
+		// Subscription requests claim the Claude Code client identity, and the
+		// claimed version must stay at or above what the API's model gates require
+		// (opus-5.5 family rejects anything below 2.280).
+		expect(oauth.headers["user-agent"]).toMatch(/^claude-cli\//);
+		expect(oauth.headers["x-app"]).toBe("cli");
+		expect((oauth.headers["anthropic-beta"] as string) ?? "").toContain("claude-code-20250219");
 
-		const apiKey = await captureAnthropicRequest(getModel("anthropic", "claude-sonnet-4-6"), context, {
-			apiKey: "sk-ant-api-fake-token",
-			cacheRetention: "none",
-		});
+		const apiKey = await captureAnthropicRequest(
+			getFixtureModel<"anthropic-messages">("anthropic", "claude-sonnet-4-6")!,
+			context,
+			{
+				apiKey: "sk-ant-api-fake-token",
+				cacheRetention: "none",
+			},
+		);
 		expect(toolsOf(apiKey.body).map((entry) => entry.name)).toEqual(["todowrite", "find", "my_custom_tool"]);
 	});
 
 	it("sends Copilot bearer auth, Copilot headers, and a valid Anthropic Messages payload", async () => {
-		const model = getModel("github-copilot", "claude-sonnet-4.6");
+		const model = getFixtureModel<"anthropic-messages">("github-copilot", "claude-sonnet-4.6")!;
 		expect(model.api).toBe("anthropic-messages");
 
 		const request = await captureAnthropicRequest(
@@ -273,7 +312,7 @@ describe("Anthropic request wire contract", () => {
 
 	it("includes the interleaved-thinking beta for non-adaptive Copilot Claude models", async () => {
 		const request = await captureAnthropicRequest(
-			getModel("github-copilot", "claude-haiku-4.5") as Model<"anthropic-messages">,
+			getFixtureModel<"anthropic-messages">("github-copilot", "claude-haiku-4.5")! as Model<"anthropic-messages">,
 			{ messages: [{ role: "user", content: "Hello", timestamp: 1 }] },
 			{ apiKey: "tid_copilot_session_test_token", interleavedThinking: true },
 		);

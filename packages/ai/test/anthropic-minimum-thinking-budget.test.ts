@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.js";
 import { streamSimpleAnthropic } from "../src/providers/anthropic.js";
 import { adjustMaxTokensForThinking } from "../src/providers/simple-options.js";
+import type { Model } from "../src/types.js";
+import { getFixtureModel } from "./fixture-models.js";
 
 describe("budget-based Anthropic thinking minimum", () => {
 	it.each([1025, 1500, 2048, 4096])("sends a valid thinking budget under a %i-token ceiling", async (maxTokens) => {
 		let payload: { max_tokens: number; thinking: { type: string; budget_tokens: number } } | undefined;
-		const model = { ...getModel("anthropic", "claude-sonnet-4-5"), maxTokens };
+		const model = {
+			...getFixtureModel<"anthropic-messages">("anthropic", "claude-sonnet-4-5")!,
+			maxTokens,
+		} as Model<"anthropic-messages">;
 		const stream = streamSimpleAnthropic(
 			model,
 			{ messages: [{ role: "user", content: "Hello", timestamp: 1 }] },

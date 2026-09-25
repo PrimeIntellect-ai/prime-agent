@@ -1,7 +1,7 @@
 import { basename, isAbsolute, resolve } from "node:path";
 import { canonicalizePath } from "../../utils/paths.js";
 import type { AgentConnectionHeartbeat, AgentConnectionSavedSessionInfo } from "../agent-connection/index.js";
-import { rosterAgentIdForSummary } from "../daemon/agent-roster.js";
+import { rosterAgentIdForSummary, sessionActivityDetail } from "../daemon/agent-roster.js";
 import { classifySessionRosterStatus, type SessionSummary } from "../daemon/daemon-session-list.js";
 
 export type AgentsViewSection = "running" | "idle" | "inactive";
@@ -112,8 +112,8 @@ export function shouldShowAgentsViewSession(summary: SessionSummary, manuallyIna
 	return summary.lifecycle === "live";
 }
 
-// TODO(unify: #2055): replace with the shared user-content rule once it lands;
-// session summaries only carry message counts today.
+// Emptiness is judged from the wire summary, which carries message counts only.
+// SessionManager.hasUserContent() needs session entries the view never receives.
 export function isEmptyAgentsViewSession(summary: SessionSummary): boolean {
 	return summary.messageCount === 0;
 }
@@ -1223,47 +1223,21 @@ export function getSessionStatusLabel(summary: SessionSummary, heartbeat?: Unifi
 	if (summary.lastHeardFromAt !== undefined) {
 		return `last heard ${formatAgeLabel(summary.lastHeardFromAt)}`;
 	}
-	// A non-ready worker cannot report fresh runtime flags; its state is the row's story.
-	if (summary.workerState !== undefined && summary.workerState !== "ready") {
-		return summary.workerState;
-	}
-	if (summary.isCompacting) {
-		return "compacting";
-	}
-	if (summary.isStreaming) {
-		return summary.isRunningTools ? "running tools" : "thinking";
-	}
-	// These classify the session as Running (isAgentsViewSessionBusy); the label
-	// must agree with the section instead of claiming the session needs input.
-	if (summary.isRunningTools === true) {
-		return "running tools";
-	}
-	if (summary.isBashRunning === true) {
-		return "running bash";
-	}
-	if (summary.sessionActions.active) {
-		return summary.sessionActions.active.label ?? summary.sessionActions.active.kind.replace("_", " ");
-	}
-	if (summary.sessionActions.queuedCount > 0) {
-		return `${summary.sessionActions.queuedCount} queued`;
-	}
-	if (summary.lifecycle === "archived") {
-		return "archived";
-	}
-	if (summary.hasActiveHeartbeat) {
-		const next = heartbeat?.nextRunAt ? Date.parse(heartbeat.nextRunAt) : Number.NaN;
-		return Number.isFinite(next)
+	const next = heartbeat?.nextRunAt ? Date.parse(heartbeat.nextRunAt) : Number.NaN;
+	return sessionActivityDetail(summary, {
+		heartbeatLabel: Number.isFinite(next)
 			? `heartbeat · next ${formatHeartbeatCountdown(next - Date.now())}`
-			: "heartbeat active";
-	}
-	if (summary.runtimeKind === "subagent" && summary.repliedSinceTask) {
-		return "replied";
-	}
-	if (summary.activity === "working") {
-		return "classifying";
-	}
-	if (summary.taskState === "error") {
-		return "error";
-	}
-	return summary.taskState === "completed" ? "completed" : "needs input";
+			: "heartbeat active",
+		idleLabel: "needs input",
+		// The TUI is the only surface whose summaries can carry action labels.
+		sessionAction: (session) => {
+			if (session.sessionActions.active) {
+				return session.sessionActions.active.label ?? session.sessionActions.active.kind.replace("_", " ");
+			}
+			if (session.sessionActions.queuedCount > 0) {
+				return `${session.sessionActions.queuedCount} queued`;
+			}
+			return undefined;
+		},
+	});
 }

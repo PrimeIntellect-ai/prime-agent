@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { setLogSink } from "../src/log.js";
-import { getModel } from "../src/models.js";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.js";
 import type { AssistantMessage, Context, Model } from "../src/types.js";
 import {
@@ -11,6 +10,7 @@ import {
 	StreamFailureError,
 	streamFailureFromStopReason,
 } from "../src/utils/stream-failure.js";
+import { getFixtureModel } from "./fixture-models.js";
 
 const originalFetch = global.fetch;
 
@@ -218,7 +218,7 @@ describe("provider retry ownership", () => {
 	const retryContext: Context = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
 
 	function completionsModel(): Model<"openai-completions"> {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-responses">("openai", "gpt-4o-mini");
 		return { ...baseModel, api: "openai-completions" } as Model<"openai-completions">;
 	}
 

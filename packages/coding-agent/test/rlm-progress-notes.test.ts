@@ -6,26 +6,27 @@ import {
 	type AssistantMessage,
 	type Context,
 	createAssistantMessageEventStream,
-	getModel,
 	type TextContent,
 	type Usage,
 } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AgentSession } from "../src/core/agent-session.js";
+import { AgentSession, RLM_CHILD_UPDATE_MIN_INTERVAL_MS } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
 import { createRlmProgressNoteHostHandler, RLM_PROGRESS_NOTE_MAX_LENGTH } from "../src/core/rlm-runtime.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { getCodingAgentFixtureModel } from "./fixture-models.js";
 import { createTestResourceLoader } from "./utilities.js";
 
-const model = getModel("anthropic", "claude-sonnet-4-5")!;
+const model = getCodingAgentFixtureModel("anthropic", "claude-sonnet-4-5");
 
 interface InspectableRlmRun {
 	progressNotes: string[];
 	lastActivityAt?: number;
 	lastActivityMonotonicAt?: number;
+	lastStreamedUpdateMonotonicAt?: number;
 	status: string;
 	activity?: { kind: string };
 	session?: AgentSession;
@@ -502,7 +503,7 @@ describe("rlm.progress.note child progress channel", () => {
 		}
 	});
 
-	it("does not churn child updates on streaming deltas once the preview saturates", async () => {
+	it("throttles streamed child updates, still previews the latest tail, and emits real activity", async () => {
 		const held = heldAnswerStream();
 		session = makeSession(held.streamFn);
 		const handle = await session.runRlmChild("slow task", { name: "worker-a" });
@@ -526,9 +527,7 @@ describe("rlm.progress.note child progress channel", () => {
 			// The agent turn starts asynchronously; wait for its activity signal so
 			// no tracked event can race the injected streaming deltas.
 			await waitFor(() => run.activity !== undefined);
-			// Streaming past the 160-character preview cap: like real token
-			// deltas, appending text past the cap leaves the capped preview
-			// unchanged, so only lastActivityAt still moves.
+			// Streaming past the preview cap: the throttle coalesces the burst, so only lastActivityAt moves.
 			const saturatedText = "saturation".repeat(40);
 			const baseline = childUpdates.length;
 			emitChild({ type: "message_update", message: assistantMessage(saturatedText) });
@@ -538,9 +537,8 @@ describe("rlm.progress.note child progress channel", () => {
 			// Saturated deltas must not re-emit (regression: the advancing
 			// lastActivityAt used to defeat the snapshot dedup on every delta).
 			const saturated = childUpdates.length;
-			const lastActivityBefore = run.lastActivityAt;
+			const lastActivityMonotonicBefore = run.lastActivityMonotonicAt;
 			for (let index = 0; index < 3; index += 1) {
-				await new Promise((resolve) => setTimeout(resolve, 2));
 				emitChild({
 					type: "message_update",
 					message: assistantMessage(`${saturatedText}${"x".repeat(index + 1)}`),
@@ -548,18 +546,23 @@ describe("rlm.progress.note child progress channel", () => {
 			}
 			expect(childUpdates.length).toBe(saturated);
 
-			// Staleness semantics survive: streaming still counts as activity.
-			expect(run.lastActivityAt).toBeGreaterThan(lastActivityBefore ?? 0);
+			expect(run.lastActivityMonotonicAt).toBeGreaterThan(lastActivityMonotonicBefore ?? 0);
 			const streamedSnapshot = session
 				.getRlmChildSnapshots()
 				.find((candidate) => candidate.id === handle.rlm_child_id);
 			expect(streamedSnapshot?.activityStaleMs).toBeUndefined();
+			expect(streamedSnapshot?.answerPreview).toMatch(/saturationxxx$/);
 
-			// Real activity still emits: a changed preview, then a tool call.
+			// Past the window a delta emits again; the preview follows the tail, never the head.
+			run.lastStreamedUpdateMonotonicAt = performance.now() - RLM_CHILD_UPDATE_MIN_INTERVAL_MS - 1;
 			const changed = childUpdates.length;
-			emitChild({ type: "message_update", message: assistantMessage(`changed ${saturatedText}`) });
+			emitChild({
+				type: "message_update",
+				message: assistantMessage(`head-marker${"x".repeat(400)}changed tail${"y".repeat(60)}`),
+			});
 			await waitFor(() => childUpdates.length > changed);
-			expect(childUpdates.at(-1)?.preview).toContain("changed");
+			expect(childUpdates.at(-1)?.preview).toMatch(/changed taily{60}$/);
+			expect(childUpdates.at(-1)?.preview).not.toContain("head-marker");
 
 			const beforeTool = childUpdates.length;
 			emitChild({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "ipython", args: {} });

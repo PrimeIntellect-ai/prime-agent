@@ -33,7 +33,9 @@
 		"release:patch": "node scripts/release.mjs patch",
 		"release:minor": "node scripts/release.mjs minor",
 		"release:major": "node scripts/release.mjs major",
-		"prepare": "husky"
+		"prepare": "husky",
+		"smoke:npm-pack-assets": "node scripts/smoke-npm-pack-assets.mjs",
+		"catalog:assets": "node packages/coding-agent/scripts/catalog-assets.mjs generate --out packages/coding-agent/catalog"
 	},
 	"devDependencies": {
 		"@anthropic-ai/sandbox-runtime": "^0.0.55",
@@ -50,9 +52,9 @@
 	"engines": {
 		"node": ">=22.8.0"
 	},
-	"version": "0.9.5",
+	"version": "0.9.6",
 	"dependencies": {
-		"@earendil-works/pi-coding-agent": "^0.9.5",
+		"@earendil-works/pi-coding-agent": "^0.9.6",
 		"get-east-asian-width": "^1.6.0"
 	},
 	"overrides": {

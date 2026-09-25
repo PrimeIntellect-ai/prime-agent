@@ -5,7 +5,7 @@ import { Type } from "typebox";
 import { fileURLToPath } from "url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getEnvApiKey } from "../src/env-api-keys.js";
-import { getModel, getModels } from "../src/models.js";
+import { getModel } from "../src/models.js";
 import { complete, stream } from "../src/stream.js";
 import type { Api, Context, ImageContent, Model, StreamOptions, Tool, ToolResultMessage } from "../src/types.js";
 import { getKimiCodingTestModel } from "./kimi-test-model.js";
@@ -17,6 +17,7 @@ import { StringEnum } from "../src/utils/typebox-helpers.js";
 import { hasAzureOpenAICredentials, resolveAzureDeploymentName } from "./azure-utils.js";
 import { hasBedrockCredentials } from "./bedrock-utils.js";
 import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.js";
+import { getFixtureModel } from "./fixture-models.js";
 import { resolveApiKey } from "./oauth.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -335,7 +336,7 @@ async function multiTurn<TApi extends Api>(model: Model<TApi>, options?: StreamO
 
 describe("Generate E2E Tests", () => {
 	describe.skipIf(!process.env.GEMINI_API_KEY)("Gemini Provider (gemini-2.5-flash)", () => {
-		const llm = getModel("google", "gemini-2.5-flash");
+		const llm = getModel("google", "gemini-2.5-flash")!;
 
 		it("should complete basic text generation", async () => {
 			await basicTextGeneration(llm);
@@ -368,7 +369,7 @@ describe("Generate E2E Tests", () => {
 		const vertexApiKey = process.env.GOOGLE_CLOUD_API_KEY;
 		const isVertexConfigured = Boolean(vertexProject && vertexLocation);
 		const vertexOptions = { project: vertexProject, location: vertexLocation } as const;
-		const llm = getModel("google-vertex", "gemini-3-flash-preview");
+		const llm = getFixtureModel<"google-vertex">("google-vertex", "gemini-3-flash-preview")!;
 
 		it.skipIf(!isVertexConfigured)("should complete basic text generation", async () => {
 			await basicTextGeneration(llm, vertexOptions);
@@ -408,7 +409,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Completions Provider (gpt-4o-mini)", () => {
-		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini");
+		const { compat: _compat, ...baseModel } = getFixtureModel<"openai-responses">("openai", "gpt-4o-mini")!;
 		void _compat;
 		const llm: Model<"openai-completions"> = {
 			...baseModel,
@@ -433,7 +434,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe.skipIf(!primeInferenceApiKey)("Prime Inference Provider (openai/gpt-5.5)", () => {
-		const llm = getModel("prime-inference", "openai/gpt-5.5");
+		const llm = getModel("prime-inference", "openai/gpt-5.5")!;
 
 		it("should complete basic text generation", async () => {
 			await basicTextGeneration(llm);
@@ -455,7 +456,7 @@ describe("Generate E2E Tests", () => {
 	describe.skipIf(!process.env.DEEPSEEK_API_KEY)(
 		"DeepSeek Provider (deepseek-v4-flash via OpenAI Completions)",
 		() => {
-			const llm = getModel("deepseek", "deepseek-v4-flash");
+			const llm = getModel("deepseek", "deepseek-v4-flash")!;
 
 			it("should complete basic text generation", async () => {
 				await basicTextGeneration(llm);
@@ -480,7 +481,7 @@ describe("Generate E2E Tests", () => {
 	);
 
 	describe.skipIf(!process.env.OPENAI_API_KEY)("OpenAI Responses Provider (gpt-5.4)", () => {
-		const llm = getModel("openai", "gpt-5.4");
+		const llm = getFixtureModel<"openai-responses">("openai", "gpt-5.4")!;
 
 		it("should complete basic text generation", async () => {
 			await basicTextGeneration(llm);
@@ -508,7 +509,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe.skipIf(!process.env.ANTHROPIC_API_KEY)("Anthropic Provider (claude-haiku-4-5)", () => {
-		const model = getModel("anthropic", "claude-haiku-4-5");
+		const model = getFixtureModel<"anthropic-messages">("anthropic", "claude-haiku-4-5")!;
 
 		it("should complete basic text generation", async () => {
 			await basicTextGeneration(model, { thinkingEnabled: true });
@@ -528,7 +529,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe.skipIf(!hasAzureOpenAICredentials())("Azure OpenAI Responses Provider (gpt-4o-mini)", () => {
-		const llm = getModel("azure-openai-responses", "gpt-4o-mini");
+		const llm = getFixtureModel<"azure-openai-responses">("azure-openai-responses", "gpt-4o-mini")!;
 		const azureDeploymentName = resolveAzureDeploymentName(llm.id);
 		const azureOptions = azureDeploymentName ? { azureDeploymentName } : {};
 
@@ -550,7 +551,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe.skipIf(!process.env.XAI_API_KEY)("xAI Provider (grok-code-fast-1 via OpenAI Completions)", () => {
-		const llm = getModel("xai", "grok-code-fast-1");
+		const llm = getFixtureModel<"openai-completions">("xai", "grok-code-fast-1")!;
 
 		it("should complete basic text generation", async () => {
 			await basicTextGeneration(llm);
@@ -574,7 +575,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe.skipIf(!process.env.GROQ_API_KEY)("Groq Provider (gpt-oss-20b via OpenAI Completions)", () => {
-		const llm = getModel("groq", "openai/gpt-oss-20b");
+		const llm = getFixtureModel<"openai-completions">("groq", "openai/gpt-oss-20b")!;
 
 		it("should complete basic text generation", async () => {
 			await basicTextGeneration(llm);
@@ -598,7 +599,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe.skipIf(!process.env.CEREBRAS_API_KEY)("Cerebras Provider (gpt-oss-120b via OpenAI Completions)", () => {
-		const llm = getModel("cerebras", "gpt-oss-120b");
+		const llm = getFixtureModel<"openai-completions">("cerebras", "gpt-oss-120b")!;
 
 		it("should complete basic text generation", async () => {
 			await basicTextGeneration(llm);
@@ -624,7 +625,7 @@ describe("Generate E2E Tests", () => {
 	describe.skipIf(!hasCloudflareWorkersAICredentials())(
 		"Cloudflare Workers AI Provider (Kimi K2.6 via OpenAI Completions)",
 		() => {
-			const llm = getModel("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.6");
+			const llm = getFixtureModel<"openai-completions">("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.6")!;
 
 			it("should complete basic text generation", async () => {
 				await basicTextGeneration(llm);
@@ -651,7 +652,7 @@ describe("Generate E2E Tests", () => {
 	describe.skipIf(!hasCloudflareAiGatewayCredentials() || !process.env.OPENAI_API_KEY)(
 		"Cloudflare AI Gateway → OpenAI BYOK (gpt-5.1 via /openai responses)",
 		() => {
-			const llm = getModel("cloudflare-ai-gateway", "gpt-5.1");
+			const llm = getFixtureModel<"openai-responses">("cloudflare-ai-gateway", "gpt-5.1")!;
 			const options = { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } };
 			const thinkingOptions = {
 				...options,
@@ -684,8 +685,7 @@ describe("Generate E2E Tests", () => {
 	describe.skipIf(!hasCloudflareAiGatewayCredentials() || !process.env.ANTHROPIC_API_KEY)(
 		"Cloudflare AI Gateway → Anthropic BYOK (Claude Sonnet 4.6 via /anthropic messages)",
 		() => {
-			const llm = getModels("cloudflare-ai-gateway").find((model) => model.name === "Claude Sonnet 4.6");
-			if (!llm) throw new Error("Cloudflare AI Gateway is missing Claude Sonnet 4.6");
+			const llm = getFixtureModel<"openai-responses">("cloudflare-ai-gateway", "claude-sonnet-4.6");
 			const options = { headers: { Authorization: `Bearer ${process.env.ANTHROPIC_API_KEY}` } };
 			const thinkingOptions = {
 				...options,
@@ -716,7 +716,7 @@ describe("Generate E2E Tests", () => {
 	);
 
 	describe.skipIf(!process.env.HF_TOKEN)("Hugging Face Provider (Kimi-K2.5 via OpenAI Completions)", () => {
-		const llm = getModel("huggingface", "moonshotai/Kimi-K2.5");
+		const llm = getFixtureModel<"openai-completions">("huggingface", "moonshotai/Kimi-K2.5")!;
 
 		it("should complete basic text generation", async () => {
 			await basicTextGeneration(llm);
@@ -740,7 +740,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe.skipIf(!process.env.OPENROUTER_API_KEY)("OpenRouter Provider (glm-4.5v via OpenAI Completions)", () => {
-		const llm = getModel("openrouter", "z-ai/glm-4.5v");
+		const llm = getFixtureModel<"openai-completions">("openrouter", "z-ai/glm-4.5v")!;
 
 		it("should complete basic text generation", async () => {
 			await basicTextGeneration(llm);
@@ -770,7 +770,7 @@ describe("Generate E2E Tests", () => {
 	describe.skipIf(!process.env.AI_GATEWAY_API_KEY)(
 		"Vercel AI Gateway Provider (google/gemini-2.5-flash via Anthropic Messages)",
 		() => {
-			const llm = getModel("vercel-ai-gateway", "google/gemini-2.5-flash");
+			const llm = getFixtureModel<"openai-completions">("vercel-ai-gateway", "google/gemini-2.5-flash")!;
 
 			it("should complete basic text generation", async () => {
 				await basicTextGeneration(llm);
@@ -797,7 +797,7 @@ describe("Generate E2E Tests", () => {
 	describe.skipIf(!process.env.AI_GATEWAY_API_KEY)(
 		"Vercel AI Gateway Provider (anthropic/claude-opus-4.5 via Anthropic Messages)",
 		() => {
-			const llm = getModel("vercel-ai-gateway", "anthropic/claude-opus-4.5");
+			const llm = getFixtureModel<"openai-completions">("vercel-ai-gateway", "anthropic/claude-opus-4.5")!;
 
 			it("should complete basic text generation", async () => {
 				await basicTextGeneration(llm);
@@ -824,7 +824,7 @@ describe("Generate E2E Tests", () => {
 	describe.skipIf(!process.env.AI_GATEWAY_API_KEY)(
 		"Vercel AI Gateway Provider (openai/gpt-5.1-codex-max via Anthropic Messages)",
 		() => {
-			const llm = getModel("vercel-ai-gateway", "openai/gpt-5.1-codex-max");
+			const llm = getFixtureModel<"openai-completions">("vercel-ai-gateway", "openai/gpt-5.1-codex-max")!;
 
 			it("should complete basic text generation", async () => {
 				await basicTextGeneration(llm);
@@ -877,7 +877,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe.skipIf(!process.env.MISTRAL_API_KEY)("Mistral Provider (devstral-medium-latest)", () => {
-		const llm = getModel("mistral", "devstral-medium-latest");
+		const llm = getFixtureModel<"mistral-conversations">("mistral", "devstral-medium-latest")!;
 
 		it("should complete basic text generation", async () => {
 			await basicTextGeneration(llm);
@@ -892,18 +892,18 @@ describe("Generate E2E Tests", () => {
 		});
 
 		it("should handle thinking mode", async () => {
-			const llm = getModel("mistral", "magistral-medium-latest");
+			const llm = getFixtureModel<"mistral-conversations">("mistral", "magistral-medium-latest")!;
 			await handleThinking(llm, { promptMode: "reasoning" });
 		});
 
 		it("should handle multi-turn with thinking and tools", async () => {
-			const llm = getModel("mistral", "magistral-medium-latest");
+			const llm = getFixtureModel<"mistral-conversations">("mistral", "magistral-medium-latest")!;
 			await multiTurn(llm, { promptMode: "reasoning" });
 		});
 	});
 
 	describe.skipIf(!process.env.MISTRAL_API_KEY)("Mistral Provider (pixtral-12b with image support)", () => {
-		const llm = getModel("mistral", "pixtral-12b");
+		const llm = getFixtureModel<"mistral-conversations">("mistral", "pixtral-12b")!;
 
 		it("should complete basic text generation", async () => {
 			await basicTextGeneration(llm);
@@ -923,7 +923,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe.skipIf(!process.env.MINIMAX_API_KEY)("MiniMax Provider (MiniMax-M2.7 via Anthropic Messages)", () => {
-		const llm = getModel("minimax", "MiniMax-M2.7");
+		const llm = getModel("minimax", "MiniMax-M2.7")!;
 
 		it("should complete basic text generation", async () => {
 			await basicTextGeneration(llm);
@@ -973,7 +973,7 @@ describe("Generate E2E Tests", () => {
 	describe.skipIf(!process.env.XIAOMI_API_KEY)(
 		"Xiaomi MiMo (API billing) Provider (Xiaomi MiMo-V2.5-Pro via Anthropic Messages)",
 		() => {
-			const llm = getModel("xiaomi", "mimo-v2.5-pro");
+			const llm = getFixtureModel<"openai-completions">("xiaomi", "mimo-v2.5-pro")!;
 			const thinkingOptions = {
 				thinkingEnabled: true,
 				reasoningEffort: "high",
@@ -1004,7 +1004,7 @@ describe("Generate E2E Tests", () => {
 	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_CN_API_KEY)(
 		"Xiaomi MiMo Token Plan Provider (Xiaomi MiMo-V2.5-Pro via Anthropic Messages, CN region)",
 		() => {
-			const llm = getModel("xiaomi-token-plan-cn", "mimo-v2.5-pro");
+			const llm = getFixtureModel<"openai-completions">("xiaomi-token-plan-cn", "mimo-v2.5-pro")!;
 			const thinkingOptions = {
 				thinkingEnabled: true,
 				reasoningEffort: "high",
@@ -1035,7 +1035,7 @@ describe("Generate E2E Tests", () => {
 	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_AMS_API_KEY)(
 		"Xiaomi MiMo Token Plan Provider (Xiaomi MiMo-V2.5-Pro via Anthropic Messages, AMS region)",
 		() => {
-			const llm = getModel("xiaomi-token-plan-ams", "mimo-v2.5-pro");
+			const llm = getFixtureModel<"openai-completions">("xiaomi-token-plan-ams", "mimo-v2.5-pro")!;
 			const thinkingOptions = {
 				thinkingEnabled: true,
 				reasoningEffort: "high",
@@ -1066,7 +1066,7 @@ describe("Generate E2E Tests", () => {
 	describe.skipIf(!process.env.XIAOMI_TOKEN_PLAN_SGP_API_KEY)(
 		"Xiaomi MiMo Token Plan Provider (Xiaomi MiMo-V2.5-Pro via Anthropic Messages, SGP region)",
 		() => {
-			const llm = getModel("xiaomi-token-plan-sgp", "mimo-v2.5-pro");
+			const llm = getFixtureModel<"openai-completions">("xiaomi-token-plan-sgp", "mimo-v2.5-pro")!;
 			const thinkingOptions = {
 				thinkingEnabled: true,
 				reasoningEffort: "high",
@@ -1095,7 +1095,7 @@ describe("Generate E2E Tests", () => {
 	);
 
 	describe("Anthropic OAuth Provider (claude-sonnet-4-6)", () => {
-		const model = getModel("anthropic", "claude-sonnet-4-6");
+		const model = getFixtureModel<"anthropic-messages">("anthropic", "claude-sonnet-4-6")!;
 
 		it.skipIf(!anthropicOAuthToken)("should complete basic text generation", async () => {
 			await basicTextGeneration(model, { apiKey: anthropicOAuthToken });
@@ -1123,7 +1123,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe("Anthropic OAuth Provider (claude-opus-4-6 with adaptive thinking)", () => {
-		const model = getModel("anthropic", "claude-opus-4-6");
+		const model = getFixtureModel<"anthropic-messages">("anthropic", "claude-opus-4-6")!;
 
 		it.skipIf(!anthropicOAuthToken)("should complete basic text generation", async () => {
 			await basicTextGeneration(model, { apiKey: anthropicOAuthToken });
@@ -1155,7 +1155,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe("GitHub Copilot Provider (gpt-5.3-codex via OpenAI Completions)", () => {
-		const llm = getModel("github-copilot", "gpt-5.3-codex");
+		const llm = getFixtureModel<"openai-completions">("github-copilot", "gpt-5.3-codex")!;
 
 		it.skipIf(!githubCopilotToken)("should complete basic text generation", async () => {
 			await basicTextGeneration(llm, { apiKey: githubCopilotToken });
@@ -1170,12 +1170,12 @@ describe("Generate E2E Tests", () => {
 		});
 
 		it.skipIf(!githubCopilotToken)("should handle thinking", async () => {
-			const thinkingModel = getModel("github-copilot", "gpt-5-mini");
+			const thinkingModel = getModel("github-copilot", "gpt-5-mini")!;
 			await handleThinking(thinkingModel, { apiKey: githubCopilotToken, reasoningEffort: "high" });
 		});
 
 		it.skipIf(!githubCopilotToken)("should handle multi-turn with thinking and tools", async () => {
-			const thinkingModel = getModel("github-copilot", "gpt-5-mini");
+			const thinkingModel = getModel("github-copilot", "gpt-5-mini")!;
 			await multiTurn(thinkingModel, { apiKey: githubCopilotToken, reasoningEffort: "high" });
 		});
 
@@ -1185,7 +1185,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe("GitHub Copilot Provider (claude-sonnet-4 via Anthropic Messages)", () => {
-		const llm = getModel("github-copilot", "claude-sonnet-4.6");
+		const llm = getFixtureModel<"openai-completions">("github-copilot", "claude-sonnet-4.6")!;
 
 		it.skipIf(!githubCopilotToken)("should complete basic text generation", async () => {
 			await basicTextGeneration(llm, { apiKey: githubCopilotToken });
@@ -1213,7 +1213,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe("OpenAI Codex Provider (gpt-5.4)", () => {
-		const llm = getModel("openai-codex", "gpt-5.4");
+		const llm = getFixtureModel<"openai-codex-responses">("openai-codex", "gpt-5.4")!;
 
 		it.skipIf(!openaiCodexToken)("should complete basic text generation", async () => {
 			await basicTextGeneration(llm, { apiKey: openaiCodexToken });
@@ -1241,7 +1241,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe("OpenAI Codex Provider (gpt-5.5)", () => {
-		const llm = getModel("openai-codex", "gpt-5.5");
+		const llm = getFixtureModel<"openai-codex-responses">("openai-codex", "gpt-5.5")!;
 
 		it.skipIf(!openaiCodexToken)("should complete basic text generation", async () => {
 			await basicTextGeneration(llm, { apiKey: openaiCodexToken });
@@ -1269,7 +1269,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe("OpenAI Codex Provider (gpt-5.5 via WebSocket)", () => {
-		const llm = getModel("openai-codex", "gpt-5.5");
+		const llm = getFixtureModel<"openai-codex-responses">("openai-codex", "gpt-5.5")!;
 		const wsOptions = { apiKey: openaiCodexToken, transport: "websocket" as const };
 
 		it.skipIf(!openaiCodexToken)("should complete basic text generation", async () => {
@@ -1298,7 +1298,10 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe.skipIf(!hasBedrockCredentials())("Amazon Bedrock Provider (claude-sonnet-4-5)", () => {
-		const llm = getModel("amazon-bedrock", "global.anthropic.claude-sonnet-4-5-20250929-v1:0");
+		const llm = getFixtureModel<"bedrock-converse-stream">(
+			"amazon-bedrock",
+			"global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+		)!;
 
 		it("should complete basic text generation", async () => {
 			await basicTextGeneration(llm);
@@ -1326,7 +1329,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe.skipIf(!hasBedrockCredentials())("Amazon Bedrock Provider (claude-opus-4-6 interleaved thinking)", () => {
-		const llm = getModel("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1");
+		const llm = getFixtureModel<"bedrock-converse-stream">("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1")!;
 
 		it("should use adaptive thinking without anthropic_beta", async () => {
 			let capturedPayload: unknown;
@@ -1372,7 +1375,10 @@ describe("Generate E2E Tests", () => {
 		});
 
 		it("should pass requestMetadata to the SDK payload", async () => {
-			const llmSonnet = getModel("amazon-bedrock", "global.anthropic.claude-sonnet-4-5-20250929-v1:0");
+			const llmSonnet = getFixtureModel<"bedrock-converse-stream">(
+				"amazon-bedrock",
+				"global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+			)!;
 			let capturedPayload: unknown;
 			const metadata = { app: "pi-test", env: "ci" };
 			const response = await complete(
@@ -1400,7 +1406,10 @@ describe("Generate E2E Tests", () => {
 		});
 
 		it("should omit requestMetadata from payload when not provided", async () => {
-			const llmSonnet = getModel("amazon-bedrock", "global.anthropic.claude-sonnet-4-5-20250929-v1:0");
+			const llmSonnet = getFixtureModel<"bedrock-converse-stream">(
+				"amazon-bedrock",
+				"global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+			)!;
 			let capturedPayload: unknown;
 			const response = await complete(
 				llmSonnet,

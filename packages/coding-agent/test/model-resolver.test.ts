@@ -1,5 +1,6 @@
-import { type Api, getModels, getSupportedThinkingLevels, type KnownProvider, type Model } from "@earendil-works/pi-ai";
+import { type Api, getModels, getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
 import { describe, expect, test, vi } from "vitest";
+import { getBundledModels } from "../src/core/bundled-model-catalog.js";
 import {
 	defaultModelPerProvider,
 	findInitialModel,
@@ -182,9 +183,10 @@ describe("resolveCliModel", () => {
 });
 
 describe("default model selection", () => {
-	test("every per-provider default exists in the model catalog", () => {
+	test("every per-provider default exists in the bundled runtime catalog", () => {
+		const bundledModels = getBundledModels();
 		for (const [provider, modelId] of Object.entries(defaultModelPerProvider)) {
-			const models = getModels(provider as KnownProvider);
+			const models = bundledModels.filter((entry) => entry.provider === provider);
 			if (models.length === 0) continue;
 			expect(
 				models.map((entry) => entry.id),

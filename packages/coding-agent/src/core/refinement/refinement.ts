@@ -285,6 +285,12 @@ function objectRecord(value: unknown): Record<string, unknown> | undefined {
 	return value as Record<string, unknown>;
 }
 
+/** Grouping label of a persisted entry. State written while the grouping was named `topic` carries no `path`. */
+function storedHarnessPath(entry: { path?: unknown; topic?: unknown }): string | undefined {
+	if (typeof entry.path === "string") return entry.path;
+	return typeof entry.topic === "string" ? entry.topic : undefined;
+}
+
 function normalizeHarnessScope(value: unknown, fallback: HarnessScope): HarnessScope {
 	return value === "global" || value === "local" ? value : fallback;
 }
@@ -350,8 +356,13 @@ export function loadHarnessState(
 			for (const [id, rawEntry] of Object.entries(records)) {
 				const entry = objectRecord(rawEntry);
 				if (!entry) continue;
+				// Migrate a topic-spelled grouping to `path` on load; `topic` is dropped so a later save
+				// writes the `path` spelling only.
+				const { topic: _topic, ...rest } = entry;
+				const path = storedHarnessPath(entry);
 				state.entries[kind][id] = {
-					...(entry as unknown as HarnessEntry),
+					...(rest as unknown as HarnessEntry),
+					...(path === undefined ? {} : { path }),
 					scope: normalizeHarnessScope(entry.scope, scope),
 					reference: objectRecord(entry.reference) ?? {},
 					arguments: objectRecord(entry.arguments) ?? {},
@@ -1160,7 +1171,8 @@ function rollbackProposal(target: RefinementResult): RefinementProposal {
 				id: edit.id,
 				title: edit.before.title,
 				content: edit.before.content,
-				path: edit.before.path,
+				// A snapshot recorded while the grouping was named `topic` has no `path` to restore.
+				path: storedHarnessPath(edit.before),
 				reference: edit.before.reference,
 				arguments: edit.before.arguments,
 				metadata: edit.before.metadata,

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.6] - 2026-09-21
+
+- Added a masked option to the Input component (and MenuSearchInput): the rendered line shows one bullet per grapheme while edits and submit keep the real buffer, so secret paste fields never draw the pasted value. The TUI's first consumer is the MCP token paste panel.
+- Added render-time click regions to the TUI: components expose them after render, containers aggregate them, and the fullscreen viewport projects them through the pinned header, scrolling transcript, clipped dock, and overlays (painted overlay pixels block click-through, and regions clipped at a viewport edge stay clickable on their visible rows). A clean unmodified left press/release pair dispatches the click; drag selection, shift/alt/ctrl clicks, and OSC-8 hyperlinks keep precedence, and fullscreen mouse stays opt-in.
+- Editor clicks now focus the editor and place the cursor from the authoritative rendered layout, handling wrapped lines, editor scroll, prompt and padding offsets, the CustomEditor header row, hidden `!`/`!!` prefixes, wide graphemes, and atomic paste/image markers.
+- Made Markdown link labels clickable in fullscreen while retaining visible URL fallbacks for terminals without native hyperlink support.
+
 ## [0.9.5] - 2026-09-15
 
 - Kept slash-command completion separate from execution so Tab and partial Enter complete without submitting.

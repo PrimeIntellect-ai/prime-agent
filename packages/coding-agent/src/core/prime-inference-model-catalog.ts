@@ -1,7 +1,9 @@
 import { Buffer } from "node:buffer";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import {
 	type Api,
+	getPrimeInferenceReasoningControls,
 	isPrivatePrimeInferenceModelId,
 	type Model,
 	type OpenAICompletionsCompat,
@@ -20,8 +22,8 @@ const pendingRefreshes = new Map<string, Promise<Model<"openai-completions">[] |
 const DEFAULT_COMPAT: OpenAICompletionsCompat = {
 	supportsStore: false,
 	supportsDeveloperRole: false,
-	// The endpoint does not yet describe reasoning controls. Do not send an
-	// unconfirmed reasoning_effort parameter for models without a bundled template.
+	// Routes that do not describe their reasoning controls get no unconfirmed
+	// reasoning_effort parameter; live supported_parameters drive the override.
 	supportsReasoningEffort: false,
 	maxTokensField: "max_tokens",
 	supportsStrictMode: false,
@@ -49,6 +51,24 @@ export function buildPrimeInferenceModels(
 		const contextWindow = entry.contextWindow ?? template?.contextWindow ?? 0;
 		const maxTokens = Math.min(entry.maxTokens ?? template?.maxTokens ?? 0, contextWindow);
 		const compat = structuredClone(template?.compat ?? DEFAULT_COMPAT);
+		const controls = getPrimeInferenceReasoningControls(entry);
+		if (controls) {
+			// The live catalog is authoritative for which reasoning parameters the
+			// route accepts; never emit one it does not declare.
+			compat.supportsReasoningEffort = controls.supportsReasoningEffort;
+			if (controls.thinkingFormat) compat.thinkingFormat = controls.thinkingFormat;
+			else delete compat.thinkingFormat;
+		}
+		// The live map is authoritative when present; no reported parameter
+		// support keeps the whole stale template. A route that declares
+		// reasoning_effort but no supported efforts keeps the template's map:
+		// the param is accepted but its values are unknown, and the template
+		// bounds the selection better than the raw default levels. A route that
+		// declares supported parameters but no reasoning controls drops the
+		// template map entirely.
+		const thinkingLevelMap = !controls
+			? template?.thinkingLevelMap
+			: (controls.thinkingLevelMap ?? (controls.supportsReasoningEffort ? template?.thinkingLevelMap : undefined));
 		// Anthropic models cache with explicit breakpoints, not automatic
 		// server-side prefix caching; cacheControlFormat makes the provider add
 		// anthropic-style cache_control markers for these entries. The catalog
@@ -64,7 +84,7 @@ export function buildPrimeInferenceModels(
 			provider: "prime-inference",
 			baseUrl: PRIME_INFERENCE_BASE_URL,
 			reasoning: entry.reasoning ?? template?.reasoning ?? false,
-			...(template?.thinkingLevelMap ? { thinkingLevelMap: { ...template.thinkingLevelMap } } : {}),
+			...(thinkingLevelMap ? { thinkingLevelMap: { ...thinkingLevelMap } } : {}),
 			input: (entry.vision ?? template?.input.includes("image")) ? ["text", "image"] : ["text"],
 			cost: { input: entry.input, output: entry.output, ...cacheCosts(entry, template) },
 			contextWindow,
@@ -90,19 +110,30 @@ export function readCachedPrimeInferenceModels(
 	cachePath: string,
 	bundledModels: readonly Model<"openai-completions">[],
 ): Model<"openai-completions">[] | undefined {
-	if (!existsSync(cachePath)) return undefined;
-	try {
-		return buildPrimeInferenceModels(
-			bundledModels,
-			parsePrimeInferenceModelCatalog(JSON.parse(readFileSync(cachePath, "utf8")) as unknown),
-		);
-	} catch {
-		return undefined;
+	// Backward-compatible cache reads: the historical flat location (beside
+	// models.json) and the intermediate "catalog" location remain readable so
+	// upgrading never costs a cold fetch; writes go to the new path only.
+	const flat = join(dirname(cachePath), "..", basename(cachePath));
+	const catalog = join(dirname(cachePath), "..", "catalog", basename(cachePath));
+	const candidates = [cachePath, flat, catalog];
+	for (const candidate of candidates) {
+		if (!existsSync(candidate)) continue;
+		try {
+			const models = buildPrimeInferenceModels(
+				bundledModels,
+				parsePrimeInferenceModelCatalog(JSON.parse(readFileSync(candidate, "utf8")) as unknown),
+			);
+			if (models) return models;
+		} catch {
+			// Try the next candidate location.
+		}
 	}
+	return undefined;
 }
 
 function writeCache(cachePath: string, value: unknown): void {
 	try {
+		mkdirSync(dirname(cachePath), { recursive: true });
 		writeFileAtomicSync(cachePath, JSON.stringify(value), { mode: 0o600 });
 	} catch {
 		// The bundled catalog remains available when the cache cannot be persisted.
@@ -154,7 +185,7 @@ export async function fetchPrimeInferenceModelCatalog(
 export async function refreshPrimeInferenceModels(
 	cachePath: string,
 	bundledModels: readonly Model<"openai-completions">[],
-	options: { fetchFn?: typeof fetch; offline?: boolean } = {},
+	options: { fetchFn?: typeof fetch; headers?: Record<string, string>; offline?: boolean } = {},
 ): Promise<Model<"openai-completions">[] | undefined> {
 	const cached = readCachedPrimeInferenceModels(cachePath, bundledModels);
 	if (options.offline) return cached;
@@ -162,7 +193,10 @@ export async function refreshPrimeInferenceModels(
 	if (existing) return existing;
 	const promise = (async () => {
 		try {
-			const { payload, entries } = await fetchPrimeInferenceModelCatalog({ fetchFn: options.fetchFn });
+			const { payload, entries } = await fetchPrimeInferenceModelCatalog({
+				fetchFn: options.fetchFn,
+				headers: options.headers,
+			});
 			const models = buildPrimeInferenceModels(bundledModels, entries);
 			if (!models) return cached;
 			writeCache(cachePath, payload);

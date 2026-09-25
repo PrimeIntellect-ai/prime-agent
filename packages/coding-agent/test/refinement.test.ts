@@ -1,4 +1,13 @@
-import { appendFileSync, chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	chmodSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -724,6 +733,80 @@ describe("harness refinement", () => {
 		await expect(
 			refineHarness([], state, [], {} as never, "api-key", { rollbackId: "missing_refinement" }),
 		).rejects.toThrow("Refinement missing_refinement not found");
+	});
+});
+
+describe("topic-era harness state migration", () => {
+	it("loads a persisted entry whose grouping is spelled topic and saves it back under path", () => {
+		const harnessStateDir = makeTempDir();
+		writeFileSync(
+			getHarnessStatePath(harnessStateDir),
+			`${JSON.stringify({
+				schema: 1,
+				entries: {
+					prompt: {},
+					memory: {
+						topic_entry: {
+							id: "topic_entry",
+							kind: "memory",
+							title: "Topic entry",
+							content: "Window-era content.",
+							topic: "window/era",
+							scope: "local",
+							reference: {},
+							arguments: {},
+							metadata: {},
+							version: 1,
+						},
+					},
+					skill: {},
+					subagent: {},
+				},
+				refinements: [],
+			})}\n`,
+		);
+
+		const state = loadHarnessState(harnessStateDir, "local");
+
+		expect(state.entries.memory.topic_entry?.path).toBe("window/era");
+		expect(formatHarnessStateForPrompt(state)).toContain("(window/era, v1)");
+		const persisted = readFileSync(saveHarnessState(harnessStateDir, state), "utf8");
+		expect(persisted).toContain('"path": "window/era"');
+		expect(persisted).not.toContain('"topic"');
+	});
+
+	it("rolls back a legacy snapshot whose recorded before state carries only topic", async () => {
+		const state = loadHarnessState(makeTempDir());
+		seedEntry(state, "memory", "grouped_memory");
+		const target = applyRefinementProposal(
+			state,
+			proposal("Target refinement", [
+				{
+					action: "update",
+					kind: "memory",
+					id: "grouped_memory",
+					title: "Updated memory",
+					content: "Updated memory content",
+					path: "updated/path",
+				},
+			]),
+			{ id: "refine_topic_snapshot" },
+		);
+		// Record the pre-edit snapshot the way a build that spelled the grouping `topic` wrote it.
+		for (const applied of target.appliedEdits) {
+			if (!applied.before) continue;
+			const before: Record<string, unknown> = { ...applied.before };
+			before.topic = before.path;
+			delete before.path;
+			applied.before = before as unknown as HarnessEntry;
+		}
+
+		const rollback = await refineHarness([], state, [target], {} as never, "api-key", {
+			rollbackId: "refine_topic_snapshot",
+		});
+
+		expect(rollback.appliedEdits.map((applied) => applied.applied)).toEqual([true]);
+		expect(state.entries.memory.grouped_memory).toMatchObject({ content: "memory content", path: "memory/path" });
 	});
 });
 

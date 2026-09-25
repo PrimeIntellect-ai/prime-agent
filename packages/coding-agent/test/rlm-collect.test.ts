@@ -6,7 +6,6 @@ import {
 	type AssistantMessage,
 	type Context,
 	createAssistantMessageEventStream,
-	getModel,
 	type TextContent,
 	type Usage,
 } from "@earendil-works/pi-ai";
@@ -15,12 +14,13 @@ import { AgentSession } from "../src/core/agent-session.js";
 import { AuthStorage } from "../src/core/auth-storage.js";
 import { convertToLlm } from "../src/core/messages.js";
 import { ModelRegistry } from "../src/core/model-registry.js";
-import { createRlmCollectHostHandler } from "../src/core/rlm-runtime.js";
+import { createRlmCollectHostHandler, type SubagentRuntimeHost } from "../src/core/rlm-runtime.js";
 import { SessionManager } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
+import { getCodingAgentFixtureModel } from "./fixture-models.js";
 import { createTestResourceLoader } from "./utilities.js";
 
-const model = getModel("anthropic", "claude-sonnet-4-5")!;
+const model = getCodingAgentFixtureModel("anthropic", "claude-sonnet-4-5");
 
 function userText(context: Context): string {
 	const last = context.messages.at(-1);
@@ -76,7 +76,9 @@ describe("rlm.collect typed fan-in", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	function makeSession(): AgentSession {
+	function makeSession(
+		options: { subagentRuntimeHost?: SubagentRuntimeHost; rlmSessionDir?: string } = {},
+	): AgentSession {
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const agent = new Agent({
@@ -92,7 +94,18 @@ describe("rlm.collect typed fan-in", () => {
 			cwd: tempDir,
 			modelRegistry: ModelRegistry.create(authStorage, join(tempDir, "models.json")),
 			resourceLoader: createTestResourceLoader(),
+			subagentRuntimeHost: options.subagentRuntimeHost,
+			rlmSessionDir: options.rlmSessionDir,
 		});
+	}
+
+	/** Register a daemon-hydrated run-less child under `name`, as the daemon does. */
+	function registerRunlessChild(root: AgentSession, childId: string, name: string): AgentSession {
+		const retainedChild = makeSession({ rlmSessionDir: join(tempDir, childId) });
+		session = root;
+		retainedChild.setSessionName(name);
+		expect(root.registerRlmChildSession(childId, retainedChild)).toBe(true);
+		return retainedChild;
 	}
 
 	it("returns a typed envelope once the child settles", async () => {
@@ -110,15 +123,20 @@ describe("rlm.collect typed fan-in", () => {
 		expect(entry.error).toBeUndefined();
 	});
 
-	it("collects every direct child when no targets are given", async () => {
+	it("collects every direct child when no targets are given and only the selected child when targeted", async () => {
 		session = makeSession();
 		const first = await session.runRlmChild("first task", { name: "worker-a" });
 		const second = await session.runRlmChild("second task", { name: "worker-b" });
 
-		const results = await session.collectRlmChildren([], 10_000);
-		const ids = results.results.map((entry) => entry.rlm_child_id).sort();
+		const all = await session.collectRlmChildren([], 10_000);
+		const ids = all.results.map((entry) => entry.rlm_child_id).sort();
 		expect(ids).toEqual([first.rlm_child_id, second.rlm_child_id].sort());
-		expect(results.results.every((entry) => entry.settled && entry.status === "done")).toBe(true);
+		expect(all.results.every((entry) => entry.settled && entry.status === "done")).toBe(true);
+
+		const targeted = await session.collectRlmChildren([first.rlm_child_id], 0);
+		expect(targeted.results.map((entry) => entry.rlm_child_id)).toEqual([first.rlm_child_id]);
+		const byName = await session.collectRlmChildren(["worker-b"], 0);
+		expect(byName.results.map((entry) => entry.rlm_child_id)).toEqual([second.rlm_child_id]);
 	});
 
 	it("re-collects a settled child after terminal cleanup", async () => {
@@ -141,18 +159,6 @@ describe("rlm.collect typed fan-in", () => {
 
 		const all = await session.collectRlmChildren([], 0);
 		expect(all.results.map((entry) => entry.rlm_child_id)).toContain(handle.rlm_child_id);
-	});
-
-	it("returns only the selected child from a targeted collect", async () => {
-		session = makeSession();
-		const first = await session.runRlmChild("first task", { name: "worker-a" });
-		const second = await session.runRlmChild("second task", { name: "worker-b" });
-		await session.collectRlmChildren([], 10_000);
-
-		const targeted = await session.collectRlmChildren([first.rlm_child_id], 0);
-		expect(targeted.results.map((entry) => entry.rlm_child_id)).toEqual([first.rlm_child_id]);
-		const byName = await session.collectRlmChildren(["worker-b"], 0);
-		expect(byName.results.map((entry) => entry.rlm_child_id)).toEqual([second.rlm_child_id]);
 	});
 
 	it("returns current snapshots on timeout without rejecting", async () => {
@@ -186,5 +192,81 @@ describe("rlm.collect typed fan-in", () => {
 		expect(ok).toEqual({ results: [] });
 		const defaults = await handler({});
 		expect(defaults).toEqual({ results: [] });
+	});
+
+	it("keeps deleted children's cancelled envelopes after their delete receipts", async () => {
+		session = makeSession();
+		// A settled child takes the no-active-run delete path; a daemon-hydrated
+		// run-less child exercises the registry-identity tombstone.
+		const done = await session.runRlmChild("done shard", { name: "done-worker" });
+		await session.collectRlmChildren([done.rlm_child_id], 10_000);
+		registerRunlessChild(session, "runless-child", "runless-worker");
+		await expect(session.deleteRlmSubagent(done.rlm_child_id)).resolves.toMatchObject({
+			subagent: { rlm_child_id: done.rlm_child_id },
+		});
+		await expect(session.deleteRlmSubagent("runless-worker")).resolves.toMatchObject({
+			subagent: { rlm_child_id: "runless-child" },
+		});
+		// The receipt promises a cancelled envelope even though both runs are gone.
+		const byName = await session.collectRlmChildren(["done-worker"], 0);
+		expect(byName.results[0]).toMatchObject({
+			rlm_child_id: done.rlm_child_id,
+			status: "cancelled",
+			settled: true,
+			error: "Deleted by parent orchestrator",
+		});
+		const byId = await session.collectRlmChildren(["runless-child"], 0);
+		expect(byId.results[0]).toMatchObject({
+			rlm_child_id: "runless-child",
+			session_name: "runless-worker",
+			status: "cancelled",
+			settled: true,
+		});
+	});
+
+	// The replacement's delete failed, so it never got a receipt and still owns the name.
+	it("keeps a failed-cleanup run-less replacement off the deleted generation's cancelled envelope", async () => {
+		const hostedChildren: AgentSession[] = [];
+		const makeHostedChild = (): AgentSession => {
+			const root = session;
+			const child = makeSession();
+			session = root;
+			hostedChildren.push(child);
+			return child;
+		};
+		const root = makeSession({
+			subagentRuntimeHost: {
+				// Only the run-less replacement's delete fails.
+				createRlmSubagentRuntime: async () => ({ session: makeHostedChild() }),
+				deleteRlmSubagentRuntime: async (childId: string) => {
+					if (childId === "runless-failed") throw new Error("injected cleanup failure");
+				},
+			},
+		});
+		session = root;
+		const first = await root.runRlmChild("first shard", { name: "reused-worker" });
+		// Settle and delete the first generation: its tombstone is the stale envelope.
+		await root.collectRlmChildren([first.rlm_child_id], 10_000);
+		await root.deleteRlmSubagent(first.rlm_child_id);
+
+		registerRunlessChild(root, "runless-failed", "reused-worker");
+		await expect(root.deleteRlmSubagent("reused-worker")).rejects.toThrow("injected cleanup failure");
+
+		// The replacement still owns the name: a same-name spawn stays blocked.
+		await expect(root.runRlmChild("blocked shard", { name: "reused-worker" })).rejects.toThrow(
+			'Agent name "reused-worker" is unavailable',
+		);
+		// Resident and name-bound, it must keep the deleted generation's tombstone silent.
+		await expect(root.collectRlmChildren(["reused-worker"], 0)).rejects.toThrow(
+			'No direct RLM child matches "reused-worker" in the current parent session',
+		);
+		const byOldId = await root.collectRlmChildren([first.rlm_child_id], 0);
+		expect(byOldId.results).toHaveLength(1);
+		expect(byOldId.results[0]).toMatchObject({
+			rlm_child_id: first.rlm_child_id,
+			status: "cancelled",
+			settled: true,
+		});
+		for (const hosted of hostedChildren) hosted.dispose();
 	});
 });

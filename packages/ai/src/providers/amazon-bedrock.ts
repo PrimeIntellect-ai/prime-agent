@@ -508,11 +508,19 @@ function supportsAdaptiveThinking(modelId: string, modelName?: string): boolean 
 }
 
 /**
- * Fable/Mythos models think every turn and reject sampling params with a 400.
+ * Fable/Mythos models — and Claude Opus 5.5 — think every turn and reject
+ * sampling params with a 400.
  */
 function supportsAlwaysOnAdaptiveThinking(modelId: string, modelName?: string): boolean {
 	const candidates = getModelMatchCandidates(modelId, modelName);
-	return candidates.some((s) => s.includes("fable-5") || s.includes("mythos-5") || s.includes("mythos-preview"));
+	return candidates.some(
+		(s) =>
+			s.includes("fable-5") ||
+			s.includes("mythos-5") ||
+			s.includes("mythos-preview") ||
+			s.includes("opus-5-5") ||
+			s.includes("opus-5.5"),
+	);
 }
 
 function mapThinkingLevelToEffort(

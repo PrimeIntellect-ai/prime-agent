@@ -406,6 +406,11 @@ class HarnessState:
                             entry_data.get("content"), str
                         ):
                             continue
+                        # State written while the grouping was named "topic" carries no "path";
+                        # migrate it on load so the grouping survives. _ENTRY_FIELDS drops "topic",
+                        # so a later save writes the "path" spelling only.
+                        if not isinstance(entry_data.get("path"), str) and isinstance(raw_entry.get("topic"), str):
+                            entry_data["path"] = raw_entry["topic"]
                         if not isinstance(entry_data.get("path"), str):
                             entry_data["path"] = "general"
                         if entry_data.get("scope") not in ("local", "global"):

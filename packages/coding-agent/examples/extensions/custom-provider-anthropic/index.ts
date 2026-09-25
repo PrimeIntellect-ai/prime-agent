@@ -375,7 +375,7 @@ function streamCustomAnthropic(
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
 					"anthropic-beta": `claude-code-20250219,oauth-2025-04-20,${betaFeatures.join(",")}`,
-					"user-agent": "claude-cli/2.1.2 (external, cli)",
+					"user-agent": "claude-cli/2.1.281 (external, cli)",
 					"x-app": "cli",
 				};
 			} else {

@@ -474,6 +474,13 @@ export interface CreateRlmSubagentRuntimeOptions {
 	spawnCode?: string;
 	/** Publish the session to the parent before a host makes the runtime addressable. */
 	onSessionPublished?: (session: AgentSession) => void;
+	/**
+	 * Session ids of children whose delete receipt already returned. A host that
+	 * re-asserts the name against a catalog still listing the unwinding child
+	 * ignores these, so an admission the delete receipt freed holds at the host
+	 * boundary too.
+	 */
+	ignoreSessionIds?: string[];
 }
 
 export interface CreateRlmRootSessionOptions {

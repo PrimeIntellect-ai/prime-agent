@@ -481,6 +481,46 @@ class HarnessStateTest(unittest.TestCase):
             state.update_memory("grouped", "Grouped", "newer", path="repo/other")
             self.assertEqual(state.get("memory", "grouped").path, "repo/other")
 
+    def test_topic_spelled_grouping_migrates_to_path_on_load(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "harness_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "schema": 1,
+                        "entries": {
+                            "prompt": {},
+                            "memory": {
+                                "topic_entry": {
+                                    "id": "topic_entry",
+                                    "kind": "memory",
+                                    "title": "Topic entry",
+                                    "content": "Window-era content.",
+                                    "topic": "window/era",
+                                    "scope": "local",
+                                    "reference": {},
+                                    "arguments": {},
+                                    "metadata": {},
+                                    "version": 1,
+                                }
+                            },
+                            "skill": {},
+                            "subagent": {},
+                        },
+                        "refinements": [],
+                    }
+                )
+            )
+
+            state = HarnessState(state_path)
+
+            self.assertEqual(state.get("memory", "topic_entry").path, "window/era")
+            # The migration is read-only: a save writes the grouping under "path" only.
+            state.save()
+            persisted = state_path.read_text()
+            self.assertIn('"path": "window/era"', persisted)
+            self.assertNotIn('"topic"', persisted)
+
     def test_in_memory_state_never_touches_disk(self) -> None:
         previous = os.environ.get("RLM_HARNESS_STATE_DIR")
         previous_global = os.environ.get("RLM_GLOBAL_HARNESS_STATE_DIR")

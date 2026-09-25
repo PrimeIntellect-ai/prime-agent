@@ -82,7 +82,9 @@ function getCacheControl(
 }
 
 // Stealth mode: Mimic Claude Code's tool naming exactly
-const claudeCodeVersion = "2.1.261";
+// The API gates newer models on the claimed client version (e.g. claude-opus-5.5
+// requires >= 2.280), so keep this at or above the latest released Claude Code.
+const claudeCodeVersion = "2.1.281";
 
 // Claude Code 2.x tool names (canonical casing)
 // Source: https://cchistory.mariozechner.at/data/prompts-2.1.11.md
@@ -748,11 +750,17 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 };
 
 /**
- * Fable/Mythos models think every turn and reject an explicit
- * `thinking: {type: "disabled"}` (and any sampling params) with a 400.
+ * Fable/Mythos models — and Claude Opus 5.5 — think every turn and reject an
+ * explicit `thinking: {type: "disabled"}` (and any sampling params) with a 400.
  */
 function isAlwaysOnAdaptiveThinkingModel(modelId: string): boolean {
-	return modelId.includes("fable-5") || modelId.includes("mythos-5") || modelId.includes("mythos-preview");
+	return (
+		modelId.includes("fable-5") ||
+		modelId.includes("mythos-5") ||
+		modelId.includes("mythos-preview") ||
+		modelId.includes("opus-5-5") ||
+		modelId.includes("opus-5.5")
+	);
 }
 
 /**

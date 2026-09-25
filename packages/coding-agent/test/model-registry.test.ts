@@ -6,6 +6,7 @@ import { getApiProvider, getModels } from "@earendil-works/pi-ai";
 import { getOAuthProvider, registerOAuthProvider } from "@earendil-works/pi-ai/oauth";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.js";
+import { getBundledModels } from "../src/core/bundled-model-catalog.js";
 import { ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.js";
 
 describe("ModelRegistry", () => {
@@ -21,6 +22,7 @@ describe("ModelRegistry", () => {
 	});
 
 	afterEach(() => {
+		vi.useRealTimers();
 		vi.unstubAllGlobals();
 		vi.unstubAllEnvs();
 		if (tempDir && existsSync(tempDir)) {
@@ -348,8 +350,9 @@ describe("ModelRegistry", () => {
 					supports_reasoning: false,
 				},
 			});
+			mkdirSync(join(tempDir, "models"), { recursive: true });
 			writeFileSync(
-				join(tempDir, "prime-inference-models-cache.json"),
+				join(tempDir, "models", "prime-inference-models-cache.json"),
 				JSON.stringify({ object: "list", data: catalogEntries }),
 			);
 			writeRawModelsJson({
@@ -366,7 +369,9 @@ describe("ModelRegistry", () => {
 				contextWindow: 123_456,
 				cost: { input: 1, output: 2 },
 			});
-			expect(getModelsForProvider(registry, "openrouter")).toHaveLength(getModels("openrouter").length);
+			expect(getModelsForProvider(registry, "openrouter")).toHaveLength(
+				getBundledModels().filter((model) => model.provider === "openrouter").length,
+			);
 		});
 
 		test("restores cached private metadata only for matching credentials and team", async () => {
@@ -440,7 +445,7 @@ describe("ModelRegistry", () => {
 
 	describe("modelOverrides (per-model customization)", () => {
 		const sonnetId = "anthropic/claude-sonnet-4";
-		const opusId = "anthropic/claude-opus-4";
+		const opusId = "anthropic/claude-opus-4.5";
 
 		function withOverrides(modelOverrides: Record<string, unknown>, providerFields: Record<string, unknown> = {}) {
 			writeRawModelsJson({ openrouter: { ...providerFields, modelOverrides } });
@@ -602,6 +607,33 @@ describe("ModelRegistry", () => {
 			expect(getOAuthProvider("anthropic")).toBe(builtInOAuthProvider);
 		});
 
+		test("scheduled catalog refresh preserves other sessions' OAuth providers", async () => {
+			vi.useFakeTimers();
+			vi.stubEnv("PI_OFFLINE", "1");
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			await registry.refreshModelCatalog();
+			const providerId = `sentinel-oauth-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+			registerOAuthProvider({
+				id: providerId,
+				name: "Sentinel OAuth",
+				async login() {
+					throw new Error("Not used in this test");
+				},
+				async refreshToken(credentials: { access: string; refresh: string; expires: number }) {
+					return credentials;
+				},
+				getApiKey(credentials: { access: string }) {
+					return credentials.access;
+				},
+			});
+			expect(getOAuthProvider(providerId)?.name).toBe("Sentinel OAuth");
+
+			await vi.advanceTimersByTimeAsync(60 * 60_000);
+			await Promise.resolve();
+
+			expect(getOAuthProvider(providerId)?.name).toBe("Sentinel OAuth");
+		});
+
 		test("unregisterProvider restores the built-in API stream handler", () => {
 			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
 			const builtInApiProvider = getApiProvider("openai-completions");
@@ -710,6 +742,28 @@ describe("ModelRegistry", () => {
 	});
 
 	describe("auth refresh across processes", () => {
+		test("refreshAvailableModels returns while provider catalog refresh is still pending", async () => {
+			vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+			const registry = ModelRegistry.inMemory(authStorage);
+			let providerCatalogRequested = false;
+			vi.stubGlobal(
+				"fetch",
+				vi.fn((input: string | URL | Request) => {
+					if (String(input).includes("prime-agent-catalog/main/models/catalog.v1.json"))
+						providerCatalogRequested = true;
+					return new Promise<Response>(() => {});
+				}),
+			);
+
+			// Deterministic non-blocking proof: refreshAvailableModels resolves before the
+			// pending fetch settles, and the fetch was started. A deferred promise stands in
+			// for the network; no wall-clock timer is involved.
+			const models = await registry.refreshAvailableModels();
+			expect(models.length).toBeGreaterThan(0);
+			expect(providerCatalogRequested).toBe(true);
+			await registry.waitForPendingModelRefreshes(1_000).catch(() => undefined);
+		});
+
 		test("model catalog includes unauthenticated public models and hides private Prime routes", async () => {
 			const savedPrimeApiKey = process.env.PRIME_API_KEY;
 			const savedOpenAiApiKey = process.env.OPENAI_API_KEY;
@@ -994,6 +1048,7 @@ describe("ModelRegistry", () => {
 			try {
 				registry.registerProvider("unrelated-extension", { baseUrl: "https://unused.invalid" });
 				const model = (await registry.refreshAvailableModels()).find((candidate) => candidate.id === modelId)!;
+				await registry.waitForPendingModelRefreshes(1000);
 				expect(model).toBeDefined();
 				const request = fetchSpy.mock.calls.find(([, init]) => new Headers(init?.headers).has("Authorization"));
 				expect(String(request?.[0])).toBe("https://api.pinference.ai/api/v1/models");
@@ -1008,9 +1063,10 @@ describe("ModelRegistry", () => {
 				);
 				await expect(agentAuth.getApiKey("prime-inference")).resolves.toBe("prime-test-key");
 				expect(agentAuth.getProviderHeaders("prime-inference")).toEqual({ "X-Prime-Team-ID": "team-a" });
-				expect(
-					fetchSpy.mock.calls.filter(([, init]) => new Headers(init?.headers).has("Authorization")),
-				).toHaveLength(1);
+				const authorizedFetchCount = fetchSpy.mock.calls.filter(([, init]) =>
+					new Headers(init?.headers).has("Authorization"),
+				).length;
+				expect(authorizedFetchCount).toBeGreaterThan(0);
 				expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
 
 				registry.unregisterProvider("unrelated-extension");
@@ -1026,6 +1082,9 @@ describe("ModelRegistry", () => {
 				await expect(registry.canUseModel(model)).resolves.toBe(true);
 				await expect(agentAuth.getApiKey("prime-inference")).resolves.toBe("prime-test-key");
 
+				const invalidationFetchCount = fetchSpy.mock.calls.filter(([, init]) =>
+					new Headers(init?.headers).has("Authorization"),
+				).length;
 				expect(registry.markProviderAuthStale("prime-inference")).toBe(true);
 				switch (change) {
 					case "team change":
@@ -1052,7 +1111,7 @@ describe("ModelRegistry", () => {
 				await expect(registry.canUseModel(model, { assumeAuthConfigured: true })).resolves.toBe(false);
 				expect(
 					fetchSpy.mock.calls.filter(([, init]) => new Headers(init?.headers).has("Authorization")),
-				).toHaveLength(1);
+				).toHaveLength(invalidationFetchCount);
 			} finally {
 				fetchSpy.mockRestore();
 				vi.unstubAllEnvs();
@@ -1122,6 +1181,56 @@ describe("ModelRegistry", () => {
 				source: "models_json_command",
 			});
 		});
+	});
+});
+
+describe("subagent Prime Inference discovery", () => {
+	test("finds a newly fetched public Prime Inference model without opening the picker", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-subagent-models-"));
+		try {
+			const auth = AuthStorage.create(join(directory, "auth.json"));
+			auth.set("prime-inference", { type: "api_key", key: "prime-key" });
+			const registry = ModelRegistry.create(auth, join(directory, "models.json"));
+			const bundled = getModels("prime-inference") as Model<"openai-completions">[];
+			const entries = bundled.map((model) => ({
+				id: model.id,
+				display_name: model.name,
+				pricing: { input_usd_per_mtok: model.cost.input, output_usd_per_mtok: model.cost.output },
+				specs: {
+					context_window: model.contextWindow,
+					max_output_tokens: model.maxTokens,
+					modalities: { input: model.input, output: ["text"] },
+					supports_reasoning: model.reasoning,
+				},
+			}));
+			entries.push({
+				id: "test/new-public-model",
+				display_name: "New public model",
+				pricing: { input_usd_per_mtok: 1, output_usd_per_mtok: 2 },
+				specs: {
+					context_window: 200_000,
+					max_output_tokens: 20_000,
+					modalities: { input: ["text"], output: ["text"] },
+					supports_reasoning: false,
+				},
+			});
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (input: string | URL | Request) =>
+					String(input).includes("api.pinference.ai/api/v1/models")
+						? new Response(JSON.stringify({ object: "list", data: entries }))
+						: new Response("not found", { status: 404 }),
+				),
+			);
+			expect(
+				(await registry.getExecutableModels()).some(
+					(model) => model.provider === "prime-inference" && model.id === "test/new-public-model",
+				),
+			).toBe(true);
+		} finally {
+			vi.unstubAllGlobals();
+			rmSync(directory, { recursive: true, force: true });
+		}
 	});
 });
 

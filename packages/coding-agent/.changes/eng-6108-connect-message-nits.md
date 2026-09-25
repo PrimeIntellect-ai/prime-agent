@@ -1,2 +1,0 @@
-- Removed the duplicate sentence under an MCP connect entry: the `◆ Connected <service> · <n> tools verified` header now stands alone, and the body keeps only what the header omits (added account, verification issue and next step, deferred activation).
-- Added the same durable feedback for MCP disconnects: a successful `/plugins` disconnect, `/mcp logout <name>`, or `/logout` of an integration now leaves a muted `◆ Disconnected <service>` entry in the chat, with the removal scope and account on expand. A failed or partial removal keeps its honest warning and records nothing.

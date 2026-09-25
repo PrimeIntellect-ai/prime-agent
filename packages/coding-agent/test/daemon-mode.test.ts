@@ -38,6 +38,7 @@ import {
 } from "../src/core/session-manager.js";
 import { SettingsManager } from "../src/core/settings-manager.js";
 import type { ActiveSessionState, DaemonSocketClient } from "../src/modes/daemon/active-session-state.js";
+import { bindActiveSessionState } from "../src/modes/daemon/daemon-extension-binding.js";
 import {
 	AgentDaemon,
 	finishClientSnapshotStreaming,
@@ -119,7 +120,7 @@ describe("daemon mode helpers", () => {
 				hasRunningRlmChildren: () => false,
 				getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
 			});
-			const spawn = (id: string) =>
+			const spawn = (id: string, ignoreSessionIds?: string[]) =>
 				internals.createRlmSubagentRuntime(parentState, {
 					parentSession: parentState.runtime.session,
 					id,
@@ -137,6 +138,7 @@ describe("daemon mode helpers", () => {
 					rlmDepth: 1,
 					rlmMaxDepth: 4,
 					rlmParentNodeId: id,
+					...(ignoreSessionIds ? { ignoreSessionIds } : {}),
 				});
 			const admission = spawn("child-1");
 			await expect(spawn("child-2")).rejects.toThrow('Agent name "real-worker" is unavailable');
@@ -181,11 +183,14 @@ describe("daemon mode helpers", () => {
 				prompt: "complete and persist",
 			});
 			await host.deleteRlmSubagentRuntime?.("child-1", childRuntime.session);
-			await spawn("child-3");
+			const child3Runtime = await spawn("child-3");
 			const edgesAfter = await internals.rlmSpawnLedger().liveEdges();
 			const namedEdges = edgesAfter.filter((edge) => edge.name === "real-worker");
 			expect(namedEdges).toHaveLength(1);
 			expect(namedEdges[0]?.childId).toBe("child-3");
+			// A respawn admitted past a freed name must hold at this re-asserting boundary.
+			await expect(spawn("child-4")).rejects.toThrow('Agent name "real-worker" is unavailable');
+			await expect(spawn("child-4", [child3Runtime.session.sessionId])).resolves.toBeTruthy();
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -284,7 +289,7 @@ describe("daemon mode helpers", () => {
 			).releaseRlmChildSession = vi.fn(() => vi.fn());
 			const passivation = internals.passivateIdleChildren(90, Date.parse("2036-08-01T12:00:00Z"), 1);
 			await disposeStarted;
-			const job = internals.cronStore.create({
+			const job = await internals.cronStore.create({
 				activeSessionId: childState.activeSessionId,
 				sessionId: childState.runtime.session.sessionId,
 				sessionFile: fixture.childSessionFile,
@@ -824,15 +829,18 @@ describe("daemon mode helpers", () => {
 							? 2
 							: 1
 						: 0,
-					isStreaming: false,
+					isStreaming: state.activeSessionId === "sibling",
 					isCompacting: false,
 					isBashRunning: false,
 					isRetrying: false,
-					isSessionActive: false,
+					isSessionActive: state.activeSessionId === "sibling",
 					hasAcceptedPromptInFlight: false,
 					unfinishedActionCount: 0,
 					messages: [],
-					state: { pendingToolCalls: new Set(), streamingMessage: undefined },
+					state: {
+						pendingToolCalls: new Set(state.activeSessionId === "sibling" ? ["call-1"] : []),
+						streamingMessage: undefined,
+					},
 					hasRunningRlmChildren: () => false,
 					getSessionActionSnapshot: () => ({ queuedCount: 0, steering: [], followUps: [] }),
 				},
@@ -850,10 +858,12 @@ describe("daemon mode helpers", () => {
 
 		const observed = await observe.listAgents();
 		expect(observed.current.activeSessionId).toBe("child");
-		expect(observed.agents.map((agent) => [agent.relationship, agent.activeSessionId])).toEqual([
-			["parent", "root"],
-			["sibling", "sibling"],
-			["child", "grandchild"],
+		expect(
+			observed.agents.map((agent) => [agent.relationship, agent.activeSessionId, agent.status, agent.activity]),
+		).toEqual([
+			["parent", "root", "idle", "idle"],
+			["sibling", "sibling", "running", "tool"],
+			["child", "grandchild", "idle", "idle"],
 		]);
 		await expect(observe.getAgent("cousin")).rejects.toThrow(
 			"Agent reach is limited to parent, siblings, and children",
@@ -1523,8 +1533,8 @@ describe("daemon mode helpers", () => {
 				grandchildSessionId,
 				getSessionArtifactPathForFile(fixture.grandchildSessionFile, grandchildSessionId),
 			);
-			const makeJob = (sessionId: string, sessionFile: string) =>
-				seedStore.createRlmHeartbeat({
+			const makeJob = async (sessionId: string, sessionFile: string) =>
+				await seedStore.createRlmHeartbeat({
 					activeSessionId: `stale-${sessionId}`,
 					sessionId,
 					sessionFile,
@@ -1533,8 +1543,8 @@ describe("daemon mode helpers", () => {
 					scheduleText: "every 30s",
 					prompt: "report exactly: hi",
 				});
-			makeJob(childSessionId, fixture.childSessionFile);
-			const grandchildHeartbeat = makeJob(grandchildSessionId, fixture.grandchildSessionFile);
+			await makeJob(childSessionId, fixture.childSessionFile);
+			const grandchildHeartbeat = await makeJob(grandchildSessionId, fixture.grandchildSessionFile);
 
 			const workerDaemon = new AgentDaemon(join(tempDir, "worker-daemon.sock"), {
 				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir, sessionDir: join(tempDir, "sessions") },
@@ -2918,7 +2928,7 @@ describe("daemon mode helpers", () => {
 			// A retried delete of the now-tombstoned child still resolves the
 			// session path and cancels its scheduled jobs.
 			const cronStore = (fixture.daemon as unknown as { cronStore: AgentCronJobStore }).cronStore;
-			const retryJob = cronStore.create({
+			const retryJob = await cronStore.create({
 				activeSessionId: "gone",
 				sessionId: "gone",
 				sessionFile: fixture.childSessionFile,
@@ -3113,7 +3123,7 @@ describe("daemon mode helpers", () => {
 			rmSync(join(tempDir, "rlm-ledger"), { recursive: true, force: true });
 			(fixture.daemon as unknown as { rlmSpawnLedgerInstance?: unknown }).rlmSpawnLedgerInstance =
 				new RlmSpawnLedger(tempDir, join(tempDir, "sessions"));
-			const job = internals.cronStore.create({
+			const job = await internals.cronStore.create({
 				activeSessionId: "gone",
 				sessionId: "gone",
 				sessionFile: fixture.childSessionFile,
@@ -3352,6 +3362,7 @@ function makeRuntimeSession(
 		},
 		sessionFile: sessionManager.getSessionFile(),
 		sessionId: sessionManager.getSessionId(),
+		rlmDepth: sessionManager.getHeader()?.rlmDepth ?? 0,
 		get sessionName() {
 			return sessionManager.getSessionName();
 		},
@@ -4173,5 +4184,47 @@ describe("daemon snapshot transfers", () => {
 		expect(socket.listenerCount("drain")).toBe(0);
 		expect(socket.destroyed).toBe(false);
 		socket.destroy();
+	});
+});
+
+describe("session replacement binding", () => {
+	it("broadcasts session_replaced only after the replaced bookkeeping settles, surfacing its failures", async () => {
+		const setRebindSession = vi.fn();
+		const session = {
+			messages: [],
+			setExecEnvProvider: vi.fn(),
+			subscribe: () => () => {},
+			bindExtensions: vi.fn(async () => {}),
+		};
+		const broadcasts: string[] = [];
+		const bindWith = (sessionReplaced: (state: object) => void | Promise<void>) =>
+			bindActiveSessionState(
+				{
+					runtime: { session, setRuntimeEnvScope: vi.fn(), setSubagentRuntimeHost: vi.fn(), setRebindSession },
+				} as never,
+				{
+					broadcast: (_state, message) => void broadcasts.push(message.type),
+					sessionReplaced,
+					shutdown: () => {},
+					createConnectionState: (() => ({})) as never,
+				},
+			);
+		// Always invoke the latest registration: bindActiveSessionState re-registers per replacement.
+		const rebind = () => setRebindSession.mock.calls.at(-1)![0] as (session: unknown) => Promise<void>;
+
+		let releaseReplaced: (() => void) | undefined;
+		await bindWith(() => new Promise<void>((resolve) => (releaseReplaced = resolve)));
+		const settling = rebind()(session);
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(broadcasts).toEqual([]);
+		releaseReplaced!();
+		await settling;
+		expect(broadcasts).toEqual(["session_replaced"]);
+
+		await bindWith(() => {
+			throw new Error("cron store contention");
+		});
+		await expect(rebind()(session)).rejects.toThrow("cron store contention");
+		expect(broadcasts).toEqual(["session_replaced"]);
 	});
 });

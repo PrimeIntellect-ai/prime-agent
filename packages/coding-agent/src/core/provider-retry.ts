@@ -60,7 +60,8 @@ export function providerStreamFailureStatus(message: AssistantMessage): number |
  * Deterministic rejections never retry; auth gets one retry before it can be
  * marked stale. A 404 is the exception: a live model briefly 404s on routing
  * blips (observed 2026-09-13 killing every active session), so it counts as
- * transient unavailability, not a permanent rejection.
+ * transient unavailability, not a permanent rejection. Safety filters
+ * deterministically reject identical requests, so they never retry.
  */
 export function isPermanentProviderFailureKind(
 	kind: string | undefined,
@@ -70,7 +71,7 @@ export function isPermanentProviderFailureKind(
 	if (kind === "invalid_request" && status === 404) {
 		return false;
 	}
-	if (kind === "invalid_request" || kind === "refusal" || kind === "permission") {
+	if (kind === "invalid_request" || kind === "refusal" || kind === "permission" || kind === "safety") {
 		return true;
 	}
 	return retriesPerformed > 0 && kind === "auth";
@@ -81,19 +82,27 @@ export type ProviderRetryDelay = { kind: "wait"; delayMs: number } | { kind: "ex
 /** Node caps timers at 2^31-1 ms; longer delays overflow setTimeout and fire after ~1ms. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
-/** Delay before retry `attempt` (1-based), honoring a server-requested wait. */
+/**
+ * Delay before retry `attempt` (1-based). A server-requested wait at or above the backoff is used as-is;
+ * otherwise the backoff is jittered so concurrent sessions do not retry in lockstep, floored at the server wait.
+ */
 export function providerRetryDelay(
 	attempt: number,
 	retryAfterMs: number | undefined,
 	policy: Pick<ProviderRetryPolicy, "baseDelayMs" | "maxRetryDelayMs">,
+	rng: () => number = Math.random,
 ): ProviderRetryDelay {
 	if (retryAfterMs !== undefined && policy.maxRetryDelayMs > 0 && retryAfterMs > policy.maxRetryDelayMs) {
 		return { kind: "exceeds-cap", retryAfterMs };
 	}
-	return {
-		kind: "wait",
-		delayMs: Math.min(Math.max(policy.baseDelayMs * 2 ** (attempt - 1), retryAfterMs ?? 0), MAX_TIMER_DELAY_MS),
-	};
+	const backoffMs = policy.baseDelayMs * 2 ** (attempt - 1);
+	if (retryAfterMs !== undefined && retryAfterMs >= backoffMs) {
+		return { kind: "wait", delayMs: Math.min(retryAfterMs, MAX_TIMER_DELAY_MS) };
+	}
+	const jitteredMs = providerWaitJitter(backoffMs, rng);
+	const flooredMs = Math.max(jitteredMs, retryAfterMs ?? 0);
+	const clampedMs = Math.min(flooredMs, MAX_TIMER_DELAY_MS);
+	return { kind: "wait", delayMs: clampedMs };
 }
 
 /**
@@ -246,7 +255,7 @@ export function providerWaitPingDelay(
 	return Math.min(capped, MAX_TIMER_DELAY_MS);
 }
 
-/** +/-25% jitter around a ping delay (avoids thundering-herd retries). */
+/** +/-25% jitter around a delay (avoids thundering-herd retries). */
 export function providerWaitJitter(delayMs: number, rng: () => number = Math.random): number {
 	const factor = 0.75 + 0.5 * Math.max(0, Math.min(1, rng()));
 	return Math.max(0, Math.round(delayMs * factor));
