@@ -1155,10 +1155,13 @@ impl AgentsViewMode {
         // cannot hold the borders and one content row (a degenerate pane)
         // falls back to the hint-line status with the notice's first line.
         let budget = height.saturating_sub(lines.len() + 1);
-        let notice_panel = match self.notice.as_ref() {
-            Some(notice) if budget >= 4 => Some(self.render_notice(notice, width, budget)),
-            _ => None,
-        };
+        // The panel is built and the notice's borrow ends here (render_list
+        // below takes the mode mutably).
+        let notice_panel = self
+            .notice
+            .as_deref()
+            .filter(|_| budget >= 4)
+            .map(|notice| self.render_notice(notice, width, budget));
         let status_fallback = notice_panel
             .is_none()
             .then(|| {
@@ -3069,7 +3072,10 @@ the holder exits.";
         // `renderHints`: `Press ${keyText("app.clear")} again to exit`).
         mode.handle_key("ctrl+q");
         assert!(mode.exit_armed);
-        assert_eq!(flat(&mode.render_hints(120)), "Press Ctrl+Q again to exit");
+        assert_eq!(
+            flat(&mode.render_hints(120, None)),
+            "Press Ctrl+Q again to exit"
+        );
         // The default ctrl+c no longer arms the exit flow.
         mode.exit_armed = false;
         mode.handle_key("ctrl+c");
@@ -3087,12 +3093,12 @@ the holder exits.";
         // Defaults: TS `renderHints` with the stock keys.
         let mode = mode_with_parent_and_child();
         assert_eq!(
-            flat(&mode.render_hints(120)),
+            flat(&mode.render_hints(120, None)),
             "\u{2191}/\u{2193} navigate   Enter/\u{2192} open   Ctrl+N new"
         );
         // A user override moves the hint with the handler.
         let mode = mode_with_user_bindings(&[("app.agents.new", "ctrl+t")]);
-        let hints = flat(&mode.render_hints(120));
+        let hints = flat(&mode.render_hints(120, None));
         assert_eq!(
             hints,
             "\u{2191}/\u{2193} navigate   Enter/\u{2192} open   Ctrl+T new"
