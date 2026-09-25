@@ -174,6 +174,10 @@ fn paused_detail_toggle_revisits_only_the_window_for_100k_entries() {
 #[test]
 fn paused_detail_round_trip_restores_the_window_without_a_walk() {
     let mut view = view();
+    // The round trip starts from the collapsed overview level — the
+    // scenario pins its own start (the startup level is the middle
+    // details since TS #2447).
+    view.detail = Detail::Overview;
     for index in 0..200 {
         view.push_entry(ChatEntry::Assistant(Box::new(AssistantMessage {
             blocks: vec![
