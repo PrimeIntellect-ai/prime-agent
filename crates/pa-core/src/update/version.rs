@@ -225,7 +225,7 @@ fn same_base_opaque_build_tag(candidate_version: &str, current_version: &str) ->
     let current_parts: Vec<&str> = current_tag.split('.').collect();
     for index in 0..candidate_parts.len().max(current_parts.len()) {
         match (candidate_parts.get(index), current_parts.get(index)) {
-            (Some(left), Some(right)) if left == right => continue,
+            (Some(left), Some(right)) if left == right => {}
             // A missing side loses (semver), but both tags are still opaque:
             // a prefix extension (`beta.1986.1` over `beta.1986`) is not a
             // recency claim either.

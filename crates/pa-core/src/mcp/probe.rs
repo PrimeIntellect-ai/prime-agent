@@ -252,7 +252,6 @@ async fn probe_endpoint(
     let tool_count = response
         .pointer("/result/tools")
         .and_then(|tools| tools.as_array())
-        .map(std::vec::Vec::len)
-        .unwrap_or(0);
+        .map_or(0, std::vec::Vec::len);
     Ok(tool_count)
 }

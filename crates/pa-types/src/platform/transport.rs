@@ -291,6 +291,7 @@ mod tests {
 
     #[tokio::test]
     async fn over_limit_paths_bind_connect_and_land_in_place() {
+        use tokio::io::AsyncReadExt;
         let dir = dir_of_exact_len("roundtrip", 120);
         let socket = dir.join("worker-test.sock");
         let _ = std::fs::remove_file(&socket);
@@ -320,7 +321,6 @@ mod tests {
         let (server, _) = listener.accept().await.expect("accept");
         let client = connect.await.expect("client task");
         // Round-trip one write to prove the pair is the same socket.
-        use tokio::io::AsyncReadExt;
         let (mut reader, _writer) = client.split();
         server.writable().await.expect("server writable");
         server.try_write(b"ping").expect("server write");

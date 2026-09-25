@@ -133,7 +133,7 @@ impl Client {
             let mut line = String::new();
             match self.reader.read_line(&mut line) {
                 Ok(0) => panic!("supervisor closed the connection"),
-                Ok(_) if line.trim().is_empty() => continue,
+                Ok(_) if line.trim().is_empty() => {}
                 Ok(_) => return serde_json::from_str(line.trim()).expect("parse line"),
                 // Would-block (EAGAIN): keep polling until the deadline.
                 Err(_) if Instant::now() < deadline => {}
@@ -217,11 +217,11 @@ fn write_synthetic_family(agent_dir: &Path, children: usize) -> (PathBuf, usize)
 
 #[test]
 fn list_all_returns_the_full_synthetic_thousand_child_roster() {
+    const CHILDREN: usize = 1_000;
     let dir = tempfile::TempDir::new().expect("temp dir");
     let socket = dir.path().join("daemon.sock");
     let agent_dir = dir.path().join("agent");
     std::fs::create_dir_all(&agent_dir).expect("agent dir");
-    const CHILDREN: usize = 1_000;
     write_synthetic_family(&agent_dir, CHILDREN);
     let _daemon = spawn_daemon(&socket, &agent_dir);
     let (mut client, hello) = Client::connect(&socket);

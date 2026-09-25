@@ -51,10 +51,10 @@ pub(crate) async fn run_loop(
 
         while has_more_tool_calls || !pending_messages.is_empty() {
             crate::abort::throw_if_aborted_signal(signal)?;
-            if !first_turn {
-                emit(AgentEvent::TurnStart).await?;
-            } else {
+            if first_turn {
                 first_turn = false;
+            } else {
+                emit(AgentEvent::TurnStart).await?;
             }
 
             if !pending_messages.is_empty() {
@@ -118,7 +118,7 @@ pub(crate) async fn run_loop(
                 tool_results: tool_results.clone(),
             })
             .await?;
-            if signal.map(AbortSignal::is_aborted).unwrap_or(false) {
+            if signal.is_some_and(AbortSignal::is_aborted) {
                 emit(AgentEvent::AgentEnd {
                     messages: new_messages.clone(),
                 })
@@ -146,14 +146,7 @@ pub(crate) async fn run_loop(
             )
             .await?;
             match should_stop_result {
-                PostTurnResult::Aborted => {
-                    emit(AgentEvent::AgentEnd {
-                        messages: new_messages.clone(),
-                    })
-                    .await?;
-                    return Ok(());
-                }
-                PostTurnResult::Completed(true) => {
+                PostTurnResult::Aborted | PostTurnResult::Completed(true) => {
                     emit(AgentEvent::AgentEnd {
                         messages: new_messages.clone(),
                     })

@@ -320,13 +320,11 @@ async fn execute_with_busy_kernel_choice(
                 match choice.as_deref() {
                     Some(BUSY_KERNEL_WAIT_CHOICE) => {
                         on_working_message(Some("Waiting for Python kernel..."));
-                        continue;
                     }
                     Some(BUSY_KERNEL_KILL_CHOICE) => {
                         on_working_message(Some("Restarting Python kernel..."));
                         provisioner.kill().await;
                         kernel_restarted = true;
-                        continue;
                     }
                     _ => return Err(err),
                 }

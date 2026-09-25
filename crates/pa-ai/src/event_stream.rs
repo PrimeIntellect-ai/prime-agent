@@ -314,8 +314,7 @@ pub fn initial_assistant_message(api: &str, provider: &str, model_id: &str) -> A
         error_message: None,
         timestamp: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_millis() as u64),
         rest: Default::default(),
     }
 }

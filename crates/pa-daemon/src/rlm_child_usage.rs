@@ -128,7 +128,7 @@ pub(crate) fn child_usage_batches(
         let origin = child_usage_origin(entries, task_prompt_row, index);
         match batches.iter_mut().find(|(origin_, _)| *origin_ == origin) {
             Some((_, total)) => {
-                pa_core::session_engine::rlm_usage::add_assistant_usage(total, &usage)
+                pa_core::session_engine::rlm_usage::add_assistant_usage(total, &usage);
             }
             None => batches.push((origin, usage)),
         }

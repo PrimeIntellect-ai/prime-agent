@@ -102,8 +102,7 @@ fn expand_ipv6(address: &str) -> Option<[u16; 8]> {
         head.split(':').collect()
     };
     let tail_parts: Vec<&str> = match tail {
-        None => Vec::new(),
-        Some("") => Vec::new(),
+        None | Some("") => Vec::new(),
         Some(tail) => tail.split(':').collect(),
     };
     let total = head_parts.len() + tail_parts.len();

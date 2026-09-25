@@ -52,9 +52,10 @@ pub(crate) fn attach_client_capabilities(
     capabilities: Option<&[String]>,
     supports_extension_ui: Option<bool>,
 ) -> Vec<String> {
-    let capabilities = capabilities
-        .map(|caps: &[String]| caps.to_vec())
-        .unwrap_or_else(crate::protocol::default_client_capabilities);
+    let capabilities = capabilities.map_or_else(
+        crate::protocol::default_client_capabilities,
+        |caps: &[String]| caps.to_vec(),
+    );
     let mut normalized = crate::protocol::normalize_client_capabilities(&capabilities);
     if supports_extension_ui.unwrap_or(false) && !normalized.iter().any(|cap| cap == "extension_ui")
     {

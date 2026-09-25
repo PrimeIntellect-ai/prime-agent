@@ -51,8 +51,7 @@ fn lost_exit_ms() -> u64 {
 fn lost_exit_ms_from(raw: Option<&str>) -> u64 {
     raw.and_then(|raw| raw.parse::<f64>().ok())
         .filter(|value| value.is_finite() && *value >= 0.0)
-        .map(|value| value as u64)
-        .unwrap_or(DEFAULT_LOST_EXIT_MS)
+        .map_or(DEFAULT_LOST_EXIT_MS, |value| value as u64)
 }
 
 /// Whether the supervisor socket accepts connections (TS
@@ -155,7 +154,6 @@ mod tests {
     fn lost_exit_ms_from(raw: Option<&str>) -> u64 {
         raw.and_then(|raw| raw.parse::<f64>().ok())
             .filter(|value| value.is_finite() && *value >= 0.0)
-            .map(|value| value as u64)
-            .unwrap_or(DEFAULT_LOST_EXIT_MS)
+            .map_or(DEFAULT_LOST_EXIT_MS, |value| value as u64)
     }
 }

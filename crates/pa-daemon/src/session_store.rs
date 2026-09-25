@@ -211,9 +211,7 @@ pub fn read_session_header(path: &Path) -> Option<SessionHeader> {
 
 /// A session file is valid when its first line is a `session` header with an id.
 pub fn is_valid_session_file(path: &Path) -> bool {
-    read_session_header(path)
-        .map(|header| !header.id.is_empty())
-        .unwrap_or(false)
+    read_session_header(path).is_some_and(|header| !header.id.is_empty())
 }
 
 impl SessionFile {
@@ -246,10 +244,9 @@ impl SessionFile {
             if trimmed.is_empty() {
                 continue;
             }
-            match serde_json::from_str::<SessionEntry>(trimmed) {
-                Ok(entry) => file.push_index(entry),
-                // Malformed lines are skipped, matching the TS loader.
-                Err(_) => continue,
+            // Malformed lines are skipped, matching the TS loader.
+            if let Ok(entry) = serde_json::from_str::<SessionEntry>(trimmed) {
+                file.push_index(entry);
             }
         }
         fold_child_usage_attributions(&mut file.entries);
@@ -1370,8 +1367,7 @@ pub fn read_session_info(path: &Path) -> Option<SessionInfo> {
         crate::util::iso_from_unix_ms(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0),
+                .map_or(0, |d| d.as_millis() as u64),
         )
     };
     let info = SessionInfo {
@@ -1445,14 +1441,14 @@ pub fn find_most_recent_session_for_cwd(session_dir: &Path, cwd: &str) -> Option
         .into_iter()
         .find(|info| {
             !info.cwd.is_empty()
-                && Path::new(&info.cwd)
-                    .canonicalize()
-                    .map(|p| {
+                && Path::new(&info.cwd).canonicalize().map_or_else(
+                    |_| info.cwd == cwd,
+                    |p| {
                         p == Path::new(cwd)
                             .canonicalize()
                             .unwrap_or_else(|_| PathBuf::from(cwd))
-                    })
-                    .unwrap_or_else(|_| info.cwd == cwd)
+                    },
+                )
         })
         .map(|info| info.path)
 }

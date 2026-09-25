@@ -682,8 +682,7 @@ impl SessionUi {
             fullscreen_enabled: options
                 .client_settings
                 .as_ref()
-                .map(|settings| settings.fullscreen())
-                .unwrap_or(true),
+                .is_none_or(|settings| settings.fullscreen()),
             service_tier: None,
             speed_display_enabled: false,
             speed_stats: None,
@@ -1027,15 +1026,11 @@ impl SessionUi {
         // rebuilds from the snapshot): a turn that is still live behind the
         // re-attach keeps the spinner, one that died with the old link (or
         // never ran) does not.
-        let streaming = attach
-            .snapshot
-            .get("state")
-            .map(|state| {
-                ["isStreaming", "isCompacting"]
-                    .iter()
-                    .any(|flag| state.get(flag).and_then(Value::as_bool).unwrap_or(false))
-            })
-            .unwrap_or(false);
+        let streaming = attach.snapshot.get("state").is_some_and(|state| {
+            ["isStreaming", "isCompacting"]
+                .iter()
+                .any(|flag| state.get(flag).and_then(Value::as_bool).unwrap_or(false))
+        });
         self.turn_active = streaming;
         self.streaming_index = None;
         // TS `applyConnectionStateSnapshot` -> `bindPromptStashSession`: the
@@ -2820,31 +2815,31 @@ impl SessionUi {
             }
             // `/tree` (TS `showTreeSelector`): the session-tree navigator.
             "tree" => {
-                if !resolved.args.is_empty() {
-                    self.note("Usage: /tree", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("tree");
                     self.open_tree_selector(view, None).await?;
+                } else {
+                    self.note("Usage: /tree", view);
                 }
             }
             // `/fork` (TS `showUserMessageSelector`): fork from a user
             // message into a new session.
             "fork" => {
-                if !resolved.args.is_empty() {
-                    self.note("Usage: /fork", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("fork");
                     self.open_fork_selector(view).await?;
+                } else {
+                    self.note("Usage: /fork", view);
                 }
             }
             // `/clone` (TS `handleCloneCommand`): duplicate the session at
             // the current position.
             "clone" => {
-                if !resolved.args.is_empty() {
-                    self.note("Usage: /clone", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("clone");
                     self.handle_clone_command(view).await?;
+                } else {
+                    self.note("Usage: /clone", view);
                 }
             }
             // TS `handleCopyCommand`: the last assistant text (the
@@ -2852,13 +2847,13 @@ impl SessionUi {
             // clipboard (platform tools, OSC 52 fallback). An argument is
             // the usage error with the text kept in the editor.
             "copy" => {
-                if !resolved.args.is_empty() {
+                if resolved.args.is_empty() {
+                    self.track_command_used("copy");
+                    self.handle_copy_command(view).await?;
+                } else {
                     view.editor
                         .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
                     self.error_row("Usage: /copy", view);
-                } else {
-                    self.track_command_used("copy");
-                    self.handle_copy_command(view).await?;
                 }
             }
             // `/login` (TS `showConfigurationMenu("providers")`): the
@@ -2866,27 +2861,27 @@ impl SessionUi {
             // configuration menu stays unported; the panel is the same
             // TS `OAuthSelectorComponent` the tab mounts).
             "login" => {
-                if !resolved.args.is_empty() {
-                    view.editor
-                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
-                    self.error_row("Usage: /login", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("login");
                     self.open_provider_auth(AuthSelectorKind::Login, view)
                         .await?;
+                } else {
+                    view.editor
+                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
+                    self.error_row("Usage: /login", view);
                 }
             }
             // `/logout` (TS `showLogoutSelector`): the stored-credential
             // selector; an empty store answers the TS status directly.
             "logout" => {
-                if !resolved.args.is_empty() {
-                    view.editor
-                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
-                    self.error_row("Usage: /logout", view);
-                } else {
+                if resolved.args.is_empty() {
                     self.track_command_used("logout");
                     self.open_provider_auth(AuthSelectorKind::Logout, view)
                         .await?;
+                } else {
+                    view.editor
+                        .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
+                    self.error_row("Usage: /logout", view);
                 }
             }
             // `/import <path.jsonl>` (TS `handleImportCommand`): the
@@ -3045,13 +3040,13 @@ impl SessionUi {
             // text stays in the editor); otherwise the session exports to a
             // temp file and uploads as a secret gist.
             "share" => {
-                if !resolved.args.is_empty() {
+                if resolved.args.is_empty() {
+                    self.track_command_used("share");
+                    self.handle_share_command(view).await?;
+                } else {
                     view.editor
                         .set_text(&format!("/{} {}", resolved.original_name, resolved.args));
                     self.error_row("Usage: /share", view);
-                } else {
-                    self.track_command_used("share");
-                    self.handle_share_command(view).await?;
                 }
             }
             // `/hotkeys` (TS `handleHotkeysCommand` after
@@ -3625,28 +3620,25 @@ impl SessionUi {
             }
             AuthSelectorAction::Login { provider, api_key } => {
                 view.provider_auth = None;
-                match api_key {
-                    // The panel-prompted key: store it (TS
-                    // `showApiKeyLoginDialog`'s save path, no panel
-                    // needed).
-                    Some(api_key) => {
-                        let auth = self.provider_auth.clone().expect("the selector was open");
-                        let outcome = auth.0.login(&provider, Some(&api_key)).await;
+                // The panel-prompted key: store it (TS
+                // `showApiKeyLoginDialog`'s save path, no panel
+                // needed).
+                if let Some(api_key) = api_key {
+                    let auth = self.provider_auth.clone().expect("the selector was open");
+                    let outcome = auth.0.login(&provider, Some(&api_key)).await;
+                    self.apply_auth_outcome(outcome, view);
+                } else {
+                    let auth = self.provider_auth.clone().expect("the selector was open");
+                    if provider.id.starts_with("mcp:")
+                        || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
+                    {
+                        self.start_provider_panel_login(&provider, auth, view);
+                    } else {
+                        // The unported OAuth subscription stubs: the
+                        // error row is the whole flow (nothing drives
+                        // the panel).
+                        let outcome = auth.0.login(&provider, None).await;
                         self.apply_auth_outcome(outcome, view);
-                    }
-                    None => {
-                        let auth = self.provider_auth.clone().expect("the selector was open");
-                        if provider.id.starts_with("mcp:")
-                            || provider.id == crate::provider_auth::PRIME_INFERENCE_PROVIDER_ID
-                        {
-                            self.start_provider_panel_login(&provider, auth, view);
-                        } else {
-                            // The unported OAuth subscription stubs: the
-                            // error row is the whole flow (nothing drives
-                            // the panel).
-                            let outcome = auth.0.login(&provider, None).await;
-                            self.apply_auth_outcome(outcome, view);
-                        }
                     }
                 }
             }
@@ -4461,11 +4453,21 @@ impl SessionUi {
                 let _ = self.handle_reload_command(view).await;
             }
             "show-hardware-cursor" => {
-                self.persist_bool_setting(
-                    |settings, enabled| settings.set_show_hardware_cursor(enabled),
-                    value,
-                    view,
-                );
+                // The show-images shape: a failed persist surfaces the
+                // error and changes nothing — the live flag flips only
+                // when the setting actually persisted, so the view and
+                // the on-disk state can never disagree.
+                if let Some(settings) = &self.client_settings {
+                    if let Err(error) = settings.set_show_hardware_cursor(value == "true") {
+                        self.error_row(&format!("{error:#}"), view);
+                        return;
+                    }
+                }
+                // The live TUI effect (TS persists through the settings
+                // manager, then calls `ui.setShowHardwareCursor(enabled)`
+                // in place): the very next frame shows or hides the
+                // hardware cursor at the focused caret.
+                view.show_hardware_cursor = value == "true";
             }
             "editor-padding" => {
                 if let Some(settings) = &self.client_settings {
@@ -4824,8 +4826,10 @@ impl SessionUi {
                 .editor
                 .keybindings()
                 .first_key("tui.viewport.follow")
-                .map(|key| crate::keybindings::format_key_text(&key))
-                .unwrap_or_else(|| "ctrl+shift+down".to_string());
+                .map_or_else(
+                    || "ctrl+shift+down".to_string(),
+                    |key| crate::keybindings::format_key_text(&key),
+                );
             format!("Fullscreen rendering on — wheel/pageUp scroll, {follow} follows output")
         } else {
             "Fullscreen rendering off".to_string()
@@ -5635,7 +5639,7 @@ impl SessionUi {
             .as_mut()
             .map(|mcp_view| mcp_view.handle_key(&id, view.editor.keybindings()));
         match action {
-            Some(crate::mcp_view::McpViewAction::None) => {}
+            Some(crate::mcp_view::McpViewAction::None) | None => {}
             Some(crate::mcp_view::McpViewAction::Cancel) => {
                 view.mcp_view = None;
                 self.picker_restored_draft = false;
@@ -5677,7 +5681,6 @@ impl SessionUi {
                     title: format!("Connect {label}"),
                 });
             }
-            None => {}
         }
         Ok(())
     }
@@ -5871,11 +5874,10 @@ impl SessionUi {
     /// tray while one is mounted.
     pub(crate) fn tray_override(&self, view: &AgentView) -> Option<String> {
         if self.ctrl_c_hint_visible() {
-            let key = self
-                .keybindings
-                .first_key("app.clear")
-                .map(|key| crate::keybindings::format_key_text(&key))
-                .unwrap_or_else(|| "Ctrl+C".to_string());
+            let key = self.keybindings.first_key("app.clear").map_or_else(
+                || "Ctrl+C".to_string(),
+                |key| crate::keybindings::format_key_text(&key),
+            );
             return Some(format!("Press {key} again to exit"));
         }
         streaming_tray_hint(
@@ -5902,7 +5904,7 @@ impl SessionUi {
             .as_mut()
             .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
         match action {
-            Some(ModelPickerAction::None) => {}
+            Some(ModelPickerAction::None) | None => {}
             Some(ModelPickerAction::Cancel) => {
                 view.model_picker = None;
                 self.picker_restored_draft = false;
@@ -5931,7 +5933,6 @@ impl SessionUi {
                     self.apply_thinking_level(&level, view).await;
                 }
             }
-            None => {}
         }
         self.update_fast_filter(view);
         Ok(())
@@ -6037,6 +6038,8 @@ impl SessionUi {
     /// overlay, not the TS `showStatus` chat row — sanctioned divergence),
     /// a failed write the failure row (TS `showError`).
     fn copy_selection(&mut self, text: &str, view: &mut AgentView) {
+        use base64::Engine;
+        use std::io::Write;
         let lines = text.lines().count().max(1);
         self.copies.push(text.to_string());
         self.track_selection(lines);
@@ -6044,8 +6047,6 @@ impl SessionUi {
             self.toast("Copied selection to clipboard", view);
             return;
         }
-        use base64::Engine;
-        use std::io::Write;
         let encoded = base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
         let mut out = std::io::stdout();
         match out.write_all(format!("\x1b]52;c;{encoded}\x07").as_bytes()) {
@@ -6074,7 +6075,7 @@ impl SessionUi {
                         row,
                         col,
                         started: Instant::now(),
-                    })
+                    });
                 }
             },
             None => self.selection_auto_scroll = None,
@@ -6155,7 +6156,7 @@ impl SessionUi {
             .as_mut()
             .map(|picker| picker.handle_key(&id, view.editor.keybindings()));
         match action {
-            Some(EffortPickerAction::None) => {}
+            Some(EffortPickerAction::None) | None => {}
             Some(EffortPickerAction::Cancel) => {
                 view.effort_picker = None;
                 self.dirty = true;
@@ -6164,7 +6165,6 @@ impl SessionUi {
                 view.effort_picker = None;
                 self.apply_thinking_level(&level, view).await;
             }
-            None => {}
         }
         Ok(())
     }
@@ -6214,10 +6214,10 @@ impl SessionUi {
     /// about, and only that session's frames land.
     pub(crate) fn apply_bash_activity(&mut self, update: BashActivityUpdate, view: &mut AgentView) {
         let session = match &update {
-            BashActivityUpdate::List { session, .. } => session,
-            BashActivityUpdate::Tail { session, .. } => session,
-            BashActivityUpdate::Refresh { session } => session,
-            BashActivityUpdate::Error { session, .. } => session,
+            BashActivityUpdate::List { session, .. }
+            | BashActivityUpdate::Tail { session, .. }
+            | BashActivityUpdate::Refresh { session }
+            | BashActivityUpdate::Error { session, .. } => session,
         };
         if session != &self.active_session_id {
             return;
@@ -7152,8 +7152,7 @@ impl SessionUi {
                 .get("model")
                 .and_then(|model| model.get("id"))
                 .and_then(Value::as_str)
-                .map(str::to_string)
-                .unwrap_or_else(|| picked_model_id.to_string());
+                .map_or_else(|| picked_model_id.to_string(), str::to_string);
             view.chrome.model_id = Some(model_id);
             self.dirty = true;
         }
@@ -8883,7 +8882,7 @@ impl SessionUi {
                     match &error_message {
                         Some(message) => card.set_failed(message),
                         None => {
-                            card.set_complete(exit_code, cancelled, truncated, full_output_path)
+                            card.set_complete(exit_code, cancelled, truncated, full_output_path);
                         }
                     }
                 }
@@ -9280,9 +9279,7 @@ impl SessionUi {
 /// The terminal's current column count (TS `this.ui.terminal.columns` for
 /// the goal status detail suffix); 80 when the size is unavailable.
 fn terminal_columns() -> usize {
-    crossterm::terminal::size()
-        .map(|(columns, _)| columns as usize)
-        .unwrap_or(80)
+    crossterm::terminal::size().map_or(80, |(columns, _)| columns as usize)
 }
 
 fn sorted_session_rows(mut sessions: Vec<Value>) -> Vec<Value> {
@@ -9333,10 +9330,10 @@ fn streaming_tray_hint(
 /// TS `isBashRunning` guard's warning: the clear key (app.clear) cancels
 /// the running user command, spelled through the effective keybindings.
 fn already_running_warning(keybindings: &crate::keybindings::KeybindingsManager) -> String {
-    let key = keybindings
-        .first_key("app.clear")
-        .map(|key| crate::keybindings::format_key_text(&key))
-        .unwrap_or_else(|| "Ctrl+C".to_string());
+    let key = keybindings.first_key("app.clear").map_or_else(
+        || "Ctrl+C".to_string(),
+        |key| crate::keybindings::format_key_text(&key),
+    );
     // TS `showWarning` renders `⚠ ${message}`: the prefix travels with the
     // row text (the StatusKind tier is color only).
     format!("\u{26a0} A bash command is already running. Press {key} to cancel it first.")

@@ -624,9 +624,7 @@ pub(crate) fn supervisor_argv_names_socket(argv: &[String], socket: &str) -> boo
 #[cfg(unix)]
 fn is_unix_socket_file(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
-    std::fs::symlink_metadata(path)
-        .map(|meta| meta.file_type().is_socket())
-        .unwrap_or(false)
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_socket())
 }
 
 /// The pids the reap must never touch: the live-worker descriptors this
@@ -687,8 +685,7 @@ fn protected_worker_pids(agent_dir: &Path, socket_path: &Path) -> HashSet<u32> {
             }
             let identity_holds = match &descriptor.process_start_id {
                 Some(expected) => crate::lease::get_process_start_id(descriptor.pid as u32)
-                    .map(|observed| observed == expected.as_str())
-                    .unwrap_or(true),
+                    .is_none_or(|observed| observed == expected.as_str()),
                 None => true,
             };
             if identity_holds {
@@ -769,12 +766,11 @@ fn exe_is_product_binary(pid: u32) -> bool {
         // The kernel appends " (deleted)" to a replaced binary's exe link
         // (an in-place upgrade while the worker lives) - the product
         // binary is still the product binary.
-        .map(|exe| {
+        .is_some_and(|exe| {
             let name = exe.to_string_lossy();
             let name = name.trim_end_matches(" (deleted)");
             is_product_binary(name)
         })
-        .unwrap_or(false)
 }
 
 /// One process's argv (None when unreadable).

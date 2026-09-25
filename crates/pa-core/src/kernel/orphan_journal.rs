@@ -134,7 +134,7 @@ pub fn read_active_orphan_processes(path: &Path) -> anyhow::Result<Vec<ActiveOrp
             continue;
         };
         let valid = record["version"] == 1
-            && record["pid"].as_i64().map(|p| p > 0).unwrap_or(false)
+            && record["pid"].as_i64().is_some_and(|p| p > 0)
             && record["ownerPid"].as_i64() == Some(owner_pid)
             && record["active"].is_boolean()
             && record["recordedAt"].is_string();

@@ -149,9 +149,10 @@ pub fn wire_session_runtime(
     let mutation_hook = cron_store
         .as_ref()
         .and_then(|wiring| wiring.mutation_hook.clone());
-    let cron_store = cron_store
-        .map(|wiring| wiring.store)
-        .unwrap_or_else(|| Arc::new(AgentCronJobStore::new(agent_dir.join("cron-jobs.json"))));
+    let cron_store = cron_store.map_or_else(
+        || Arc::new(AgentCronJobStore::new(agent_dir.join("cron-jobs.json"))),
+        |wiring| wiring.store,
+    );
     let mut runtime = SessionRuntime::new(&session, cron_store, active_session_id, binding);
     if let Some(purge) = goal_complete_purge {
         runtime.set_goal_complete_purge(purge);

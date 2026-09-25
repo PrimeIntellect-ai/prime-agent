@@ -476,7 +476,6 @@ fn status_icon(status: &str) -> (&'static str, ThemeColor) {
         "running" => ("\u{25c6}", ThemeColor::Accent),
         "done" => ("\u{2713}", ThemeColor::Success),
         "error" | "cancelled" => ("\u{2717}", ThemeColor::Error),
-        "queued" => ("\u{25c7}", ThemeColor::Dim),
         _ => ("\u{25c7}", ThemeColor::Dim),
     }
 }
@@ -792,9 +791,7 @@ pub fn render_client_text(rows: &[ClientLine], theme: &Theme, width: usize) -> V
         let row_count = wrapped.len();
         for (index, mut line) in wrapped.into_iter().enumerate() {
             let padding_style = if index + 1 < row_count {
-                line.last()
-                    .map(|span| span.style)
-                    .unwrap_or(Style::default())
+                line.last().map_or(Style::default(), |span| span.style)
             } else {
                 Style::default()
             };

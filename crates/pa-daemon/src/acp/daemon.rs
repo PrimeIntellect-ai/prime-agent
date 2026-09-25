@@ -314,9 +314,8 @@ pub async fn run_daemon_attached_acp_mode(options: DaemonAcpOptions) -> anyhow::
     loop {
         line.clear();
         match stdin.read_line(&mut line).await {
-            Ok(0) => break,
+            Ok(0) | Err(_) => break,
             Ok(_) => {}
-            Err(_) => break,
         }
         if line.trim().is_empty() {
             continue;
@@ -763,8 +762,7 @@ async fn handle_session_prompt(
         .await
         .session
         .as_mut()
-        .map(|hosted| std::mem::take(&mut hosted.cancel_requested))
-        .unwrap_or(true);
+        .is_none_or(|hosted| std::mem::take(&mut hosted.cancel_requested));
     if cancelled {
         producer.finish_prompt(turn_id).await;
         let _ = tx.send(jsonrpc::response(
@@ -800,13 +798,12 @@ async fn handle_session_prompt(
     let remaining_continuations = autonomous_status
         .as_ref()
         .filter(|status| status.enabled)
-        .map(|status| {
+        .map_or(0, |status| {
             status
                 .limits
                 .max_continuations
                 .saturating_sub(status.continuations_used)
-        })
-        .unwrap_or(0);
+        });
     // The boundary, completion, and terminal quiescence frames match the
     // in-process settlement because both serve the same captures.
     let boundary = types::AcpSessionUpdate::SessionInfoUpdate {

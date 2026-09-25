@@ -169,12 +169,10 @@ impl Inner {
                 true
             }
             Ok(r) => {
-                let detail = r
-                    .result
-                    .error
-                    .as_ref()
-                    .map(|e| e.evalue.clone())
-                    .unwrap_or_else(|| r.result.stderr.trim_end().to_string());
+                let detail = r.result.error.as_ref().map_or_else(
+                    || r.result.stderr.trim_end().to_string(),
+                    |e| e.evalue.clone(),
+                );
                 self.append_diagnostic(&format!("protocol repair bootstrap failed: {detail}"));
                 false
             }
@@ -206,21 +204,20 @@ impl Inner {
         }
         let task = {
             let mut memo = lock(&self.rebootstrap_memo);
-            match memo.as_ref() {
-                Some(existing) => existing.clone(),
-                None => {
-                    let inner = Arc::clone(self);
-                    let slot = MemoSlot::new();
-                    let run_slot = slot.clone();
-                    tokio::spawn(async move {
-                        let ok = inner.reprovision_fresh_kernel().await;
-                        run_slot.finish(
-                            (!ok).then(|| anyhow!("Kernel bootstrap failed after protocol repair")),
-                        );
-                    });
-                    *memo = Some(slot.clone());
-                    slot
-                }
+            if let Some(existing) = memo.as_ref() {
+                existing.clone()
+            } else {
+                let inner = Arc::clone(self);
+                let slot = MemoSlot::new();
+                let run_slot = slot.clone();
+                tokio::spawn(async move {
+                    let ok = inner.reprovision_fresh_kernel().await;
+                    run_slot.finish(
+                        (!ok).then(|| anyhow!("Kernel bootstrap failed after protocol repair")),
+                    );
+                });
+                *memo = Some(slot.clone());
+                slot
             }
         };
         // An aborted request never executes, so it may skip the wait; race

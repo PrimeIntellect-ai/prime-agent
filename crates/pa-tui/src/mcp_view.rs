@@ -907,12 +907,10 @@ fn trailing_menu_row(
 fn hint_line(theme: &Theme, width: usize, kb: &KeybindingsManager, action: Option<&str>) -> Line {
     let select_key = kb
         .first_key("tui.select.confirm")
-        .map(|key| format_key_text(&key))
-        .unwrap_or_else(|| "Enter".to_string());
+        .map_or_else(|| "Enter".to_string(), |key| format_key_text(&key));
     let close_key = kb
         .first_key("tui.select.cancel")
-        .map(|key| format_key_text(&key))
-        .unwrap_or_else(|| "Esc".to_string());
+        .map_or_else(|| "Esc".to_string(), |key| format_key_text(&key));
     let action_segment = action
         .map(|action| format!("{select_key} {action} \u{b7} "))
         .unwrap_or_default();
@@ -920,11 +918,9 @@ fn hint_line(theme: &Theme, width: usize, kb: &KeybindingsManager, action: Optio
         let navigation = format!(
             "{}/{} navigate \u{b7} ",
             kb.first_key("tui.select.up")
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| "\u{2191}".to_string()),
+                .map_or_else(|| "\u{2191}".to_string(), |key| format_key_text(&key)),
             kb.first_key("tui.select.down")
-                .map(|key| format_key_text(&key))
-                .unwrap_or_else(|| "\u{2193}".to_string())
+                .map_or_else(|| "\u{2193}".to_string(), |key| format_key_text(&key))
         );
         format!("{navigation}{action_segment}{close_key} close")
     } else {
