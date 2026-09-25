@@ -836,17 +836,18 @@ impl AgentsViewMode {
         let stop = row.section == crate::agents_view_state::Section::Running;
         match row.kind {
             RowKind::SubagentSummary => None,
-            RowKind::Agent => {
-                if stop {
-                    row.summary.get("activeSessionId").map(Value::as_str)?;
-                } else {
-                    row.summary.get("sessionFile").map(Value::as_str)?;
-                }
-            }
-            RowKind::Subagent => {
-                row.summary.get("rlmChildId").map(Value::as_str)?;
-            }
-        }
+            RowKind::Agent if stop => row
+                .summary
+                .get("activeSessionId")
+                .map(Value::as_str)
+                .map(|_| ()),
+            RowKind::Agent => row
+                .summary
+                .get("sessionFile")
+                .map(Value::as_str)
+                .map(|_| ()),
+            RowKind::Subagent => row.summary.get("rlmChildId").map(Value::as_str).map(|_| ()),
+        }?;
         Some(PendingDelete {
             identity: row.identity.clone(),
             stop,
@@ -2904,8 +2905,8 @@ mod tests {
             .expect("the saved row");
         mode.selected = saved_index;
         mode.handle_key("ctrl+x");
-        let (_, stop) = mode.delete_arm_target().expect("an armed target");
-        assert!(!stop, "the saved row arms as delete");
+        let armed = mode.delete_arm_target().expect("an armed target");
+        assert!(!armed.stop, "the saved row arms as delete");
         mode.handle_key("ctrl+x");
         match mode.take_delete_action().expect("the dispatch") {
             DeleteAction::DeleteSavedSession { session_path, .. } => {
