@@ -371,13 +371,16 @@ mod tests {
     #[tokio::test]
     async fn the_deadline_fails_a_wait_past_its_budget() {
         let mut attempts = 0;
-        let deadline_error = wait_through_update_restart(true, 60, 5, || async {
+        let deadline_error = wait_through_update_restart(true, 60, 5, || {
             attempts += 1;
-            if attempts == 1 {
-                Err::<&'static str, anyhow::Error>(preparing_rejection())
-            } else {
-                // An attempt that never settles (the in-flight create).
-                std::future::pending().await
+            let first_attempt = attempts == 1;
+            async move {
+                if first_attempt {
+                    Err::<&'static str, anyhow::Error>(preparing_rejection())
+                } else {
+                    // An attempt that never settles (the in-flight create).
+                    std::future::pending().await
+                }
             }
         })
         .await

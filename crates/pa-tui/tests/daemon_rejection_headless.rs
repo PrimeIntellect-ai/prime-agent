@@ -75,7 +75,7 @@ impl MockSupervisor {
 
     /// Serve one client connection until it goes quiet (bounded, so the
     /// plan teardown join always finishes).
-    fn serve(self) {
+    fn serve(mut self) {
         self.listener
             .set_nonblocking(true)
             .expect("nonblocking mock listener");
