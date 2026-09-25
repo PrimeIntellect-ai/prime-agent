@@ -914,6 +914,55 @@ fn a_short_sequence_pop_folds_at_the_popped_slot() {
 }
 
 #[test]
+fn a_non_glue_pop_keeps_the_run_map_in_lockstep() {
+    // A non-glue tail pop (the retry-episode error row) leaves the
+    // map one slot long: the truncate keeps it in lockstep, so the
+    // next tail append reads the true tail - a stale slot would let
+    // the append treat the leftover as the new card's owner and push
+    // a phantom member.
+    let card = |id: &str| {
+        ChatEntry::Tool(Box::new(crate::chat::ToolCallCard {
+            id: id.to_string(),
+            name: "bash".to_string(),
+            args: serde_json::json!({"command": "echo done"}),
+            started: true,
+            started_at: Some(std::time::Instant::now()),
+            ended_at: Some(std::time::Instant::now()),
+            result: Some(crate::chat::ToolResultView {
+                content: vec![serde_json::json!({"type": "text", "text": "ok"})],
+                details: serde_json::Value::Null,
+                is_error: false,
+            }),
+            result_partial: false,
+            ..Default::default()
+        }))
+    };
+    let mut view = view();
+    view.detail = Detail::Overview;
+    for index in 0..5 {
+        view.push_entry(card(&format!("c{index}")));
+    }
+    // A non-glue tail entry (the error row), then the pop.
+    view.push_entry(ChatEntry::Status {
+        text: "the error row".into(),
+        kind: StatusKind::Error,
+    });
+    view.pop_chat_entry();
+    assert_eq!(
+        view.run_map.slots().len(),
+        view.chat.len(),
+        "the map stays in lockstep with the chat"
+    );
+    let mut fresh = crate::tool_runs::ToolRuns::default();
+    fresh.rebuild_from(&view.chat, 0);
+    assert_eq!(
+        view.run_map.slots(),
+        fresh.slots(),
+        "the truncated map equals the full rebuild"
+    );
+}
+
+#[test]
 fn a_qualifying_tail_append_patches_the_map_incrementally() {
     // The O(1) tail append must produce the EXACT map the full rebuild
     // derives: the run's extent widens by one and the pushed slot is a

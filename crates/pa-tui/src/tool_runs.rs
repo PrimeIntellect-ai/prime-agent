@@ -438,6 +438,17 @@ impl ToolRuns {
         &self.slots
     }
 
+    /// Drop the map's stale tail slots past `chat.len()` (a non-glue
+    /// tail pop: the popped entry's own slot was Solo and the entries
+    /// before it never moved, so no re-derivation is needed - only the
+    /// leftover slot leaves, keeping the map in lockstep for the next
+    /// tail append).
+    pub fn truncate_tail(&mut self, chat: &[ChatEntry]) {
+        if self.slots.len() > chat.len() {
+            self.slots.truncate(chat.len());
+        }
+    }
+
     /// The qualifying run whose block starts at `index`.
     pub fn run_at(&self, index: usize) -> Option<ToolRun> {
         match self.slot(index) {

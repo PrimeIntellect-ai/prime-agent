@@ -539,6 +539,12 @@ impl AgentView {
                 };
                 self.sparse_tail_delta(after as isize - before as isize, fold);
             }
+        } else {
+            // A non-glue pop (the retry-episode error row) left the
+            // map one slot long: truncate it back into lockstep - the
+            // entries before the popped row never moved, but a stale
+            // slot would let the next tail append misread the tail.
+            self.run_map.truncate_tail(&self.chat);
         }
         popped
     }

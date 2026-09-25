@@ -233,7 +233,7 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
     let ordered = order_messages_for_transcript(messages);
     let mut chat: Vec<ChatEntry> = Vec::new();
     let mut tool_results: Vec<ToolResultReplay> = Vec::new();
-    let mut card_index: HashMap<String, usize> = HashMap::new();
+    let mut card_index: HashMap<String, Vec<usize>> = HashMap::new();
     for message in ordered {
         if let Some(result) = tool_result_message_view(message) {
             tool_results.push(result);
@@ -260,7 +260,8 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
             if let ChatEntry::Tool(card) = entry {
                 card_index
                     .entry(card.id.clone())
-                    .or_insert(first_new + offset);
+                    .or_default()
+                    .push(first_new + offset);
             }
         }
     }
@@ -275,15 +276,23 @@ pub fn transcript_to_entries(messages: &[Value]) -> Vec<ChatEntry> {
         // A pending card takes its result in place; every other result
         // (a true orphan, or a duplicate settle on a finished card)
         // keeps its standalone card exactly like the live push path -
-        // the rebuilt transcript never drops it.
-        let pending =
-            card_index
-                .get(&tool_call_id)
+        // the rebuilt transcript never drops it. The LAST pending card
+        // matches first (the live `rposition` semantics: a later
+        // invocation reusing the id settles its own card, never the
+        // first invocation's).
+        let pending_index = card_index.get(&tool_call_id).and_then(|indices| {
+            indices
+                .iter()
+                .rev()
                 .copied()
-                .and_then(|index| match chat.get_mut(index) {
-                    Some(ChatEntry::Tool(card)) if card.result.is_none() => Some(card),
-                    _ => None,
-                });
+                .find(|&index| {
+                    matches!(chat.get(index), Some(ChatEntry::Tool(card)) if card.result.is_none())
+                })
+        });
+        let pending = pending_index.and_then(|index| match chat.get_mut(index) {
+            Some(ChatEntry::Tool(card)) => Some(card),
+            _ => None,
+        });
         match pending {
             Some(card) => {
                 card.started = true;
@@ -1710,6 +1719,54 @@ mod tests {
             }
             other => panic!("the orphan is a card: {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_bulk_replay_settles_the_last_pending_card_for_a_reused_id() {
+        // A later invocation reusing a `tool_call_id` settles its OWN
+        // card (the live `rposition` match), never the first
+        // invocation's pending one - and the result never becomes an
+        // orphan.
+        let chat = transcript_to_entries(&[
+            json!({
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "calling twice" },
+                    { "type": "toolCall", "id": "dup", "name": "ipython", "arguments": {"code": "1"} },
+                ],
+                "timestamp": 1,
+            }),
+            json!({
+                "role": "assistant",
+                "content": [
+                    { "type": "text", "text": "again" },
+                    { "type": "toolCall", "id": "dup", "name": "ipython", "arguments": {"code": "2"} },
+                ],
+                "timestamp": 2,
+            }),
+            json!({
+                "role": "toolResult",
+                "toolCallId": "dup",
+                "toolName": "ipython",
+                "content": [{ "type": "text", "text": "the second run" }],
+                "isError": false,
+                "timestamp": 3,
+            }),
+        ]);
+        let cards: Vec<&crate::chat::ToolCallCard> = chat
+            .iter()
+            .filter_map(|entry| match entry {
+                ChatEntry::Tool(card) => Some(card.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards.len(), 2, "two cards for the reused id: {chat:?}");
+        assert!(cards[0].result.is_none(), "the first stays pending");
+        let settled = cards[1].result.as_ref().expect("the LAST card settled");
+        assert_eq!(
+            settled.content,
+            vec![json!({ "type": "text", "text": "the second run" })]
+        );
     }
 
     #[test]
