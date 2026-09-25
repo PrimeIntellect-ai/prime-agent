@@ -18,10 +18,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use pa_core::auth::{
-    check_prime_inference_access, fetch_prime_teams, login_prime_inference, PrimeAccessError,
-    PrimeAuthInfo, PrimeHttp, PrimeInferenceLoginCallbacks, PrimeInferenceLoginOptions,
-    PrimeInferenceLoginResult, PrimeTeamAssignment, PrimeTeamCredential, StoredPrimeTeam,
-    DEFAULT_REQUEST_TIMEOUT_MS,
+    check_prime_inference_access, fetch_prime_teams, login_prime_inference, AuthStorage,
+    PrimeAccessError, PrimeAuthInfo, PrimeHttp, PrimeInferenceAuthConfig,
+    PrimeInferenceLoginCallbacks, PrimeInferenceLoginOptions, PrimeInferenceLoginResult,
+    PrimeTeamAssignment, PrimeTeamCredential, StoredPrimeTeam, DEFAULT_REQUEST_TIMEOUT_MS,
 };
 use pa_tui::auth_panel::{PasteStyle, PrimeTeamOption, PrimeTeamPick};
 use pa_tui::provider_auth::ProviderAuthOutcome;
@@ -44,8 +44,9 @@ const FALLBACK_PROMPT: &str = "Paste a Prime API key below:";
 
 /// The login's terminal surface (the TS login dialog's surface): progress
 /// lines, the auth URL, the paste prompt, and the team selection. The seam
-/// keeps the flow scriptable in tests.
-pub(crate) trait PrimeLoginUi {
+/// keeps the flow scriptable in tests; `Send + Sync` because the race's
+/// boxed arms are `Send`.
+pub(crate) trait PrimeLoginUi: Send + Sync {
     /// TS `onProgress` / `dialog.showProgress`.
     fn progress(&self, message: &str);
     /// The driving surface's cooperative cancel state: `true` once the
