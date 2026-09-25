@@ -120,6 +120,14 @@ pub(crate) fn escape_len(s: &str) -> Option<usize> {
     }
 }
 
+/// The visible width of a string (grapheme clusters, escape sequences at
+/// zero width, tabs expanded to three spaces).
+///
+/// # Panics
+///
+/// Panics when the width-cache mutex is poisoned (a thread panicked
+/// while holding it); the `expect` guards the loop condition and
+/// cannot fire.
 pub fn str_width(s: &str) -> usize {
     use unicode_segmentation::UnicodeSegmentation;
     if s.is_empty() {
@@ -231,7 +239,7 @@ fn is_leading_nonprinting(c: char) -> bool {
 }
 
 /// Single-codepoint RGI emoji: TS `\p{RGI_Emoji}` matches a bare codepoint
-/// exactly when Emoji_Presentation=Yes (`⭐`, `⌚`, `🀄`, the flag RIs, …).
+/// exactly when `Emoji_Presentation=Yes` (`⭐`, `⌚`, `🀄`, the flag RIs, …).
 fn is_emoji_presentation(c: char) -> bool {
     matches!(
         c.emoji_status(),
@@ -391,6 +399,11 @@ pub fn pad_line(mut line: Line, width: usize) -> Line {
 
 /// Truncate a line to `max_width` visible columns, appending `ellipsis` (also
 /// measured) when content was cut.
+///
+/// # Panics
+///
+/// Cannot panic: the `expect` guards the loop condition (`rest` is
+/// non-empty exactly when checked).
 pub fn truncate_line(line: &Line, max_width: usize, ellipsis: &str) -> Line {
     if line_width(line) <= max_width {
         return line.clone();
@@ -494,6 +507,11 @@ pub fn slice_line_by_column(line: &Line, start: usize, length: usize) -> Line {
 /// The `strict` form of TS `sliceByColumn` (sliceWithWidth): clip a wide
 /// cluster whose end crosses the slice boundary (the overlay-compositing
 /// form) instead of including it whole.
+///
+/// # Panics
+///
+/// Cannot panic: the `expect` guards the loop condition (`rest` is
+/// non-empty exactly when checked).
 pub fn slice_line_by_column_strict(line: &Line, start: usize, length: usize, strict: bool) -> Line {
     use unicode_segmentation::UnicodeSegmentation;
     let mut out: Line = Vec::new();

@@ -83,7 +83,7 @@ pub struct EditorPasteSnapshot {
 /// Outcome of a submit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubmitOutcome {
-    /// Expanded + trimmed text, as delivered to on_submit.
+    /// Expanded + trimmed text, as delivered to `on_submit`.
     pub text: String,
 }
 

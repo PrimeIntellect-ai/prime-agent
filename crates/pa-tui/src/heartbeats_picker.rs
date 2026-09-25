@@ -1838,7 +1838,7 @@ mod tests {
 
     /// The schedule pair never displaces the error row (the bot-round
     /// fix): a heartbeat carrying both a schedule fact and a last error
-    /// renders every pair — MAX_DETAIL_ROWS covers the seven base pairs.
+    /// renders every pair — `MAX_DETAIL_ROWS` covers the seven base pairs.
     #[test]
     fn the_schedule_pair_never_hides_the_error_row() {
         let mut catalog = entries();
@@ -1888,7 +1888,7 @@ mod tests {
 
     /// The scroll-indicator row is reserved exactly once: a scrolling
     /// viewport uses every row it can hold (the frame constant excludes
-    /// the conditional indicator; menu_list_layout reserves it).
+    /// the conditional indicator; `menu_list_layout` reserves it).
     #[test]
     fn a_scrolling_viewport_uses_every_row() {
         let mut catalog = entries();

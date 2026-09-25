@@ -183,7 +183,7 @@ fn attach_data(id: &str) -> Value {
 
 /// One scripted assistant turn: a streamed start, one delta, and a
 /// completed message carrying usage and a stream-start timestamp (the
-/// message_end timestamp is set at provider stream start, so the completed
+/// `message_end` timestamp is set at provider stream start, so the completed
 /// message spans a real wall-clock window).
 fn stream_turn(writer: &mut UnixStream) {
     let event = |payload: Value| json!({ "type": "session_event", "activeSessionId": "s1", "event": payload });
