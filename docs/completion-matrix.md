@@ -409,8 +409,9 @@ dry-run artifact integrity. The heavy sidecar-venv bootstrap
 (`--ignored`) exercises the fresh-venv path.
 
 Remaining: the installer (`install.sh`) itself, R2/native update manifests,
-and release CI (a reference sketch exists at `docs/ci.yml.reference`; merge
-gates run locally via `make check`).
+and release CI (release CI has since gone live as
+`.github/workflows/continuous.yml` + `release.yml`; merge gates run locally
+via `make check`).
 
 ## 22. Platform readiness - in-flight
 
