@@ -2115,7 +2115,7 @@ mod tests {
             ],
             "rlmChildStatus": { "steering": [], "followUp": [0, 2] },
         });
-        let data = attach_data_from_response(&attach).unwrap();
+        let data = attach_data_from_response(attach).unwrap();
         let view = reconstruct(&data);
         assert_eq!(
             view.queued.rlm_child_status,
