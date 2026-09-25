@@ -2820,6 +2820,13 @@ mod tests {
     #[test]
     fn the_delete_confirm_hint_and_the_cleared_arm() {
         let mut mode = mode_with_parent_and_child();
+        // Select the child row explicitly, then arm over it.
+        let child_index = mode
+            .rows
+            .iter()
+            .position(|row| row.summary.get("rlmChildId").is_some())
+            .expect("the child row");
+        mode.selected = child_index;
         mode.handle_key("ctrl+x");
         let frame = mode.render_list(120, 8);
         let hint = frame
@@ -2829,9 +2836,12 @@ mod tests {
                     .map(|span| span.content.as_str())
                     .collect::<String>()
             })
-            .find(|row| row.contains("Press ctrl+x again to"))
+            .find(|row| row.contains("again to stop"))
             .expect("the confirm hint row");
-        assert!(hint.contains("stop"), "the live row reads stop: {hint}");
+        assert!(
+            hint.contains("again to stop"),
+            "the live row reads stop: {hint}"
+        );
         // A moved selection never executes the armed row.
         mode.handle_key("down");
         mode.handle_key("ctrl+x");
