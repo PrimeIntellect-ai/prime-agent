@@ -825,32 +825,32 @@ impl AgentsViewMode {
         self.saved_query_rearm = self.saved_fetch_failed;
     }
 
-    /// The selected row's stop-or-delete arming target: `(identity,
-    /// stop)`, `None` for rows with no stop-or-delete action (summary
-    /// rows, and rows carrying neither a live session nor a saved file).
-    /// `stop` is true while the row has live work (TS `hasLiveWork`: the
-    /// running section, or a subagent under a live parent).
-    fn delete_arm_target(&self) -> Option<(String, bool)> {
+    /// The selected row's stop-or-delete arming target (the confirm's
+    /// [`PendingDelete`]), `None` for rows with no stop-or-delete action
+    /// (summary rows, and rows carrying neither a live session nor a
+    /// saved file). `stop` is true while the row has live work (TS
+    /// `hasLiveWork`: the running section, or a subagent under a live
+    /// parent).
+    fn delete_arm_target(&self) -> Option<PendingDelete> {
         let row = self.rows.get(self.selected)?;
+        let stop = row.section == crate::agents_view_state::Section::Running;
         match row.kind {
             RowKind::SubagentSummary => None,
             RowKind::Agent => {
-                let live = row.section == crate::agents_view_state::Section::Running;
-                if live {
+                if stop {
                     row.summary.get("activeSessionId").map(Value::as_str)?;
                 } else {
                     row.summary.get("sessionFile").map(Value::as_str)?;
                 }
-                Some((row.identity.clone(), live))
             }
             RowKind::Subagent => {
                 row.summary.get("rlmChildId").map(Value::as_str)?;
-                Some((
-                    row.identity.clone(),
-                    row.section == crate::agents_view_state::Section::Running,
-                ))
             }
         }
+        Some(PendingDelete {
+            identity: row.identity.clone(),
+            stop,
+        })
     }
 
     /// The executed dispatch for the armed row (the second press): the
@@ -1205,8 +1205,8 @@ impl AgentsViewMode {
                 if let Some(action) = self.delete_action_for_selected() {
                     self.pending_delete_action = Some(action);
                 }
-            } else if let Some((identity, stop)) = self.delete_arm_target() {
-                self.pending_delete = Some(PendingDelete { identity, stop });
+            } else if let Some(pending) = self.delete_arm_target() {
+                self.pending_delete = Some(pending);
             }
             return;
         }
@@ -2783,9 +2783,9 @@ mod tests {
             "the first press arms the confirm"
         );
         assert!(mode.pending_delete_action.is_none(), "no dispatch yet");
-        let (identity, stop) = mode.delete_arm_target().expect("an armed target");
-        assert_eq!(identity, child_identity);
-        assert!(stop, "the running subagent arms as stop");
+        let armed = mode.delete_arm_target().expect("an armed target");
+        assert_eq!(armed.identity, child_identity);
+        assert!(armed.stop, "the running subagent arms as stop");
         // Any other key clears the arm.
         mode.handle_key("down");
         assert!(mode.pending_delete.is_none(), "another key clears the arm");
@@ -2831,8 +2831,8 @@ mod tests {
             .position(|row| row.summary.get("rlmChildId").is_some())
             .expect("the child row");
         mode.selected = child_index;
-        let (_, stop) = mode.delete_arm_target().expect("an armed target");
-        assert!(!stop, "the idle subagent arms as delete");
+        let armed = mode.delete_arm_target().expect("an armed target");
+        assert!(!armed.stop, "the idle subagent arms as delete");
         mode.handle_key("ctrl+x");
         mode.handle_key("ctrl+x");
         let action = mode.take_delete_action().expect("the executed dispatch");
