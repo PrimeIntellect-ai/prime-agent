@@ -246,6 +246,14 @@ impl AgentSession {
                 Ok(Some(review)) => {
                     if self.agent().state().await.is_streaming {
                         Ok(AutoRefineRound::Deferred(review))
+                    } else if !self.compact_auto_refine_branch_version_unchanged(branch_version) {
+                        // The streaming await above is a branch-move
+                        // window (the fresh arm's version check inside
+                        // review_compact_auto_refine ran before it), and
+                        // a round that resolved against a bumped version
+                        // never applies: the same fence the retained
+                        // arm runs before its apply, now on both arms.
+                        Ok(AutoRefineRound::Declined)
                     } else {
                         self.run_approved_refine(&review, model, api_key, global_harness_dir)
                             .await
