@@ -123,9 +123,9 @@ pub struct AgentView {
     /// The `/effort` inline picker (TS `ThinkingSelectorComponent` seam):
     /// while set, it owns the whole frame like the model picker.
     pub effort_picker: Option<crate::effort_picker::EffortPicker>,
-    /// The `/mcp` inline connections view (TS the configuration menu's
-    /// MCP Connections tab): while set, it owns the editor dock like the
-    /// model picker.
+    /// The `/mcp` inline connections view (the MCP surface's own
+    /// picker): while set, it owns the editor dock like the model
+    /// picker.
     pub mcp_view: Option<crate::mcp_view::McpView>,
     /// The `/heartbeats` inline management view (TS
     /// `HeartbeatManagerComponent`, inline-picker style): while set, it
@@ -803,9 +803,6 @@ impl AgentView {
                     width,
                 ));
                 rows
-            }
-            ChatEntry::SlashCommandResult { content } => {
-                crate::chat_slash::render_slash_command_result(content, &self.theme, width)
             }
             ChatEntry::CompactionSummary {
                 summary,
@@ -2607,7 +2604,7 @@ mod tests {
         let mut view = view_with(vec![agent_message_row(), shell_completion_row()]);
         view.detail = Detail::All;
         let text = transcript_text(&mut view, 80);
-        assert!(text.contains("Agent message received \u{b7} from child lane"));
+        assert!(text.contains("Agent message received \u{b7} \u{2190} child lane"));
         assert!(text.contains("\u{2570}\u{2500} hi"));
         assert!(text.contains("Background shell command finished"));
         assert!(text.contains("[bash-done]"));
