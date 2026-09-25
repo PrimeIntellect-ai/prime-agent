@@ -422,6 +422,20 @@ fn drags_and_modified_clicks_do_not_dispatch() {
         !after.contains("OUTPUT-ONE"),
         "a modified click never dispatches:\n{after}"
     );
+
+    // A modified PRESS stays selection-only even when its release drops
+    // the modifier (the pair is the unit, not the release alone).
+    let slipped = run_plan(vec![
+        HeadlessStep::WaitMs(700),
+        HeadlessStep::ScrollTop,
+        HeadlessStep::Mouse(shift_press(header_col + 2, header_row + 1)),
+        HeadlessStep::Mouse(release(header_col + 2, header_row + 1)),
+    ]);
+    let after = slipped.0.last().expect("a frame after the slipped release");
+    assert!(
+        !after.contains("OUTPUT-ONE"),
+        "a modified press never dispatches, whatever its release:\n{after}"
+    );
 }
 
 /// A clean click on a rendered OSC 8 link opens it (TS `openHyperlink`):

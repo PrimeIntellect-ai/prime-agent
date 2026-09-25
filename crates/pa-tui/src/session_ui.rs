@@ -592,6 +592,12 @@ pub(crate) struct SessionUi {
     /// `fullscreenPressedClick`): the release fires it when it lands on
     /// the same row inside the target's columns.
     fullscreen_pressed_click: Option<crate::click_regions::FrameClickTarget>,
+    /// The last left press carried a modifier (selection-only pairing):
+    /// a modified press never arms a click dispatch, whatever its
+    /// release reports (TS's declared contract - "shift/alt/ctrl clicks
+    /// stay selection-only" - tightened past the TS implementation,
+    /// which re-checks only at the release).
+    fullscreen_press_modified: bool,
 }
 
 /// Why one transcript rebuild runs (TS: a session rebind renders through
@@ -797,6 +803,7 @@ impl SessionUi {
             fullscreen_left_dragged: false,
             fullscreen_pressed_hyperlink: None,
             fullscreen_pressed_click: None,
+            fullscreen_press_modified: false,
             copies: Vec::new(),
         };
         session
@@ -1307,6 +1314,7 @@ impl SessionUi {
         self.fullscreen_left_dragged = false;
         self.fullscreen_pressed_hyperlink = None;
         self.fullscreen_pressed_click = None;
+        self.fullscreen_press_modified = false;
         // The rebuild drops the previous run's pending-tool map (TS
         // `resetPendingToolState` at the rebuild boundary).
         self.pending_tools.clear();
@@ -6009,10 +6017,17 @@ impl SessionUi {
         if left_press {
             self.fullscreen_left_dragged = event.motion;
             if !event.motion {
-                self.fullscreen_pressed_hyperlink = view.frame_link_at(row, col);
-                self.fullscreen_pressed_click = if !event.shift
-                    && !event.alt
-                    && !event.ctrl
+                // The pairing is clean only when the PRESS carried no
+                // modifier: a modified press stays selection-only even
+                // when its release reports none (the release-side
+                // re-check alone would let a modifier slip through).
+                self.fullscreen_press_modified = event.shift || event.alt || event.ctrl;
+                self.fullscreen_pressed_hyperlink = if !self.fullscreen_press_modified {
+                    view.frame_link_at(row, col)
+                } else {
+                    None
+                };
+                self.fullscreen_pressed_click = if !self.fullscreen_press_modified
                     && self.fullscreen_pressed_hyperlink.is_none()
                 {
                     view.frame_click_target_at(row, col)
@@ -6094,6 +6109,7 @@ impl SessionUi {
             || event.shift
             || event.alt
             || event.ctrl
+            || self.fullscreen_press_modified
         {
             return;
         }
@@ -6140,6 +6156,7 @@ impl SessionUi {
             self.fullscreen_left_dragged = false;
             self.fullscreen_pressed_hyperlink = None;
             self.fullscreen_pressed_click = None;
+            self.fullscreen_press_modified = false;
         }
     }
 
@@ -6169,12 +6186,25 @@ impl SessionUi {
         }
         // TS runs the executable path with the handler and URL as its
         // arguments (`execFile`): the rundll32 path is the PROGRAM, never
-        // a positional argument.
+        // a positional argument. The inherited `SystemRoot` names the
+        // executable, so it must be an absolute drive path (no traversal,
+        // no redirection); anything else falls back to the TS default.
         #[cfg(target_os = "windows")]
         let (program, mut args) = {
-            let system_root =
-                std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
-            let rundll32 = std::path::Path::new(&system_root)
+            let default_root = "C:\\Windows".to_string();
+            let inherited_root = std::env::var("SystemRoot").unwrap_or_default();
+            let bytes = inherited_root.as_bytes();
+            let trusted_root = if bytes.len() >= 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && (bytes[2] == b'\\' || bytes[2] == b'/')
+                && !inherited_root.contains("..")
+            {
+                inherited_root
+            } else {
+                default_root
+            };
+            let rundll32 = std::path::Path::new(&trusted_root)
                 .join("System32")
                 .join("rundll32.exe");
             (
@@ -7671,10 +7701,15 @@ impl SessionUi {
             if kb.matches(&id, "app.tools.expand") {
                 view.detail = view.detail.next();
                 // The global cycle resets every per-entry expansion
-                // override (TS `applyChatExpansion` fans the new state
-                // out to all components; #2430's clicks only ever flipped
-                // their own).
+                // override and re-flags the side-question pane (TS
+                // `applyChatExpansion` fans the new state out to all
+                // components; #2430's clicks only ever flipped their
+                // own).
                 view.clear_entry_expanded();
+                if let Some(pane) = view.side_pane.as_mut() {
+                    pane.expanded = view.detail == crate::chat::Detail::All;
+                    pane.bash_expanded = None;
+                }
                 self.dirty = true;
                 return Ok(());
             }
@@ -8820,10 +8855,14 @@ impl SessionUi {
             // The same component as the main thread, mounted inside the
             // pane (TS `sideQuestionComponent.addBash`).
             if let Some(pane) = view.side_pane.as_mut() {
+                // A fresh bash block starts from the global expansion
+                // state: the previous block's click override never
+                // carries over (TS mounts a fresh component).
                 pane.bash = Some(crate::side_question::PaneBash::new_running(
                     &command,
                     exclude_from_context,
                 ));
+                pane.bash_expanded = None;
             }
             self.user_bash_card = None;
             self.user_bash_started_at = None;

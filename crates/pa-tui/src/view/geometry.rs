@@ -47,7 +47,7 @@ impl AgentView {
             ChatEntry::AgentMessage(row) => {
                 crate::custom_message::geometry::agent_message_row_count(
                     row,
-                    self.detail,
+                    self.entry_detail(index),
                     &self.theme,
                     width,
                     spacing,
@@ -56,7 +56,7 @@ impl AgentView {
             ChatEntry::ShellCompletion(row) => {
                 crate::custom_message::geometry::shell_completion_row_count(
                     row,
-                    self.detail,
+                    self.entry_detail(index),
                     width,
                     spacing,
                 )
@@ -89,7 +89,7 @@ impl AgentView {
                     + crate::tool_card::count_tool_card(
                         card,
                         self.pulse_frame,
-                        self.detail,
+                        self.entry_detail(index),
                         &self.theme,
                         width,
                         self.show_images,
@@ -104,7 +104,7 @@ impl AgentView {
                     + crate::bash_card::render_bash_execution(
                         card,
                         self.pulse_frame,
-                        self.detail.tool_output_expanded(),
+                        self.entry_tool_expanded(index),
                         &cancel_hint,
                         &self.theme,
                         width,
@@ -114,7 +114,7 @@ impl AgentView {
             ChatEntry::SkillInvocation(row) => {
                 crate::custom_message::skill_invocation::count_skill_invocation(
                     row,
-                    self.detail,
+                    self.entry_detail(index),
                     &self.theme,
                     width,
                     spacing,
@@ -123,7 +123,7 @@ impl AgentView {
             ChatEntry::InjectedPrompt(row) => {
                 crate::custom_message::injected_prompt::count_injected_prompt(
                     row,
-                    self.detail,
+                    self.entry_detail(index),
                     &self.theme,
                     width,
                 )
@@ -131,7 +131,7 @@ impl AgentView {
             ChatEntry::RefinementOutcome(row) => {
                 crate::custom_message::refinement::count_refinement_outcome(
                     row,
-                    self.detail,
+                    self.entry_detail(index),
                     &self.theme,
                     width,
                 )
@@ -146,7 +146,7 @@ impl AgentView {
                         summary,
                         *tokens_before,
                         custom_instructions.as_deref(),
-                        self.detail.tool_output_expanded(),
+                        self.entry_tool_expanded(index),
                         &self.theme,
                         width,
                     )

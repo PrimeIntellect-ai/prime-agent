@@ -1662,7 +1662,14 @@ impl AgentView {
                     continue;
                 }
                 let row = top_rows + window_height + dock_row - cropped;
-                clicks.push_editor_row(row, row - offset, width);
+                // The anchor keeps the region-relative position: only a
+                // frame shorter than the region could place the first
+                // line's row below its own offset, and such rows cannot
+                // carry a meaningful anchor.
+                let Some(anchor) = row.checked_sub(offset) else {
+                    continue;
+                };
+                clicks.push_editor_row(row, anchor, width);
             }
         }
         // A paused viewport carries the follow hint over the last transcript
@@ -3114,11 +3121,20 @@ mod tests {
             !before.contains("RESULT-ONE") && !before.contains("RESULT-TWO"),
             "collapsed cards hide the tool output: {before}"
         );
+        // The geometry path measures the same expansion the render
+        // shows (a count that keeps the global detail would leave the
+        // sparse bookkeeping short by the growth).
+        let collapsed_rows = v.count_entry_rows(0, 80);
         v.toggle_entry_expanded(0);
         let after = transcript_text(&mut v, 80);
         assert!(
             after.contains("RESULT-ONE"),
             "the first card expanded: {after}"
+        );
+        let expanded_rows = v.count_entry_rows(0, 80);
+        assert!(
+            expanded_rows > collapsed_rows,
+            "the expanded card measures taller: {collapsed_rows} vs {expanded_rows}"
         );
         assert!(
             !after.contains("RESULT-TWO"),
