@@ -23,7 +23,7 @@ pub(crate) enum KillCloseReason {
 impl KillCloseReason {
     /// The `rlmCloseReason` marker of a child-close cascade (the plain
     /// client kill carries none).
-    fn from_payload(payload: &Value) -> Self {
+    pub(crate) fn from_payload(payload: &Value) -> Self {
         match payload.get("rlmCloseReason").and_then(Value::as_str) {
             Some("shutdown") => Self::Shutdown,
             Some("replaced") => Self::Replaced,
@@ -32,7 +32,7 @@ impl KillCloseReason {
     }
 
     /// The wire `session_closed` reason.
-    fn session_closed_reason(self) -> DaemonSessionClosedReason {
+    pub(crate) fn session_closed_reason(self) -> DaemonSessionClosedReason {
         match self {
             Self::Killed => DaemonSessionClosedReason::Killed,
             Self::Shutdown => DaemonSessionClosedReason::Shutdown,
@@ -41,7 +41,7 @@ impl KillCloseReason {
     }
 
     /// The recovery journal's close operation.
-    fn recovery_operation(self) -> &'static str {
+    pub(crate) fn recovery_operation(self) -> &'static str {
         match self {
             Self::Killed => "killed",
             Self::Shutdown => "shutdown",

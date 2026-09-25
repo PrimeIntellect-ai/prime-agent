@@ -21,7 +21,6 @@ pub use env::{
 pub(crate) use session_core::SessionCore;
 
 use std::collections::VecDeque;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
