@@ -1,11 +1,14 @@
 import {
 	type ChildProcess,
+	type ExecException,
 	type ExecFileException,
 	type ExecFileOptionsWithStringEncoding,
 	type ExecFileSyncOptions,
 	type ExecFileSyncOptionsWithStringEncoding,
+	type ExecOptionsWithStringEncoding,
 	type ExecSyncOptions,
 	type ExecSyncOptionsWithStringEncoding,
+	exec,
 	execFile,
 	execFileSync,
 	execSync,
@@ -49,6 +52,14 @@ export function execSyncHidden(command: string, options: ExecSyncOptionsWithStri
 export function execSyncHidden(command: string, options?: ExecSyncOptions): Buffer;
 export function execSyncHidden(command: string, options: ExecSyncOptions = {}): string | Buffer {
 	return execSync(command, { ...options, windowsHide: true });
+}
+
+export function execHidden(
+	command: string,
+	options: ExecOptionsWithStringEncoding,
+	callback: (error: ExecException | null, stdout: string, stderr: string) => void,
+): ChildProcess {
+	return exec(command, { ...options, windowsHide: true }, callback);
 }
 
 export function execFileHidden(

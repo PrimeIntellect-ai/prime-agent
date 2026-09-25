@@ -49,9 +49,11 @@ import {
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.js";
 import { PROVIDER_MODEL_CATALOG_URL, parseProviderModelCatalog } from "./provider-model-catalog.js";
 import {
-	resolveConfigValueOrThrow,
+	invalidateCommandTtlCacheEntry,
+	resolveConfigValueAsync,
+	resolveConfigValueOrThrowAsync,
 	resolveConfigValueUncached,
-	resolveHeadersOrThrow,
+	resolveHeadersOrThrowAsync,
 } from "./resolve-config-value.js";
 
 const PercentileCutoffsSchema = Type.Object({
@@ -1466,7 +1468,23 @@ export class ModelRegistry {
 		return source !== undefined && !this.isProviderRequestAuthStaleForStatus(provider, source);
 	}
 
+	// An auth failure may mean the credential rotated: drop the cached !command
+	// results so the next request re-runs them.
+	private invalidateProviderCommandResults(provider: string): void {
+		const providerConfig = this.providerRequestConfigs.get(provider);
+		const configs = [providerConfig?.apiKey, ...Object.values(providerConfig?.headers ?? {})];
+		for (const model of this.models) {
+			if (model.provider !== provider) continue;
+			const modelHeaders = this.modelRequestHeaders.get(this.getModelRequestKey(provider, model.id));
+			if (modelHeaders) configs.push(...Object.values(modelHeaders));
+		}
+		for (const config of configs) {
+			if (config) invalidateCommandTtlCacheEntry(config);
+		}
+	}
+
 	markProviderAuthStale(provider: string): boolean {
+		this.invalidateProviderCommandResults(provider);
 		if (this.authStorage.markAuthStale(provider)) {
 			return true;
 		}
@@ -1512,6 +1530,7 @@ export class ModelRegistry {
 	}
 
 	markProviderAuthSourceStale(token: AuthSourceToken): boolean {
+		this.invalidateProviderCommandResults(token.provider);
 		let marked = false;
 		const providerRequestSource = this.getProviderRequestAuthSource(token.provider);
 		if (
@@ -1584,7 +1603,7 @@ export class ModelRegistry {
 			let apiKey = authStorageAuth.apiKey;
 			let authSourceToken = authStorageAuth.sourceToken;
 			if (apiKey === undefined && providerConfig?.apiKey) {
-				const resolvedApiKey = resolveConfigValueOrThrow(
+				const resolvedApiKey = await resolveConfigValueOrThrowAsync(
 					providerConfig.apiKey,
 					`API key for provider "${model.provider}"`,
 				);
@@ -1596,6 +1615,8 @@ export class ModelRegistry {
 					this.clearStaleProviderRequestAuthSource(model.provider, providerRequestAuthSource);
 					apiKey = resolvedApiKey;
 					authSourceToken = this.getProviderRequestAuthSourceToken(model.provider, providerRequestAuthSource);
+				} else if (providerRequestAuthSource) {
+					this.invalidateProviderCommandResults(model.provider);
 				}
 			}
 			this.setLastProviderAuthSourceToken(model.provider, apiKey === undefined ? undefined : authSourceToken);
@@ -1619,9 +1640,12 @@ export class ModelRegistry {
 				}
 			}
 
-			const providerHeaders = resolveHeadersOrThrow(providerConfig?.headers, `provider "${model.provider}"`);
+			const providerHeaders = await resolveHeadersOrThrowAsync(
+				providerConfig?.headers,
+				`provider "${model.provider}"`,
+			);
 			const authStorageHeaders = this.authStorage.getProviderHeaders(model.provider);
-			const modelHeaders = resolveHeadersOrThrow(
+			const modelHeaders = await resolveHeadersOrThrowAsync(
 				this.modelRequestHeaders.get(this.getModelRequestKey(model.provider, model.id)),
 				`model "${model.provider}/${model.id}"`,
 			);
@@ -1725,7 +1749,7 @@ export class ModelRegistry {
 			return undefined;
 		}
 
-		const resolvedApiKey = resolveConfigValueUncached(providerApiKey);
+		const resolvedApiKey = await resolveConfigValueAsync(providerApiKey);
 		if (resolvedApiKey === undefined) {
 			this.setLastProviderAuthSourceToken(provider, undefined);
 			return undefined;
@@ -1733,6 +1757,9 @@ export class ModelRegistry {
 		const source = this.getProviderRequestAuthSource(provider, { resolvedApiKey });
 		if (!source || this.isProviderRequestAuthStale(provider, source)) {
 			this.setLastProviderAuthSourceToken(provider, undefined);
+			if (source) {
+				this.invalidateProviderCommandResults(provider);
+			}
 			return undefined;
 		}
 		this.clearStaleProviderRequestAuthSource(provider, source);

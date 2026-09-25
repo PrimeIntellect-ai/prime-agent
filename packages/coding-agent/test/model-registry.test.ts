@@ -815,7 +815,7 @@ describe("ModelRegistry", () => {
 	});
 
 	describe("API key resolution and stale auth", () => {
-		function providerWithApiKey(apiKey: string) {
+		function providerWithApiKey(apiKey: string, modelHeaders?: Record<string, string>) {
 			return {
 				baseUrl: "https://example.com/v1",
 				apiKey,
@@ -829,6 +829,7 @@ describe("ModelRegistry", () => {
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 						contextWindow: 100000,
 						maxTokens: 8000,
+						...(modelHeaders ? { headers: modelHeaders } : {}),
 					},
 				],
 			};
@@ -1118,7 +1119,7 @@ describe("ModelRegistry", () => {
 			}
 		});
 
-		test("resolves rotated environment and command credentials without caching", async () => {
+		test("resolves rotated environment credentials per request and command credentials per TTL window", async () => {
 			const envKey = "TEST_API_KEY_ROTATION_98765";
 			const tokenFile = join(tempDir, "rotating-models-json-token");
 			const tokenPath = toShPath(tokenFile);
@@ -1142,15 +1143,66 @@ describe("ModelRegistry", () => {
 				headers: { Authorization: "Bearer command-key-1" },
 			});
 
+			// Env credentials rotate per request; command credentials rotate after the TTL.
 			vi.stubEnv(envKey, "env-key-2");
-			writeFileSync(tokenFile, "command-key-2");
-
 			await expect(registry.getApiKeyForProvider("env-provider")).resolves.toBe("env-key-2");
+			writeFileSync(tokenFile, "command-key-2");
 			await expect(registry.getApiKeyAndHeaders(commandModel!)).resolves.toEqual({
 				ok: true,
-				apiKey: "command-key-2",
-				headers: { Authorization: "Bearer command-key-2" },
+				apiKey: "command-key-1",
+				headers: { Authorization: "Bearer command-key-1" },
 			});
+
+			const nowSpy = vi.spyOn(Date, "now");
+			const base = Date.now();
+			nowSpy.mockReturnValue(base + 60_000); // well past the command TTL
+			try {
+				await expect(registry.getApiKeyAndHeaders(commandModel!)).resolves.toEqual({
+					ok: true,
+					apiKey: "command-key-2",
+					headers: { Authorization: "Bearer command-key-2" },
+				});
+			} finally {
+				nowSpy.mockRestore();
+			}
+		});
+
+		test("an auth failure invalidates the cached command credential and model headers so the next request re-runs them", async () => {
+			const tokenFile = join(tempDir, "auth-failure-token");
+			const execLog = join(tempDir, "auth-failure-exec.log");
+			const tokenPath = toShPath(tokenFile);
+			const execLogPath = toShPath(execLog);
+			writeFileSync(tokenFile, "key-1");
+			writeRawModelsJson({
+				"custom-provider": providerWithApiKey(`!sh -c 'printf x >> "${execLogPath}"; cat "${tokenPath}"'`, {
+					"X-Token": `!sh -c 'printf y >> "${execLogPath}"; cat "${tokenPath}"'`,
+				}),
+			});
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registry.find("custom-provider", "test-model")!;
+			const execRuns = () => readFileSync(execLog, "utf8").length;
+
+			// Two requests share one exec per command (apiKey + model header): two runs total.
+			await expect(registry.getApiKeyAndHeaders(model)).resolves.toEqual({
+				ok: true,
+				apiKey: "key-1",
+				headers: { "X-Token": "key-1" },
+			});
+			await expect(registry.getApiKeyAndHeaders(model)).resolves.toEqual({
+				ok: true,
+				apiKey: "key-1",
+				headers: { "X-Token": "key-1" },
+			});
+			expect(execRuns()).toBe(2);
+
+			writeFileSync(tokenFile, "key-2");
+			expect(registry.markProviderAuthStale("custom-provider")).toBe(true);
+			await expect(registry.getApiKeyAndHeaders(model)).resolves.toEqual({
+				ok: true,
+				apiKey: "key-2",
+				headers: { "X-Token": "key-2" },
+			});
+			expect(execRuns()).toBe(4);
 		});
 
 		test("changed command-backed apiKey no longer matches stale models.json marker", async () => {
