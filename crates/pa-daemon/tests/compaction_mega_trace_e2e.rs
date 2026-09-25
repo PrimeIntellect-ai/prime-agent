@@ -477,7 +477,7 @@ fn mega_session_threshold_compaction_phase_measurement() {
             .count()
     };
     assert!(
-        summarizer_requests > 1,
+        summarizer_requests >= 1,
         "the compaction's summarizer request never arrived ({summarizer_requests})"
     );
 
