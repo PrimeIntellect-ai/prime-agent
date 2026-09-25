@@ -1,8 +1,7 @@
 # Review rules
 
-These rules mirror the repo standards in AGENTS.md (Style and structure; Change
-hygiene; Tests; Lint discipline; Merge gates; Crates). The bugbot rules mirror
-AGENTS.md - update both whenever either changes.
+These rules mirror the repo standards in AGENTS.md - update both whenever
+either changes.
 
 ## No legacy or migration scaffolding
 
