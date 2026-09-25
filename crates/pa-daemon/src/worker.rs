@@ -4805,6 +4805,59 @@ fn restore_queue_snapshot(
 /// level: sequence + meta under the core lock, then one broadcast (the
 /// free-standing form of `Worker::emit_worker_event`, shared with the
 /// goal admission sink).
+/// Record one durable custom row of the background compact-trigger
+/// review and broadcast its `message_start`/`message_end` pair (the TS
+/// `_emit` for rows the session appends outside a turn): the same shape
+/// `Worker::emit_custom_row` persists for the `/refine` command's rows.
+///
+/// `review_session_id` fences the row against the session moves a branch
+/// navigation or replacement makes while the review's model call was in
+/// flight (the round's branch-version check already drops its harness
+/// edits; this drops the ROWS): the worker's live store answers with a
+/// different session id — the review resolved against the abandoned
+/// conversation, so its rows never persist or broadcast into the
+/// moved-to session. Returns whether the row landed.
+fn emit_refinement_row(
+    core: &Arc<Mutex<SessionCore>>,
+    events: &Arc<EventPump>,
+    review_session_id: &str,
+    message: Value,
+) -> bool {
+    {
+        let mut core = core.lock().unwrap();
+        let Some(store) = core.store.as_mut() else {
+            return false;
+        };
+        if store.session_id() != review_session_id {
+            pa_core::session_engine::compaction_trace::trace(
+                "autorefine.rows_dropped_session_moved",
+                serde_json::Value::Null,
+            );
+            return false;
+        }
+        let _ = store.persist_entry(
+            "custom_message",
+            json!({
+                "customType": message.get("customType").cloned().unwrap_or(Value::Null),
+                "content": message.get("content").cloned().unwrap_or(Value::Null),
+                "display": message.get("display").cloned().unwrap_or(Value::Bool(true)),
+                "details": message.get("details").cloned().unwrap_or(Value::Null),
+            }),
+        );
+    }
+    emit_worker_event_with(
+        core,
+        events,
+        json!({ "type": "message_start", "message": message }),
+    );
+    emit_worker_event_with(
+        core,
+        events,
+        json!({ "type": "message_end", "message": message }),
+    );
+    true
+}
+
 pub(crate) fn emit_worker_event_with(
     core: &Arc<Mutex<SessionCore>>,
     events: &Arc<EventPump>,
@@ -5312,6 +5365,18 @@ impl TurnRunner {
         let events = self.events.clone();
         let turn_coalescer = Arc::clone(&coalescer);
         let agent_dir = crate::paths::agent_dir().unwrap_or_default();
+        // The settle tail's background compact-trigger servicing owns its
+        // own engine clone (the turn closure below moves the shadowing
+        // clone), and fences its rows on the session identity it serviced
+        // (a branch move or replacement swaps the store mid-review).
+        let review_engine = std::sync::Arc::clone(&engine);
+        let review_session_id = {
+            let core = self.core.lock().unwrap();
+            core.store
+                .as_ref()
+                .map(|store| store.session_id().to_string())
+                .unwrap_or_default()
+        };
         // The turn's settled outcome reaches the waiting prompt only
         // after the runner flipped the session back to idle (TS
         // `promptAndWait` resolves after the full settle): the blocking
@@ -5449,6 +5514,12 @@ impl TurnRunner {
                 } = event
                 {
                     if !entry.is_null() {
+                        let repin_started = std::time::Instant::now();
+                        let durable_entries = core
+                            .store
+                            .as_ref()
+                            .and_then(|store| store.branch().len().checked_sub(1))
+                            .unwrap_or(0);
                         if let Some(id) = core.store.as_ref().and_then(|store| {
                             store.durable_first_kept_entry_id(keep_recent_tokens(
                                 &core.cwd, &agent_dir,
@@ -5461,6 +5532,13 @@ impl TurnRunner {
                                 result.insert("firstKeptEntryId".to_string(), json!(id));
                             }
                         }
+                        pa_core::session_engine::compaction_trace::trace(
+                            "emit.compaction_repin",
+                            serde_json::json!({
+                                "durableEntries": durable_entries,
+                                "micros": repin_started.elapsed().as_micros(),
+                            }),
+                        );
                     }
                 }
                 match &event {
@@ -5507,7 +5585,14 @@ impl TurnRunner {
                         // A skipped compaction carries a null entry (the
                         // skip shape): publish the event, never persist it.
                         if let Some(store) = core.store.as_mut().filter(|_| !entry.is_null()) {
+                            let persist_started = std::time::Instant::now();
                             let _ = store.persist_entry("compaction", entry.clone());
+                            pa_core::session_engine::compaction_trace::trace(
+                                "emit.compaction_persist",
+                                serde_json::json!({
+                                    "micros": persist_started.elapsed().as_micros(),
+                                }),
+                            );
                         }
                     }
                     // The durable mirror of a goal-state change (TS
@@ -5565,6 +5650,12 @@ impl TurnRunner {
                         // waiting on it (the parent's continuation request
                         // is in flight before any child's first turn).
                         engine.on_turn_done();
+                        pa_core::session_engine::compaction_trace::trace(
+                            "turn.done_emitted",
+                            serde_json::json!({
+                                "ok": matches!(result, Ok(())),
+                            }),
+                        );
                         Some(match result {
                             Ok(()) => TurnSettle::Completed,
                             Err(error) => TurnSettle::Failed(error.clone()),
@@ -5964,6 +6055,80 @@ impl TurnRunner {
             for done in items_done {
                 let _ = done.send(result.clone());
             }
+        }
+        // The compact-trigger review a compaction armed this run services
+        // off the settle (TS `_scheduleAutoRefineAfterCompaction` ->
+        // `setTimeout(0)` background `_maybeAutoRefine("compact")`): the
+        // turn settled and the waiting prompts resolved, so the review's
+        // model call runs as a background round and the queued next
+        // prompt's admission never waits on it. The round's own gates
+        // (the armed trigger, queued work) keep the trigger armed for the
+        // next settle when work is queued mid-review.
+        {
+            let engine = review_engine;
+            let core = Arc::clone(&self.core);
+            let events = self.events.clone();
+            let review_session_id = review_session_id.clone();
+            tokio::spawn(async move {
+                // The pending pre-check and the round both take the
+                // engine's session mutex (`blocking_lock`): they run on
+                // the blocking pool, never on this async task — a
+                // `blocking_lock` from the runtime thread deadlocks the
+                // settle when the mutex is contended.
+                let refined = tokio::task::spawn_blocking(move || {
+                    pa_core::session_engine::compaction_trace::trace(
+                        "autorefine.review_started",
+                        serde_json::Value::Null,
+                    );
+                    let outcome = engine.consume_compact_auto_refine();
+                    pa_core::session_engine::compaction_trace::trace(
+                        "autorefine.review_done",
+                        serde_json::json!({ "ran": outcome.is_ok() }),
+                    );
+                    outcome
+                })
+                .await
+                .unwrap_or_else(|error| {
+                    Err(anyhow::anyhow!("auto-refinement task failed: {error}"))
+                });
+                match refined {
+                    Ok(Some(result)) => {
+                        // TS `refine()` appends the TUI outcome row and
+                        // the model-facing notice (when edits applied) as
+                        // durable rows: persist both to the session file
+                        // and broadcast their message pairs like the
+                        // `/refine` command — each row fenced on the
+                        // session identity the review serviced (a branch
+                        // move or replacement swaps the store mid-review;
+                        // the row never lands on the moved-to session).
+                        let outcome_row =
+                            pa_core::session_engine::refine::create_refinement_outcome_message(
+                                &result,
+                            );
+                        if let Ok(value) = serde_json::to_value(
+                            pa_types::session::AgentMessage::Custom(outcome_row),
+                        ) {
+                            emit_refinement_row(&core, &events, &review_session_id, value);
+                        }
+                        if result.applied_edits.iter().any(|edit| edit.applied) {
+                            let notice =
+                                pa_core::session_engine::refine::create_refinement_notice_message(
+                                    &result,
+                                    pa_core::session_engine::refine::RefinementSource::Auto,
+                                );
+                            if let Ok(value) = serde_json::to_value(
+                                pa_types::session::AgentMessage::Custom(notice),
+                            ) {
+                                emit_refinement_row(&core, &events, &review_session_id, value);
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        eprintln!("pa-daemon: auto-refinement after compaction failed: {error:#}");
+                    }
+                }
+            });
         }
     }
 
