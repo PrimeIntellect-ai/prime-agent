@@ -238,11 +238,12 @@ impl TracesCommands for ClientTraces {
         })
     }
 
-    /// TS `runPrimeAgentTracesLogin`: the terminal login flow (the
-    /// run loop hands the terminal over around the call).
-    fn login(&self) -> TracesFuture<TraceLoginOutcome> {
+    /// TS `runPrimeAgentTracesLogin`: the login flow against the inline
+    /// auth panel (the TUI mounts it; the panel channel carries the
+    /// flow's surfaces and the settled outcome).
+    fn login(&self, panel: pa_tui::auth_panel::AuthPanelHandle) -> TracesFuture<TraceLoginOutcome> {
         let agent_dir = self.agent_dir.clone();
-        Box::pin(async move { crate::traces_login::run_traces_login(&agent_dir).await })
+        Box::pin(async move { crate::traces_login::run_traces_login(&agent_dir, panel).await })
     }
 }
 
