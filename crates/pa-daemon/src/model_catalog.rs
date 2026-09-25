@@ -67,9 +67,9 @@ impl Worker {
         let credentials = pa_core::models::prime_credentials_for_dir(&agent_dir);
         let catalog = pa_core::models::catalog_for(Some(&models_json));
         let trigger = if catalog.credentials_changed(credentials.as_ref()) {
-            pa_core::models::RefreshTrigger::AuthChange
+            pa_models::RefreshTrigger::AuthChange
         } else {
-            pa_core::models::RefreshTrigger::PickerOpen
+            pa_models::RefreshTrigger::PickerOpen
         };
         self.spawn_catalog_refresh(trigger, served.clone());
         response_success(None, "get_model_catalog", Some(served))
@@ -82,7 +82,7 @@ impl Worker {
     /// changes the served snapshot broadcasts `model_catalog_changed`;
     /// failures keep the last-good snapshot (the caches' contract) and
     /// stay silent.
-    fn spawn_catalog_refresh(&self, trigger: pa_core::models::RefreshTrigger, served: Value) {
+    fn spawn_catalog_refresh(&self, trigger: pa_models::RefreshTrigger, served: Value) {
         let agent_dir = self.config.agent_dir.clone();
         let events = Arc::clone(&self.events);
         tokio::spawn(async move {
