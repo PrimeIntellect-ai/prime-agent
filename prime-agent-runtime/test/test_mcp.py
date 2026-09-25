@@ -815,6 +815,25 @@ class McpDiscoveryInventoryTest(unittest.TestCase):
         self.assertEqual(notion["oauth"], {"kind": "oauth"})
         self.assertEqual(connections[1]["setupHint"], "configure API key")
 
+    def test_list_plugins_keeps_boolean_markers_and_still_strips_secret_keys(self):
+        # `pasteToken: true` is a boolean view marker of the plugin contract, and
+        # its name contains "token": a name-only secret heuristic ate it (and
+        # every other boolean marker named like one) before it reached the agent.
+        plugin = {
+            "serviceId": "acme",
+            "pasteToken": True,
+            "tokenRequired": True,
+            "accessToken": "tok",
+            "oauth": {"clientSecret": "cs", "pasteToken": True},
+        }
+        with self._patch_host({"mcp.list_plugins": {"plugins": [plugin], "nextCursor": None}}):
+            page = run(mcp.list_plugins())
+        entry = page["plugins"][0]
+        self.assertIs(entry["pasteToken"], True)
+        self.assertIs(entry["tokenRequired"], True)
+        self.assertEqual(entry["oauth"], {"pasteToken": True})
+        self.assertNotIn("accessToken", entry)
+
     def test_list_connections_rejects_malformed_host_data(self):
         # One table: each malformed host reply must fail the whole call instead
         # of passing a broken inventory shape through to the agent.

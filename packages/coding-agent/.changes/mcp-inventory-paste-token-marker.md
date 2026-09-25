@@ -1,0 +1,1 @@
+- Fixed `mcp.list_plugins` / `mcp.search_plugins` dropping the boolean `pasteToken` marker from every catalog row: inventory markers now survive the kernel-side secret-key sanitizer (a boolean value is never a credential), while secret-named keys with credential values are still stripped.
