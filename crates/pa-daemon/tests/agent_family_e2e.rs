@@ -855,6 +855,19 @@ async fn family_edges_never_cross_families_end_to_end() {
     let (kid_a_active, kid_a_session, kid_a_file) = &kids[0];
     let kid_b_active = &kids[1].0;
 
+    // The kid's script accounts for the parent's broadcast draining into
+    // its steering queue as the spawn turn's follow-up (the filler turn):
+    // parent-a's first turn — the spawn-settle notice — runs the cell
+    // that sends it. That notice rides a watcher with second-scale
+    // cadence, so gate the drives on its own observable: once the
+    // broadcast receipt exists the delivery completed, the broadcast is
+    // already ahead of every drive in the FIFO steering lane, and each
+    // scripted cell lands on its driven turn no matter when the drain
+    // fires. Ungated, a slow notice shifts every cell one turn late and
+    // the observe cell runs out of driven turns — its receipt then never
+    // appears (the receipt-absent red).
+    let _parent_broadcast = read_recorded(&receipts_dir, "parent-broadcast.json");
+
     // Drive kid-a's kernel turns: the cross-family sibling probe, the
     // parent reply, and its own broadcast.
     let drive_kid_turn = |client: &mut Client, id: &str, message: &str| {
