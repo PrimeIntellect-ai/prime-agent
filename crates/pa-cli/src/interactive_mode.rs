@@ -20,6 +20,127 @@ use pa_tui::interactive::{InteractiveOptions, ModelSelection, SessionSelection, 
 const DAEMON_STARTUP_TIMEOUT_MS: u64 = 30_000;
 const DAEMON_SHUTDOWN_WAIT_MS: u64 = 5_000;
 
+/// The startup-model resolution inputs (TS `findInitialModel`'s chain),
+/// captured at task construction: the onboarding flow re-resolves the
+/// model state at its own boundaries — the branch (TS
+/// `isOnboardingModelReady` at flow start) and the completion gate (TS
+/// re-reads `getOnboardingState` before `markOnboardingShown`) — because
+/// the flow's own sign-in can change the answer.
+#[derive(Clone)]
+struct StartupModelProbe {
+    cwd: PathBuf,
+    agent_dir: PathBuf,
+    cli_provider: Option<String>,
+    cli_model: Option<String>,
+    /// The `--models` scope pattern list, resolved against the fresh
+    /// catalog on every probe.
+    models: Option<Vec<String>>,
+    is_continuing: bool,
+    /// An explicit `--api-key` counts as configured auth (it rides the
+    /// resolved model's provider as a runtime key).
+    api_key: Option<String>,
+}
+
+impl StartupModelProbe {
+    /// The resolution (TS `findInitialModel` + `isOnboardingModelReady`):
+    /// the startup model, and whether it carries configured auth.
+    fn resolve(&self) -> (Option<pa_types::ai::Model>, bool) {
+        let settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
+        let auth = pa_core::auth::AuthStorage::create(&self.agent_dir);
+        let mut registry =
+            pa_core::models::ModelRegistry::create(auth, self.agent_dir.join("models.json"));
+        // Sync resolution on a fresh registry must adopt the on-disk private
+        // authorization cache before `get_available` (same rule as the daemon
+        // create path).
+        registry.load_private_authorization_from_cache();
+        let all: Vec<pa_types::ai::Model> = registry.get_all().to_vec();
+        let available: Vec<pa_types::ai::Model> =
+            registry.get_available().into_iter().cloned().collect();
+        let scoped = self
+            .models
+            .as_deref()
+            .map(|patterns| pa_core::models::resolve_model_scope_from_models(patterns, &available))
+            .unwrap_or_default();
+        let startup_model =
+            pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
+                cli_provider: self.cli_provider.as_deref(),
+                cli_model: self.cli_model.as_deref(),
+                scoped_models: &scoped,
+                is_continuing: self.is_continuing,
+                default_provider: settings.get_default_provider(),
+                default_model_id: settings.get_default_model(),
+                all_models: &all,
+                available_models: &available,
+            });
+        let ready = match &startup_model {
+            Some(model) => registry.has_configured_auth(model) || self.api_key.is_some(),
+            None => false,
+        };
+        (startup_model, ready)
+    }
+
+    /// The completion telemetry's category columns (TS
+    /// `captureOnboardingCompleted`): the resolved startup model's
+    /// provider category and the credential source's auth category.
+    /// The storage's status candidates cover stored, environment, and
+    /// stale credentials; a model the storage cannot explain is ready
+    /// through a models.json provider key (the registry's request-auth
+    /// resolves it) or the `--api-key` flag (a runtime key the daemon
+    /// installs — the flag is the client's evidence). Best-effort — a
+    /// resolution failure reports the unknown columns.
+    fn telemetry_categories(&self) -> (String, String) {
+        use pa_core::auth::AuthSource;
+        let Some(model) = self.resolve().0 else {
+            return ("none".to_string(), "unknown".to_string());
+        };
+        let provider_category =
+            pa_core::session_engine::telemetry::provider_category(Some(&model.provider));
+        let auth = pa_core::auth::AuthStorage::create(&self.agent_dir);
+        let status = auth.get_auth_status(&model.provider);
+        let credential = auth.get_all().credential(&model.provider);
+        let auth_category = match status.source {
+            // TS `telemetryAuthCategory`: the stored credential reports
+            // its type.
+            Some(AuthSource::Stored) => credential.as_ref().map_or_else(
+                || "stored".to_string(),
+                |credential| credential.credential_type().to_string(),
+            ),
+            Some(AuthSource::Runtime) => "runtime_api_key".to_string(),
+            Some(AuthSource::Environment) => "environment".to_string(),
+            Some(AuthSource::PrimeCli) => "prime_cli".to_string(),
+            Some(AuthSource::ModelsJsonKey | AuthSource::ModelsJsonCommand) => {
+                "models_json".to_string()
+            }
+            Some(AuthSource::Fallback) => "fallback".to_string(),
+            Some(AuthSource::Stale) => "stale".to_string(),
+            None => {
+                // The `--api-key` flag rides as a runtime key the daemon
+                // installs; the registry's request-auth resolves a
+                // models.json provider key only when one actually
+                // resolves (`ok` alone is not evidence of a key).
+                if self.api_key.is_some() {
+                    "runtime_api_key".to_string()
+                } else {
+                    let mut registry = pa_core::models::ModelRegistry::create(
+                        auth,
+                        self.agent_dir.join("models.json"),
+                    );
+                    if registry
+                        .get_api_key_and_headers(&model, None)
+                        .api_key
+                        .is_some()
+                    {
+                        "models_json".to_string()
+                    } else {
+                        "none".to_string()
+                    }
+                }
+            }
+        };
+        (auth_category, provider_category)
+    }
+}
+
 /// Persistence for the first-run onboarding answers: the global settings
 /// file (TS `setAgentTracesEnabled` / `markOnboardingShown` + flush).
 struct SettingsOnboardingSink {
@@ -30,6 +151,9 @@ struct SettingsOnboardingSink {
     /// flow right away; a fresh home answers the question, a home with a
     /// standing choice completes silently).
     created_at: std::time::Instant,
+    /// The startup-model probe (the completion telemetry's category
+    /// columns: the resolved startup model and its auth source).
+    probe: StartupModelProbe,
 }
 
 impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
@@ -51,10 +175,11 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
     fn mark_onboarding_complete(&self) -> Result<()> {
         let mut settings = pa_core::settings::SettingsManager::create(&self.cwd, &self.agent_dir);
         settings.set_onboarding_shown(true)?;
-        // `onboarding completed` (schema v1): a fresh home answers the
-        // question and a standing-choice home completes silently, so the
-        // outcome is always success and no auth/provider step runs
-        // (auth_category `none`). Best-effort like all telemetry.
+        // `onboarding completed` (schema v1): the marker writes only on a
+        // completed flow, so the outcome is always success; the auth and
+        // provider categories read the resolved startup model (TS
+        // `captureOnboardingCompleted`'s `getCurrentModel` + auth status
+        // columns). Best-effort like all telemetry.
         if !crate::mode::telemetry_disabled(&settings) {
             let client =
                 pa_core::session_engine::telemetry::build_client(&settings, &self.agent_dir);
@@ -64,90 +189,63 @@ impl pa_tui::interactive::OnboardingSink for SettingsOnboardingSink {
                 serde_json::Value::from(self.created_at.elapsed().as_millis() as u64),
             );
             properties.set("outcome", serde_json::Value::from("success"));
-            properties.set("auth_category", serde_json::Value::from("none"));
-            properties.set("provider_category", serde_json::Value::from("unknown"));
+            let (auth_category, provider_category) = self.probe.telemetry_categories();
+            properties.set("auth_category", serde_json::Value::from(auth_category));
+            properties.set(
+                "provider_category",
+                serde_json::Value::from(provider_category),
+            );
             client.track("onboarding completed", properties);
         }
         Ok(())
     }
 }
 
-/// TS `shouldRunOnboarding` + `isOnboardingModelReady`: first run is defined
-/// by the settings flag alone; the task mounts only when the startup model
-/// resolves and has configured auth (no login sequence). The phase then
-/// asks the trace question once on a fresh home, while a home that already
-/// carries a trace choice (a provisioned or copied config) completes
-/// silently with the standing choice. The startup model
-/// follows the TS `findInitialModel` chain —
-/// explicit flags, the `--models` scope, the saved settings default, the
-/// featured default, the first available model — so a flagless launch with
-/// a configured default mounts the task exactly like TS. The TS non-ready
-/// path (sign-in + provider picker) is not ported yet: a first launch that
-/// resolves no usable model skips the notice.
-fn onboarding_task(options: &RunOptions) -> Option<pa_tui::interactive::OnboardingTask> {
+/// TS `shouldRunOnboarding`: first launch is defined by the settings flag
+/// alone — credentials found on disk (a Prime CLI token, an API key in
+/// the environment) never skip the flow, they only make the sign-in step
+/// instant. The task carries the startup model state (the resolved model
+/// is TS `getCurrentModel` at flow time; the readiness probe decides the
+/// branch and gates the completion marker), and the provider auth surface
+/// the full flow signs in through. The startup model follows the TS
+/// `findInitialModel` chain — explicit flags, the `--models` scope, the
+/// saved settings default, the featured default, the first available
+/// model.
+fn onboarding_task(
+    options: &RunOptions,
+    provider_auth: Option<pa_tui::provider_auth::ProviderAuthCommandsHandle>,
+) -> Option<pa_tui::interactive::OnboardingTask> {
     let config = &options.config;
     let settings = pa_core::settings::SettingsManager::create(&config.cwd, &config.agent_dir);
     if settings.get_onboarding_shown() {
         return None;
     }
-    if !startup_model_ready(options, &settings) {
-        return None;
-    }
+    let probe = StartupModelProbe {
+        cwd: config.cwd.clone(),
+        agent_dir: config.agent_dir.clone(),
+        cli_provider: config.provider.clone(),
+        cli_model: config.model.clone(),
+        models: config.models.clone(),
+        // A fork launch resolves the startup model as a continuation
+        // (#2806): the copy holds the source's rows.
+        is_continuing: options.session.resume.is_some()
+            || options.session.continue_recent
+            || options.session.fork.is_some(),
+        api_key: config.api_key.clone(),
+    };
+    let (current_model, _) = probe.resolve();
+    let readiness_probe = probe.clone();
     Some(pa_tui::interactive::OnboardingTask {
         sink: std::sync::Arc::new(SettingsOnboardingSink {
             cwd: config.cwd.clone(),
             agent_dir: config.agent_dir.clone(),
             created_at: std::time::Instant::now(),
+            probe,
         }),
+        model_ready: std::sync::Arc::new(move || readiness_probe.resolve().1),
+        current_model,
+        provider_auth,
     })
-}
-
-/// TS `isOnboardingModelReady` for the startup model: the resolved model
-/// must have configured auth (auth storage, an environment credential, or
-/// the models.json provider key). An explicit `--api-key` rides the
-/// resolved model's provider as a runtime key, so it counts too.
-fn startup_model_ready(
-    options: &RunOptions,
-    settings: &pa_core::settings::SettingsManager,
-) -> bool {
-    let config = &options.config;
-    let auth = pa_core::auth::AuthStorage::create(&config.agent_dir);
-    let mut registry =
-        pa_core::models::ModelRegistry::create(auth, config.agent_dir.join("models.json"));
-    // Sync resolution on a fresh registry must adopt the on-disk private
-    // authorization cache before `get_available` (same rule as the daemon
-    // create path).
-    registry.load_private_authorization_from_cache();
-    let all: Vec<pa_types::ai::Model> = registry.get_all().to_vec();
-    let available: Vec<pa_types::ai::Model> =
-        registry.get_available().into_iter().cloned().collect();
-    let scoped = config
-        .models
-        .as_deref()
-        .map(|patterns| pa_core::models::resolve_model_scope_from_models(patterns, &available))
-        .unwrap_or_default();
-    // TS `isContinuing` is `hasExistingSession` (the session context
-    // carries messages): a fork always does — the copy holds the source's
-    // rows — so the fork launch resolves the startup model as a
-    // continuation.
-    let is_continuing = options.session.resume.is_some()
-        || options.session.continue_recent
-        || options.session.fork.is_some();
-    let startup_model =
-        pa_core::models::find_initial_model(&pa_core::models::InitialModelOptions {
-            cli_provider: config.provider.as_deref(),
-            cli_model: config.model.as_deref(),
-            scoped_models: &scoped,
-            is_continuing,
-            default_provider: settings.get_default_provider(),
-            default_model_id: settings.get_default_model(),
-            all_models: &all,
-            available_models: &available,
-        });
-    match startup_model {
-        Some(model) => registry.has_configured_auth(&model) || config.api_key.is_some(),
-        None => false,
-    }
 }
 
 /// `tui scroll used` / `tui exit` adoption telemetry: a one-shot client per
@@ -763,6 +861,13 @@ fn build_tui_options(
     let default_thinking_level = settings
         .get_default_thinking_level()
         .map(|level| level.model_level().wire_name().to_string());
+    // `/login` + `/logout`: the provider auth flows (the API-key store,
+    // the MCP device flow, the Prime Inference login, the provider
+    // catalog) — one handle serves the commands and the onboarding flow's
+    // sign-in steps.
+    let provider_auth = pa_tui::provider_auth::ProviderAuthCommandsHandle(std::sync::Arc::new(
+        crate::provider_login::ProviderAuth::new(config.cwd.clone(), config.agent_dir.clone()),
+    ));
     Ok(InteractiveOptions {
         code_block_indent,
         tree_filter_mode,
@@ -800,9 +905,11 @@ fn build_tui_options(
             config.agent_dir.clone(),
         )),
         version: crate::config::version().to_string(),
-        // The startup-model chain (PR lane): the task is built from the full
-        // run options so the resolved startup model gates the notice.
-        onboarding: onboarding_task(options),
+        // TS `shouldRunOnboarding`: the settings flag alone mounts the
+        // task; the carried startup-model state decides the branch and
+        // gates the completion marker, and the auth handle serves the
+        // not-ready branch's sign-in steps.
+        onboarding: onboarding_task(options, Some(provider_auth.clone())),
         // Only Some(true) rides the wire (TS `telemetryDisabled`).
         telemetry_disabled: config.telemetry_disabled.then_some(true),
         // `/mcp login` / `/mcp logout`: the client-side auth flows run in
@@ -825,12 +932,7 @@ fn build_tui_options(
         )),
         // `/login` + `/logout`: the provider auth flows (the API-key store,
         // the MCP device flow, the provider catalog).
-        provider_auth: Some(pa_tui::provider_auth::ProviderAuthCommandsHandle(
-            std::sync::Arc::new(crate::provider_login::ProviderAuth::new(
-                config.cwd.clone(),
-                config.agent_dir.clone(),
-            )),
-        )),
+        provider_auth: Some(provider_auth),
         telemetry: Some(std::sync::Arc::new(CliInteractionTelemetry {
             cwd: config.cwd.clone(),
             agent_dir: config.agent_dir.clone(),
@@ -1440,7 +1542,7 @@ mod tests {
         let mut settings = pa_core::settings::SettingsManager::create(dir.path(), &agent);
         settings.set_onboarding_shown(true).expect("set flag");
         let options = run_options(dir.path());
-        assert!(onboarding_task(&options).is_none());
+        assert!(onboarding_task(&options, None).is_none());
         // Back to a first run for the readiness checks below.
         settings.set_onboarding_shown(false).expect("reset flag");
 
@@ -1473,17 +1575,33 @@ mod tests {
             .set_default_model_and_provider("onboard-test".into(), "m1".into())
             .expect("saved default");
         let options = run_options(dir.path());
-        assert!(onboarding_task(&options).is_some());
+        let task = onboarding_task(&options, None).expect("the ready home mounts the flow");
+        assert!(
+            (task.model_ready)(),
+            "the configured default model is ready (the question flow)"
+        );
 
-        // Explicit flags that resolve to a provider without configured auth
-        // leave the model not ready: no onboarding task. TS `validateConfig`
-        // requires an "apiKey" for custom providers, but a `!command` key
-        // that fails resolves to nothing (TS `resolveConfigValue`), so the
-        // provider stays unauthenticated.
+        // Explicit flags that resolve to a provider without configured
+        // auth mount the task too (TS `shouldRunOnboarding`: the flag
+        // alone), carrying the not-ready branch — the full sign-in flow,
+        // not the question. TS `validateConfig` requires an "apiKey" for
+        // custom providers, but a `!command` key that fails resolves to
+        // nothing (TS `resolveConfigValue`), so the provider stays
+        // unauthenticated.
         let mut options = run_options(dir.path());
         options.config.provider = Some("onboard-naked".into());
         options.config.model = Some("m2".into());
-        assert!(onboarding_task(&options).is_none());
+        let task = onboarding_task(&options, None).expect("the flag alone mounts the flow");
+        assert!(
+            !(task.model_ready)(),
+            "the naked provider leaves the model not ready (the full flow)"
+        );
+        assert!(
+            task.current_model
+                .as_ref()
+                .is_some_and(|model| model.id == "m2"),
+            "the resolved startup model rides the task (TS getCurrentModel)"
+        );
     }
 
     /// The product sink's persistence over the real settings files: a
@@ -1511,6 +1629,15 @@ mod tests {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
             created_at: std::time::Instant::now(),
+            probe: StartupModelProbe {
+                cwd: dir.path().to_path_buf(),
+                agent_dir: agent_dir.clone(),
+                cli_provider: None,
+                cli_model: None,
+                models: None,
+                is_continuing: false,
+                api_key: None,
+            },
         };
         assert!(
             !sink.onboarding_shown(),
@@ -1550,6 +1677,15 @@ mod tests {
             cwd: dir.path().to_path_buf(),
             agent_dir: agent_dir.clone(),
             created_at: std::time::Instant::now(),
+            probe: StartupModelProbe {
+                cwd: dir.path().to_path_buf(),
+                agent_dir: agent_dir.clone(),
+                cli_provider: None,
+                cli_model: None,
+                models: None,
+                is_continuing: false,
+                api_key: None,
+            },
         };
         assert!(
             !sink.onboarding_shown(),

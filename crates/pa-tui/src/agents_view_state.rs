@@ -845,6 +845,7 @@ mod tests {
             None,
             &Default::default(),
             &Default::default(),
+            &Default::default(),
             None,
         );
         assert_eq!(rows[0].section, Section::Running);
@@ -1042,6 +1043,7 @@ mod tests {
             None,
             &Default::default(),
             &Default::default(),
+            &Default::default(),
             None,
         );
         let layout = build_layout(&rows, 120);
@@ -1089,6 +1091,7 @@ mod tests {
         let rows = crate::agents_view_forest::build_rows(
             &records,
             None,
+            &Default::default(),
             &Default::default(),
             &Default::default(),
             None,

@@ -1170,7 +1170,8 @@ impl SessionUi {
         // still seeds) never bloat the indicator — they render in the
         // scoped agents view.
         let dock = crate::chrome::ActivityDock {
-            subagents_running: counts.running,
+            subagents_running_direct: counts.running_direct,
+            subagents_running_nested: counts.running_nested,
             subagents_total: counts.total,
             heartbeats: self.heartbeat_catalog.len(),
             heartbeats_paused: paused_heartbeat_count(&self.heartbeat_catalog),
@@ -3714,6 +3715,13 @@ impl SessionUi {
         Ok(())
     }
 
+    /// The auth panel's request channel (TS the login dialog's surface
+    /// seam): the onboarding phase drives its flows against the same
+    /// channel the run loop services after the pane ends.
+    pub(crate) fn auth_panel_handle(&self) -> crate::auth_panel::AuthPanelHandle {
+        crate::auth_panel::AuthPanelHandle::new(self.auth_panel_notes.clone())
+    }
+
     /// Enter on a panel-driven login row (the MCP OAuth logins, the Prime
     /// Inference login, the Codex Subscription login): mount the inline
     /// auth panel (TS `showAuthPanel` mounts the login dialog as the
@@ -3799,7 +3807,7 @@ impl SessionUi {
     /// a failed or cancelled flow — or a settled login for a different
     /// provider, which abandons the route the user left — drops the park
     /// (the outcome's own rows render as usual).
-    async fn apply_auth_outcome(
+    pub(crate) async fn apply_auth_outcome(
         &mut self,
         outcome: crate::provider_auth::ProviderAuthOutcome,
         provider: &str,
@@ -7209,6 +7217,32 @@ impl SessionUi {
         }
     }
 
+    /// The onboarding default-model apply (TS
+    /// `prepareForModelSelectionAfterLogin`): the switch runs through the
+    /// same `try_set_model` path the model picker uses. A refusal after
+    /// the just-completed sign-in keeps the flow moving (TS's post-login
+    /// "still unavailable" row — never a second sign-in route inside the
+    /// onboarding pane), and every other failure already rendered its
+    /// error row, so the caller never branches.
+    pub(crate) async fn apply_model_selection(
+        &mut self,
+        provider: &str,
+        model_id: &str,
+        view: &mut AgentView,
+    ) {
+        match self.try_set_model(provider, model_id, view).await {
+            // The switch recorded its own `Model: <id>` row; every other
+            // failure already rendered the error row.
+            SetModelOutcome::Switched | SetModelOutcome::Failed => {}
+            SetModelOutcome::NeedsSignIn => {
+                self.error_row(
+                    &format!("Authentication completed, but {provider} is still unavailable."),
+                    view,
+                );
+            }
+        }
+    }
+
     /// Route a picked model whose provider is not signed in to the
     /// provider sign-in flow (TS `ensureModelProviderConfigured`): park
     /// the selection, then mount the `/login` provider menu preselected on
@@ -7361,15 +7395,16 @@ impl SessionUi {
                 },
             )
             .await;
-        if let Ok(data) = state {
-            let model_id = data
+        let model_id = match state {
+            Ok(data) => data
                 .get("model")
                 .and_then(|model| model.get("id"))
                 .and_then(Value::as_str)
-                .map_or_else(|| picked_model_id.to_string(), str::to_string);
-            view.chrome.model_id = Some(model_id);
-            self.dirty = true;
-        }
+                .map_or_else(|| picked_model_id.to_string(), str::to_string),
+            Err(_) => picked_model_id.to_string(),
+        };
+        view.chrome.model_id = Some(model_id);
+        self.dirty = true;
     }
 
     /// Abort the active turn off the UI loop (TS `interruptOrClearInput`

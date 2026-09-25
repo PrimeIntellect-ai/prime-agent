@@ -318,6 +318,7 @@ impl ProviderAuth {
                     auth_type: AuthType::Oauth,
                     status: status_indicator(credential.as_ref(), &status, AuthType::Oauth),
                     flow: AuthFlow::TerminalFlow,
+                    configured: status.configured,
                     available: true,
                 });
             }
@@ -358,6 +359,7 @@ impl ProviderAuth {
                     name: display_name(&provider_id),
                     auth_type: AuthType::ApiKey,
                     flow,
+                    configured: status.configured,
                     available: true,
                 });
             }
@@ -424,9 +426,12 @@ impl ProviderAuth {
                     label: "configured".to_string(),
                 }),
                 flow: AuthFlow::TerminalFlow,
-                // Credential removal always runs (an unavailable row's
+                // The stored-credential rows exist because the credential
+                // is there (TS `getProviderAuthStatus(id).configured`);
+                // credential removal always runs (an unavailable row's
                 // login never existed; its logout still removes the
                 // stored credential).
+                configured: true,
                 available: true,
             });
         }
@@ -854,6 +859,7 @@ mod tests {
             auth_type: AuthType::ApiKey,
             status: None,
             flow: AuthFlow::ApiKeyPrompt,
+            configured: false,
             available: true,
         };
         match auth.login(&row, Some("sk-test")).await {

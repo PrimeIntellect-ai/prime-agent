@@ -79,6 +79,10 @@ pub struct ProviderRow {
     pub status: Option<AuthStatusIndicator>,
     /// The login flow the row runs.
     pub flow: AuthFlow,
+    /// Whether a usable credential exists (TS
+    /// `getProviderAuthStatus(id).configured`): the onboarding picker's
+    /// connected check, distinct from the display indicator.
+    pub configured: bool,
     /// Whether this build carries the row's login flow (the codex
     /// subscription row does; the not-yet-ported subscription providers
     /// do not). An unavailable row renders dimmed with the "not
@@ -147,6 +151,11 @@ impl std::fmt::Debug for ProviderAuthCommandsHandle {
 /// `PRIME_INFERENCE_PROVIDER_ID`: the row the panel-driven login
 /// serves).
 pub const PRIME_INFERENCE_PROVIDER_ID: &str = "prime-inference";
+/// The Prime Inference default model's id (pa-core's
+/// `PRIME_INFERENCE_DEFAULT_MODEL_ID` = TS `PRIME_INFERENCE_DEFAULT_MODEL_ID`):
+/// the model the onboarding flow applies after the sign-in when the home
+/// has no current model.
+pub const PRIME_INFERENCE_DEFAULT_MODEL_ID: &str = "z-ai/glm-5.3";
 
 /// The Codex Subscription provider's id (the wire identifier pa-core's
 /// auth exports; carried here too because the TUI does not link the
@@ -571,6 +580,7 @@ mod tests {
             auth_type: AuthType::Oauth,
             status: None,
             flow: AuthFlow::TerminalFlow,
+            configured: false,
             available: false,
         }
     }
@@ -584,6 +594,7 @@ mod tests {
             auth_type: AuthType::Oauth,
             status: None,
             flow: AuthFlow::TerminalFlow,
+            configured: false,
             available: true,
         }
     }
@@ -598,6 +609,7 @@ mod tests {
                 label: "configured".to_string(),
             }),
             flow: AuthFlow::ApiKeyPrompt,
+            configured: true,
             available: true,
         }
     }
@@ -609,6 +621,7 @@ mod tests {
             auth_type: AuthType::Oauth,
             status: None,
             flow: AuthFlow::TerminalFlow,
+            configured: false,
             available: true,
         }
     }
