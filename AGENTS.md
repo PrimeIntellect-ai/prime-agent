@@ -95,9 +95,11 @@ Every contributor (human or agent) must read this before working on this repo.
   direction) and classify the change: internals, new `pub` surface, or a new
   dependency/cross-crate re-export. The latter two are architectural changes — an innocent-looking
   `pub use` is a very simple way to break encapsulation.
-- Edit generated data via its generator, never by hand
-  (`crates/pa-ai/src/models_generated.rs` comes from `crates/pa-ai/scripts/generate-models.py`).
-  Generated files are exempt from the size guidance.
+- The compiled fallback model catalog `crates/pa-ai/src/models_generated.rs` is
+  hand-maintained Rust mirroring the TS `packages/ai/src/models.generated.ts` object
+  literal — edit it by hand, exactly like its TS source (there is no generator). The
+  parity fixture `crates/pa-models/tests/fixtures/catalog.v1.json` refreshes with
+  `scripts/generate-catalog-fixture.py`. Bulk data files are exempt from the size guidance.
 
 ## Adoption telemetry
 

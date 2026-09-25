@@ -396,8 +396,9 @@ def validate_bundled_catalog_dir(directory, allow_small_fixture: bool = False) -
 # --------------------------------------------------------------------------
 
 # The compiled transport tuples of the shipped registry (43 distinct
-# (provider, api, baseUrl) triples across 32 providers, derived from
-# crates/pa-ai/src/models.generated.json). Fixture models use real tuples so
+# (provider, api, baseUrl) triples across 32 providers, from the compiled
+# model catalog, now the hand-maintained fallback table
+# crates/pa-ai/src/models_generated.rs). Fixture models use real tuples so
 # they survive runtime transport pinning; nothing here can introduce a
 # transport the client does not implement.
 FIXTURE_TRANSPORT_TUPLES = [
