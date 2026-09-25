@@ -1067,4 +1067,64 @@ mod tests {
         assert!(layout.legend.contains("Cost"));
         assert_eq!(layout.details["session:s1"].trim_end(), "$1.50");
     }
+
+    #[test]
+    fn saved_only_age_reads_modified_first_and_falls_back_to_created() {
+        // TS formatSessionDuration: a row without an activeSessionId is a
+        // saved-only record - the age column reads `modified` first. The
+        // daemon scan's `modified` is the durable fallback (header time,
+        // then mtime), so an old record keeps its real age here; pin the
+        // ordering so a days-old record can never read as minutes-old
+        // through a scan-time value.
+        let now = now_ms();
+        let iso = |ms: i64| {
+            let total = ms.div_euclid(1000);
+            let days = total.div_euclid(86_400);
+            let secs_of_day = total.rem_euclid(86_400);
+            let (year, month, day) = civil_test(days);
+            format!(
+                "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.000Z",
+                secs_of_day / 3600,
+                (secs_of_day % 3600) / 60,
+                secs_of_day % 60
+            )
+        };
+        let created_days_ago = iso(now as i64 - 3 * 86_400_000);
+        let modified_minutes_ago = iso(now as i64 - 5 * 60_000);
+        // The catalog contract the daemon serves: every row carries the
+        // scan's durable `modified` (a real message timestamp, the header
+        // time, or the file mtime) alongside `created`.
+        let saved = vec![json!({
+            "id": "old-record",
+            "path": "/x/old-record.jsonl",
+            "firstMessage": "old task",
+            "messageCount": 2,
+            "created": created_days_ago,
+            "modified": modified_minutes_ago,
+        })];
+        let records = reconcile_unified_sessions(&[], &saved);
+        let rows = crate::agents_view_forest::build_rows(
+            &records,
+            None,
+            &Default::default(),
+            &Default::default(),
+            None,
+        );
+        let age = rows
+            .iter()
+            .find(|row| row.identity.contains("old-record"))
+            .map_or_else(
+                || {
+                    panic!(
+                        "no row for the old record, identities: {:?}",
+                        rows.iter().map(|row| &row.identity).collect::<Vec<_>>()
+                    )
+                },
+                |row| row.age.clone(),
+            );
+        // `modified` first: the column reads the durable last-activity
+        // value, not `created` - and a scan-time fabrication would read
+        // "0s" here, not the record's own five-minute-old value.
+        assert_eq!(age, "5m");
+    }
 }

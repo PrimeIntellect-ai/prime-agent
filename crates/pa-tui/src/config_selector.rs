@@ -1,7 +1,9 @@
 //! The resource-configuration modal (TS `ConfigSelectorComponent`): a
 //! filterable, grouped checkbox list over session resources with Space to
 //! toggle and Esc to close. Data comes from the caller as flat rows; this
-//! module owns rendering, filtering, selection, and the terminal loop.
+//! module owns filtering, selection, and the terminal loop, and renders
+//! through the shared menu-panel grammar (the bordered search field, the
+//! `›` marker rows, the scroll and hint status rows).
 
 use anyhow::Result;
 use crossterm::event::{Event, KeyEvent};
@@ -12,7 +14,6 @@ use std::time::{Duration, Instant};
 use crate::keybindings::{format_key_text, KeybindingsManager};
 use crate::keys::key_event_to_id;
 use crate::theme::{Theme, ThemeColor};
-use crate::width::{str_width, truncate_line};
 use crate::{Line, Span};
 
 /// One flat selector row. `Item` rows carry the caller's identity key and
@@ -48,28 +49,26 @@ pub enum SelectorAction {
 const MAX_VISIBLE: usize = 15;
 
 /// The selector's frame chrome: which surface is being picked. The list,
-/// filter, and selection behavior are shared; only the header title and
-/// its key hints differ.
+/// filter, and selection behavior are shared; only the frame title and its
+/// key-hint vocabulary differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectorKind {
     /// The resource-configuration modal (`prime-agent config`): checkbox
     /// semantics, Space toggles.
     ResourceConfig,
-    /// The `/model` picker: single-select semantics, Enter applies.
-    Model,
     /// The `/effort` picker: single-select semantics, Enter applies.
     Effort,
 }
 
 impl SelectorKind {
-    /// The header title and its `(key, action)` hints.
+    /// The frame title and its `(key, action)` hint vocabulary (the
+    /// shared hint row carries it).
     fn header(self) -> (&'static str, &'static [(&'static str, &'static str)]) {
         match self {
             SelectorKind::ResourceConfig => (
                 "Resource Configuration",
                 &[("space", "toggle"), ("escape", "close")],
             ),
-            SelectorKind::Model => ("Select Model", &[("enter", "select"), ("escape", "close")]),
             SelectorKind::Effort => (
                 "Thinking Level",
                 &[("enter", "select"), ("escape", "close")],
@@ -96,8 +95,8 @@ impl ConfigSelector {
         Self::with_kind(rows, SelectorKind::ResourceConfig)
     }
 
-    /// Build the selector for a specific surface (the `/model` picker uses
-    /// [`SelectorKind::Model`]).
+    /// Build the selector for a specific surface (`/effort` uses
+    /// [`SelectorKind::Effort`]).
     pub fn with_kind(rows: Vec<SelectorRow>, kind: SelectorKind) -> Self {
         let filtered = (0..rows.len()).collect();
         let mut selector = ConfigSelector {
@@ -341,15 +340,18 @@ impl ConfigSelector {
         self.select_first_item();
     }
 
-    /// The selector's rendered rows for `render` (TS `ResourceList.render`).
+    /// The selector's rendered rows for `render` (TS `ResourceList.render`
+    /// through the shared menu-panel grammar: the `›` marker rows with the
+    /// selection band, the group headers, the scroll indicator, the
+    /// no-match row).
     fn list_rows(&self, theme: &Theme, width: usize) -> Vec<Line> {
         let mut lines: Vec<Line> = Vec::new();
-        lines.push(self.input_line(theme));
-        lines.push(Vec::new());
         if self.filtered.is_empty() {
-            lines.push(vec![
-                theme.fg_span(ThemeColor::Muted, "  No resources found")
-            ]);
+            lines.push(crate::menu_panel::no_match_row(
+                theme,
+                width,
+                self.no_match_text(),
+            ));
             return lines;
         }
         let start = self
@@ -360,27 +362,30 @@ impl ConfigSelector {
         for (position, row_index) in self.filtered[start..end].iter().enumerate() {
             let position = start + position;
             let row = &self.rows[*row_index];
-            let line = match row {
-                SelectorRow::Group(label) => {
-                    let line = vec![
+            match row {
+                SelectorRow::Group(label) => lines.push(crate::width::truncate_line(
+                    &vec![
                         Span::raw("  "),
                         theme.fg_span(ThemeColor::Accent, label.clone()),
-                    ];
-                    truncate_line(&line, width, "")
-                }
-                SelectorRow::Subgroup(label) => {
-                    let line = vec![
+                    ],
+                    width,
+                    "",
+                )),
+                SelectorRow::Subgroup(label) => lines.push(crate::width::truncate_line(
+                    &vec![
                         Span::raw("    "),
                         theme.fg_span(ThemeColor::Dim, label.clone()),
-                    ];
-                    truncate_line(&line, width, "")
-                }
-                SelectorRow::Item { label, checked, .. } => {
-                    let cursor = if position == self.selected {
-                        "> "
-                    } else {
-                        "  "
-                    };
+                    ],
+                    width,
+                    "",
+                )),
+                SelectorRow::Item {
+                    label,
+                    checked,
+                    type_label,
+                    ..
+                } => {
+                    let selected = position == self.selected;
                     let checkbox = theme.fg_span(
                         if *checked {
                             ThemeColor::Success
@@ -389,22 +394,17 @@ impl ConfigSelector {
                         },
                         if *checked { "[x]" } else { "[ ]" },
                     );
-                    let mut line = vec![
-                        Span::raw(cursor),
-                        Span::raw("    "),
-                        checkbox,
-                        Span::raw(" "),
-                    ];
-                    let name = Span::raw(label.clone());
-                    if position == self.selected {
-                        line.push(theme.bold(name));
+                    let primary: Line = vec![checkbox, Span::raw(" "), Span::raw(label.clone())];
+                    let trailing: Vec<crate::menu_panel::MenuSegment> = if type_label.is_empty() {
+                        Vec::new()
                     } else {
-                        line.push(name);
-                    }
-                    truncate_line(&line, width, "...")
+                        vec![crate::menu_panel::MenuSegment::muted(type_label)]
+                    };
+                    lines.push(crate::menu_panel::menu_row(
+                        theme, width, primary, &trailing, selected,
+                    ));
                 }
-            };
-            lines.push(line);
+            }
         }
         if start > 0 || end < self.filtered.len() {
             let item_count = self
@@ -416,79 +416,86 @@ impl ConfigSelector {
                 .iter()
                 .filter(|row_index| matches!(self.rows[**row_index], SelectorRow::Item { .. }))
                 .count();
-            lines.push(vec![
-                theme.fg_span(ThemeColor::Dim, format!("  ({current}/{item_count})"))
-            ]);
+            lines.push(crate::menu_panel::scroll_row(
+                theme, width, current, item_count,
+            ));
         }
         lines
     }
 
-    /// "> <query>" with the cursor block (TS `Input` render).
-    fn input_line(&self, theme: &Theme) -> Line {
-        let _ = theme;
-        vec![
-            Span::raw("> "),
-            Span::raw(self.query.clone()),
-            Span::styled(
-                " ".to_string(),
-                ratatui::style::Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
-            ),
-        ]
-    }
-
-    /// The full modal frame: border, header, filter input, list, border
-    /// (TS `ConfigSelectorComponent.render` composition).
-    pub fn render(&self, theme: &Theme, width: usize) -> Vec<Line> {
-        let border = || vec![theme.fg_span(ThemeColor::Accent, "─".repeat(width.max(1)))];
-        let mut lines: Vec<Line> = vec![
-            Vec::new(),
-            border(),
-            Vec::new(),
-            self.header_line(theme, width),
-            vec![theme.fg_span(
-                ThemeColor::Muted,
-                match self.kind {
-                    SelectorKind::ResourceConfig => "Type to filter resources",
-                    SelectorKind::Model => "Type to filter models",
-                    SelectorKind::Effort => "Type to filter levels",
-                },
-            )],
-            Vec::new(),
-        ];
+    /// The full modal frame: the title, the shared bordered search field,
+    /// the grouped list, and the key hint (the shared menu-panel grammar).
+    pub fn render(&self, theme: &Theme, width: usize, kb: &KeybindingsManager) -> Vec<Line> {
+        let mut lines: Vec<Line> = vec![Vec::new(), self.header_line(theme), Vec::new()];
+        lines.extend(crate::menu_panel::search_field_lines(
+            theme,
+            width,
+            &self.query,
+            self.query.chars().count(),
+            true,
+            self.search_placeholder(),
+        ));
         lines.extend(self.list_rows(theme, width));
         lines.push(Vec::new());
-        lines.push(border());
+        lines.push(crate::menu_panel::hint_row(
+            theme,
+            width,
+            &self.hint_text(kb),
+        ));
         lines
     }
 
-    /// "<title> ... <key action> · <key action>" (the resource header is TS
-    /// `ConfigSelectorHeader.render`; the model header carries the picker's
-    /// own hints).
-    fn header_line(&self, theme: &Theme, width: usize) -> Line {
-        let (title, hints) = self.kind.header();
-        let mut hint_parts: Line = Vec::new();
-        for (position, (key, action)) in hints.iter().enumerate() {
-            if position > 0 {
-                hint_parts.push(Span::raw(theme.fg_span(ThemeColor::Muted, " · ").content));
-            }
-            hint_parts.extend(raw_key_hint(theme, key, action));
+    /// The frame title (TS `ConfigSelectorHeader.render`): the surface's
+    /// name, accent like every menu title.
+    fn header_line(&self, theme: &Theme) -> Line {
+        let (title, _) = self.kind.header();
+        vec![theme.fg_span(ThemeColor::Accent, title.to_string())]
+    }
+
+    /// The search field's placeholder (the frame's filter hint).
+    fn search_placeholder(&self) -> &'static str {
+        match self.kind {
+            SelectorKind::ResourceConfig => "Type to filter resources",
+            SelectorKind::Effort => "Type to filter levels",
         }
-        let title_width = str_width(title);
-        let hint_width = crate::width::spans_width(&hint_parts);
-        let spacing = width.saturating_sub(title_width + hint_width).max(1);
-        let mut line = vec![Span::raw(format!("{title}{}", " ".repeat(spacing)))];
-        line.extend(hint_parts);
-        truncate_line(&line, width, "")
+    }
+
+    /// The no-match row's message when the filter empties the list.
+    fn no_match_text(&self) -> &'static str {
+        match self.kind {
+            SelectorKind::ResourceConfig => "No resources found",
+            SelectorKind::Effort => "No matching levels",
+        }
+    }
+
+    /// The key hint: the shared hint-row grammar, this surface's
+    /// vocabulary (an unbound action is omitted, never advertised with a
+    /// default key).
+    fn hint_text(&self, kb: &KeybindingsManager) -> String {
+        let (_, hints) = self.kind.header();
+        hints
+            .iter()
+            .filter_map(|(key, action)| raw_key_hint(kb, key, action))
+            .collect::<Vec<String>>()
+            .join(" \u{b7} ")
     }
 }
 
-/// `theme.fg("dim", keyText) + theme.fg("muted", " description")`
-/// (TS `rawKeyHint`).
-fn raw_key_hint(theme: &Theme, key: &str, action: &str) -> Line {
-    vec![
-        theme.fg_span(ThemeColor::Dim, format_key_text(key)),
-        theme.fg_span(ThemeColor::Muted, format!(" {action}")),
-    ]
+/// One hint segment (TS `rawKeyHint`): the key's label when the action is
+/// available — the literal Space key always is — and None when the
+/// action's binding is unconfigured.
+fn raw_key_hint(kb: &KeybindingsManager, key: &str, action: &str) -> Option<String> {
+    let label = match key {
+        "space" => "Space".to_string(),
+        "escape" => kb
+            .first_key("tui.select.cancel")
+            .map(|key| format_key_text(&key))?,
+        "enter" => kb
+            .first_key("tui.select.confirm")
+            .map(|key| format_key_text(&key))?,
+        other => format_key_text(other),
+    };
+    Some(format!("{label} {action}"))
 }
 
 /// Options for the selector's terminal loop.
@@ -562,7 +569,7 @@ fn run_selector_surface(
     loop {
         let size = terminal.size()?;
         let (width, height) = (size.width, size.height);
-        let mut frame: Vec<Line> = selector.render(&theme, width as usize);
+        let mut frame: Vec<Line> = selector.render(&theme, width as usize, &kb);
         while frame.len() < height as usize {
             frame.push(Vec::new());
         }
@@ -622,6 +629,79 @@ fn selector_query_insert(selector: &mut ConfigSelector, text: &str) {
     for c in text.chars() {
         let id = c.to_string();
         selector.handle_key(&id, &KeybindingsManager::new());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kb() -> KeybindingsManager {
+        KeybindingsManager::new()
+    }
+
+    fn theme() -> Theme {
+        Theme::builtin("prime", crate::theme::ColorMode::TrueColor)
+    }
+
+    fn rows() -> Vec<SelectorRow> {
+        vec![
+            SelectorRow::Group("Resources".to_string()),
+            SelectorRow::Item {
+                key: "kernel".to_string(),
+                label: "Kernel".to_string(),
+                checked: true,
+                type_label: "tool".to_string(),
+                path: "pa-core/kernel".to_string(),
+            },
+            SelectorRow::Item {
+                key: "browser".to_string(),
+                label: "Browser".to_string(),
+                checked: false,
+                type_label: "tool".to_string(),
+                path: "pa-core/browser".to_string(),
+            },
+        ]
+    }
+
+    #[test]
+    fn escape_closes_and_space_toggles() {
+        let mut selector = ConfigSelector::new(rows());
+        assert_eq!(
+            selector.handle_key("escape", &kb()),
+            Some(SelectorAction::Close)
+        );
+        let mut selector = ConfigSelector::new(rows());
+        assert_eq!(
+            selector.handle_key(" ", &kb()),
+            Some(SelectorAction::Toggle {
+                key: "kernel".to_string(),
+                enabled: false
+            })
+        );
+        assert_eq!(selector.checked("kernel"), Some(false));
+    }
+
+    /// The frame renders through the shared menu grammar: the title, the
+    /// bordered search field, the `›` marker row, and the hint status row
+    /// (the hints ride the bottom row, not a header line).
+    #[test]
+    fn the_frame_renders_through_the_shared_menu_grammar() {
+        let selector = ConfigSelector::new(rows());
+        let lines = selector.render(&theme(), 80, &kb());
+        let rendered: Vec<String> = lines
+            .iter()
+            .map(|line| line.iter().map(|span| span.content.as_str()).collect())
+            .collect();
+        assert!(rendered
+            .iter()
+            .any(|row| row.contains("Resource Configuration")));
+        assert!(rendered
+            .iter()
+            .any(|row| row.contains("\u{203a} [x] Kernel")));
+        assert!(rendered
+            .iter()
+            .any(|row| row.contains("Space toggle · Esc close")));
     }
 }
 

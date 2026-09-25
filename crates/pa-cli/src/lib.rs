@@ -9,6 +9,7 @@ pub(crate) mod args;
 pub(crate) mod client_settings;
 pub(crate) mod client_traces;
 pub(crate) mod client_update;
+pub(crate) mod codex_subscription_login;
 pub(crate) mod command_registry;
 pub(crate) mod config;
 pub(crate) mod config_command;
@@ -31,6 +32,7 @@ pub(crate) mod prime_inference_login;
 pub(crate) mod prompt_command;
 pub(crate) mod provider_login;
 pub(crate) mod public_command;
+pub(crate) mod self_update;
 pub(crate) mod session_export;
 pub(crate) mod traces_login;
 

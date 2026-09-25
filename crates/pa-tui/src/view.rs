@@ -1494,7 +1494,7 @@ impl AgentView {
             Some(dock)
         } else if let Some(picker) = &self.effort_picker {
             let mut dock = prompt_context;
-            dock.extend(picker.render(&self.theme, width));
+            dock.extend(picker.render(&self.theme, width, self.editor.keybindings()));
             Some(dock)
         } else if let Some(mcp_view) = self.mcp_view.as_mut() {
             let mut dock = prompt_context;
@@ -1543,11 +1543,11 @@ impl AgentView {
             if let Some(selector) = self.tree_selector.as_ref() {
                 dock.extend(selector.render(&self.theme, width));
             } else if let Some(selector) = self.fork_selector.as_ref() {
-                dock.extend(selector.render(&self.theme, width));
+                dock.extend(selector.render(&self.theme, width, self.editor.keybindings()));
             } else if let Some(loader) = self.share_loader.as_ref() {
                 dock.extend(self.render_share_loader(loader, width));
             } else if let Some(confirm) = self.confirm.as_ref() {
-                dock.extend(confirm.render(&self.theme, width));
+                dock.extend(confirm.render(&self.theme, width, self.editor.keybindings()));
             } else if let Some(selector) = self.provider_auth.as_mut() {
                 dock.extend(selector.render(&self.theme, width));
             } else if let Some(panel) = self.auth_panel.as_mut() {
@@ -1555,7 +1555,7 @@ impl AgentView {
             } else if let Some(message) = self.reload_box.as_ref() {
                 dock.extend(self.render_reload_box(message, width));
             } else if let Some(menu) = self.settings_menu.as_ref() {
-                dock.extend(menu.render(&self.theme, width));
+                dock.extend(menu.render(&self.theme, width, self.editor.keybindings()));
             }
             Some(dock)
         } else {
@@ -2202,6 +2202,7 @@ mod tests {
         v.compaction = Some(crate::chat::CompactionState {
             reason: crate::chat::CompactionReason::Manual,
             custom_instructions: None,
+            summary: String::new(),
         });
         let frame = v.render_frame(80, 24);
         let flat: Vec<String> = frame.iter().map(row_text).collect();
@@ -2232,6 +2233,77 @@ mod tests {
         assert!(
             flat.iter().any(|l| l.trim() == "the story so far"),
             "{flat:?}"
+        );
+    }
+
+    /// The live streamed-summary block (the operator's "stream the
+    /// compacted summary" feature): while a compaction runs, the expanded
+    /// view (`all` detail) renders the accumulated delta text under the
+    /// loader row on the branch grammar; collapsed details keep the
+    /// loader alone; the settling end clears the streamed block when the
+    /// durable summary row lands.
+    #[test]
+    fn compaction_streams_the_summary_under_the_loader_in_expanded_detail() {
+        let mut v = view();
+        v.detail = crate::chat::Detail::All;
+        v.compaction = Some(crate::chat::CompactionState {
+            reason: crate::chat::CompactionReason::Threshold,
+            custom_instructions: None,
+            summary: "The session covered the fleet work.".to_string(),
+        });
+        let frame = v.render_frame(80, 24);
+        let flat: Vec<String> = frame.iter().map(row_text).collect();
+        let loader = flat
+            .iter()
+            .position(|l| l.contains("Auto-compacting..."))
+            .expect("the loader row renders");
+        // The streamed block hangs off the loader row on the branch
+        // gutter, the content visible under the spinner.
+        let gutter = &flat[loader + 1];
+        assert!(
+            gutter
+                .trim_start()
+                .starts_with(crate::branch::BRANCH_GUTTER),
+            "the live block nests under the loader: {flat:?}"
+        );
+        assert!(
+            gutter.contains("The session covered the fleet work."),
+            "{flat:?}"
+        );
+        // Collapsed detail (`overview`): the loader stands alone — no
+        // streamed block (TS keeps the loader plain outside `all`).
+        v.detail = crate::chat::Detail::Overview;
+        let frame = v.render_frame(80, 24);
+        let flat: Vec<String> = frame.iter().map(row_text).collect();
+        assert!(
+            flat.iter().any(|l| l.contains("Auto-compacting...")),
+            "{flat:?}"
+        );
+        assert!(
+            !flat
+                .iter()
+                .any(|l| l.contains("The session covered the fleet work.")),
+            "no streamed block outside the expanded detail: {flat:?}"
+        );
+        // `compaction_end` resolves the streamed block into the durable
+        // summary row (the loader and the live block clear together).
+        v.detail = crate::chat::Detail::All;
+        v.compaction = None;
+        v.push_entry(crate::chat::ChatEntry::CompactionSummary {
+            summary: "The session covered the fleet work.".to_string(),
+            tokens_before: 1234,
+            custom_instructions: None,
+        });
+        let frame = v.render_frame(80, 24);
+        let flat: Vec<String> = frame.iter().map(row_text).collect();
+        assert!(
+            !flat.iter().any(|l| l.contains("Auto-compacting...")),
+            "the loader cleared: {flat:?}"
+        );
+        assert!(
+            flat.iter()
+                .any(|l| l.trim() == "\u{25c6} Context compacted"),
+            "the durable summary row replaced the streamed block: {flat:?}"
         );
     }
 

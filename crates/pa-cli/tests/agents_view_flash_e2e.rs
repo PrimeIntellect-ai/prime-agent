@@ -438,8 +438,12 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     );
 
     // The worker departs (the operator's stale-worker stop): the family
-    // loses its only resident root, so its rows settle out of the roster
-    // with the stop.
+    // loses its only resident root, so its SEEDED rows settle out of the
+    // roster with the stop, while the parent's own TOP-LEVEL row
+    // PASSIVATES and stays (TS `flipWorkerRosterEntriesInactive` keeps
+    // every stopped non-ephemeral row visible - the dead family's
+    // children return to the saved catalog alone, the root session's row
+    // never vanishes).
     client.send_command(
         "k1",
         json!({ "type": "kill", "activeSessionId": active_id }),
@@ -449,10 +453,30 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     client.drain_roster_pushes(Duration::from_millis(500));
     client.send_command("r2", json!({ "type": "roster_subscribe" }));
     let departed = client.request("r2");
+    let departed_roster = roster_of(&departed);
+    let seeded_children = departed_roster
+        .iter()
+        .filter(|entry| {
+            entry["summary"]["rlmChildId"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("sub-"))
+        })
+        .count();
     assert_eq!(
-        family_rows(&roster_of(&departed), &parent_file, "sub-"),
-        0,
-        "the departed family's rows left the roster: {departed}"
+        seeded_children, 0,
+        "the departed family's seeded rows left the roster: {departed}"
+    );
+    let passivated_parent = departed_roster
+        .iter()
+        .find(|entry| {
+            entry["summary"]["sessionFile"].as_str() == Some(parent_file.to_string_lossy().as_ref())
+        })
+        .unwrap_or_else(|| {
+            panic!("the stopped parent's row stays in the roster (passivated): {departed}")
+        });
+    assert_eq!(
+        passivated_parent["status"], "inactive",
+        "the stopped parent's row passivated: {passivated_parent}"
     );
 
     // The saved catalog keeps every dead row resumable (the passive
@@ -512,5 +536,141 @@ async fn the_first_agents_view_render_is_clean_behind_hundreds_of_dead_subagents
     assert!(
         !expanded.contains("▸ 300 inactive subagents"),
         "the expansion opens the parent's list:\n{expanded}"
+    );
+}
+
+/// A stopped session's row STAYS visible in the view (TS
+/// `flipWorkerRosterEntriesInactive` keeps every stopped non-ephemeral
+/// row passivated; the Rust stop used to delete the top-level row, so
+/// the session vanished until a later catalog scan re-listed it - the
+/// operator's rows-disappear report). The stop's push passivates the
+/// row in place, the roster snapshot serves it, and the view's first
+/// frame shows it in the Inactive section - no catalog wait, no
+/// vanishing.
+#[tokio::test]
+async fn a_stopped_session_stays_visible_in_the_view() {
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let agent_dir = dir.path().join("agent");
+    let sessions_dir = agent_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).expect("session dir");
+
+    std::fs::write(
+        agent_dir.join("models.json"),
+        json!({
+            "providers": {
+                "battery": {
+                    "api": "openai-completions",
+                    "baseUrl": "http://127.0.0.1:9/v1",
+                    "apiKey": "sk-battery",
+                    "models": [
+                        {
+                            "id": "mock-1",
+                            "name": "Mock 1",
+                            "api": "openai-completions",
+                            "reasoning": true,
+                            "contextWindow": 128_000,
+                            "maxTokens": 4096
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string(),
+    )
+    .expect("write models.json");
+
+    let stopped_file = write_fixture(
+        &sessions_dir,
+        "kept-session",
+        "kept session",
+        None,
+        0,
+        &[("run the drill", "the drill ran")],
+    );
+
+    let supervisor = spawn_supervisor(dir.path());
+    let mut client = Client::connect(&supervisor.socket);
+
+    // The session runs (its worker registers), then stops: the stop's
+    // roster push must PASSIVATE the row (a `changed` push), never
+    // remove it.
+    client.send_command(
+        "c1",
+        json!({
+            "type": "create",
+            "sessionPath": stopped_file.to_string_lossy(),
+            "config": {
+                "cwd": dir.path().to_string_lossy(),
+                "sessionDir": sessions_dir.to_string_lossy(),
+                "provider": "battery",
+                "model": "mock-1",
+                "thinking": "low",
+            },
+        }),
+    );
+    let created = client.request("c1");
+    assert_eq!(created["success"], true, "create failed: {created}");
+    let active_id = created["data"]["activeSessionId"]
+        .as_str()
+        .or_else(|| created["data"]["id"].as_str())
+        .expect("the active session id")
+        .to_string();
+    client.drain_roster_pushes(Duration::from_millis(500));
+    client.send_command(
+        "k1",
+        json!({ "type": "kill", "activeSessionId": active_id }),
+    );
+    let killed = client.request("k1");
+    assert_eq!(killed["success"], true, "kill failed: {killed}");
+    client.drain_roster_pushes(Duration::from_millis(500));
+
+    // The snapshot serves the passivated row (the view's roster half).
+    client.send_command("r1", json!({ "type": "roster_subscribe" }));
+    let roster = client.request("r1");
+    assert_eq!(roster["success"], true, "roster_subscribe: {roster}");
+    let entries = roster["data"]["roster"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let entry = entries
+        .iter()
+        .find(|entry| entry["summary"]["sessionName"] == json!("kept session"))
+        .unwrap_or_else(|| {
+            panic!("the stopped session's passivated row is in the snapshot: {entries:?}")
+        });
+    assert_eq!(
+        entry["status"], "inactive",
+        "the row is passivated: {entry}"
+    );
+    assert_eq!(
+        entry["summary"]["lifecycle"], "live",
+        "lifecycle stays live (TS passivation): {entry}"
+    );
+
+    // The view's FIRST frame shows the stopped session in the Inactive
+    // section - from the roster alone, before the catalog even loads.
+    let plan = AgentsHeadlessPlan {
+        steps: vec![AgentsStep::WaitSettle { timeout_ms: 2_000 }],
+        width: 120,
+        height: 36,
+    };
+    let view = pa_tui::agents_view::run_agents_view(
+        view_options(&supervisor.socket, &sessions_dir),
+        AgentsViewUiMode::Headless(plan),
+        None,
+    )
+    .await
+    .expect("agents view run")
+    .outcome;
+    let first = first_frame(&view.frames);
+    assert!(
+        first.contains("kept session"),
+        "the stopped session's row paints on the FIRST frame (TS keeps stopped rows visible):
+{first}"
+    );
+    assert!(
+        first.contains("Inactive"),
+        "the stopped session renders in the Inactive section:
+{first}"
     );
 }

@@ -294,6 +294,15 @@ pub struct AgentSessionEngine {
     link: Arc<crate::supervisor_link::SupervisorLink>,
     /// Supervisor-backed RLM children; `None` for standalone workers.
     pub(crate) children: Option<Arc<SupervisorChildSessions>>,
+    /// The live compaction summary-delta sink the worker installs (the
+    /// `compaction_summary_delta` broadcast seam): adopted onto every
+    /// built session at [`Self::adopt_built_session`], so every compaction
+    /// surface — the manual `compact` command, the threshold, overflow,
+    /// and requested auto arms — streams its summarizer deltas to the
+    /// attached clients. `None` for engine constructions without a worker
+    /// pump (tests, headless embeds): no streaming, no deltas.
+    compaction_summary_sink:
+        std::sync::Mutex<Option<pa_core::session_engine::compaction_exec::SummaryDeltaSink>>,
     /// The attribution producer the children registry's sink last got:
     /// the session's live children outlive an engine rebuild, and their
     /// spawn registrations live on the producer of the build that
@@ -580,6 +589,7 @@ impl AgentSessionEngine {
             faux_model: std::sync::OnceLock::new(),
             overflow_recovery: std::sync::Mutex::new(OverflowRecovery::default()),
             auto_compaction_abort: std::sync::Mutex::new(None),
+            compaction_summary_sink: std::sync::Mutex::new(None),
             model_refusal_telemetry,
         })
     }
@@ -652,6 +662,28 @@ impl AgentSessionEngine {
         Ok(())
     }
 
+    /// Install the worker's live compaction summary-delta sink (the
+    /// `compaction_summary_delta` broadcast seam): the worker calls this
+    /// once after the engine is built, capturing its event pump; every
+    /// built session adopts the sink at [`Self::adopt_built_session`], so
+    /// each compaction surface (the manual `compact` command, the
+    /// threshold, overflow, and requested auto arms) streams its
+    /// summarizer deltas to the attached clients while the summary
+    /// generates.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the sink slot's mutex is poisoned.
+    pub fn set_compaction_summary_sink(
+        &self,
+        sink: pa_core::session_engine::compaction_exec::SummaryDeltaSink,
+    ) {
+        *self
+            .compaction_summary_sink
+            .lock()
+            .expect("compaction summary sink lock") = Some(sink);
+    }
+
     /// Post-build adoption, shared by every build path (the async funnel
     /// and the turn-driven `session_agent` build): mirror the goal
     /// runtime, flush a depth override that landed before the build, and
@@ -662,6 +694,19 @@ impl AgentSessionEngine {
     /// branch and the session would start off the moved branch's entries.
     async fn adopt_built_session(&self, built: &CoreSessionEngine) -> anyhow::Result<()> {
         self.mirror_goal_runtime(built);
+        // The live compaction summary-delta sink (the worker's
+        // `compaction_summary_delta` broadcast): adopted onto the built
+        // session like the goal runtime mirrors, so every rebuild's
+        // compactions stream — the worker installs the sink before the
+        // first build and every built session takes the current slot.
+        if let Some(sink) = self
+            .compaction_summary_sink
+            .lock()
+            .expect("compaction summary sink lock")
+            .clone()
+        {
+            built.session.set_compaction_summary_sink(sink);
+        }
         // The in-run consult's mirror (deadlock-free reads: the session
         // mutex is held across compaction model turns, and the consult
         // runs inside one of them).
